@@ -182,8 +182,7 @@ void fillMachines(QComboBox *combo, const FleetState &fleet, const QString &expl
     for (const auto &host : accountHosts(fleet, explicitHost)) combo->addItem(machineChoice(fleet, host), host);
 }
 // Whether the machine starts this provider's agent: peers are POSIX, and the
-// local Windows computer lists, adds and takes no DeepSeek or OpenCode account
-// (spec D16).
+// local Windows computer lists, adds and takes no OpenCode account (spec D16).
 bool launchable(const FleetState &fleet, const QString &host, const QString &provider) {
     return AccountCatalog::launchable(provider, MachinePlatform::of(host.isEmpty() ? fleet.local().metrics : QJsonObject(), host.isEmpty()));
 }

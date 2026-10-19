@@ -83,9 +83,10 @@ inline bool contains(const QJsonObject &account, const QString &profile) {
     return false;
 }
 // Whether a machine of this style starts the provider's agent. The local Windows
-// computer runs neither DeepSeek (a Phase 2 non-goal) nor OpenCode, whose launch
-// path does not resolve npm .cmd shims there (spec D16).
+// computer does not run OpenCode, whose launch path does not resolve npm .cmd
+// shims there (spec D16). DeepSeek runs there in this fork: its resident host
+// starts outside the CLI's job and its bridge listens on a named pipe.
 inline bool launchable(const QString &provider, MachinePlatform::Style style) {
-    return style == MachinePlatform::Style::Posix || (provider != "dsh" && provider != "opencode");
+    return style == MachinePlatform::Style::Posix || provider != "opencode";
 }
 }

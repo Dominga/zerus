@@ -5,18 +5,16 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
-// The native host's socket and start (see `rpc` and `ensure_host`).
+// The native host's endpoint and start (see `rpc` and `ensure_host`).
 #[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::{
     fs::OpenOptions,
     io::{BufRead, BufReader},
-    os::unix::net::UnixStream,
     time::{Duration, Instant},
 };
 
-#[cfg(unix)]
 const VERSION: &str = "0.2.0-rc.2";
-#[cfg(unix)]
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 fn bindings() -> PathBuf {
     root().join("dsh/bindings")
@@ -73,49 +71,58 @@ fn host_dir(record: &Value) -> PathBuf {
         )[..16],
     )
 }
-/// The native host listens on a Unix socket; DeepSeek is a Phase 2 non-goal on
-/// Windows, so nothing there starts or reaches a host.
-#[cfg(not(unix))]
-const UNSUPPORTED: &str =
-    "DeepSeek sessions are not supported on Windows yet; run them on a Linux or macOS machine.";
-#[cfg(not(unix))]
-fn rpc(_: &Value, _: &str, _: Value) -> Result<Value> {
-    Err(UNSUPPORTED.into())
+/// The bridge's private endpoint: a Unix socket in the host directory.
+#[cfg(unix)]
+fn endpoint(dir: &Path) -> PathBuf {
+    dir.join("host.sock")
 }
-#[cfg(not(unix))]
-fn search_rpc(_: &Value, _: Value) -> Result<Value> {
-    Err(UNSUPPORTED.into())
-}
-#[cfg(not(unix))]
-fn ensure_host(_: &Value) -> Result<()> {
-    Err(UNSUPPORTED.into())
+/// On Windows a named pipe named after the host directory, which is per user
+/// and per native home. Its default security lets other accounts open it only
+/// for reading, which cannot send the bridge a request.
+#[cfg(windows)]
+fn endpoint(dir: &Path) -> PathBuf {
+    let digest = format!("{:x}", Sha256::digest(dir.to_string_lossy().as_bytes()));
+    PathBuf::from(format!(r"\\.\pipe\hgs-dsh-{}", &digest[..32]))
 }
 #[cfg(unix)]
+fn connect(path: &Path) -> io::Result<UnixStream> {
+    UnixStream::connect(path)
+}
+#[cfg(windows)]
+fn connect(path: &Path) -> io::Result<fs::File> {
+    // ERROR_PIPE_BUSY: every listening instance is taken; the bridge adds more.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match OpenOptions::new().read(true).write(true).open(path) {
+            Err(error) if error.raw_os_error() == Some(231) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            result => return result,
+        }
+    }
+}
+/// The official harness as a session would start it. On Windows its npm shim
+/// resolves to node and the package's script, never through cmd.exe.
+#[cfg(unix)]
+fn dsh_command() -> io::Result<Command> {
+    Ok(Command::new("dsh"))
+}
+#[cfg(windows)]
+fn dsh_command() -> io::Result<Command> {
+    crate::platform::agent_command(&["dsh".to_owned()])
+}
 fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
     rpc_within(record, method, params, Duration::from_secs(35))
 }
 /// Interactive search waits at most this long for one host: the adapter's own
 /// 5 s scan budget plus a margin. A host that does not answer counts as
 /// unavailable instead of holding up every other provider's results.
-#[cfg(unix)]
 fn search_rpc(record: &Value, params: Value) -> Result<Value> {
     rpc_within(record, "search-history", params, Duration::from_secs(7))
 }
-#[cfg(unix)]
 fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
-    let mut socket = UnixStream::connect(host_dir(record).join("host.sock"))
-        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
-    socket
-        .set_read_timeout(Some(read_timeout))
-        .map_err(|e| e.to_string())?;
-    socket
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| e.to_string())?;
-    writeln!(socket, "{}", json!({"method":method,"params":params})).map_err(|e| e.to_string())?;
-    let mut response = String::new();
-    BufReader::new(socket.take(32 * 1024 * 1024))
-        .read_line(&mut response)
-        .map_err(|e| format!("Native request delivery uncertain: {e}"))?;
+    let request = json!({"method":method,"params":params}).to_string();
+    let response = exchange(&endpoint(&host_dir(record)), &request, read_timeout)?;
     let response: Value = serde_json::from_str(&response)
         .map_err(|e| format!("Invalid native response; delivery uncertain: {e}"))?;
     if response["ok"] != true {
@@ -123,7 +130,45 @@ fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duratio
     }
     Ok(response["value"].clone())
 }
+/// One request line and its response line.
 #[cfg(unix)]
+fn exchange(path: &Path, request: &str, read_timeout: Duration) -> Result<String> {
+    let mut socket = connect(path)
+        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
+    socket
+        .set_read_timeout(Some(read_timeout))
+        .map_err(|e| e.to_string())?;
+    socket
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    writeln!(socket, "{request}").map_err(|e| e.to_string())?;
+    let mut response = String::new();
+    BufReader::new(socket.take(32 * 1024 * 1024))
+        .read_line(&mut response)
+        .map_err(|e| format!("Native request delivery uncertain: {e}"))?;
+    Ok(response)
+}
+#[cfg(windows)]
+fn exchange(path: &Path, request: &str, read_timeout: Duration) -> Result<String> {
+    let mut pipe = connect(path)
+        .map_err(|_| "DeepSeek host is unavailable; resume the session to reconnect")?;
+    writeln!(pipe, "{request}").map_err(|e| e.to_string())?;
+    // A pipe handle has no read timeout: the deadline abandons a reading thread,
+    // which ends with this short-lived process.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut response = String::new();
+        let result = BufReader::new(pipe.take(32 * 1024 * 1024))
+            .read_line(&mut response)
+            .map(|_| response);
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(read_timeout) {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(e)) => Err(format!("Native request delivery uncertain: {e}")),
+        Err(_) => Err("Native request delivery uncertain: the DeepSeek host did not answer in time".into()),
+    }
+}
 fn ensure_host(record: &Value) -> Result<()> {
     let dir = host_dir(record);
     private_dir(&dir)?;
@@ -134,12 +179,12 @@ fn ensure_host(record: &Value) -> Result<()> {
         }
         return Err("The running DeepSeek host uses an incompatible adapter; close its sessions before upgrading".into());
     }
-    match UnixStream::connect(dir.join("host.sock")) {
+    match connect(&endpoint(&dir)) {
         Ok(_) => return Err("The running DeepSeek host is not responding; it has been left running. Retry when it recovers".into()),
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {},
         Err(e) => return Err(format!("Cannot check the native host: {e}")),
     }
-    let version = Command::new("dsh").arg("--version").output().map_err(|_| {
+    let version = dsh_command().and_then(|mut command| command.arg("--version").output()).map_err(|_| {
         format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
     })?;
     if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != VERSION {
@@ -149,11 +194,15 @@ fn ensure_host(record: &Value) -> Result<()> {
     }
     let script = dir.join("hgs-bridge.mjs");
     atomic(&script, BRIDGE)?;
-    let socket = dir.join("host.sock");
+    let socket = endpoint(&dir);
     // The startup lock excludes competing HGS starters. Only unlink a stale
-    // endpoint after a failed connection, never an active native host.
-    if socket.exists() {
-        fs::remove_file(&socket).map_err(|e| e.to_string())?;
+    // endpoint after a failed connection, never an active native host. A named
+    // pipe ends with its server.
+    #[cfg(unix)]
+    {
+        if socket.exists() {
+            fs::remove_file(&socket).map_err(|e| e.to_string())?;
+        }
     }
     let overlay = dir.join("hgs.patch.json");
     atomic(
@@ -164,7 +213,9 @@ fn ensure_host(record: &Value) -> Result<()> {
     let log = crate::platform::private_open(OpenOptions::new().create(true).truncate(true).write(true))
         .open(dir.join("host.log"))
         .map_err(|e| e.to_string())?;
-    let mut command = Command::new("dsh");
+    let mut command = dsh_command().map_err(|_| {
+        format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
+    })?;
     #[cfg(target_os = "linux")]
     {
         let runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }));
@@ -1631,5 +1682,51 @@ mod question_identity_tests {
         let next = normalize(&record, &row, &json!({"pendingQuestions":[{"id":"question-2"}]}));
         assert_ne!(next["attention_id"], first["attention_id"]);
         assert!(normalize(&record, &row, &json!({}))["attention_id"].is_null());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn each_host_directory_has_its_own_named_pipe() {
+        let first = endpoint(Path::new(r"C:\Users\fixture\.local\state\hgs\dsh\hosts\one"));
+        let second = endpoint(Path::new(r"C:\Users\fixture\.local\state\hgs\dsh\hosts\two"));
+        assert!(first.to_string_lossy().starts_with(r"\.\pipe\hgs-dsh-"), "{}", first.display());
+        assert_ne!(first, second);
+        assert_eq!(first, endpoint(Path::new(r"C:\Users\fixture\.local\state\hgs\dsh\hosts\one")));
+    }
+
+    #[test]
+    fn a_missing_host_is_unavailable() {
+        let pipe = endpoint(Path::new(&format!(r"C:\zerus-test\{}", uuid::Uuid::new_v4())));
+        let error = exchange(&pipe, "{}", Duration::from_secs(1)).unwrap_err();
+        assert!(error.contains("unavailable"), "{error}");
+    }
+
+    // The bridge answers one request line with one response line, as Node serves it.
+    #[test]
+    fn a_request_line_gets_the_bridge_response_line() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let pipe = endpoint(Path::new(&format!(r"C:\zerus-test\{}", uuid::Uuid::new_v4())));
+        let script = format!(
+            "const net=require('net');const s=net.createServer(c=>c.on('data',d=>{{c.end(JSON.stringify({{ok:true,value:JSON.parse(d)}})+'\n');s.close();}}));s.listen({:?},()=>console.log('ready'));",
+            pipe.to_string_lossy()
+        );
+        let mut node = Command::new("node")
+            .args(["-e", &script])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(node.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let response = exchange(&pipe, r#"{"method":"ping"}"#, Duration::from_secs(10)).unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["value"]["method"], "ping");
+        assert!(node.wait().unwrap().success());
     }
 }

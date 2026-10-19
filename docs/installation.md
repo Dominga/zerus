@@ -396,7 +396,10 @@ Node.js directly; other batch files are refused.
   Windows CI suite yet.
 - **Run PowerShell** in New session (`hgs sh`) opens an untracked PowerShell 7
   (`pwsh`), or Windows PowerShell when PowerShell 7 is missing.
-- DeepSeek and OpenCode are not offered for this computer.
+- **DeepSeek Harness** runs on this computer in the WhiteWh fork (official
+  `@deepseek-ai/dsh@0.2.0-rc.2` from npm): its resident host starts outside the
+  CLI's job, as the OpenCode host does on other systems, and the Zerus bridge
+  listens on a named pipe instead of a Unix socket. OpenCode is not offered.
 
 Start Zerus and `hgs.exe` without elevation: a session host started from an
 elevated terminal refuses every client that is not elevated, Zerus included, with
@@ -423,10 +426,11 @@ stops an idle session host without disabling anything.
 - Until local sessions are enabled, the computer has no local sessions, agent
   accounts or hooks, and `hgs.exe` exits with code 2 for local session commands.
   Commands for another machine (`hgs.exe '@build-01' …`) work as on Linux.
-- No DeepSeek or OpenCode sessions on the Windows computer, and no DeepSeek Native
-  UI from Windows: it needs SSH connection sharing, which Windows OpenSSH lacks, so
-  a DeepSeek session cannot be opened externally either. Its Activity still works;
-  DeepSeek sessions have no Terminal tab on any platform.
+- No OpenCode sessions on the Windows computer. Its own DeepSeek Native UI opens
+  in the default browser; another machine's needs SSH connection sharing, which
+  Windows OpenSSH lacks, so a remote DeepSeek session cannot be opened externally
+  from Windows. Its Activity still works; DeepSeek sessions have no Terminal tab
+  on any platform.
 - Voice messages cannot be sent to sessions on the Windows computer.
 - No mobile gateway: pair your phone with a Linux or macOS machine. Settings →
   Mobile connection is hidden, and activity on the Windows computer does not

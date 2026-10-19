@@ -625,8 +625,10 @@ export function apply(ctx, config) {
     }
   }
 
-  // A private Unix socket is a local plugin transport, never an HTTP endpoint.
-  // The native web application's own authentication remains untouched.
+  // A private Unix socket (a named pipe on Windows) is a local plugin transport,
+  // never an HTTP endpoint. The native web application's own authentication
+  // remains untouched.
+  const pipe = process.platform === 'win32';
   const server = net.createServer(socket => {
     let bytes = 0, chunks = [], handled = false;
     socket.setTimeout(45000, () => socket.destroy());
@@ -652,11 +654,13 @@ export function apply(ctx, config) {
     await new Promise((resolve, reject) => {
       server.once('error', reject); server.listen(config.socket, resolve);
     });
-    await fs.chmod(config.socket, 0o600);
+    // A pipe has no file mode; its default security admits only readers from
+    // other accounts, who cannot send a request.
+    if (!pipe) await fs.chmod(config.socket, 0o600);
     return async () => {
       closing = true; server.close();
       for (const handle of owned.values()) await handle.dispose();
-      owned.clear(); await fs.unlink(config.socket).catch(() => {});
+      owned.clear(); if (!pipe) await fs.unlink(config.socket).catch(() => {});
     };
   }, 'hgs.native-dsh');
 }

@@ -76,7 +76,7 @@ private slots:
     void addToMachineOffersCopyOrNativeSignIn();
     void missingAgentInstallsOnSelectedMachine();
     void deepSeekKeyStaysOnSelectedMachine();
-    void localWindowsOffersNoDeepSeekOrOpenCode();
+    void localWindowsOffersDeepSeekButNoOpenCode();
     void refreshPreservesRowsAndShowsPendingUsage();
     void summaryCountsReadInSingularAndPlural();
     void initialLoadingPublishesOnlyGroupedAccounts();
@@ -886,14 +886,14 @@ void TestAccountsPage::deepSeekKeyStaysOnSelectedMachine()
     QCOMPARE(install.first(), QVariantList({QString("mac"), QString("dsh")})); QCOMPARE(login.size(), 0);
 }
 
-void TestAccountsPage::localWindowsOffersNoDeepSeekOrOpenCode()
+void TestAccountsPage::localWindowsOffersDeepSeekButNoOpenCode()
 {
-    // Spec D16: the local Windows computer lists, adds and takes no DeepSeek or
-    // OpenCode account; the Linux peer keeps them.
+    // Spec D16: the local Windows computer lists, adds and takes no OpenCode
+    // account; the Linux peer keeps it. This fork runs DeepSeek there too.
     using MachinePlatform::Style;
     for (const auto *provider : {"codex", "claude", "kimi", "dsh", "opencode"}) {
         QVERIFY(AccountCatalog::launchable(provider, Style::Posix));
-        QCOMPARE(AccountCatalog::launchable(provider, Style::Windows), QString(provider) != "dsh" && QString(provider) != "opencode");
+        QCOMPARE(AccountCatalog::launchable(provider, Style::Windows), QString(provider) != "opencode");
     }
     QFile original(m_script); QVERIFY(original.open(QIODevice::ReadOnly));
     const auto bytes = original.readAll().replace("for p in ['codex','claude','kimi']", "for p in ['codex','claude','kimi','opencode']");
@@ -911,15 +911,14 @@ void TestAccountsPage::localWindowsOffersNoDeepSeekOrOpenCode()
     };
     page.showAccount("mac", "native-dsh"); QTRY_VERIFY(shown("dsh")); QTRY_COMPARE(destinations(), QStringList{QString()});
     auto state = fleet(); auto local = state.local(); local.metrics = QJsonObject{{"platform", "windows"}}; state.setLocal(local, 0);
-    page.setFleet(state); QTRY_COMPARE(list->count(), 10);
+    page.setFleet(state); QTRY_COMPARE(list->count(), 11);
     for (const auto &value : page.profiles(true)) {
         const auto p = value.toObject();
         QVERIFY(!p["host"].toString().isEmpty() || AccountCatalog::launchable(p["provider"].toString(), Style::Windows));
     }
-    for (const auto *provider : {"dsh", "opencode"}) {
-        page.showAccount("mac", QString("native-") + provider); QTRY_VERIFY(shown(provider));
-        QTRY_VERIFY(destinations().isEmpty()); QVERIFY(!page.findChild<QPushButton *>("copyAccount")->isEnabled());
-    }
+    page.showAccount("mac", "native-opencode"); QTRY_VERIFY(shown("opencode"));
+    QTRY_VERIFY(destinations().isEmpty()); QVERIFY(!page.findChild<QPushButton *>("copyAccount")->isEnabled());
+    page.showAccount("mac", "native-dsh"); QTRY_VERIFY(shown("dsh")); QTRY_COMPARE(destinations(), QStringList{QString()});
     page.showAccount("mac", "native-codex"); QTRY_VERIFY(page.findChild<QPushButton *>("refreshAccounts")->isEnabled());
     auto *add = page.findChild<QPushButton *>("addAccount"); QTRY_VERIFY(add->isEnabled());
     QTimer::singleShot(0, &page, [&] {
@@ -929,14 +928,14 @@ void TestAccountsPage::localWindowsOffersNoDeepSeekOrOpenCode()
         const auto names = [provider] { QStringList result; for (int i = 0; i < provider->count(); ++i) result << provider->item(i)->data(Qt::UserRole + 1).toString(); return result; };
         const auto choose = [provider](const QString &id) { for (int i = 0; i < provider->count(); ++i) if (provider->item(i)->data(Qt::UserRole + 1) == id) provider->setCurrentRow(i); };
         const auto current = [provider] { return provider->currentItem() ? provider->currentItem()->data(Qt::UserRole + 1).toString() : QString(); };
-        QCOMPARE(machine->currentData().toString(), QString()); QCOMPARE(names(), QStringList({"codex", "claude", "kimi"}));
+        QCOMPARE(machine->currentData().toString(), QString()); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh"}));
         machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh", "opencode"}));
         // OpenCode on mac is already in Accounts: its row explains and cannot be chosen.
         QVERIFY(!(provider->item(4)->flags() & Qt::ItemIsEnabled));
         QCOMPARE(provider->item(4)->data(Qt::UserRole + 3).toString(), QString("Native configuration, already added"));
         choose("dsh");
-        machine->setCurrentIndex(machine->findData(QString())); QCOMPARE(names(), QStringList({"codex", "claude", "kimi"}));
-        QCOMPARE(current(), QString("codex"));
+        machine->setCurrentIndex(machine->findData(QString())); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh"}));
+        QCOMPARE(current(), QString("dsh"));
         choose("claude");
         machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(current(), QString("claude"));
     });

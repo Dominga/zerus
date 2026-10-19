@@ -33,6 +33,7 @@ private:
     void selectionChanged();
     void add();
     void copy(const QString &target = QStringLiteral("*"));
+    void setupOllama(const QString &host, const QString &accountLabel);
     void setupDeepSeek(const QString &host, const QString &label = {});
     void updateRefreshState();
     int pendingAccounts() const;

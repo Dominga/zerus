@@ -256,6 +256,12 @@ fn codex(home: &Path, native: bool) -> Value {
     result
 }
 fn claude(home: &Path, native: bool) -> Value {
+    // WhiteWh fork: a local model has no Anthropic sign-in or plan limits.
+    if let Some(local) = super::local_model::read(home).filter(|_| !native) {
+        return json!({"identity":{"auth_method":"Ollama","plan":local.model},"windows":[],"source":"Ollama",
+            "status":"configured","auth_status":"configured","endpoint":local.endpoint,
+            "reachable":super::local_model::reachable(&local.endpoint)});
+    }
     let mut result =
         json!({"identity":{},"windows":[],"source":"Claude Code","status":"unavailable"});
     let mut cmd = native_command("claude", home, native);

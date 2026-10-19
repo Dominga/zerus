@@ -1,5 +1,34 @@
 # Local models with Ollama
 
+## Claude Code on an Ollama model (WhiteWh fork)
+
+**Accounts → Add → Ollama** creates a Claude Code account that runs a model Ollama
+serves on the chosen machine; no Anthropic sign-in is needed. Choose the model
+from Ollama's list (`GET /api/tags` on `http://127.0.0.1:11434`), the address Claude
+Code calls, an optional context window and an optional start command. The CLI is
+
+```sh
+hgs account ollama-models [--endpoint http://127.0.0.1:11434]
+hgs account add local-qwen --provider claude --label "Local Qwen" --ollama qwen3.8-cc:latest \
+  [--endpoint http://127.0.0.1:11500] [--context 262144] [--prepare "python proxy.py qwen3.8-cc:latest"]
+```
+
+The profile stores these in `.hgs-local-model.json`. Its sessions start with
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN=ollama`, every model slot
+(`ANTHROPIC_MODEL`, the Opus, Sonnet and Haiku defaults, the small fast model, the
+subagent and the auto-mode classifier) set to the model,
+`CLAUDE_CODE_EFFORT_LEVEL=unset`, a 30-minute request timeout,
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and, when set,
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Ollama serves the Anthropic API itself; a model
+whose chat template rejects Claude Code's mid-conversation system messages can
+sit behind a rewriting proxy. When the address does not answer, a new session
+first runs the start command detached and waits up to 20 seconds for it. On
+Windows the start command splits at spaces outside double quotes, so paths keep
+their backslashes. Such an account reports **Local model** instead of plan
+limits and needs no sign-in.
+
+## Codex on an Ollama model
+
 The agent and the inference provider are separate choices. Codex owns tools,
 permissions, conversation history and agent state; Ollama runs the selected model.
 Zerus connects to Codex through its existing adapter. The model runs on the computer

@@ -6,6 +6,7 @@ mod mcp_servers;
 mod permission_status;
 mod install;
 mod deepseek;
+mod local_model;
 use crate::{
     cli::{Error, Result},
     config::Config,
@@ -470,8 +471,27 @@ pub fn select(config: &Config, id: &str, provider: &str) -> Result<Vec<String>> 
             env::remove_var(key);
             environment.push(format!("{key}="));
         }
+        if let Some(local) = local_model::read(&home).filter(|_| provider == "claude") {
+            for (key, value) in local_model::environment(&local) {
+                env::set_var(&key, &value);
+                environment.push(format!("{key}={value}"));
+            }
+        }
     }
     Ok(environment)
+}
+
+/// Starts a local model account's endpoint (a proxy before Ollama, say) when it
+/// does not answer, so a new session's first request finds it.
+pub fn prepare_local_model(config: &Config, id: &str, provider: &str) -> Result<()> {
+    let (profile, home, native) = lookup(config, id)?;
+    if native || provider != "claude" || profile.provider != "claude" {
+        return Ok(());
+    }
+    match local_model::read(&home) {
+        Some(local) => local_model::prepare(&local),
+        None => Ok(()),
+    }
 }
 fn arg<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter()
@@ -548,6 +568,17 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         },
         "add"=>{
             let p=Profile{provider:arg(args,"--provider").unwrap_or("").into(),label:arg(args,"--label").unwrap_or(id).into()};validate(id,&p)?;
+            // WhiteWh fork: a Claude Code account that runs a local Ollama model.
+            let local=match arg(args,"--ollama") {
+                None=>None,
+                Some(model)=>{
+                    if p.provider!="claude" {return Err(Error::new(1,"--ollama makes a Claude Code account; use --provider claude."));}
+                    let context=match arg(args,"--context") {None=>0,Some(v)=>v.parse().map_err(|_|Error::new(1,"--context needs a number of tokens."))?};
+                    let prepare=match arg(args,"--prepare") {None=>Vec::new(),Some(v)=>local_model::split_command(v)?};
+                    let local=local_model::LocalModel{endpoint:arg(args,"--endpoint").unwrap_or(local_model::DEFAULT_ENDPOINT).into(),model:model.into(),context,prepare};
+                    local_model::validate(&local)?;Some(local)
+                }
+            };
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
             if catalog.profiles.contains_key(id) || profile_home(config,id).exists() {return Err(Error::new(1,"Account ID or its profile directory already exists. Choose another ID."));}
             if dry {println!("{}",json!({"dry_run":true,"id":id,"provider":p.provider}));return Ok(0);}
@@ -559,7 +590,12 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                 platform::make_private(&file)?;
                 file.write_all(b"cli_auth_credentials_store = \"file\"\n")?; file.sync_all()?;
             }
+            if let Some(local)=&local {local_model::write(&profile_home(config,id),local)?;}
             catalog.profiles.insert(id.into(),p);save(config,&catalog)?;println!("{}",list(config)?);
+        },
+        "ollama-models"=>{
+            let endpoint=arg(args,"--endpoint").unwrap_or(local_model::DEFAULT_ENDPOINT);
+            println!("{}",json!({"endpoint":endpoint,"models":local_model::models(endpoint)?}));
         },
         "rm"|"restore"=>{
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
@@ -614,7 +650,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             }
             return Ok(code);
         },
-        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME | rm ID | login ID")),
+        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME [--ollama MODEL [--endpoint URL] [--context TOKENS] [--prepare COMMAND]] | ollama-models [--endpoint URL] | rm ID | login ID")),
     }
     Ok(0)
 }

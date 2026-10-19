@@ -31,6 +31,7 @@
 #include <QSignalBlocker>
 #include <QStyledItemDelegate>
 #include <QStackedLayout>
+#include <QSpinBox>
 #include <QUuid>
 #include <QVBoxLayout>
 namespace {
@@ -553,7 +554,8 @@ void AccountsPage::selectionChanged()
     m_permissionState->setToolTip(permissionHint(p));
     m_permissionState->setStyleSheet(mode == "bypass" ? QString("color:%1;font-weight:600;").arg(m_dark ? "#ffa0aa" : "#a7243b") : QString());
     m_permissions->setToolTip(tr("Change permission defaults on %1").arg(p["machine"].toString()));
-    m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool() && !nativeConfig); m_remove->setEnabled(has && idle && online(p["host"].toString()));
+    m_login->setEnabled(has && idle && online(p["host"].toString()) && p["installed"].toBool() && !nativeConfig
+        && p["usage"].toObject()["identity"].toObject()["auth_method"] != "Ollama"); m_remove->setEnabled(has && idle && online(p["host"].toString()));
     const bool machines = !accountHosts(m_fleet, m_explicitHost).isEmpty();
     m_add->setEnabled(idle && machines); m_add->setToolTip(machines ? QString() : remoteOnlyHint(m_fleet));
     updateRefreshState();
@@ -584,6 +586,8 @@ void AccountsPage::selectionChanged()
         : tr("Open %1 sign-in in a terminal on %2 for this profile. Completing sign-in updates the credentials used by this profile on %2.").arg(providerName(p["provider"].toString()), machine));
     m_detail->setText(!online(p["host"].toString()) ? tr("%1 is offline.").arg(machine)
         : !p["installed"].toBool() ? tr("%1 is not installed on %2.").arg(providerName(p["provider"].toString()), machine)
+        : status == "configured" && p["usage"].toObject()["identity"].toObject()["auth_method"] == "Ollama"
+            ? tr("Claude Code uses the Ollama model %1 on %2.").arg(p["usage"].toObject()["identity"].toObject()["plan"].toString(), machine)
         : status == "configured" ? tr("API key configured on %1.").arg(machine)
         : status == "signed_out" && p["provider"] == "dsh" ? tr("Set a DeepSeek API key on %1 to use API models.").arg(machine)
         : status == "signed_out" ? tr("Sign in on %1 to use this account.").arg(machine)
@@ -737,12 +741,13 @@ void AccountsPage::add()
             name->setEnabled(!reuse);
         }
         create->setEnabled(!none && online(host) && !chosen.isEmpty() && (reuse || (!name->text().trimmed().isEmpty() && name->text().size()<=160)));
-        create->setText(reuse?tr("Add account"):chosen=="dsh"?tr("Enter API key…"):tr("Create and sign in"));
+        create->setText(reuse?tr("Add account"):chosen=="dsh"?tr("Enter API key…"):chosen=="ollama"?tr("Choose model…"):tr("Create and sign in"));
         const QString openCode=tr("Use OpenCode's native configuration on %1 for new sessions again.").arg(where()),
             restore=tr("Use the saved sign-in on %1. The account will be available for new sessions again.").arg(where()),
-            key=tr("Configure a DeepSeek API key on the selected machine."),fresh=tr("Create a separate account profile on the selected machine, then sign in.");
-        hint->reserve({remoteOnlyHint(m_fleet),openCode,restore,key,fresh});
-        hint->setText(none?remoteOnlyHint(m_fleet):reuse&&chosen=="opencode"?openCode:reuse?restore:chosen=="dsh"?key:fresh);
+            key=tr("Configure a DeepSeek API key on the selected machine."),fresh=tr("Create a separate account profile on the selected machine, then sign in."),
+            local=tr("Run Claude Code on a model that Ollama serves on the selected machine. No Anthropic sign-in is needed.");
+        hint->reserve({remoteOnlyHint(m_fleet),openCode,restore,key,fresh,local});
+        hint->setText(none?remoteOnlyHint(m_fleet):reuse&&chosen=="opencode"?openCode:reuse?restore:chosen=="dsh"?key:chosen=="ollama"?local:fresh);
     };
     const auto populate=[=] {
         const QSignalBlocker blocker(saved);saved->clear();const auto chosen=agent();
@@ -762,12 +767,15 @@ void AccountsPage::add()
             return false;
         };
         const QSignalBlocker blocker(provider);provider->clear();int row=0;
-        for (const auto *value : {"codex", "claude", "kimi", "dsh", "opencode"}) {
+        for (const auto *value : {"codex", "claude", "kimi", "dsh", "opencode", "ollama"}) {
             const QString id=value;if(!launchable(m_fleet,host,id))continue;
-            auto *item=new QListWidgetItem(workspaceIcon(id,IdentityBadges::providerColor(id,m_dark)),providerName(id),provider);
+            // WhiteWh fork: Ollama is Claude Code with a local model, not an agent of its own.
+            const bool ollama=id=="ollama";const QString glyph=ollama?QStringLiteral("claude"):id;
+            auto *item=new QListWidgetItem(workspaceIcon(glyph,IdentityBadges::providerColor(glyph,m_dark)),ollama?tr("Ollama"):providerName(id),provider);
             item->setData(AccountChoice::ProviderRole,id);
             const bool reusable=!savedProfiles(host,id).isEmpty();
             QString detail=id=="dsh"?(reusable?tr("Saved API key or a new one"):tr("DeepSeek API key"))
+                :ollama?tr("Claude Code with a local model")
                 :reusable?tr("Saved account or a new profile"):tr("New profile with its own sign-in");
             if(id=="opencode"){
                 detail=reusable?tr("Add the native configuration again"):listed("native-opencode")?tr("Native configuration, already added"):tr("Not installed on %1").arg(where());
@@ -790,7 +798,7 @@ void AccountsPage::add()
     dialog.ensurePolished();
     // The action button is as wide as its longest label, so Cancel never moves.
     int widest=0;
-    for(const auto &text:{tr("Create and sign in"),tr("Add account"),tr("Enter API key…")}){create->setText(text);widest=qMax(widest,create->sizeHint().width());}
+    for(const auto &text:{tr("Create and sign in"),tr("Add account"),tr("Enter API key…"),tr("Choose model…")}){create->setText(text);widest=qMax(widest,create->sizeHint().width());}
     create->setMinimumWidth(widest);update();
     // Wrap the hint at its final width, then size the dialog around it.
     dialog.adjustSize();hint->fit();dialog.adjustSize();
@@ -798,6 +806,7 @@ void AccountsPage::add()
     const auto existing=saved->currentData().toJsonObject();if(!existing.isEmpty()){useSavedProfile(existing);return;}
     if (agent() == "opencode") return;
     if (agent() == "dsh") { setupDeepSeek(machine->currentData().toString(), name->text().trimmed()); return; }
+    if (agent() == "ollama") { setupOllama(machine->currentData().toString(), name->text().trimmed()); return; }
     const QString id = agent() + "-" + QUuid::createUuid().toString(QUuid::Id128).left(10); const QString host = machine->currentData().toString();
     m_loginAfterAddHost = host; m_loginAfterAddId = id;
     m_activeProfile = m_requestedProfile = profileKey(host, id);
@@ -867,6 +876,58 @@ void AccountsPage::copy(const QString &target)
         if (m_catalogs.contains(host)) args << "--revision" << m_catalogs[host]["revision"].toString();
         request(host, args);
     }
+}
+// WhiteWh fork: a Claude Code profile whose every model slot names one model that
+// Ollama serves on that machine, optionally through a proxy its start command runs.
+void AccountsPage::setupOllama(const QString &host, const QString &accountLabel)
+{
+    const auto machine = host.isEmpty() ? m_fleet.local().host : host;
+    if (!online(host)) { emit notice(tr("%1 is offline.").arg(machine), true); return; }
+    QDialog dialog(this); dialog.setObjectName("ollamaDialog");
+    dialog.setWindowTitle(tr("Ollama model on %1").arg(machine)); dialog.setMinimumWidth(520);
+    auto *layout = new QVBoxLayout(&dialog); layout->setContentsMargins(18, 18, 18, 18); layout->setSpacing(12);
+    auto *intro = label(tr("Claude Code on %1 will use a model that Ollama serves there. No Anthropic sign-in is needed.").arg(machine));
+    intro->setWordWrap(true); layout->addWidget(intro);
+    auto *form = new QFormLayout; form->setSpacing(10);
+    auto *model = new QComboBox; model->setObjectName("ollamaModel"); model->setEditable(true); model->setMinimumContentsLength(28);
+    auto *endpoint = new QLineEdit(QStringLiteral("http://127.0.0.1:11434")); endpoint->setObjectName("ollamaEndpoint");
+    endpoint->setToolTip(tr("The Anthropic-compatible address Claude Code calls: Ollama itself, or a proxy in front of it."));
+    auto *context = new QSpinBox; context->setObjectName("ollamaContext"); context->setRange(0, 4194304); context->setSingleStep(8192);
+    context->setSpecialValueText(tr("Model default"));
+    auto *prepare = new QLineEdit; prepare->setObjectName("ollamaPrepare");
+    prepare->setPlaceholderText(tr("Optional command that starts a proxy at that address"));
+    form->addRow(tr("Model"), model); form->addRow(tr("Address"), endpoint); form->addRow(tr("Context tokens"), context); form->addRow(tr("Start command"), prepare);
+    layout->addLayout(form);
+    auto *status = label(); status->setObjectName("ollamaStatus"); status->setWordWrap(true); layout->addWidget(status);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    auto *save = buttons->button(QDialogButtonBox::Save); save->setText(tr("Add account")); layout->addWidget(buttons);
+    const auto ready = [=] { save->setEnabled(!model->currentText().trimmed().isEmpty() && !endpoint->text().trimmed().isEmpty()); };
+    connect(model, &QComboBox::currentTextChanged, &dialog, ready); connect(endpoint, &QLineEdit::textChanged, &dialog, ready); ready();
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    // The model names come from Ollama's own address on that machine.
+    status->setText(tr("Reading Ollama models on %1…").arg(machine));
+    const auto listing = m_client.requestAccounts(host, {"ollama-models"});
+    connect(&m_client, &HgsClient::accountsReady, &dialog, [=](quint64 id, const QString &, const QJsonObject &data) {
+        if (id != listing) return;
+        const auto typed = model->currentText();
+        for (const auto &value : data["models"].toArray()) if (model->findText(value.toString()) < 0) model->addItem(value.toString());
+        if (!typed.isEmpty()) model->setCurrentText(typed);
+        status->setText(model->count() ? QString() : tr("Ollama lists no models on %1. Type a model name.").arg(machine)); ready();
+    });
+    connect(&m_client, &HgsClient::accountsFailed, &dialog, [=](quint64 id, const QString &, const QString &error) {
+        if (id == listing) status->setText(tr("Could not read the Ollama models: %1 Type a model name.").arg(error));
+    });
+    if (dialog.exec() != QDialog::Accepted) return;
+    const auto chosen = model->currentText().trimmed();
+    const QString id = "claude-ollama-" + QUuid::createUuid().toString(QUuid::Id128).left(10);
+    QStringList args{"add", id, "--provider", "claude", "--label", accountLabel.isEmpty() ? chosen : accountLabel,
+                     "--ollama", chosen, "--endpoint", endpoint->text().trimmed()};
+    if (context->value() > 0) args << "--context" << QString::number(context->value());
+    if (!prepare->text().trimmed().isEmpty()) args << "--prepare" << prepare->text().trimmed();
+    if (m_catalogs.contains(host)) args << "--revision" << m_catalogs[host]["revision"].toString();
+    m_activeProfile = m_requestedProfile = profileKey(host, id);
+    { const QSignalBlocker blocker(m_machine); m_machine->setCurrentIndex(0); }
+    request(host, args);
 }
 void AccountsPage::setupDeepSeek(const QString &host, const QString &accountLabel)
 {

@@ -1978,6 +1978,12 @@ fn launch(
             account_environment = crate::accounts::select(config, id, &command_name)?;
         }
     }
+    // WhiteWh fork: a local model account's endpoint starts with its session.
+    if !options.dry {
+        if let Some(id) = &options.account {
+            crate::accounts::prepare_local_model(config, id, &command_name)?;
+        }
+    }
     #[cfg(unix)]
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let (mut base, mut resume): (Vec<String>, Vec<String>) = match command_name.as_str() {

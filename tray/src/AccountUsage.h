@@ -145,6 +145,8 @@ inline QString launchSummary(const QJsonObject &data) {
     if(data["refreshing"].toBool()||status=="loading")return QObject::tr("Checking limits…");
     if(status=="signed_out"&&data["provider"]!="dsh")return QObject::tr("Sign in required");
     if(status=="expired")return QObject::tr("Sign-in expired");
+    if(status=="configured"&&data["identity"].toObject()["auth_method"]=="Ollama")
+        return QObject::tr("Local model %1").arg(data["identity"].toObject()["plan"].toString());
     return QObject::tr("limits n/a");
 }
 inline double highest(const QJsonObject &data) {
@@ -192,6 +194,8 @@ inline QColor color(double value,bool dark) {return toneColor(thresholdTone(valu
 inline QString state(const QJsonObject &data) {
     return data.isEmpty() || data.value("status")=="loading" ? QObject::tr("Loading account details…")
         : data.value("status")=="configured" && data.value("provider")=="opencode" ? QObject::tr("OpenCode uses its native provider configuration. Usage is not available here.")
+        : data.value("status")=="configured" && data.value("identity").toObject().value("auth_method")=="Ollama"
+            ? QObject::tr("Local Ollama model %1. Plan limits do not apply.").arg(data.value("identity").toObject().value("plan").toString())
         : data.value("status")=="configured" ? QObject::tr("API key configured. Usage is available in the DeepSeek console.")
         : data.value("offline").toBool() || data.value("status")=="offline" ? QObject::tr("Machine is offline. Showing the last available account data.") : data.value("status")=="expired" ? QObject::tr("Native sign-in has expired. Open the agent or sign in again, then refresh usage.")
         : data.value("status")=="signed_out" && data.value("provider")=="dsh" ? QObject::tr("DeepSeek account is signed out. API-key connections are configured separately in the native settings.")
@@ -356,7 +360,7 @@ private:
     }
     QString summaryText() const {
         const auto balances=m_data.value("balances").toArray();const auto b=balances.isEmpty()?QJsonObject():balances.first().toObject();
-        return !b.isEmpty()?b.value("balance").toString()+" "+b.value("currency").toString():m_data.value("status")=="configured"?(m_data.value("provider")=="opencode"?tr("Configured"):tr("API key")):m_data.value("status")=="signed_out"?tr("Sign in required"):m_data.value("status")=="expired"?tr("Sign-in expired"):tr("Unavailable");
+        return !b.isEmpty()?b.value("balance").toString()+" "+b.value("currency").toString():m_data.value("status")=="configured"?(m_data.value("provider")=="opencode"?tr("Configured"):m_data.value("identity").toObject().value("auth_method")=="Ollama"?tr("Ollama"):tr("API key")):m_data.value("status")=="signed_out"?tr("Sign in required"):m_data.value("status")=="expired"?tr("Sign-in expired"):tr("Unavailable");
     }
     int contentWidth() const {
         const auto windows=m_data.value("windows").toArray();const bool loading=m_data.isEmpty() || m_data.value("status")=="loading";

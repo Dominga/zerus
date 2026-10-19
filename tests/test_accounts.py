@@ -156,6 +156,38 @@ class Accounts(unittest.TestCase):
         self.assertEqual((data['status'], data['identity']['email']), ('ok', 'kimi@example.invalid'))
         self.assertEqual(data['windows'][0]['used_percent'], 25.0)
 
+    def test_ollama_account_runs_claude_code_on_a_local_model(self):
+        import http.server, threading
+        class Ollama(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                body = {'models': [{'name': 'qwen3.8-cc:latest'}, {'name': 'qwen2.5-coder:7b'}]} if self.path == '/api/tags' else None
+                self.send_response(200 if body else 404); self.send_header('Content-Type', 'application/json'); self.end_headers()
+                self.wfile.write(json.dumps(body or {}).encode())
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Ollama)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        endpoint = f'http://127.0.0.1:{server.server_port}'
+        listed = json.loads(self.run_hgs('account', 'ollama-models', '--endpoint', endpoint).stdout)
+        self.assertEqual(listed['models'], ['qwen2.5-coder:7b', 'qwen3.8-cc:latest'])
+        self.run_hgs('account', 'add', 'local', '--provider', 'codex', '--ollama', 'qwen3.8-cc:latest', ok=False)
+        self.run_hgs('account', 'add', 'local', '--provider', 'claude', '--ollama', 'two words', ok=False)
+        self.run_hgs('account', 'add', 'local', '--provider', 'claude', '--ollama', 'm', '--endpoint', 'https://example.invalid', ok=False)
+        self.assertFalse((self.config/'accounts/local').exists())
+        self.run_hgs('account', 'add', 'local', '--provider', 'claude', '--label', 'Local Qwen', '--ollama', 'qwen3.8-cc:latest',
+                     '--endpoint', endpoint, '--context', '262144')
+        home = self.config/'accounts/local'
+        self.assertEqual(json.loads((home/'.hgs-local-model.json').read_text())['model'], 'qwen3.8-cc:latest')
+        self.assertTrue(json.loads((home/'.claude.json').read_text())['hasCompletedOnboarding'])
+        status = json.loads(self.run_hgs('account', 'inspect', 'local', '--refresh').stdout)
+        self.assertEqual((status['status'], status['identity']['plan'], status['reachable']), ('configured', 'qwen3.8-cc:latest', True))
+        launch = self.run_hgs('claude', str(self.root), '--new', '--account', 'local', '--dry-run').stdout.decode()
+        for expected in (f'ANTHROPIC_BASE_URL={endpoint}', 'ANTHROPIC_AUTH_TOKEN=ollama', 'ANTHROPIC_DEFAULT_OPUS_MODEL=qwen3.8-cc:latest',
+                         'CLAUDE_CODE_SUBAGENT_MODEL=qwen3.8-cc:latest', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS=262144'):
+            self.assertIn(expected, launch)
+        # An ordinary Claude account keeps Anthropic's endpoint.
+        self.assertNotIn('ANTHROPIC_BASE_URL=http', self.run_hgs('claude', str(self.root), '--new', '--dry-run').stdout.decode())
+
     def test_remove_preserves_native_context(self):
         self.add(); f=self.config/'accounts/work/session.jsonl'; f.write_text('saved context')
         self.run_hgs('account','rm','work'); self.assertEqual(f.read_text(),'saved context')

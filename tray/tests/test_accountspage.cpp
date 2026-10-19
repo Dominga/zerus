@@ -225,7 +225,7 @@ void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccount
     QTimer::singleShot(0,&page,[&]{
         auto *dialog=page.findChild<QDialog *>("accountDialog");QVERIFY(dialog);
         const auto closeOnFailure=qScopeGuard([dialog]{if(dialog->isVisible())dialog->reject();});
-        auto *agents=dialog->findChild<QListWidget *>("addAccountProvider");QCOMPARE(agents->count(),5);
+        auto *agents=dialog->findChild<QListWidget *>("addAccountProvider");QCOMPARE(agents->count(),6);
         auto *openCode=agents->item(4);QCOMPARE(openCode->data(Qt::UserRole+1).toString(),QString("opencode"));
         QCOMPARE(openCode->text(),QString("OpenCode"));QVERIFY(openCode->flags()&Qt::ItemIsEnabled);QVERIFY(!openCode->icon().isNull());
         QCOMPARE(openCode->data(Qt::UserRole+3).toString(),QString("Add the native configuration again"));
@@ -292,7 +292,7 @@ void TestAccountsPage::addAccountUsesProviderRows()
         auto *agents=dialog->findChild<QListWidget *>("addAccountProvider");QVERIFY(agents);
         QVERIFY(dynamic_cast<AccountChoice::Delegate *>(agents->itemDelegate()));
         QStringList names;for(int i=0;i<agents->count();++i)names<<agents->item(i)->text();
-        QCOMPARE(names,QStringList({"Codex","Claude","Kimi","DeepSeek","OpenCode"}));
+        QCOMPARE(names,QStringList({"Codex","Claude","Kimi","DeepSeek","OpenCode","Ollama"}));
         QCOMPARE(agents->currentRow(),0);QCOMPARE(agents->currentItem()->data(Qt::UserRole+3).toString(),QString("New profile with its own sign-in"));
         const auto logo=agents->item(1)->icon().pixmap(40,40).toImage();const auto expected=IdentityBadges::providerColor("claude",true);bool colored=false;
         for(int y=0;y<logo.height();++y)for(int x=0;x<logo.width();++x){const auto pixel=logo.pixelColor(x,y);
@@ -928,13 +928,13 @@ void TestAccountsPage::localWindowsOffersDeepSeekButNoOpenCode()
         const auto names = [provider] { QStringList result; for (int i = 0; i < provider->count(); ++i) result << provider->item(i)->data(Qt::UserRole + 1).toString(); return result; };
         const auto choose = [provider](const QString &id) { for (int i = 0; i < provider->count(); ++i) if (provider->item(i)->data(Qt::UserRole + 1) == id) provider->setCurrentRow(i); };
         const auto current = [provider] { return provider->currentItem() ? provider->currentItem()->data(Qt::UserRole + 1).toString() : QString(); };
-        QCOMPARE(machine->currentData().toString(), QString()); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh"}));
-        machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh", "opencode"}));
+        QCOMPARE(machine->currentData().toString(), QString()); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh", "ollama"}));
+        machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh", "opencode", "ollama"}));
         // OpenCode on mac is already in Accounts: its row explains and cannot be chosen.
         QVERIFY(!(provider->item(4)->flags() & Qt::ItemIsEnabled));
         QCOMPARE(provider->item(4)->data(Qt::UserRole + 3).toString(), QString("Native configuration, already added"));
         choose("dsh");
-        machine->setCurrentIndex(machine->findData(QString())); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh"}));
+        machine->setCurrentIndex(machine->findData(QString())); QCOMPARE(names(), QStringList({"codex", "claude", "kimi", "dsh", "ollama"}));
         QCOMPARE(current(), QString("dsh"));
         choose("claude");
         machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(current(), QString("claude"));

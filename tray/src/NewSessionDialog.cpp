@@ -1125,7 +1125,8 @@ void NewSessionDialog::refreshDense()
         const auto balances=usage["balances"].toArray();
         if(!balances.isEmpty()){
             bool valid=false;const double amount=balances.first().toObject()["balance"].toString().toDouble(&valid);
-            if(valid){agent.balanceValue=amount;agent.balance=QStringLiteral("$")+QString::number(amount,'f',2);tip<<tr("Balance: %1").arg(agent.balance);}
+            const auto currency=balances.first().toObject()["currency"].toString();
+            if(valid){agent.balanceValue=amount;agent.balance=(currency=="CNY"?QStringLiteral("¥"):currency=="USD"?QStringLiteral("$"):currency+' ')+QString::number(amount,'f',2);tip<<tr("Balance: %1").arg(agent.balance);}
         }
         if(!agent.connected)tip<<(agent.kind=="balance"?tr("No API key"):tr("Not connected"));
         agent.tooltip=tip.join('\n');

@@ -2212,6 +2212,11 @@ A new session waits for its first message. API-key `deepseek-official` connectio
 work independently of account sign-in. If `deepseek-account` needs login, Activity
 shows **Sign in** and keeps the draft until native authorization finishes.
 
+Accounts and New session show the balance of an API key from DeepSeek's
+`/user/balance`, read with the key that `DEEPSEEK_API_KEY` or
+`DSH_HOME/.credentials.yaml` holds, also while no native host runs. The key goes
+only to `api.deepseek.com`; Zerus keeps an opaque hash of it as the identity.
+
 **Native UI** opens the official web interface and the host workspace's native
 session list, including sessions created through Zerus. Native cookie exchange
 supplies authentication, and ports/tunnels are discovered automatically. The

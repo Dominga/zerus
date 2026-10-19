@@ -422,9 +422,8 @@ fn kimi(home: &Path) -> Value {
 fn dsh(home: &Path) -> Value {
     let fallback =
         json!({"identity":{},"windows":[],"source":"DeepSeek Harness","status":"unavailable"});
-    let Ok(url) = crate::state::dsh::account_ui_url(home) else {
-        return fallback;
-    };
+    // Without a running native UI only the API key and its balance are read.
+    let url = crate::state::dsh::account_ui_url(home).ok();
     let mut cmd = Command::new("node");
     cmd.args([
         "--input-type=module",

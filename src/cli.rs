@@ -106,7 +106,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account install codex|claude|kimi|dsh   install an agent in this terminal
        hgs [@host] account inspect --session SESSION [--refresh]
        hgs account copy ID --from MACHINE --to MACHINE --as NEW_ID [--label NAME]
-       hgs [@host] socraticode status|start|stop PATH | install   a folder's SocratiCode index (JSON)
+       hgs [@host] socraticode status|start|stop|connect PATH [--qdrant native|docker] | install | install-qdrant   a folder's SocratiCode index (JSON)
        hgs [@host] worktrees --path PATH [--refresh] [--json]   existing checkouts as JSON
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
        hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]

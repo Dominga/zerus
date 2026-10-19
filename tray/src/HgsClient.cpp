@@ -459,14 +459,14 @@ quint64 HgsClient::requestAccounts(const QString &host, const QStringList &argum
     return request;
 }
 
-quint64 HgsClient::requestSocratiCode(const QString &host, const QString &action, const QString &path)
+quint64 HgsClient::requestSocratiCode(const QString &host, const QString &action, const QString &path, bool nativeQdrant)
 {
     const quint64 request = ++m_socratiCodeRequest;
     QStringList args;
     if (!host.isEmpty()) args << QLatin1Char('@') + host;
     args << QStringLiteral("socraticode") << action;
     const bool machineWide = action == QLatin1String("install") || action == QLatin1String("install-qdrant");
-    if (!machineWide) args << path;
+    if (!machineWide) args << path << QStringLiteral("--qdrant") << QLatin1String(nativeQdrant ? "native" : "docker");
     // Start may first bring up Qdrant and Ollama; installs download.
     runHgs(m_hgs, args, machineWide ? 300000 : action == QLatin1String("start") ? 120000 : 30000, this,
         [this, request, host, path, action](const QByteArray &bytes) {

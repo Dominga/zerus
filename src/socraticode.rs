@@ -6,7 +6,8 @@
 //! Claude Code configures its plugin: the `env` of ~/.claude/settings.json,
 //! then of the folder's .claude/settings.json and settings.local.json.
 //!
-//! Without Docker, Zerus runs SocratiCode on a native Qdrant
+//! With `--qdrant native` (off by default: SocratiCode's own Docker Qdrant),
+//! Zerus runs SocratiCode on a native Qdrant
 //! (%LOCALAPPDATA%\Programs\qdrant\qdrant.exe, its data in
 //! %LOCALAPPDATA%\qdrant, on 127.0.0.1:6333) and a native Ollama:
 //! `install-qdrant` fetches the pinned Qdrant release, `start` brings up what
@@ -66,7 +67,20 @@ telemetry_disabled: true\r
 ";
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
-    let usage = "usage: hgs socraticode status|start|stop|connect PATH | install | install-qdrant";
+    let usage = "usage: hgs socraticode status|start|stop|connect PATH [--qdrant native|docker] | install | install-qdrant";
+    let mut args = args.to_vec();
+    let native_qdrant = match args.iter().position(|a| a == "--qdrant") {
+        Some(at) => {
+            let choice = args.get(at + 1).cloned().ok_or_else(|| Error::new(1, "--qdrant needs native or docker"))?;
+            args.drain(at..at + 2);
+            match choice.as_str() {
+                "native" => true,
+                "docker" => false,
+                _ => return Err(Error::new(1, "--qdrant needs native or docker")),
+            }
+        }
+        None => false,
+    };
     let action = args.first().map(String::as_str).ok_or_else(|| Error::new(1, usage))?;
     match action {
         "install" => return install(dry),
@@ -77,11 +91,11 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     let folder = resolve(folder)?;
     match action {
         "status" => {
-            println!("{}", status(config, &folder));
+            println!("{}", status(config, &folder, native_qdrant));
             Ok(0)
         }
-        "start" => start(config, &folder, dry),
-        "stop" => stop(config, &folder, dry),
+        "start" => start(config, &folder, native_qdrant, dry),
+        "stop" => stop(config, &folder, native_qdrant, dry),
         "connect" => connect(&folder, dry),
         _ => Err(Error::new(1, usage)),
     }
@@ -126,6 +140,13 @@ fn relevant(key: &str) -> bool {
 /// settings, each overriding the one before.
 fn settings(folder: &str) -> BTreeMap<String, String> {
     let mut values: BTreeMap<String, String> = env::vars().filter(|(key, _)| relevant(key)).collect();
+    values.extend(settings_files(folder));
+    values
+}
+
+/// What the Claude Code settings files alone give SocratiCode in the folder.
+fn settings_files(folder: &str) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
     let mut files = Vec::new();
     if let Some(home) = platform::home_dir() {
         files.push(home.join(".claude/settings.json"));
@@ -215,20 +236,19 @@ fn native() -> Native {
 
 /// Where SocratiCode keeps this folder's index, and how Zerus reaches it.
 struct Target {
-    mode: &'static str, // external (the settings name it), native (Zerus' way) or managed (Docker)
+    mode: &'static str, // external (the settings name it), native (--qdrant native) or managed (Docker)
     url: String,
     key: String,
     agents: bool, // agents in the folder reach the same Qdrant
 }
 
-fn target(values: &BTreeMap<String, String>, docker: bool, native: &Native) -> Target {
+fn target(values: &BTreeMap<String, String>, docker: bool, native_qdrant: bool) -> Target {
     let key = values.get("QDRANT_API_KEY").cloned().unwrap_or_default();
     if values.get("QDRANT_MODE").is_some_and(|mode| mode == "external") {
         let url = values.get("QDRANT_URL").cloned().unwrap_or_else(|| NATIVE_URL.into());
         return Target { mode: "external", url, key, agents: true };
     }
-    let native_up = http(NATIVE_URL, "GET", "/collections", None, "").is_some_and(|(code, _)| code == 200);
-    if !docker && (native.exe.is_some() || native_up) {
+    if native_qdrant {
         return Target { mode: "native", url: NATIVE_URL.into(), key, agents: false };
     }
     Target { mode: "managed", url: MANAGED_URL.into(), key, agents: docker }
@@ -290,12 +310,12 @@ fn runner(config: &Config, id: &str) -> Value {
     json!({"running": running, "phase": data["phase"], "detail": data["detail"], "error": data["error"], "updated_at": data["updated_at"]})
 }
 
-pub fn status(config: &Config, folder: &str) -> Value {
+pub fn status(config: &Config, folder: &str, native_qdrant: bool) -> Value {
     let values = settings(folder);
     let ids = project_ids(folder, &values);
     let docker = platform::which("docker").is_some();
     let native = native();
-    let target = target(&values, docker, &native);
+    let target = target(&values, docker, native_qdrant);
     let prefix = values.get("QDRANT_COLLECTION_PREFIX").cloned().unwrap_or_default();
     let reachable = http(&target.url, "GET", "/collections", None, &target.key).is_some_and(|(code, _)| code == 200);
     let mut chosen = ids[0].clone();
@@ -374,8 +394,8 @@ fn ensure_qdrant_files(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn start(config: &Config, folder: &str, dry: bool) -> Result<i32> {
-    let current = status(config, folder);
+fn start(config: &Config, folder: &str, native_qdrant: bool, dry: bool) -> Result<i32> {
+    let current = status(config, folder, native_qdrant);
     let id = current["project_id"].as_str().unwrap_or_default().to_owned();
     if current["runner"]["running"] == true || current["watching"] == true {
         println!("{}", json!({"started": false, "reason": "already running", "status": current}));
@@ -386,12 +406,12 @@ fn start(config: &Config, folder: &str, dry: bool) -> Result<i32> {
     }
     let values = settings(folder);
     let native = native();
-    let target = target(&values, current["docker"] == true, &native);
+    let target = target(&values, current["docker"] == true, native_qdrant);
     let qdrant_down = current["qdrant"]["reachable"] != true;
     let ollama = &current["ollama"];
     let ollama_down = ollama["provider"] == "ollama" && ollama["reachable"] != true;
     if qdrant_down && target.mode == "managed" && current["docker"] != true {
-        return Err(Error::new(1, "SocratiCode needs Qdrant: run hgs socraticode install-qdrant, or install Docker."));
+        return Err(Error::new(1, "SocratiCode keeps its index in Qdrant: install Docker, or use a native Qdrant (--qdrant native)."));
     }
     if qdrant_down && target.mode == "external" && !(local(&target.url) && native.exe.is_some()) {
         return Err(Error::new(1, format!("Qdrant does not answer at {}.", target.url)));
@@ -433,8 +453,8 @@ fn start(config: &Config, folder: &str, dry: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn stop(config: &Config, folder: &str, dry: bool) -> Result<i32> {
-    let current = status(config, folder);
+fn stop(config: &Config, folder: &str, native_qdrant: bool, dry: bool) -> Result<i32> {
+    let current = status(config, folder, native_qdrant);
     let id = current["project_id"].as_str().unwrap_or_default();
     if current["runner"]["running"] != true {
         // A watcher of an agent session belongs to that session.
@@ -459,7 +479,8 @@ fn connect(folder: &str, dry: bool) -> Result<i32> {
     } else {
         json!({})
     };
-    let values = settings(folder);
+    // Agents get the settings files, not this process's environment.
+    let values = settings_files(folder);
     let wanted = [("QDRANT_MODE", "external"), ("QDRANT_URL", NATIVE_URL), ("EMBEDDING_PROVIDER", "ollama"), ("OLLAMA_MODE", "external"),
                   ("OLLAMA_URL", OLLAMA_URL), ("EMBEDDING_MODEL", "nomic-embed-text"), ("EMBEDDING_DIMENSIONS", "768")];
     let root = data.as_object_mut().ok_or_else(|| Error::new(1, format!("{} is not a JSON object.", file.display())))?;
@@ -599,8 +620,14 @@ mod tests {
         let values = settings(&folder);
         assert_eq!(values["QDRANT_URL"], "http://127.0.0.1:6333");
         assert!(!values.contains_key("PATH"));
-        let target = target(&values, false, &Native { exe: None, home: PathBuf::new() });
-        assert_eq!((target.mode, target.url.as_str(), target.agents), ("external", "http://127.0.0.1:6333", true));
+        let named = target(&values, false, false);
+        assert_eq!((named.mode, named.url.as_str(), named.agents), ("external", "http://127.0.0.1:6333", true));
+        // Without a Qdrant in the settings, Docker is the default and native the choice.
+        let none = BTreeMap::new();
+        assert_eq!(target(&none, false, false).mode, "managed");
+        assert_eq!(target(&none, false, false).url, MANAGED_URL);
+        let native = target(&none, false, true);
+        assert_eq!((native.mode, native.url.as_str(), native.agents), ("native", NATIVE_URL, false));
     }
 
     #[test]

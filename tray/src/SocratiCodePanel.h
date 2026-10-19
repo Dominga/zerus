@@ -7,6 +7,7 @@
 #include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QShowEvent>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -109,7 +110,7 @@ private:
     void request(const QString &action)
     {
         if (m_path.isEmpty() || m_request) return;
-        m_request = m_client->requestSocratiCode(m_host, action, m_path);
+        m_request = m_client->requestSocratiCode(m_host, action, m_path, nativeQdrant());
         render();
     }
     void act()
@@ -130,6 +131,11 @@ private:
         }
         request(step);
     }
+public:
+    // Settings > Sessions: SocratiCode on a native Qdrant instead of its Docker one.
+    static bool nativeQdrant() { return QSettings().value(QStringLiteral("socraticode/nativeQdrant"), false).toBool(); }
+
+private:
     static QString ago(qint64 seconds)
     {
         if (seconds < 90) return tr("just now");
@@ -190,9 +196,11 @@ private:
         } else text = tr("Not indexed");
         if (!qdrant) text += startable ? tr(" · Qdrant is not running") : tr(" · no Qdrant");
         if (!data["plugin"].toObject()["installed"].toBool()) details << tr("The Claude Code plugin is not installed, so agents do not use this index.");
-        if (mode == QLatin1String("managed") && !data["docker"].toBool() && !native)
-            details << (store["native"].toObject()["installable"].toBool() ? tr("SocratiCode keeps its index in Qdrant. Install it natively here, or install Docker.")
-                                                                         : tr("SocratiCode keeps its index in Qdrant: install qdrant on PATH, or Docker."));
+        if (mode == QLatin1String("managed") && !data["docker"].toBool())
+            details << tr("SocratiCode keeps its index in a Qdrant that runs in Docker. Install Docker, or turn on a native Qdrant in Settings > Sessions.");
+        if (mode == QLatin1String("native") && !native && !qdrant)
+            details << (store["native"].toObject()["installable"].toBool() ? tr("The native Qdrant is not installed yet.")
+                                                                         : tr("Install qdrant on PATH for a native Qdrant."));
         if (!store["agents"].toBool() && mode == QLatin1String("native"))
             details << tr("Zerus uses the native Qdrant at %1; this folder's agents still look for SocratiCode's Docker one.").arg(store["url"].toString());
         if (!data["node"].toBool()) details << tr("SocratiCode needs Node.js with npx on this computer.");
@@ -208,7 +216,7 @@ private:
         // The one next step.
         const bool needsQdrant = !qdrant && !startable && !(mode == QLatin1String("managed") && data["docker"].toBool());
         if (!data["plugin"].toObject()["installed"].toBool()) setAction(QStringLiteral("install"), tr("Install plugin"), tr("claude plugin install socraticode@socraticode"));
-        else if (needsQdrant && mode == QLatin1String("managed") && store["native"].toObject()["installable"].toBool())
+        else if (needsQdrant && mode == QLatin1String("native") && store["native"].toObject()["installable"].toBool())
             setAction(QStringLiteral("install-qdrant"), tr("Install Qdrant…"), tr("Download the pinned native Qdrant for SocratiCode"));
         else if (needsQdrant) setAction({}, {});
         else if (!running && !watching) setAction(QStringLiteral("start"), state == QLatin1String("none") ? tr("Index and watch") : qdrant ? tr("Watch") : tr("Start"),

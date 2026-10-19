@@ -136,6 +136,11 @@ public:
         auto *optionalQuestions=new QCheckBox(tr("Notify about optional questions"));optionalQuestions->setObjectName("notifyOptionalQuestions");optionalQuestions->setChecked(QuestionNotificationSettings::enabled());sessions->addWidget(optionalQuestions);
         auto *optionalHint=new QLabel(tr("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify."));optionalHint->setWordWrap(true);sessions->addWidget(optionalHint);
         connect(optionalQuestions,&QCheckBox::toggled,this,[](bool on){QuestionNotificationSettings::setEnabled(on);});
+        auto *nativeQdrant=new QCheckBox(tr("Run SocratiCode on a native Qdrant (no Docker)"));nativeQdrant->setObjectName("socratiCodeNativeQdrant");
+        nativeQdrant->setChecked(QSettings().value("socraticode/nativeQdrant",false).toBool());sessions->addWidget(nativeQdrant);
+        auto *nativeHint=new QLabel(tr("Off by default: SocratiCode keeps each folder's index in its own Qdrant container in Docker. On: Zerus uses a Qdrant program on 127.0.0.1:6333, which it can install and start, with Ollama for embeddings. Folders whose Claude Code settings name a Qdrant always use that one."));
+        nativeHint->setWordWrap(true);sessions->addWidget(nativeHint);
+        connect(nativeQdrant,&QCheckBox::toggled,this,[](bool on){QSettings().setValue("socraticode/nativeQdrant",on);});
         auto *hint=new QLabel(tr("Closing Zerus keeps agents running. Projects and the arrangement of your workspace are saved on this device."));hint->setWordWrap(true);sessions->addWidget(hint);sessions->addStretch();
         sync=new RecoverySync(executable,this);recovery=new RecoverySettings(sync);recovery->setMaximumWidth(850);addPage(recovery);
         auto *processes=makePage(tr("Processes"));

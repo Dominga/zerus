@@ -188,6 +188,10 @@ public:
     void requestProjects(const QString &host = {});
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
     // WhiteWh fork: hgs socraticode status|start|stop|connect PATH, or install|install-qdrant.
+    // WhiteWh fork: the Claude desktop app's sessions (hgs claude-app ls), and
+    // one continued as a new Zerus session; the result is nativeSessionLaunched.
+    quint64 requestClaudeAppSessions(const QString &host);
+    void resumeClaudeAppSession(const QString &host, const QString &id, const QString &name, const QString &launchId, bool force);
     quint64 requestSocratiCode(const QString &host, const QString &action, const QString &path, bool nativeQdrant = false);
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     // hgs [@host] mobile …: phones of the workspace that host's mobile connection
@@ -322,6 +326,8 @@ signals:
     void searchFailed(quint64 request, const QString &host, const QString &error);
     void accountsReady(quint64 request, const QString &host, const QJsonObject &result);
     void accountsFailed(quint64 request, const QString &host, const QString &error);
+    void claudeAppSessionsReady(quint64 request, const QString &host, const QJsonObject &result);
+    void claudeAppSessionsFailed(quint64 request, const QString &host, const QString &error);
     void socratiCodeReady(quint64 request, const QString &host, const QString &path, const QString &action, const QJsonObject &result);
     void socratiCodeFailed(quint64 request, const QString &host, const QString &path, const QString &action, const QString &error);
     void mobileReady(quint64 request, const QString &host, const QJsonObject &result);
@@ -437,6 +443,7 @@ private:
     quint64 m_sessionHostRequest = 0;
     quint64 m_accountRequest = 0;
     quint64 m_socratiCodeRequest = 0;
+    quint64 m_claudeAppRequest = 0;
     bool m_machineSetupInFlight = false;
     quint64 m_messageRequest = 0;
     quint64 m_sessionActionRequest = 0;

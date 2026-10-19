@@ -459,6 +459,32 @@ quint64 HgsClient::requestAccounts(const QString &host, const QStringList &argum
     return request;
 }
 
+quint64 HgsClient::requestClaudeAppSessions(const QString &host)
+{
+    const quint64 request = ++m_claudeAppRequest;
+    QStringList args;
+    if (!host.isEmpty()) args << QLatin1Char('@') + host;
+    args << QStringLiteral("claude-app") << QStringLiteral("ls");
+    runHgs(m_hgs, args, 30000, this,
+        [this, request, host](const QByteArray &bytes) {
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
+            if (error.error != QJsonParseError::NoError || !data.isObject()) emit claudeAppSessionsFailed(request, host, tr("Invalid Claude app session list"));
+            else emit claudeAppSessionsReady(request, host, data.object());
+        }, [this, request, host](const QString &, const QString &error) { emit claudeAppSessionsFailed(request, host, error); });
+    return request;
+}
+
+void HgsClient::resumeClaudeAppSession(const QString &host, const QString &id, const QString &name, const QString &launchId, bool force)
+{
+    QStringList args{QStringLiteral("claude-app"), QStringLiteral("resume"), id, QStringLiteral("-n"), name,
+                     QStringLiteral("--launch-id"), launchId, QStringLiteral("-d")};
+    if (force) args << QStringLiteral("--force");
+    if (!host.isEmpty()) args.prepend('@' + host);
+    runHgs(m_hgs, args, 90000, this,
+        [this, launchId](const QByteArray &) { emit nativeSessionLaunched(launchId, true, {}); },
+        [this, launchId](const QString &, const QString &error) { emit nativeSessionLaunched(launchId, false, error); });
+}
+
 quint64 HgsClient::requestSocratiCode(const QString &host, const QString &action, const QString &path, bool nativeQdrant)
 {
     const quint64 request = ++m_socratiCodeRequest;

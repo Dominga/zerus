@@ -2,6 +2,7 @@ mod accounts;
 mod agent_guide;
 mod analytics;
 mod approval_log;
+mod claude_app;
 mod cli;
 mod config;
 mod download;

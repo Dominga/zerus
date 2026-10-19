@@ -2518,6 +2518,21 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     connect(&dialog, &NewSessionDialog::projectFoldersRequested, this, [this](const QString &id) { showProjects(); m_projectsPage->selectProject(id); });
     connect(&dialog, &NewSessionDialog::machinesRequested, this, [this] { runShortcut(QStringLiteral("go.machines")); m_machinesPage->selectMachine({}); });
     connect(&dialog, &NewSessionDialog::accountLoginRequested, this, &SessionsWindow::accountLoginRequested);
+    // WhiteWh fork: a Claude app session continues as a new detached session.
+    connect(&dialog, &NewSessionDialog::claudeAppResumeRequested, this,
+        [this](const QString &host, const QString &session, const QString &name, bool force, const QString &folder, const QString &group) {
+            const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", "claude"}, {"tag", name}, {"group", group},
+                {"target", folder}, {"add_folder", false}, {"folder", QString()}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
+            savePendingLaunches();
+            m_organization.setCollapsed(group, false);
+            m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters.clear(); m_search->clear(); showSessionList();
+            for (int delay : {750, 2000}) QTimer::singleShot(delay, this, [this, id] {
+                if (m_pendingLaunches.contains(id)) emit refreshRequested();
+            });
+            showNotice(tr("Continuing the Claude app session…"));
+            m_client.resumeClaudeAppSession(host, session, name, id, force);
+        });
     connect(&dialog, &NewSessionDialog::accountSetupRequested, this, [this](const QString &host, const QString &, const QString &id) {
         m_pages->setCurrentIndex(4);
         if (id.isEmpty()) m_accountsPage->showMachine(host); else m_accountsPage->showAccount(host, id);

@@ -50,6 +50,8 @@ signals:
     void machinesRequested();
     // WhiteWh fork, dense view: sign in to an account here, or set one up in Accounts.
     void accountLoginRequested(const QString &host, const QString &account);
+    // WhiteWh fork: continue a Claude desktop app session in its folder.
+    void claudeAppResumeRequested(const QString &host, const QString &session, const QString &name, bool force, const QString &folder, const QString &project);
     void accountSetupRequested(const QString &host, const QString &provider, const QString &account);
 private:
     // Views of the same widgets (WhiteWh fork skins, WorkspaceSkin.h).

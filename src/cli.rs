@@ -106,6 +106,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account install codex|claude|kimi|dsh   install an agent in this terminal
        hgs [@host] account inspect --session SESSION [--refresh]
        hgs account copy ID --from MACHINE --to MACHINE --as NEW_ID [--label NAME]
+       hgs [@host] claude-app ls | resume ID [-n NAME] [-d] [--force]   continue a Claude desktop app session (JSON list)
        hgs [@host] socraticode status|start|stop|connect PATH [--qdrant native|docker] | install | install-qdrant   a folder's SocratiCode index (JSON)
        hgs [@host] worktrees --path PATH [--refresh] [--json]   existing checkouts as JSON
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
@@ -633,6 +634,11 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         "account" => crate::accounts::dispatch(&config, args, dry),
         // WhiteWh fork: a folder's SocratiCode index.
         "socraticode" => crate::socraticode::dispatch(&config, args, dry),
+        // WhiteWh fork: continue a Claude desktop app session in Zerus.
+        "claude-app" => match crate::claude_app::dispatch(args)? {
+            crate::claude_app::Outcome::Done(code) => Ok(code),
+            crate::claude_app::Outcome::Launch(argv) => launch(&config, "claude", &argv, &client, dry),
+        },
         "project" => project(&config, args, dry),
         _ => launch(&config, command, args, &client, dry),
     }
@@ -1759,7 +1765,8 @@ impl LaunchOptions {
             ));
         }
         if options.new_only {
-            if options.resume || options.fresh {
+            // WhiteWh fork: a new session may continue one exact conversation.
+            if (options.resume && options.resume_id.is_none()) || options.fresh {
                 return Err(Error::new(
                     1,
                     "--new cannot be combined with --resume or --fresh",
@@ -1970,6 +1977,12 @@ fn launch(
         if existing || binding_exists(config, &session)? {
             requested_saved = state::check_requested_session(&session, &command_name, id)
                 .map_err(|error| Error::new(1, error))?;
+        }
+    }
+    // WhiteWh fork: one tracked session per conversation.
+    if let Some(id) = options.resume_id.as_ref().filter(|_| options.new_only) {
+        if let Some(tracked) = state::find_requested_session(&command_name, id).map_err(|error| Error::new(1, error))? {
+            return Err(Error::new(1, format!("conversation {id} is already open as {tracked}; open it from Sessions")));
         }
     }
     if options.new_only && (existing || binding_exists(config, &session)?) {

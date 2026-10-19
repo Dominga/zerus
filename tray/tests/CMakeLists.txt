@@ -584,6 +584,12 @@ target_include_directories(test_socraticodepanel PRIVATE ../src)
 target_link_libraries(test_socraticodepanel PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(socraticodepanel test_socraticodepanel)
 set_tests_properties(socraticodepanel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# WhiteWh fork: Claude desktop app sessions continued in Zerus.
+add_executable(test_claudeappsessions test_claudeappsessions.cpp)
+target_include_directories(test_claudeappsessions PRIVATE ../src)
+target_link_libraries(test_claudeappsessions PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(claudeappsessions test_claudeappsessions)
+set_tests_properties(claudeappsessions PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_markdownhtml test_markdownhtml.cpp)
 target_link_libraries(test_markdownhtml PRIVATE Qt6::Test hgs-markdown)

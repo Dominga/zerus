@@ -15,6 +15,7 @@
 #include "IdentityBadge.h"
 #include "WorkspaceSkin.h"
 #include "NewSessionDense.h"
+#include "ClaudeAppSessionsDialog.h"
 #include <QStackedWidget>
 #include <QGridLayout>
 #include <QKeySequence>
@@ -95,6 +96,15 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     auto *worktreeMenu=new QMenu(m_worktreeOptions);
     m_worktrees=worktreeMenu->addAction(workspaceIcon("git-branch",iconColor),tr("Choose existing…"));m_worktrees->setObjectName("chooseLaunchWorktree");
     m_newWorktree=worktreeMenu->addAction(workspaceIcon("add",iconColor),tr("Create manually…"));m_newWorktree->setObjectName("newLaunchWorktree");
+    // WhiteWh fork: a Claude desktop app session continues as a new session.
+    worktreeMenu->addSeparator();
+    auto *claudeApp=worktreeMenu->addAction(workspaceIcon("claude",iconColor),tr("Continue a Claude app session…"));claudeApp->setObjectName("continueClaudeAppSession");
+    connect(claudeApp,&QAction::triggered,this,[this]{
+        ClaudeAppSessionsDialog sessions(&m_client,host(),m_folder->currentData(Qt::UserRole+2).toString(),this);
+        if(sessions.exec()!=QDialog::Accepted)return;
+        emit claudeAppResumeRequested(host(),sessions.sessionId(),sessions.name(),sessions.force(),sessions.folder(),m_project->currentData().toString());
+        accept();
+    });
     m_worktreeOptions->setMenu(worktreeMenu);
     m_worktreeTarget=plainLabel();m_worktreeTarget->setObjectName("launchWorktreeTarget");m_worktreeTarget->setTextInteractionFlags(Qt::TextSelectableByMouse);
     // WhiteWh fork: the worktree type chosen for the last started session is

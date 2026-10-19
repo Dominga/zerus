@@ -157,6 +157,26 @@ conversation keeps its session name; another gets `resume-ID` unless `-n` is set
 An occupied name bound to another conversation is an error. Native history must
 remain on the selected host: project synchronization does not move conversations.
 
+Sessions of the Claude desktop app (its Code tab) continue the same way, from
+New session's **···** menu > **Continue a Claude app session…** or the CLI:
+
+```sh
+hgs [@host] claude-app ls                       # the app's newest 200 sessions, JSON
+hgs [@host] claude-app resume local_ID -n NAME -d
+```
+
+`ls` reads the app's session files (`claude-code-sessions` in its data folder:
+`%APPDATA%\Claude` on Windows, `~/Library/Application Support/Claude` on macOS,
+`~/.config/Claude` on Linux) for the conversation, folder, title and model, and
+whether Claude Code keeps that conversation's history. `resume` starts it as a new
+session with `--account native-claude` and `claude --resume ID` in its folder; a
+conversation another Zerus session already tracks is refused. Zerus never writes
+the app's files. A session the app may still run is refused unless `--force`, and
+the GUI asks first: two processes writing one conversation break its history.
+"Running" means a Claude process continues the conversation (`--resume ID`), or
+its files changed in the last two minutes; the app does not report it otherwise,
+so stop the session in the app first.
+
 Before the agent confirms its conversation and creates native history, pause is
 unavailable. Codex and Kimi may defer creation until the first message. Codex can
 also defer `SessionStart` after resume; Activity may send the first resumed message,

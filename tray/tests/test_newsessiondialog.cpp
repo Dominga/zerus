@@ -339,24 +339,24 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(row(dialog,"pc-claude"),-1);QTRY_VERIFY(row(dialog,"mac-claude")>=0);QCOMPARE(choices(dialog)->count(),2);
         QCOMPARE(choices(dialog)->item(0)->text(),QString("mac@example.invalid"));
     }
-    void localWindowsHidesDeepSeekAndOpenCode() {
-        // Spec D16: the local Windows computer starts neither DeepSeek nor OpenCode,
-        // even with their accounts in its catalog, and its shell is PowerShell. A
-        // Linux peer in the same dialog keeps both.
+    void localWindowsHidesOnlyOpenCode() {
+        // Spec D16: the local Windows computer does not start OpenCode, even with its
+        // account in its catalog, and its shell is PowerShell. This fork runs DeepSeek
+        // there. A Linux peer in the same dialog keeps both.
         flag("opencode");auto state=fleet();auto local=state.local();local.metrics=QJsonObject{{"platform","windows"}};
         state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
         NewSessionDialog dialog(program(),state,{},"dsh");dialog.show();auto *list=choices(dialog);
-        QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(list->count(),4);
-        QCOMPARE(row(dialog,"native-dsh"),-1);QCOMPARE(row(dialog,"native-opencode"),-1);
-        for(int i=0;i<list->count();++i)for(const auto *hidden:{"dsh","opencode"})QVERIFY(list->item(i)->data(Qt::UserRole+1).toString()!=hidden);
+        QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(list->count(),5);
+        QVERIFY(row(dialog,"native-dsh")>=0);QCOMPARE(row(dialog,"native-opencode"),-1);
+        for(int i=0;i<list->count();++i)QVERIFY(list->item(i)->data(Qt::UserRole+1).toString()!="opencode");
         QVERIFY(list->currentItem());QCOMPARE(list->item(list->count()-1)->text(),QString("Run PowerShell"));
         QCOMPARE(list->item(list->count()-1)->data(Qt::UserRole+1).toString(),QString("sh"));
         auto *computer=dialog.findChild<QComboBox *>("launchComputer");computer->setCurrentIndex(computer->findData(QString("mac")));
         QTRY_VERIFY(row(dialog,"native-dsh")>=0);QVERIFY(row(dialog,"native-opencode")>=0);QCOMPARE(list->count(),6);
         QCOMPARE(list->item(list->count()-1)->text(),QString("Run shell"));
         computer->setCurrentIndex(computer->findData(QString()));
-        QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(list->count(),4);
-        QCOMPARE(row(dialog,"native-dsh"),-1);QCOMPARE(row(dialog,"native-opencode"),-1);
+        QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(list->count(),5);
+        QVERIFY(row(dialog,"native-dsh")>=0);QCOMPARE(row(dialog,"native-opencode"),-1);
         QCOMPARE(list->item(list->count()-1)->text(),QString("Run PowerShell"));
         // A Linux computer keeps both and its shell.
         NewSessionDialog posix(program(),fleet(),{},"dsh");posix.show();

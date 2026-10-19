@@ -29,6 +29,12 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
     if !target.is_empty() && !config.is_self(target) {
         return Err(Error::new(2, UNSUPPORTED));
     }
+    if !crate::platform::local_sessions() {
+        return Err(Error::new(
+            2,
+            "The native DeepSeek UI needs local sessions on this computer; enable them in Machines.",
+        ));
+    }
     let url = crate::state::dsh::native_ui_url(name).map_err(|e| Error::new(1, e))?;
     let pattern =
         regex::Regex::new(r"^http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_%.-]+$").unwrap();

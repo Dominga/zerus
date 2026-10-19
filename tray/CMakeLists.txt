@@ -97,7 +97,7 @@ elseif(APPLE)
 endif()
 
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h
-    src/WindowsUpdateTrust.cpp src/WindowsUpdateTrust.h)
+    src/WindowsUpdateTrust.cpp src/WindowsUpdateTrust.h src/ForkUpdater.cpp src/ForkUpdater.h)
 target_include_directories(hgs-updates PUBLIC src)
 target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
 if(WIN32)
@@ -138,6 +138,23 @@ if(ZERUS_SOURCE_COMMIT MATCHES "^[a-f0-9]+$" AND ZERUS_SOURCE_COMMIT_LENGTH EQUA
     endif()
 endif()
 include(cmake/BuildVersion.cmake)
+# WhiteWh/zerus only: the fork workflow's run number and release feed
+# (docs/fork-updates.md). Builds made elsewhere have neither and never update.
+set(ZERUS_FORK_BUILD "$ENV{ZERUS_FORK_BUILD}" CACHE STRING "Fork workflow run number")
+set(ZERUS_FORK_FEED_URL "$ENV{ZERUS_FORK_FEED_URL}" CACHE STRING "Fork release update feed")
+if(NOT ZERUS_FORK_BUILD STREQUAL "")
+    string(LENGTH "${ZERUS_FORK_BUILD}" ZERUS_FORK_BUILD_LENGTH)
+    if(NOT ZERUS_FORK_BUILD MATCHES "^[1-9][0-9]*$" OR ZERUS_FORK_BUILD_LENGTH GREATER 15)
+        message(FATAL_ERROR "ZERUS_FORK_BUILD must be a positive integer of at most 15 digits")
+    endif()
+    target_compile_definitions(hgs-updates PRIVATE ZERUS_FORK_BUILD=${ZERUS_FORK_BUILD})
+endif()
+if(NOT ZERUS_FORK_FEED_URL STREQUAL "")
+    if(NOT ZERUS_FORK_FEED_URL MATCHES "^https://github[.]com/WhiteWh/zerus/releases/[A-Za-z0-9./_-]+$")
+        message(FATAL_ERROR "ZERUS_FORK_FEED_URL must name a release asset of WhiteWh/zerus")
+    endif()
+    target_compile_definitions(hgs-updates PRIVATE ZERUS_FORK_FEED_URL="${ZERUS_FORK_FEED_URL}")
+endif()
 
 # Tray sources compile once, into static libraries that hgs-tray and the Qt suites
 # link; tests/CMakeLists.txt fails when a suite lists a source that one of them

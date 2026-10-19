@@ -112,7 +112,8 @@ public:
     DesktopInstallation installation() const{return m_installation;}
     DesktopUpdateFeed feed() const{return m_feed;}
     bool busy() const{return m_busy;}
-    bool restartRequired() const{return m_restartRequired;}
+    // Also a verified build of this fork that waits next to a portable installation.
+    bool restartRequired() const;
     void refreshBundleState();
     // Quits after starting a detached helper that reopens the installed bundle once this
     // process has exited. Drafts are already persisted; agents and tmux are untouched.

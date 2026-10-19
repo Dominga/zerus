@@ -17,6 +17,7 @@
 #include "CommandBackend.h"
 #include "SessionsWindow.h"
 #include "UpdateController.h"
+#include "ForkUpdater.h"
 #include "SessionCommands.h"
 #ifdef Q_OS_LINUX
 #include "KonsoleBackend.h"
@@ -153,7 +154,12 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     connect(updates,&UpdateController::changed,this,[this]{if(!m_menu.isOpen())m_menu.rebuild(m_state);});
     connect(updates,&UpdateController::newerReleaseVerified,this,[this](const QString &token,const QString &version){m_notifier->post(token,tr("Zerus update available"),tr("Zerus %1 is available. Open Updates for installation instructions.").arg(version));});
     connect(&m_menu,&TrayMenu::updatesRequested,this,[this]{showSessions();m_sessionsWindow->showUpdates();});
+    // WhiteWh/zerus: a verified fork build waits; Restart to finish update installs it.
+    connect(ForkUpdater::instance(),&ForkUpdater::buildReady,this,[this](qint64 build){
+        m_notifier->post(QStringLiteral("zerus-fork-update:%1").arg(build),tr("Zerus update ready"),
+                         tr("Fork build %1 is downloaded. Choose Restart to finish update; drafts are kept and sessions keep running.").arg(build));});
     connect(m_notifier.get(), &AttentionNotifier::activated, this, [this](const QString &token, const QString &activationToken) {
+        if(token.startsWith(QLatin1String("zerus-fork-update:"))){showSessions();return;}
         if(UpdateController::isUpdateToken(token)){
             auto *updates=UpdateController::instance();if(!updates->updateAvailable()||updates->updateToken()!=token)return;
             showSessions();m_sessionsWindow->showUpdates();
@@ -181,7 +187,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     });
     connect(m_notifier.get(), &AttentionNotifier::failed, this, [this](const QString &token, const QString &detail) {
         qWarning().noquote() << "Zerus: notification:" << detail;
-        if(UpdateController::isUpdateToken(token))return;
+        if(UpdateController::isUpdateToken(token)||token.startsWith(QLatin1String("zerus-fork-update:")))return;
         m_attention.deliveryFailed(token);
         QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
         if (m_sessionsWindow) m_sessionsWindow->showNotificationNotice(tr("System notification was not delivered: %1").arg(detail));

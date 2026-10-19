@@ -1,5 +1,6 @@
 #include "UpdateController.h"
 #include "ChildProcess.h"
+#include "ForkUpdater.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -444,7 +445,9 @@ bool UpdateController::startRestartHelper(const QString &bundle,qint64 pid,const
     // request's pipe that ProcessRunner is still creating (ChildProcess.h).
     return ChildProcess::startDetached(shell,{QStringLiteral("-c"),script,QStringLiteral("zerus-restart"),QString::number(pid),bundle});
 }
+bool UpdateController::restartRequired() const{return m_restartRequired||ForkUpdater::instance()->ready();}
 void UpdateController::restartIntoInstalledBundle(){
+    if(auto *fork=ForkUpdater::instance();fork->ready()){if(fork->startInstall())QCoreApplication::quit();return;}
 #ifdef Q_OS_MACOS
     QDir bundle=QFileInfo(m_executable).absoluteDir();if(!bundle.cdUp()||!bundle.cdUp()||!bundle.dirName().endsWith(".app"))return;
     if(startRestartHelper(bundle.absolutePath(),QCoreApplication::applicationPid()))QCoreApplication::quit();
@@ -457,6 +460,7 @@ UpdateController::UpdateController(QObject *parent,QString executable,std::funct
     QFile osRelease("/etc/os-release");if(osRelease.open(QIODevice::ReadOnly))m_installation.arch=isArchLinux(osRelease.read(8193));
     if(!QStandardPaths::findExecutable("yay").isEmpty())m_installation.helper="yay";else if(!QStandardPaths::findExecutable("paru").isEmpty())m_installation.helper="paru";
 #endif
+    connect(ForkUpdater::instance(),&ForkUpdater::changed,this,&UpdateController::changed);
     auto *periodic=new QTimer(this);periodic->setInterval(15*60*1000);connect(periodic,&QTimer::timeout,this,&UpdateController::checkAutomatically);connect(periodic,&QTimer::timeout,this,&UpdateController::refreshBundleState);periodic->start();
     restoreCatalog();
     if(executable.isEmpty())executable=QCoreApplication::applicationFilePath();

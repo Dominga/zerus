@@ -308,6 +308,23 @@ pub(crate) fn shell_in_own_job() -> io::Result<bool> {
 /// Whether this process's immediate job lets it start a child outside the job;
 /// None outside any job (D4).
 pub(crate) fn current_job_allows_breakaway() -> io::Result<Option<bool>> {
+    let allowing = JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+    Ok(current_job_limits()?.map(|flags| flags & allowing != 0))
+}
+
+/// WhiteWh fork: whether this process's immediate job holds nothing: it lets its
+/// processes leave and does not end them when it closes. Some Windows desktops
+/// run nearly every user process, but not the shell, in such a job, installed by
+/// third-party software, that a child still cannot leave; a host there ends no
+/// earlier than the processes around it (D4). A job that forbids breakaway, such
+/// as an agent's tool sandbox, or a kill-on-close job still holds the host.
+pub(crate) fn current_job_is_open() -> io::Result<bool> {
+    let allowing = JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+    Ok(current_job_limits()?.is_some_and(|flags| flags & allowing != 0 && flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0))
+}
+
+/// The limit flags of this process's immediate job; None outside any job.
+fn current_job_limits() -> io::Result<Option<u32>> {
     if !in_any_job()? {
         return Ok(None);
     }
@@ -326,10 +343,7 @@ pub(crate) fn current_job_allows_breakaway() -> io::Result<Option<bool>> {
     {
         return Err(io::Error::last_os_error());
     }
-    let allowing = JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
-    Ok(Some(
-        information.BasicLimitInformation.LimitFlags & allowing != 0,
-    ))
+    Ok(Some(information.BasicLimitInformation.LimitFlags))
 }
 
 /// The host's own job and where the host stood before it joined it.
@@ -344,6 +358,7 @@ pub(crate) struct HostJob {
     pub was_in_job: bool,
     /// That job also holds the shell of this desktop: the host then ends no
     /// earlier than the desktop, whose processes all run in that job (D4).
+    /// WhiteWh fork: or that job holds nothing (`current_job_is_open`).
     pub desktop_job: bool,
 }
 
@@ -354,7 +369,7 @@ pub(crate) fn join_host_job() -> io::Result<HostJob> {
     let was_in_job = in_any_job()?;
     // Asked before the host's own job exists: the immediate job is still the one
     // breakaway stopped at.
-    let desktop_job = was_in_job && shell_in_own_job()?;
+    let desktop_job = was_in_job && (shell_in_own_job()? || current_job_is_open()?);
     let job = Job::new(Limits::HOST)?;
     // SAFETY: GetCurrentProcess returns the current-process pseudo-handle, which
     // is always valid and which BorrowedHandle allows.

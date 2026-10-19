@@ -1693,7 +1693,7 @@ mod windows_tests {
     fn each_host_directory_has_its_own_named_pipe() {
         let first = endpoint(Path::new(r"C:\Users\fixture\.local\state\hgs\dsh\hosts\one"));
         let second = endpoint(Path::new(r"C:\Users\fixture\.local\state\hgs\dsh\hosts\two"));
-        assert!(first.to_string_lossy().starts_with(r"\.\pipe\hgs-dsh-"), "{}", first.display());
+        assert!(first.to_string_lossy().starts_with(r"\\.\pipe\hgs-dsh-"), "{}", first.display());
         assert_ne!(first, second);
         assert_eq!(first, endpoint(Path::new(r"C:\Users\fixture\.local\state\hgs\dsh\hosts\one")));
     }
@@ -1713,7 +1713,7 @@ mod windows_tests {
         }
         let pipe = endpoint(Path::new(&format!(r"C:\zerus-test\{}", uuid::Uuid::new_v4())));
         let script = format!(
-            "const net=require('net');const s=net.createServer(c=>c.on('data',d=>{{c.end(JSON.stringify({{ok:true,value:JSON.parse(d)}})+'\n');s.close();}}));s.listen({:?},()=>console.log('ready'));",
+            "const net=require('net');const s=net.createServer(c=>c.on('data',d=>{{c.end(JSON.stringify({{ok:true,value:JSON.parse(d)}})+'\\n');s.close();}}));s.listen({:?},()=>console.log('ready'));",
             pipe.to_string_lossy()
         );
         let mut node = Command::new("node")

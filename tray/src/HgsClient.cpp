@@ -889,6 +889,8 @@ void HgsClient::launchDetachedSession(const QString &host, const QString &agent,
     if (agent == "opencode" && !model.isEmpty()) args << "--model" << model;
     // hgs requires --model with --effort: effort is that model's variant.
     if (agent == "opencode" && !model.isEmpty() && !effort.isEmpty()) args << "--effort" << effort;
+    // WhiteWh fork: another model of a local Ollama account for this session.
+    if (agent == "claude" && !model.isEmpty()) args << "--local-model" << model;
     if (!host.isEmpty()) args.prepend('@' + host);
     runHgs(m_hgs, args, 90000, this,
         [this,launchId](const QByteArray &) { emit nativeSessionLaunched(launchId,true,{}); },

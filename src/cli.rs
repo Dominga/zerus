@@ -135,6 +135,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
   -n tag   separate session <cmd>/<project>/<tag>
   --account ID   use a named native agent profile for this session
   --permissions auto|bypass   this session's native permission mode instead of the account's (auto: claude only)
+  --local-model NAME   this session's model of a local Ollama account (claude)
   --model PROVIDER/MODEL   OpenCode native model for a new session
   --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (omit for the model's default)
   --new    always create a separate session; generate a name unless -n is given
@@ -778,7 +779,7 @@ fn peer_session(command: &str, args: &[String]) -> String {
                 tag = args.get(i + 1).cloned().unwrap_or_default();
                 i += 1;
             }
-            "--launch-id" | "--permissions" => i += 1,
+            "--launch-id" | "--permissions" | "--local-model" => i += 1,
             option if option.starts_with('-') => {}
             name if project.is_empty() => project = name.into(),
             _ => {}
@@ -1636,6 +1637,7 @@ fn absolute_directory(path: &str) -> std::io::Result<PathBuf> {
 struct LaunchOptions {
     account: Option<String>,
     permissions: Option<String>,
+    local_model: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     launch_id: Option<String>,
@@ -1683,6 +1685,11 @@ impl LaunchOptions {
                 "--permissions" => {
                     options.permissions =
                         Some(require(args, i + 1, "--permissions needs auto or bypass")?.into());
+                    i += 1;
+                }
+                "--local-model" => {
+                    options.local_model =
+                        Some(require(args, i + 1, "--local-model needs a model name")?.into());
                     i += 1;
                 }
                 "--launch-id" => {
@@ -1978,7 +1985,12 @@ fn launch(
             account_environment = crate::accounts::select(config, id, &command_name)?;
         }
     }
-    // WhiteWh fork: a local model account's endpoint starts with its session.
+    // WhiteWh fork: this session's model of a local model account, then its
+    // endpoint, which starts with the session.
+    if let Some(model) = options.local_model.as_deref() {
+        let id = options.account.as_deref().ok_or_else(|| Error::new(1, "--local-model needs --account"))?;
+        account_environment.extend(crate::accounts::local_model_session(config, id, &command_name, model)?);
+    }
     if !options.dry {
         if let Some(id) = &options.account {
             crate::accounts::prepare_local_model(config, id, &command_name)?;

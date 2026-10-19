@@ -2509,11 +2509,16 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
             if (!openTerminal || cmd=="dsh" || cmd=="opencode") {
                 showNotice(tr("Starting session…"));
                 m_client.launchDetachedSession(host,cmd,target,name,account,id,model,effort,permissions);
-            } else emit newSessionRequested(host, cmd, target, name, account, id, permissions);
+            } else emit newSessionRequested(host, cmd, target, name, account, id, permissions, cmd == "claude" ? model : QString());
         });
     connect(&dialog, &NewSessionDialog::manageProjectsRequested, this, &SessionsWindow::showProjects);
     connect(&dialog, &NewSessionDialog::projectFoldersRequested, this, [this](const QString &id) { showProjects(); m_projectsPage->selectProject(id); });
     connect(&dialog, &NewSessionDialog::machinesRequested, this, [this] { runShortcut(QStringLiteral("go.machines")); m_machinesPage->selectMachine({}); });
+    connect(&dialog, &NewSessionDialog::accountLoginRequested, this, &SessionsWindow::accountLoginRequested);
+    connect(&dialog, &NewSessionDialog::accountSetupRequested, this, [this](const QString &host, const QString &, const QString &id) {
+        m_pages->setCurrentIndex(4);
+        if (id.isEmpty()) m_accountsPage->showMachine(host); else m_accountsPage->showAccount(host, id);
+    });
     dialog.exec();
 }
 

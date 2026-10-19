@@ -164,8 +164,9 @@ pub(super) fn split_command(text: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
-/// Model names that the Ollama at `endpoint` lists (`GET /api/tags`).
-pub(super) fn models(endpoint: &str) -> Result<Vec<String>> {
+/// The models that the Ollama at `endpoint` lists (`GET /api/tags`), by name,
+/// with their parameter size, quantization and file size when Ollama reports them.
+pub(super) fn models(endpoint: &str) -> Result<Vec<Value>> {
     let (host, port) = address(endpoint)
         .ok_or_else(|| Error::new(1, "The Ollama address must be http://HOST:PORT."))?;
     let addr = (host.as_str(), port).to_socket_addrs()?.next()
@@ -183,13 +184,17 @@ pub(super) fn models(endpoint: &str) -> Result<Vec<String>> {
         return Err(Error::new(1, "Ollama did not list its models."));
     }
     let data: Value = serde_json::from_str(body).map_err(|_| Error::new(1, "Invalid Ollama model list."))?;
-    let mut names: Vec<String> = data["models"].as_array().into_iter().flatten()
-        .filter_map(|m| m["name"].as_str().map(str::to_owned))
-        .filter(|name| !name.is_empty() && name.len() <= 256)
+    let text = |value: &Value| value.as_str().filter(|v| v.len() <= 64 && !v.chars().any(char::is_control)).unwrap_or("").to_owned();
+    let mut models: Vec<Value> = data["models"].as_array().into_iter().flatten()
+        .filter_map(|m| {
+            let name = m["name"].as_str().filter(|name| !name.is_empty() && name.len() <= 256)?;
+            Some(json!({"name": name, "parameter_size": text(&m["details"]["parameter_size"]),
+                        "quantization": text(&m["details"]["quantization_level"]), "size": m["size"].as_u64().unwrap_or(0)}))
+        })
         .collect();
-    names.sort();
-    names.dedup();
-    Ok(names)
+    models.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    models.dedup_by(|a, b| a["name"] == b["name"]);
+    Ok(models)
 }
 
 #[cfg(test)]

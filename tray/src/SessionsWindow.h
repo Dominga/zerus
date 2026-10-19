@@ -96,7 +96,7 @@ signals:
     void folderShellRequested(const QString &host, const QString &directory);
     void copySessionCommandRequested(const QString &host, const QString &name, const QString &archiveId);
     void copyTextRequested(const QString &text);
-    void newSessionRequested(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions = {});
+    void newSessionRequested(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions = {}, const QString &localModel = {});
     void projectsChanged(const QString &host);
     void accountLoginRequested(const QString &host, const QString &id);
     void accountInstallRequested(const QString &host, const QString &provider);

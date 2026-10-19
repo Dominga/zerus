@@ -25,6 +25,7 @@
 #include <QFrame>
 #include <QShortcut>
 #include <QToolButton>
+#include <QMenu>
 
 class TestNewSessionDialog : public QObject {
     Q_OBJECT
@@ -282,18 +283,30 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QVERIFY(dialog.findChild<QFrame *>("newSessionDense"));QVERIFY(dialog.windowFlags()&Qt::FramelessWindowHint);
         QCOMPARE(dialog.findChildren<QShortcut *>().size(),2);
         QTRY_VERIFY(row(dialog,"work")>=0);QVERIFY(!choices(dialog)->isVisible());
-        const auto agents=[&]{QStringList ids;for(auto *button:dialog.findChildren<QToolButton *>("denseAgent"))ids<<button->property("provider").toString();return ids;};
-        QTRY_COMPARE(agents(),QStringList({"codex","claude","dsh","sh"}));
-        // Two Codex accounts: the account line becomes a choice.
-        auto *choice=dialog.findChild<QComboBox *>("denseAccountChoice");QTRY_VERIFY(choice->isVisible());QCOMPARE(choice->count(),2);
-        for(auto *button:dialog.findChildren<QToolButton *>("denseAgent"))if(button->property("provider").toString()=="claude")button->click();
+        const auto agents=[&]{QStringList ids;for(auto *button:dialog.findChildren<QAbstractButton *>("denseAgent"))ids<<button->property("agent").toString();return ids;};
+        const auto pick=[&](const QString &key){for(auto *button:dialog.findChildren<QAbstractButton *>("denseAgent"))if(button->property("agent").toString()==key)button->click();};
+        // Ollama follows Claude Code: a local model account is a Claude Code profile.
+        QTRY_COMPARE(agents(),QStringList({"codex","claude","dsh","ollama","sh"}));
+        // Two Codex accounts: a menu names them.
+        auto *accounts=dialog.findChild<QToolButton *>("denseAccounts");QTRY_VERIFY(accounts->isVisible());QCOMPARE(accounts->menu()->actions().size(),2);
+        pick("claude");
         QTRY_COMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude"));
-        QVERIFY(!choice->isVisible());QTRY_VERIFY(dialog.findChild<QLabel *>("denseAccount")->text().contains("shared@example.invalid"));
-        QTRY_COMPARE(dialog.findChildren<QLabel *>("denseUsageLeft").value(0)->text(),QString("83% left"));
-        QCOMPARE(dialog.findChildren<QLabel *>("denseUsageLeft").value(1)->text(),QString("22% left"));
-        auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        QVERIFY(!accounts->isVisible());
+        auto *info=dialog.findChild<QWidget *>("denseInfo");
+        QTRY_VERIFY(info->accessibleName().contains("shared@example.invalid"));
+        QVERIFY2(info->accessibleName().contains("5h 17% used")&&info->accessibleName().contains("week 78% used"),qPrintable(info->accessibleName()));
+        const auto preview=qEnvironmentVariable("ZERUS_DENSE_PREVIEW");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-claude.png"));
+        // A signed-out agent offers its own action and does not start.
+        auto *start=dialog.findChild<QPushButton *>("primary");
+        pick("dsh");QTRY_VERIFY(!start->isEnabled());
+        QCOMPARE(start->toolTip(),QString("Connect the account first"));
+        auto *action=dialog.findChild<QPushButton *>("denseSignIn");QVERIFY(action->isVisible());QCOMPARE(action->text(),QString("Add key"));
+        if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-dsh.png"));
+        QVERIFY(!dialog.findChild<QWidget *>("denseModelField")->isVisible());
+        pick("claude");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
         QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
         QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][4].toString(),QString("claude"));
+        QVERIFY(launched[0][8].toString().isEmpty());
     }
     void permissionsOfferOnlyTheComputersListedModes() {
         {   // An older computer lists no modes: only the account default exists.

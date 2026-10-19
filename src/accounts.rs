@@ -481,6 +481,22 @@ pub fn select(config: &Config, id: &str, provider: &str) -> Result<Vec<String>> 
     Ok(environment)
 }
 
+/// The variables that run a local model account's session on another model of
+/// the same endpoint (`--local-model`), without changing the account.
+pub fn local_model_session(config: &Config, id: &str, provider: &str, model: &str) -> Result<Vec<String>> {
+    let (profile, home, native) = lookup(config, id)?;
+    let local = local_model::read(&home).filter(|_| !native && provider == "claude" && profile.provider == "claude");
+    let Some(mut local) = local else {
+        return Err(Error::new(1, "--local-model needs a local model account (hgs account add ID --provider claude --ollama MODEL)."));
+    };
+    local.model = model.into();
+    local_model::validate(&local)?;
+    Ok(local_model::environment(&local).into_iter().map(|(key, value)| {
+        env::set_var(&key, &value);
+        format!("{key}={value}")
+    }).collect())
+}
+
 /// Starts a local model account's endpoint (a proxy before Ollama, say) when it
 /// does not answer, so a new session's first request finds it.
 pub fn prepare_local_model(config: &Config, id: &str, provider: &str) -> Result<()> {
@@ -595,7 +611,9 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         },
         "ollama-models"=>{
             let endpoint=arg(args,"--endpoint").unwrap_or(local_model::DEFAULT_ENDPOINT);
-            println!("{}",json!({"endpoint":endpoint,"models":local_model::models(endpoint)?}));
+            let details=local_model::models(endpoint)?;
+            let names:Vec<Value>=details.iter().map(|m|m["name"].clone()).collect();
+            println!("{}",json!({"endpoint":endpoint,"models":names,"details":details}));
         },
         "rm"|"restore"=>{
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;

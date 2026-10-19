@@ -1,5 +1,7 @@
 #pragma once
 #include "WorkspaceSkin.h"
+#include "NewSessionDense.h"
+#include <memory>
 #include <QDialog>
 #include <QMap>
 #include "FleetState.h"
@@ -9,7 +11,9 @@ class QComboBox;
 class QCheckBox;
 class QButtonGroup;
 class QDialogButtonBox;
-class QProgressBar;
+class QMenu;
+class QStackedWidget;
+class QToolButton;
 class QToolButton;
 class QLabel;
 class QLineEdit;
@@ -44,20 +48,36 @@ signals:
     void projectFoldersRequested(const QString &project);
     // Open Machines with this computer selected (offered without a computer).
     void machinesRequested();
+    // WhiteWh fork, dense view: sign in to an account here, or set one up in Accounts.
+    void accountLoginRequested(const QString &host, const QString &account);
+    void accountSetupRequested(const QString &host, const QString &provider, const QString &account);
 private:
     // Views of the same widgets (WhiteWh fork skins, WorkspaceSkin.h).
     void buildClassicLayout(QDialogButtonBox *buttons);
     void buildDenseLayout(QDialogButtonBox *buttons, bool dark, const WorkspaceSkin::Skin &skin);
     void refreshDense();
-    struct DenseMeter { QWidget *widget = nullptr; QLabel *text = nullptr, *left = nullptr; QProgressBar *bar = nullptr; };
-    QWidget *m_denseHeader = nullptr, *m_denseAgents = nullptr;
-    QButtonGroup *m_denseAgentGroup = nullptr;
-    QComboBox *m_denseAccount = nullptr;
-    QLabel *m_denseAccountLabel = nullptr, *m_denseUsageCaption = nullptr;
-    DenseMeter m_denseMeters[2];
-    QStringList m_denseProviders;
-    QString m_denseMuted;
-    bool m_denseDark = false;
+    void refreshDenseModel();
+    void selectDenseAgent(const QString &key);
+    void requestLocalModels();
+    void denseAccountAction();
+    QString denseKey(int row) const;
+    int denseRow(const QString &key) const;
+    QString denseAccountModel() const;
+    QString denseLocalModel() const;
+    std::shared_ptr<NewSessionDense::Tokens> m_denseTokens;
+    NewSessionDense::AgentRail *m_denseRail = nullptr;
+    NewSessionDense::InfoLine *m_denseInfo = nullptr;
+    QWidget *m_denseHeader = nullptr, *m_denseModelCaption = nullptr, *m_denseMetaBox = nullptr;
+    QStackedWidget *m_denseModelField = nullptr, *m_denseMetaField = nullptr;
+    QToolButton *m_denseAccounts = nullptr, *m_denseRescan = nullptr;
+    QPushButton *m_denseSignIn = nullptr;
+    QComboBox *m_localModel = nullptr;
+    QLabel *m_denseModelMeta = nullptr;
+    QMenu *m_densePermissions = nullptr;
+    QAction *m_densePermissionsSeparator = nullptr;
+    QString m_denseKey;
+    quint64 m_localModelRequest = 0;
+    bool m_denseDark = false, m_denseBlocked = false, m_denseSigningIn = false, m_localModelsListed = false;
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
     void browseFolder();

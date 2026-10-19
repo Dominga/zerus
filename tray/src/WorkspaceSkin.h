@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
@@ -17,7 +18,10 @@
 // files in the "skins" folder beside the settings file, and a running Zerus
 // reloads the selected one when it changes. Schema 1:
 //   {"schema":1,"name":"…","dark":{token:color…},"light":{…},"stylesheet":"…",
-//    "views":{"newSession":"classic|dense"},"window":{"dialogs":"native|frameless"}}
+//    "views":{"newSession":"classic|dense"},"window":{"dialogs":"native|frameless"},
+//    "viewColors":{"dark":{name:color…},"light":{…}}}
+// viewColors name the colors of views, such as the dense New session, apart
+// from the workspace tokens.
 // A view arranges a screen's widgets; its logic stays the same. Missing or
 // invalid tokens keep the Zerus colors, and unknown views the classic ones.
 namespace WorkspaceSkin {
@@ -32,6 +36,9 @@ struct Skin {
     Palette dark, light;
     QJsonObject views;
     QString dialogFrame = QStringLiteral("native");
+    QHash<QString, QString> darkViewColors, lightViewColors;
+    // A view color the skin names, or an empty string for the view's own default.
+    QString named(bool darkTheme, const QString &name) const { return (darkTheme ? darkViewColors : lightViewColors).value(name); }
     const Palette &palette(bool darkTheme) const { return darkTheme ? dark : light; }
     QString view(const QString &screen) const { return views[screen].toString(QStringLiteral("classic")); }
     bool framelessDialogs() const { return dialogFrame == QLatin1String("frameless"); }
@@ -76,6 +83,14 @@ inline Skin parse(const QJsonObject &data, const QString &id, const QString &pat
     for (auto it = views.begin(); it != views.end(); ++it)
         if (screenName.match(it.key()).hasMatch() && viewName.match(it.value().toString()).hasMatch()) skin.views[it.key()] = it.value().toString();
     if (data["window"].toObject()["dialogs"].toString() == QLatin1String("frameless")) skin.dialogFrame = QStringLiteral("frameless");
+    static const QRegularExpression colorPlain(QStringLiteral("\\A(?:#[0-9A-Fa-f]{3,8}|[A-Za-z]{3,30})\\z"));
+    for (const auto &[key, colors] : {std::pair{QStringLiteral("dark"), &skin.darkViewColors}, std::pair{QStringLiteral("light"), &skin.lightViewColors}}) {
+        const auto values = data["viewColors"].toObject()[key].toObject();
+        for (auto it = values.begin(); it != values.end() && colors->size() < 64; ++it) {
+            const auto value = it.value().toString().trimmed();
+            if (screenName.match(it.key()).hasMatch() && colorPlain.match(value).hasMatch() && QColor::isValidColorName(value)) colors->insert(it.key(), value);
+        }
+    }
     for (const auto &[key, palette] : {std::pair{QStringLiteral("dark"), &skin.dark}, std::pair{QStringLiteral("light"), &skin.light}}) {
         const auto values = data[key].toObject();
         for (const auto &name : tokens()) {
@@ -97,6 +112,10 @@ inline const char *whiteWhJson()
 "light":{"background":"#f5f7f9","foreground":"#1a2733","muted":"#627082","surface":"#ffffff","border":"#dce2e8","accent":"#167357",
          "accentText":"#ffffff","accentHover":"#115d46","hover":"#edf2f5","selected":"#e0f0e9","inset":"#f3f6f8"},
 "views":{"newSession":"dense"},"window":{"dialogs":"frameless"},
+"viewColors":{"dark":{"dialog":"#1b1f26","field":"#151920","selectedAgent":"#1f3a31","segmentOn":"#26443a","buttonNeutral":"#232830",
+  "disabled":"#2a3038","border":"#2c323b","fieldBorder":"#39404a","neutralBorder":"#4a525d","track":"#2c323b","foreground":"#e6e8eb",
+  "text2":"#c4cad1","text3":"#aab1ba","muted":"#9aa3ad","label":"#8b939e","dim":"#6f7883","accent":"#7dd3b0","accentText":"#0f1a16",
+  "warn":"#e8a75a","danger":"#ef7d6d","folder":"#7fb6e0"}},
 "stylesheet":""})";
 }
 
@@ -156,8 +175,14 @@ inline QString duplicate(const Skin &skin, const QString &name, QString *error)
     auto id = base;
     for (int n = 2; taken.contains(id); ++n) id = base + '-' + QString::number(n);
     if (!QDir().mkpath(directory())) { if (error) *error = QObject::tr("Could not create %1.").arg(QDir::toNativeSeparators(directory())); return {}; }
+    const auto colors = [](const QHash<QString, QString> &values) {
+        QJsonObject result;
+        for (auto it = values.begin(); it != values.end(); ++it) result[it.key()] = it.value();
+        return result;
+    };
     QJsonObject data{{"schema", 1}, {"name", trimmed.isEmpty() ? skin.name : trimmed}, {"dark", toJson(skin.dark)},
                      {"light", toJson(skin.light)}, {"views", skin.views}, {"window", QJsonObject{{"dialogs", skin.dialogFrame}}},
+                     {"viewColors", QJsonObject{{"dark", colors(skin.darkViewColors)}, {"light", colors(skin.lightViewColors)}}},
                      {"stylesheet", skin.stylesheet}};
     QFile output(QDir(directory()).filePath(id + QStringLiteral(".json")));
     if (!output.open(QIODevice::NewOnly | QIODevice::WriteOnly) || output.write(QJsonDocument(data).toJson()) < 0) {

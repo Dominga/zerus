@@ -96,8 +96,11 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_worktreeOptions->setMenu(worktreeMenu);worktreeRow->addWidget(m_worktreeOptions);worktreeRow->addStretch();worktreeField->addLayout(worktreeRow);
     m_worktreeTarget=plainLabel();m_worktreeTarget->setObjectName("launchWorktreeTarget");m_worktreeTarget->setTextInteractionFlags(Qt::TextSelectableByMouse);
     worktreeField->addWidget(m_worktreeTarget);form->addRow(tr("Worktree"),worktreeField);
-    connect(m_autoWorktree,&QPushButton::clicked,this,[this]{m_autoPreferred=true;updateForm();});
-    connect(m_plainFolder,&QPushButton::clicked,this,[this]{m_autoPreferred=false;updateForm();});
+    // WhiteWh fork: the worktree type chosen for the last started session is
+    // the next default; an explicit folder or worktree choice does not change it.
+    m_autoPreferred=QSettings().value("workspace/launchWorktree").toString()!="none";
+    connect(m_autoWorktree,&QPushButton::clicked,this,[this]{m_autoPreferred=true;m_worktreeChosen=true;updateForm();});
+    connect(m_plainFolder,&QPushButton::clicked,this,[this]{m_autoPreferred=false;m_worktreeChosen=true;updateForm();});
     connect(m_worktrees,&QAction::triggered,this,&NewSessionDialog::chooseWorktree);
     connect(m_newWorktree,&QAction::triggered,this,&NewSessionDialog::createWorktree);
     m_agents={"codex","claude","kimi","dsh","opencode"};
@@ -412,6 +415,7 @@ QString NewSessionDialog::automaticWorktreePath() const
 void NewSessionDialog::launch(const QString &target,const QString &addFolder)
 {
     QSettings settings;settings.setValue("workspace/launchOpenTerminal",m_openTerminal->isChecked());
+    if(m_worktreeChosen)settings.setValue("workspace/launchWorktree",m_autoPreferred?"auto":"none");
     // The next dialog starts with this agent and, per machine and agent, this account.
     settings.setValue("workspace/launchAgent",agent());
     if(const auto selectedAccount=account();!selectedAccount.isEmpty()){

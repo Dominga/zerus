@@ -137,6 +137,8 @@ elif a[:2]==['account','inspect']:
  if (root/'fail').exists():sys.exit(1)
  print(json.dumps({'id':i,'provider':p,'home':'/profiles/'+i,**status(i,p)}))
 elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
+elif a and a[0]=='worktrees' and (root/'repo').exists():
+ print(json.dumps({'state':'ok','path':a[1],'selected_root':'/repo','common_dir':'/repo/.git','sampled_at':int(time.time()),'worktrees':[{'path':'/repo','kind':'main','available':True}]}))
 elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]}))
 )PY"));
     }
@@ -227,6 +229,24 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][1].toString(),QString("codex"));QCOMPARE(launched[0][4].toString(),QString("work"));
         NewSessionDialog next(program(),fleet(),host);QTRY_VERIFY(row(next,"work")>=0);QTRY_COMPARE(choices(next)->count(),5);
         QCOMPARE(choices(next)->currentItem()->data(Qt::UserRole).toString(),QString("work"));
+    }
+    // WhiteWh fork: the worktree type of the last started session is the next default.
+    void lastWorktreeTypeIsRemembered() {
+        flag("repo");QSettings().remove("workspace/launchWorktree");
+        {
+            NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.selectPath("/workspace/example");dialog.show();
+            auto *automatic=dialog.findChild<QPushButton *>("automaticLaunchWorktree");auto *plain=dialog.findChild<QPushButton *>("launchWithoutWorktree");
+            QTRY_VERIFY(automatic->isChecked());plain->click();QVERIFY(plain->isChecked());
+            auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+            QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        }
+        QCOMPARE(QSettings().value("workspace/launchWorktree").toString(),QString("none"));
+        NewSessionDialog next(program(),fleet(),{},"codex");next.selectPath("/workspace/example");next.show();
+        auto *automatic=next.findChild<QPushButton *>("automaticLaunchWorktree");auto *plain=next.findChild<QPushButton *>("launchWithoutWorktree");
+        // Auto stays available for this repository; only the default changed.
+        QTRY_VERIFY(next.findChild<QPushButton *>("primary")->isEnabled());QVERIFY(plain->isChecked());
+        automatic->click();QTRY_VERIFY(automatic->isChecked());
+        QSettings().remove("workspace/launchWorktree");flag("repo",false);
     }
     void permissionsOfferOnlyTheComputersListedModes() {
         {   // An older computer lists no modes: only the account default exists.

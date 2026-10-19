@@ -102,6 +102,8 @@ private:
     QLabel *m_worktreeTarget;
     QString m_generatedBranch;
     bool m_autoPreferred=true,m_creationFailed=false,m_startWithWorktree=false;
+    // Auto or None was chosen with its button in this dialog (WhiteWh fork).
+    bool m_worktreeChosen=false;
     quint64 m_creation=0;
     QJsonObject m_creationCatalog;
     QString m_creationFolder;

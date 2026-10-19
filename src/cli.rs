@@ -106,6 +106,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account install codex|claude|kimi|dsh   install an agent in this terminal
        hgs [@host] account inspect --session SESSION [--refresh]
        hgs account copy ID --from MACHINE --to MACHINE --as NEW_ID [--label NAME]
+       hgs [@host] socraticode status|start|stop PATH | install   a folder's SocratiCode index (JSON)
        hgs [@host] worktrees --path PATH [--refresh] [--json]   existing checkouts as JSON
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
        hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
@@ -630,6 +631,8 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         "presence" => crate::presence::dispatch(&config, args, dry),
         "swarm" => crate::swarm::dispatch(&config, args, dry),
         "account" => crate::accounts::dispatch(&config, args, dry),
+        // WhiteWh fork: a folder's SocratiCode index.
+        "socraticode" => crate::socraticode::dispatch(&config, args, dry),
         "project" => project(&config, args, dry),
         _ => launch(&config, command, args, &client, dry),
     }

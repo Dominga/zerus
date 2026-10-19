@@ -187,6 +187,8 @@ public:
     // Directory request IDs let views discard replies to superseded navigation.
     void requestProjects(const QString &host = {});
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
+    // WhiteWh fork: hgs socraticode status|start|stop PATH, or install.
+    quint64 requestSocratiCode(const QString &host, const QString &action, const QString &path);
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     // hgs [@host] mobile …: phones of the workspace that host's mobile connection
     // reaches. Probes the host CLI first, so an older one is never asked.
@@ -320,6 +322,8 @@ signals:
     void searchFailed(quint64 request, const QString &host, const QString &error);
     void accountsReady(quint64 request, const QString &host, const QJsonObject &result);
     void accountsFailed(quint64 request, const QString &host, const QString &error);
+    void socratiCodeReady(quint64 request, const QString &host, const QString &path, const QString &action, const QJsonObject &result);
+    void socratiCodeFailed(quint64 request, const QString &host, const QString &path, const QString &action, const QString &error);
     void mobileReady(quint64 request, const QString &host, const QJsonObject &result);
     void mobileFailed(quint64 request, const QString &host, const QString &error);
     void machinesReady(quint64 request, const QJsonObject &result);
@@ -432,6 +436,7 @@ private:
     quint64 m_swarmRequest = 0;
     quint64 m_sessionHostRequest = 0;
     quint64 m_accountRequest = 0;
+    quint64 m_socratiCodeRequest = 0;
     bool m_machineSetupInFlight = false;
     quint64 m_messageRequest = 0;
     quint64 m_sessionActionRequest = 0;

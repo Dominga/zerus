@@ -578,6 +578,12 @@ target_include_directories(test_worktreepanel PRIVATE ../src)
 target_link_libraries(test_worktreepanel PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(worktreepanel test_worktreepanel)
 set_tests_properties(worktreepanel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# WhiteWh fork: a session folder's SocratiCode strip.
+add_executable(test_socraticodepanel test_socraticodepanel.cpp)
+target_include_directories(test_socraticodepanel PRIVATE ../src)
+target_link_libraries(test_socraticodepanel PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(socraticodepanel test_socraticodepanel)
+set_tests_properties(socraticodepanel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_markdownhtml test_markdownhtml.cpp)
 target_link_libraries(test_markdownhtml PRIVATE Qt6::Test hgs-markdown)

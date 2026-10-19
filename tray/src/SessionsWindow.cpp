@@ -25,6 +25,7 @@
 #include "SwarmController.h"
 #include "SwarmDialog.h"
 #include "WorktreePanel.h"
+#include "SocratiCodePanel.h"
 #include "NewSessionDialog.h"
 #include "ActivityView.h"
 #include "ProcessView.h"
@@ -1309,6 +1310,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_detailsClear->setToolTip(tr("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     connect(m_detailsClear,&QPushButton::clicked,this,&SessionsWindow::clearContext);
     contextRow->addWidget(m_detailsContext,1);contextRow->addWidget(m_detailsClear);detailsLayout->addLayout(contextRow);
+    // WhiteWh fork: the SocratiCode index of this session's folder.
+    m_socratiCode=new SocratiCodePanel(&m_client);detailsLayout->addWidget(m_socratiCode);
     m_inspector->addTab(m_children, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
@@ -5327,6 +5330,7 @@ void SessionsWindow::updateWorktrees()
     if(!m_worktrees||!m_inspectorPanel||!m_inspector)return;
     const auto *entry=selected();
     m_worktrees->setContext(entry?entry->host:QString(),entry?(m_subagentId.isEmpty()?m_details.value("cwd").toString(entry->session.cwd):m_subagentCwd):QString(),m_fleet);
+    if(m_socratiCode)m_socratiCode->setContext(entry?entry->host:QString(),entry?m_details.value("cwd").toString(entry->session.cwd):QString());
 }
 void SessionsWindow::filterFolder(const QString &host,const QString &path,bool checkout)
 {

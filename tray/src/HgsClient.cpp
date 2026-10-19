@@ -459,6 +459,22 @@ quint64 HgsClient::requestAccounts(const QString &host, const QStringList &argum
     return request;
 }
 
+quint64 HgsClient::requestSocratiCode(const QString &host, const QString &action, const QString &path)
+{
+    const quint64 request = ++m_socratiCodeRequest;
+    QStringList args;
+    if (!host.isEmpty()) args << QLatin1Char('@') + host;
+    args << QStringLiteral("socraticode") << action;
+    if (action != QLatin1String("install")) args << path;
+    runHgs(m_hgs, args, action == QLatin1String("install") ? 180000 : 30000, this,
+        [this, request, host, path, action](const QByteArray &bytes) {
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
+            if (error.error != QJsonParseError::NoError || !data.isObject()) emit socratiCodeFailed(request, host, path, action, tr("Invalid SocratiCode response"));
+            else emit socratiCodeReady(request, host, path, action, data.object());
+        }, [this, request, host, path, action](const QString &, const QString &error) { emit socratiCodeFailed(request, host, path, action, error); });
+    return request;
+}
+
 quint64 HgsClient::requestMobile(const QString &host, const QStringList &arguments)
 {
     const quint64 request = ++m_mobileRequest;

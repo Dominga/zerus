@@ -20,6 +20,11 @@
 #include "AccountsPage.h"
 #include "LaunchWarnings.h"
 #include "LocalSessionHost.h"
+#include "WorkspaceSkin.h"
+#include <QDir>
+#include <QFrame>
+#include <QShortcut>
+#include <QToolButton>
 
 class TestNewSessionDialog : public QObject {
     Q_OBJECT
@@ -247,6 +252,46 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QTRY_VERIFY(next.findChild<QPushButton *>("primary")->isEnabled());QVERIFY(plain->isChecked());
         automatic->click();QTRY_VERIFY(automatic->isChecked());
         QSettings().remove("workspace/launchWorktree");flag("repo",false);
+    }
+    // WhiteWh fork: skins fall back to the Zerus colors and the classic views.
+    void skinsKeepSafeValuesAndDuplicate() {
+        const auto skins=WorkspaceSkin::available();QVERIFY(skins.size()>=2);
+        QCOMPARE(skins[0].id,QString("zerus"));QCOMPARE(skins[1].id,QString("whitewh"));
+        QCOMPARE(skins[0].view("newSession"),QString("classic"));QVERIFY(!skins[0].framelessDialogs());
+        QCOMPARE(skins[1].view("newSession"),QString("dense"));QVERIFY(skins[1].framelessDialogs());
+        QCOMPARE(WorkspaceSkin::toJson(skins[1].dark),WorkspaceSkin::toJson(WorkspaceSkin::zerus(true)));
+        QCOMPARE(WorkspaceSkin::toJson(skins[1].light),WorkspaceSkin::toJson(WorkspaceSkin::zerus(false)));
+        const auto parsed=WorkspaceSkin::parse(QJsonDocument::fromJson(
+            R"({"schema":1,"name":"T","dark":{"accent":"#ff00aa","border":"red; background:url(x)"},"views":{"newSession":"Dense!"}})").object(),"t",{},false);
+        QCOMPARE(parsed.dark.accent,QString("#ff00aa"));QCOMPARE(parsed.dark.border,WorkspaceSkin::zerus(true).border);
+        QCOMPARE(parsed.view("newSession"),QString("classic"));
+        const auto dir=WorkspaceSkin::directory();QDir(dir).removeRecursively();
+        const auto cleanup=qScopeGuard([dir]{QDir(dir).removeRecursively();});
+        QString error;QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin"));QVERIFY(error.isEmpty());
+        QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin-2"));
+        const auto again=WorkspaceSkin::available();QCOMPARE(again.size(),4);
+        QCOMPARE(again[2].id,QString("my-skin"));QVERIFY(!again[2].builtin);QCOMPARE(again[2].view("newSession"),QString("dense"));
+    }
+    // The WhiteWh skin arranges the same form densely; its logic is unchanged.
+    void denseViewStartsLikeTheClassicOne() {
+        QSettings().setValue("workspace/skin","whitewh");
+        const auto restore=qScopeGuard([]{QSettings().remove("workspace/skin");});
+        NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.selectPath("/workspace/example",false);dialog.show();
+        QVERIFY(dialog.findChild<QFrame *>("newSessionDense"));QVERIFY(dialog.windowFlags()&Qt::FramelessWindowHint);
+        QCOMPARE(dialog.findChildren<QShortcut *>().size(),2);
+        QTRY_VERIFY(row(dialog,"work")>=0);QVERIFY(!choices(dialog)->isVisible());
+        const auto agents=[&]{QStringList ids;for(auto *button:dialog.findChildren<QToolButton *>("denseAgent"))ids<<button->property("provider").toString();return ids;};
+        QTRY_COMPARE(agents(),QStringList({"codex","claude","dsh","sh"}));
+        // Two Codex accounts: the account line becomes a choice.
+        auto *choice=dialog.findChild<QComboBox *>("denseAccountChoice");QTRY_VERIFY(choice->isVisible());QCOMPARE(choice->count(),2);
+        for(auto *button:dialog.findChildren<QToolButton *>("denseAgent"))if(button->property("provider").toString()=="claude")button->click();
+        QTRY_COMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude"));
+        QVERIFY(!choice->isVisible());QTRY_VERIFY(dialog.findChild<QLabel *>("denseAccount")->text().contains("shared@example.invalid"));
+        QTRY_COMPARE(dialog.findChildren<QLabel *>("denseUsageLeft").value(0)->text(),QString("83% left"));
+        QCOMPARE(dialog.findChildren<QLabel *>("denseUsageLeft").value(1)->text(),QString("22% left"));
+        auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][4].toString(),QString("claude"));
     }
     void permissionsOfferOnlyTheComputersListedModes() {
         {   // An older computer lists no modes: only the account default exists.

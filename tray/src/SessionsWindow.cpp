@@ -40,6 +40,8 @@
 #include "ContentScale.h"
 #include "ActivityWidth.h"
 #include "UpdateController.h"
+#include "WorkspaceSkin.h"
+#include <QFileSystemWatcher>
 #include "ProcessSettings.h"
 #include "TerminalView.h"
 #include "TerminalScreen.h"
@@ -1745,14 +1747,25 @@ void SessionsWindow::applyTheme()
     const QString theme = QSettings().value("workspace/theme", "system").toString();
     m_dark = theme == "dark" || (theme != "light" && qApp->palette().color(QPalette::Window).lightness() < 128);
     m_sessionLoading->setTheme(m_dark);
-    m_fg = m_dark ? "#e8edf4" : "#1a2733";
-    m_muted = m_dark ? "#a2adbc" : "#627082";
-    m_surface = m_dark ? "#1c2229" : "#ffffff";
-    m_border = m_dark ? "#333c47" : "#dce2e8";
-    m_accent = m_dark ? "#8bdfc0" : "#167357";
-    const QString bg = m_dark ? "#161b21" : "#f5f7f9";
-    const QString hover = m_dark ? "#2b3540" : "#edf2f5";
-    const QString selected = m_dark ? "#233d35" : "#e0f0e9";
+    // WhiteWh fork: the selected skin supplies the workspace colors and may
+    // append its own stylesheet (WorkspaceSkin.h); Zerus keeps these exactly.
+    const auto skin = WorkspaceSkin::current();
+    const auto &colors = skin.palette(m_dark);
+    m_fg = colors.foreground;
+    m_muted = colors.muted;
+    m_surface = colors.surface;
+    m_border = colors.border;
+    m_accent = colors.accent;
+    const QString bg = colors.background;
+    const QString hover = colors.hover;
+    const QString selected = colors.selected;
+    // A saved change to a user skin applies at once; editors may replace the file.
+    if (!m_skinWatcher) {
+        m_skinWatcher = new QFileSystemWatcher(this);
+        connect(m_skinWatcher, &QFileSystemWatcher::fileChanged, this, [this] { QTimer::singleShot(150, this, &SessionsWindow::applyTheme); });
+    }
+    if (!m_skinWatcher->files().isEmpty()) m_skinWatcher->removePaths(m_skinWatcher->files());
+    if (!skin.path.isEmpty()) m_skinWatcher->addPath(skin.path);
     setStyleSheet(QString(R"(
         QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QColorDialog#workspaceColorDialog { background:%1; color:%2; }
@@ -1898,8 +1911,8 @@ void SessionsWindow::applyTheme()
         QTabWidget#sessionInspector QTabBar::tab { font-size:12px; padding:8px 7px; }
         QTabWidget#sessionInspector QTextBrowser { padding:10px 2px 0; }
     )").arg(bg, m_fg, m_surface, m_border, m_accent, m_muted, hover,
-              m_dark ? "#12372b" : "#ffffff", m_dark ? "#aae9d2" : "#115d46", selected,
-              m_dark ? "#151b21" : "#f3f6f8", tone("Error", m_dark).name()) + workspaceScrollbars(m_dark));
+              colors.accentText, colors.accentHover, selected,
+              colors.inset, tone("Error", m_dark).name()) + workspaceScrollbars(m_dark) + skin.stylesheet);
     for (auto *button : findChildren<QPushButton *>()) if (button != m_windowPin && !button->property("glyph").toString().isEmpty())
         button->setIcon(workspaceIcon(button->property("glyph").toString(), QColor(button->objectName() == "updatesAvailable" || button->objectName() == "restartToUpdate" ? m_accent : m_muted)));
     updateWindowPinAppearance(); updateWorktreeCleanupOffer();

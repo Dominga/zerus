@@ -12,6 +12,14 @@
 #include "MachinePlatform.h"
 #include "LocalLaunchWarning.h"
 #include "OpenCodeEffort.h"
+#include "IdentityBadge.h"
+#include "WorkspaceSkin.h"
+#include <QGridLayout>
+#include <QKeySequence>
+#include <QMouseEvent>
+#include <QProgressBar>
+#include <QShortcut>
+#include <QWindow>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QToolButton>
@@ -48,9 +56,8 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
 {
     m_usageStore=usage?usage:new AccountUsageStore(hgsPath,this);m_usageStore->setFleet(fleet);
     setObjectName("newSessionDialog");setWindowTitle(tr("New session"));resize(660,730);setMinimumWidth(520);
-    auto *layout=new QVBoxLayout(this);layout->setContentsMargins(28,24,28,24);layout->setSpacing(18);
-    auto *heading=plainLabel(tr("New session"));heading->setObjectName("heading");layout->addWidget(heading);
-    auto *form=new QFormLayout;form->setSpacing(12);form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    // The widgets and their logic are the same for every view; a skin's view
+    // only arranges them (buildClassicLayout, buildDenseLayout).
     m_project=new QComboBox;m_project->setObjectName("launchProject");m_project->setAccessibleName(tr("Project"));
     const auto theme=QSettings().value("workspace/theme","system").toString();
     const bool dark=theme=="dark"||(theme!="light"&&palette().color(QPalette::Window).lightness()<128);
@@ -59,31 +66,24 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_manage=new QToolButton;m_manage->setObjectName("manageLaunchProject");
     m_manage->setAutoRaise(true);m_manage->setIcon(workspaceIcon("settings",iconColor));m_manage->setIconSize(QSize(18,18));m_manage->setFixedSize(34,34);
     m_manage->setToolTip(tr("Manage this project's folders"));m_manage->setAccessibleName(m_manage->toolTip());
-    auto *projectRow=new QHBoxLayout;projectRow->setSpacing(8);projectRow->addWidget(m_project,1);projectRow->addWidget(m_manage);
-    form->addRow(tr("Project"),projectRow);
-    m_machine=new QComboBox;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));form->addRow(tr("Computer"),m_machine);
+    m_machine=new QComboBox;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));
     m_folder=new QComboBox;m_folder->setObjectName("launchProjectFolder");m_folder->setAccessibleName(tr("Working folder"));
     m_folder->setMinimumContentsLength(16);m_folder->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_folder->setPlaceholderText(tr("Choose a folder…"));
     m_browse=new QPushButton(tr("Browse…"));m_browse->setObjectName("browseLaunchFolder");m_browse->setAutoDefault(false);
-    auto *folderRow=new QHBoxLayout;folderRow->setSpacing(8);folderRow->addWidget(m_folder,1);folderRow->addWidget(m_browse);
-    auto *folderField=new QVBoxLayout;folderField->setSpacing(6);folderField->addLayout(folderRow);
     m_projectPath=plainLabel();m_projectPath->setObjectName("launchFolderPath");m_projectPath->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_projectPath->setWordWrap(false);
-    m_projectPath->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);folderField->addWidget(m_projectPath);
-    m_preview=plainLabel();m_preview->setObjectName("muted");folderField->addWidget(m_preview);
+    m_projectPath->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+    m_preview=plainLabel();m_preview->setObjectName("muted");
     // Keep the form stable as paths and repository discovery change.
     for(auto *widget:QList<QWidget *>{m_projectPath}) {
         auto policy=widget->sizePolicy();policy.setRetainSizeWhenHidden(true);widget->setSizePolicy(policy);
     }
-    form->addRow(tr("Working folder"),folderField);
-    auto *worktreeField=new QVBoxLayout;worktreeField->setSpacing(6);
-    auto *worktreeRow=new QHBoxLayout;worktreeRow->setSpacing(8);
     m_autoWorktree=new QPushButton(workspaceIcon("git-branch",iconColor),tr("Auto"));m_autoWorktree->setObjectName("automaticLaunchWorktree");
     m_plainFolder=new QPushButton(workspaceIcon("folder",iconColor),tr("None"));m_plainFolder->setObjectName("launchWithoutWorktree");
     auto *modes=new QButtonGroup(this);
     for(auto *button:{m_autoWorktree,m_plainFolder}){
-        button->setCheckable(true);button->setAutoDefault(false);modes->addButton(button);worktreeRow->addWidget(button);
+        button->setCheckable(true);button->setAutoDefault(false);modes->addButton(button);
         button->setStyleSheet(QString("QPushButton:checked { border-color:%1; color:%1; }").arg(dark?"#8bdfc0":"#167357"));
     }
     m_autoWorktree->setToolTip(tr("Create a generated branch and worktree when you start the session."));
@@ -93,9 +93,8 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     auto *worktreeMenu=new QMenu(m_worktreeOptions);
     m_worktrees=worktreeMenu->addAction(workspaceIcon("git-branch",iconColor),tr("Choose existing…"));m_worktrees->setObjectName("chooseLaunchWorktree");
     m_newWorktree=worktreeMenu->addAction(workspaceIcon("add",iconColor),tr("Create manually…"));m_newWorktree->setObjectName("newLaunchWorktree");
-    m_worktreeOptions->setMenu(worktreeMenu);worktreeRow->addWidget(m_worktreeOptions);worktreeRow->addStretch();worktreeField->addLayout(worktreeRow);
+    m_worktreeOptions->setMenu(worktreeMenu);
     m_worktreeTarget=plainLabel();m_worktreeTarget->setObjectName("launchWorktreeTarget");m_worktreeTarget->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    worktreeField->addWidget(m_worktreeTarget);form->addRow(tr("Worktree"),worktreeField);
     // WhiteWh fork: the worktree type chosen for the last started session is
     // the next default; an explicit folder or worktree choice does not change it.
     m_autoPreferred=QSettings().value("workspace/launchWorktree").toString()!="none";
@@ -111,14 +110,11 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_account->setProperty("hgsDark",dark);
     m_account->setItemDelegate(new AccountChoice::Delegate(m_account));m_account->setMinimumHeight(180);m_account->setMaximumHeight(250);
     m_account->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);m_account->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    auto *accountField=new QVBoxLayout;accountField->setSpacing(6);accountField->addWidget(m_account);
-    auto *accountStatusRow=new QHBoxLayout;
-    m_accountStatus=plainLabel();m_accountStatus->setObjectName("launchAccountStatus");accountStatusRow->addWidget(m_accountStatus,1);
+    m_accountStatus=plainLabel();m_accountStatus->setObjectName("launchAccountStatus");
     m_refreshAccounts=new QPushButton(workspaceIcon("refresh",iconColor),tr("Refresh"));m_refreshAccounts->setObjectName("refreshLaunchAccounts");m_refreshAccounts->setAutoDefault(false);
-    m_refreshAccounts->setAccessibleName(tr("Refresh accounts"));accountStatusRow->addWidget(m_refreshAccounts);
-    accountField->addLayout(accountStatusRow);form->addRow(tr("Account and agent"),accountField);
+    m_refreshAccounts->setAccessibleName(tr("Refresh accounts"));
     m_model=new QComboBox;m_model->setObjectName("launchModel");m_model->setAccessibleName(tr("Model"));m_model->setMinimumContentsLength(18);m_model->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    m_modelLabel=plainLabel(tr("Model"));form->addRow(m_modelLabel,m_model);
+    m_modelLabel=plainLabel(tr("Model"));
     m_model->addItem(tr("Native default model"),QString());m_model->hide();m_modelLabel->hide();
     // Inspecting never starts OpenCode: a stopped service keeps the last known
     // models and offers this explicit start.
@@ -127,24 +123,26 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_catalogStatus=plainLabel();m_catalogStatus->setObjectName("launchCatalogStatus");serviceRow->addWidget(m_catalogStatus,1);
     m_startOpenCode=new QPushButton;m_startOpenCode->setObjectName("launchStartOpenCode");m_startOpenCode->setAutoDefault(false);
     m_startOpenCode->setToolTip(tr("Start the shared OpenCode service on this computer. Zerus never stops it."));
-    serviceRow->addWidget(m_startOpenCode);form->addRow(QString(),m_openCodeService);m_openCodeService->hide();
+    serviceRow->addWidget(m_startOpenCode);m_openCodeService->hide();
     m_effort=new QComboBox;m_effort->setObjectName("launchEffort");m_effort->setAccessibleName(tr("Effort"));
-    m_effortLabel=plainLabel(tr("Effort"));form->addRow(m_effortLabel,m_effort);
+    m_effortLabel=plainLabel(tr("Effort"));
     m_effort->addItem(tr("Default"),QString());m_effort->hide();m_effortLabel->hide();
     m_effort->setToolTip(tr("Variants of the selected model. Default uses the model's own setting."));
     m_permissions=new QComboBox;m_permissions->setObjectName("launchPermissions");m_permissions->setAccessibleName(tr("Permissions"));
-    m_permissionsLabel=plainLabel(tr("Permissions"));form->addRow(m_permissionsLabel,m_permissions);
+    m_permissionsLabel=plainLabel(tr("Permissions"));
     m_permissions->addItem(tr("Account default"),QString());m_permissions->hide();m_permissionsLabel->hide();
-    m_name=new QLineEdit(m_generatedBranch);m_name->setObjectName("launchName");form->addRow(tr("Session name"),m_name);
-    m_nameError=plainLabel();m_nameError->setObjectName("launchNameError");m_nameError->hide();form->addRow(QString(),m_nameError);
+    m_name=new QLineEdit(m_generatedBranch);m_name->setObjectName("launchName");
+    m_nameError=plainLabel();m_nameError->setObjectName("launchNameError");m_nameError->hide();
     m_openTerminal=new QCheckBox(tr("Open terminal window"));m_openTerminal->setObjectName("launchOpenTerminal");
-    m_openTerminal->setChecked(QSettings().value("workspace/launchOpenTerminal",false).toBool());form->addRow(QString(),m_openTerminal);
-    layout->addLayout(form);
-    m_error=plainLabel();m_error->setObjectName("launchError");layout->addWidget(m_error);
-    layout->addStretch();auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel);m_cancel=buttons->button(QDialogButtonBox::Cancel);m_start=buttons->addButton(tr("Start session"),QDialogButtonBox::AcceptRole);m_start->setObjectName("primary");layout->addWidget(buttons);
+    m_openTerminal->setChecked(QSettings().value("workspace/launchOpenTerminal",false).toBool());
+    m_error=plainLabel();m_error->setObjectName("launchError");
+    auto *buttons=new QDialogButtonBox(QDialogButtonBox::Cancel);m_cancel=buttons->button(QDialogButtonBox::Cancel);m_start=buttons->addButton(tr("Start session"),QDialogButtonBox::AcceptRole);m_start->setObjectName("primary");
     // Without a computer to start on, it only opens Machines with this computer
     // selected; enabling local sessions keeps its own confirmation there.
     m_openMachines=buttons->addButton(tr("Open Machines"),QDialogButtonBox::ActionRole);m_openMachines->setObjectName("launchOpenMachines");m_openMachines->hide();
+    // WhiteWh fork: the selected skin chooses the view (WorkspaceSkin.h).
+    const auto skin=WorkspaceSkin::current();
+    if(skin.view("newSession")=="dense")buildDenseLayout(buttons,dark,skin);else buildClassicLayout(buttons);
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);connect(m_start,&QPushButton::clicked,this,&NewSessionDialog::start);
     connect(m_manage,&QToolButton::clicked,this,[this]{const auto id=m_project->currentData().toString();reject();emit projectFoldersRequested(id);});
     connect(m_openMachines,&QPushButton::clicked,this,[this]{if(m_creation)return;reject();emit machinesRequested();});
@@ -596,6 +594,7 @@ void NewSessionDialog::updateUsage()
         item->setToolTip(name+'\n'+summary);
         item->setData(Qt::AccessibleTextRole,IdentityBadges::providerName(profile["provider"].toString())+' '+name+'\n'+summary);
     }
+    refreshDense();
 }
 
 void NewSessionDialog::selectPath(const QString &path, bool automaticWorktree)
@@ -815,4 +814,198 @@ void NewSessionDialog::startOpenCode()
     m_serviceHost=host();m_accountStatus->clear();
     m_serviceStart=m_client.requestAccounts(m_serviceHost,{"start","native-opencode","--json"});
     updateOpenCodeService();
+}
+
+// The view every skin had before skins: a heading and a labelled form.
+void NewSessionDialog::buildClassicLayout(QDialogButtonBox *buttons)
+{
+    auto *layout=new QVBoxLayout(this);layout->setContentsMargins(28,24,28,24);layout->setSpacing(18);
+    auto *heading=plainLabel(tr("New session"));heading->setObjectName("heading");layout->addWidget(heading);
+    auto *form=new QFormLayout;form->setSpacing(12);form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    auto *projectRow=new QHBoxLayout;projectRow->setSpacing(8);projectRow->addWidget(m_project,1);projectRow->addWidget(m_manage);
+    form->addRow(tr("Project"),projectRow);
+    form->addRow(tr("Computer"),m_machine);
+    auto *folderRow=new QHBoxLayout;folderRow->setSpacing(8);folderRow->addWidget(m_folder,1);folderRow->addWidget(m_browse);
+    auto *folderField=new QVBoxLayout;folderField->setSpacing(6);folderField->addLayout(folderRow);
+    folderField->addWidget(m_projectPath);folderField->addWidget(m_preview);
+    form->addRow(tr("Working folder"),folderField);
+    auto *worktreeField=new QVBoxLayout;worktreeField->setSpacing(6);
+    auto *worktreeRow=new QHBoxLayout;worktreeRow->setSpacing(8);
+    worktreeRow->addWidget(m_autoWorktree);worktreeRow->addWidget(m_plainFolder);worktreeRow->addWidget(m_worktreeOptions);worktreeRow->addStretch();
+    worktreeField->addLayout(worktreeRow);worktreeField->addWidget(m_worktreeTarget);form->addRow(tr("Worktree"),worktreeField);
+    auto *accountField=new QVBoxLayout;accountField->setSpacing(6);accountField->addWidget(m_account);
+    auto *accountStatusRow=new QHBoxLayout;accountStatusRow->addWidget(m_accountStatus,1);accountStatusRow->addWidget(m_refreshAccounts);
+    accountField->addLayout(accountStatusRow);form->addRow(tr("Account and agent"),accountField);
+    form->addRow(m_modelLabel,m_model);
+    form->addRow(QString(),m_openCodeService);
+    form->addRow(m_effortLabel,m_effort);
+    form->addRow(m_permissionsLabel,m_permissions);
+    form->addRow(tr("Session name"),m_name);
+    form->addRow(QString(),m_nameError);
+    form->addRow(QString(),m_openTerminal);
+    layout->addLayout(form);
+    layout->addWidget(m_error);
+    layout->addStretch();layout->addWidget(buttons);
+}
+
+// WhiteWh fork: captions on the left, the name in the header, the agents as one
+// strip and their limits as meters. With frameless skin dialogs it draws its own
+// rounded frame, moves by its header and closes with its own button.
+void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,const WorkspaceSkin::Skin &skin)
+{
+    const auto &colors=skin.palette(dark);
+    m_denseDark=dark;m_denseMuted=colors.muted;
+    auto *outer=new QVBoxLayout(this);outer->setContentsMargins(0,0,0,0);outer->setSpacing(0);
+    if(skin.framelessDialogs()){
+        setWindowFlag(Qt::FramelessWindowHint,true);setAttribute(Qt::WA_TranslucentBackground,true);outer->setContentsMargins(4,4,4,4);
+    }
+    auto *frame=new QFrame;frame->setObjectName("newSessionDense");outer->addWidget(frame);
+    auto *layout=new QVBoxLayout(frame);layout->setContentsMargins(0,0,0,0);layout->setSpacing(0);
+    const auto caption=[](const QString &text){auto *label=new QLabel(text);label->setObjectName("denseCaption");label->setMinimumWidth(92);return label;};
+    const auto rule=[]{auto *line=new QFrame;line->setObjectName("denseRule");line->setFixedHeight(1);return line;};
+    m_denseHeader=new QWidget;m_denseHeader->setObjectName("denseHeader");
+    auto *top=new QHBoxLayout(m_denseHeader);top->setContentsMargins(26,18,16,14);top->setSpacing(14);
+    top->addWidget(caption(tr("Name")));top->addWidget(m_name,1);
+    auto *close=new QToolButton;close->setObjectName("denseClose");close->setAutoRaise(true);close->setIcon(workspaceIcon("close",QColor(colors.muted)));
+    close->setIconSize(QSize(18,18));close->setToolTip(tr("Close"));close->setAccessibleName(close->toolTip());close->setVisible(skin.framelessDialogs());
+    connect(close,&QToolButton::clicked,this,&QDialog::reject);top->addWidget(close);
+    if(skin.framelessDialogs())m_denseHeader->installEventFilter(this);
+    layout->addWidget(m_denseHeader);layout->addWidget(rule());
+    auto *grid=new QGridLayout;grid->setContentsMargins(26,18,26,16);grid->setHorizontalSpacing(14);grid->setVerticalSpacing(12);grid->setColumnStretch(1,1);
+    int row=0;
+    grid->addWidget(caption(tr("Target")),row,0);
+    auto *target=new QHBoxLayout;target->setSpacing(10);target->addWidget(m_project,3);target->addWidget(m_manage);target->addSpacing(6);target->addWidget(m_machine,2);
+    grid->addLayout(target,row++,1);
+    grid->addWidget(caption(tr("Folder")),row,0);
+    auto *folder=new QHBoxLayout;folder->setSpacing(10);folder->addWidget(m_folder,3);folder->addWidget(m_browse);folder->addSpacing(6);
+    auto *worktree=new QFrame;worktree->setObjectName("denseSegments");
+    auto *segments=new QHBoxLayout(worktree);segments->setContentsMargins(4,4,4,4);segments->setSpacing(2);
+    segments->addWidget(m_autoWorktree);segments->addWidget(m_plainFolder);segments->addWidget(m_worktreeOptions);
+    folder->addWidget(worktree,2);grid->addLayout(folder,row++,1);
+    auto *paths=new QVBoxLayout;paths->setSpacing(2);paths->addWidget(m_projectPath);paths->addWidget(m_worktreeTarget);paths->addWidget(m_preview);
+    grid->addLayout(paths,row++,1);
+    grid->addWidget(caption(tr("Agent")),row,0);
+    m_denseAgents=new QFrame;m_denseAgents->setObjectName("denseSegments");
+    auto *agents=new QHBoxLayout(m_denseAgents);agents->setContentsMargins(4,4,4,4);agents->setSpacing(2);
+    m_denseAgentGroup=new QButtonGroup(this);m_denseAgentGroup->setExclusive(true);
+    grid->addWidget(m_denseAgents,row++,1);
+    auto *account=new QHBoxLayout;account->setSpacing(8);
+    m_denseAccountLabel=new QLabel;m_denseAccountLabel->setObjectName("denseAccount");m_denseAccountLabel->setTextFormat(Qt::RichText);
+    m_denseAccount=new QComboBox;m_denseAccount->setObjectName("denseAccountChoice");m_denseAccount->setAccessibleName(tr("Account"));m_denseAccount->hide();
+    connect(m_denseAccount,&QComboBox::currentIndexChanged,this,[this]{
+        const int at=m_denseAccount->currentData().toInt();if(m_denseAccount->count()&&at>=0&&at<m_account->count())m_account->setCurrentRow(at);});
+    account->addWidget(m_denseAccountLabel);account->addWidget(m_denseAccount);account->addStretch();
+    account->addWidget(m_accountStatus);account->addWidget(m_refreshAccounts);
+    grid->addLayout(account,row++,1);
+    m_denseUsageCaption=caption(tr("Usage"));grid->addWidget(m_denseUsageCaption,row,0);
+    auto *usage=new QHBoxLayout;usage->setSpacing(22);
+    for(auto &meter:m_denseMeters){
+        meter.widget=new QWidget;auto *column=new QVBoxLayout(meter.widget);column->setContentsMargins(0,0,0,0);column->setSpacing(6);
+        auto *line=new QHBoxLayout;meter.text=new QLabel;meter.text->setObjectName("denseUsageText");
+        meter.left=new QLabel;meter.left->setObjectName("denseUsageLeft");line->addWidget(meter.text,1);line->addWidget(meter.left);
+        meter.bar=new QProgressBar;meter.bar->setObjectName("denseUsageBar");meter.bar->setTextVisible(false);meter.bar->setRange(0,1000);meter.bar->setFixedHeight(4);
+        column->addLayout(line);column->addWidget(meter.bar);usage->addWidget(meter.widget,1);meter.widget->hide();
+    }
+    grid->addLayout(usage,row++,1);
+    // Agent options keep their rows and show only for agents that take them.
+    grid->addWidget(m_modelLabel,row,0);grid->addWidget(m_model,row++,1);
+    grid->addWidget(m_openCodeService,row++,1);
+    grid->addWidget(m_effortLabel,row,0);grid->addWidget(m_effort,row++,1);
+    grid->addWidget(m_permissionsLabel,row,0);grid->addWidget(m_permissions,row++,1);
+    grid->addWidget(m_nameError,row++,1);
+    grid->addWidget(m_error,row++,1);
+    layout->addLayout(grid);layout->addStretch();
+    // The strip and the account line stand in for the list, which keeps the choice.
+    m_account->setParent(frame);m_account->hide();
+    connect(m_account,&QListWidget::currentItemChanged,this,&NewSessionDialog::refreshDense);
+    layout->addWidget(rule());
+    auto *footer=new QHBoxLayout;footer->setContentsMargins(26,14,26,18);footer->setSpacing(12);
+    footer->addWidget(m_openTerminal);footer->addStretch();footer->addWidget(buttons);
+    auto *shortcutHint=new QLabel(QStringLiteral("Ctrl+↵"));shortcutHint->setObjectName("denseShortcut");footer->addWidget(shortcutHint);
+    layout->addLayout(footer);
+    for(const auto key:{QKeySequence(Qt::CTRL|Qt::Key_Return),QKeySequence(Qt::CTRL|Qt::Key_Enter)})
+        connect(new QShortcut(key,this),&QShortcut::activated,this,&NewSessionDialog::start);
+    m_start->setToolTip(tr("Start session (Ctrl+Enter)"));
+    setStyleSheet(QString(R"(
+        QFrame#newSessionDense { background:%1; border:1px solid %2; border-radius:14px; }
+        QFrame#denseRule { background:%2; border:0; }
+        QLabel#denseCaption { color:%3; font-size:14px; letter-spacing:2px; }
+        QLineEdit#launchName { background:transparent; border:0; border-bottom:1px solid %2; border-radius:0; font-size:20px; font-weight:600; padding:6px 2px; color:%4; }
+        QLineEdit#launchName:focus { border-bottom-color:%5; }
+        QFrame#newSessionDense QComboBox { background:%6; border:1px solid %2; border-radius:8px; padding:7px 12px; min-height:22px; }
+        QFrame#denseSegments { background:%6; border:1px solid %2; border-radius:8px; }
+        QFrame#denseSegments QPushButton, QFrame#denseSegments QToolButton { background:transparent; border:1px solid transparent; border-radius:6px; padding:6px 12px; }
+        QFrame#denseSegments QPushButton:hover, QFrame#denseSegments QToolButton:hover { background:%7; }
+        QFrame#denseSegments QPushButton:checked, QFrame#denseSegments QToolButton:checked { background:%8; border-color:%5; color:%5; }
+        QLabel#denseAccount, QLabel#denseUsageText { color:%4; }
+        QLabel#denseUsageLeft { color:%5; font-weight:600; font-family:monospace; }
+        QLabel#denseShortcut { color:%3; font-family:monospace; }
+        QProgressBar#denseUsageBar { background:%2; border:0; border-radius:2px; }
+        QProgressBar#denseUsageBar::chunk { background:%5; border-radius:2px; }
+    )").arg(colors.background,colors.border,colors.muted,colors.foreground,colors.accent,colors.surface,colors.hover,colors.selected)+skin.stylesheet);
+    resize(820,560);setMinimumWidth(680);
+}
+
+// The strip follows the listed accounts: one segment per agent, then the shell.
+void NewSessionDialog::refreshDense()
+{
+    if(!m_denseAgents)return;
+    QStringList providers;
+    for(int row=0;row<m_account->count();++row){const auto provider=m_account->item(row)->data(ProviderRole).toString();if(!providers.contains(provider))providers<<provider;}
+    const auto current=m_account->currentItem()?agent():QString();
+    if(providers!=m_denseProviders){
+        for(auto *button:m_denseAgentGroup->buttons()){m_denseAgentGroup->removeButton(button);button->deleteLater();}
+        auto *strip=static_cast<QHBoxLayout *>(m_denseAgents->layout());
+        for(const auto &provider:providers){
+            auto *button=new QToolButton;button->setObjectName("denseAgent");button->setProperty("provider",provider);button->setCheckable(true);
+            button->setIcon(workspaceIcon(m_agents.contains(provider)?provider:QString("terminal"),IdentityBadges::providerColor(provider,m_denseDark)));
+            button->setIconSize(QSize(20,20));button->setMinimumHeight(34);button->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+            const auto name=provider=="sh"?tr("Shell"):IdentityBadges::providerName(provider);button->setToolTip(name);button->setAccessibleName(name);
+            m_denseAgentGroup->addButton(button);strip->addWidget(button,1);
+            connect(button,&QToolButton::clicked,this,[this,provider]{
+                int chosen=-1;
+                for(int row=0;row<m_account->count()&&chosen<0;++row)if(m_account->item(row)->data(ProviderRole).toString()==provider)chosen=row;
+                if(chosen>=0&&(!m_account->currentItem()||agent()!=provider))m_account->setCurrentRow(chosen);
+                refreshDense();
+            });
+        }
+        m_denseProviders=providers;
+    }
+    for(auto *button:m_denseAgentGroup->buttons()){const QSignalBlocker blocker(button);button->setChecked(button->property("provider").toString()==current);}
+    {
+        const QSignalBlocker blocker(m_denseAccount);m_denseAccount->clear();
+        for(int row=0;row<m_account->count();++row){auto *item=m_account->item(row);if(item->data(ProviderRole).toString()==current)m_denseAccount->addItem(item->text(),row);}
+        m_denseAccount->setCurrentIndex(qMax(0,m_denseAccount->findData(m_account->currentRow())));
+        m_denseAccount->setVisible(m_denseAccount->count()>1);
+    }
+    auto *item=m_account->currentItem();
+    const auto usage=item?item->data(ProfileRole).toJsonObject()["usage"].toObject():QJsonObject();
+    const auto plan=usage["identity"].toObject()["plan"].toString();
+    m_denseAccountLabel->setText(!item?tr("Choose an agent").toHtmlEscaped():"<b>"+item->text().toHtmlEscaped()+"</b>"
+        +(plan.isEmpty()?QString():QString(" <span style=\"color:%1\">· %2</span>").arg(m_denseMuted,plan.toHtmlEscaped())));
+    m_denseAccountLabel->setVisible(m_denseAccount->count()<=1);
+    const auto windows=AccountUsage::launchMeterData(usage)["windows"].toArray();
+    bool shown=false;
+    for(int i=0;i<2;++i){
+        auto &meter=m_denseMeters[i];QJsonObject window;
+        for(const auto &value:windows)if(value.toObject()["window_minutes"].toInt()==(i==0?300:10080))window=value.toObject();
+        meter.widget->setVisible(!window.isEmpty());if(window.isEmpty())continue;shown=true;
+        const double used=window["used_percent"].toDouble();
+        meter.text->setText((i==0?tr("5h"):tr("Week"))+" · "+tr("resets in %1").arg(AccountUsage::remaining(AccountUsage::reset(window["resets_at"]))));
+        meter.left->setText(tr("%1% left").arg(qRound(100-used)));
+        meter.bar->setValue(qRound((100-used)*10));
+        const auto tone=AccountUsage::color(used,m_denseDark).name();
+        meter.left->setStyleSheet(QString("QLabel { color:%1; }").arg(tone));
+        meter.bar->setStyleSheet(QString("QProgressBar::chunk { background:%1; border-radius:2px; }").arg(tone));
+    }
+    m_denseUsageCaption->setVisible(shown);
+}
+
+// A frameless dense dialog moves by its header, with the system's snapping.
+bool NewSessionDialog::eventFilter(QObject *object,QEvent *event)
+{
+    if(object==m_denseHeader&&event->type()==QEvent::MouseButtonPress&&static_cast<QMouseEvent *>(event)->button()==Qt::LeftButton&&windowHandle()){
+        windowHandle()->startSystemMove();return true;
+    }
+    return QDialog::eventFilter(object,event);
 }

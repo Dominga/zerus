@@ -1,4 +1,5 @@
 #pragma once
+#include "WorkspaceSkin.h"
 #include <QDialog>
 #include <QMap>
 #include "FleetState.h"
@@ -6,6 +7,9 @@
 #include "SessionOrganization.h"
 class QComboBox;
 class QCheckBox;
+class QButtonGroup;
+class QDialogButtonBox;
+class QProgressBar;
 class QToolButton;
 class QLabel;
 class QLineEdit;
@@ -27,6 +31,9 @@ public:
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
     void reject() override;
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override;
+public:
 signals:
     // addFolder: the confirmed folder outside the project that joins it once the
     // session starts, or empty. A worktree generated from it never replaces it.
@@ -38,6 +45,19 @@ signals:
     // Open Machines with this computer selected (offered without a computer).
     void machinesRequested();
 private:
+    // Views of the same widgets (WhiteWh fork skins, WorkspaceSkin.h).
+    void buildClassicLayout(QDialogButtonBox *buttons);
+    void buildDenseLayout(QDialogButtonBox *buttons, bool dark, const WorkspaceSkin::Skin &skin);
+    void refreshDense();
+    struct DenseMeter { QWidget *widget = nullptr; QLabel *text = nullptr, *left = nullptr; QProgressBar *bar = nullptr; };
+    QWidget *m_denseHeader = nullptr, *m_denseAgents = nullptr;
+    QButtonGroup *m_denseAgentGroup = nullptr;
+    QComboBox *m_denseAccount = nullptr;
+    QLabel *m_denseAccountLabel = nullptr, *m_denseUsageCaption = nullptr;
+    DenseMeter m_denseMeters[2];
+    QStringList m_denseProviders;
+    QString m_denseMuted;
+    bool m_denseDark = false;
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
     void browseFolder();

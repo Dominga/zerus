@@ -21,6 +21,7 @@ class SwarmController;
 #include "SessionOrganization.h"
 
 class QAction;
+class QFileSystemWatcher;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -513,5 +514,6 @@ private:
     ProjectsDialog *m_projectsPage;
     QPushButton *m_projectsNav;
     bool m_dark = false;
+    QFileSystemWatcher *m_skinWatcher = nullptr;
     QString m_fg, m_muted, m_surface, m_border, m_accent;
 };

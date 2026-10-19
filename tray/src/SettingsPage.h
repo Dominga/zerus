@@ -25,6 +25,13 @@
 #include "ProcessSettings.h"
 #include "QuestionNotificationSettings.h"
 #include "UiLanguage.h"
+#include "WorkspaceSkin.h"
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QSignalBlocker>
 
 class SettingsPage : public QWidget {
 public:
@@ -40,6 +47,31 @@ public:
         pages=new QStackedWidget;pages->setMinimumWidth(0);body->addWidget(pages,1);outer->addLayout(body,1);
         auto makePage=[&](const QString &heading){auto *content=new QWidget;content->setMaximumWidth(850);auto *layout=new QVBoxLayout(content);layout->setContentsMargins(0,0,12,0);layout->setSpacing(18);auto *h=new QLabel(heading);h->setObjectName("heading");layout->addWidget(h);addPage(content);return layout;};
         auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(QSettings().value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
+        // WhiteWh fork: switchable skins (WorkspaceSkin.h). A duplicate is a JSON file
+        // the person edits; the workspace reloads it when it is saved.
+        auto *skin=new QComboBox;skin->setObjectName("workspaceSkin");
+        const auto fillSkins=[skin]{
+            const QSignalBlocker blocker(skin);skin->clear();
+            for(const auto &value:WorkspaceSkin::available())skin->addItem(value.builtin?value.name:QObject::tr("%1 (custom)").arg(value.name),value.id);
+            skin->setCurrentIndex(qMax(0,skin->findData(WorkspaceSkin::currentId())));
+        };
+        fillSkins();
+        auto *duplicateSkin=new QPushButton(tr("Duplicate…"));duplicateSkin->setObjectName("duplicateWorkspaceSkin");duplicateSkin->setAutoDefault(false);
+        auto *skinFolder=new QPushButton(tr("Open skins folder"));skinFolder->setObjectName("openWorkspaceSkins");skinFolder->setAutoDefault(false);
+        auto *skinRow=new QHBoxLayout;skinRow->setSpacing(8);skinRow->addWidget(skin,1);skinRow->addWidget(duplicateSkin);skinRow->addWidget(skinFolder);
+        appearance->addWidget(new QLabel(tr("Skin")));appearance->addLayout(skinRow);
+        auto *skinHint=new QLabel(tr("A skin sets colors, window shape and the layout of screens such as New session. Duplicate one to edit its JSON file; saved changes apply at once."));
+        skinHint->setWordWrap(true);skinHint->setObjectName("muted");appearance->addWidget(skinHint);
+        connect(skin,&QComboBox::currentIndexChanged,this,[this,skin]{QSettings().setValue("workspace/skin",skin->currentData());if(appearanceChanged)appearanceChanged();});
+        connect(duplicateSkin,&QPushButton::clicked,this,[this,fillSkins]{
+            const auto current=WorkspaceSkin::current();bool ok=false;
+            const auto name=QInputDialog::getText(this,tr("Duplicate skin"),tr("Name of the copy"),QLineEdit::Normal,tr("%1 copy").arg(current.name),&ok);
+            if(!ok)return;
+            QString error;const auto id=WorkspaceSkin::duplicate(current,name,&error);
+            if(id.isEmpty()){QMessageBox::warning(this,tr("Duplicate skin"),error);return;}
+            QSettings().setValue("workspace/skin",id);fillSkins();if(appearanceChanged)appearanceChanged();
+        });
+        connect(skinFolder,&QPushButton::clicked,this,[]{QDir().mkpath(WorkspaceSkin::directory());QDesktopServices::openUrl(QUrl::fromLocalFile(WorkspaceSkin::directory()));});
         appearance->addWidget(new QLabel(tr("Interface language")));
         appearance->addWidget(zerusLanguageChoice());
         auto *languageHint=new QLabel(tr("Restart Zerus to apply the interface language. Agent sessions keep running."));

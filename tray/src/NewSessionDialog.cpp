@@ -991,12 +991,13 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
         QToolButton#denseAccounts { border:0; background:transparent; color:%9; font-size:10px; }
         QPushButton#denseSignIn { min-height:20px; max-height:20px; padding:0 8px; border:1px solid %10; border-radius:4px; background:%11; color:%4; font-size:10px; font-weight:500; }
         QLabel#denseModelMeta { color:%9; }
+        QLabel#launchNameError, QLabel#launchError { color:%15; font-size:12px; }
         QFrame#newSessionDense QCheckBox { color:%7; font-size:12px; spacing:8px; }
         QFrame#newSessionDense QDialogButtonBox QPushButton { min-height:28px; max-height:28px; padding:0 12px; border-radius:6px; font-size:13px; background:transparent; border:1px solid %3; color:%4; }
         QFrame#newSessionDense QPushButton#primary { padding:0 64px 0 14px; border:0; background:%5; color:%12; font-weight:600; }
         QFrame#newSessionDense QPushButton#primary:disabled { background:%13; color:%14; }
     )").arg(t.dialog.name(),t.border.name(),t.borderField.name(),t.text.name(),t.accent.name(),t.field.name(),t.muted.name(),
-            t.segOn.name(),t.label.name(),t.borderNeutral.name(),t.btnNeutral.name(),t.onAccent.name(),t.disabled.name(),t.dim.name())+skin.stylesheet);
+            t.segOn.name(),t.label.name(),t.borderNeutral.name(),t.btnNeutral.name(),t.onAccent.name(),t.disabled.name(),t.dim.name(),t.danger.name())+skin.stylesheet);
 }
 
 // The rail key of a listed account: Ollama accounts are Claude Code profiles.

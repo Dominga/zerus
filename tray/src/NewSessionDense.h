@@ -195,13 +195,14 @@ public:
         setProperty("agent", agent.key);
         setToolTip(agent.tooltip);
         setAccessibleName(agent.tooltip.isEmpty() ? agent.name : QString(agent.tooltip).replace('\n', QStringLiteral(" · ")));
-        setFixedHeight(34);
-        if (agent.narrow()) setFixedWidth(38); else { setMinimumWidth(0); setMaximumWidth(QWIDGETSIZE_MAX); }
+        setFixedHeight(kHeight);
+        if (agent.narrow()) setFixedWidth(kNarrow); else { setMinimumWidth(0); setMaximumWidth(QWIDGETSIZE_MAX); }
         setSizePolicy(agent.narrow() ? QSizePolicy::Fixed : QSizePolicy::Expanding, QSizePolicy::Fixed);
         update();
     }
     const Agent &agent() const { return m_agent; }
-    QSize sizeHint() const override { return {m_agent.narrow() ? 38 : 76, 34}; }
+    QSize sizeHint() const override { return {m_agent.narrow() ? kNarrow : 92, kHeight}; }
+    static constexpr int kHeight = 46, kNarrow = 46;
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -216,11 +217,11 @@ protected:
             p.setPen(m_tokens.borderNeutral); p.setBrush(Qt::NoBrush);
             p.drawRoundedRect(box, 6, 6);
         }
-        const int iconSize = m_agent.kind == QLatin1String("local") ? 18 : 20;
+        const int iconSize = m_agent.kind == QLatin1String("local") ? 22 : 24;
         const bool off = !m_agent.connected && !m_agent.narrow();
         const auto lines = this->lines();
         int contentWidth = iconSize;
-        if (!lines.isEmpty()) contentWidth += 4 + blockWidth(lines);
+        if (!lines.isEmpty()) contentWidth += 6 + blockWidth(lines);
         int x = (width() - contentWidth) / 2;
         const auto pixmap = m_agent.icon.pixmap(QSize(iconSize, iconSize), devicePixelRatioF(), off ? QIcon::Disabled : QIcon::Normal);
         p.save();
@@ -228,56 +229,64 @@ protected:
         p.drawPixmap(QRect(x, (height() - iconSize) / 2, iconSize, iconSize), pixmap);
         p.restore();
         if (lines.isEmpty()) return;
-        x += iconSize + 4;
+        x += iconSize + 6;
         if (m_agent.kind == QLatin1String("subscription") && m_agent.connected) {
-            // [bar][percent] for 5h and week, then the 5h reset: 8px rows, 1px apart.
-            p.setFont(mono(8));
-            const int top = (height() - 26) / 2;
+            // [bar][percent] for 5h and week, then the 5h reset: 12px rows.
+            p.setFont(mono(kMeter));
+            const int top = (height() - 3 * kRow) / 2;
             const double values[2] = {m_agent.fiveHour, m_agent.week};
             for (int row = 0; row < 2; ++row) {
-                const int y = top + row * 9;
-                p.fillRect(QRect(x, y + 3, 12, 2), m_tokens.track);
+                const int y = top + row * kRow;
+                const QRectF bar(x, y + (kRow - 3) / 2.0, kBar, 3);
+                p.setPen(Qt::NoPen);
+                p.setBrush(m_tokens.track);
+                p.drawRoundedRect(bar, 1.5, 1.5);
+                const QRect label(x + kBar + 4, y, 48, kRow);
                 if (values[row] >= 0) {
                     const auto color = usageColor(values[row], m_tokens);
-                    p.fillRect(QRectF(x, y + 3, 12 * qBound(0.0, values[row], 100.0) / 100.0, 2), color);
-                    p.setPen(values[row] < 65 ? m_tokens.text3 : color);
-                    p.drawText(QRect(x + 14, y, 40, 8), Qt::AlignLeft | Qt::AlignVCenter, QString::number(qRound(values[row])) + '%');
+                    p.setBrush(color);
+                    p.drawRoundedRect(QRectF(bar.x(), bar.y(), qMax(1.5, kBar * qBound(0.0, values[row], 100.0) / 100.0), 3), 1.5, 1.5);
+                    p.setPen(values[row] < 65 ? m_tokens.text2 : color);
+                    p.drawText(label, Qt::AlignLeft | Qt::AlignVCenter, QString::number(qRound(values[row])) + '%');
                 } else {
                     p.setPen(m_tokens.dim);
-                    p.drawText(QRect(x + 14, y, 40, 8), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("—"));
+                    p.drawText(label, Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("—"));
                 }
             }
             p.setPen(m_tokens.text3);
-            p.drawText(QRect(x, top + 18, 60, 8), Qt::AlignLeft | Qt::AlignVCenter, m_agent.reset);
+            p.drawText(QRect(x, top + 2 * kRow, 80, kRow), Qt::AlignLeft | Qt::AlignVCenter, m_agent.reset);
             return;
         }
-        // Two monospace lines: a balance, or why the account cannot start yet.
-        const int top = (height() - 18) / 2;
+        // One or two monospace lines: a balance, or why the account cannot start yet.
+        const int top = (height() - lines.size() * kLine) / 2;
         for (int row = 0; row < lines.size(); ++row) {
             const auto &[text, color, font] = lines[row];
             p.setFont(font); p.setPen(color);
-            p.drawText(QRect(x, top + row * 10, 60, 9), Qt::AlignLeft | Qt::AlignVCenter, text);
+            p.drawText(QRect(x, top + row * kLine, 80, kLine), Qt::AlignLeft | Qt::AlignVCenter, text);
         }
     }
 
 private:
+    static constexpr int kMeter = 10, kRow = 12, kBar = 18, kLine = 14;
     struct Line { QString text; QColor color; QFont font; };
     QList<Line> lines() const
     {
         if (m_agent.narrow()) return {};
-        if (m_agent.kind == QLatin1String("subscription") && m_agent.connected) return {{m_agent.reset, m_tokens.text3, mono(8)}};
+        if (m_agent.kind == QLatin1String("subscription") && m_agent.connected) return {{m_agent.reset, m_tokens.text3, mono(kMeter)}};
         if (m_agent.kind == QLatin1String("balance") && m_agent.connected) {
-            const auto color = m_agent.balanceValue < 0 ? m_tokens.text2 : m_agent.balanceValue < 2 ? m_tokens.danger : m_agent.balanceValue < 5 ? m_tokens.warn : m_tokens.text2;
-            return {{m_agent.balance.isEmpty() ? QStringLiteral("key") : m_agent.balance, color, mono(9, QFont::Medium)}, {QStringLiteral("bal"), m_tokens.dim, mono(8)}};
+            // A key whose balance is not known yet says only that it is there.
+            if (m_agent.balance.isEmpty()) return {{QStringLiteral("key"), m_tokens.text2, mono(11, QFont::Medium)}};
+            const auto color = m_agent.balanceValue < 2 ? m_tokens.danger : m_agent.balanceValue < 5 ? m_tokens.warn : m_tokens.text2;
+            return {{m_agent.balance, color, mono(11, QFont::Medium)}, {QStringLiteral("bal"), m_tokens.dim, mono(kMeter)}};
         }
         const bool balance = m_agent.kind == QLatin1String("balance");
-        return {{balance ? QStringLiteral("no key") : QStringLiteral("offline"), m_tokens.dim, mono(8)},
-                {m_agent.busy ? QStringLiteral("···") : balance ? QStringLiteral("+ add") : QStringLiteral("sign in"), m_agent.busy ? m_tokens.label : m_tokens.warn, mono(8)}};
+        return {{balance ? QStringLiteral("no key") : QStringLiteral("offline"), m_tokens.dim, mono(kMeter)},
+                {m_agent.busy ? QStringLiteral("···") : balance ? QStringLiteral("+ add") : QStringLiteral("sign in"), m_agent.busy ? m_tokens.label : m_tokens.warn, mono(kMeter)}};
     }
     int blockWidth(const QList<Line> &lines) const
     {
         if (m_agent.kind == QLatin1String("subscription") && m_agent.connected)
-            return qMax(14 + QFontMetrics(mono(8)).horizontalAdvance(QStringLiteral("100%")), QFontMetrics(mono(8)).horizontalAdvance(m_agent.reset));
+            return qMax(kBar + 4 + QFontMetrics(mono(kMeter)).horizontalAdvance(QStringLiteral("100%")), QFontMetrics(mono(kMeter)).horizontalAdvance(m_agent.reset));
         int widest = 0;
         for (const auto &line : lines) widest = qMax(widest, QFontMetrics(line.font).horizontalAdvance(line.text));
         return widest;
@@ -293,7 +302,7 @@ public:
     {
         setObjectName("denseAgents");
         setAccessibleName(QObject::tr("Agent"));
-        setFixedHeight(34);
+        setFixedHeight(AgentButton::kHeight);
         auto *row = new QHBoxLayout(this);
         row->setContentsMargins(0, 0, 0, 0);
         row->setSpacing(0);

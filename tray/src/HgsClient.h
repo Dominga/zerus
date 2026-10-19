@@ -187,7 +187,7 @@ public:
     // Directory request IDs let views discard replies to superseded navigation.
     void requestProjects(const QString &host = {});
     quint64 requestAccounts(const QString &host, const QStringList &arguments = {QStringLiteral("ls")}, const QByteArray &input = {});
-    // WhiteWh fork: hgs socraticode status|start|stop PATH, or install.
+    // WhiteWh fork: hgs socraticode status|start|stop|connect PATH, or install|install-qdrant.
     quint64 requestSocratiCode(const QString &host, const QString &action, const QString &path);
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     // hgs [@host] mobile …: phones of the workspace that host's mobile connection

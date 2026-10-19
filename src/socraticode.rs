@@ -2,23 +2,34 @@
 //!
 //! `hgs socraticode status PATH` reads what SocratiCode itself records: the
 //! Qdrant collection and metadata point of the folder's project id, and the
-//! lock of the process that watches it. `start` keeps one SocratiCode MCP
-//! server alive for the folder (it indexes a new folder, then watches it),
-//! `stop` ends that server, and `install` adds the Claude Code plugin.
+//! lock of the process that watches it. SocratiCode is configured the way
+//! Claude Code configures its plugin: the `env` of ~/.claude/settings.json,
+//! then of the folder's .claude/settings.json and settings.local.json.
+//!
+//! Without Docker, Zerus runs SocratiCode on a native Qdrant
+//! (%LOCALAPPDATA%\Programs\qdrant\qdrant.exe, its data in
+//! %LOCALAPPDATA%\qdrant, on 127.0.0.1:6333) and a native Ollama:
+//! `install-qdrant` fetches the pinned Qdrant release, `start` brings up what
+//! is down and keeps one SocratiCode MCP server alive for the folder (it
+//! indexes a new folder, then watches it), `stop` ends that server, `connect`
+//! points the folder's agents at the same Qdrant, and `install` adds the
+//! Claude Code plugin.
 use crate::{
     cli::{Error, Result},
     config::Config,
     platform,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const RUNNER: &str = include_str!("socraticode/runner.mjs");
@@ -26,12 +37,41 @@ const PLUGIN: &str = "socraticode@socraticode";
 const MARKETPLACE: &str = "giancarloerra/socraticode";
 /// SocratiCode's own lock is stale when its file is not touched for this long.
 const LOCK_STALE_SECS: u64 = 120;
+const MANAGED_URL: &str = "http://127.0.0.1:16333";
+const NATIVE_URL: &str = "http://127.0.0.1:6333";
+const OLLAMA_URL: &str = "http://127.0.0.1:11434";
+
+// The native Qdrant release, pinned: its storage is written by this version,
+// and an upgrade is a decision with a re-index behind it.
+const QDRANT_VERSION: &str = "1.19.1";
+const QDRANT_RELEASE: &str = "https://github.com/qdrant/qdrant/releases/download/v1.19.1/qdrant-x86_64-pc-windows-msvc.zip";
+const QDRANT_ZIP_BYTES: u64 = 29_671_153;
+const QDRANT_ZIP_SHA256: &str = "9b6f69bd85f6abed4bc13f943099f55c6ffd55f5dd90388635320d8fbb569eb0";
+const QDRANT_EXE_SHA256: &str = "b5354e3c8f9d13d92294f38d4988d4ddedc04acaa2ce51f0a2d65b30e2d4cd69";
+const QDRANT_CONFIG: &str = "# Qdrant for SocratiCode, native, no Docker. Written by Zerus.\r
+log_level: INFO\r
+\r
+storage:\r
+  storage_path: ./storage\r
+  snapshots_path: ./snapshots\r
+  on_disk_payload: true\r
+\r
+service:\r
+  host: 127.0.0.1\r
+  http_port: 6333\r
+  grpc_port: 6334\r
+  enable_cors: true\r
+\r
+telemetry_disabled: true\r
+";
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
-    let usage = "usage: hgs socraticode status|start|stop PATH | install";
+    let usage = "usage: hgs socraticode status|start|stop|connect PATH | install | install-qdrant";
     let action = args.first().map(String::as_str).ok_or_else(|| Error::new(1, usage))?;
-    if action == "install" {
-        return install(dry);
+    match action {
+        "install" => return install(dry),
+        "install-qdrant" => return install_qdrant(dry),
+        _ => {}
     }
     let folder = args.get(1).ok_or_else(|| Error::new(1, usage))?;
     let folder = resolve(folder)?;
@@ -42,6 +82,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         }
         "start" => start(config, &folder, dry),
         "stop" => stop(config, &folder, dry),
+        "connect" => connect(&folder, dry),
         _ => Err(Error::new(1, usage)),
     }
 }
@@ -70,14 +111,48 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Project ids the folder may have: its .socraticode.json projectId, else the
-/// first 12 hex digits of SHA-256 of the resolved path. Windows drive letters
-/// keep the case they were typed with, so both spellings are candidates.
-fn project_ids(folder: &str) -> Vec<String> {
-    let named = fs::read(Path::new(folder).join(".socraticode.json")).ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|data| data["projectId"].as_str().map(str::to_owned))
-        .filter(|id| !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+fn read_json(path: &Path) -> Value {
+    fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null)
+}
+
+/// Whether an environment name configures SocratiCode or what it reaches.
+fn relevant(key: &str) -> bool {
+    ["QDRANT_", "OLLAMA_", "EMBEDDING_", "SOCRATICODE_", "OPENAI_", "GOOGLE_", "LMSTUDIO_", "LITELLM_"].iter().any(|p| key.starts_with(p))
+        || key == "EXTRA_EXTENSIONS"
+}
+
+/// SocratiCode's environment for the folder, as Claude Code would give it to
+/// the plugin: this process, then the user's, the project's and the local
+/// settings, each overriding the one before.
+fn settings(folder: &str) -> BTreeMap<String, String> {
+    let mut values: BTreeMap<String, String> = env::vars().filter(|(key, _)| relevant(key)).collect();
+    let mut files = Vec::new();
+    if let Some(home) = platform::home_dir() {
+        files.push(home.join(".claude/settings.json"));
+    }
+    files.push(Path::new(folder).join(".claude/settings.json"));
+    files.push(Path::new(folder).join(".claude/settings.local.json"));
+    for file in files {
+        if let Some(env) = read_json(&file)["env"].as_object() {
+            for (key, value) in env {
+                if let Some(value) = value.as_str().filter(|_| relevant(key)) {
+                    values.insert(key.clone(), value.to_owned());
+                }
+            }
+        }
+    }
+    values
+}
+
+/// Project ids the folder may have: SOCRATICODE_PROJECT_ID, its
+/// .socraticode.json projectId, else the first 12 hex digits of SHA-256 of the
+/// resolved path. Windows drive letters keep the case they were typed with,
+/// so both spellings are candidates.
+fn project_ids(folder: &str, values: &BTreeMap<String, String>) -> Vec<String> {
+    let valid = |id: &String| !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let named = values.get("SOCRATICODE_PROJECT_ID").cloned().filter(valid).or_else(|| {
+        read_json(&Path::new(folder).join(".socraticode.json"))["projectId"].as_str().map(str::to_owned).filter(valid)
+    });
     if let Some(id) = named {
         return vec![id];
     }
@@ -93,14 +168,6 @@ fn project_ids(folder: &str) -> Vec<String> {
     spellings.iter().map(|path| hex(&Sha256::digest(path.as_bytes()))[..12].to_owned()).collect()
 }
 
-/// SocratiCode's Qdrant: QDRANT_URL in external mode, else its managed container.
-fn qdrant() -> (String, u16, String) {
-    let external = env::var("QDRANT_MODE").is_ok_and(|mode| mode == "external");
-    let url = env::var("QDRANT_URL").ok().filter(|_| external).unwrap_or_else(|| "http://127.0.0.1:16333".into());
-    let (host, port) = address(&url).unwrap_or(("127.0.0.1".into(), 16333));
-    (host, port, env::var("QDRANT_API_KEY").unwrap_or_default())
-}
-
 fn address(url: &str) -> Option<(String, u16)> {
     let rest = url.strip_prefix("http://")?;
     let authority = rest.split('/').next()?;
@@ -110,8 +177,9 @@ fn address(url: &str) -> Option<(String, u16)> {
 }
 
 /// One small HTTP/1.0 JSON exchange; None when nothing answers.
-fn http(host: &str, port: u16, method: &str, path: &str, body: Option<&Value>, key: &str) -> Option<(u16, Value)> {
-    let addr = (host, port).to_socket_addrs().ok()?.next()?;
+fn http(url: &str, method: &str, path: &str, body: Option<&Value>, key: &str) -> Option<(u16, Value)> {
+    let (host, port) = address(url)?;
+    let addr = (host.as_str(), port).to_socket_addrs().ok()?.next()?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(700)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(4))).ok()?;
     let body = body.map(Value::to_string).unwrap_or_default();
@@ -123,6 +191,47 @@ fn http(host: &str, port: u16, method: &str, path: &str, body: Option<&Value>, k
     let (head, body) = text.split_once("\r\n\r\n")?;
     let code = head.split_whitespace().nth(1)?.parse().ok()?;
     Some((code, serde_json::from_str(body).unwrap_or(Value::Null)))
+}
+
+fn local(url: &str) -> bool {
+    address(url).is_some_and(|(host, _)| host == "127.0.0.1")
+}
+
+/// The native Qdrant: where its program and its data live.
+struct Native {
+    exe: Option<PathBuf>,
+    home: PathBuf,
+}
+
+fn native() -> Native {
+    if cfg!(windows) {
+        let root = env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default();
+        let exe = root.join("Programs").join("qdrant").join("qdrant.exe");
+        return Native { exe: exe.is_file().then_some(exe).or_else(|| platform::which("qdrant")), home: root.join("qdrant") };
+    }
+    let home = platform::home_dir().unwrap_or_default().join(".local/share/qdrant");
+    Native { exe: platform::which("qdrant"), home }
+}
+
+/// Where SocratiCode keeps this folder's index, and how Zerus reaches it.
+struct Target {
+    mode: &'static str, // external (the settings name it), native (Zerus' way) or managed (Docker)
+    url: String,
+    key: String,
+    agents: bool, // agents in the folder reach the same Qdrant
+}
+
+fn target(values: &BTreeMap<String, String>, docker: bool, native: &Native) -> Target {
+    let key = values.get("QDRANT_API_KEY").cloned().unwrap_or_default();
+    if values.get("QDRANT_MODE").is_some_and(|mode| mode == "external") {
+        let url = values.get("QDRANT_URL").cloned().unwrap_or_else(|| NATIVE_URL.into());
+        return Target { mode: "external", url, key, agents: true };
+    }
+    let native_up = http(NATIVE_URL, "GET", "/collections", None, "").is_some_and(|(code, _)| code == 200);
+    if !docker && (native.exe.is_some() || native_up) {
+        return Target { mode: "native", url: NATIVE_URL.into(), key, agents: false };
+    }
+    Target { mode: "managed", url: MANAGED_URL.into(), key, agents: docker }
 }
 
 /// The metadata point id of a collection: SHA-256 of its name as a UUID.
@@ -144,21 +253,26 @@ fn locked(id: &str, kind: &str) -> bool {
 }
 
 fn plugin() -> Value {
-    let file = platform::home_dir().map(|home| home.join(".claude/plugins/installed_plugins.json"));
-    let data = file.and_then(|file| fs::read(file).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).unwrap_or(Value::Null);
+    let data = platform::home_dir().map(|home| read_json(&home.join(".claude/plugins/installed_plugins.json"))).unwrap_or(Value::Null);
     let entry = &data["plugins"][PLUGIN];
     let version = entry.as_array().and_then(|list| list.first()).map(|e| e["version"].clone()).unwrap_or(Value::Null);
     json!({"installed": !entry.is_null(), "version": version})
 }
 
-fn ollama() -> Value {
-    let url = env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
-    let model = env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "nomic-embed-text".into());
-    let (host, port) = address(&url).unwrap_or(("127.0.0.1".into(), 11434));
-    let tags = http(&host, port, "GET", "/api/tags", None, "").filter(|(code, _)| *code == 200).map(|(_, data)| data);
+fn ollama_url(values: &BTreeMap<String, String>) -> String {
+    values.get("OLLAMA_URL").cloned().unwrap_or_else(|| OLLAMA_URL.into())
+}
+
+fn ollama(values: &BTreeMap<String, String>) -> Value {
+    let provider = values.get("EMBEDDING_PROVIDER").map(String::as_str).unwrap_or("ollama");
+    let url = ollama_url(values);
+    let model = values.get("EMBEDDING_MODEL").cloned().unwrap_or_else(|| "nomic-embed-text".into());
+    let tags = (provider == "ollama").then(|| http(&url, "GET", "/api/tags", None, "")).flatten()
+        .filter(|(code, _)| *code == 200).map(|(_, data)| data);
     let present = tags.as_ref().is_some_and(|data| data["models"].as_array().into_iter().flatten()
         .any(|m| m["name"].as_str().is_some_and(|name| name == model || name.strip_suffix(":latest") == Some(&model))));
-    json!({"reachable": tags.is_some(), "model": model, "model_present": present})
+    json!({"provider": provider, "url": url, "reachable": tags.is_some(), "model": model, "model_present": present,
+           "installed": platform::which("ollama").is_some()})
 }
 
 fn runner_file(config: &Config, id: &str) -> PathBuf {
@@ -167,7 +281,7 @@ fn runner_file(config: &Config, id: &str) -> PathBuf {
 
 /// The runner this hgs started for the folder, if it still runs.
 fn runner(config: &Config, id: &str) -> Value {
-    let data = fs::read(runner_file(config, id)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
+    let data = read_json(&runner_file(config, id));
     if data.is_null() {
         return json!({"running": false});
     }
@@ -177,37 +291,87 @@ fn runner(config: &Config, id: &str) -> Value {
 }
 
 pub fn status(config: &Config, folder: &str) -> Value {
-    let ids = project_ids(folder);
-    let (host, port, key) = qdrant();
-    let reachable = http(&host, port, "GET", "/collections", None, &key).is_some_and(|(code, _)| code == 200);
+    let values = settings(folder);
+    let ids = project_ids(folder, &values);
+    let docker = platform::which("docker").is_some();
+    let native = native();
+    let target = target(&values, docker, &native);
+    let prefix = values.get("QDRANT_COLLECTION_PREFIX").cloned().unwrap_or_default();
+    let reachable = http(&target.url, "GET", "/collections", None, &target.key).is_some_and(|(code, _)| code == 200);
     let mut chosen = ids[0].clone();
     let mut index = json!({"state": "none"});
     if reachable {
         for id in &ids {
-            let collection = format!("codebase_{id}");
-            let Some((200, info)) = http(&host, port, "GET", &format!("/collections/{collection}"), None, &key) else { continue };
+            let collection = format!("{prefix}codebase_{id}");
+            let Some((200, info)) = http(&target.url, "GET", &format!("/collections/{collection}"), None, &target.key) else { continue };
             chosen = id.clone();
-            let body = json!({"ids": [metadata_id(&collection)], "with_payload": true, "with_vector": false});
-            let meta = http(&host, port, "POST", "/collections/socraticode_metadata/points", Some(&body), &key)
+            let body = json!({"ids": [metadata_id(&collection)], "with_payload": ["indexingStatus", "filesTotal", "filesIndexed", "lastIndexedAt"], "with_vector": false});
+            let meta = http(&target.url, "POST", &format!("/collections/{prefix}socraticode_metadata/points"), Some(&body), &target.key)
                 .map(|(_, data)| data["result"][0]["payload"].clone()).unwrap_or(Value::Null);
-            let state = match meta["indexingStatus"].as_str() { Some("in-progress") => "indexing", Some("completed") => "indexed", _ => "indexed" };
+            let state = if meta["indexingStatus"] == "in-progress" { "indexing" } else { "indexed" };
             index = json!({"state": state, "collection": collection, "chunks": info["result"]["points_count"],
                            "files_total": meta["filesTotal"], "files_indexed": meta["filesIndexed"], "last_indexed_at": meta["lastIndexedAt"]});
             break;
         }
     }
-    let watching = ids.iter().any(|id| locked(id, "watch"));
-    let indexing = ids.iter().any(|id| locked(id, "index"));
-    if indexing && index["state"] != "indexed" {
+    if ids.iter().any(|id| locked(id, "index")) && index["state"] != "indexed" {
         index["state"] = json!("indexing");
     }
     json!({
-        "path": folder, "project_id": chosen, "plugin": plugin(),
-        "docker": platform::which("docker").is_some(),
-        "qdrant": {"reachable": reachable, "url": format!("http://{host}:{port}")},
-        "ollama": ollama(), "node": platform::which("node").is_some() && platform::which("npx").is_some(),
-        "index": index, "watching": watching, "runner": runner(config, &chosen),
+        "path": folder, "project_id": chosen, "plugin": plugin(), "docker": docker,
+        "qdrant": {"mode": target.mode, "url": target.url, "reachable": reachable, "agents": target.agents,
+                   "native": {"installed": native.exe.is_some(), "version": QDRANT_VERSION, "installable": cfg!(all(windows, target_arch = "x86_64"))}},
+        "ollama": ollama(&values), "node": platform::which("node").is_some() && platform::which("npx").is_some(),
+        "index": index, "watching": ids.iter().any(|id| locked(id, "watch")), "runner": runner(config, &chosen),
     })
+}
+
+fn wait_for(probe: impl Fn() -> bool, seconds: u64) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(seconds) {
+        if probe() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// Starts the native Qdrant: the user's own launcher when there is one,
+/// else the program in its data folder, where it reads config/config.yaml.
+fn start_native(native: &Native) -> Result<()> {
+    let exe = native.exe.as_ref().ok_or_else(|| Error::new(1, "Qdrant is not installed; run hgs socraticode install-qdrant."))?;
+    ensure_qdrant_files(&native.home)?;
+    let launcher = native.home.join("qdrant-start.cmd");
+    let mut command = if cfg!(windows) && launcher.is_file() {
+        let mut command = Command::new("cmd");
+        command.arg("/c").arg(&launcher);
+        command
+    } else {
+        let log = fs::OpenOptions::new().create(true).append(true).open(native.home.join("logs").join("qdrant.log"))?;
+        let mut command = Command::new(exe);
+        command.stdout(log.try_clone()?).stderr(log);
+        command
+    };
+    command.current_dir(&native.home).stdin(Stdio::null());
+    platform::spawn_detached(&mut command).map_err(|e| Error::new(1, format!("Qdrant did not start: {e}")))?;
+    if !wait_for(|| http(NATIVE_URL, "GET", "/collections", None, "").is_some(), 30) {
+        return Err(Error::new(1, format!("Qdrant did not answer at {NATIVE_URL}; see {}", native.home.join("logs").join("qdrant.log").display())));
+    }
+    Ok(())
+}
+
+/// Writes the native Qdrant's config and folders when they are missing; a
+/// tuned config is left alone.
+fn ensure_qdrant_files(home: &Path) -> Result<()> {
+    for folder in ["config", "logs", "storage", "snapshots"] {
+        fs::create_dir_all(home.join(folder))?;
+    }
+    let config = home.join("config").join("config.yaml");
+    if !config.is_file() {
+        fs::write(config, QDRANT_CONFIG)?;
+    }
+    Ok(())
 }
 
 fn start(config: &Config, folder: &str, dry: bool) -> Result<i32> {
@@ -220,22 +384,52 @@ fn start(config: &Config, folder: &str, dry: bool) -> Result<i32> {
     if current["node"] != true {
         return Err(Error::new(1, "SocratiCode needs Node.js with npx on this computer."));
     }
-    if current["docker"] != true && current["qdrant"]["reachable"] != true {
-        return Err(Error::new(1, "SocratiCode keeps its index in Qdrant, which needs Docker. Install Docker and start it first."));
+    let values = settings(folder);
+    let native = native();
+    let target = target(&values, current["docker"] == true, &native);
+    let qdrant_down = current["qdrant"]["reachable"] != true;
+    let ollama = &current["ollama"];
+    let ollama_down = ollama["provider"] == "ollama" && ollama["reachable"] != true;
+    if qdrant_down && target.mode == "managed" && current["docker"] != true {
+        return Err(Error::new(1, "SocratiCode needs Qdrant: run hgs socraticode install-qdrant, or install Docker."));
+    }
+    if qdrant_down && target.mode == "external" && !(local(&target.url) && native.exe.is_some()) {
+        return Err(Error::new(1, format!("Qdrant does not answer at {}.", target.url)));
     }
     let file = runner_file(config, &id);
     if dry {
-        println!("{}", json!({"started": false, "dry_run": true, "state": file}));
+        println!("{}", json!({"started": false, "dry_run": true, "start_qdrant": qdrant_down && target.mode != "managed", "start_ollama": ollama_down, "state": file}));
         return Ok(0);
+    }
+    if qdrant_down && target.mode != "managed" {
+        start_native(&native)?;
+    }
+    // A native Ollama comes up on demand; SocratiCode would start a Docker one.
+    if ollama_down && local(&ollama_url(&values)) {
+        if let Some(program) = platform::which("ollama") {
+            let mut command = Command::new(program);
+            command.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            platform::spawn_detached(&mut command).map_err(|e| Error::new(1, format!("Ollama did not start: {e}")))?;
+            let url = ollama_url(&values);
+            if !wait_for(|| http(&url, "GET", "/api/tags", None, "").is_some(), 30) {
+                return Err(Error::new(1, format!("Ollama did not answer at {url}.")));
+            }
+        }
     }
     fs::create_dir_all(file.parent().unwrap())?;
     let mut command = Command::new(platform::which("node").unwrap());
-    command.args(["--input-type=module", "-e", RUNNER])
-        .env("HGS_SC_PATH", folder).env("HGS_SC_STATE", &file)
+    command.args(["--input-type=module", "-e", RUNNER]).envs(&values);
+    if target.mode == "native" {
+        command.env("QDRANT_MODE", "external").env("QDRANT_URL", &target.url);
+    }
+    if !values.contains_key("OLLAMA_MODE") && ollama["provider"] == "ollama" && platform::which("ollama").is_some() {
+        command.env("OLLAMA_MODE", "external").env("OLLAMA_URL", ollama_url(&values));
+    }
+    command.env("HGS_SC_PATH", folder).env("HGS_SC_STATE", &file)
         .current_dir(folder)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let child = platform::spawn_detached(&mut command).map_err(|e| Error::new(1, format!("Could not start SocratiCode: {e}")))?;
-    println!("{}", json!({"started": true, "pid": child.id(), "project_id": id}));
+    println!("{}", json!({"started": true, "pid": child.id(), "project_id": id, "qdrant": target.mode}));
     Ok(0)
 }
 
@@ -252,6 +446,104 @@ fn stop(config: &Config, folder: &str, dry: bool) -> Result<i32> {
         fs::write(PathBuf::from(format!("{}.stop", file.display())), b"stop")?;
     }
     println!("{}", json!({"stopped": !dry, "dry_run": dry}));
+    Ok(0)
+}
+
+/// Points the folder's agents at the native Qdrant and Ollama: the variables
+/// the plugin reads, in .claude/settings.local.json, which stays out of Git.
+/// Variables the folder already sets are kept.
+fn connect(folder: &str, dry: bool) -> Result<i32> {
+    let file = Path::new(folder).join(".claude").join("settings.local.json");
+    let mut data = if file.is_file() {
+        serde_json::from_slice::<Value>(&fs::read(&file)?).map_err(|_| Error::new(1, format!("{} is not valid JSON.", file.display())))?
+    } else {
+        json!({})
+    };
+    let values = settings(folder);
+    let wanted = [("QDRANT_MODE", "external"), ("QDRANT_URL", NATIVE_URL), ("EMBEDDING_PROVIDER", "ollama"), ("OLLAMA_MODE", "external"),
+                  ("OLLAMA_URL", OLLAMA_URL), ("EMBEDDING_MODEL", "nomic-embed-text"), ("EMBEDDING_DIMENSIONS", "768")];
+    let root = data.as_object_mut().ok_or_else(|| Error::new(1, format!("{} is not a JSON object.", file.display())))?;
+    let env = root.entry("env").or_insert_with(|| Value::Object(Map::new()));
+    let env = env.as_object_mut().ok_or_else(|| Error::new(1, format!("env in {} is not an object.", file.display())))?;
+    let mut added = Vec::new();
+    for (key, value) in wanted {
+        if !values.contains_key(key) && !env.contains_key(key) {
+            env.insert(key.into(), json!(value));
+            added.push(key);
+        }
+    }
+    if !dry && !added.is_empty() {
+        fs::create_dir_all(file.parent().unwrap())?;
+        let temporary = file.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_vec_pretty(&data).unwrap())?;
+        fs::rename(&temporary, &file)?;
+    }
+    println!("{}", json!({"connected": !dry, "dry_run": dry, "file": file, "added": added}));
+    Ok(0)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(hex(&digest.finalize()));
+        }
+        digest.update(&buffer[..read]);
+    }
+}
+
+/// Fetches the pinned Qdrant release, checks the archive's size and both
+/// SHA-256 hashes, and puts qdrant.exe where `start` looks for it.
+fn install_qdrant(dry: bool) -> Result<i32> {
+    if !cfg!(all(windows, target_arch = "x86_64")) {
+        return Err(Error::new(1, "Zerus installs Qdrant on Windows x86_64; elsewhere install qdrant on PATH or use Docker."));
+    }
+    let native = native();
+    let root = env::var_os("LOCALAPPDATA").map(PathBuf::from).ok_or_else(|| Error::new(1, "LOCALAPPDATA is not set."))?;
+    let destination = root.join("Programs").join("qdrant").join("qdrant.exe");
+    if destination.is_file() {
+        ensure_qdrant_files(&native.home)?;
+        let verified = sha256_file(&destination)? == QDRANT_EXE_SHA256;
+        println!("{}", json!({"installed": true, "already": true, "path": destination, "pinned": verified}));
+        return Ok(0);
+    }
+    if dry {
+        println!("{}", json!({"installed": false, "dry_run": true, "release": QDRANT_RELEASE, "path": destination}));
+        return Ok(0);
+    }
+    let system = PathBuf::from(env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("System32");
+    let work = tempfile::tempdir()?;
+    let archive = work.path().join("qdrant.zip");
+    let fetched = Command::new(system.join("curl.exe"))
+        .args(["-fsSL", "--proto", "=https", "--max-filesize", "40000000", "-o"]).arg(&archive).arg(QDRANT_RELEASE)
+        .stdin(Stdio::null()).status().map_err(|e| Error::new(1, format!("curl did not run: {e}")))?;
+    if !fetched.success() {
+        return Err(Error::new(1, format!("Could not download {QDRANT_RELEASE}.")));
+    }
+    let size = fs::metadata(&archive)?.len();
+    let digest = sha256_file(&archive)?;
+    if size != QDRANT_ZIP_BYTES || digest != QDRANT_ZIP_SHA256 {
+        return Err(Error::new(1, format!("The Qdrant archive does not match its pin ({size} bytes, sha256 {digest}).")));
+    }
+    let unpacked = work.path().join("unpacked");
+    fs::create_dir_all(&unpacked)?;
+    let extracted = Command::new(system.join("tar.exe")).arg("-xf").arg(&archive).arg("-C").arg(&unpacked)
+        .stdin(Stdio::null()).stdout(Stdio::null()).status().map_err(|e| Error::new(1, format!("tar did not run: {e}")))?;
+    let exe = unpacked.join("qdrant.exe");
+    if !extracted.success() || !exe.is_file() {
+        return Err(Error::new(1, "The Qdrant archive has no qdrant.exe."));
+    }
+    let digest = sha256_file(&exe)?;
+    if digest != QDRANT_EXE_SHA256 {
+        return Err(Error::new(1, format!("qdrant.exe does not match its pin (sha256 {digest}).")));
+    }
+    fs::create_dir_all(destination.parent().unwrap())?;
+    fs::copy(&exe, &destination)?;
+    ensure_qdrant_files(&native.home)?;
+    println!("{}", json!({"installed": true, "path": destination, "version": QDRANT_VERSION}));
     Ok(0)
 }
 
@@ -287,12 +579,42 @@ mod tests {
     fn project_ids_hash_the_resolved_path_like_socraticode() {
         let dir = tempfile::tempdir().unwrap();
         let folder = resolve(dir.path().to_str().unwrap()).unwrap();
-        let ids = project_ids(&folder);
+        let ids = project_ids(&folder, &BTreeMap::new());
         assert_eq!(ids[0], hex(&Sha256::digest(folder.as_bytes()))[..12]);
         fs::write(dir.path().join(".socraticode.json"), br#"{"projectId":"my-app"}"#).unwrap();
-        assert_eq!(project_ids(&folder), vec!["my-app".to_owned()]);
+        assert_eq!(project_ids(&folder, &BTreeMap::new()), vec!["my-app".to_owned()]);
+        let named = BTreeMap::from([("SOCRATICODE_PROJECT_ID".to_owned(), "other".to_owned())]);
+        assert_eq!(project_ids(&folder, &named), vec!["other".to_owned()]);
         fs::write(dir.path().join(".socraticode.json"), br#"{"projectId":"../bad"}"#).unwrap();
-        assert_eq!(project_ids(&folder)[0], ids[0]);
+        assert_eq!(project_ids(&folder, &BTreeMap::new())[0], ids[0]);
+    }
+
+    #[test]
+    fn folder_settings_override_and_name_an_external_qdrant() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = resolve(dir.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::write(dir.path().join(".claude/settings.json"), br#"{"env":{"QDRANT_MODE":"external","QDRANT_URL":"http://127.0.0.1:7333","PATH":"x"}}"#).unwrap();
+        fs::write(dir.path().join(".claude/settings.local.json"), br#"{"env":{"QDRANT_URL":"http://127.0.0.1:6333"}}"#).unwrap();
+        let values = settings(&folder);
+        assert_eq!(values["QDRANT_URL"], "http://127.0.0.1:6333");
+        assert!(!values.contains_key("PATH"));
+        let target = target(&values, false, &Native { exe: None, home: PathBuf::new() });
+        assert_eq!((target.mode, target.url.as_str(), target.agents), ("external", "http://127.0.0.1:6333", true));
+    }
+
+    #[test]
+    fn connect_adds_only_missing_variables_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = resolve(dir.path().to_str().unwrap()).unwrap();
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        fs::write(dir.path().join(".claude/settings.local.json"), br#"{"permissions":{"allow":["Bash"]},"env":{"EMBEDDING_MODEL":"mine"}}"#).unwrap();
+        connect(&folder, false).unwrap();
+        let data = read_json(&dir.path().join(".claude/settings.local.json"));
+        assert_eq!(data["permissions"]["allow"][0], "Bash");
+        assert_eq!(data["env"]["EMBEDDING_MODEL"], "mine");
+        assert_eq!(data["env"]["QDRANT_MODE"], "external");
+        assert_eq!(data["env"]["QDRANT_URL"], NATIVE_URL);
     }
 
     #[test]

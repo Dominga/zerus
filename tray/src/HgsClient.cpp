@@ -465,8 +465,10 @@ quint64 HgsClient::requestSocratiCode(const QString &host, const QString &action
     QStringList args;
     if (!host.isEmpty()) args << QLatin1Char('@') + host;
     args << QStringLiteral("socraticode") << action;
-    if (action != QLatin1String("install")) args << path;
-    runHgs(m_hgs, args, action == QLatin1String("install") ? 180000 : 30000, this,
+    const bool machineWide = action == QLatin1String("install") || action == QLatin1String("install-qdrant");
+    if (!machineWide) args << path;
+    // Start may first bring up Qdrant and Ollama; installs download.
+    runHgs(m_hgs, args, machineWide ? 300000 : action == QLatin1String("start") ? 120000 : 30000, this,
         [this, request, host, path, action](const QByteArray &bytes) {
             QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
             if (error.error != QJsonParseError::NoError || !data.isObject()) emit socratiCodeFailed(request, host, path, action, tr("Invalid SocratiCode response"));

@@ -1,7 +1,6 @@
 #pragma once
 #include "HgsClient.h"
 #include <QDateTime>
-#include <QDesktopServices>
 #include <QHBoxLayout>
 #include <QJsonObject>
 #include <QLabel>
@@ -10,14 +9,16 @@
 #include <QPushButton>
 #include <QShowEvent>
 #include <QTimer>
-#include <QUrl>
 #include <QVBoxLayout>
+#include <utility>
 
 // WhiteWh fork: the SocratiCode index of a session's folder (hgs socraticode).
-// It shows whether the plugin, Docker and the index are there and whether the
-// folder is watched, and offers the one next step: install the plugin, get
-// Docker, or index and watch the folder with a SocratiCode server that Zerus
-// keeps running. Reads are on demand and polled only while work runs.
+// It shows whether the plugin, Qdrant and the index are there and whether the
+// folder is watched, and offers the one next step: install the plugin, install
+// the native Qdrant, or start: bring up Qdrant and Ollama, then index and watch
+// the folder with a SocratiCode server that Zerus keeps running. Without
+// Docker, "Connect agents" points the folder's agents at the same Qdrant.
+// Reads are on demand and polled only while work runs.
 class SocratiCodePanel : public QWidget {
 public:
     explicit SocratiCodePanel(HgsClient *client, QWidget *parent = nullptr) : QWidget(parent), m_client(client)
@@ -39,6 +40,11 @@ public:
         m_action->setObjectName("socratiCodeAction");
         m_action->setAutoDefault(false);
         row->addWidget(m_action);
+        m_connect = new QPushButton(tr("Connect agents"));
+        m_connect->setObjectName("socratiCodeConnect");
+        m_connect->setAutoDefault(false);
+        m_connect->setToolTip(tr("Let this folder's agents use the same Qdrant and Ollama (.claude/settings.local.json)"));
+        row->addWidget(m_connect);
         m_stop = new QPushButton(tr("Stop"));
         m_stop->setObjectName("socratiCodeStop");
         m_stop->setAutoDefault(false);
@@ -60,11 +66,19 @@ public:
         connect(m_refresh, &QPushButton::clicked, this, [this] { request(QStringLiteral("status")); });
         connect(m_action, &QPushButton::clicked, this, &SocratiCodePanel::act);
         connect(m_stop, &QPushButton::clicked, this, [this] { request(QStringLiteral("stop")); });
+        connect(m_connect, &QPushButton::clicked, this, [this] {
+            if (QMessageBox::question(this, tr("Connect this folder's agents?"),
+                    tr("Agents use SocratiCode's Docker Qdrant unless the folder says otherwise. Zerus adds QDRANT_MODE, QDRANT_URL "
+                       "and the Ollama settings to %1, which stays out of Git; variables the folder already sets are kept. "
+                       "Sessions started after this use the index.").arg(m_path + QStringLiteral("/.claude/settings.local.json")))
+                == QMessageBox::Yes) request(QStringLiteral("connect"));
+        });
         connect(m_client, &HgsClient::socratiCodeReady, this, [this](quint64 id, const QString &host, const QString &path, const QString &action, const QJsonObject &data) {
             if (id != m_request || host != m_host || path != m_path) return;
             m_request = 0;
             if (action == QLatin1String("status")) { m_data = data; m_error.clear(); }
             else if (action == QLatin1String("install") && !data["installed"].toBool()) m_error = tr("The plugin was not installed. Run: claude plugin install socraticode@socraticode");
+            else if (action == QLatin1String("install-qdrant") && !data["installed"].toBool()) m_error = tr("Qdrant was not installed.");
             render();
             if (action != QLatin1String("status")) QTimer::singleShot(action == QLatin1String("start") ? 1500 : 500, this, [this] { request(QStringLiteral("status")); });
         });
@@ -101,12 +115,14 @@ private:
     void act()
     {
         const auto step = m_action->property("step").toString();
-        if (step == QLatin1String("docker")) {
-            QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.docker.com/products/docker-desktop/")));
-            return;
-        }
+        if (step == QLatin1String("install-qdrant")
+            && QMessageBox::question(this, tr("Install Qdrant?"),
+                   tr("Zerus downloads Qdrant %1 for Windows (about 30 MB) from its GitHub release, checks the archive and qdrant.exe "
+                      "against pinned SHA-256 hashes, and puts it in %LOCALAPPDATA%\\Programs\\qdrant. Its data stays in "
+                      "%LOCALAPPDATA%\\qdrant, and it listens only on 127.0.0.1:6333.").arg(std::as_const(m_data)["qdrant"].toObject()["native"].toObject()["version"].toString()))
+                   != QMessageBox::Yes) return;
         if (step == QLatin1String("start")) {
-            const bool fresh = m_data["index"].toObject()["state"].toString() == QLatin1String("none");
+            const bool fresh = std::as_const(m_data)["index"].toObject()["state"].toString() == QLatin1String("none");
             if (fresh && QMessageBox::question(this, tr("Index this folder?"),
                     tr("SocratiCode reads every source file of %1 and keeps its index in a local Qdrant container. "
                        "The first index can take several minutes; Zerus then keeps watching the folder until you stop it.").arg(m_path))
@@ -130,25 +146,35 @@ private:
     }
     void render()
     {
+        // A read-only copy: operator[] of a writable object adds what it looks up.
+        const QJsonObject data = m_data;
         const bool busy = m_request != 0;
         m_refresh->setEnabled(!busy && !m_path.isEmpty());
         m_action->setEnabled(!busy);
         m_stop->setEnabled(!busy);
+        m_connect->setEnabled(!busy);
         setVisible(!m_path.isEmpty());
-        const auto runner = m_data["runner"].toObject();
+        const auto runner = data["runner"].toObject();
         const bool running = runner["running"].toBool();
         m_stop->setVisible(running);
-        if (m_data.isEmpty()) {
+        if (data.isEmpty()) {
             m_state->setText(busy ? tr("Checking…") : m_error.isEmpty() ? tr("Not checked") : tr("Unavailable"));
             m_details->setText(m_error);
             setAction({}, {});
+            m_connect->hide();
             m_poll.stop();
             return;
         }
-        const auto index = m_data["index"].toObject();
+        const auto index = data["index"].toObject();
         const auto state = index["state"].toString();
-        const bool watching = m_data["watching"].toBool();
-        const bool qdrant = m_data["qdrant"].toObject()["reachable"].toBool();
+        const bool watching = data["watching"].toBool();
+        const auto store = data["qdrant"].toObject();
+        const bool qdrant = store["reachable"].toBool();
+        const auto mode = store["mode"].toString();
+        const bool native = store["native"].toObject()["installed"].toBool();
+        // Zerus can bring up a Qdrant on this computer: the native one, or the
+        // one the folder's settings name here.
+        const bool startable = native && (mode == QLatin1String("native") || (mode == QLatin1String("external") && store["url"].toString().startsWith(QLatin1String("http://127.0.0.1"))));
         QStringList details;
         QString text;
         if (state == QLatin1String("indexed")) {
@@ -161,11 +187,16 @@ private:
             text = tr("Indexing…");
             if (index["files_total"].toInteger() > 0)
                 text += tr(" %1 of %2 files").arg(index["files_indexed"].toInteger()).arg(index["files_total"].toInteger());
-        } else text = qdrant ? tr("Not indexed") : tr("Not indexed · Qdrant is not running");
-        if (!m_data["plugin"].toObject()["installed"].toBool()) details << tr("The Claude Code plugin is not installed, so agents do not use this index.");
-        if (!m_data["docker"].toBool() && !qdrant) details << tr("SocratiCode keeps its index in Qdrant, which runs in Docker. Install Docker Desktop and start it.");
-        if (!m_data["node"].toBool()) details << tr("SocratiCode needs Node.js with npx on this computer.");
-        const auto ollama = m_data["ollama"].toObject();
+        } else text = tr("Not indexed");
+        if (!qdrant) text += startable ? tr(" · Qdrant is not running") : tr(" · no Qdrant");
+        if (!data["plugin"].toObject()["installed"].toBool()) details << tr("The Claude Code plugin is not installed, so agents do not use this index.");
+        if (mode == QLatin1String("managed") && !data["docker"].toBool() && !native)
+            details << (store["native"].toObject()["installable"].toBool() ? tr("SocratiCode keeps its index in Qdrant. Install it natively here, or install Docker.")
+                                                                         : tr("SocratiCode keeps its index in Qdrant: install qdrant on PATH, or Docker."));
+        if (!store["agents"].toBool() && mode == QLatin1String("native"))
+            details << tr("Zerus uses the native Qdrant at %1; this folder's agents still look for SocratiCode's Docker one.").arg(store["url"].toString());
+        if (!data["node"].toBool()) details << tr("SocratiCode needs Node.js with npx on this computer.");
+        const auto ollama = data["ollama"].toObject();
         if (ollama["reachable"].toBool() && !ollama["model_present"].toBool())
             details << tr("Ollama has no %1 yet; SocratiCode downloads it with the first index.").arg(ollama["model"].toString());
         if (runner["phase"].toString() == QLatin1String("failed") && !runner["error"].toString().isEmpty())
@@ -175,14 +206,15 @@ private:
         m_details->setText(details.join('\n'));
         m_details->setVisible(!details.isEmpty());
         // The one next step.
-        const bool local = m_host.isEmpty();
-        if (!m_data["plugin"].toObject()["installed"].toBool()) setAction(QStringLiteral("install"), tr("Install plugin"), tr("claude plugin install socraticode@socraticode"));
-        else if (!m_data["docker"].toBool() && !qdrant) {
-            if (local) setAction(QStringLiteral("docker"), tr("Get Docker…"), tr("Open the Docker Desktop download page"));
-            else setAction({}, {});
-        } else if (!running && !watching) setAction(QStringLiteral("start"), state == QLatin1String("none") ? tr("Index and watch") : tr("Watch"),
-                                                    tr("Run a SocratiCode server for this folder that indexes it and follows its changes"));
+        const bool needsQdrant = !qdrant && !startable && !(mode == QLatin1String("managed") && data["docker"].toBool());
+        if (!data["plugin"].toObject()["installed"].toBool()) setAction(QStringLiteral("install"), tr("Install plugin"), tr("claude plugin install socraticode@socraticode"));
+        else if (needsQdrant && mode == QLatin1String("managed") && store["native"].toObject()["installable"].toBool())
+            setAction(QStringLiteral("install-qdrant"), tr("Install Qdrant…"), tr("Download the pinned native Qdrant for SocratiCode"));
+        else if (needsQdrant) setAction({}, {});
+        else if (!running && !watching) setAction(QStringLiteral("start"), state == QLatin1String("none") ? tr("Index and watch") : qdrant ? tr("Watch") : tr("Start"),
+                                                    tr("Bring up Qdrant and Ollama when they are down, then run a SocratiCode server that keeps this folder's index current"));
         else setAction({}, {});
+        m_connect->setVisible(mode == QLatin1String("native") && !store["agents"].toBool());
         if (running || state == QLatin1String("indexing")) { if (!m_poll.isActive()) m_poll.start(); }
         else m_poll.stop();
     }
@@ -191,6 +223,6 @@ private:
     QJsonObject m_data;
     quint64 m_request = 0;
     QLabel *m_state, *m_details;
-    QPushButton *m_action, *m_stop, *m_refresh;
+    QPushButton *m_action, *m_connect, *m_stop, *m_refresh;
     QTimer m_poll;
 };

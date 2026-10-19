@@ -127,6 +127,35 @@ class Accounts(unittest.TestCase):
         self.run_hgs('claude',str(self.root),'--new','--permissions','auto','--dry-run','--','--permission-mode','plan',ok=False)
         self.assertNotIn('--permission-mode',self.run_hgs('claude',str(self.root),'--new','--dry-run').stdout.decode())
 
+    @unittest.skipIf(os.name == 'nt' or not shutil.which('node'), 'the Kimi helper starts a POSIX mock through node')
+    def test_kimi_usage_uses_the_running_native_server(self):
+        import http.server, threading
+        routes = {}
+        class Native(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                body = routes.get(self.path) if self.headers.get('Authorization') == 'Bearer fixturetoken0123456789' else None
+                self.send_response(200 if body is not None else 404); self.send_header('Content-Type', 'application/json'); self.end_headers()
+                self.wfile.write(json.dumps(body if body is not None else {'statusCode': 404}).encode())
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Native)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        # Kimi Code 0.24 reuses its running server and ignores --port, then exits.
+        (self.bin/'kimi').write_text('#!/bin/sh\n'
+            f'echo "A server is already running at http://127.0.0.1:{server.server_port} — the options from this command were not applied."\n'
+            f'echo "  Local:    http://127.0.0.1:{server.server_port}/#token=fixturetoken0123456789"\n')
+        credentials = self.home/'.kimi-code/credentials'; credentials.mkdir(parents=True)
+        (credentials/'kimi-code.json').write_text(json.dumps({'access_token': 'expired-fixture', 'refresh_token': 'refresh-fixture', 'expires_at': 1}))
+        def inspect():
+            return json.loads(self.run_hgs('account', 'inspect', 'native-kimi', '--refresh').stdout)
+        # Routes this Kimi version no longer serves leave the grant expired, and say so.
+        self.assertEqual(inspect()['status'], 'expired')
+        routes['/api/v1/oauth/usage'] = {'data': {'kind': 'ok', 'quota': {'usages': {'limit5h': {'usedRatio': 0.25, 'resetAt': None}}}}}
+        routes['/api/v1/oauth/userinfo'] = {'data': {'kind': 'ok', 'userInfo': {'nickname': 'Fixture', 'email': 'kimi@example.invalid', 'userLevelName': 'Pro'}}}
+        data = inspect()
+        self.assertEqual((data['status'], data['identity']['email']), ('ok', 'kimi@example.invalid'))
+        self.assertEqual(data['windows'][0]['used_percent'], 25.0)
+
     def test_remove_preserves_native_context(self):
         self.add(); f=self.config/'accounts/work/session.jsonl'; f.write_text('saved context')
         self.run_hgs('account','rm','work'); self.assertEqual(f.read_text(),'saved context')

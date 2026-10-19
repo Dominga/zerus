@@ -358,10 +358,19 @@ fn kimi(home: &Path) -> Value {
         if let Some(dir) = &work {
             cmd.current_dir(dir.path());
         }
-        return capture(cmd, &[], 18)
+        let mut output: Value = capture(cmd, &[], 18)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or(result);
+        // Without renewal the grant stays expired: opening Kimi or signing in again
+        // renews it, which "unavailable" would not say.
+        let renewed = read_json(&home.join("credentials/kimi-code.json"));
+        if output["status"] != "ok"
+            && renewed["expires_at"].as_u64().is_some_and(|expiry| expiry <= now() + 60)
+        {
+            output["status"] = json!("expired");
+        }
+        return output;
     }
     // Match the native managed provider's default endpoint. Custom gateways do not receive this token.
     let base =

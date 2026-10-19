@@ -5,21 +5,25 @@ const output = {identity:{},windows:[],source:'Kimi Code',status:'unavailable'};
 const listener=net.createServer();
 await new Promise((resolve,reject)=>{listener.once('error',reject);listener.listen(0,'127.0.0.1',resolve);});
 const port=listener.address().port;await new Promise(resolve=>listener.close(resolve));
+// A server that already runs keeps its own address and ignores --port; use the one it reports.
+let base=`http://127.0.0.1:${port}`;
 const child=spawn('kimi',['web','--host','127.0.0.1','--port',String(port),'--no-open'],{stdio:['ignore','pipe','pipe']});
 try {
   const token=await new Promise((resolve,reject)=>{
     let buffer='';const timer=setTimeout(()=>reject(new Error('startup')),5000);
     const read=chunk=>{
       buffer+=chunk.toString().replace(/\x1b\[[0-9;]*m/g,'');
-      const match=buffer.match(/#token=([A-Za-z0-9_-]+)/)??buffer.match(/Token:\s+([A-Za-z0-9_-]{16,})/);
+      const local=buffer.match(/(http:\/\/127\.0\.0\.1:\d+)\/#token=([A-Za-z0-9_-]+)/);
+      if(local)base=local[1];
+      const match=local?[local[0],local[2]]:buffer.match(/#token=([A-Za-z0-9_-]+)/)??buffer.match(/Token:\s+([A-Za-z0-9_-]{16,})/);
       if(match){clearTimeout(timer);resolve(match[1]);}
       if(buffer.length>65536){clearTimeout(timer);reject(new Error('output'));}
     };
     child.stdout.on('data',read);child.stderr.on('data',read);child.once('error',()=>{clearTimeout(timer);reject(new Error('launch'));});
-    child.once('exit',()=>{clearTimeout(timer);reject(new Error('exit'));});
+    child.once('close',()=>{clearTimeout(timer);reject(new Error('exit'));});
   });
   const get=async path=>{
-    const r=await fetch(`http://127.0.0.1:${port}/api/v1/oauth/${path}`,{headers:{Authorization:`Bearer ${token}`},redirect:'error',signal:AbortSignal.timeout(9000)});
+    const r=await fetch(`${base}/api/v1/oauth/${path}`,{headers:{Authorization:`Bearer ${token}`},redirect:'error',signal:AbortSignal.timeout(9000)});
     if(!r.ok)throw new Error('request');return (await r.json()).data;
   };
   // Sequence these so the first native call finishes token renewal before the second.

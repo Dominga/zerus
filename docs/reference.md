@@ -2277,6 +2277,52 @@ contract verification; updates never restart live hosts or agents automatically.
 keyless model, covering history, lifecycle, questions, settings, fork, search,
 schedules and browser login.
 
+## SocratiCode index
+
+[SocratiCode](https://github.com/giancarloerra/socraticode) gives agents a
+semantic index of a folder through its Claude Code plugin. The session
+**Details** tab shows the index of the session's folder and the one next
+step; `hgs [@host] socraticode ACTION PATH` does the same from a terminal and
+prints JSON.
+
+- `status PATH` reads what SocratiCode records itself: the folder's Qdrant
+  collection (`codebase_<project id>`) and its point in `socraticode_metadata`
+  (files, chunks, last index), the watch lock in
+  `socraticode-locks` under the temporary folder, the installed plugin, Docker,
+  Node.js and the embedding model in Ollama. Nothing is started.
+- `start PATH` keeps one SocratiCode MCP server running for the folder, detached
+  from the GUI: it indexes a folder without an index, then watches it; a folder
+  with an index catches up and is watched. A folder another SocratiCode process
+  already watches is left to it. `stop PATH` ends only the server that `start`
+  ran; a watcher of an agent session belongs to that session.
+- `install` adds the plugin (`claude plugin marketplace add
+  giancarloerra/socraticode`, then `claude plugin install --scope user
+  socraticode@socraticode`).
+
+The project id and settings are the ones Claude Code gives the plugin:
+`SOCRATICODE_PROJECT_ID` or `projectId` in `.socraticode.json`, else the
+first 12 hex digits of the SHA-256 of the resolved path, and the `env` of
+`~/.claude/settings.json`, then of the folder's `.claude/settings.json` and
+`.claude/settings.local.json`. A Qdrant those settings name
+(`QDRANT_MODE=external`, `QDRANT_URL`) is always the one read and started.
+
+By default SocratiCode keeps its index in its own Qdrant container in Docker
+(`127.0.0.1:16333`). **Settings > Sessions > Run SocratiCode on a native
+Qdrant (no Docker)**, off by default, passes `--qdrant native` instead:
+
+- the index lives in a Qdrant program on `127.0.0.1:6333`, with Ollama on
+  `127.0.0.1:11434` for embeddings; `start` brings up either one when it is
+  down and installed;
+- `install-qdrant` (Windows x86_64) downloads the pinned Qdrant release from
+  GitHub, checks the archive and `qdrant.exe` against their pinned SHA-256
+  hashes and puts the program in `%LOCALAPPDATA%\Programs\qdrant`; its config,
+  storage and log stay in `%LOCALAPPDATA%\qdrant`. Elsewhere, put `qdrant` on
+  `PATH`;
+- `connect PATH` points the folder's agents at the same Qdrant and Ollama: it
+  adds the missing `QDRANT_*`, `OLLAMA_*` and `EMBEDDING_*` variables to the
+  folder's `.claude/settings.local.json`, after a confirmation in the GUI.
+  Sessions started afterwards use the index.
+
 ## Automatic recovery
 
 **Settings → Automatic recovery** shares rules for temporary overload, rate limits,

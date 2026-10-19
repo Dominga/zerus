@@ -360,6 +360,7 @@ private:
     bool m_folderFilterCheckout=false;
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
+    class SocratiCodePanel *m_socratiCode=nullptr;
     QSet<QString> m_hostFilters, m_projectFilters;
     QString selectedHostTarget() const;
     void updateDashboard();

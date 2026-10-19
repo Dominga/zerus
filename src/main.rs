@@ -14,6 +14,7 @@ mod mobile_peers;
 mod native_ui;
 mod phones;
 mod session_reference;
+mod socraticode;
 mod platform;
 mod presence;
 mod screen;

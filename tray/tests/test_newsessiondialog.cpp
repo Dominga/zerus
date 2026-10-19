@@ -143,7 +143,7 @@ elif a[:2]==['account','inspect']:
  print(json.dumps({'id':i,'provider':p,'home':'/profiles/'+i,**status(i,p)}))
 elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
 elif a and a[0]=='worktrees' and (root/'repo').exists():
- print(json.dumps({'state':'ok','path':a[1],'selected_root':'/repo','common_dir':'/repo/.git','sampled_at':int(time.time()),'worktrees':[{'path':'/repo','kind':'main','available':True}]}))
+ print(json.dumps({'state':'ok','path':'/workspace/example','selected_root':'/workspace/example','common_dir':'/workspace/example/.git','sampled_at':int(time.time()),'worktrees':[{'path':'/workspace/example','kind':'main','available':True}]}))
 elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]}))
 )PY"));
     }
@@ -261,8 +261,9 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(skins[1].view("newSession"),QString("dense"));QVERIFY(skins[1].framelessDialogs());
         QCOMPARE(WorkspaceSkin::toJson(skins[1].dark),WorkspaceSkin::toJson(WorkspaceSkin::zerus(true)));
         QCOMPARE(WorkspaceSkin::toJson(skins[1].light),WorkspaceSkin::toJson(WorkspaceSkin::zerus(false)));
-        const auto parsed=WorkspaceSkin::parse(QJsonDocument::fromJson(
-            R"({"schema":1,"name":"T","dark":{"accent":"#ff00aa","border":"red; background:url(x)"},"views":{"newSession":"Dense!"}})").object(),"t",{},false);
+        const QJsonObject unsafe{{"schema",1},{"name","T"},{"dark",QJsonObject{{"accent","#ff00aa"},{"border","red; background:url(x)"}}},
+                                 {"views",QJsonObject{{"newSession","Dense!"}}}};
+        const auto parsed=WorkspaceSkin::parse(unsafe,"t",{},false);
         QCOMPARE(parsed.dark.accent,QString("#ff00aa"));QCOMPARE(parsed.dark.border,WorkspaceSkin::zerus(true).border);
         QCOMPARE(parsed.view("newSession"),QString("classic"));
         const auto dir=WorkspaceSkin::directory();QDir(dir).removeRecursively();
@@ -270,7 +271,8 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QString error;QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin"));QVERIFY(error.isEmpty());
         QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin-2"));
         const auto again=WorkspaceSkin::available();QCOMPARE(again.size(),4);
-        QCOMPARE(again[2].id,QString("my-skin"));QVERIFY(!again[2].builtin);QCOMPARE(again[2].view("newSession"),QString("dense"));
+        const QStringList copies{again[2].id,again[3].id};QVERIFY(copies.contains("my-skin"));QVERIFY(copies.contains("my-skin-2"));
+        QVERIFY(!again[2].builtin);QCOMPARE(again[2].view("newSession"),QString("dense"));QVERIFY(again[2].framelessDialogs());
     }
     // The WhiteWh skin arranges the same form densely; its logic is unchanged.
     void denseViewStartsLikeTheClassicOne() {

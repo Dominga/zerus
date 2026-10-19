@@ -69,10 +69,12 @@ inline Skin parse(const QJsonObject &data, const QString &id, const QString &pat
 {
     Skin skin{id, data["name"].toString().trimmed().left(80), path, data["stylesheet"].toString().left(256 * 1024), builtin, zerus(true), zerus(false), {}, QStringLiteral("native")};
     if (skin.name.isEmpty()) skin.name = id;
+    // Screens are named like newSession, views like dense.
+    static const QRegularExpression screenName(QStringLiteral("\\A[a-z][A-Za-z0-9]{0,31}\\z"));
     static const QRegularExpression viewName(QStringLiteral("\\A[a-z][a-z0-9-]{0,31}\\z"));
     const auto views = data["views"].toObject();
     for (auto it = views.begin(); it != views.end(); ++it)
-        if (viewName.match(it.key()).hasMatch() && viewName.match(it.value().toString()).hasMatch()) skin.views[it.key()] = it.value().toString();
+        if (screenName.match(it.key()).hasMatch() && viewName.match(it.value().toString()).hasMatch()) skin.views[it.key()] = it.value().toString();
     if (data["window"].toObject()["dialogs"].toString() == QLatin1String("frameless")) skin.dialogFrame = QStringLiteral("frameless");
     for (const auto &[key, palette] : {std::pair{QStringLiteral("dark"), &skin.dark}, std::pair{QStringLiteral("light"), &skin.light}}) {
         const auto values = data[key].toObject();

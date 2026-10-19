@@ -879,11 +879,13 @@ void HgsClient::launchNativeSession(const QString &host, const QString &target, 
     launchDetachedSession(host,"dsh",target,name,account,launchId);
 }
 
-void HgsClient::launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model, const QString &effort)
+void HgsClient::launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model, const QString &effort, const QString &permissions)
 {
     QStringList args{agent, target, "--new", "-n", name, "--launch-id", launchId};
     if (agent != "dsh" && agent != "opencode") args << "-d";
     if (!account.isEmpty()) args << "--account" << account;
+    // This session's own mode; hgs rejects it for agents that cannot take it.
+    if (!permissions.isEmpty()) args << "--permissions" << permissions;
     if (agent == "opencode" && !model.isEmpty()) args << "--model" << model;
     // hgs requires --model with --effort: effort is that model's variant.
     if (agent == "opencode" && !model.isEmpty() && !effort.isEmpty()) args << "--effort" << effort;

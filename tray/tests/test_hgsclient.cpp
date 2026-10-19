@@ -679,6 +679,11 @@ print('DeepSeek session ready')
     client.launchDetachedSession("mac","codex",folder,"background","work","launch-three");
     QTRY_COMPARE(result.size(),3);QVERIFY(result[2][1].toBool());QVERIFY(args.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"@mac","codex",folder,"--new","-n","background","--launch-id","launch-three","-d","--account","work"}));
+    args.close();
+    // This session's own permission mode travels as one hgs option.
+    client.launchDetachedSession("mac","claude",folder,"auto","work","launch-four",{},{},"auto");
+    QTRY_COMPARE(result.size(),4);QVERIFY(result[3][1].toBool());QVERIFY(args.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),QJsonArray({"@mac","claude",folder,"--new","-n","auto","--launch-id","launch-four","-d","--account","work","--permissions","auto"}));
 }
 
 

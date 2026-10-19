@@ -38,8 +38,8 @@ fn native(provider: &str, home: &Path, claude_native: &Path) -> Option<(&'static
 }
 pub(super) fn describe(config: &Config, row: &mut Value, mode: &str) {
     row["permission_mode"] = json!(mode);
-    let (effective, detail) = if mode == "bypass" {
-        ("bypass", "Set in Zerus".into())
+    let (effective, detail) = if let Some(set) = ["bypass", "auto"].into_iter().find(|set| *set == mode) {
+        (set, "Set in Zerus".into())
     } else {
         native(string_field(row,"provider"), Path::new(string_field(row,"home")),
             &if row["native"].as_bool().unwrap_or(false) { PathBuf::from(string_field(row,"home")) } else { Path::new(&config.home).join(".claude") })

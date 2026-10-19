@@ -63,7 +63,7 @@ private:
     void openSessionTerminal(const QString &peer, const QString &session, const QString &tty);
     void activateSessionWith(TerminalBackend &backend, const QString &peer, const QString &session, const QString &tty);
     void copyText(const QString &text);
-    void launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId);
+    void launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions = {});
     // Вызывать сразу после успешного backend.open(). Не про Konsole и не про D-Bus
     // -- просто спрашивает интерфейс TerminalBackend, есть ли что сказать пользователю
     // об этом конкретном открытии (см. TerminalBackend::takeAdvisory), и если да, кладёт

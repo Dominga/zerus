@@ -66,8 +66,11 @@ private:
     int m_height = 0;
 };
 using IdentityBadges::providerName;
+bool setInZerus(const QJsonObject &p) {
+    return p["permission_mode"] == "bypass" || p["permission_mode"] == "auto";
+}
 QString permissionMode(const QJsonObject &p) {
-    return p["permission_mode"] == "bypass" ? "bypass" : p["effective_permission_mode"].toString("unknown");
+    return setInZerus(p) ? p["permission_mode"].toString() : p["effective_permission_mode"].toString("unknown");
 }
 QString permissionLabel(const QString &mode) {
     return mode == "bypass" ? QObject::tr("Bypass") : mode == "auto" ? QObject::tr("Auto")
@@ -83,7 +86,7 @@ QString accountPermission(const QJsonObject &account) {
     return mode;
 }
 QString permissionHint(const QJsonObject &p) {
-    const auto source = p["permission_mode"] == "bypass" ? QObject::tr("Set in Zerus") : QObject::tr("From provider settings");
+    const auto source = setInZerus(p) ? QObject::tr("Set in Zerus") : QObject::tr("From provider settings");
     return source + "\n" + p["permission_detail"].toString(QObject::tr("Provider defaults have not been verified."))
         + "\n" + QObject::tr("Applies to new and resumed sessions; a running session may use a different mode.");
 }
@@ -946,14 +949,18 @@ void AccountsPage::permissions()
     auto *layout = new QVBoxLayout(&dialog);layout->setContentsMargins(18,18,18,18);layout->setSpacing(12);layout->setSizeConstraint(QLayout::SetMinimumSize);
     layout->addWidget(label(tr("%1 on %2").arg(selectedAccount()["label"].toString(),p["machine"].toString())));
     auto *mode = new QComboBox; mode->setObjectName("accountPermissionMode");
-    mode->addItem(tr("Default (provider settings)"),"provider"); mode->addItem(tr("Bypass permissions"),"bypass");mode->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-    mode->setCurrentIndex(p["permission_mode"] == "bypass" ? 1 : 0);layout->addWidget(mode);
+    mode->addItem(tr("Default (provider settings)"),"provider");
+    // Older computers list no modes and support only provider and bypass.
+    if (p["permission_modes"].toArray().contains(QJsonValue("auto"))) mode->addItem(tr("Auto"),"auto");
+    mode->addItem(tr("Bypass permissions"),"bypass");mode->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    mode->setCurrentIndex(qMax(0, mode->findData(p["permission_mode"].toString("provider"))));layout->addWidget(mode);
     const auto provider = p["provider"].toString();
     auto *explanation = label(); explanation->setObjectName("permissionExplanation"); layout->addWidget(explanation);
     const auto explain = [=] {
         explanation->setText(mode->currentData() == "provider"
             ? tr("Inherit %1 settings on %2. %3").arg(providerName(provider), p["machine"].toString(),
-                p["permission_mode"] == "bypass" ? QString() : p["permission_detail"].toString())
+                setInZerus(p) ? QString() : p["permission_detail"].toString())
+            : mode->currentData() == "auto" ? tr("Claude's Auto mode decides which tool calls still need your approval.")
             : provider == "kimi" ? tr("Run tools and answer questions automatically (Never Ask).")
             : provider == "codex" || provider == "dsh" ? tr("Full access without approval prompts or a sandbox.")
             : tr("Run tools without permission prompts."));

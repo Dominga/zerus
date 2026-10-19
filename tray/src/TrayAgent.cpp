@@ -585,13 +585,14 @@ void TrayAgent::copyText(const QString &text)
         notify(tr("Zerus: could not copy"), error, QSystemTrayIcon::Warning, 8000);
 }
 
-void TrayAgent::launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId)
+void TrayAgent::launchSession(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &permissions)
 {
     QStringList args;
     if (!host.isEmpty()) args << QLatin1Char('@') + host;
     args << cmd << target << QStringLiteral("--new") << QStringLiteral("-n") << name;
     args << QStringLiteral("--launch-id") << launchId;
     if (!account.isEmpty()) args << QStringLiteral("--account") << account;
+    if (!permissions.isEmpty()) args << QStringLiteral("--permissions") << permissions;
     const QString command = SessionCommands::command(m_cfg.hgsPath, args);
     auto launchTerminal = m_cfg.openMode == QLatin1String("clipboard")
         ? makeLaunchTerminal(m_cfg) : nullptr;

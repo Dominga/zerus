@@ -104,6 +104,29 @@ class Accounts(unittest.TestCase):
         self.run_hgs('account','permissions','work','--mode','bypass','--dry-run')
         self.assertEqual(next(p for p in self.ls()['profiles'] if p['id']=='work')['permission_mode'],'provider')
 
+    def test_auto_permission_mode_is_claude_only(self):
+        self.add('review','claude');self.add()
+        modes={p['id']:p.get('permission_modes') for p in self.ls()['profiles']}
+        self.assertEqual(modes['review'],['provider','auto','bypass']);self.assertEqual(modes['work'],['provider','bypass'])
+        self.assertEqual(modes['native-kimi'],['provider','bypass']);self.assertFalse(modes.get('native-opencode'))
+        self.run_hgs('account','permissions','review','--mode','auto')
+        review=next(p for p in self.ls()['profiles'] if p['id']=='review')
+        self.assertEqual((review['permission_mode'],review['effective_permission_mode']),('auto','auto'))
+        for account in ['work','native-codex','native-kimi','native-dsh']:
+            self.run_hgs('account','permissions',account,'--mode','auto',ok=False)
+            self.assertEqual(next(p for p in self.ls()['profiles'] if p['id']==account)['permission_mode'],'provider')
+
+    def test_launch_permissions_choose_one_sessions_mode(self):
+        claude=self.run_hgs('claude',str(self.root),'--new','--permissions','auto','--dry-run').stdout.decode()
+        self.assertIn('--permission-mode auto',claude)
+        codex=self.run_hgs('codex',str(self.root),'--new','--permissions','bypass','--dry-run').stdout.decode()
+        self.assertIn('--dangerously-bypass-approvals-and-sandbox',codex)
+        # Auto is Claude's; DeepSeek and OpenCode modes come from their own settings.
+        for agent,mode in [('codex','auto'),('kimi','auto'),('dsh','bypass'),('opencode','bypass'),('claude','provider')]:
+            self.run_hgs(agent,str(self.root),'--new','--permissions',mode,'--dry-run',ok=False)
+        self.run_hgs('claude',str(self.root),'--new','--permissions','auto','--dry-run','--','--permission-mode','plan',ok=False)
+        self.assertNotIn('--permission-mode',self.run_hgs('claude',str(self.root),'--new','--dry-run').stdout.decode())
+
     def test_remove_preserves_native_context(self):
         self.add(); f=self.config/'accounts/work/session.jsonl'; f.write_text('saved context')
         self.run_hgs('account','rm','work'); self.assertEqual(f.read_text(),'saved context')

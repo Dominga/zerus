@@ -2125,13 +2125,22 @@ headers. A server that the profile added, changed or removed keeps its own state
 the profile's `.hgs-inherited-mcp.json` records only digests of what was inherited.
 Provider sign-in, hooks and other settings are not shared this way.
 
-**Permissions → Change…** sets provider defaults or bypass for future launches
-and resume on that host. Explicit launch flags take precedence. Current agents
-continue unchanged; account labels describe launch settings, not every running
-session's effective permissions. Bypass maps to Codex full access without sandbox,
+**Permissions → Change…** sets provider defaults, Auto (Claude accounts only) or
+bypass for future launches and resume on that host. Explicit launch flags take
+precedence. Current agents continue unchanged; account labels describe launch
+settings, not every running session's effective permissions. Auto maps to Claude
+`--permission-mode auto`. Bypass maps to Codex full access without sandbox,
 Claude `bypassPermissions`, Kimi Never Ask/`--auto` and DeepSeek's native
 `danger-full-access`. The CLI is `hgs [@host] account permissions ID --mode
-provider|bypass`. Permissions do not accompany copied sign-in credentials.
+provider|auto|bypass`; `account ls` lists each account's `permission_modes`.
+Permissions do not accompany copied sign-in credentials.
+
+**New session → Permissions** chooses one session's mode instead of the account
+default: Auto for Claude, or Bypass for Claude, Codex and Kimi. It becomes that
+agent's own launch flag (`hgs <agent> … --permissions auto|bypass`), so the
+session keeps it when resumed while the account default stays unchanged. It
+cannot be combined with the agent's own permission flags after `--`. The choice
+is offered only by computers whose `hgs` lists the mode.
 Resident legacy DeepSeek bridges also support this mode through the official
 authenticated web API, without restarting the host or changing other sessions.
 Capability checks precede new binding creation. If permission setup is not

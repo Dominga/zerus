@@ -114,6 +114,8 @@ elif a[:2]==['account','ls']:
  if (root/'opencode').exists():
   profiles.append({'id':'native-opencode','provider':'opencode','label':'Native configuration','home':'/profiles/native-opencode','installed':True,'is_default':True})
   if (root/'opencode-models').exists():profiles[-1].update(catalog())
+ if (root/'permission-modes').exists():
+  for profile in profiles:profile['permission_modes']={'claude':['provider','auto','bypass'],'codex':['provider','bypass'],'dsh':['provider','bypass']}.get(profile['provider'],[])
  if (root/'empty-catalog').exists():profiles=[]
  for profile in profiles:
   if not (root/'uncached').exists():profile['account_status']=status(profile['id'],profile['provider'])
@@ -223,6 +225,26 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][1].toString(),QString("codex"));QCOMPARE(launched[0][4].toString(),QString("work"));
         NewSessionDialog next(program(),fleet(),host);QTRY_VERIFY(row(next,"work")>=0);QTRY_COMPARE(choices(next)->count(),5);
         QCOMPARE(choices(next)->currentItem()->data(Qt::UserRole).toString(),QString("work"));
+    }
+    void permissionsOfferOnlyTheComputersListedModes() {
+        {   // An older computer lists no modes: only the account default exists.
+            NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.selectPath("/workspace/example",false);dialog.show();
+            QTRY_VERIFY(row(dialog,"claude")>=0);choices(dialog)->setCurrentRow(row(dialog,"claude"));
+            QVERIFY(!dialog.findChild<QComboBox *>("launchPermissions")->isVisible());
+        }
+        flag("permission-modes");
+        NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.selectPath("/workspace/example",false);dialog.show();
+        QTRY_VERIFY(row(dialog,"claude")>=0);choices(dialog)->setCurrentRow(row(dialog,"claude"));
+        auto *mode=dialog.findChild<QComboBox *>("launchPermissions");
+        QTRY_VERIFY(mode->isVisible());QCOMPARE(mode->count(),3);QCOMPARE(mode->itemData(1).toString(),QString("auto"));
+        // Codex has no Auto mode; DeepSeek takes its mode only from the account.
+        choices(dialog)->setCurrentRow(row(dialog,"work"));QCOMPARE(mode->count(),2);QCOMPARE(mode->findData("auto"),-1);
+        choices(dialog)->setCurrentRow(row(dialog,"native-dsh"));QVERIFY(!mode->isVisible());
+        choices(dialog)->setCurrentRow(row(dialog,"claude"));mode->setCurrentIndex(mode->findData("auto"));
+        auto *start=dialog.findChild<QPushButton *>("primary");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][10].toString(),QString("auto"));
+        flag("permission-modes",false);
     }
     void rememberedAndExplicitMissingAccounts() {
         QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));

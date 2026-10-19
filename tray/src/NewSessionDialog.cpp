@@ -129,6 +129,9 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_effortLabel=plainLabel(tr("Effort"));form->addRow(m_effortLabel,m_effort);
     m_effort->addItem(tr("Default"),QString());m_effort->hide();m_effortLabel->hide();
     m_effort->setToolTip(tr("Variants of the selected model. Default uses the model's own setting."));
+    m_permissions=new QComboBox;m_permissions->setObjectName("launchPermissions");m_permissions->setAccessibleName(tr("Permissions"));
+    m_permissionsLabel=plainLabel(tr("Permissions"));form->addRow(m_permissionsLabel,m_permissions);
+    m_permissions->addItem(tr("Account default"),QString());m_permissions->hide();m_permissionsLabel->hide();
     m_name=new QLineEdit(m_generatedBranch);m_name->setObjectName("launchName");form->addRow(tr("Session name"),m_name);
     m_nameError=plainLabel();m_nameError->setObjectName("launchNameError");m_nameError->hide();form->addRow(QString(),m_nameError);
     m_openTerminal=new QCheckBox(tr("Open terminal window"));m_openTerminal->setObjectName("launchOpenTerminal");
@@ -151,7 +154,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         loadAccounts();updateForm();updateWorktrees();
     });
     connect(m_folder,&QComboBox::activated,this,[this]{m_prefillRequest=0;updateForm();});
-    connect(m_account,&QListWidget::currentItemChanged,this,[this]{m_preferredAgent=this->agent();m_preferredAccount=account();m_accountPreset=true;updateModels();updateForm();});
+    connect(m_account,&QListWidget::currentItemChanged,this,[this]{m_preferredAgent=this->agent();m_preferredAccount=account();m_accountPreset=true;updateModels();updatePermissions();updateForm();});
     connect(m_refreshAccounts,&QPushButton::clicked,this,[this]{m_forceUsage=true;loadAccounts(true);});
     connect(m_model,&QComboBox::currentIndexChanged,this,&NewSessionDialog::updateEfforts);
     connect(m_startOpenCode,&QPushButton::clicked,this,&NewSessionDialog::startOpenCode);
@@ -352,7 +355,7 @@ void NewSessionDialog::updateForm()
     m_start->setEnabled(!noMachine&&m_account->currentItem()&&(!m_accountRequest||agent()=="sh")&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
         &&(!m_autoPreferred||!m_catalogRequest)&&!(automatic&&m_creationFailed));
     m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):tr("Start session"));
-    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_model,m_effort,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
+    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_model,m_effort,m_permissions,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
     m_refreshAccounts->setEnabled(!busy&&!noMachine&&!m_accountRequest);
     m_autoWorktree->setEnabled(!busy&&automaticWorktreeAvailable());m_plainFolder->setEnabled(!busy);m_cancel->setEnabled(!m_creation);
     m_autoWorktree->setChecked(automatic);m_plainFolder->setChecked(!automatic);
@@ -418,7 +421,7 @@ void NewSessionDialog::launch(const QString &target,const QString &addFolder)
     }
     const auto model=agent()=="opencode"?m_model->currentData().toString():QString();
     emit launchRequested(host(),agent(),target,m_name->text(),account(),m_project->currentData().toString(),m_openTerminal->isChecked()&&agent()!="dsh"&&agent()!="opencode",addFolder,
-        model,model.isEmpty()?QString():m_effort->currentData().toString());accept();
+        model,model.isEmpty()?QString():m_effort->currentData().toString(),m_permissions->currentData().toString());accept();
 }
 QString NewSessionDialog::agent() const
 {
@@ -440,7 +443,7 @@ void NewSessionDialog::loadAccounts(bool refresh)
 }
 void NewSessionDialog::updateAccounts()
 {
-    if(m_machine->count()==0){const QSignalBlocker block(m_account);m_account->clear();updateModels();updateForm();return;}
+    if(m_machine->count()==0){const QSignalBlocker block(m_account);m_account->clear();updateModels();updatePermissions();updateForm();return;}
     const auto style=folderStyle(m_fleet,host());
     // Use the Accounts page's identity/scope rules, applied only to this
     // computer's catalog. An account can have several local launch bindings.
@@ -514,7 +517,7 @@ void NewSessionDialog::updateAccounts()
     // not pick the first row: on macOS this list takes the dialog's first focus,
     // and while loading that row is Run shell.
     if(target<0)m_account->setCurrentIndex({});else m_account->setCurrentRow(target);
-    updateUsage();updateModels();updateForm();
+    updateUsage();updateModels();updatePermissions();updateForm();
 }
 
 // Opening and Refresh ask for current limits of this computer's accounts. The
@@ -706,6 +709,24 @@ void NewSessionDialog::createWorktree()
     catalog["worktrees"]=entries;
     m_verifiedWorktrees[machine+'\n'+dialog.createdPath()]=catalog;
     m_autoPreferred=false;selectPath(dialog.createdPath());
+}
+
+// Only modes the selected computer's hgs lists for this account, and only for
+// agents whose launch takes them; older computers list none.
+void NewSessionDialog::updatePermissions()
+{
+    const auto selected=m_permissions->currentData().toString();
+    const auto profile=m_account->currentItem()?m_account->currentItem()->data(ProfileRole).toJsonObject():QJsonObject();
+    const auto modes=profile["permission_modes"].toArray();
+    const bool launchable=QStringList{"claude","codex","kimi"}.contains(agent());
+    const QSignalBlocker blocker(m_permissions);
+    m_permissions->clear();m_permissions->addItem(tr("Account default"),QString());
+    if(launchable&&modes.contains(QJsonValue("auto")))m_permissions->addItem(tr("Auto"),"auto");
+    if(launchable&&modes.contains(QJsonValue("bypass")))m_permissions->addItem(tr("Bypass permissions"),"bypass");
+    m_permissions->setCurrentIndex(qMax(0,m_permissions->findData(selected)));
+    const bool visible=m_permissions->count()>1;
+    m_permissions->setVisible(visible);m_permissionsLabel->setVisible(visible);
+    m_permissions->setToolTip(tr("This session only. Account default keeps the account's permission mode."));
 }
 
 void NewSessionDialog::updateModels()

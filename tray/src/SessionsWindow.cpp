@@ -2479,7 +2479,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
-        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
+        [this](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort, const QString &permissions) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
             m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", cmd}, {"tag", name}, {"group", group},
                 {"target", target}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
@@ -2495,8 +2495,8 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
             });
             if (!openTerminal || cmd=="dsh" || cmd=="opencode") {
                 showNotice(tr("Starting session…"));
-                m_client.launchDetachedSession(host,cmd,target,name,account,id,model,effort);
-            } else emit newSessionRequested(host, cmd, target, name, account, id);
+                m_client.launchDetachedSession(host,cmd,target,name,account,id,model,effort,permissions);
+            } else emit newSessionRequested(host, cmd, target, name, account, id, permissions);
         });
     connect(&dialog, &NewSessionDialog::manageProjectsRequested, this, &SessionsWindow::showProjects);
     connect(&dialog, &NewSessionDialog::projectFoldersRequested, this, [this](const QString &id) { showProjects(); m_projectsPage->selectProject(id); });

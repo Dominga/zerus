@@ -76,7 +76,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
         }
     }
     for (id, mode) in &catalog.permission_modes {
-        if (!native_id(id) && !catalog.profiles.contains_key(id)) || !["provider", "bypass"].contains(&mode.as_str()) {
+        if (!native_id(id) && !catalog.profiles.contains_key(id)) || !["provider", "auto", "bypass"].contains(&mode.as_str()) {
             return Err(Error::new(1,"Invalid account permission mode."));
         }
     }
@@ -325,10 +325,11 @@ fn list(config: &Config) -> Result<Value> {
         rows.push(row);
     }
     for row in &mut rows {
-        let provider = row["provider"].as_str().unwrap_or("");
-        row["is_default"] = json!(row["id"].as_str() == Some(catalog.defaults.get(provider).map(String::as_str).unwrap_or(&format!("native-{provider}"))));
+        let provider = row["provider"].as_str().unwrap_or("").to_owned();
+        row["is_default"] = json!(row["id"].as_str() == Some(catalog.defaults.get(&provider).map(String::as_str).unwrap_or(&format!("native-{provider}"))));
         let mode = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("provider");
         permission_status::describe(config, row, mode);
+        row["permission_modes"] = json!(permission_modes(&provider));
     }
     let (removed, visible): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| {
         catalog
@@ -370,25 +371,43 @@ pub fn permission_mode(config: &Config, account: &str, provider: &str) -> Result
     Ok(decode(&read(config)?)?.permission_modes.get(&id).cloned().unwrap_or_else(||"provider".into()))
 }
 
-/// Append native switches only to the spawned argv; saved resume recipes stay
-/// unchanged so returning to provider settings takes effect on the next start.
-pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
-    if mode != "bypass" || argv.is_empty() { return; }
+/// Modes Zerus can set for a provider's account or a single launch; `provider`
+/// leaves the native settings in charge. Only Claude has a native Auto mode.
+pub fn permission_modes(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "claude" => &["provider", "auto", "bypass"],
+        "codex" | "kimi" | "dsh" => &["provider", "bypass"],
+        _ => &[],
+    }
+}
+/// The native switches for a mode; empty where Zerus cannot set it at launch.
+pub fn permission_args(provider: &str, mode: &str) -> &'static [&'static str] {
+    match (provider, mode) {
+        ("claude", "auto") => &["--permission-mode", "auto"],
+        ("claude", "bypass") => &["--permission-mode", "bypassPermissions"],
+        ("codex", "bypass") => &["--dangerously-bypass-approvals-and-sandbox"],
+        ("kimi", "bypass") => &["--auto"],
+        _ => &[],
+    }
+}
+/// Whether the agent's own arguments, before any `--`, already choose a mode.
+pub fn explicit_permissions(provider: &str, argv: &[String]) -> bool {
     let at = argv.iter().position(|arg|arg=="--").unwrap_or(argv.len());
-    // An explicit per-launch mode takes precedence over the account default.
     let explicit: &[&str] = match provider {
         "claude" => &["--permission-mode", "--dangerously-skip-permissions"],
         "codex" => &["--ask-for-approval", "-a", "--sandbox", "-s", "--full-auto", "--yolo", "--dangerously-bypass-approvals-and-sandbox"],
         "kimi" => &["--auto", "--yolo", "-y", "--plan"],
         _ => &[],
     };
-    if argv[..at].iter().any(|v|explicit.contains(&v.split('=').next().unwrap_or(""))) { return; }
-    let values: &[&str] = match provider {
-        "claude" => &["--permission-mode", "bypassPermissions"],
-        "codex" => &["--dangerously-bypass-approvals-and-sandbox"],
-        "kimi" => &["--auto"],
-        _ => &[],
-    };
+    argv[..at].iter().any(|v|explicit.contains(&v.split('=').next().unwrap_or("")))
+}
+/// Append native switches only to the spawned argv; saved resume recipes stay
+/// unchanged so returning to provider settings takes effect on the next start.
+pub fn apply_permissions(provider: &str, mode: &str, argv: &mut Vec<String>) {
+    let values = permission_args(provider, mode);
+    // An explicit per-launch mode takes precedence over the account default.
+    if values.is_empty() || argv.is_empty() || explicit_permissions(provider, argv) { return; }
+    let at = argv.iter().position(|arg|arg=="--").unwrap_or(argv.len());
     argv.splice(at..at,values.iter().map(|v|(*v).to_owned()));
 }
 
@@ -507,11 +526,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
         "permissions"=>{
-            let mode=arg(args,"--mode").ok_or_else(||Error::new(1,"Choose provider or bypass permission mode."))?;
-            if !["provider","bypass"].contains(&mode) {return Err(Error::new(1,"Choose provider or bypass permission mode."));}
+            let mode=arg(args,"--mode").ok_or_else(||Error::new(1,"Choose provider, auto or bypass permission mode."))?;
+            if !["provider","auto","bypass"].contains(&mode) {return Err(Error::new(1,"Choose provider, auto or bypass permission mode."));}
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
             if !native_id(id) && !catalog.profiles.contains_key(id) {return Err(Error::new(1,"Account profile does not exist."));}
             if id=="native-opencode" && mode!="provider" {return Err(Error::new(1,"OpenCode permissions are managed in its native configuration"));}
+            let provider=if native_id(id) {id.trim_start_matches("native-").to_owned()} else {catalog.profiles[id].provider.clone()};
+            if mode!="provider" && !permission_modes(&provider).contains(&mode) {return Err(Error::new(1,"Auto permission mode is available only for Claude accounts."));}
             if mode=="provider" {catalog.permission_modes.remove(id);} else {catalog.permission_modes.insert(id.into(),mode.into());}
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
@@ -1000,5 +1021,17 @@ mod permission_tests {
             assert!(prompt.iter().position(|s|s=="--").unwrap()>1);assert_eq!(prompt.last().unwrap(),flag);
             let saved=prompt.clone();apply_permissions(provider,"bypass",&mut prompt);assert_eq!(prompt,saved);
         }
+    }
+    #[test]
+    fn auto_mode_is_claude_only() {
+        let mut claude=vec!["claude".to_owned(),"--".into(),"task".into()];apply_permissions("claude","auto",&mut claude);
+        assert_eq!(claude,["claude","--permission-mode","auto","--","task"]);
+        for provider in ["codex","kimi","dsh","opencode"] {
+            let mut argv=vec![provider.to_owned()];apply_permissions(provider,"auto",&mut argv);assert_eq!(argv,[provider]);
+            assert!(!permission_modes(provider).contains(&"auto"));
+        }
+        assert!(permission_modes("opencode").is_empty());
+        assert!(explicit_permissions("claude",&["claude","--permission-mode","plan"].map(String::from)));
+        assert!(!explicit_permissions("claude",&["claude","--","--permission-mode"].map(String::from)));
     }
 }

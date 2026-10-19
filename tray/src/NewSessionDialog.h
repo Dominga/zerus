@@ -31,7 +31,8 @@ signals:
     // addFolder: the confirmed folder outside the project that joins it once the
     // session starts, or empty. A worktree generated from it never replaces it.
     // effort: the chosen OpenCode model's variant, or empty for that model's default.
-    void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,const QString &addFolder,const QString &model,const QString &effort);
+    // permissions: this session's own mode (auto or bypass), or empty for the account's.
+    void launchRequested(const QString &host,const QString &agent,const QString &target,const QString &name,const QString &account,const QString &project,bool openTerminal,const QString &addFolder,const QString &model,const QString &effort,const QString &permissions);
     void manageProjectsRequested(const QString &host);
     void projectFoldersRequested(const QString &project);
     // Open Machines with this computer selected (offered without a computer).
@@ -58,6 +59,7 @@ private:
     void updateUsage();
     void updateModels();
     void updateEfforts();
+    void updatePermissions();
     // The selected OpenCode account row of this computer's catalog, if any.
     QJsonObject openCodeProfile() const;
     void updateOpenCodeService();
@@ -82,7 +84,7 @@ private:
     bool m_regroupAccounts=true,m_forceUsage=false;
     MachinePlatform::Style m_accountStyle=MachinePlatform::Style::Posix;
     QJsonArray m_accountGroups;
-    QComboBox *m_project,*m_machine,*m_folder,*m_model,*m_effort;
+    QComboBox *m_project,*m_machine,*m_folder,*m_model,*m_effort,*m_permissions;
     QListWidget *m_account;
     QPushButton *m_refreshAccounts;
     QLabel *m_accountStatus;
@@ -90,7 +92,7 @@ private:
     QMap<QString, QString> m_browsedFolders;
     QString m_folderContext;
     QLineEdit *m_name;
-    QLabel *m_projectPath,*m_preview,*m_error,*m_nameError,*m_modelLabel,*m_effortLabel,*m_catalogStatus;
+    QLabel *m_projectPath,*m_preview,*m_error,*m_nameError,*m_modelLabel,*m_effortLabel,*m_permissionsLabel,*m_catalogStatus;
     QWidget *m_openCodeService;
     QPushButton *m_startOpenCode;
     quint64 m_serviceStart=0;

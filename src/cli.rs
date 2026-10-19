@@ -134,6 +134,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
   -c ID    resume this exact conversation UUID; --resume=ID is also accepted
   -n tag   separate session <cmd>/<project>/<tag>
   --account ID   use a named native agent profile for this session
+  --permissions auto|bypass   this session's native permission mode instead of the account's (auto: claude only)
   --model PROVIDER/MODEL   OpenCode native model for a new session
   --effort VARIANT   OpenCode effort; needs --model, one of that model's effort_options (omit for the model's default)
   --new    always create a separate session; generate a name unless -n is given
@@ -777,7 +778,7 @@ fn peer_session(command: &str, args: &[String]) -> String {
                 tag = args.get(i + 1).cloned().unwrap_or_default();
                 i += 1;
             }
-            "--launch-id" => i += 1,
+            "--launch-id" | "--permissions" => i += 1,
             option if option.starts_with('-') => {}
             name if project.is_empty() => project = name.into(),
             _ => {}
@@ -1634,6 +1635,7 @@ fn absolute_directory(path: &str) -> std::io::Result<PathBuf> {
 #[derive(Default)]
 struct LaunchOptions {
     account: Option<String>,
+    permissions: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     launch_id: Option<String>,
@@ -1676,6 +1678,11 @@ impl LaunchOptions {
                 "--account" => {
                     options.account =
                         Some(require(args, i + 1, "--account needs a profile ID")?.into());
+                    i += 1;
+                }
+                "--permissions" => {
+                    options.permissions =
+                        Some(require(args, i + 1, "--permissions needs auto or bypass")?.into());
                     i += 1;
                 }
                 "--launch-id" => {
@@ -1836,6 +1843,16 @@ fn launch(
     let mut options = LaunchOptions::parse(args, global_dry)?;
     let (directory, project) = resolve_project(config, command, &options)?;
     let command_name = basename(command);
+    // This launch's own mode becomes the agent's native flag, which the
+    // account default then leaves alone.
+    if let Some(mode) = options.permissions.as_deref() {
+        if crate::accounts::permission_args(&command_name, mode).is_empty() {
+            return Err(Error::new(1, format!("--permissions {mode} is not available for {command_name}")));
+        }
+        if crate::accounts::explicit_permissions(&command_name, &options.extra) {
+            return Err(Error::new(1, "choose --permissions or the agent's own permission flags, not both"));
+        }
+    }
     if command_name=="opencode" {
         if options.account.as_deref().is_some_and(|id|id!="native-opencode") {return Err(Error::new(1,"Choose native-opencode; separate OpenCode profiles are not supported"));}
         if options.resume || !options.extra.is_empty() || options.fresh || options.remote_control {return Err(Error::new(1,"Use saved HGS session names to resume OpenCode; select a model with --model provider/model"));}
@@ -2054,6 +2071,12 @@ fn launch(
             resume.extend(options.extra.clone());
         }
     }
+    if let Some(mode) = options.permissions.as_deref() {
+        crate::accounts::apply_permissions(&command_name, mode, &mut base);
+        if !resume.is_empty() {
+            crate::accounts::apply_permissions(&command_name, mode, &mut resume);
+        }
+    }
     if options.remote_control {
         if command_name == "claude" {
             base.extend(["--remote-control".into(), session.clone()]);
@@ -2112,6 +2135,7 @@ fn launch(
         } else if options.fresh
             || options.resume
             || options.remote_control
+            || options.permissions.is_some()
             || !options.extra.is_empty()
         {
             eprintln!("hgs: session {session} exists, attaching; launch options ignored");

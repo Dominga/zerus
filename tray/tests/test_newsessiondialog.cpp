@@ -478,9 +478,9 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
     void signInStatesExplainMissingLimits() {
         flag("claude-signed_out");NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.show();
         QTRY_VERIFY(row(dialog,"claude")>=0);
-        QTRY_VERIFY2(choices(dialog)->item(row(dialog,"claude"))->toolTip().endsWith("\nSign in required"),qPrintable(choices(dialog)->item(row(dialog,"claude"))->toolTip()));
+        QTRY_VERIFY2(tip(dialog,"claude").endsWith("\nSign in required"),qPrintable(tip(dialog,"claude")));
         flag("claude-signed_out",false);flag("claude-expired");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
-        QTRY_VERIFY2(choices(dialog)->item(row(dialog,"claude"))->toolTip().endsWith("\nSign-in expired"),qPrintable(choices(dialog)->item(row(dialog,"claude"))->toolTip()));
+        QTRY_VERIFY2(tip(dialog,"claude").endsWith("\nSign-in expired"),qPrintable(tip(dialog,"claude")));
         flag("claude-expired",false);
     }
     void unknownAndEndedWindowsStayUnavailable() {

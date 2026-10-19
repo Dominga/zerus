@@ -76,6 +76,8 @@ def status(i,provider):
          'windows':[] if provider=='dsh' else [window,weekly],'checked_at':time.time()}
  if provider=='codex':result['identity']['account_id']='scope-'+i
  if provider=='opencode':result.update(status='configured',identity={},windows=[])
+ for state in ('signed_out','expired'):
+  if provider=='claude' and (root/('claude-'+state)).exists():result.update(status=state,identity={},windows=[])
  if (root/'other-scope').exists() and i=='claude-copy':result['identity']['organization']='Other team'
  if (root/'machine-accounts').exists():result['identity']['email']=('mac' if host=='mac' else 'pc')+'@example.invalid'
  return result
@@ -164,7 +166,7 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         AccountUsageStore store(program());store.setFleet(fleet());
         auto dialog=std::make_unique<NewSessionDialog>(program(),fleet(),QString(),"claude",QString(),nullptr,&store);dialog->show();
         auto *list=choices(*dialog);QTRY_VERIFY(row(*dialog,"claude-copy")>=0);QTRY_COMPARE(list->count(),6);
-        QTRY_COMPARE(probes().size(),2);QCOMPARE(tip(*dialog,"work"),QString("Work\nlimits n/a"));
+        QTRY_COMPARE(probes().size(),2);QCOMPARE(tip(*dialog,"work"),QString("Work\nChecking limits…"));
         list->setCurrentRow(row(*dialog,"claude"));
         list->verticalScrollBar()->setValue(list->verticalScrollBar()->maximum());const auto scroll=list->verticalScrollBar()->value();
         QList<QPersistentModelIndex> rows;for(int i=0;i<list->count();++i)rows.append(list->model()->index(i,0));
@@ -449,6 +451,15 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QCOMPARE(renderer->indicator(),AccountUsage::Indicator::MarkerCountdown);
         flag("missing");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
         QTRY_COMPARE(choices(dialog)->item(row(dialog,"work"))->toolTip(),QString("shared@example.invalid\nlimits n/a"));
+    }
+    // A row without limits says whether they are still read or which sign-in to fix.
+    void signInStatesExplainMissingLimits() {
+        flag("claude-signed_out");NewSessionDialog dialog(program(),fleet(),{},"claude");dialog.show();
+        QTRY_VERIFY(row(dialog,"claude")>=0);
+        QTRY_VERIFY2(choices(dialog)->item(row(dialog,"claude"))->toolTip().endsWith("\nSign in required"),qPrintable(choices(dialog)->item(row(dialog,"claude"))->toolTip()));
+        flag("claude-signed_out",false);flag("claude-expired");dialog.findChild<QPushButton *>("refreshLaunchAccounts")->click();
+        QTRY_VERIFY2(choices(dialog)->item(row(dialog,"claude"))->toolTip().endsWith("\nSign-in expired"),qPrintable(choices(dialog)->item(row(dialog,"claude"))->toolTip()));
+        flag("claude-expired",false);
     }
     void unknownAndEndedWindowsStayUnavailable() {
         flag("missing");NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.show();

@@ -138,7 +138,14 @@ inline QString launchSummary(const QJsonObject &data) {
         const auto amount=balance["balance"].toString();const double number=amount.toDouble(&valid);
         if(valid&&std::isfinite(number))limits.append(QObject::tr("Balance: %1 %2").arg(amount,balance["currency"].toString()).trimmed());
     }
-    return limits.isEmpty()?QObject::tr("limits n/a"):limits.join("  ");
+    if(!limits.isEmpty())return limits.join("  ");
+    // Say why no limits show: still being read, or a sign-in to act on. DeepSeek
+    // API-key connections are configured apart from its signed-out account.
+    const auto status=data["status"].toString();
+    if(data["refreshing"].toBool()||status=="loading")return QObject::tr("Checking limits…");
+    if(status=="signed_out"&&data["provider"]!="dsh")return QObject::tr("Sign in required");
+    if(status=="expired")return QObject::tr("Sign-in expired");
+    return QObject::tr("limits n/a");
 }
 inline double highest(const QJsonObject &data) {
     double used=-1;for(const auto &value:data.value("windows").toArray()){const auto w=value.toObject();if(current(w)&&w.value("used_percent").isDouble())used=qMax(used,w.value("used_percent").toDouble());}return used;

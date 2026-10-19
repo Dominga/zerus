@@ -539,7 +539,10 @@ QJsonObject NewSessionDialog::cachedUsage(const QJsonObject &profile) const
     auto usage=m_usageStore->data(AccountUsageRef::profile(profile));
     const auto cached=profile["account_status"].toObject();
     if(!cached.isEmpty()&&(usage["status"]=="loading"||usage["status"]=="offline"
-        ||cached["checked_at"].toDouble()>usage["checked_at"].toDouble()))usage=cached;
+        ||cached["checked_at"].toDouble()>usage["checked_at"].toDouble())){
+        // The listing's snapshot stands in while a probe runs; the row still says so.
+        const auto refreshing=usage["refreshing"];usage=cached;usage["refreshing"]=refreshing;
+    }
     return usage;
 }
 

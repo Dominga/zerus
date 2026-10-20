@@ -1,6 +1,8 @@
 #pragma once
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -13,13 +15,30 @@
 // background programs that Zerus starts: Windows has no user service manager
 // like systemd or launchd. They outlive Zerus; native agents never run inside
 // them, so stopping the connector stops only the connector (a request in
-// progress is recovered at its next start).
+// progress is recovered at its next start). They run from a copy under
+// %USERPROFILE%\.local\share\hgs\mobile\<hash>, like the session host: a
+// program running from the portable folder would block its update.
 namespace WindowsMobileServices {
-inline QString program(const QString &name) { return QDir(QCoreApplication::applicationDirPath()).filePath(name); }
+inline QString bundled(const QString &name) { return QDir(QCoreApplication::applicationDirPath()).filePath(name); }
+inline bool available() { return QFileInfo(bundled(QStringLiteral("zerus-mobile-connector.exe"))).isExecutable(); }
+// The bundled program's copy for this exact build, made once.
+inline QString program(const QString &name)
+{
+    const auto source = bundled(name);
+    QFile file(source);
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file)) return source;
+    const auto folder = QDir::homePath() + QStringLiteral("/.local/share/hgs/mobile/") + QString::fromLatin1(hash.result().toHex().left(16));
+    const auto target = QDir(folder).filePath(name);
+    if (QFileInfo::exists(target)) return target;
+    QDir().mkpath(folder);
+    const auto partial = target + QStringLiteral(".partial");
+    QFile::remove(partial);
+    if (!QFile::copy(source, partial) || !QFile::rename(partial, target)) { QFile::remove(partial); return source; }
+    return target;
+}
 inline QString connector() { return program(QStringLiteral("zerus-mobile-connector.exe")); }
 inline QString relay() { return program(QStringLiteral("zerus-relay.exe")); }
-inline QString hgs() { return program(QStringLiteral("hgs.exe")); }
-inline bool available() { return QFileInfo(connector()).isExecutable(); }
 inline QString stateDirectory()
 {
     const auto path = QDir::homePath() + QStringLiteral("/.local/state/hgs");
@@ -92,14 +111,43 @@ inline void stopRelay()
     QProcess::execute(QStringLiteral("taskkill"), {QStringLiteral("/F"), QStringLiteral("/IM"), QStringLiteral("zerus-relay.exe")});
 }
 
+// The connector runs `hgs_path`; it names the stable hgs the desktop uses (the
+// session host's copy), never one inside the portable folder. True when the
+// configuration changed.
+inline bool pinHgs(const QString &config, const QString &hgs)
+{
+    if (hgs.isEmpty() || !QFileInfo(hgs).isAbsolute()) return false;
+    QFile file(config);
+    if (!file.open(QIODevice::ReadOnly) || file.size() > 65536) return false;
+    auto object = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    const auto native = QDir::toNativeSeparators(hgs);
+    if (object.isEmpty() || object.value(QStringLiteral("hgs_path")).toString() == native) return false;
+    object.insert(QStringLiteral("hgs_path"), native);
+    QFile out(config + QStringLiteral(".tmp"));
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    out.write(QJsonDocument(object).toJson());
+    out.close();
+    QFile::remove(config + QStringLiteral(".previous"));
+    if (!QFile::rename(config, config + QStringLiteral(".previous"))) { QFile::remove(out.fileName()); return false; }
+    if (!QFile::rename(out.fileName(), config)) { QFile::rename(config + QStringLiteral(".previous"), config); return false; }
+    QFile::remove(config + QStringLiteral(".previous"));
+    return true;
+}
+
 // At Zerus start, off the GUI thread: the chosen relay, then a configured
-// connector, each only when it is not running already.
-inline void ensureInBackground(const QString &config)
+// connector, each only when it is not running already. A connector whose hgs
+// changed restarts.
+inline void ensureInBackground(const QString &config, const QString &hgs)
 {
     if (!available()) return;
-    auto *thread = QThread::create([config] {
-        if (runRelay() && QFileInfo(relay()).isExecutable() && !relayRunning()) { startRelay(); QThread::sleep(1); }
-        if (runConnector() && QFileInfo::exists(config) && connectorState(config) == QLatin1String("stopped")) startConnector(config);
+    auto *thread = QThread::create([config, hgs] {
+        if (runRelay() && QFileInfo(bundled(QStringLiteral("zerus-relay.exe"))).isExecutable() && !relayRunning()) { startRelay(); QThread::sleep(1); }
+        if (!runConnector() || !QFileInfo::exists(config)) return;
+        const bool changed = pinHgs(config, hgs);
+        const auto state = connectorState(config);
+        if (state == QLatin1String("running") && changed) { stopConnector(); QThread::sleep(1); startConnector(config); }
+        else if (state == QLatin1String("stopped")) startConnector(config);
     });
     QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     thread->start();

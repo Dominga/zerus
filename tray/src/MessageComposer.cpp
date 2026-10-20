@@ -1247,7 +1247,8 @@ void MessageComposer::setTheme(bool dark)
         QFrame#composerCard:focus-within { border-color:%3; }
         QFrame#composerCard QPlainTextEdit#messageInput, QFrame#composerCard QPlainTextEdit#messageInput:focus { background:transparent; border:0; padding:6px 4px; }
         QFrame#composerCard QPushButton#attachMessageFile { border:0; border-radius:9px; }
-        QFrame#composerCard QPushButton#sendMessage { padding:0; border-radius:9px; }
+        QFrame#composerCard QPushButton#sendMessage { padding:0; border-radius:9px; min-width:34px; max-width:34px; min-height:34px; max-height:34px; }
+        QFrame#composerCard QPushButton#attachMessageFile { min-width:34px; max-width:34px; min-height:34px; max-height:34px; }
         QPushButton#sessionModelSettings { border:1px solid transparent; }
     )").arg(dark ? "#1b1f26" : "#ffffff", dark ? "#2c323b" : "#dce2e8", dark ? "#7dd3b0" : "#167357") : QString()));
     updateControls();
@@ -1294,11 +1295,14 @@ void MessageComposer::setCompact(bool compact)
         inputLayout->removeWidget(m_editor); m_actions->removeWidget(m_attach); m_actions->removeWidget(m_send);
         m_cardRow->addWidget(m_attach, 0, Qt::AlignBottom); m_cardRow->addWidget(m_editor, 1); m_cardRow->addWidget(m_send, 0, Qt::AlignBottom);
         inputLayout->insertWidget(0, m_card);
+        // The toolbar (voice, video, attachments) moves under the card, left of the model.
+        static_cast<QBoxLayout *>(layout())->removeWidget(m_toolbar); m_actions->insertWidget(0, m_toolbar);
         m_send->setFixedSize(34, 34); m_send->setLayoutDirection(Qt::LeftToRight);
         m_card->show();
     } else {
         m_cardRow->removeWidget(m_attach); m_cardRow->removeWidget(m_editor); m_cardRow->removeWidget(m_send);
         inputLayout->removeWidget(m_card); m_card->hide();
+        m_actions->removeWidget(m_toolbar); static_cast<QBoxLayout *>(layout())->insertWidget(0, m_toolbar);
         inputLayout->insertWidget(0, m_editor);
         m_actions->insertWidget(0, m_attach); m_actions->addWidget(m_send);
         m_send->setMinimumSize(0, 0); m_send->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX); m_send->setLayoutDirection(Qt::RightToLeft);

@@ -54,7 +54,6 @@ fn windows_advertisement_rejects_unix_and_unsupported_provider_features() {
         "gateway_one_hop",
         "voice_video",
         "opencode_launch_effort",
-        "launch_project",
     ] {
         assert!(
             !offered["features"]
@@ -64,7 +63,14 @@ fn windows_advertisement_rejects_unix_and_unsupported_provider_features() {
             "{feature}"
         );
     }
-    assert!(!flags.peers && !flags.launch && !flags.voice && !flags.speech);
+    assert!(!flags.peers && !flags.voice && !flags.speech && !flags.worktree);
+    // WhiteWh fork: new sessions from the phone, folders as /D:/... (windows_paths.rs).
+    for operation in ["launch", "catalog", "dirs"] {
+        assert!(
+            offered["operations"].as_array().unwrap().contains(&json!(operation)),
+            "{operation}"
+        );
+    }
 }
 #[tokio::test(flavor = "current_thread")]
 async fn media_and_path_refusals_are_durable_and_cannot_replay_after_scope_changes() {

@@ -51,6 +51,12 @@ pub const WINDOWS_OPERATIONS: &[&str] = &[
     "restore",
     "resume",
     "terminate",
+    // WhiteWh fork: new sessions from the phone, with folders as `/D:/...`
+    // (windows_paths.rs).
+    "catalog",
+    "dirs",
+    "directory_create",
+    "launch",
 ];
 pub const CLEAR_CONTEXT_DISMISS_HELP_MARKER: &str = "Mobile clear-context ABI: dismiss-prompt-v1";
 
@@ -321,10 +327,9 @@ impl Flags {
         self.voice_video = false;
         self.speech = false;
         self.speech_config = false;
-        self.launch = false;
-        self.project_launch = false;
+        // WhiteWh fork: launch, project placement and folder creation stay as
+        // the native CLI offers them; worktrees still need Windows Git paths.
         self.worktree = false;
-        self.directory_create = false;
         self.file_read = false;
         self.attachment_read = false;
         self.git_status = false;
@@ -459,12 +464,11 @@ impl Flags {
                 ![
                     "send_agent",
                     "gateway_one_hop",
-                    "launch_project",
                     "inspect_agent",
                 ]
                 .contains(feature)
             });
-            reasons.insert("windows_scope".into(), json!("Existing local Codex, Claude and Kimi sessions; mobile creation, Windows paths, peers, DeepSeek/OpenCode and voice/speech are unavailable"));
+            reasons.insert("windows_scope".into(), json!("Local Codex, Claude and Kimi sessions, including new ones in folders named /D:/...; worktrees, peers, DeepSeek/OpenCode and voice/speech are unavailable"));
         }
         json!({"protocol_version": 1, "operations": operations, "features": features,
                "reasons": reasons})

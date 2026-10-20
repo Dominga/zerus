@@ -40,6 +40,8 @@ pub mod url;
 pub mod validate;
 #[cfg(windows)]
 pub mod windows_management;
+// WhiteWh fork: folders between the phone and a Windows gateway's hgs.
+pub mod windows_paths;
 
 pub use error::ConnectorError;
 

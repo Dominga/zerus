@@ -271,6 +271,23 @@ impl<N: Native + 'static> Connector<N> {
         if self.stopping.is_set() {
             return Err(NativeError::Stopping);
         }
+        // WhiteWh fork: a Windows gateway names folders as `/D:/...` to the
+        // phone and as `D:\...` to hgs (windows_paths.rs).
+        if self.flags.get().windows_gateway && !self.peer {
+            crate::windows_paths::native_argv(&mut call.argv);
+            if let Some(payload) = call.payload.as_mut() {
+                crate::windows_paths::native_payload(payload);
+            }
+            let mut result = self.native_call(call).await;
+            if let Ok(Output::Json(value)) = &mut result {
+                crate::windows_paths::phone_output(value);
+            }
+            return result;
+        }
+        self.native_call(call).await
+    }
+
+    async fn native_call(&self, mut call: Call) -> NativeResult {
         if self.peer {
             return self.native.call(call).await;
         }

@@ -582,6 +582,10 @@ impl<N: Native + 'static> Connector<N> {
     ) -> Result<Value, Failure> {
         let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default();
         let agent = text("agent");
+        // WhiteWh fork: a Windows gateway launches only the agents it serves.
+        if self.flags.get().windows_gateway && !crate::capabilities::windows_provider(&payload["agent"]) {
+            return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
+        }
         let raw = self
             .call(Call::new(["account", "ls"]).timeout(CATALOG_TIMEOUT))
             .await?;

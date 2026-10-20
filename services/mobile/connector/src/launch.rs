@@ -718,7 +718,7 @@ impl<N: Native + 'static> Connector<N> {
     /// The project catalog and folder checks before a project launch; the
     /// checked folder paths replace the catalog's, as in Python.
     /// Whether `directory` is a working folder of one of the projects.
-    async fn project_folder(&self, directory: &str) -> Result<bool, Failure> {
+    pub(crate) async fn project_folder(&self, directory: &str) -> Result<bool, Failure> {
         let raw = self
             .call(Call::new(["swarm", "get"]).timeout(SWARM_TIMEOUT))
             .await?;

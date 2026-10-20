@@ -65,14 +65,14 @@ fn windows_advertisement_rejects_unix_and_unsupported_provider_features() {
     }
     assert!(!flags.peers && !flags.voice && !flags.speech && !flags.worktree);
     // WhiteWh fork: new sessions from the phone, folders as /D:/... (windows_paths.rs).
-    for operation in ["launch", "catalog"] {
+    for operation in ["launch", "catalog", "dirs"] {
         assert!(
             offered["operations"].as_array().unwrap().contains(&json!(operation)),
             "{operation}"
         );
     }
-    // The phone does not browse or create folders on a Windows gateway.
-    for operation in ["dirs", "directory_create"] {
+    // The phone does not create folders on a Windows gateway.
+    for operation in ["directory_create"] {
         assert!(
             !offered["operations"].as_array().unwrap().contains(&json!(operation)),
             "{operation}"

@@ -52,9 +52,10 @@ pub const WINDOWS_OPERATIONS: &[&str] = &[
     "resume",
     "terminate",
     // WhiteWh fork: new sessions from the phone in its projects' working
-    // folders, named as `/D:/...` (windows_paths.rs). The phone neither
-    // browses nor creates folders here.
+    // folders, named as `/D:/...` (windows_paths.rs). `dirs` answers only for
+    // those folders, without subfolders; folders are not created here.
     "catalog",
+    "dirs",
     "launch",
 ];
 pub const CLEAR_CONTEXT_DISMISS_HELP_MARKER: &str = "Mobile clear-context ABI: dismiss-prompt-v1";

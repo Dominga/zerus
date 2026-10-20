@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
     fs::{File, OpenOptions},
@@ -170,6 +171,7 @@ impl Config {
     }
 }
 /// Open once with no-follow, then check the opened inode rather than a path race.
+#[cfg(unix)]
 pub fn read_private(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     let mut f = OpenOptions::new()
         .read(true)
@@ -186,6 +188,7 @@ pub fn read_private(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     }
     Ok(b)
 }
+#[cfg(unix)]
 pub fn sqlite_file(path: &Path) -> Result<File> {
     let parent = path
         .parent()
@@ -219,4 +222,108 @@ pub fn sqlite_file(path: &Path) -> Result<File> {
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     fs2::FileExt::try_lock_exclusive(&file).map_err(|_| Error::BUSY)?;
     Ok(file)
+}
+
+// A relay on Windows. Windows has no mode bits or owner uid:
+// private files rely on the ACL of the folder they live in (the user's
+// profile), and a reparse point (symlink or junction) is refused instead of
+// followed.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+#[cfg(windows)]
+fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
+    use std::os::windows::fs::OpenOptionsExt;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+}
+
+#[cfg(windows)]
+fn plain_file(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+}
+
+#[cfg(windows)]
+pub fn read_private(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+    let mut f = no_follow(OpenOptions::new().read(true)).open(path)?;
+    let m = f.metadata()?;
+    if !plain_file(&m) || m.len() > maximum {
+        return Err(Error::BAD);
+    }
+    let mut b = Vec::new();
+    (&mut f).take(maximum + 1).read_to_end(&mut b)?;
+    if b.len() as u64 > maximum {
+        return Err(Error::LARGE);
+    }
+    Ok(b)
+}
+
+#[cfg(windows)]
+pub fn sqlite_file(path: &Path) -> Result<File> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.exists() {
+        std::fs::DirBuilder::new().recursive(true).create(parent)?;
+    }
+    let file = no_follow(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(path)?;
+    if !plain_file(&file.metadata()?) {
+        return Err(Error::BAD);
+    }
+    drop(file);
+    // Windows locks are mandatory: a lock on the database itself would shut
+    // SQLite out, so one process at a time holds a lock file beside it.
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    let lock = no_follow(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(Path::new(&name))?;
+    if !plain_file(&lock.metadata()?) {
+        return Err(Error::BAD);
+    }
+    fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| Error::BUSY)?;
+    Ok(lock)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn the_database_stays_open_to_sqlite_while_one_relay_holds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data").join("relay.sqlite3");
+        let lock = sqlite_file(&path).unwrap();
+        // The lock lives beside the database, which others can still read.
+        assert!(dir.path().join("data").join("relay.sqlite3.lock").is_file());
+        std::fs::read(&path).unwrap();
+        assert!(sqlite_file(&path).is_err());
+        drop(lock);
+        drop(sqlite_file(&path).unwrap());
+    }
+
+    #[test]
+    fn private_files_are_read_whole_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.toml");
+        std::fs::write(&path, b"listen = 1").unwrap();
+        assert_eq!(read_private(&path, 64).unwrap(), b"listen = 1");
+        assert!(read_private(&path, 4).is_err());
+        assert!(read_private(dir.path(), 64).is_err());
+    }
 }

@@ -187,6 +187,17 @@ impl Tx {
         Ok(())
     }
 }
+/// The SQLite URL of a database file. A Windows path keeps its
+/// drive letter as a path, not a URL host (`sqlite:///C:/…`).
+fn sqlite_url(path: &Path) -> String {
+    if cfg!(windows) && path.is_absolute() {
+        return format!(
+            "sqlite:///{}?mode=rw",
+            path.display().to_string().replace('\\', "/")
+        );
+    }
+    format!("sqlite://{}?mode=rw", path.display())
+}
 impl Db {
     pub async fn open(path: &Path, cfg: Arc<Config>) -> Result<Self> {
         sqlx::any::install_default_drivers();
@@ -196,10 +207,7 @@ impl Db {
         } else {
             Some(Arc::new(config::sqlite_file(path)?))
         };
-        let url = cfg
-            .database_url
-            .clone()
-            .unwrap_or_else(|| format!("sqlite://{}?mode=rw", path.display()));
+        let url = cfg.database_url.clone().unwrap_or_else(|| sqlite_url(path));
         let options = AnyConnectOptions::from_str(&url)?.disable_statement_logging();
         let pool = AnyPoolOptions::new()
             .min_connections(if pg { cfg.pool_min } else { 1 })
@@ -511,4 +519,28 @@ pub fn now() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+mod sqlite_url_tests {
+    use super::sqlite_url;
+    use std::path::Path;
+
+    #[test]
+    fn relative_and_absolute_paths_name_the_same_file() {
+        assert_eq!(
+            sqlite_url(Path::new("relay.sqlite3")),
+            "sqlite://relay.sqlite3?mode=rw"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            sqlite_url(Path::new(r"C:\Users\fixture\relay.sqlite3")),
+            "sqlite:///C:/Users/fixture/relay.sqlite3?mode=rw"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            sqlite_url(Path::new("/var/lib/relay.sqlite3")),
+            "sqlite:///var/lib/relay.sqlite3?mode=rw"
+        );
+    }
 }

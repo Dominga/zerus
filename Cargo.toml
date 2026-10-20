@@ -11,6 +11,10 @@ repository = "https://github.com/ufna/zerus"
 name = "hgs"
 path = "src/main.rs"
 
+[features]
+# WhiteWh fork: optional extensions (src/extensions.rs), off by default.
+socraticode = []
+
 [dependencies]
 anyhow = "1"
 aes-gcm = "0.10.3"

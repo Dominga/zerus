@@ -107,7 +107,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account inspect --session SESSION [--refresh]
        hgs account copy ID --from MACHINE --to MACHINE --as NEW_ID [--label NAME]
        hgs [@host] claude-app ls | resume ID [-n NAME] [-d] [--force]   continue a Claude desktop app session (JSON list)
-       hgs [@host] socraticode status|start|stop|connect PATH [--qdrant native|docker] | install | install-qdrant   a folder's SocratiCode index (JSON)
+       hgs [@host] socraticode status|start|stop|connect PATH [--qdrant native|docker] | install | install-qdrant   a folder's SocratiCode index (JSON; extension, cargo feature socraticode)
        hgs [@host] worktrees --path PATH [--refresh] [--json]   existing checkouts as JSON
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
        hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
@@ -632,8 +632,8 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         "presence" => crate::presence::dispatch(&config, args, dry),
         "swarm" => crate::swarm::dispatch(&config, args, dry),
         "account" => crate::accounts::dispatch(&config, args, dry),
-        // WhiteWh fork: a folder's SocratiCode index.
-        "socraticode" => crate::socraticode::dispatch(&config, args, dry),
+        // WhiteWh fork: a folder's SocratiCode index, an optional extension.
+        "socraticode" => crate::extensions::socraticode(&config, args, dry),
         // WhiteWh fork: continue a Claude desktop app session in Zerus.
         "claude-app" => match crate::claude_app::dispatch(args)? {
             crate::claude_app::Outcome::Done(code) => Ok(code),

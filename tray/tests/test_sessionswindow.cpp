@@ -56,6 +56,7 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
+#include "Extensions.h"
 #include "DownloadCache.h"
 #include "ProcessView.h"
 #include "ActivityView.h"
@@ -226,6 +227,7 @@ private slots:
     void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void whiteWhWorkspaceView();
+    void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
     void groupsPersistFilterAndRevealAttention();
     void emptyProjectsSettingPreservesArchiveAndProjects();
@@ -524,9 +526,10 @@ void TestSessionsWindow::nativeSettingsNavigationOnExplicitSpeechHost()
     SettingsPage page(executable); page.setPeers({host}); page.show();
     auto *sections=page.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
     QCOMPARE(sections->item(sections->count()-1)->text(),"About");
-    QCOMPARE(sections->item(sections->count()-2)->text(),"Private analytics");
-    QCOMPARE(sections->item(sections->count()-3)->text(),"Keyboard");
-    const int voice=sections->count()-4; QCOMPARE(sections->item(voice)->text(),"Voice input");
+    QCOMPARE(sections->item(sections->count()-2)->text(),"Extensions");
+    QCOMPARE(sections->item(sections->count()-3)->text(),"Private analytics");
+    QCOMPARE(sections->item(sections->count()-4)->text(),"Keyboard");
+    const int voice=sections->count()-5; QCOMPARE(sections->item(voice)->text(),"Voice input");
     sections->setCurrentRow(sections->count()-1);
     auto *version=page.findChild<QLabel *>("aboutHgsVersion"); QVERIFY(version);
     QTRY_VERIFY_WITH_TIMEOUT(version->text().startsWith("hgs CLI 1."),10000);
@@ -680,8 +683,10 @@ void TestSessionsWindow::subordinateSessionsFollowTheirLead()
 
 void TestSessionsWindow::whiteWhWorkspaceView()
 {
-    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", "dark");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); QSettings().remove("workspace/theme"); sessionCardTileInset() = 0; });
+    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", "dark"); QSettings().setValue("extensions/socraticode", true);
+    const auto restore = qScopeGuard([] {
+        QSettings().remove("workspace/skin"); QSettings().remove("workspace/theme"); QSettings().remove("extensions/socraticode"); sessionCardTileInset() = 0;
+    });
     const auto state = fleet();
     SessionsWindow window(FakeCli::program(script())); window.resize(1280, 760); window.setFleet(state); window.show();
     window.showSession({}, state.local().sessions[0].name);
@@ -709,6 +714,23 @@ void TestSessionsWindow::whiteWhWorkspaceView()
     QSettings().remove("workspace/skin"); window.applySkin();
     QTRY_VERIFY(!toggle->isVisible()); QVERIFY(railNew->isVisible()); QCOMPARE(sessionCardTileInset(), 0);
     QVERIFY(!composer->findChild<QFrame *>("composerCard")->isVisible());
+}
+
+// WhiteWh fork: SocratiCode is an optional extension. Off, Details has no
+// SocratiCode strip; Settings → Extensions turns it on and off at once.
+void TestSessionsWindow::socratiCodeIsAnOptionalExtension()
+{
+    QSettings().setValue("extensions/socraticode", false);
+    const auto restore = qScopeGuard([] { QSettings().remove("extensions/socraticode"); });
+    auto state = fleet(); auto box = state.local(); box.sessions[0].cwd = "/repo"; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(script())); window.resize(1120, 680); window.setFleet(state); window.show();
+    window.showSession({}, box.sessions[0].name);
+    auto *socratic = window.findChild<QWidget *>("socratiCodePanel"); QVERIFY(socratic);
+    auto *check = window.findChild<QCheckBox *>("extension_socraticode"); QVERIFY(check); QVERIFY(!check->isChecked());
+    QTest::qWait(100); QVERIFY(socratic->isHidden());
+    auto *native = window.findChild<QCheckBox *>("socratiCodeNativeQdrant"); QVERIFY(native); QVERIFY(!native->isEnabledTo(native->window()));
+    check->click(); QVERIFY(Extensions::enabled("socraticode")); QTRY_VERIFY(!socratic->isHidden()); QVERIFY(native->isEnabledTo(native->window()));
+    check->click(); QVERIFY(!Extensions::enabled("socraticode")); QTRY_VERIFY(socratic->isHidden());
 }
 
 void TestSessionsWindow::gitPublicationChecksKeepDraftFocusAndSharedCards()
@@ -10735,9 +10757,10 @@ void TestSessionsWindow::fileCacheSettingsNavigation(){
     auto *sections = window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
     QCOMPARE(sections->item(6)->text(), QString("Files"));
     QCOMPARE(sections->item(sections->count()-1)->text(), QString("About"));
-    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Private analytics"));
-    QCOMPARE(sections->item(sections->count()-3)->text(), QString("Keyboard"));
-    QCOMPARE(sections->item(sections->count()-4)->text(), QString("Voice input"));
+    QCOMPARE(sections->item(sections->count()-2)->text(), QString("Extensions"));
+    QCOMPARE(sections->item(sections->count()-3)->text(), QString("Private analytics"));
+    QCOMPARE(sections->item(sections->count()-4)->text(), QString("Keyboard"));
+    QCOMPARE(sections->item(sections->count()-5)->text(), QString("Voice input"));
     sections->setCurrentRow(6);
     auto *files = window.findChild<DownloadCacheSettings *>("downloadCacheSettings"); QVERIFY(files); QVERIFY(files->isVisible());
     QCOMPARE(files->findChild<QComboBox *>("downloadCachePolicy")->currentText(), QString("Never clear"));

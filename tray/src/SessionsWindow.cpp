@@ -26,6 +26,7 @@
 #include "SwarmDialog.h"
 #include "WorktreePanel.h"
 #include "SocratiCodePanel.h"
+#include "Extensions.h"
 #include "IronRulesPanel.h"
 #include "SessionLeadPanel.h"
 #include "SessionLeads.h"
@@ -1465,6 +1466,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         applyTheme();rebuild();
     };
     m_settingsPage->contentScaleChanged=[this]{applyContentScale();};
+    m_settingsPage->extensionsChanged=[this]{updateWorktrees();};
     m_settingsPage->activityWidthChanged=[this]{applyActivityWidth();};
     // The rail pin and Settings → Appearance switch the same preference.
     auto *windowLayer=new WindowLayer(this);
@@ -5510,7 +5512,8 @@ void SessionsWindow::updateWorktrees()
     if(!m_worktrees||!m_inspectorPanel||!m_inspector)return;
     const auto *entry=selected();
     m_worktrees->setContext(entry?entry->host:QString(),entry?(m_subagentId.isEmpty()?m_details.value("cwd").toString(entry->session.cwd):m_subagentCwd):QString(),m_fleet);
-    if(m_socratiCode)m_socratiCode->setContext(entry?entry->host:QString(),entry?m_details.value("cwd").toString(entry->session.cwd):QString());
+    // WhiteWh fork: SocratiCode is an optional extension; off, its panel has no folder and hides.
+    if(m_socratiCode){const bool on=entry&&Extensions::enabled(QStringLiteral("socraticode"));m_socratiCode->setContext(on?entry->host:QString(),on?m_details.value("cwd").toString(entry->session.cwd):QString());}
     if(m_ironRules){
         const auto project=entry?m_organization.groupFor(entry->identity):QString();
         const auto *group=m_organization.group(project);

@@ -149,6 +149,16 @@ if(NOT ZERUS_FORK_BUILD STREQUAL "")
     endif()
     target_compile_definitions(hgs-updates PRIVATE ZERUS_FORK_BUILD=${ZERUS_FORK_BUILD})
 endif()
+# Optional extensions (src/Extensions.h) are off unless a build turns them on;
+# the WhiteWh fork builds do.
+option(ZERUS_EXTENSIONS_ON_BY_DEFAULT "Turn optional extensions on by default" OFF)
+if(NOT ZERUS_FORK_BUILD STREQUAL "")
+    set(ZERUS_EXTENSIONS_ON_BY_DEFAULT ON)
+endif()
+if(ZERUS_EXTENSIONS_ON_BY_DEFAULT)
+    # Every target below (and the Qt suites) reads Extensions.h.
+    add_compile_definitions(ZERUS_EXTENSIONS_ON_BY_DEFAULT)
+endif()
 if(NOT ZERUS_FORK_FEED_URL STREQUAL "")
     if(NOT ZERUS_FORK_FEED_URL MATCHES "^https://github[.]com/WhiteWh/zerus/releases/[A-Za-z0-9./_-]+$")
         message(FATAL_ERROR "ZERUS_FORK_FEED_URL must name a release asset of WhiteWh/zerus")

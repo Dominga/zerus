@@ -8,6 +8,7 @@
 #include <QSettings>
 #include "FakeCli.h"
 #include "SocratiCodePanel.h"
+#include "Extensions.h"
 
 // WhiteWh fork: the session folder's SocratiCode strip offers one next step.
 class TestSocratiCodePanel : public QObject {
@@ -73,6 +74,15 @@ print(json.dumps({'path':a[2],'project_id':'abc','plugin':{'installed':not on('n
 )PY"));
     }
     // Off by default: SocratiCode's Docker Qdrant, and a hint at the setting.
+    // Extensions are off unless the build turns them on (the fork builds do).
+    void extensionFollowsTheBuildDefault()
+    {
+        QSettings().remove("extensions/socraticode");
+        QCOMPARE(Extensions::enabled("socraticode"), Extensions::enabledByDefault());
+        Extensions::setEnabled("socraticode", !Extensions::enabledByDefault());
+        QCOMPARE(Extensions::enabled("socraticode"), !Extensions::enabledByDefault());
+        QSettings().remove("extensions/socraticode");
+    }
     void dockerIsTheDefault()
     {
         HgsClient client(program());

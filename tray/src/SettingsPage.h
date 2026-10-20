@@ -12,10 +12,12 @@
 #include "speech/SpeechSettings.h"
 #include "KeyboardSettings.h"
 #include "AnalyticsSettings.h"
+#include "Extensions.h"
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QListWidget>
+#include <QPointer>
 #include <QScrollArea>
 #include <QSlider>
 #include <QStackedWidget>
@@ -40,10 +42,11 @@ public:
     std::function<void()> activityWidthChanged;
     std::function<void(bool)> windowLayerChanged;
     std::function<void()> pollingChanged;
+    std::function<void()> extensionsChanged;
     explicit SettingsPage(const QString &executable,QWidget *parent=nullptr):QWidget(parent){
         setObjectName("settingsPage");auto *outer=new QVBoxLayout(this);outer->setContentsMargins(24,20,24,20);outer->setSpacing(20);
         auto *title=new QLabel(tr("Settings"));title->setObjectName("heading");outer->addWidget(title);
-        auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Files"),tr("Automatic approvals"),tr("Voice input"),tr("Keyboard"),tr("Private analytics"),tr("About")});body->addWidget(nav);
+        auto *body=new QHBoxLayout;body->setSpacing(24);nav=new QListWidget;nav->setObjectName("settingsSections");nav->setFixedWidth(180);nav->addItems({tr("Appearance"),tr("Sessions"),tr("Automatic recovery"),tr("Processes"),tr("Updates"),tr("Mobile connection"),tr("Files"),tr("Automatic approvals"),tr("Voice input"),tr("Keyboard"),tr("Private analytics"),tr("Extensions"),tr("About")});body->addWidget(nav);
         pages=new QStackedWidget;pages->setMinimumWidth(0);body->addWidget(pages,1);outer->addLayout(body,1);
         auto makePage=[&](const QString &heading){auto *content=new QWidget;content->setMaximumWidth(850);auto *layout=new QVBoxLayout(content);layout->setContentsMargins(0,0,12,0);layout->setSpacing(18);auto *h=new QLabel(heading);h->setObjectName("heading");layout->addWidget(h);addPage(content);return layout;};
         auto *appearance=makePage(tr("Appearance"));auto *theme=new QComboBox;theme->setObjectName("workspaceTheme");theme->addItem(tr("Follow system appearance"),"system");theme->addItem(tr("Dark"),"dark");theme->addItem(tr("Light"),"light");theme->setCurrentIndex(qMax(0,theme->findData(QSettings().value("workspace/theme","system"))));appearance->addWidget(new QLabel(tr("Theme")));appearance->addWidget(theme);
@@ -136,11 +139,6 @@ public:
         auto *optionalQuestions=new QCheckBox(tr("Notify about optional questions"));optionalQuestions->setObjectName("notifyOptionalQuestions");optionalQuestions->setChecked(QuestionNotificationSettings::enabled());sessions->addWidget(optionalQuestions);
         auto *optionalHint=new QLabel(tr("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify."));optionalHint->setWordWrap(true);sessions->addWidget(optionalHint);
         connect(optionalQuestions,&QCheckBox::toggled,this,[](bool on){QuestionNotificationSettings::setEnabled(on);});
-        auto *nativeQdrant=new QCheckBox(tr("Run SocratiCode on a native Qdrant (no Docker)"));nativeQdrant->setObjectName("socratiCodeNativeQdrant");
-        nativeQdrant->setChecked(QSettings().value("socraticode/nativeQdrant",false).toBool());sessions->addWidget(nativeQdrant);
-        auto *nativeHint=new QLabel(tr("Off by default: SocratiCode keeps each folder's index in its own Qdrant container in Docker. On: Zerus uses a Qdrant program on 127.0.0.1:6333, which it can install and start, with Ollama for embeddings. Folders whose Claude Code settings name a Qdrant always use that one."));
-        nativeHint->setWordWrap(true);sessions->addWidget(nativeHint);
-        connect(nativeQdrant,&QCheckBox::toggled,this,[](bool on){QSettings().setValue("socraticode/nativeQdrant",on);});
         auto *hint=new QLabel(tr("Closing Zerus keeps agents running. Projects and the arrangement of your workspace are saved on this device."));hint->setWordWrap(true);sessions->addWidget(hint);sessions->addStretch();
         sync=new RecoverySync(executable,this);recovery=new RecoverySettings(sync);recovery->setMaximumWidth(850);addPage(recovery);
         auto *processes=makePage(tr("Processes"));
@@ -165,6 +163,24 @@ public:
         speechSection=pages->count();speech=new SpeechSettings(executable);speech->setMaximumWidth(850);addPage(speech);
         keyboardSection=pages->count();keyboard=new KeyboardSettings(ShortcutRegistry::instance());keyboard->setMaximumWidth(850);addPage(keyboard);
         analyticsSection=pages->count();analytics=new AnalyticsSettings(executable);addPage(analytics);
+        // WhiteWh fork: optional extensions (Extensions.h), each with its own options.
+        auto *extensions=makePage(tr("Extensions"));
+        auto *extensionsHint=new QLabel(tr("Integrations with optional third-party tools. They are not part of Zerus and stay off until you turn them on."));extensionsHint->setWordWrap(true);extensions->addWidget(extensionsHint);
+        for(const auto &extension:Extensions::available()){
+            auto *check=new QCheckBox(extension.name);check->setObjectName(QStringLiteral("extension_")+extension.id);check->setChecked(Extensions::enabled(extension.id));extensions->addWidget(check);
+            auto *about=new QLabel(extension.description);about->setWordWrap(true);about->setObjectName("muted");extensions->addWidget(about);
+            auto *options=new QWidget;auto *optionsLayout=new QVBoxLayout(options);optionsLayout->setContentsMargins(24,0,0,0);optionsLayout->setSpacing(6);options->setEnabled(check->isChecked());
+            if(extension.id==QLatin1String("socraticode")){
+                auto *nativeQdrant=new QCheckBox(tr("Run SocratiCode on a native Qdrant (no Docker)"));nativeQdrant->setObjectName("socratiCodeNativeQdrant");
+                nativeQdrant->setChecked(QSettings().value("socraticode/nativeQdrant",false).toBool());optionsLayout->addWidget(nativeQdrant);
+                auto *nativeHint=new QLabel(tr("Off by default: SocratiCode keeps each folder's index in its own Qdrant container in Docker. On: Zerus uses a Qdrant program on 127.0.0.1:6333, which it can install and start, with Ollama for embeddings. Folders whose Claude Code settings name a Qdrant always use that one."));
+                nativeHint->setWordWrap(true);optionsLayout->addWidget(nativeHint);
+                connect(nativeQdrant,&QCheckBox::toggled,this,[](bool on){QSettings().setValue("socraticode/nativeQdrant",on);});
+            }
+            QPointer<QWidget> kept;if(optionsLayout->count()){extensions->addWidget(options);kept=options;}else delete options;
+            connect(check,&QCheckBox::toggled,this,[this,id=extension.id,kept](bool on){Extensions::setEnabled(id,on);if(kept)kept->setEnabled(on);if(extensionsChanged)extensionsChanged();});
+        }
+        extensions->addStretch();
         aboutSection=pages->count();
         auto *about=makePage(tr("About"));auto *installedVersion=new QLabel(tr("Zerus %1").arg(UpdateController::installedVersion()));installedVersion->setObjectName("aboutZerusVersion");installedVersion->setTextInteractionFlags(Qt::TextSelectableByMouse);about->addWidget(installedVersion);
         cliVersion=new QLabel(tr("hgs CLI version unavailable"));cliVersion->setObjectName("aboutHgsVersion");

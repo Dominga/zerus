@@ -60,3 +60,17 @@ them. On its first start, the new build refreshes the staged CLI through
 
 The first fork build is installed by hand. Builds made elsewhere, including
 upstream releases, have no fork build number and never update this way.
+
+## Optional extensions
+
+Integrations with optional third-party tools stay outside the core as
+extensions. Each has an id that names both its cargo feature (`src/extensions.rs`)
+and its Settings → Extensions switch (`tray/src/Extensions.h`, QSettings key
+`extensions/<id>`). Both are off by default: a plain `cargo build` keeps the
+command but answers that the extension is absent, and a GUI built without
+`ZERUS_FORK_BUILD` (or `-DZERUS_EXTENSIONS_ON_BY_DEFAULT=ON`) shows the switch off.
+The fork workflow builds `hgs` with `--features socraticode`, and a fork GUI
+turns extensions on by default.
+
+- `socraticode`: `hgs socraticode …` and the SocratiCode strip in Details, with
+  its native-Qdrant option.

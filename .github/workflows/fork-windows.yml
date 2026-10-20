@@ -63,8 +63,8 @@ jobs:
       - name: Rust tests and release build
         run: |
           mkdir -p artifacts/test-results
-          cargo test --locked </dev/null 2>&1 | tee artifacts/test-results/rust.log
-          cargo build --release --locked
+          cargo test --locked --features socraticode </dev/null 2>&1 | tee artifacts/test-results/rust.log
+          cargo build --release --locked --features socraticode
       - name: Save Rust cache
         if: steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

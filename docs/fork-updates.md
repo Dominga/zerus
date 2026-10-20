@@ -42,6 +42,7 @@ the feed's commit. Windows `tar.exe` unpacks it. The feed is read hourly even
 while a build waits for the restart: a newer build downloads into
 `<stage>-next` and replaces the waiting one only once it is verified, so the
 restart always installs the newest build found.
+**Settings -> Updates -> Check now** reads the feed at once.
 
 A verified build shows **Restart to finish update** in the tray menu and the
 sidebar, and posts one notification. Restarting quits Zerus as Quit does, so

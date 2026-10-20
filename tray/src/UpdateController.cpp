@@ -582,7 +582,8 @@ void UpdateController::detectInstallation(const QString &executable){
 #endif
     sourceInstallation(canonical);
 }
-void UpdateController::check(){refreshBundleState();startCheck(false);}
+// WhiteWh fork: Check now also reads the fork's feed, which otherwise waits an hour.
+void UpdateController::check(){refreshBundleState();startCheck(false);ForkUpdater::instance()->check();}
 void UpdateController::startCheck(bool automatic){
     if(automatic&&!automaticChecks())return;
     if(m_busy)return;m_busy=true;m_freshForNotification=false;m_automaticInFlight=automatic;m_message="Checking the published release catalog…";m_error.clear();emit changed();emit requestStarted();

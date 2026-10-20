@@ -127,6 +127,7 @@ fn claude_settings(
 /// WhiteWh fork: newer Claude Code (2.1.25x) writes "Model set to Name for this
 /// session only", its name and effort level with or without backticks, and may
 /// color them; both forms are read.
+/// Its default row's model is named "Name (default)"; that is still `Name`.
 fn claude_receipt(text: &str) -> Option<(String, String)> {
     let text = text
         .strip_prefix("<local-command-stdout>")?
@@ -151,6 +152,7 @@ fn claude_receipt(text: &str) -> Option<(String, String)> {
         .filter(|level| valid(level))
         .unwrap_or_default();
     let name = name.trim();
+    let name = name.strip_suffix(" (default)").unwrap_or(name);
     (!name.is_empty()).then(|| (name.to_owned(), effort.to_owned()))
 }
 
@@ -179,12 +181,29 @@ fn composer_rule(line: &str) -> bool {
     line.chars().count() >= 12 && line.chars().all(|ch| ch == '─')
 }
 
-/// Claude's right-aligned effort indicator directly above its composer:
-/// "◐ medium · /effort", "● high · ultracode · /effort" or "effort: high · /effort".
+/// The level in an indicator's text: "◐ medium", "● high · ultracode" or
+/// "effort: high", without its " · /effort" suffix.
+fn claude_effort_words(rest: &str) -> Option<String> {
+    let rest = rest.strip_suffix(" · ultracode").unwrap_or(rest);
+    let words: Vec<_> = rest.split_whitespace().collect();
+    let [.., mark, level] = words.as_slice() else {
+        return None;
+    };
+    let glyph = mark.chars().count() == 1 && !mark.chars().all(char::is_alphanumeric);
+    (valid(level) && (glyph || *mark == "effort:")).then(|| (*level).to_owned())
+}
+
+/// Claude's right-aligned effort indicator for its composer: either on its own
+/// line directly above the composer's rule ("◐ medium · /effort",
+/// "● high · ultracode · /effort" or "effort: high · /effort"), or, in newer
+/// Claude Code, drawn into that rule itself ("──── ◐ medium · /effort ─").
 /// It shares a notification slot, so its absence is not evidence of a change.
 fn claude_footer(screen: &str) -> Option<String> {
     let lines: Vec<_> = screen.lines().collect();
     lines.iter().enumerate().rev().find_map(|(index, line)| {
+        if let Some(level) = claude_rule_indicator(line) {
+            return Some(level);
+        }
         if !lines.get(index + 1).is_some_and(|next| composer_rule(next)) {
             return None;
         }
@@ -193,14 +212,20 @@ fn claude_footer(screen: &str) -> Option<String> {
         if line.len() - line.trim_start().len() < 8 {
             return None;
         }
-        let rest = rest.strip_suffix(" · ultracode").unwrap_or(rest);
-        let words: Vec<_> = rest.split_whitespace().collect();
-        let [.., mark, level] = words.as_slice() else {
-            return None;
-        };
-        let glyph = mark.chars().count() == 1 && !mark.chars().all(char::is_alphanumeric);
-        (valid(level) && (glyph || *mark == "effort:")).then(|| (*level).to_owned())
+        claude_effort_words(rest)
     })
+}
+
+/// The indicator drawn into an unindented rule: at least 12 `─` before it and
+/// only `─` after it.
+fn claude_rule_indicator(line: &str) -> Option<String> {
+    let line = line.trim_end();
+    let body = line.trim_start_matches('─');
+    if line.chars().count() - body.chars().count() < 12 {
+        return None;
+    }
+    let body = body.trim_end_matches('─').trim();
+    claude_effort_words(body.strip_suffix(" · /effort")?)
 }
 
 /// Claude Code caches its account's signed model catalog for the /model picker.
@@ -1615,15 +1640,29 @@ fn claude_picker(screen: &str) -> Option<ClaudePicker> {
     })
 }
 
-/// Whether a picker row shows this model: its description starts with the name.
+/// Whether a picker row shows this model. Older Claude Code lists a family label
+/// ("Opus") and then the model's name and description ("Opus 5.5 · Best for …");
+/// newer Claude Code puts the name itself in the label column ("Opus 5.5") and
+/// only a description after it. The default row describes the default model; it
+/// is not that model's row.
 fn claude_row_is(row: &str, name: &str) -> bool {
     let Some((_, rest)) = row.split_once(". ") else {
         return false;
     };
-    // The label column ("Opus", "Haiku ✔") ends at the first double space.
-    let Some((_, description)) = rest.split_once("  ") else {
+    // The label column ("Opus", "Haiku ✔", "Fable 5.1") ends at the first double space.
+    let Some((label, description)) = rest.split_once("  ") else {
         return false;
     };
+    // A trailing mark such as ✔ shows the current model.
+    let label = label
+        .trim_end_matches(|ch: char| !ch.is_alphanumeric() && ch != ')')
+        .trim_end();
+    if label == name {
+        return true;
+    }
+    if label.starts_with("Default") {
+        return false;
+    }
     let description = description.trim_start();
     description == name || description.starts_with(&format!("{name} · "))
 }
@@ -2791,6 +2830,62 @@ mod tests {
         assert!(!claude_picker(&CLAUDE_PICKER.replace(" · s to use this session only", "")).unwrap().session_only);
         assert!(claude_picker(&CLAUDE_PICKER.replace("     4. Sonnet", "   ❯ 4. Sonnet")).is_none());
         assert!(claude_picker(&CLAUDE_PICKER.replace("Select model", "Select a model")).is_none());
+    }
+
+    // Newer Claude Code: the model's name is the label column, the default row
+    // names the default model, and the list scrolls ("↓ 10.", "… +3 models").
+    const CLAUDE_PICKER_NAMED: &str = "   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names,\n   specify with --model.\n\n   ❯ 1. Default (recommended) ✔  Opus 5.5 · Best for everyday, complex tasks\n     2. Opus 5.5                 For complex work and everyday tasks\n     3. Fable 5.1                For your toughest challenges\n     4. Sonnet 5.5               Most efficient for simpler tasks\n     5. Haiku 5.5                Fastest for quick answers\n     6. Haiku 4.5                Fastest for quick answers\n     7. Sonnet 5                 Efficient for routine tasks\n     8. Opus 5                   Best for everyday, complex tasks\n     9. Fable 5                  Most capable for your hardest and longest-running tasks\n   ↓ 10. Opus 4.8                Best for everyday, complex tasks\n      … +3 models\n\n   ◐ Medium effort (default) ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n";
+
+    #[test]
+    fn claude_picker_rows_named_in_the_label_column() {
+        let picker = claude_picker(CLAUDE_PICKER_NAMED).unwrap();
+        assert!(picker.session_only);
+        assert_eq!(picker.effort.as_deref(), Some("medium"));
+        // The default row describes Opus 5.5 but is not its row.
+        assert!(!claude_row_is(&picker.row, "Opus 5.5"));
+        let row = |number: &str| {
+            let screen = CLAUDE_PICKER_NAMED
+                .replace("   ❯ 1. Default", "     1. Default")
+                .replace(&format!("     {number}. "), &format!("   ❯ {number}. "));
+            claude_picker(&screen).unwrap().row
+        };
+        assert!(claude_row_is(&row("2"), "Opus 5.5"));
+        assert!(!claude_row_is(&row("2"), "Opus 5"));
+        assert!(claude_row_is(&row("3"), "Fable 5.1"));
+        assert!(!claude_row_is(&row("3"), "Fable 5"));
+        assert!(claude_row_is(&row("8"), "Opus 5"));
+        assert!(claude_row_is("3. Fable 5.1 ✔              For your toughest challenges", "Fable 5.1"));
+    }
+
+    #[test]
+    fn claude_receipt_names_the_default_model_without_its_mark() {
+        let wrap = |text: &str| format!("<local-command-stdout>{text}</local-command-stdout>");
+        assert_eq!(
+            claude_receipt(&wrap("Set model to `Opus 5.5 (default)` for this session only with `xhigh` effort")),
+            Some(("Opus 5.5".into(), "xhigh".into()))
+        );
+        assert_eq!(
+            claude_receipt(&wrap("Set model to Opus 5.5 (default) for this session only with medium effort")),
+            Some(("Opus 5.5".into(), "medium".into()))
+        );
+        assert_eq!(
+            claude_receipt(&wrap("Set model to Fable 5.1 for this session only")),
+            Some(("Fable 5.1".into(), String::new()))
+        );
+        assert_eq!(claude_receipt(&wrap("Kept model as Opus 5.5 (default)")), None);
+    }
+
+    #[test]
+    fn claude_effort_indicator_drawn_into_the_composer_rule() {
+        let rule = "─".repeat(40);
+        let screen = |indicator: &str| format!("● Hi!\n{rule}{indicator}\n❯\u{a0}\n{rule}\n  ⏸ manual mode on");
+        assert_eq!(claude_footer(&screen(" ◐ medium · /effort ─")).as_deref(), Some("medium"));
+        assert_eq!(claude_footer(&screen(" ● high · ultracode · /effort ─")).as_deref(), Some("high"));
+        assert_eq!(claude_footer(&screen(" effort: xhigh · /effort")).as_deref(), Some("xhigh"));
+        assert!(claude_footer(&screen(" ◐ turbo · /effort ─")).is_none());
+        // A short rule or indented text quoting the indicator is not the composer's rule.
+        assert!(claude_footer("──── ◐ medium · /effort ─\n❯\u{a0}").is_none());
+        assert!(claude_footer(&format!("  {rule} ◐ medium · /effort\n❯\u{a0}")).is_none());
     }
 
     #[test]

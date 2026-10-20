@@ -1,5 +1,9 @@
 #include "ForkUpdater.h"
 #include "ChildProcess.h"
+#ifdef Q_OS_WIN
+#include "RelayConfiguration.h"
+#include "WindowsMobileServices.h"
+#endif
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -316,6 +320,20 @@ void ForkUpdater::extracted()
 bool ForkUpdater::startInstall()
 {
     if (!ready() || !QFileInfo::exists(unpacked())) return false;
+#ifdef Q_OS_WIN
+    // The bundled mobile connector runs from the portable folder, which the
+    // plain layout's helper waits to be free of. Ask it to stop through its own
+    // management interface: it finishes its current phone request first, and
+    // the new build starts it again (WindowsMobileServices::ensureInBackground).
+    if (!m_layout.versioned && QFileInfo::exists(RelaySettings::configPath())) {
+        const auto config = RelaySettings::configPath();
+        const auto status = WindowsMobileServices::manage(QStringLiteral("status"), config, {{QStringLiteral("revision"), QString()}});
+        if (status.value(QStringLiteral("running")).toBool())
+            WindowsMobileServices::manage(QStringLiteral("stop"), config,
+                {{QStringLiteral("revision"), status.value(QStringLiteral("revision")).toString()},
+                 {QStringLiteral("generation"), status.value(QStringLiteral("generation")).toString()}});
+    }
+#endif
     const QString script = QDir::temp().filePath(QStringLiteral("zerus-fork-install-%1.ps1").arg(m_readyBuild));
     QFile file(script);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)

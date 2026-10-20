@@ -5672,7 +5672,9 @@ void SessionsWindow::terminateSession()
 
 void SessionsWindow::placeRailControls(bool inTitle)
 {
-    if (inTitle == m_railInTitle || !m_railLayout) return;
+    // A collapsed list restores before the status bar exists; the theme places
+    // the controls once the window is complete.
+    if (inTitle == m_railInTitle || !m_railLayout || !m_statusLayout || !m_titleBar) return;
     m_railInTitle = inTitle;
     const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav};
     const QList<QPushButton *> trailing{m_windowPin, m_settingsNav};

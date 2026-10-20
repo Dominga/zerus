@@ -447,7 +447,7 @@ private:
     QElapsedTimer m_processPollAge,m_inspectionAge;
     SessionList *m_sessions;
     SessionSearch *m_searchResults;
-    QStackedWidget *m_listStack;
+    QStackedWidget *m_listStack = nullptr;
     MachinesPage *m_machinesPage;
     MachineFilter *m_machineFilter;
     ProjectFilter *m_projectFilter;
@@ -550,9 +550,10 @@ private:
     struct PendingNotifications { Entry entry; };
     QHash<quint64, PendingNotifications> m_pendingNotifications;
     bool m_confirmingQuestionCache = false;
-    QStackedWidget *m_detailStack;
+    QStackedWidget *m_detailStack = nullptr;
     QSplitter *m_splitter;
-    QStackedWidget *m_pages;
+    // Null until the pages exist: restoring a collapsed list runs earlier.
+    QStackedWidget *m_pages = nullptr;
     SettingsPage *m_settingsPage;
     QPushButton *m_settingsNav;
     QPushButton *m_windowPin = nullptr;

@@ -229,6 +229,7 @@ private slots:
     void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void whiteWhWorkspaceView();
+    void compactSkinStartsWithACollapsedList();
     void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
     void groupsPersistFilterAndRevealAttention();
@@ -749,6 +750,25 @@ void TestSessionsWindow::whiteWhWorkspaceView()
     QVERIFY(window.width() < 2000);
     QTRY_VERIFY(!toggle->isVisible()); QVERIFY(railNew->isVisible()); QCOMPARE(sessionCardTileInset(), 0);
     QVERIFY(!composer->findChild<QFrame *>("composerCard")->isVisible());
+}
+
+// WhiteWh fork: a list collapsed when Zerus quit restores while the window is
+// still being built, before its pages and status bar exist.
+void TestSessionsWindow::compactSkinStartsWithACollapsedList()
+{
+    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/sessionsCollapsed", true);
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); QSettings().remove("workspace/sessionsCollapsed"); sessionCardTileInset() = 0; });
+    const auto state = fleet();
+    SessionsWindow window(FakeCli::program(script())); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *listPanel = window.findChild<QWidget *>("sessionListPanel"); QVERIFY(listPanel);
+    QTRY_VERIFY(!listPanel->isVisible());
+    auto *toggle = window.findChild<QPushButton *>("railSessionsToggle"); QVERIFY(toggle);
+    QTRY_VERIFY(toggle->isVisible());
+#ifdef Q_OS_WIN
+    QVERIFY(window.findChild<QWidget *>("windowTitleBar")->isAncestorOf(toggle));
+    QVERIFY(window.findChild<QWidget *>("workspaceStatus")->isAncestorOf(window.findChild<QWidget *>("appVersion")));
+#endif
+    toggle->click(); QTRY_VERIFY(listPanel->isVisible());
 }
 
 // WhiteWh fork: SocratiCode is an optional extension. Off, Details has no

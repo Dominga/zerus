@@ -714,6 +714,9 @@ void TestSessionsWindow::whiteWhWorkspaceView()
     // Collapsed, the cards list leaves no strip: only the rail remains.
     QTRY_VERIFY(!listPanel->isVisible());
     toggle->click(); QTRY_VERIFY(!railNew->isVisible()); QTRY_VERIFY(listPanel->isVisible());
+    // Other pages have no session list, so no list toggle.
+    window.findChild<QPushButton *>("workspaceSettings")->click(); QTRY_VERIFY(!toggle->isVisible());
+    window.findChild<QPushButton *>("railButton")->click(); QTRY_VERIFY(toggle->isVisible());
     const auto preview = qEnvironmentVariable("HGS_WHITEWH_PREVIEW");
     if (!preview.isEmpty()) {
         QDir().mkpath(preview);

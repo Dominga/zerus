@@ -1594,6 +1594,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_sessionFeedback = new StatusMessage; m_sessionFeedback->setObjectName("sessionFeedback");
     m_sessionFeedback->hide(); statusLayout->addWidget(m_sessionFeedback, 1);
     connect(m_pages, &QStackedWidget::currentChanged, this, [this] { updateSessionFeedback(); });
+    connect(m_pages, &QStackedWidget::currentChanged, this, [this](int index) {
+        if (m_railSessionsToggle) m_railSessionsToggle->setVisible(sessionCardTileInset() && index == 0);
+    });
     m_noticeDismiss = new QPushButton; m_noticeDismiss->setObjectName("dismissNotice");
     m_noticeDismiss->setProperty("glyph", "close"); m_noticeDismiss->setIconSize(QSize(14, 14));
     m_noticeDismiss->setFixedSize(20, 20); m_noticeDismiss->setFlat(true);
@@ -2045,7 +2048,8 @@ void SessionsWindow::applyWorkspaceView()
     sessionCardTileInset() = cards ? 38 : 0;
     m_sessions->viewport()->update();
     const bool docked = !m_sessionDock || m_sessionDock->mode() == SessionPanelDock::Docked;
-    if (m_railSessionsToggle) m_railSessionsToggle->setVisible(cards);
+    // The list toggle belongs to Sessions; other pages have no session list.
+    if (m_railSessionsToggle) m_railSessionsToggle->setVisible(cards && (!m_pages || m_pages->currentIndex() == 0));
     // Cards: a collapsed list leaves only the rail, which expands it again.
     if (m_sessionDock) m_sessionDock->setStripWidth(cards ? 0 : SessionStrip::width(m_sessions->property("compact").toBool()));
     const bool compactComposer = skin.view(QStringLiteral("composer")) == QLatin1String("compact");

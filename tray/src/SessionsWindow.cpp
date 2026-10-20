@@ -308,8 +308,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_brand->setFixedSize(42,44); m_brand->setCheckable(true); m_brand->setProperty("caption", tr("Home — Zerus %1").arg(version)); m_brand->setAccessibleName(tr("Home dashboard"));
     connect(m_brand,&QPushButton::clicked,this,[this] { m_pages->setCurrentIndex(3); m_brand->setChecked(true); emit refreshRequested(); });
     side->addWidget(m_brand); side->addSpacing(8);
+    // WhiteWh fork: the cards view collapses and expands the session list here.
+    m_railSessionsToggle = iconButton("collapse-sessions", tr("Collapse session list"), "railSessionsToggle");
+    m_railSessionsToggle->setFixedSize(42, 36); m_railSessionsToggle->hide(); side->addWidget(m_railSessionsToggle);
+    connect(m_railSessionsToggle, &QPushButton::clicked, this, [this] { if (m_sessionDock) m_sessionDock->toggle(); });
     auto *create = iconButton("add", tr("New session"), "newSession");
-    create->setFixedSize(42,44);create->setIconSize(QSize(24,24));side->addWidget(create);
+    create->setFixedSize(42,44);create->setIconSize(QSize(24,24));side->addWidget(create); m_railNewSession = create;
     connect(create, &QPushButton::clicked, this, [this]() { showNewSession({}, {}, selectedHostTarget()); });
     m_sessionsNav = iconButton("sessions", tr("Sessions"), "railButton"); m_sessionsNav->setCheckable(true); m_sessionsNav->setChecked(true);
     m_projectsNav = iconButton("projects", tr("Projects"), "railButton"); m_projectsNav->setCheckable(true);
@@ -1940,6 +1944,7 @@ void SessionsWindow::applyTheme()
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
+    applyWorkspaceView();
 }
 
 // The exact text sent from Activity when it is this turn's prompt, otherwise
@@ -1982,6 +1987,36 @@ void SessionsWindow::updateSessionsToggle()
         : mode == SessionPanelDock::Collapsed ? tr("Expand session list") : tr("Keep session list open");
     m_sessionsToggle->setProperty("glyph", glyph); m_sessionsToggle->setToolTip(caption); m_sessionsToggle->setAccessibleName(caption);
     m_sessionsToggle->setIcon(workspaceIcon(glyph, QColor(m_muted)));
+    if (m_railSessionsToggle) {
+        m_railSessionsToggle->setProperty("glyph", glyph); m_railSessionsToggle->setToolTip(caption); m_railSessionsToggle->setAccessibleName(caption);
+        m_railSessionsToggle->setIcon(workspaceIcon(glyph, QColor(m_muted)));
+    }
+    applyWorkspaceView();
+}
+
+// WhiteWh fork: the skin's "cards" view of the workspace. Each session card has
+// its own surface, the rail holds the list toggle and offers New session only
+// while the list is collapsed (the list header has its own), and SocratiCode
+// leads the Details page.
+void SessionsWindow::applyWorkspaceView()
+{
+    const auto skin = WorkspaceSkin::current();
+    const bool cards = skin.view(QStringLiteral("sessions")) == QLatin1String("cards");
+    const QStringList names{"cardSurface", "cardBorder", "cardHover", "cardSelected", "cardSelectedBorder"};
+    const QStringList keys{"card", "cardBorder", "cardHover", "cardSelected", "cardSelectedBorder"};
+    for (int at = 0; at < names.size(); ++at) {
+        const auto value = skin.named(m_dark, keys[at]);
+        m_sessions->setProperty(names[at].toLatin1().constData(), cards && !value.isEmpty() ? QVariant(QColor(value)) : QVariant());
+    }
+    m_sessions->viewport()->update();
+    const bool docked = !m_sessionDock || m_sessionDock->mode() == SessionPanelDock::Docked;
+    if (m_railSessionsToggle) m_railSessionsToggle->setVisible(cards);
+    if (m_railNewSession) m_railNewSession->setVisible(!cards || !docked);
+    if (m_sessionsToggle) m_sessionsToggle->setVisible(!cards);
+    if (m_socratiCode) if (auto *layout = qobject_cast<QBoxLayout *>(m_socratiCode->parentWidget() ? m_socratiCode->parentWidget()->layout() : nullptr)) {
+        const int at = layout->indexOf(m_socratiCode), wanted = cards ? 0 : layout->count() - 1;
+        if (at >= 0 && at != wanted) { layout->removeWidget(m_socratiCode); layout->insertWidget(wanted, m_socratiCode); }
+    }
 }
 
 // The strip keeps the list and swaps the panel chrome for compact controls:

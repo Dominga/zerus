@@ -162,6 +162,9 @@ private:
     void applySessionStrip();
     SessionPanelDock *m_sessionDock = nullptr;
     QPushButton *m_sessionsToggle = nullptr, *m_stripSearch = nullptr, *m_batchButton = nullptr, *m_panelNewSession = nullptr;
+    // WhiteWh fork: the rail's New session and its session list toggle (cards view).
+    QPushButton *m_railNewSession = nullptr, *m_railSessionsToggle = nullptr;
+    void applyWorkspaceView();
     QHBoxLayout *m_sessionHeader = nullptr, *m_filterRow = nullptr;
     QString m_countFull, m_countShort;
     bool m_focusSearch = false;

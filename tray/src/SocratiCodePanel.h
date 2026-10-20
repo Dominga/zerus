@@ -25,8 +25,10 @@ public:
     explicit SocratiCodePanel(HgsClient *client, QWidget *parent = nullptr) : QWidget(parent), m_client(client)
     {
         setObjectName("socratiCodePanel");
+        // A skin may give the panel a surface of its own.
+        setAttribute(Qt::WA_StyledBackground, true);
         auto *layout = new QVBoxLayout(this);
-        layout->setContentsMargins(4, 6, 4, 2);
+        layout->setContentsMargins(8, 6, 8, 6);
         layout->setSpacing(4);
         // The title and the state, then the buttons on a row of their own: the
         // inspector can be narrow, and buttons must keep their whole labels.

@@ -28,15 +28,24 @@ public:
         auto *layout = new QVBoxLayout(this);
         layout->setContentsMargins(4, 6, 4, 2);
         layout->setSpacing(4);
-        auto *row = new QHBoxLayout;
-        row->setSpacing(6);
+        // The title and the state, then the buttons on a row of their own: the
+        // inspector can be narrow, and buttons must keep their whole labels.
+        auto *head = new QHBoxLayout;
+        head->setSpacing(6);
         auto *title = new QLabel(tr("SocratiCode"));
         title->setObjectName("detailsIdentityTitle");
-        row->addWidget(title);
+        title->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+        head->addWidget(title, 0, Qt::AlignTop);
         m_state = new QLabel;
         m_state->setObjectName("socratiCodeState");
         m_state->setTextFormat(Qt::PlainText);
-        row->addWidget(m_state, 1);
+        m_state->setWordWrap(true);
+        m_state->setMinimumWidth(0);
+        m_state->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        head->addWidget(m_state, 1);
+        layout->addLayout(head);
+        auto *row = new QHBoxLayout;
+        row->setSpacing(6);
         m_action = new QPushButton;
         m_action->setObjectName("socratiCodeAction");
         m_action->setAutoDefault(false);
@@ -55,6 +64,7 @@ public:
         m_refresh->setObjectName("socratiCodeRefresh");
         m_refresh->setAutoDefault(false);
         row->addWidget(m_refresh);
+        row->addStretch();
         layout->addLayout(row);
         m_details = new QLabel;
         m_details->setObjectName("socratiCodeDetails");

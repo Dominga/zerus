@@ -26,6 +26,7 @@
 #include "SwarmDialog.h"
 #include "WorktreePanel.h"
 #include "SocratiCodePanel.h"
+#include "IronRulesPanel.h"
 #include "NewSessionDialog.h"
 #include "ActivityView.h"
 #include "ProcessView.h"
@@ -1266,8 +1267,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_children = browser(); m_children->setObjectName("subagents"); m_children->setAccessibleName(tr("Subagents")); m_children->viewport()->installEventFilter(this);
     connect(m_children, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
         if (url.scheme() == "hgs-agent") openSubagent(url.path(QUrl::FullyDecoded));
+        else if (url.scheme() == "hgs-fold") toggleInspectorSection(url.path(QUrl::FullyDecoded));
     });
     m_info = browser(); m_info->setObjectName("sessionInfo"); m_info->setAccessibleName(tr("Session details"));
+    connect(m_info, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
+        if (url.scheme() == "hgs-fold") toggleInspectorSection(url.path(QUrl::FullyDecoded));
+    });
     tabs->addTab(m_activityStack, tr("Activity")); tabs->addTab(m_terminal, tr("Terminal"));
     m_nativeUi = new NativeUiView(&m_client, [] { return NativeBrowserPlugin::factory(); });
     tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
@@ -1316,6 +1321,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     contextRow->addWidget(m_detailsContext,1);contextRow->addWidget(m_detailsClear);detailsLayout->addLayout(contextRow);
     // WhiteWh fork: the SocratiCode index of this session's folder.
     m_socratiCode=new SocratiCodePanel(&m_client);detailsLayout->addWidget(m_socratiCode);
+    // WhiteWh fork: the iron rules of this session's project.
+    m_ironRules=new IronRulesPanel;detailsLayout->addWidget(m_ironRules);
+    m_ironRules->changed=[this](int count){m_composer->setIronRulesCount(count);};
     m_inspector->addTab(m_children, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
@@ -2008,6 +2016,7 @@ void SessionsWindow::applyWorkspaceView()
         const auto value = skin.named(m_dark, keys[at]);
         m_sessions->setProperty(names[at].toLatin1().constData(), cards && !value.isEmpty() ? QVariant(QColor(value)) : QVariant());
     }
+    sessionCardTileInset() = cards ? 38 : 0;
     m_sessions->viewport()->update();
     const bool docked = !m_sessionDock || m_sessionDock->mode() == SessionPanelDock::Docked;
     if (m_railSessionsToggle) m_railSessionsToggle->setVisible(cards);
@@ -2017,8 +2026,13 @@ void SessionsWindow::applyWorkspaceView()
     if (m_composer) m_composer->setCompact(compact);
     if (m_subagentComposer) m_subagentComposer->setCompact(compact);
     if (m_socratiCode) if (auto *layout = qobject_cast<QBoxLayout *>(m_socratiCode->parentWidget() ? m_socratiCode->parentWidget()->layout() : nullptr)) {
-        const int at = layout->indexOf(m_socratiCode), wanted = cards ? 0 : layout->count() - 1;
-        if (at >= 0 && at != wanted) { layout->removeWidget(m_socratiCode); layout->insertWidget(wanted, m_socratiCode); }
+        // Cards: SocratiCode, then the iron rules, lead the page; classic: both close it.
+        for (QWidget *panel : {static_cast<QWidget *>(m_socratiCode), static_cast<QWidget *>(m_ironRules)}) {
+            if (!panel) continue;
+            const int at = layout->indexOf(panel);
+            const int wanted = cards ? (panel == m_socratiCode ? 0 : 1) : layout->count() - 1;
+            if (at >= 0 && at != wanted) { layout->removeWidget(panel); layout->insertWidget(wanted, panel); }
+        }
     }
 }
 
@@ -3819,7 +3833,7 @@ void SessionsWindow::renderDetails()
         m_goal->hide(); m_model->hide(); m_restore->hide(); m_more->hide();
         m_forkAction->setEnabled(false); m_renameAction->setEnabled(false);
     } else m_more->show();
-    updateBrowser(m_children, children, m_childrenHtml);
+    updateBrowser(m_children, foldInspectorSections(children), m_childrenHtml);
     const auto conversation = m_details.value("conversation_id").toString(s.conversationId);
     const auto run = m_details.value("run_id").toString(s.runId);
     QString identity = conversation.isEmpty() ? run : conversation;
@@ -3849,8 +3863,46 @@ void SessionsWindow::renderDetails()
     info += SessionUsage::html((m_subagentId.isEmpty() ? m_details : m_subagentDetails).value("session_usage").toObject(), m_muted, !m_subagentId.isEmpty());
     const QStringList infoContext{entry->key, m_details.value("conversation_id").toString(s.conversationId), m_subagentId};
     auto previousInfo = m_info->property("inspectorHtml").toString();
-    updateBrowser(m_info, info, previousInfo, m_info->property("context").toStringList() == infoContext);
+    updateBrowser(m_info, foldInspectorSections(info), previousInfo, m_info->property("context").toStringList() == infoContext);
     m_info->setProperty("inspectorHtml", previousInfo); m_info->setProperty("context", infoContext);
+}
+
+// WhiteWh fork: the skin's foldable inspector. Each <h3> section of an
+// inspector page gets a disclosure link; a folded section keeps only its
+// heading. Folded headings are remembered by their text.
+QString SessionsWindow::foldInspectorSections(const QString &html) const
+{
+    if (WorkspaceSkin::current().view(QStringLiteral("inspector")) != QLatin1String("foldable")) return html;
+    const QStringList folded = QSettings().value(QStringLiteral("workspace/foldedInspector")).toStringList();
+    const auto parts = html.split(QStringLiteral("<h3>"));
+    QString result = parts.value(0);
+    static const QRegularExpression tags(QStringLiteral("<[^>]*>"));
+    for (int at = 1; at < parts.size(); ++at) {
+        const int end = parts[at].indexOf(QStringLiteral("</h3>"));
+        if (end < 0) { result += QStringLiteral("<h3>") + parts[at]; continue; }
+        const QString heading = parts[at].left(end), body = parts[at].mid(end + 5);
+        const QString key = QString(heading).remove(tags).simplified();
+        const bool closed = folded.contains(key);
+        result += QStringLiteral("<h3><a href='hgs-fold:%1' style='color:%2;text-decoration:none'>%3&nbsp;%4</a></h3>")
+            .arg(QString::fromLatin1(QUrl::toPercentEncoding(key)), m_fg, closed ? QStringLiteral("▸") : QStringLiteral("▾"), heading);
+        if (!closed) result += body;
+    }
+    return result;
+}
+
+void SessionsWindow::toggleInspectorSection(const QString &key)
+{
+    QSettings settings;
+    auto folded = settings.value(QStringLiteral("workspace/foldedInspector")).toStringList();
+    if (!folded.removeAll(key)) folded << key;
+    settings.setValue(QStringLiteral("workspace/foldedInspector"), folded);
+    m_childrenHtml.clear(); m_info->setProperty("inspectorHtml", QString()); renderDetails();
+}
+
+QString SessionsWindow::projectOfKey(const QString &key) const
+{
+    for (const auto &entry : m_entries) if (entry.key == key) return m_organization.groupFor(entry.identity);
+    return {};
 }
 
 QString SessionsWindow::modelSettingsBlockReason(const Entry &entry) const
@@ -4495,7 +4547,9 @@ void SessionsWindow::deliverMessage(const QString &key, const QString &host, con
                 if (!error.isEmpty() || !valid || !m_composer->isSending(key)) {
                     m_composer->deliveryFinished(key, false, error.isEmpty() ? tr("The session changed. Your draft was kept without sending.") : error); return;
                 }
-                const quint64 request = m_client.requestSendMessage(host, name, text, attachments, runId, conversationId, {}, compactionId);
+                // WhiteWh fork: the project's iron rules travel ahead of the text; the
+                // draft, retries and the local copy keep the text alone.
+                const quint64 request = m_client.requestSendMessage(host, name, IronRules::wrap(IronRules::rules(projectOfKey(key)), text), attachments, runId, conversationId, {}, compactionId);
                 m_pendingMessages.insert(request, {key, runId, conversationId});
                 if (m_push && m_push->key == key && !m_push->request && m_push->text == text) {
                     m_push->request = request; m_push->run = runId; m_push->conversation = conversationId;
@@ -5384,6 +5438,12 @@ void SessionsWindow::updateWorktrees()
     const auto *entry=selected();
     m_worktrees->setContext(entry?entry->host:QString(),entry?(m_subagentId.isEmpty()?m_details.value("cwd").toString(entry->session.cwd):m_subagentCwd):QString(),m_fleet);
     if(m_socratiCode)m_socratiCode->setContext(entry?entry->host:QString(),entry?m_details.value("cwd").toString(entry->session.cwd):QString());
+    if(m_ironRules){
+        const auto project=entry?m_organization.groupFor(entry->identity):QString();
+        const auto *group=m_organization.group(project);
+        m_ironRules->setProject(project,group?group->name:project);
+        m_composer->setIronRulesCount(m_ironRules->rules().size());
+    }
 }
 void SessionsWindow::filterFolder(const QString &host,const QString &path,bool checkout)
 {

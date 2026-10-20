@@ -16,6 +16,9 @@
 
 // One renderer for session-list rows and overview cards.
 inline QRect sessionCardRect(const QRect &row) { return row.adjusted(2, 4, -2, -6); }
+// WhiteWh fork: the skin's cards view puts the agent's tile left of a session
+// card's text; every place that lays out or hit-tests that text shifts by it.
+inline int &sessionCardTileInset() { static int inset = 0; return inset; }
 
 // The collapsed session list keeps every row at its height; only the width
 // changes. The list's "expansion" runs from 0 (strip) to 1 (full cards), and
@@ -97,7 +100,7 @@ public:
     }
     static QRect gitStatusRect(const QRect &row, const QModelIndex &index, QFont base, bool compact) {
         if (index.data(SessionRoles::Header).toBool() || !index.data(SessionRoles::ChildId).toString().isEmpty()) return {};
-        const QRect card = sessionCardRect(row);
+        const QRect card = sessionCardRect(row).adjusted(sessionCardTileInset(), 0, 0, 0);
         const int textX = card.x() + 20, right = card.right() - 11;
         const int end = right - machineBadgeWidth(index, base, right - textX) - 8;
         const auto values = GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), base, end - textX - 48);
@@ -144,7 +147,7 @@ public:
     }
     static TitleLayout titleLayout(const QRect &row, const QFont &base, bool compact, const QModelIndex &index, const CardStatus &status) {
         const bool child = !index.data(SessionRoles::ChildId).toString().isEmpty();
-        const QRect r = sessionCardRect(row).adjusted(child ? 24 : 0, 0, 0, 0);
+        const QRect r = sessionCardRect(row).adjusted(child ? 24 : sessionCardTileInset(), 0, 0, 0);
         const int x = r.x() + 12, right = r.right() - 11;
         const int y = r.y() + (child ? (compact ? 5 : 6) : (compact ? 3 : 5));
         const int statusWidth = SessionStatusBadge::width(status.caption, status.kind, base);
@@ -346,7 +349,7 @@ private:
         const bool dark = option.widget && option.widget->property("hgsDark").toBool();
         const bool childRow = !index.data(SessionRoles::ChildId).toString().isEmpty();
         const bool expandable = index.data(SessionRoles::HasChildren).toBool();
-        const QRect r = sessionCardRect(option.rect).adjusted(childRow ? 24 : 0, 0, 0, 0);
+        const QRect r = sessionCardRect(option.rect).adjusted(childRow ? 24 : sessionCardTileInset(), 0, 0, 0);
         const bool compact = option.widget && option.widget->property("compact").toBool();
         const auto status = statusForView(option, index);
         const bool attention = status.attention, unread = status.unread, working = status.working, paused = status.paused;
@@ -356,6 +359,25 @@ private:
         if (!shared) IdentityBadges::paintRow(p, cardOption, dark, status.emphasis);
         const int x = r.x() + 12, textX = x + 8, right = r.right() - 11, width = right - textX;
         const QColor foreground(dark ? "#e8edf4" : "#1a2733"), muted(dark ? "#a1adbb" : "#647386");
+        if (!childRow && sessionCardTileInset() > 0) {
+            // The agent's tile: its initials on its color, and the state as a dot.
+            const QString agentKey = index.data(SessionRoles::Agent).toString();
+            const QColor color = IdentityBadges::providerColor(agentKey, dark);
+            const QRect tile(sessionCardRect(option.rect).x() + 12, r.y() + 10, 30, 30);
+            QColor fill = color; fill.setAlphaF(dark ? 0.16 : 0.14);
+            p->setPen(Qt::NoPen); p->setBrush(fill); p->drawRoundedRect(tile, 8, 8);
+            const QString name = IdentityBadges::providerName(agentKey);
+            const QString initials = agentKey == QLatin1String("codex") ? QStringLiteral(">_") : agentKey == QLatin1String("sh") ? QStringLiteral("$") : name.left(1).toUpper();
+            QFont mark = option.font; mark.setPixelSize(12); mark.setWeight(QFont::Bold); mark.setStyleHint(QFont::Monospace);
+            mark.setFamilies({QStringLiteral("JetBrains Mono"), QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), mark.family()});
+            p->setFont(mark); p->setPen(color); p->drawText(tile, Qt::AlignCenter, initials);
+            const auto state = statusForView(option, index);
+            const QColor dot = state.attention ? QColor("#e8a75a") : state.working ? QColor("#7dd3b0") : state.unread ? QColor("#7fb6e0") : QColor();
+            if (dot.isValid()) {
+                p->setPen(QPen(option.widget && option.widget->property("cardSurface").isValid() ? option.widget->property("cardSurface").value<QColor>() : QColor(dark ? "#181c22" : "#ffffff"), 2));
+                p->setBrush(dot); p->drawEllipse(QRectF(tile.right() - 7, tile.bottom() - 7, 10, 10));
+            }
+        }
         if (childRow) {
             p->setPen(QPen(QColor(dark ? "#38434e" : "#c5cfd9"), 1));
             p->drawLine(option.rect.left() + 17, option.rect.top(), option.rect.left() + 17, option.rect.bottom());

@@ -590,6 +590,12 @@ target_include_directories(test_claudeappsessions PRIVATE ../src)
 target_link_libraries(test_claudeappsessions PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(claudeappsessions test_claudeappsessions)
 set_tests_properties(claudeappsessions PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# WhiteWh fork: a project's iron rules.
+add_executable(test_ironrules test_ironrules.cpp)
+target_include_directories(test_ironrules PRIVATE ../src)
+target_link_libraries(test_ironrules PRIVATE Qt6::Test Qt6::Widgets)
+zerus_add_test(ironrules test_ironrules)
+set_tests_properties(ironrules PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_markdownhtml test_markdownhtml.cpp)
 target_link_libraries(test_markdownhtml PRIVATE Qt6::Test hgs-markdown)

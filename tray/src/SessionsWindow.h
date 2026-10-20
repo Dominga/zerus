@@ -102,6 +102,9 @@ signals:
     void accountInstallRequested(const QString &host, const QString &provider);
     void machineSshRequested(const QString &alias);
 
+public:
+    // WhiteWh fork: apply the selected skin again, as after a change in Settings.
+    void applySkin() { applyTheme(); }
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void showEvent(QShowEvent *event) override;
@@ -165,6 +168,8 @@ private:
     // WhiteWh fork: the rail's New session and its session list toggle (cards view).
     QPushButton *m_railNewSession = nullptr, *m_railSessionsToggle = nullptr;
     void applyWorkspaceView();
+    QString foldInspectorSections(const QString &html) const;
+    void toggleInspectorSection(const QString &key);
     QHBoxLayout *m_sessionHeader = nullptr, *m_filterRow = nullptr;
     QString m_countFull, m_countShort;
     bool m_focusSearch = false;
@@ -365,6 +370,9 @@ private:
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
     class SocratiCodePanel *m_socratiCode=nullptr;
+    class IronRulesPanel *m_ironRules=nullptr;
+    // WhiteWh fork: the project (organization group) a session belongs to.
+    QString projectOfKey(const QString &key) const;
     QSet<QString> m_hostFilters, m_projectFilters;
     QString selectedHostTarget() const;
     void updateDashboard();

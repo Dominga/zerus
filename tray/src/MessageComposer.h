@@ -52,6 +52,8 @@ public:
     // in one card, the field grows with its text, and the model and effort are
     // chosen from a menu that applies a choice at once.
     void setCompact(bool compact);
+    // WhiteWh fork: how many iron rules go with every message (0 hides the chip).
+    void setIronRulesCount(int count);
     // modelDefaultEffort: an empty effort is a choice, the model's own default
     // (OpenCode variants); the popup then offers "Default" first.
     void setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
@@ -195,6 +197,7 @@ private:
     QHBoxLayout *m_actions;
     bool m_narrow = false;
     bool m_compact = false;
+    class QLabel *m_rulesChip = nullptr;
     class QFrame *m_card = nullptr;
     QHBoxLayout *m_cardRow = nullptr;
     void fitEditor();

@@ -1,4 +1,5 @@
 #include "ActivityView.h"
+#include "IronRules.h"
 #include "ActivityWidth.h"
 #include "ContentScale.h"
 #include "MarkdownHtml.h"
@@ -608,6 +609,13 @@ struct ActivityRenderResult {
     }
     for (int i = 0; i < sourceEvents.size(); ++i) {
         auto event = sourceEvents[i].toObject();
+        // WhiteWh fork: a project's iron rules precede every message Zerus
+        // sends; the text is shown, and matched to its delivery, without them.
+        if (event.value("detail").isString()) {
+            bool rules = false;
+            const auto detail = IronRules::strip(event.value("detail").toString(), &rules);
+            if (rules) { event["detail"] = detail; event["iron_rules"] = true; sourceEvents[i] = event; }
+        }
         const auto id = event.value("attachment_request_id").toString(event.value("message_id").toString());
         if (m_deliveryKeys.contains(id)) { event["activity_key"] = m_deliveryKeys.value(id); sourceEvents[i] = event; }
     }

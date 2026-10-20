@@ -224,6 +224,7 @@ private slots:
     void independentWaitRemainsVisibleWithoutExpandingHeader_data();
     void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
+    void whiteWhWorkspaceView();
     void groupsPersistFilterAndRevealAttention();
     void emptyProjectsSettingPreservesArchiveAndProjects();
     void contentScaleLeavesWorkspaceChrome();
@@ -635,6 +636,34 @@ FleetState TestSessionsWindow::fleet() const
     BoxState mac; mac.host = "mac"; mac.ok = true; mac.sessions = {approval};
     FleetState result; result.setLocal(arch, QDateTime::currentMSecsSinceEpoch()); result.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
     return result;
+}
+
+// WhiteWh fork: the skin's workspace view. The rail holds the list toggle and
+// hides New session while the list is docked, cards make room for the agent
+// tile, the composer is compact and SocratiCode leads Details. The classic
+// skin restores all of it.
+void TestSessionsWindow::whiteWhWorkspaceView()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); sessionCardTileInset() = 0; });
+    const auto state = fleet();
+    SessionsWindow window(FakeCli::program(script())); window.resize(1280, 760); window.setFleet(state); window.show();
+    window.showSession({}, state.local().sessions[0].name);
+    auto *toggle = window.findChild<QPushButton *>("railSessionsToggle"); auto *railNew = window.findChild<QPushButton *>("newSession");
+    QVERIFY(toggle); QVERIFY(railNew);
+    QTRY_VERIFY(toggle->isVisible()); QVERIFY(!railNew->isVisible()); QVERIFY(!window.findChild<QPushButton *>("sessionPanelToggle")->isVisible());
+    QCOMPARE(sessionCardTileInset(), 38);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QVERIFY(composer->findChild<QFrame *>("composerCard")); QVERIFY(composer->findChild<QFrame *>("composerCard")->isVisible());
+    auto *socratic = window.findChild<QWidget *>("socratiCodePanel"); QVERIFY(socratic);
+    QCOMPARE(qobject_cast<QBoxLayout *>(socratic->parentWidget()->layout())->indexOf(socratic), 0);
+    toggle->click(); QTRY_VERIFY(railNew->isVisible());
+    toggle->click(); QTRY_VERIFY(!railNew->isVisible());
+    const auto preview = qEnvironmentVariable("HGS_WHITEWH_PREVIEW");
+    if (!preview.isEmpty()) { QDir().mkpath(preview); QTest::qWait(300); QVERIFY(window.grab().save(preview + "/workspace.png")); }
+    QSettings().remove("workspace/skin"); window.applySkin();
+    QTRY_VERIFY(!toggle->isVisible()); QVERIFY(railNew->isVisible()); QCOMPARE(sessionCardTileInset(), 0);
+    QVERIFY(!composer->findChild<QFrame *>("composerCard")->isVisible());
 }
 
 void TestSessionsWindow::gitPublicationChecksKeepDraftFocusAndSharedCards()

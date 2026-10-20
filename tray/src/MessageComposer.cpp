@@ -265,7 +265,9 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         const QString model = m_models->currentData().toString(), effort = m_efforts->currentData().toString();
         m_settingsPopup->hide(); emit settingsRequested(m_key, model, effort);
     });
-    actions->addWidget(m_attach); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
+    m_rulesChip = new QLabel; m_rulesChip->setObjectName("ironRulesChip"); m_rulesChip->hide();
+    m_rulesChip->setToolTip(tr("This project's iron rules are sent at the start of every message"));
+    actions->addWidget(m_attach); actions->addWidget(m_rulesChip); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
     inputLayout->addLayout(actions);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
         if (m_loading || m_key.isEmpty()) return;
@@ -1235,9 +1237,19 @@ void MessageComposer::setTheme(bool dark)
         QPushButton#attachMessageFile:focus[keyboardFocus="true"] { border-color:%5; }
         QPushButton#refreshSessionStatus { padding:0; border:0; background:transparent; }
         QPushButton#allowMessageRetry { padding:7px 10px; font-size:11px; }
+        QLabel#ironRulesChip { padding:2px 8px; border:1px solid %3; border-radius:6px; font-size:11px; color:%7; }
     )").arg(dark ? "#171d24" : "#f8fafb", dark ? "#e8edf4" : "#1a2733", dark ? "#3d4855" : "#dce2e8",
              dark ? "#365b4d" : "#c7eadd", dark ? "#8bdfc0" : "#167357", dark ? "#10231b" : "#ffffff", dark ? "#85909e" : "#6d7784")
-        .arg(ContentScale::px(9, m_scale)).arg(ContentScale::px(13, m_scale)) + workspaceScrollbars(dark));
+        .arg(ContentScale::px(9, m_scale)).arg(ContentScale::px(13, m_scale)) + workspaceScrollbars(dark)
+        // WhiteWh fork: the compact composer's card frames the field and its buttons.
+        + (m_compact ? QString(R"(
+        QFrame#composerCard { background:%1; border:1px solid %2; border-radius:12px; }
+        QFrame#composerCard:focus-within { border-color:%3; }
+        QFrame#composerCard QPlainTextEdit#messageInput, QFrame#composerCard QPlainTextEdit#messageInput:focus { background:transparent; border:0; padding:6px 4px; }
+        QFrame#composerCard QPushButton#attachMessageFile { border:0; border-radius:9px; }
+        QFrame#composerCard QPushButton#sendMessage { padding:0; border-radius:9px; }
+        QPushButton#sessionModelSettings { border:0; }
+    )").arg(dark ? "#1b1f26" : "#ffffff", dark ? "#2c323b" : "#dce2e8", dark ? "#7dd3b0" : "#167357") : QString()));
     updateControls();
 }
 
@@ -1257,7 +1269,15 @@ void MessageComposer::fitEditor()
     // One line to start, at most six; the field scrolls beyond them.
     const int line = m_editor->fontMetrics().lineSpacing();
     const int lines = qBound(1, int(m_editor->document()->documentLayout()->documentSize().height()), 6);
-    m_editor->setFixedHeight(lines * line + 2 * int(m_editor->document()->documentMargin()) + 6);
+    // The field's padding (6px) and the document margin above and below the text.
+    m_editor->setFixedHeight(qMax(34, lines * line + 2 * int(m_editor->document()->documentMargin()) + 14));
+}
+
+void MessageComposer::setIronRulesCount(int count)
+{
+    m_rulesChip->setText(tr("%n iron rule(s)", nullptr, count));
+    m_rulesChip->setAccessibleName(m_rulesChip->text());
+    m_rulesChip->setVisible(count > 0);
 }
 
 void MessageComposer::setCompact(bool compact)

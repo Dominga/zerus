@@ -62,10 +62,7 @@ pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>)
         ])
         .args(crate::machines::ssh_options(config, alias))
         .arg(alias)
-        .arg(format!(
-            "~/.local/bin/hgs swarm {}",
-            platform::quote(action)
-        ));
+        .arg(crate::windows_peer::hgs(config, alias, &["swarm".into(), action.into()]).map_err(|e| anyhow::anyhow!(e.message.clone()))?);
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     let mut child = ssh.child;
     let mut stdin = ssh.stdin.unwrap();

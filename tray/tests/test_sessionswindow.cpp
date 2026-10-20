@@ -11036,8 +11036,8 @@ void TestSessionsWindow::localWindowsFolderFilterIgnoresCase()
     local.sessions[0].cwd=local.sessions[0].canonicalCwd="c:\\work\\repo";local.sessions[0].gitRoot="C:\\WORK\\Repo";
     local.sessions[1].cwd=local.sessions[1].canonicalCwd="C:\\Work\\Repo\\sub";local.sessions[1].gitRoot="C:\\Work\\Repo";
     state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
-    // A peer is POSIX even when it reports Windows (Phase 2 has no Windows peers).
-    auto remote=*state.peer("mac");remote.metrics["platform"]="windows";remote.sessions[0].canonicalCwd=remote.sessions[0].gitRoot="/work/repo";
+    // A POSIX peer keeps its folders exact.
+    auto remote=*state.peer("mac");remote.metrics["platform"]="macos";remote.sessions[0].canonicalCwd=remote.sessions[0].gitRoot="/work/repo";
     state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
     SessionsWindow window(program());window.setFleet(state);window.resize(1200,850);window.show();
     auto *page=window.findChild<ProjectsDialog *>("projectsPage");auto *list=window.findChild<SessionList *>("sessionList");

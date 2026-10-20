@@ -28,7 +28,7 @@ pub fn version(config: &Config, target: &str, args: &[String]) -> Result<i32> {
         return Err(Error::new(1, "usage: hgs [@host] version"));
     }
     // Every hgs answers --version without side effects.
-    let output = ssh(config, target, "~/.local/bin/hgs --version")?;
+    let output = ssh(config, target, &crate::windows_peer::hgs(config, target, &["--version".into()])?)?;
     if !output.status.success() {
         return Err(Error::new(3, format!("{target} unreachable: {}", detail(&output))));
     }

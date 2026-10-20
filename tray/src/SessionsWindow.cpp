@@ -727,7 +727,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         source->setTextFormat(Qt::PlainText); layout->addWidget(source);
         // This computer shows and copies its paths with native separators; a peer's
         // stay POSIX. path keeps the Qt form that QFileInfo and QUrl read.
-        const auto shown = MachinePlatform::native(path.isEmpty() ? target.path : path, MachinePlatform::of(m_fleet.local().metrics, local));
+        const auto shown = MachinePlatform::native(path.isEmpty() ? target.path : path, MachinePlatform::of(m_fleet.metricsOf(host), local));
         auto *address = new QLineEdit(shown); address->setReadOnly(true);
         address->setObjectName("sessionFilePath");
         auto *copy = new QPushButton;copy->setObjectName("copySessionFilePath");
@@ -2405,7 +2405,7 @@ void SessionsWindow::pasteTerminalPaths(const QStringList &paths)
     // typographic quote delimiters. POSIX machines, including every peer, keep
     // their own single-quote escaping.
     const auto *entry=selected();
-    const bool windows=entry&&MachinePlatform::of(m_fleet.local().metrics,entry->host.isEmpty())==MachinePlatform::Style::Windows;
+    const bool windows=entry&&MachinePlatform::of(m_fleet.metricsOf(entry->host), entry->host.isEmpty())==MachinePlatform::Style::Windows;
     QStringList quoted;
     for(auto path:paths) {
         if(path.contains(QRegularExpression("[\\x00-\\x1f\\x7f]"))) {showNotice(tr("File names containing control characters cannot be pasted into Terminal."),true);return;}
@@ -2746,7 +2746,7 @@ void SessionsWindow::placeLaunchedSessions()
             // A generated worktree launches in its target but adds the folder it
             // came from. Launches saved before "folder" existed add their target.
             const auto path=launch.value("add_folder").toBool()?launch.value("folder").toString(launch.value("target").toString()):QString();
-            const auto style=MachinePlatform::of(m_fleet.local().metrics,entry.host.isEmpty());
+            const auto style=MachinePlatform::of(m_fleet.metricsOf(entry.host), entry.host.isEmpty());
             if(MachinePlatform::absolute(path,style))m_organization.addFolder(group,entry.machine,path,{},style);
             m_organization.moveSession(entry.identity, group); m_organization.setCollapsed(group, false); consumed = true;
         }
@@ -3042,7 +3042,7 @@ void SessionsWindow::rebuild()
         if (!m_hostFilters.isEmpty() && !m_hostFilters.contains(entry.host.isEmpty() ? "@local" : entry.host)) continue;
         const auto &s = entry.session;
         if (!m_folderFilterPath.isEmpty() && (entry.host != m_folderFilterHost || !MachinePlatform::same(
-            m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd, m_folderFilterPath, MachinePlatform::of(m_fleet.local().metrics, entry.host.isEmpty())))) continue;
+            m_folderFilterCheckout ? s.gitRoot : s.canonicalCwd, m_folderFilterPath, MachinePlatform::of(m_fleet.metricsOf(entry.host), entry.host.isEmpty())))) continue;
         if (s.state == "archived") { ++archived; continue; }
         ++total;
         const bool needsAttention = entryNeedsAttention(entry);
@@ -3087,7 +3087,7 @@ void SessionsWindow::rebuild()
             && !(e.key == m_selectedKey && e.key == m_readSelectionKey)) continue;
         if (m_filter == "paused" && s.state == "running") continue;
         if (!(s.name + ' ' + e.machine + ' ' + s.prompt + ' ' + s.currentTool + ' ' + s.gitBranch + ' ' + s.gitWorktreeName + ' ' + s.activitySummary + ' ' + s.activityDetail).contains(query, Qt::CaseInsensitive)) continue;
-        if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||!MachinePlatform::same(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd,m_folderFilterPath,MachinePlatform::of(m_fleet.local().metrics,e.host.isEmpty()))))continue;
+        if(!m_folderFilterPath.isEmpty()&&(e.host!=m_folderFilterHost||!MachinePlatform::same(m_folderFilterCheckout?s.gitRoot:s.canonicalCwd,m_folderFilterPath,MachinePlatform::of(m_fleet.metricsOf(e.host), e.host.isEmpty()))))continue;
         const QString machine = e.host.isEmpty() ? QStringLiteral("@local") : e.host;
         const auto project = m_organization.groupFor(e.identity);
         if (m_hostFilters.isEmpty() || m_hostFilters.contains(machine)) ++projectCounts[project];
@@ -3293,7 +3293,7 @@ void SessionsWindow::rebuild()
     m_countFull = m_count->text(); m_countShort = QString::number(visible.size() + starting);
     // The strip keeps this row hidden (applySessionStrip()).
     m_folderFilterClear->setVisible(!m_folderFilterPath.isEmpty() && !(m_sessionDock && m_sessionDock->chromeNarrow()));
-    const auto folderStyle=MachinePlatform::of(m_fleet.local().metrics,m_folderFilterHost.isEmpty());
+    const auto folderStyle=MachinePlatform::of(m_fleet.metricsOf(m_folderFilterHost), m_folderFilterHost.isEmpty());
     m_folderFilterClear->setText(tr("Folder: %1   ×").arg(MachinePlatform::leaf(m_folderFilterPath,folderStyle)));m_folderFilterClear->setToolTip(MachinePlatform::native(m_folderFilterPath,folderStyle)+tr("\nClear folder filter"));
     m_count->setToolTip(m_countFull);
     m_count->setVisible(!m_searchResults->active());
@@ -3662,7 +3662,7 @@ void SessionsWindow::renderDetails()
     }
     s.cwd = m_details.value("cwd").toString(s.cwd);
     const QString directory = m_subagentId.isEmpty() ? s.cwd : m_subagentCwd;
-    m_shell->setEnabled(entry->online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, entry->host.isEmpty())));
+    m_shell->setEnabled(entry->online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.metricsOf(entry->host), entry->host.isEmpty())));
     const bool localFolder = entry->host.isEmpty() && QFileInfo(directory).isAbsolute() && QFileInfo(directory).isDir();
     m_fileManager->setEnabled(localFolder);
     m_fileManager->setToolTip(!entry->host.isEmpty() ? tr("Available only for sessions on this computer")
@@ -5139,7 +5139,7 @@ void SessionsWindow::openFolderShell()
     const auto *entry = selected();
     if (!entry || !entry->online) return;
     const auto directory = m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd;
-    if (MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, entry->host.isEmpty())))
+    if (MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.metricsOf(entry->host), entry->host.isEmpty())))
         emit folderShellRequested(entry->host, directory);
 }
 
@@ -5199,7 +5199,7 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
         !original.host.isEmpty() ? tr("Available only for sessions on this computer")
         : localFolder ? tr("Open session folder in file manager\n%1").arg(directory) : tr("Session folder is unavailable"));
     add(tr("Open shell in session folder"), "contextFolderShell", SessionMenuAction::FolderShell,
-        original.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, original.host.isEmpty())));
+        original.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.metricsOf(original.host), original.host.isEmpty())));
     add(archived ? tr("Copy restore command") : tr("Copy connect command"), "contextCopyCommand", SessionMenuAction::CopyCommand,
         (archived || NativeSessionCapabilities::terminal(target)) && (!archived || !original.session.archiveId.isEmpty()));
     if (!archived) {
@@ -5332,7 +5332,7 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     case SessionMenuAction::OpenFolder:
         if (current.host.isEmpty()) openLocalFolder(directory); return;
     case SessionMenuAction::FolderShell:
-        if (current.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.local().metrics, current.host.isEmpty())))
+        if (current.online && MachinePlatform::absolute(directory, MachinePlatform::of(m_fleet.metricsOf(current.host), current.host.isEmpty())))
             emit folderShellRequested(current.host, directory);
         return;
     case SessionMenuAction::CopyName: emit copyTextRequested(current.session.name); return;
@@ -5500,7 +5500,7 @@ void SessionsWindow::updateWorktreeCleanupOffer()
         if (inUse(inspected)) { m_worktreeCleanup->hide(); return; }
     }
     const auto machine = host.isEmpty() ? m_fleet.local().host : host;
-    const auto platform = MachinePlatform::of(m_fleet.local().metrics, host.isEmpty());
+    const auto platform = MachinePlatform::of(m_fleet.metricsOf(host), host.isEmpty());
     const auto folder = MachinePlatform::leaf(path, platform);
     const auto shortFolder = m_worktreeCleanup->fontMetrics().elidedText(folder, Qt::ElideMiddle, 150);
     const auto label = (m_worktreeCleanupUnconfirmed ? tr("Check worktree: %1") : tr("Review worktree: %1")).arg(shortFolder);

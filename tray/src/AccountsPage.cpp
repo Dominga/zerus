@@ -188,7 +188,7 @@ void fillMachines(QComboBox *combo, const FleetState &fleet, const QString &expl
 // Whether the machine starts this provider's agent: peers are POSIX, and the
 // local Windows computer lists, adds and takes no OpenCode account (spec D16).
 bool launchable(const FleetState &fleet, const QString &host, const QString &provider) {
-    return AccountCatalog::launchable(provider, MachinePlatform::of(host.isEmpty() ? fleet.local().metrics : QJsonObject(), host.isEmpty()));
+    return AccountCatalog::launchable(provider, MachinePlatform::of(fleet.metricsOf(host), host.isEmpty()));
 }
 }
 AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsageStore *usage) : QWidget(parent), m_client(hgsPath, this)

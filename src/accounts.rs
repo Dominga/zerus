@@ -924,7 +924,7 @@ fn transport(
         command
             .args(crate::machines::ssh_options(config, host))
             .arg(host)
-            .arg(format!("~/.local/bin/hgs {}", platform::join(args)));
+            .arg(crate::windows_peer::hgs(config, host, args)?);
     }
     command.stdin(Stdio::null()).stderr(Stdio::null());
     let ssh = platform::spawn_ssh(

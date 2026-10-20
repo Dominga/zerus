@@ -16,6 +16,7 @@ mod native_ui;
 mod phones;
 mod session_reference;
 mod extensions;
+mod windows_peer;
 mod platform;
 mod presence;
 mod screen;

@@ -112,7 +112,7 @@ void markCatalogFavorite(QJsonObject &catalog,const QString &value,bool favorite
 // Folders of the selected computer: drive and UNC paths on the local Windows
 // machine (D16), POSIX paths elsewhere.
 MachinePlatform::Style folderStyle(const FleetState &fleet,const QString &host) {
-    return MachinePlatform::of(fleet.local().metrics,host.isEmpty());
+    return MachinePlatform::of(fleet.metricsOf(host), host.isEmpty());
 }
 }
 NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &selectedHost,

@@ -27,14 +27,14 @@ inline Style build()
 #endif
 }
 
-// A peer is POSIX. The local machine follows metrics.platform of its box ("windows",
-// "linux", "macos"); before it reports one (the first poll, an older CLI) it is the
-// platform this GUI was built for.
+// Each machine follows metrics.platform of its own box ("windows", "linux",
+// "macos"). Before it reports one (the first poll, an older CLI) the local machine
+// is the platform this GUI was built for and a peer is POSIX. WhiteWh fork: a
+// Windows peer (src/windows_peer.rs) is Windows.
 inline Style of(const QJsonObject &metrics, bool local)
 {
-    if (!local) return Style::Posix;
     const auto platform = metrics.value(QLatin1String("platform")).toString();
-    if (platform.isEmpty()) return build();
+    if (platform.isEmpty()) return local ? build() : Style::Posix;
     return platform == QLatin1String("windows") ? Style::Windows : Style::Posix;
 }
 

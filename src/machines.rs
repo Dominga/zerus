@@ -359,6 +359,13 @@ fn check(config: &Config, alias: &str) -> Result<Value> {
             .stdin(Stdio::null()),
     )?;
     let text = String::from_utf8_lossy(&out.stdout);
+    // WhiteWh fork: a Windows computer's cmd.exe cannot run the POSIX probe.
+    if !text.contains("__HGS_MACHINE__") {
+        if let Some(result) = check_windows(config, alias)? {
+            return Ok(result);
+        }
+    }
+    let _ = crate::windows_peer::record(config, alias, false);
     let mut result = json!({"alias":alias,"ok":false,"ssh_ok":out.status.success(),"error":String::from_utf8_lossy(&out.stderr).chars().take(3000).collect::<String>()});
     if out.status.success() {
         if let Some((_, probe)) = text.split_once("__HGS_MACHINE__\n") {
@@ -384,7 +391,55 @@ fn check(config: &Config, alias: &str) -> Result<Value> {
     }
     Ok(result)
 }
+/// WhiteWh fork: the check of a Windows computer, or `None` when `alias` is
+/// not one. Its CLI comes with Zerus there (`hgs session-host install`).
+fn check_windows(config: &Config, alias: &str) -> Result<Option<Value>> {
+    let probe = crate::windows_peer::wrap(crate::windows_peer::PROBE);
+    let out = platform::ssh_output(
+        platform::ssh()
+            .args(ssh_options(config, alias))
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=6",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                alias,
+                probe.as_str(),
+            ])
+            .stdin(Stdio::null()),
+    )?;
+    let text = String::from_utf8_lossy(&out.stdout).replace('\r', "");
+    let Some((_, probe)) = text.split_once("__HGS_MACHINE__\n") else {
+        return Ok(None);
+    };
+    let mut result = json!({"alias":alias,"ok":false,"ssh_ok":out.status.success(),"platform":"windows",
+        "tmux":"","cargo":"","error":String::from_utf8_lossy(&out.stderr).chars().take(3000).collect::<String>()});
+    for line in probe.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            if matches!(key, "os" | "arch") {
+                result[key] = json!(value.trim());
+            }
+        } else if line.starts_with("hgs ") {
+            result["hgs"] = json!(line.trim());
+        }
+    }
+    if result["os"] != json!("Windows_NT") {
+        return Ok(None);
+    }
+    crate::windows_peer::record(config, alias, true)?;
+    result["ok"] = json!(result["hgs"].as_str().is_some_and(|s| s.starts_with("hgs ")));
+    if result["ok"] != json!(true) {
+        result["error"] = json!("Zerus is not set up on this Windows computer. Start Zerus there and enable local sessions, then check again.");
+    }
+    Ok(Some(result))
+}
+
 fn setup(config: &Config, alias: &str, source: Option<&str>, dry: bool) -> Result<i32> {
+    if crate::windows_peer::is_windows(config, alias) {
+        return Err(Error::new(1, "This is a Windows computer: install Zerus there and enable local sessions in Machines, then choose Check."));
+    }
     let root = source
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| Path::new(&config.home).join(".local/src/hgs"));

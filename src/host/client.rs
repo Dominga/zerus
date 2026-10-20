@@ -421,6 +421,15 @@ mod windows {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
+            // WhiteWh fork: an SSH session (a Windows peer, src/windows_peer.rs)
+            // never starts the host: one started there would carry that
+            // session's token (elevated for an administrator, which then shuts
+            // the desktop out) and end with it. Zerus on this computer runs it.
+            if started.is_none() && std::env::var_os("SSH_CONNECTION").is_some() {
+                return Err(ClientError::Start(
+                    "the session host of this computer is not running: start Zerus on it".into(),
+                ));
+            }
             // Start a host unless the one started last is still coming up. A
             // host that found another one holding the lock or the pipe exits
             // with EXIT_OTHER_HOST: that one is exiting, so try again.

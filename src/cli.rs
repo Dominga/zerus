@@ -822,6 +822,14 @@ fn peer_session(command: &str, args: &[String]) -> String {
         }
     )
 }
+/// `hgs ls --local --json` on `peer`, in that computer's shell.
+fn peer_ls(config: &Config, peer: &str, archives: bool) -> String {
+    let mut args: Vec<String> = ["ls", "--local", "--json"].map(String::from).into();
+    if !archives {
+        args.push("--no-archives".into());
+    }
+    crate::windows_peer::hgs(config, peer, &args).unwrap_or_default()
+}
 fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
     let output = platform::ssh_output(
         platform::ssh()
@@ -832,7 +840,7 @@ fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
                 "-o",
                 "ConnectTimeout=3",
                 peer,
-                if archives { "~/.local/bin/hgs ls --local --json" } else { "~/.local/bin/hgs ls --local --json --no-archives" },
+                peer_ls(config, peer, archives).as_str(),
             ])
             .stderr(Stdio::piped()),
     );
@@ -966,7 +974,15 @@ fn remote(
         }
     };
     flags.extend(crate::machines::ssh_options(config, target));
-    let remote = if command == "wait" {
+    let remote = if crate::windows_peer::is_windows(config, target) {
+        // WhiteWh fork: a Windows computer runs the same build's commands; its
+        // cmd.exe has no POSIX capability probes.
+        let mut windows_args = remote_args.clone();
+        if command == "analytics" {
+            windows_args.push("--read-only".into());
+        }
+        crate::windows_peer::command(&windows_args)?
+    } else if command == "wait" {
         // Old peers otherwise interpret an unknown command as an agent launch.
         // Probe the same installed executable without consuming JSON stdin.
         format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args))
@@ -1135,11 +1151,11 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
                 "-o",
                 "ConnectTimeout=3",
                 peer,
-                "~/.local/bin/hgs ls --local",
             ]
             .into_iter()
             .map(str::to_owned),
         );
+        flags.push(crate::windows_peer::hgs(config, peer, &["ls".into(), "--local".into()])?);
         match platform::ssh_capture(&flags) {
             Some(out) => println!("{}", out.trim_end_matches('\n')),
             None => println!("  offline"),

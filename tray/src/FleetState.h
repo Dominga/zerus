@@ -58,6 +58,12 @@ public:
     const BoxState &local() const { return m_local; }
     QList<QString> peerNames() const;
     const BoxState *peer(const QString &alias) const;
+    // WhiteWh fork: the metrics of the machine `host` names (empty: this one).
+    QJsonObject metricsOf(const QString &host) const {
+        if (host.isEmpty() || host == m_local.host) return m_local.metrics;
+        const auto *box = peer(host);
+        return box ? box->metrics : QJsonObject();
+    }
     qint64 peerPolledAt(const QString &alias) const;
 
 private:

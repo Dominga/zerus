@@ -421,7 +421,7 @@ void ProjectsDialog::transferFolder(const QString &projectId, const SessionOrgan
 }
 MachinePlatform::Style ProjectsDialog::folderStyle(const QString &machine) const
 {
-    return MachinePlatform::of(m_fleet.local().metrics,!machine.isEmpty()&&machine==m_fleet.local().host);
+    return MachinePlatform::of(m_fleet.metricsOf(machine),!machine.isEmpty()&&machine==m_fleet.local().host);
 }
 SessionOrganization::Folder ProjectsDialog::selectedFolder() const
 {

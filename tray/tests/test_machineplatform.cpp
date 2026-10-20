@@ -41,8 +41,10 @@ void TestMachinePlatform::peersArePosixAndTheLocalMachineFollowsItsPlatform()
     QCOMPARE(MachinePlatform::of(windows, true), Style::Windows);
     QCOMPARE(MachinePlatform::of(linuxBox, true), Style::Posix);
     QCOMPARE(MachinePlatform::of(macos, true), Style::Posix);
-    // Windows peers are not supported in Phase 2: a peer is always POSIX.
-    QCOMPARE(MachinePlatform::of(windows, false), Style::Posix);
+    // WhiteWh fork: a peer follows its own platform too (src/windows_peer.rs);
+    // one that reports none yet is POSIX.
+    QCOMPARE(MachinePlatform::of(windows, false), Style::Windows);
+    QCOMPARE(MachinePlatform::of(linuxBox, false), Style::Posix);
     QCOMPARE(MachinePlatform::of({}, false), Style::Posix);
     // Before the first poll, or from a CLI that reports no platform: the GUI's own.
     const auto own = QSysInfo::productType() == QLatin1String("windows") ? Style::Windows : Style::Posix;

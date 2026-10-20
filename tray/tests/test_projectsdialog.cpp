@@ -347,9 +347,9 @@ void TestProjectsDialog::folderDialogTakesDriveFoldersOnlyOnLocalWindows()
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
     QCoreApplication::setOrganizationName("hgs-folder-platform-test"); QCoreApplication::setApplicationName("projects");
     SessionOrganization projects; const auto project = projects.createGroup("Work");
-    // A peer is POSIX even when it reports Windows (Phase 2 has no Windows peers).
+    // A POSIX peer takes only POSIX folders, whatever this computer is.
     BoxState local; local.host = "desktop"; local.ok = true; local.metrics["platform"] = platform;
-    BoxState peer; peer.host = "mac"; peer.ok = true; peer.metrics["platform"] = "windows";
+    BoxState peer; peer.host = "mac"; peer.ok = true; peer.metrics["platform"] = "macos";
     FleetState fleet; fleet.setLocal(local, QDateTime::currentMSecsSinceEpoch()); fleet.setPeer(peer, QDateTime::currentMSecsSinceEpoch());
     HgsClient client("/nonexistent/hgs"); ProjectsDialog dialog(&client, nullptr, false, &projects);
     dialog.setFleet(fleet); dialog.selectProject(project); dialog.show();

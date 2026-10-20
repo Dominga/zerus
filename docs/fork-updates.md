@@ -42,11 +42,17 @@ the feed's commit. Windows `tar.exe` unpacks it.
 
 A verified build shows **Restart to finish update** in the tray menu and the
 sidebar, and posts one notification. Restarting quits Zerus as Quit does, so
-drafts are saved. A hidden PowerShell helper then:
+drafts are saved. A PowerShell helper without a console window then shows a small
+banner in the lower right corner of the screen with each step and its progress
+(a click hides it) and:
 
-1. waits until no program runs from the installation folder;
+1. waits until no program runs from the installation folder, naming the ones it
+   waits for;
 2. moves the folder to `<installation>.previous` (the single rollback copy);
-3. moves the new build in and starts it.
+3. moves the new build in and starts it again.
+
+The banner leaves once the new build's window is up. A failure stays on it for
+ten seconds and goes to the log.
 
 If the new build exits within 15 seconds, the helper restores the previous build,
 keeps the failed one as `<installation>.failed` and starts the previous build. If a

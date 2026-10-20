@@ -31,61 +31,169 @@ constexpr qint64 feedLimit = 64 * 1024;
 constexpr qint64 zipLimit = 1024LL * 1024 * 1024;
 constexpr int firstCheckMs = 2 * 60 * 1000, checkIntervalMs = 60 * 60 * 1000;
 
+// Both helpers show a small always-on-top banner in a corner of the screen while
+// they work: what they wait for, each step and the result. A click hides it.
+// Without Windows Forms the helper still runs, only without the banner. Each
+// helper defines Log first; the banner follows its parameters and log.
+const char *bannerScript = R"PS(
+$banner = $null
+try {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    try { Add-Type -Namespace ZerusUpdate -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'; [void][ZerusUpdate.Dpi]::SetProcessDPIAware() } catch { }
+    $graphics = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = $graphics.DpiX / 96; $graphics.Dispose()
+    function Px([double]$value) { [int][Math]::Round($value * $scale) }
+    function Rgb([int]$r, [int]$g, [int]$b) { [System.Drawing.Color]::FromArgb($r, $g, $b) }
+    $banner = New-Object System.Windows.Forms.Form
+    $banner.Text = 'Zerus update'
+    $banner.FormBorderStyle = 'None'; $banner.TopMost = $true; $banner.ShowInTaskbar = $true; $banner.StartPosition = 'Manual'
+    try { $banner.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon((Join-Path $New 'hgs-tray.exe')) } catch { }
+    $banner.BackColor = Rgb 58 61 68
+    $banner.Padding = New-Object System.Windows.Forms.Padding(1)
+    $banner.ClientSize = New-Object System.Drawing.Size((Px 380), (Px 104))
+    $area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $banner.Location = New-Object System.Drawing.Point(($area.Right - $banner.Width - (Px 16)), ($area.Bottom - $banner.Height - (Px 16)))
+    $body = New-Object System.Windows.Forms.Panel
+    $body.Dock = 'Fill'; $body.BackColor = Rgb 31 33 38
+    $banner.Controls.Add($body)
+    $heading = New-Object System.Windows.Forms.Label
+    $heading.Text = "Updating Zerus to build $Build"; $heading.ForeColor = Rgb 236 238 241
+    $heading.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+    $heading.SetBounds((Px 16), (Px 12), (Px 346), (Px 22))
+    $status = New-Object System.Windows.Forms.Label
+    $status.ForeColor = Rgb 178 182 189
+    $status.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $status.SetBounds((Px 16), (Px 36), (Px 346), (Px 38))
+    $track = New-Object System.Windows.Forms.Panel
+    $track.BackColor = Rgb 51 54 61
+    $track.SetBounds((Px 16), (Px 82), (Px 346), (Px 6))
+    $fill = New-Object System.Windows.Forms.Panel
+    $fill.BackColor = Rgb 76 141 255
+    $fill.SetBounds(0, 0, 0, (Px 6))
+    $track.Controls.Add($fill)
+    $body.Controls.AddRange(@($heading, $status, $track))
+    foreach ($control in @($banner, $body, $heading, $status, $track, $fill)) { $control.Add_Click({ $banner.Hide() }) }
+    $banner.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+} catch { $banner = $null }
+# Waits while the banner stays responsive.
+function Pump([int]$milliseconds) {
+    $until = (Get-Date).AddMilliseconds($milliseconds)
+    do {
+        if ($banner -and $banner.Visible) { [System.Windows.Forms.Application]::DoEvents() }
+        Start-Sleep -Milliseconds 50
+    } while ((Get-Date) -lt $until)
+}
+function Step([string]$text, [int]$percent) {
+    if (-not $banner) { return }
+    $status.Text = $text
+    $fill.Width = [int]($track.Width * [Math]::Min(100, [Math]::Max(0, $percent)) / 100)
+    $banner.Refresh()
+    [System.Windows.Forms.Application]::DoEvents()
+}
+# The result: a failure is logged and stays on screen longer, even after the
+# banner was hidden.
+function Finish([string]$text, [bool]$failed) {
+    if ($failed) { Log $text }
+    if (-not $banner) { return }
+    if ($failed) {
+        $fill.BackColor = Rgb 224 82 82; $status.ForeColor = Rgb 255 160 160
+        if (-not $banner.Visible) { $banner.Show() }
+    }
+    Step $text 100
+    Pump $(if ($failed) { 10000 } else { 2500 })
+    $banner.Close()
+}
+function WaitExit([int]$id, [int]$seconds) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ((Get-Process -Id $id -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Pump 200 }
+    -not (Get-Process -Id $id -ErrorAction SilentlyContinue)
+}
+# The new build counts as started once it runs 15 seconds. The banner leaves
+# as soon as its window is up; a build that exits later still reports.
+function Started($process) {
+    for ($second = 1; $second -le 15; $second++) {
+        Pump 1000
+        if ($process.HasExited) { return $false }
+        $process.Refresh()
+        if ($banner -and $banner.Visible -and $second -ge 2 -and $process.MainWindowHandle -ne [IntPtr]::Zero) {
+            Step "Zerus build $Build is running." 100; Pump 1200; $banner.Hide()
+        } else { Step 'Starting Zerus...' (70 + 2 * $second) }
+    }
+    -not $process.HasExited
+}
+)PS";
+
 // Runs detached once Zerus quits: waits until nothing runs from the installation,
 // sets it aside as the single rollback copy, moves the verified build in and
 // starts it. A build that exits within 15 seconds is replaced by the previous one.
-const char *installScript = R"PS(param([int]$ParentPid, [string]$Install, [string]$New, [string]$Previous, [string]$Stage)
+const char *installHead = R"PS(param([int]$ParentPid, [string]$Install, [string]$New, [string]$Previous, [string]$Stage, [int]$Build)
 $ErrorActionPreference = 'Stop'
 $log = Join-Path (Split-Path -Parent $Install) 'zerus-fork-update.log'
 function Log([string]$message) { try { Add-Content -LiteralPath $log -Value ("{0:u} {1}" -f (Get-Date), $message) } catch { } }
-function Running {
+)PS";
+const char *installBody = R"PS(
+# The programs that still run from the installation, by name.
+function Holders {
     $prefix = $Install.TrimEnd('\') + '\'
     @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -and $_.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
-    }).Count -gt 0
+    } | ForEach-Object { $_.ProcessName + '.exe' } | Sort-Object -Unique)
 }
 function WaitIdle([int]$seconds) {
     $deadline = (Get-Date).AddSeconds($seconds)
-    while ((Running) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-    -not (Running)
+    while ((Get-Date) -lt $deadline) {
+        $holders = @(Holders)
+        if ($holders.Count -eq 0) { return $true }
+        Step ('Waiting for programs that run from the installation: ' + ($holders -join ', ')) 25
+        Pump 500
+    }
+    @(Holders).Count -eq 0
 }
 $gui = Join-Path $Install 'hgs-tray.exe'
-try { Wait-Process -Id $ParentPid -Timeout 120 -ErrorAction Stop } catch { }
-if (-not (WaitIdle 120)) { Log 'Programs still run from the installation; the update waits for the next restart.'; Start-Process -FilePath $gui; exit 1 }
+Step 'Waiting for Zerus to close...' 10
+[void](WaitExit $ParentPid 120)
+if (-not (WaitIdle 120)) { Start-Process -FilePath $gui; Finish 'Programs still run from the installation; the update waits for the next restart.' $true; exit 1 }
+Step 'Setting the current build aside...' 45
 try {
     if (Test-Path -LiteralPath $Previous) { Remove-Item -LiteralPath $Previous -Recurse -Force }
     Move-Item -LiteralPath $Install -Destination $Previous
-} catch { Log "Could not set the current build aside: $_"; Start-Process -FilePath $gui; exit 1 }
+} catch { Start-Process -FilePath $gui; Finish "Could not set the current build aside: $_" $true; exit 1 }
+Step 'Moving the new build in...' 60
 try { Move-Item -LiteralPath $New -Destination $Install }
 catch {
-    Log "Could not move the new build in: $_"
+    $problem = "$_"
     Move-Item -LiteralPath $Previous -Destination $Install
-    Start-Process -FilePath $gui; exit 1
+    Start-Process -FilePath $gui; Finish "Could not move the new build in: $problem" $true; exit 1
 }
+Step 'Starting Zerus...' 70
 $started = Start-Process -FilePath $gui -PassThru
-Start-Sleep -Seconds 15
-if ($started.HasExited) {
-    Log "The new build exited with code $($started.ExitCode); restoring the previous build."
+if (-not (Started $started)) {
+    $code = $started.ExitCode
+    Step 'The new build exited; restoring the previous build...' 90
     [void](WaitIdle 30)
     $failed = $Install.TrimEnd('\') + '.failed'
     if (Test-Path -LiteralPath $failed) { Remove-Item -LiteralPath $failed -Recurse -Force }
     Move-Item -LiteralPath $Install -Destination $failed
     Move-Item -LiteralPath $Previous -Destination $Install
     Start-Process -FilePath $gui
+    Finish "The new build exited with code $code; the previous build runs again." $true
     exit 1
 }
 Log "Updated to the build in $Install."
 Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
+if ($banner -and $banner.Visible) { Finish "Zerus build $Build is running." $false } elseif ($banner) { $banner.Close() }
 )PS";
 
 // The versioned root's helper: the running build is never moved, so nothing has to
 // stop running from it. Once Zerus quits, the verified build becomes <root>\app-<N>,
 // <root>\current is re-pointed at it and started; a build that exits within 15
 // seconds hands current back. The two newest builds stay, older app-* go.
-const char *versionedScript = R"PS(param([int]$ParentPid, [string]$Root, [string]$Link, [string]$New, [string]$Target, [string]$Stage)
+const char *versionedHead = R"PS(param([int]$ParentPid, [string]$Root, [string]$Link, [string]$New, [string]$Target, [string]$Stage, [int]$Build)
 $ErrorActionPreference = 'Stop'
 $log = Join-Path $Root 'update.log'
 function Log([string]$message) { try { Add-Content -LiteralPath $log -Value ("{0:u} {1}" -f (Get-Date), $message) } catch { } }
+)PS";
+const char *versionedBody = R"PS(
 function Point([string]$folder) {
     # rmdir removes the junction itself and never the build it points to.
     if (Test-Path -LiteralPath $Link) { cmd /c rmdir "$Link" | Out-Null }
@@ -93,23 +201,25 @@ function Point([string]$folder) {
 }
 $gui = Join-Path $Link 'hgs-tray.exe'
 $previous = ([string]((Get-Item -LiteralPath $Link).Target | Select-Object -First 1)).TrimEnd('\')
-try { Wait-Process -Id $ParentPid -Timeout 120 -ErrorAction Stop } catch { }
-if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) { Log 'Zerus did not quit; the update waits for the next restart.'; exit 1 }
+Step 'Waiting for Zerus to close...' 10
+if (-not (WaitExit $ParentPid 120)) { Finish 'Zerus did not quit; the update waits for the next restart.' $true; exit 1 }
+Step 'Switching to the new build...' 50
 try {
     if (Test-Path -LiteralPath $Target) { Remove-Item -LiteralPath $Target -Recurse -Force }
     Move-Item -LiteralPath $New -Destination $Target
     Point $Target
 } catch {
-    Log "Could not switch to the new build: $_"
+    $problem = "$_"
     if (-not (Test-Path -LiteralPath $Link)) { Point $previous }
-    Start-Process -FilePath $gui; exit 1
+    Start-Process -FilePath $gui; Finish "Could not switch to the new build: $problem" $true; exit 1
 }
+Step 'Starting Zerus...' 70
 $started = Start-Process -FilePath $gui -PassThru
-Start-Sleep -Seconds 15
-if ($started.HasExited) {
-    Log "The new build exited with code $($started.ExitCode); current points to $previous again."
+if (-not (Started $started)) {
+    $code = $started.ExitCode
     Point $previous
     Start-Process -FilePath $gui
+    Finish "The new build exited with code $code; current points to $previous again." $true
     exit 1
 }
 Log "Updated: current is $Target, the previous build stays in $previous."
@@ -117,6 +227,7 @@ Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
 Get-ChildItem -LiteralPath $Root -Directory -Filter 'app-*' | Where-Object { $_.FullName -ne $Target -and $_.FullName -ne $previous } | ForEach-Object {
     try { Remove-Item -LiteralPath $_.FullName -Recurse -Force } catch { Log "Kept $($_.FullName): $_" }
 }
+if ($banner -and $banner.Visible) { Finish "Zerus build $Build is running." $false } elseif ($banner) { $banner.Close() }
 )PS";
 }
 
@@ -320,30 +431,18 @@ void ForkUpdater::extracted()
 bool ForkUpdater::startInstall()
 {
     if (!ready() || !QFileInfo::exists(unpacked())) return false;
-#ifdef Q_OS_WIN
-    // The bundled mobile connector runs from the portable folder, which the
-    // plain layout's helper waits to be free of. Ask it to stop through its own
-    // management interface: it finishes its current phone request first, and
-    // the new build starts it again (WindowsMobileServices::ensureInBackground).
-    if (!m_layout.versioned && QFileInfo::exists(RelaySettings::configPath())) {
-        const auto config = RelaySettings::configPath();
-        const auto status = WindowsMobileServices::manage(QStringLiteral("status"), config, {{QStringLiteral("revision"), QString()}});
-        if (status.value(QStringLiteral("running")).toBool())
-            WindowsMobileServices::manage(QStringLiteral("stop"), config,
-                {{QStringLiteral("revision"), status.value(QStringLiteral("revision")).toString()},
-                 {QStringLiteral("generation"), status.value(QStringLiteral("generation")).toString()}});
-    }
-#endif
     const QString script = QDir::temp().filePath(QStringLiteral("zerus-fork-install-%1.ps1").arg(m_readyBuild));
     QFile file(script);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)
-        || file.write(m_layout.versioned ? versionedScript : installScript) < 0) return false;
+    const QByteArray text = m_layout.versioned ? QByteArray(versionedHead) + bannerScript + versionedBody
+                                               : QByteArray(installHead) + bannerScript + installBody;
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(text) != text.size()) return false;
     file.close();
     const auto native = [](const QString &path) { return QDir::toNativeSeparators(path); };
     QStringList args{QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
                           QStringLiteral("-WindowStyle"), QStringLiteral("Hidden"), QStringLiteral("-File"), native(script),
                           QStringLiteral("-ParentPid"), QString::number(QCoreApplication::applicationPid()),
-                          QStringLiteral("-New"), native(unpacked()), QStringLiteral("-Stage"), native(m_stage)};
+                          QStringLiteral("-New"), native(unpacked()), QStringLiteral("-Stage"), native(m_stage),
+                          QStringLiteral("-Build"), QString::number(m_readyBuild)};
     if (m_layout.versioned)
         args << QStringLiteral("-Root") << native(m_layout.root) << QStringLiteral("-Link") << native(m_layout.link)
                   << QStringLiteral("-Target") << native(QDir(m_layout.root).filePath(QStringLiteral("app-%1").arg(m_readyBuild)));
@@ -354,9 +453,26 @@ bool ForkUpdater::startInstall()
     process.setProgram(QDir(qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"))).filePath(QStringLiteral("System32/WindowsPowerShell/v1.0/powershell.exe")));
     process.setArguments(args);
 #ifdef Q_OS_WIN
-    // CREATE_NO_WINDOW: the helper outlives Zerus without a console window.
+    // CREATE_NO_WINDOW: the helper outlives Zerus without a console window; its
+    // banner is its only window.
     process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments) { arguments->flags |= 0x08000000; });
 #endif
     ChildProcess::inheritStdioOnly(process);
-    return process.startDetached();
+    if (!process.startDetached()) return false;
+#ifdef Q_OS_WIN
+    // The bundled mobile connector runs from the portable folder, which the
+    // plain layout's helper waits to be free of. Ask it to stop through its own
+    // management interface: it finishes its current phone request first, and
+    // the new build starts it again (WindowsMobileServices::ensureInBackground).
+    // The helper's banner already shows while this waits.
+    if (!m_layout.versioned && QFileInfo::exists(RelaySettings::configPath())) {
+        const auto config = RelaySettings::configPath();
+        const auto status = WindowsMobileServices::manage(QStringLiteral("status"), config, {{QStringLiteral("revision"), QString()}});
+        if (status.value(QStringLiteral("running")).toBool())
+            WindowsMobileServices::manage(QStringLiteral("stop"), config,
+                {{QStringLiteral("revision"), status.value(QStringLiteral("revision")).toString()},
+                 {QStringLiteral("generation"), status.value(QStringLiteral("generation")).toString()}});
+    }
+#endif
+    return true;
 }

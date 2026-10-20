@@ -101,6 +101,10 @@ pub fn phone_output(value: &mut Value) {
 /// computer's folders out of the shared catalog, so they have no catalog id.
 pub const LOCAL_FOLDER_PREFIX: &str = "windows-local-";
 
+/// A Windows gateway starts phone sessions only in project working folders.
+pub const PROJECT_FOLDERS_ONLY: &str =
+    "On this computer the phone starts sessions only in a project's working folder";
+
 /// The shared catalog (`hgs swarm get`) with this computer's own project
 /// folders (`hgs project ls --json`, already in the phone's form) added to the
 /// projects of the same name. The desktop keeps local Windows folders out of

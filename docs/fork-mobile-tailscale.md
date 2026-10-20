@@ -12,9 +12,12 @@ phone (Zerus app) --HTTPS inside the tailnet--> tailscale serve on the PC
 
 The Windows gateway is upstream's (see
 `docs/superpowers/specs/2026-10-20-windows-mobile-gateway-design.md`): from the
-phone you control the PC's existing Codex, Claude and Kimi sessions. Creating
-sessions, folders and worktrees, DeepSeek, OpenCode and voice are not available
-from the phone on a Windows gateway yet.
+phone you control the PC's Codex, Claude and Kimi sessions. The fork adds new
+sessions from the phone, but only in a project's working folder on this PC: the
+phone cannot browse the PC's folders or create new ones. A project's folders are
+the ones Zerus shows under Projects for this computer (`hgs project ls`); the
+phone sees them as `/D:/Work/project`. Worktrees, DeepSeek, OpenCode and voice
+are not available from the phone on a Windows gateway yet.
 
 ## What you need
 

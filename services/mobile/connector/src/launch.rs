@@ -637,6 +637,11 @@ impl<N: Native + 'static> Connector<N> {
             Some(Value::String(path)) if path.starts_with('/') => path.clone(),
             _ => return Err(Failure::text(DIRECTORY_UNAVAILABLE)),
         };
+        // WhiteWh fork: a Windows gateway starts phone sessions only in its
+        // projects' working folders; the phone cannot browse the computer.
+        if self.flags.get().windows_gateway && !self.project_folder(&directory).await? {
+            return Err(Failure::text(crate::windows_paths::PROJECT_FOLDERS_ONLY));
+        }
         if payload.get("project_id").is_some() {
             if !self.flags.get().project_launch {
                 return Err(Failure::text(
@@ -712,6 +717,20 @@ impl<N: Native + 'static> Connector<N> {
 
     /// The project catalog and folder checks before a project launch; the
     /// checked folder paths replace the catalog's, as in Python.
+    /// Whether `directory` is a working folder of one of the projects.
+    async fn project_folder(&self, directory: &str) -> Result<bool, Failure> {
+        let raw = self
+            .call(Call::new(["swarm", "get"]).timeout(SWARM_TIMEOUT))
+            .await?;
+        let catalog = launch_projects(&raw).map_err(py)?;
+        Ok(catalog["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|project| project["folders"].as_array().into_iter().flatten())
+            .any(|folder| folder["path"].as_str() == Some(directory)))
+    }
+
     async fn project_preflight(&self, payload: &Value, directory: &str) -> Result<(), Failure> {
         let raw = self
             .call(Call::new(["swarm", "get"]).timeout(SWARM_TIMEOUT))

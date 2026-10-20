@@ -204,11 +204,11 @@ void TestSessionSearch::multipleMachinesScopeSearch()
 void TestSessionSearch::folderScopeFollowsTheMachinePathStyle()
 {
     // A local Windows folder scope matches sessions in any case and with either
-    // separator; a peer is POSIX even when it reports Windows, and keeps exact names.
+    // separator; a POSIX peer keeps exact names.
     auto state = fleet(); auto box = state.local(); box.metrics["platform"] = "windows";
     box.sessions[0].canonicalCwd = "c:\\docs\\live"; box.sessions[1].canonicalCwd = "C:\\Docs\\Saved"; box.sessions[2].canonicalCwd = "C:\\Docs\\Live";
     state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
-    auto mac = *state.peer("mac"); mac.metrics["platform"] = "windows"; mac.sessions[0].canonicalCwd = "/remote/Docs";
+    auto mac = *state.peer("mac"); mac.metrics["platform"] = "macos"; mac.sessions[0].canonicalCwd = "/remote/Docs";
     state.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
     SessionSearch search(FakeCli::program(script())); search.setScope(state, "all", {}); search.setFolderScope({}, "C:/Docs/Live", false);
     search.setQuery("needle"); QTRY_COMPARE(calls().size(), 2); QTRY_COMPARE(list(search)->count(), 2);

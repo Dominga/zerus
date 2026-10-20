@@ -281,7 +281,8 @@ fn assign(store: &mut Store, request: &Request, _conversation: &str) -> Result<S
         values.get(&Key::project(&request.project_id, "alive")) == Some(&json!(true)),
         "Requested project no longer exists"
     );
-    let directory = Path::new(&request.directory).canonicalize()?;
+    // The plain form on Windows, as the catalog stores drive folders (WhiteWh fork).
+    let directory = crate::platform::canonical(&request.directory)?;
     ensure!(directory.is_dir(), "Launch directory is not a directory");
     let path = directory
         .to_str()
@@ -293,9 +294,7 @@ fn assign(store: &mut Store, request: &Request, _conversation: &str) -> Result<S
                 .as_str()
                 .is_some_and(|id| store.catalog.machine(id) == local)
             && location["path"].as_str().is_some_and(|saved| {
-                Path::new(saved)
-                    .canonicalize()
-                    .is_ok_and(|saved| saved == directory)
+                crate::platform::canonical(saved).is_ok_and(|saved| saved == directory)
             })
     };
     let existing = if let Some(anchor) = &request.worktree_folder_id {
@@ -309,12 +308,11 @@ fn assign(store: &mut Store, request: &Request, _conversation: &str) -> Result<S
                     .is_some_and(|id| store.catalog.machine(id) == local),
             "Worktree anchor is outside this local project"
         );
-        let anchor_path = Path::new(
+        let anchor_path = crate::platform::canonical(
             folder["path"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("Invalid worktree anchor path"))?,
-        )
-        .canonicalize()?;
+        )?;
         let evidence = crate::state::worktree_catalog(&anchor_path);
         ensure!(
             evidence["state"] == "ok"

@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// A drive (`C:\`, `c:/`) or UNC (`\\server\share`, `//server/share`) path: on this
 /// machine, a local Windows folder of a desktop (D15 of the Windows native host design).
-/// The catalog has no Windows path kind yet, so these stay in that desktop's
-/// organization. A peer's `//server/share` is a POSIX path, which a Windows GUI can
-/// store (`QDir::cleanPath` keeps the leading `//` there). Matches
+/// WhiteWh fork: the catalog shares drive folders of every machine
+/// (`catalog::drive_path`); a UNC folder of this machine still stays in that
+/// desktop's organization. A peer's `//server/share` is a POSIX path, which a Windows
+/// GUI can store (`QDir::cleanPath` keeps the leading `//` there). Matches
 /// `MachinePlatform::windowsShaped` in the GUI.
 fn windows_folder(path: &str) -> bool {
     let separator = |c: &u8| *c == b'/' || *c == b'\\';
@@ -77,10 +78,10 @@ impl Store {
                         .filter(|s| !s.is_empty())
                         .or_else(|| f["machine"].as_str())
                         .unwrap_or_default();
-                    // A local Windows folder is skipped whole. A peer's drive path, like
-                    // other invalid paths, still fails when written.
-                    let windows = f["path"].as_str().is_some_and(windows_folder);
-                    if windows && machine_id(alias)? == local {
+                    // A local folder on a server share is skipped whole. Drive paths
+                    // are shared (WhiteWh fork); other invalid paths fail when written.
+                    let share = f["path"].as_str().is_some_and(|p| windows_folder(p) && !super::catalog::drive_path(p));
+                    if share && machine_id(alias)? == local {
                         continue;
                     }
                     let folder = f["id"]
@@ -502,12 +503,7 @@ mod tests {
                 ),
             ]
         };
-        for path in [
-            "C:\\work",
-            "c:/Users/user/project",
-            "\\\\server\\share\\dir",
-            "//server/share",
-        ] {
+        for path in ["\\\\server\\share\\dir", "//server/share"] {
             for document in local(path) {
                 a.apply(Patch {
                     base: org("Initial"),
@@ -524,28 +520,42 @@ mod tests {
                 assert_eq!(a.catalog.digest(), digest, "{path}");
             }
         }
-        for document in local("C:\\work") {
+        for document in local("\\\\server\\share") {
             assert!(a
                 .flatten(&document)
                 .unwrap()
                 .keys()
                 .all(|key| !matches!(key, Key::Folder { .. })));
         }
+        // WhiteWh fork: drive folders of this machine and of a Windows peer are shared.
+        let peer = new_id();
+        for document in [
+            local("C:\\work")[0].clone(),
+            local("c:/Users/user/project")[1].clone(),
+            with(json!({"id":"local-folder","machine":"laptop","path":"D:/x","name":""})),
+            with(json!({"id":"local-folder","machine":"laptop","machine_id":peer,"path":"d:\\work","name":""})),
+        ] {
+            let path = document["projects"][0]["folders"][0]["path"].clone();
+            let versions = a.catalog.versions();
+            a.apply(Patch {
+                base: org("Initial"),
+                desired: document.clone(),
+                versions: versions.clone(),
+            })
+            .unwrap();
+            assert_eq!(a.catalog.values()[&Key::Folder { id: "local-folder".into() }]["path"], path);
+            a.apply(Patch {
+                base: document,
+                desired: org("Initial"),
+                versions: a.catalog.versions(),
+            })
+            .unwrap();
+        }
+        let versions = a.catalog.versions();
         let [work, work_by_id] = local("work");
         let [drive_relative, _] = local("C:work");
         let [rooted, _] = local("\\work");
-        let peer = new_id();
-        for desired in [
-            work,
-            work_by_id,
-            drive_relative,
-            rooted,
-            // A peer's drive path, by alias or ID, is no folder of a POSIX machine.
-            with(json!({"id":"peer-folder","machine":"laptop","path":"C:/x","name":""})),
-            with(
-                json!({"id":"peer-folder","machine":"laptop","machine_id":peer,"path":"c:\\work","name":""}),
-            ),
-        ] {
+        for desired in [work, work_by_id, drive_relative, rooted] {
             assert!(
                 a.apply(Patch {
                     base: org("Initial"),

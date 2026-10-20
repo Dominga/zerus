@@ -18,6 +18,14 @@ pub enum Key {
     Order { field: String },
 }
 
+/// WhiteWh fork: an absolute drive path (`D:\Work`, `d:/work`), the folder of a
+/// Windows machine (src/windows_peer.rs). The catalog shares it like a POSIX
+/// folder; a folder on a server share (`\\server\share`) still stays in the
+/// desktop's own organization.
+pub(crate) fn drive_path(path: &str) -> bool {
+    matches!(path.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic())
+}
+
 impl Key {
     pub fn token(&self) -> String {
         serde_json::to_string(self).expect("field key")
@@ -82,8 +90,9 @@ impl Key {
                     let o = value
                         .as_object()
                         .ok_or_else(|| anyhow::anyhow!("invalid folder"))?;
+                    // WhiteWh fork: a Windows machine's folder is a drive path.
                     ensure!(o.len() == 4 && string(&value["project"], 128) && uuid(value["machine"].as_str().unwrap_or_default())
-                        && value["path"].as_str().is_some_and(|p| p.starts_with('/') && p.len() <= 8192 && !p.chars().any(char::is_control))
+                        && value["path"].as_str().is_some_and(|p| (p.starts_with('/') || drive_path(p)) && p.len() <= 8192 && !p.chars().any(char::is_control))
                         && value["name"].as_str().is_some_and(|s| s.len() <= 320 && !s.chars().any(char::is_control)), "invalid shared folder fields");
                 }
             }

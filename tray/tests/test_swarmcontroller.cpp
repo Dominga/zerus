@@ -86,8 +86,10 @@ print(json.dumps(result))
         QCOMPARE(result["run_groups"],local["run_groups"]);
     }
     void presentationRestoresOnlyThisMachinesWindowsFolders() {
-        // Local Windows folders (D15) are not in the catalog. A read restores those of
+        // Local share folders (D15) are not in the catalog. A read restores those of
         // this machine (no machine ID yet, or this node's) while their project lives.
+        // WhiteWh fork: drive folders are the catalog's; only pending ones of this
+        // machine come back while they are uploaded.
         const QJsonObject posix{{"id","posix"},{"machine","desktop"},{"path","/work"},{"machine_id","node-a"}};
         const QJsonObject drive{{"id","drive"},{"machine","desktop"},{"path","C:/work"},{"machine_id",""}};
         const QJsonObject share{{"id","share"},{"machine","desktop"},{"path","//server/share/dir"},{"machine_id","node-a"}};
@@ -103,13 +105,16 @@ print(json.dumps(result))
         shared["projects"]=QJsonArray{project};
         const auto ids=[](const QJsonObject &organization){
             QStringList result;for(const auto &p:organization["projects"].toArray())for(const auto &f:p.toObject()["folders"].toArray())result.append(f.toObject()["id"].toString());return result;};
-        const auto merged=SwarmController::presentation(shared,local,"node-a");
+        const auto merged=SwarmController::presentation(shared,local,"node-a",true);
         QCOMPARE(merged["projects"].toArray().size(),1);QCOMPARE(ids(merged),QStringList({"posix","share","drive"}));
         QCOMPARE(merged["projects"].toArray()[0].toObject()["folders"].toArray()[2].toObject(),drive);
-        QCOMPARE(ids(SwarmController::presentation(shared,local)),QStringList({"posix","share","drive"}));
+        QCOMPARE(ids(SwarmController::presentation(shared,local,"node-a")),QStringList({"posix","share"}));
+        QCOMPARE(ids(SwarmController::presentation(shared,local,{},true)),QStringList({"posix","share","drive"}));
         project["folders"]=QJsonArray{posix};shared["projects"]=QJsonArray{project};
-        QCOMPARE(ids(SwarmController::presentation(shared,local,"node-a")),QStringList({"posix","drive","share"}));
-        QCOMPARE(ids(SwarmController::presentation(shared,local,"node-b")),QStringList({"posix","drive","other"}));
+        QCOMPARE(ids(SwarmController::presentation(shared,local,"node-a")),QStringList({"posix","share"}));
+        QCOMPARE(ids(SwarmController::presentation(shared,local,"node-a",true)),QStringList({"posix","drive","share"}));
+        QCOMPARE(ids(SwarmController::presentation(shared,local,"node-b",true)),QStringList({"posix","drive","other"}));
+        QCOMPARE(ids(SwarmController::presentation(shared,local,"node-b")),QStringList({"posix"}));
         // Without local Windows folders a read presents the catalog's folders as before.
         project=local["projects"].toArray()[0].toObject();project["folders"]=QJsonArray{posix,stale};local["projects"]=QJsonArray{project};
         QCOMPARE(SwarmController::presentation(shared,local,"node-a")["projects"].toArray()[0].toObject()["folders"],shared["projects"].toArray()[0].toObject()["folders"]);
@@ -158,7 +163,7 @@ print(json.dumps(result))
     }
     void localWindowsFoldersNeverReachTheCatalog() {
         const QJsonObject posix{{"id","posix"},{"machine","desktop"},{"path","/work"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
-        const QJsonObject drive{{"id","drive"},{"machine","desktop"},{"path","C:/work"},{"name","Drive"},{"machine_id",""},{"machine_name",""}};
+        const QJsonObject drive{{"id","drive"},{"machine","desktop"},{"path","//nas/local/work"},{"name","Drive"},{"machine_id",""},{"machine_name",""}};
         const QJsonObject share{{"id","share"},{"machine","desktop"},{"path","//server/share/dir"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
         auto local=organization("Original");auto project=local["projects"].toArray()[0].toObject();
         project["folders"]=QJsonArray{drive,posix,share};local["projects"]=QJsonArray{project};
@@ -186,7 +191,7 @@ print(json.dumps(result))
         catalog(true);controller.refresh();QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
         QCOMPARE(ids(ready,"p"),QStringList({"posix","drive","share"}));
         QFile raw(m_root+"/requests");QVERIFY(raw.open(QIODevice::ReadOnly));const auto sent=raw.readAll();
-        for(const char *path:{"C:/work","//server"})QVERIFY2(!sent.contains(path),path);
+        for(const char *path:{"//nas","//server"})QVERIFY2(!sent.contains(path),path);
         // A restart keeps them in the observed baseline, still out of every request.
         controller.suspend(true);
         {
@@ -199,11 +204,47 @@ print(json.dumps(result))
         catalog(false);controller.suspend(false);QTRY_COMPARE(requests().size(),5);QTRY_VERIFY(controller.settled());
         QVERIFY(ids(ready,"p").isEmpty());QCOMPARE(ready["projects"].toArray().size(),1);
     }
+    // WhiteWh fork: drive folders of this computer and of a Windows peer sync through
+    // the catalog. Those this desktop kept before are uploaded once.
+    void driveFoldersSyncAndKeptOnesAreUploadedOnce() {
+        const QJsonObject posix{{"id","posix"},{"machine","desktop"},{"path","/work"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
+        const QJsonObject kept{{"id","kept"},{"machine","desktop"},{"path","D:/Work/project"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
+        const QJsonObject peer{{"id","peer"},{"machine","msi-old"},{"path","E:/Work/project"},{"name",""},{"machine_id","node-b"},{"machine_name","msi-old"}};
+        const auto with=[this](const QJsonArray &folders){
+            auto result=organization("Original");auto p=result["projects"].toArray()[0].toObject();p["folders"]=folders;result["projects"]=QJsonArray{p};return result;};
+        const auto catalog=[&](const QJsonArray &folders){
+            write("response",QJsonDocument(QJsonObject{{"schema",1},{"node_id","node-a"},{"organization",with(folders)},{"versions",QJsonObject{}},
+                {"peers",QJsonObject{{"msi-old",QJsonObject{}}}},{"conflicts",QJsonArray{}}}).toJson());
+        };
+        const auto ids=[](const QJsonObject &organization){
+            QStringList result;for(const auto &p:organization["projects"].toArray())for(const auto &f:p.toObject()["folders"].toArray())result.append(f.toObject()["id"].toString());return result;};
+        const auto input=[this](int request,const QString &field){return requests()[request].toObject()["input"].toObject()[field].toObject();};
+        // Observed before this build: the drive folder lived only in this desktop's cache.
+        QSettings().setValue("swarm/observedOrganization",QJsonDocument(with({posix,kept})).toJson(QJsonDocument::Compact));
+        catalog({posix,peer});
+        HgsClient client(FakeCli::program(m_program));SwarmController controller(&client);
+        QJsonObject ready;connect(&controller,&SwarmController::organizationReady,this,[&](const QJsonObject &value){ready=value;});
+        controller.start(with({posix,kept}));
+        // The read keeps it and the next write adds it to the catalog beside the peer's.
+        QTRY_COMPARE(requests().size(),2);
+        QCOMPARE(requests()[0].toObject()["action"].toString(),QString("get"));QCOMPARE(requests()[1].toObject()["action"].toString(),QString("apply"));
+        QCOMPARE(ids(input(1,"base")),QStringList({"posix","peer"}));QCOMPARE(ids(input(1,"desired")),QStringList({"posix","peer","kept"}));
+        QTRY_VERIFY(controller.settled());
+        catalog({posix,peer,kept});controller.refresh();QTRY_COMPARE(requests().size(),3);QTRY_VERIFY(controller.settled());
+        QCOMPARE(ids(ready),QStringList({"posix","peer","kept"}));QVERIFY(QSettings().value("swarm/driveFoldersShared").toBool());
+        // Removed on another computer, it is gone here too: the upload happens once.
+        catalog({posix,peer});controller.refresh();QTRY_COMPARE(requests().size(),4);QTRY_VERIFY(controller.settled());
+        QCOMPARE(ids(ready),QStringList({"posix","peer"}));
+        // A folder added here for the Windows peer is sent like any other.
+        const QJsonObject added{{"id","added"},{"machine","msi-old"},{"path","F:/New"},{"name",""},{"machine_id","node-b"},{"machine_name","msi-old"}};
+        controller.edit(with({posix,peer,added}));QTRY_COMPARE(requests().size(),5);QTRY_VERIFY(controller.settled());
+        QCOMPARE(ids(input(4,"desired")),QStringList({"posix","peer","added"}));
+    }
     void peerUncFoldersSyncWhileLocalOnesStayLocal() {
         // A Windows GUI can store "//server/share" for a POSIX peer, a path the catalog
         // holds. Only this computer's Windows folders stay out of requests.
         const QJsonObject posix{{"id","posix"},{"machine","desktop"},{"path","/work"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
-        const QJsonObject drive{{"id","drive"},{"machine","desktop"},{"path","C:/work"},{"name",""},{"machine_id",""},{"machine_name",""}};
+        const QJsonObject drive{{"id","drive"},{"machine","desktop"},{"path","//nas/local/work"},{"name",""},{"machine_id",""},{"machine_name",""}};
         const QJsonObject share{{"id","share"},{"machine","desktop"},{"path","//server/share/local"},{"name",""},{"machine_id","node-a"},{"machine_name","Desktop"}};
         QJsonObject peer{{"id","peer"},{"machine","laptop"},{"path","//server/share/peer"},{"name",""},{"machine_id","node-b"},{"machine_name","Laptop"}};
         const auto with=[this](const QJsonArray &folders){
@@ -237,7 +278,7 @@ print(json.dumps(result))
         catalog({posix});controller.refresh();QTRY_COMPARE(requests().size(),5);QTRY_VERIFY(controller.settled());
         QCOMPARE(ids(ready),QStringList({"posix","share","drive"}));
         QFile raw(m_root+"/requests");QVERIFY(raw.open(QIODevice::ReadOnly));const auto sent=raw.readAll();
-        for(const char *path:{"C:/work","share/local"})QVERIFY2(!sent.contains(path),path);
+        for(const char *path:{"//nas","share/local"})QVERIFY2(!sent.contains(path),path);
     }
     void posixRequestsKeepTheirForm() {
         // Without local Windows folders a request is the former shared organization:

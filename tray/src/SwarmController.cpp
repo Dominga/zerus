@@ -1,6 +1,7 @@
 #include "SwarmController.h"
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QSet>
 #include "MachinePlatform.h"
@@ -10,13 +11,25 @@ bool windowsShaped(const QJsonValue &folder)
 {
     return MachinePlatform::windowsShaped(folder.toObject().value("path").toString());
 }
-// Local Windows folders (D15): the shared catalog has no Windows path kind yet. They
-// are this computer's: no machine ID yet, or the snapshot's node_id. A peer's
-// "//server/share" is a POSIX path, which a Windows GUI can store; it is shared.
-bool localOnly(const QJsonValue &folder, const QString &node)
+// WhiteWh fork: the catalog shares drive folders (`D:/Work`) of every machine,
+// a Windows peer's as well as this computer's (src/swarm/catalog.rs).
+bool drive(const QJsonValue &folder)
+{
+    static const QRegularExpression pattern(QStringLiteral("^[A-Za-z]:[\\\\/]"));
+    return pattern.match(folder.toObject().value("path").toString()).hasMatch();
+}
+// This computer's folder: no machine ID yet, or the snapshot's node_id.
+bool mine(const QJsonValue &folder, const QString &node)
 {
     const auto machine = folder.toObject().value("machine_id").toString();
-    return windowsShaped(folder) && (machine.isEmpty() || machine == node);
+    return machine.isEmpty() || machine == node;
+}
+// Local Windows folders (D15) on a server share: the shared catalog has no such path
+// kind yet, so they stay in this desktop's cache. A peer's "//server/share" is a
+// POSIX path, which a Windows GUI can store; it is shared.
+bool localOnly(const QJsonValue &folder, const QString &node)
+{
+    return windowsShaped(folder) && !drive(folder) && mine(folder, node);
 }
 QJsonObject sharedOrganization(QJsonObject local, const QString &node)
 {
@@ -31,11 +44,11 @@ QJsonObject sharedOrganization(QJsonObject local, const QString &node)
         for (const auto &session : project.value("sessions").toArray())
             if (!unassigned.contains(session.toString())) sessions.append(session);
         project.insert("sessions", sessions);
-        // Local Windows folders stay in this cache; presentation() restores them. Before
-        // a snapshot names this computer, any Windows folder may be one of them.
+        // Local share folders stay in this cache; presentation() restores them. Before
+        // a snapshot names this computer, any share folder may be one of them.
         const auto folders = project.value("folders").toArray(); QJsonArray shared;
         for (const auto &folder : folders)
-            if (node.isEmpty() ? !windowsShaped(folder) : !localOnly(folder, node)) shared.append(folder);
+            if (node.isEmpty() ? !(windowsShaped(folder) && !drive(folder)) : !localOnly(folder, node)) shared.append(folder);
         if (shared.size() != folders.size()) project.insert("folders", shared);
         projects.append(project);
     }
@@ -125,7 +138,7 @@ void SwarmController::persist()
         m_persistedVersions = versions;
     }
 }
-QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJsonObject &local, const QString &node)
+QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJsonObject &local, const QString &node, bool pendingDrives)
 {
     QMap<QString,QJsonObject> remaining;
     QSet<QString> assigned, unassigned, retained;
@@ -145,12 +158,13 @@ QJsonObject SwarmController::presentation(const QJsonObject &shared, const QJson
         // Session order is local too. Explicit membership comes from the catalog.
         for(const auto &s:old.value("sessions").toArray())if(sessions.contains(s)){sorted.append(s);for(qsizetype i=0;i<sessions.size();++i)if(sessions[i]==s){sessions.removeAt(i);break;}}
         for(const auto &s:sessions)sorted.append(s);project.insert("sessions",sorted);
-        // The catalog never sees local Windows folders. Restore this machine's (not yet
+        // The catalog never sees local share folders. Restore this machine's (not yet
         // synced, or of this node) while their project lives; a deleted project drops them.
+        // Drive folders this desktop kept before the catalog took them stay until sent.
         auto folders=project.value("folders").toArray();const auto sharedFolders=folders.size();
         for(const auto &value:old.value("folders").toArray()){
             const auto folder=value.toObject();
-            if(!localOnly(folder,node))continue;
+            if(!localOnly(folder,node)&&!(pendingDrives&&drive(folder)&&mine(folder,node)))continue;
             bool present=false;for(const auto &f:folders)present|=f.toObject().value("id")==folder.value("id");
             if(!present)folders.append(folder);
         }
@@ -202,10 +216,18 @@ void SwarmController::received(quint64 id,const QJsonObject &result)
     if(pending){persist();m_flush.start();return;}
     if(m_draftEditing){persist();return;}
     m_snapshot=result;m_versions=result.value("versions").toObject();
-    m_desired=presentation(result.value("organization").toObject(),m_desired,result.value("node_id").toString());
-    m_base=m_desired;persist();
+    // WhiteWh fork: once, this computer's drive folders that the catalog did not
+    // take before join it; afterwards the catalog decides, as for every folder.
+    QSettings settings;const bool upload=!settings.value("swarm/driveFoldersShared").toBool();
+    const auto organization=result.value("organization").toObject();const auto node=result.value("node_id").toString();
+    const auto previous=m_desired;
+    m_desired=presentation(organization,previous,node,upload);
+    m_base=upload?presentation(organization,previous,node):m_desired;
+    if(upload)settings.setValue("swarm/driveFoldersShared",true);
+    persist();
     emit organizationReady(m_desired);
     emit snapshotChanged(result);
+    if(m_base!=m_desired)m_flush.start();
     const int conflicts=result.value("conflicts").toArray().size();
     const auto peers=result.value("peers").toObject();
     int offline=0;for(const auto &p:peers)if(!p.toObject().value("error").toString().isEmpty())++offline;

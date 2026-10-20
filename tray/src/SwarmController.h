@@ -25,7 +25,8 @@ public:
     static void setPollInterval(int milliseconds);
     // node: this computer's catalog ID (the snapshot's node_id), whose local
     // Windows folders are merged back from local.
-    static QJsonObject presentation(const QJsonObject &shared, const QJsonObject &local, const QString &node = {});
+    // pendingDrives keeps this computer's drive folders the catalog does not hold yet.
+    static QJsonObject presentation(const QJsonObject &shared, const QJsonObject &local, const QString &node = {}, bool pendingDrives = false);
 signals:
     void organizationReady(const QJsonObject &organization);
     void statusChanged(const QString &text, bool error);

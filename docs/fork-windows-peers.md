@@ -76,10 +76,24 @@ On the **managing PC**:
    `<pc>.<tailnet>.ts.net`) and the peer's **Windows user name**, then choose
    Check. The check reports `Windows_NT` and the peer's hgs version.
 
+## Projects
+
+The shared project catalog (`hgs swarm`) holds each project's folders as
+"computer + path"; only this description syncs, never files. Upstream keeps a
+Windows computer's own folders out of it. The fork shares drive folders
+(`D:\Work\project`) of every computer, so the projects of two Windows PCs sync
+both ways, and New session and the phone offer a project's folder on either PC.
+Folders on a server share (`\\server\share`) still stay in the desktop that
+added them.
+
+The first time the fork's desktop reads the catalog, it adds the drive folders it
+had kept to itself before. After that the catalog decides, as for every folder:
+removing a folder on one computer removes it everywhere.
+
+A computer whose hgs predates this (upstream, or an older fork build) refuses a
+drive folder in the catalog, and project sync with it fails until it is updated.
+
 ## Limits
 
-- Project folders of a Windows peer stay on that computer: the shared catalog
-  takes POSIX folders only, so New session on another computer browses the
-  peer's folders instead of offering them by project.
 - The peer's sessions start only while its session host runs (step 2 above).
 - `hgs @peer session-host` stays refused: a computer manages its own host.

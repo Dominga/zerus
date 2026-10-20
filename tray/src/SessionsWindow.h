@@ -371,6 +371,9 @@ private:
     WorktreePanel *m_worktrees=nullptr;
     class SocratiCodePanel *m_socratiCode=nullptr;
     class IronRulesPanel *m_ironRules=nullptr;
+    class SessionLeadPanel *m_leadPanel=nullptr;
+    void updateLeadPanel();
+    void sendReportToLead();
     // WhiteWh fork: the project (organization group) a session belongs to.
     QString projectOfKey(const QString &key) const;
     QSet<QString> m_hostFilters, m_projectFilters;

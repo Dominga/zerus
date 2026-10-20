@@ -79,6 +79,7 @@
 #include "ComposerToolbar.h"
 #include "SessionList.h"
 #include "SessionCardDelegate.h"
+#include "SessionLeads.h"
 #include "SessionOrganization.h"
 #include "MachineFilter.h"
 #include "ProjectFilter.h"
@@ -225,6 +226,7 @@ private slots:
     void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
     void whiteWhWorkspaceView();
+    void subordinateSessionsFollowTheirLead();
     void groupsPersistFilterAndRevealAttention();
     void emptyProjectsSettingPreservesArchiveAndProjects();
     void contentScaleLeavesWorkspaceChrome();
@@ -642,6 +644,40 @@ FleetState TestSessionsWindow::fleet() const
 // hides New session while the list is docked, cards make room for the agent
 // tile, the composer is compact and SocratiCode leads Details. The classic
 // skin restores all of it.
+// WhiteWh fork: a subordinate session is listed under its lead, Details
+// links and unlinks it, and its report becomes the lead's draft.
+void TestSessionsWindow::subordinateSessionsFollowTheirLead()
+{
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/sessionLeads"); });
+    const auto state = fleet();
+    SessionsWindow window(FakeCli::program(script())); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList");
+    QTRY_VERIFY(list->count() >= 3);
+    QStringList identities, names;
+    for (int i = 0; i < list->count(); ++i) if (!list->item(i)->data(SessionRoles::Header).toBool() && list->item(i)->data(SessionRoles::ChildId).toString().isEmpty()) {
+        identities << list->item(i)->data(SessionRoles::Identity).toString(); names << list->item(i)->data(SessionRoles::Title).toString(); }
+    QVERIFY(identities.size() >= 3);
+    // The last session reports to the first one.
+    QVERIFY(SessionLeads::setLead(identities.last(), identities.first()));
+    QVERIFY(!SessionLeads::setLead(identities.first(), identities[1]));   // a lead reports to no one
+    window.setFleet(state);
+    const auto rowOf = [&](const QString &identity) { for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Identity) == identity && list->item(i)->data(SessionRoles::ChildId).toString().isEmpty()) return i; return -1; };
+    QTRY_COMPARE(rowOf(identities.last()), rowOf(identities.first()) + 1);
+    QVERIFY(list->item(rowOf(identities.last()))->data(SessionRoles::Subordinate).toBool());
+    QVERIFY(!list->item(rowOf(identities.first()))->data(SessionRoles::Subordinate).toBool());
+    // Details of the subordinate name its lead.
+    QString host, name;
+    for (const auto &box : {state.local()}) for (const auto &session : box.sessions) if (identities.last().contains(session.name)) { host = {}; name = session.name; }
+    list->setCurrentRow(rowOf(identities.last()));
+    auto *panel = window.findChild<QWidget *>("sessionLeadPanel"); QVERIFY(panel);
+    QTRY_VERIFY(panel->findChild<QLabel *>("sessionLeadName"));
+    QVERIFY(panel->findChild<QLabel *>("sessionLeadName")->text().contains(names.first().toHtmlEscaped()));
+    panel->findChild<QPushButton *>("detachSessionLead")->click();
+    QTRY_VERIFY(SessionLeads::lead(identities.last()).isEmpty());
+    QTRY_VERIFY(!list->item(rowOf(identities.last()))->data(SessionRoles::Subordinate).toBool());
+    QTRY_VERIFY(panel->findChild<QComboBox *>("sessionLeadChoice"));
+}
+
 void TestSessionsWindow::whiteWhWorkspaceView()
 {
     QSettings().setValue("workspace/skin", "whitewh");

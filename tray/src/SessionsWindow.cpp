@@ -27,6 +27,8 @@
 #include "WorktreePanel.h"
 #include "SocratiCodePanel.h"
 #include "IronRulesPanel.h"
+#include "SessionLeadPanel.h"
+#include "SessionLeads.h"
 #include "NewSessionDialog.h"
 #include "ActivityView.h"
 #include "ProcessView.h"
@@ -1324,6 +1326,16 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // WhiteWh fork: the iron rules of this session's project.
     m_ironRules=new IronRulesPanel;detailsLayout->addWidget(m_ironRules);
     m_ironRules->changed=[this](int count){m_composer->setIronRulesCount(count);};
+    // WhiteWh fork: lead and subordinate sessions of this project.
+    m_leadPanel=new SessionLeadPanel;detailsLayout->addWidget(m_leadPanel);
+    m_leadPanel->setLead=[this](const QString &identity,const QString &lead){
+        if(!SessionLeads::setLead(identity,lead)){showNotice(tr("A lead cannot report to another session, and a subordinate cannot lead."),true);return;}
+        rebuild();updateLeadPanel();
+    };
+    m_leadPanel->open=[this](const QString &identity){
+        for(const auto &entry:m_entries)if(entry.identity==identity){showSession(entry.host,entry.session.name);return;}
+    };
+    m_leadPanel->sendReport=[this]{sendReportToLead();};
     m_inspector->addTab(m_children, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
@@ -2991,6 +3003,7 @@ void SessionsWindow::rebuild()
         m_projectFilter->setSessionCounts(projectCounts, countCaption + (m_hostFilters.isEmpty() ? QString() : tr(" / selected machines"))); }
     struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
     QList<Row> rows;
+    QSet<int> subordinateRows;   // WhiteWh fork: visible entries listed under their lead
     const bool hasGroups = m_organization.groups().size() > 1;
     const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
     const bool hideEmptyProjects = QSettings().value("workspace/hideEmptyProjects", true).toBool();
@@ -3012,6 +3025,21 @@ void SessionsWindow::rebuild()
         std::stable_sort(members.begin(), members.end(), [&](int a, int b) {
             return group.sessions.indexOf(visible[a].identity) < group.sessions.indexOf(visible[b].identity);
         });
+        {
+            // WhiteWh fork: a subordinate follows its lead when both are listed here.
+            const auto leadAt = [&](int i) {
+                const auto lead = SessionLeads::lead(visible[i].identity);
+                if (!lead.isEmpty()) for (int j : members) if (visible[j].identity == lead && SessionLeads::lead(lead).isEmpty()) return j;
+                return -1;
+            };
+            QList<int> ordered;
+            for (int i : members) {
+                if (leadAt(i) >= 0) continue;
+                ordered.append(i);
+                for (int j : members) if (j != i && leadAt(j) == i) { ordered.append(j); subordinateRows.insert(j); }
+            }
+            members = ordered;
+        }
         if (members.isEmpty() && launches.isEmpty() && (filtering || hideEmptyProjects || !group.accessible)) continue;
         if (hasGroups) rows.append({group.id, -1, false});
         for (int i : members) {
@@ -3042,6 +3070,7 @@ void SessionsWindow::rebuild()
         item->setData(KeyRole, rowKey(row)); item->setData(SessionRoles::Group, row.group);
         item->setData(SessionRoles::ChildId, row.child);
         item->setData(SessionRoles::ParentKey, row.entry >= 0 ? visible[row.entry].key : QString());
+        item->setData(SessionRoles::Subordinate, row.entry >= 0 && row.child.isEmpty() && row.launch.isEmpty() && subordinateRows.contains(row.entry));
         item->setData(SessionRoles::LaunchId, row.launch);
         item->setData(SessionRoles::WorkingSince, 0.0);
         item->setData(SessionRoles::Scheduled, false);
@@ -3897,6 +3926,48 @@ void SessionsWindow::toggleInspectorSection(const QString &key)
     if (!folded.removeAll(key)) folded << key;
     settings.setValue(QStringLiteral("workspace/foldedInspector"), folded);
     m_childrenHtml.clear(); m_info->setProperty("inspectorHtml", QString()); renderDetails();
+}
+
+void SessionsWindow::updateLeadPanel()
+{
+    if (!m_leadPanel) return;
+    const auto *entry = selected();
+    if (!entry || !m_subagentId.isEmpty()) { m_leadPanel->setContext({}, {}, {}, {}); return; }
+    const auto project = m_organization.groupFor(entry->identity);
+    const auto nameOf = [this](const Entry &e) { return displayTitle(e.session); };
+    SessionLeadPanel::Session lead;
+    QList<SessionLeadPanel::Session> subordinates, candidates;
+    const auto leadId = SessionLeads::lead(entry->identity);
+    for (const auto &other : m_entries) {
+        if (other.identity == entry->identity) continue;
+        if (other.identity == leadId) lead = {other.identity, nameOf(other)};
+        if (SessionLeads::lead(other.identity) == entry->identity) subordinates.append({other.identity, nameOf(other)});
+        else if (m_organization.groupFor(other.identity) == project && SessionLeads::lead(other.identity).isEmpty())
+            candidates.append({other.identity, nameOf(other)});
+    }
+    if (!leadId.isEmpty() && lead.first.isEmpty()) lead = {leadId, tr("a closed session")};
+    m_leadPanel->setContext(entry->identity, lead, subordinates, candidates);
+}
+
+// WhiteWh fork: opens the lead with this session's latest reply as its draft.
+void SessionsWindow::sendReportToLead()
+{
+    const auto *entry = selected();
+    if (!entry) return;
+    const auto leadId = SessionLeads::lead(entry->identity);
+    const Entry *lead = nullptr;
+    for (const auto &other : m_entries) if (other.identity == leadId) lead = &other;
+    if (!lead) { showNotice(tr("The lead session is not open."), true); return; }
+    QString reply;
+    for (int at = m_events.size(); at-- > 0 && reply.isEmpty();) {
+        const auto event = m_events[at].toObject();
+        if (event.value("agent_id").toString().isEmpty() && (event.value("type") == "Stop" || event.value("type") == "AgentMessage"))
+            reply = event.value("detail").toString().trimmed();
+    }
+    const QString text = tr("Report from %1:").arg(displayTitle(entry->session)) + (reply.isEmpty() ? QString() : "\n\n" + reply);
+    const QString host = lead->host, name = lead->session.name, key = lead->key;
+    showSession(host, name);
+    if (!m_composer->offerDraft(key, text)) showNotice(tr("The lead already has a draft. The report was not added."), true);
 }
 
 QString SessionsWindow::projectOfKey(const QString &key) const
@@ -5444,6 +5515,7 @@ void SessionsWindow::updateWorktrees()
         m_ironRules->setProject(project,group?group->name:project);
         m_composer->setIronRulesCount(m_ironRules->rules().size());
     }
+    updateLeadPanel();
 }
 void SessionsWindow::filterFolder(const QString &host,const QString &path,bool checkout)
 {

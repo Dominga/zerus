@@ -19,6 +19,8 @@ inline QRect sessionCardRect(const QRect &row) { return row.adjusted(2, 4, -2, -
 // WhiteWh fork: the skin's cards view puts the agent's tile left of a session
 // card's text; every place that lays out or hit-tests that text shifts by it.
 inline int &sessionCardTileInset() { static int inset = 0; return inset; }
+// WhiteWh fork: a subordinate session's card stands indented under its lead.
+inline int sessionCardIndent(const QModelIndex &index) { return index.data(SessionRoles::Subordinate).toBool() ? 22 : 0; }
 
 // The collapsed session list keeps every row at its height; only the width
 // changes. The list's "expansion" runs from 0 (strip) to 1 (full cards), and
@@ -100,7 +102,7 @@ public:
     }
     static QRect gitStatusRect(const QRect &row, const QModelIndex &index, QFont base, bool compact) {
         if (index.data(SessionRoles::Header).toBool() || !index.data(SessionRoles::ChildId).toString().isEmpty()) return {};
-        const QRect card = sessionCardRect(row).adjusted(sessionCardTileInset(), 0, 0, 0);
+        const QRect card = sessionCardRect(row).adjusted(sessionCardTileInset() + sessionCardIndent(index), 0, 0, 0);
         const int textX = card.x() + 20, right = card.right() - 11;
         const int end = right - machineBadgeWidth(index, base, right - textX) - 8;
         const auto values = GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), base, end - textX - 48);
@@ -147,7 +149,7 @@ public:
     }
     static TitleLayout titleLayout(const QRect &row, const QFont &base, bool compact, const QModelIndex &index, const CardStatus &status) {
         const bool child = !index.data(SessionRoles::ChildId).toString().isEmpty();
-        const QRect r = sessionCardRect(row).adjusted(child ? 24 : sessionCardTileInset(), 0, 0, 0);
+        const QRect r = sessionCardRect(row).adjusted(child ? 24 : sessionCardTileInset() + sessionCardIndent(index), 0, 0, 0);
         const int x = r.x() + 12, right = r.right() - 11;
         const int y = r.y() + (child ? (compact ? 5 : 6) : (compact ? 3 : 5));
         const int statusWidth = SessionStatusBadge::width(status.caption, status.kind, base);
@@ -349,13 +351,14 @@ private:
         const bool dark = option.widget && option.widget->property("hgsDark").toBool();
         const bool childRow = !index.data(SessionRoles::ChildId).toString().isEmpty();
         const bool expandable = index.data(SessionRoles::HasChildren).toBool();
-        const QRect r = sessionCardRect(option.rect).adjusted(childRow ? 24 : sessionCardTileInset(), 0, 0, 0);
+        const int indent = childRow ? 0 : sessionCardIndent(index);
+        const QRect r = sessionCardRect(option.rect).adjusted(childRow ? 24 : sessionCardTileInset() + indent, 0, 0, 0);
         const bool compact = option.widget && option.widget->property("compact").toBool();
         const auto status = statusForView(option, index);
         const bool attention = status.attention, unread = status.unread, working = status.working, paused = status.paused;
         const QString state = status.state;
         p->setClipRect(option.rect, Qt::IntersectClip);
-        QStyleOptionViewItem cardOption(option); cardOption.rect.adjust(childRow ? 24 : 0, 2, 0, -4);
+        QStyleOptionViewItem cardOption(option); cardOption.rect.adjust(childRow ? 24 : indent, 2, 0, -4);
         if (!shared) IdentityBadges::paintRow(p, cardOption, dark, status.emphasis);
         const int x = r.x() + 12, textX = x + 8, right = r.right() - 11, width = right - textX;
         const QColor foreground(dark ? "#e8edf4" : "#1a2733"), muted(dark ? "#a1adbb" : "#647386");
@@ -363,7 +366,7 @@ private:
             // The agent's tile: its initials on its color, and the state as a dot.
             const QString agentKey = index.data(SessionRoles::Agent).toString();
             const QColor color = IdentityBadges::providerColor(agentKey, dark);
-            const QRect tile(sessionCardRect(option.rect).x() + 12, r.y() + 10, 30, 30);
+            const QRect tile(sessionCardRect(option.rect).x() + 12 + indent, r.y() + 10, 30, 30);
             QColor fill = color; fill.setAlphaF(dark ? 0.16 : 0.14);
             p->setPen(Qt::NoPen); p->setBrush(fill); p->drawRoundedRect(tile, 8, 8);
             const QString name = IdentityBadges::providerName(agentKey);
@@ -382,6 +385,13 @@ private:
             p->setPen(QPen(QColor(dark ? "#38434e" : "#c5cfd9"), 1));
             p->drawLine(option.rect.left() + 17, option.rect.top(), option.rect.left() + 17, option.rect.bottom());
             p->drawLine(option.rect.left() + 17, r.center().y(), r.left() - 3, r.center().y());
+        } else if (indent) {
+            // The line from the lead above into this subordinate's card.
+            const int line = option.rect.left() + 12, middle = option.rect.top() + 26;
+            p->setPen(QPen(QColor(dark ? "#4a525d" : "#b7c3ce"), 1.5)); p->setBrush(Qt::NoBrush);
+            p->drawLine(line, option.rect.top() - 2, line, middle - 6);
+            p->drawArc(QRect(line, middle - 12, 12, 12), 180 * 16, 90 * 16);
+            p->drawLine(line + 6, middle, cardOption.rect.left() + 2, middle);
         }
         const int titleY = r.y() + (childRow ? (compact ? 5 : 6) : (compact ? 3 : 5));
         const int metadataY = titleY + (compact ? 22 : 24);

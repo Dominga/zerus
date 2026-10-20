@@ -2013,6 +2013,9 @@ void SessionsWindow::applyWorkspaceView()
     if (m_railSessionsToggle) m_railSessionsToggle->setVisible(cards);
     if (m_railNewSession) m_railNewSession->setVisible(!cards || !docked);
     if (m_sessionsToggle) m_sessionsToggle->setVisible(!cards);
+    const bool compact = skin.view(QStringLiteral("composer")) == QLatin1String("compact");
+    if (m_composer) m_composer->setCompact(compact);
+    if (m_subagentComposer) m_subagentComposer->setCompact(compact);
     if (m_socratiCode) if (auto *layout = qobject_cast<QBoxLayout *>(m_socratiCode->parentWidget() ? m_socratiCode->parentWidget()->layout() : nullptr)) {
         const int at = layout->indexOf(m_socratiCode), wanted = cards ? 0 : layout->count() - 1;
         if (at >= 0 && at != wanted) { layout->removeWidget(m_socratiCode); layout->insertWidget(wanted, m_socratiCode); }

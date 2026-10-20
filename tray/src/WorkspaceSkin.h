@@ -112,14 +112,14 @@ inline const char *whiteWhJson()
         "accentText":"#0f1a16","accentHover":"#a8e6cc","hover":"#1f242c","selected":"#1b2621","inset":"#151920"},
 "light":{"background":"#f5f7f9","foreground":"#1a2733","muted":"#627082","surface":"#ffffff","border":"#dce2e8","accent":"#167357",
          "accentText":"#ffffff","accentHover":"#115d46","hover":"#edf2f5","selected":"#e0f0e9","inset":"#f3f6f8"},
-"views":{"newSession":"dense","sessions":"cards"},"window":{"dialogs":"frameless"},
+"views":{"newSession":"dense","sessions":"cards","composer":"compact"},"window":{"dialogs":"frameless"},
 "viewColors":{"dark":{"dialog":"#1b1f26","field":"#151920","selectedAgent":"#1f3a31","segmentOn":"#26443a","buttonNeutral":"#232830",
   "disabled":"#2a3038","border":"#2c323b","fieldBorder":"#39404a","neutralBorder":"#4a525d","track":"#2c323b","foreground":"#e6e8eb",
   "text2":"#c4cad1","text3":"#aab1ba","muted":"#9aa3ad","label":"#8b939e","dim":"#6f7883","accent":"#7dd3b0","accentText":"#0f1a16",
   "warn":"#e8a75a","danger":"#ef7d6d","folder":"#7fb6e0",
   "card":"#181c22","cardBorder":"#222830","cardHover":"#1d2229","cardSelected":"#1b2621","cardSelectedBorder":"#2f5a4a"},
  "light":{"card":"#ffffff","cardBorder":"#e3e8ed","cardHover":"#f4f7f9","cardSelected":"#e7f3ee","cardSelectedBorder":"#9fd3bd"}},
-"stylesheet":"QScrollBar:vertical{background:transparent;width:8px;margin:0;border:0}QScrollBar:horizontal{background:transparent;height:8px;margin:0;border:0}QScrollBar::handle:vertical{background:rgba(128,138,150,.38);border-radius:3px;min-height:28px;margin:1px}QScrollBar::handle:horizontal{background:rgba(128,138,150,.38);border-radius:3px;min-width:28px;margin:1px}QScrollBar::handle:hover{background:rgba(128,138,150,.65)}QScrollBar::add-line,QScrollBar::sub-line{width:0;height:0;border:0}QScrollBar::add-page,QScrollBar::sub-page{background:transparent}QWidget#socratiCodePanel{background:rgba(199,162,240,.08);border:1px solid rgba(199,162,240,.38);border-radius:10px}QWidget#socratiCodePanel QLabel#detailsIdentityTitle{color:#b48ee6;font-weight:600}"})";
+"stylesheet":"QScrollBar:vertical{background:transparent;width:8px;margin:0;border:0}QScrollBar:horizontal{background:transparent;height:8px;margin:0;border:0}QScrollBar::handle:vertical{background:rgba(128,138,150,.38);border-radius:3px;min-height:28px;margin:1px}QScrollBar::handle:horizontal{background:rgba(128,138,150,.38);border-radius:3px;min-width:28px;margin:1px}QScrollBar::handle:hover{background:rgba(128,138,150,.65)}QScrollBar::add-line,QScrollBar::sub-line{width:0;height:0;border:0}QScrollBar::add-page,QScrollBar::sub-page{background:transparent}QWidget#socratiCodePanel{background:rgba(199,162,240,.08);border:1px solid rgba(199,162,240,.38);border-radius:10px}QWidget#socratiCodePanel QLabel#detailsIdentityTitle{color:#b48ee6;font-weight:600}QFrame#composerCard{background:rgba(128,138,150,.07);border:1px solid rgba(128,138,150,.30);border-radius:12px}QFrame#composerCard QPlainTextEdit{border:0;background:transparent;padding:0}QFrame#composerCard QPushButton#attachMessageFile{border:0;background:transparent;border-radius:9px}QFrame#composerCard QPushButton#sendMessage{border-radius:9px;padding:0}QPushButton#sessionModelSettings{border:0;background:transparent}"})";
 }
 
 inline QList<Skin> builtins()

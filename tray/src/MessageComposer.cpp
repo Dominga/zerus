@@ -24,6 +24,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
+#include <QMenu>
+#include <QTextDocument>
+#include <QAbstractTextDocumentLayout>
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QInputMethodEvent>
@@ -870,8 +873,9 @@ void MessageComposer::updateControls()
     m_attach->setToolTip(m_attachmentsAvailable?tr("Attach files, paste an image, or drop files onto this session"):m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
-    m_send->setText(draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send"));
-    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : tr("Send: Enter; new line: Shift+Enter"));
+    const QString sendText = draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send");
+    m_send->setText(m_compact ? QString() : sendText); m_send->setAccessibleName(sendText);
+    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_compact ? sendText + " · " + tr("Enter; new line: Shift+Enter") : tr("Send: Enter; new line: Shift+Enter"));
     m_retry->setVisible(draft.uncertain && !operationLocked);
     m_refreshStatus->setVisible(!m_sessionStatus.isEmpty() && m_sessionStatusError);
     m_refreshStatus->setEnabled(!operationLocked);
@@ -1089,6 +1093,7 @@ void MessageComposer::updateSettingsButton()
 void MessageComposer::openSettings()
 {
     if (m_key.isEmpty()) return;
+    if (m_compact && m_settingsEnabled) { showSettingsMenu(); return; }
     m_popupKey = m_key;
     const QString model = m_pendingModel.isEmpty() ? m_model : m_pendingModel;
     const QSignalBlocker blocker(m_models); m_models->clear();
@@ -1242,6 +1247,87 @@ void MessageComposer::setContentScale(double scale)
     if (qFuzzyCompare(scale, m_scale)) return;
     m_scale = scale;
     // Keep the same number of visible lines as at the native size.
-    m_editor->setFixedHeight(ContentScale::px(76, scale));
+    fitEditor();
     setTheme(m_dark);
+}
+
+void MessageComposer::fitEditor()
+{
+    if (!m_compact) { m_editor->setFixedHeight(ContentScale::px(76, m_scale)); return; }
+    // One line to start, at most six; the field scrolls beyond them.
+    const int line = m_editor->fontMetrics().lineSpacing();
+    const int lines = qBound(1, int(m_editor->document()->documentLayout()->documentSize().height()), 6);
+    m_editor->setFixedHeight(lines * line + 2 * int(m_editor->document()->documentMargin()) + 6);
+}
+
+void MessageComposer::setCompact(bool compact)
+{
+    if (compact == m_compact) return;
+    m_compact = compact;
+    auto *inputLayout = static_cast<QVBoxLayout *>(m_input->layout());
+    if (compact) {
+        if (!m_card) {
+            m_card = new QFrame; m_card->setObjectName("composerCard");
+            m_cardRow = new QHBoxLayout(m_card); m_cardRow->setContentsMargins(5, 5, 5, 5); m_cardRow->setSpacing(4);
+            connect(m_editor->document(), &QTextDocument::contentsChanged, this, [this] { if (m_compact) fitEditor(); });
+        }
+        inputLayout->removeWidget(m_editor); m_actions->removeWidget(m_attach); m_actions->removeWidget(m_send);
+        m_cardRow->addWidget(m_attach, 0, Qt::AlignBottom); m_cardRow->addWidget(m_editor, 1); m_cardRow->addWidget(m_send, 0, Qt::AlignBottom);
+        inputLayout->insertWidget(0, m_card);
+        m_send->setFixedSize(34, 34); m_send->setLayoutDirection(Qt::LeftToRight);
+        m_card->show();
+    } else {
+        m_cardRow->removeWidget(m_attach); m_cardRow->removeWidget(m_editor); m_cardRow->removeWidget(m_send);
+        inputLayout->removeWidget(m_card); m_card->hide();
+        inputLayout->insertWidget(0, m_editor);
+        m_actions->insertWidget(0, m_attach); m_actions->addWidget(m_send);
+        m_send->setMinimumSize(0, 0); m_send->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX); m_send->setLayoutDirection(Qt::RightToLeft);
+    }
+    fitEditor(); updateControls(); setTheme(m_dark);
+}
+
+// The compact menu: the models, then the effort of the chosen one. A choice
+// applies at once, through the same request as Apply.
+void MessageComposer::showSettingsMenu()
+{
+    m_popupKey = m_key;
+    const QString model = m_pendingModel.isEmpty() ? m_model : m_pendingModel;
+    {
+        const QSignalBlocker blocker(m_models); m_models->clear();
+        for (const auto &value : m_modelOptions) {
+            const auto option = value.toObject(); const auto id = option.value("id").toString();
+            if (!id.isEmpty() && m_models->findData(id) < 0) m_models->addItem(option.value("label").toString(id), id);
+        }
+        if (m_models->findData(model) < 0 && !model.isEmpty()) m_models->insertItem(0, model, model);
+        m_models->setCurrentIndex(m_models->findData(model));
+    }
+    updateSettingsEfforts(); updateSettingsApply();
+    auto *menu = new QMenu(this); menu->setObjectName("sessionSettingsMenu"); menu->setAttribute(Qt::WA_DeleteOnClose);
+    const auto apply = [this] { updateSettingsApply(); if (m_applySettings->isEnabled()) m_applySettings->click(); };
+    for (int index = 0; index < m_models->count(); ++index) {
+        auto *action = menu->addAction(m_models->itemText(index));
+        action->setCheckable(true); action->setChecked(index == m_models->currentIndex()); action->setEnabled(m_models->isEnabled() || index == m_models->currentIndex());
+        if (index < 9) action->setShortcut(QKeySequence(QString::number(index + 1)));
+        connect(action, &QAction::triggered, this, [this, index, apply] {
+            if (m_popupKey != m_key) return;
+            m_models->setCurrentIndex(index); updateSettingsEfforts(); apply();
+        });
+    }
+    if (m_efforts->count()) {
+        menu->addSeparator();
+        auto *efforts = menu->addMenu(tr("Effort") + QStringLiteral("  ·  ") + m_efforts->currentText());
+        efforts->setEnabled(m_efforts->isEnabled());
+        for (int index = 0; index < m_efforts->count(); ++index) {
+            auto *action = efforts->addAction(m_efforts->itemText(index));
+            action->setCheckable(true); action->setChecked(index == m_efforts->currentIndex());
+            connect(action, &QAction::triggered, this, [this, index, apply] {
+                if (m_popupKey != m_key) return;
+                m_efforts->setCurrentIndex(index); apply();
+            });
+        }
+    }
+    menu->addSeparator();
+    auto *note = menu->addAction(m_settingsHint->text().section('\n', 0, 0)); note->setEnabled(false);
+    const QSize size = menu->sizeHint();
+    menu->popup(m_settings->mapToGlobal(QPoint(m_settings->width() - size.width(), -size.height() - 6)));
 }

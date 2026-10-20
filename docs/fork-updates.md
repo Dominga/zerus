@@ -115,6 +115,9 @@ turns extensions on by default.
 
 ## Windows mobile gateway additions
 
+The step-by-step setup with Tailscale, from install to pairing a phone and the
+usual problems, is in [fork-mobile-tailscale.md](fork-mobile-tailscale.md).
+
 Upstream's Windows gateway (`docs/superpowers/specs/2026-10-20-windows-mobile-gateway-design.md`)
 manages the bundled connector through `zerus-mobile-connector --manage`. The fork
 adds, under Settings -> Mobile connection (`tray/src/WindowsMobileServices.h`):

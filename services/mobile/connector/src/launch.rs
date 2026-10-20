@@ -786,6 +786,11 @@ impl<N: Native + 'static> Connector<N> {
             "project_folder_id",
         ] {
             if let Some(value) = payload.get(field) {
+                // WhiteWh fork: a folder only this Windows computer knows has
+                // no shared catalog id; the project takes the session as is.
+                if value.as_str().is_some_and(|id| id.starts_with(crate::windows_paths::LOCAL_FOLDER_PREFIX)) {
+                    continue;
+                }
                 stdin[field] = value.clone();
             }
         }

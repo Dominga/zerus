@@ -278,9 +278,19 @@ impl<N: Native + 'static> Connector<N> {
             if let Some(payload) = call.payload.as_mut() {
                 crate::windows_paths::native_payload(payload);
             }
+            let shared_catalog = call.argv == ["swarm", "get"];
             let mut result = self.native_call(call).await;
             if let Ok(Output::Json(value)) = &mut result {
                 crate::windows_paths::phone_output(value);
+                if shared_catalog {
+                    let mut local = self
+                        .native_call(Call::new(["project", "ls", "--json"]).timeout(5.0))
+                        .await
+                        .map(Output::json)
+                        .unwrap_or(Value::Null);
+                    crate::windows_paths::phone_output(&mut local);
+                    crate::windows_paths::add_local_folders(value, &local);
+                }
             }
             return result;
         }

@@ -97,6 +97,56 @@ pub fn phone_output(value: &mut Value) {
     }
 }
 
+/// Folder ids of [`add_local_folders`]: the desktop keeps a Windows
+/// computer's folders out of the shared catalog, so they have no catalog id.
+pub const LOCAL_FOLDER_PREFIX: &str = "windows-local-";
+
+/// The shared catalog (`hgs swarm get`) with this computer's own project
+/// folders (`hgs project ls --json`, already in the phone's form) added to the
+/// projects of the same name. The desktop keeps local Windows folders out of
+/// the shared catalog; the phone needs them to start a session in a project.
+pub fn add_local_folders(swarm: &mut Value, local: &Value) {
+    let node = swarm["node_id"].as_str().unwrap_or_default().to_owned();
+    if node.is_empty() {
+        return;
+    }
+    let machine_name = swarm["machines"]
+        .as_array()
+        .and_then(|machines| machines.iter().find(|m| m["id"].as_str() == Some(node.as_str())))
+        .and_then(|m| m["name"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let Some(projects) = swarm["organization"]["projects"].as_array_mut() else {
+        return;
+    };
+    for entry in local.as_array().into_iter().flatten() {
+        let (Some(name), Some(path)) = (entry["name"].as_str(), entry["dir"].as_str()) else {
+            continue;
+        };
+        if entry["exists"] == Value::Bool(false) || !path.starts_with('/') {
+            continue;
+        }
+        let Some(project) = projects.iter_mut().find(|p| p["name"].as_str() == Some(name)) else {
+            continue;
+        };
+        if !project["folders"].is_array() {
+            project["folders"] = Value::Array(Vec::new());
+        }
+        let folders = project["folders"].as_array_mut().expect("array");
+        if folders.iter().any(|f| f["machine_id"].as_str() == Some(node.as_str()) && f["path"].as_str() == Some(path)) {
+            continue;
+        }
+        let digest = ring::digest::digest(&ring::digest::SHA256, format!("{node}
+{path}").as_bytes());
+        let id: String = digest.as_ref()[..12].iter().map(|b| format!("{b:02x}")).collect();
+        let label = path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(path);
+        folders.push(serde_json::json!({
+            "id": format!("{LOCAL_FOLDER_PREFIX}{id}"), "name": label, "path": path,
+            "machine_id": node, "machine_name": machine_name,
+        }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +188,21 @@ mod tests {
         let mut answer = json!({"path": r"D:\Work", "directories": [{"name": "app", "path": r"D:\Work\app"}], "name": "codex/x"});
         phone_output(&mut answer);
         assert_eq!(answer, json!({"path": "/D:/Work", "directories": [{"name": "app", "path": "/D:/Work/app"}], "name": "codex/x"}));
+    }
+
+    #[test]
+    fn local_project_folders_join_the_shared_catalog() {
+        let mut swarm = json!({"node_id": "n1", "machines": [{"id": "n1", "name": "msi"}],
+            "organization": {"projects": [{"id": "p1", "name": "RogueDod", "folders": []}, {"id": "p2", "name": "Other", "folders": []}]}});
+        let local = json!([{"name": "RogueDod", "dir": "/D:/Work/RogueDOD", "exists": true}, {"name": "Gone", "dir": "/D:/x", "exists": true}]);
+        add_local_folders(&mut swarm, &local);
+        add_local_folders(&mut swarm, &local);
+        let folders = swarm["organization"]["projects"][0]["folders"].as_array().unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0]["path"], "/D:/Work/RogueDOD");
+        assert_eq!(folders[0]["machine_id"], "n1");
+        assert_eq!(folders[0]["name"], "RogueDOD");
+        assert!(folders[0]["id"].as_str().unwrap().starts_with(LOCAL_FOLDER_PREFIX));
+        assert!(swarm["organization"]["projects"][1]["folders"].as_array().unwrap().is_empty());
     }
 }

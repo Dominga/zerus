@@ -1,8 +1,10 @@
 #include "UpdateController.h"
 #include "UpdatesWidget.h"
 #include "WindowsUpdateTrust.h"
+#include "ForkUpdater.h"
 #include <QDesktopServices>
 #include <QDir>
+#include <QProcess>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -27,6 +29,14 @@
 #include "ChildProcess.h"
 
 namespace {
+// <link> pointing at <target>: a junction on Windows, as a versioned fork root has.
+bool makeDirectoryLink(const QString &link,const QString &target){
+#ifdef Q_OS_WIN
+    return QProcess::execute("cmd",{"/c","mklink","/J",QDir::toNativeSeparators(link),QDir::toNativeSeparators(target)})==0;
+#else
+    return QFile::link(target,link);
+#endif
+}
 #ifdef Q_OS_UNIX
 // A request's pipe ProcessRunner's macOS worker is still creating: pipe() made it
 // and close-on-exec follows only afterwards. High numbers keep its ends apart from
@@ -130,6 +140,35 @@ class TestUpdates : public QObject {
     }
     void tool(const QString &path,const QByteArray &script){QFile file(path);QVERIFY(file.open(QIODevice::WriteOnly));file.write(script);file.close();QVERIFY(file.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));}
 private slots:
+    void forkLayoutOfAPlainFolderKeepsItsSiblingStage(){
+        QTemporaryDir root;QVERIFY(root.isValid());
+        const QString build=root.filePath("zerus");QVERIFY(QDir().mkpath(build));
+        const auto layout=ForkUpdater::layoutFor(build+"/hgs-tray.exe");
+        QVERIFY(!layout.versioned);QVERIFY(!layout.superseded);
+        QCOMPARE(layout.install,QFileInfo(build).canonicalFilePath());
+        QCOMPARE(layout.stage,layout.install+".update");
+    }
+    void forkLayoutOfAVersionedRootKeepsEverythingInside(){
+        QTemporaryDir root;QVERIFY(root.isValid());
+        const QString build=root.filePath("app-7");QVERIFY(QDir().mkpath(build));
+        QVERIFY(makeDirectoryLink(root.filePath("current"),build));
+        const QString canonicalRoot=QFileInfo(root.path()).canonicalFilePath();
+        for(const QString &exe:{root.filePath("current/hgs-tray.exe"),build+"/hgs-tray.exe"}){
+            const auto layout=ForkUpdater::layoutFor(exe);
+            QVERIFY2(layout.versioned,qPrintable(exe));QVERIFY(!layout.superseded);
+            QCOMPARE(layout.install,QFileInfo(build).canonicalFilePath());
+            QCOMPARE(layout.root,canonicalRoot);
+            QCOMPARE(layout.link,QDir(canonicalRoot).filePath("current"));
+            QCOMPARE(layout.stage,QDir(canonicalRoot).filePath(".update"));
+        }
+    }
+    void forkLayoutOfABuildThatIsNotCurrentLeavesTheRootAlone(){
+        QTemporaryDir root;QVERIFY(root.isValid());
+        QVERIFY(QDir().mkpath(root.filePath("app-7")));QVERIFY(QDir().mkpath(root.filePath("app-8")));
+        QVERIFY(makeDirectoryLink(root.filePath("current"),root.filePath("app-8")));
+        const auto layout=ForkUpdater::layoutFor(root.filePath("app-7/hgs-tray.exe"));
+        QVERIFY(!layout.versioned);QVERIFY(layout.superseded);
+    }
     void devVersionSequenceIsVisibleAndMatchesTheFeed(){
         auto value=devRaw();
         auto legacy=UpdateController::parseFeed(QJsonDocument(value).toJson(),"dev");

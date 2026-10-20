@@ -104,7 +104,7 @@ public:
         if (index.data(SessionRoles::Header).toBool() || !index.data(SessionRoles::ChildId).toString().isEmpty()) return {};
         const QRect card = sessionCardRect(row).adjusted(sessionCardTileInset() + sessionCardIndent(index), 0, 0, 0);
         const int textX = card.x() + 20, right = card.right() - 11;
-        const int end = right - machineBadgeWidth(index, base, right - textX) - 8;
+        const int end = sessionCardTileInset() > 0 ? right : right - machineBadgeWidth(index, base, right - textX) - 8;
         const auto values = GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), base, end - textX - 48);
         const int w = GitStatusBadge::width(values, base);
         return w ? QRect(end - w, card.y() + (compact ? 25 : 29), w, 18) : QRect();
@@ -162,7 +162,8 @@ public:
         const int reservedTitle = qMin(72, CachedText::width(font, index.data(SessionRoles::Title).toString()));
         const int providerRoom = right - x - statusWidth - 16 - trailing - reservedTitle;
         const int naturalWidth = agent.isEmpty() ? 0 : IdentityBadges::width(IdentityBadges::Provider, agent, base, child ? 85 : 95);
-        const int providerWidth = naturalWidth && !child && providerRoom < naturalWidth ? 26 : naturalWidth;
+        // WhiteWh fork: the agent's tile replaces the provider badge.
+        const int providerWidth = !child && sessionCardTileInset() > 0 ? 0 : naturalWidth && !child && providerRoom < naturalWidth ? 26 : naturalWidth;
         const int titleWidth = qMax(0, right - x - statusWidth - 8 - trailing - (providerWidth ? providerWidth + 8 : 0));
         const QString text = CachedText::elided(font, index.data(SessionRoles::Title).toString(), Qt::ElideRight, titleWidth);
         const QRect badge(x + CachedText::width(font, text) + 8, y, statusWidth, 20);
@@ -429,19 +430,22 @@ private:
             p->restore(); return;
         }
         font.setPixelSize(11); font.setWeight(QFont::Normal); p->setFont(font);
-        const int hostWidth = IdentityBadges::width(IdentityBadges::Machine, host, font, width / 3 + 10);
+        // WhiteWh fork: with agent tiles the machine leads the meta line instead of a badge.
+        const bool tiles = sessionCardTileInset() > 0;
+        const QString machineName = index.data(SessionRoles::MachineName).toString(), machineLabel = machineName.isEmpty() ? host : machineName;
+        const int hostWidth = tiles ? 0 : IdentityBadges::width(IdentityBadges::Machine, host, font, width / 3 + 10);
         const QRect machineBadge(right - hostWidth, metadataY, hostWidth, 18);
-        IdentityBadges::paint(p, machineBadge, IdentityBadges::Machine, host, dark, index.data(SessionRoles::MachineColor).value<QColor>(), index.data(SessionRoles::MachineName).toString());
+        if (!tiles) IdentityBadges::paint(p, machineBadge, IdentityBadges::Machine, host, dark, index.data(SessionRoles::MachineColor).value<QColor>(), index.data(SessionRoles::MachineName).toString());
         p->setPen(muted);
         const QRect gitBadge = gitStatusRect(option.rect, index, option.font, compact);
         if (!gitBadge.isEmpty()) GitStatusBadge::paint(p, gitBadge,
             GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), option.font, gitBadge.width()), option.font, dark);
-        const int metadataWidth = qMax(0, (!gitBadge.isEmpty() ? gitBadge.left() : machineBadge.left()) - textX - 8);
+        const int metadataWidth = qMax(0, (!gitBadge.isEmpty() ? gitBadge.left() : tiles ? right + 8 : machineBadge.left()) - textX - 8);
         const QString metaIcon = index.data(SessionRoles::MetaIcon).toString();
         const int iconInset = !metaIcon.isEmpty() && metadataWidth >= 32 ? 18 : 0;
         if (iconInset) workspaceIcon(metaIcon, muted).paint(p, QRect(textX, metadataY + 2, 14, 14));
         CachedText::draw(p, QRect(textX + iconInset, metadataY, qMax(0, metadataWidth - iconInset), 18), Qt::AlignVCenter,
-                    CachedText::elided(font, index.data(SessionRoles::Meta).toString(), Qt::ElideMiddle, qMax(0, metadataWidth - iconInset)));
+                    CachedText::elided(font, (tiles && !machineLabel.isEmpty() ? machineLabel + (index.data(SessionRoles::Meta).toString().isEmpty() ? QString() : QStringLiteral(" · ")) : QString()) + index.data(SessionRoles::Meta).toString(), Qt::ElideMiddle, qMax(0, metadataWidth - iconInset)));
 
         QString detail = index.data(SessionRoles::Detail).toString();
         // Status is already beside the title. Keep the activity excerpt useful

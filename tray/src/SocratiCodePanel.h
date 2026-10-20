@@ -35,7 +35,7 @@ public:
         auto *head = new QHBoxLayout;
         head->setSpacing(6);
         auto *title = new QLabel(tr("SocratiCode"));
-        title->setObjectName("detailsIdentityTitle");
+        title->setObjectName("inspectorPanelTitle");
         title->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
         head->addWidget(title, 0, Qt::AlignTop);
         m_state = new QLabel;
@@ -45,6 +45,12 @@ public:
         m_state->setMinimumWidth(0);
         m_state->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         head->addWidget(m_state, 1);
+        m_refresh = new QPushButton(QStringLiteral("↻"));
+        m_refresh->setObjectName("socratiCodeRefresh");
+        m_refresh->setAutoDefault(false);
+        m_refresh->setFixedSize(24, 24);
+        m_refresh->setToolTip(tr("Refresh")); m_refresh->setAccessibleName(tr("Refresh SocratiCode status"));
+        head->addWidget(m_refresh, 0, Qt::AlignTop);
         layout->addLayout(head);
         auto *row = new QHBoxLayout;
         row->setSpacing(6);
@@ -62,10 +68,9 @@ public:
         m_stop->setAutoDefault(false);
         m_stop->setToolTip(tr("Stop the SocratiCode server that Zerus started for this folder"));
         row->addWidget(m_stop);
-        m_refresh = new QPushButton(tr("Refresh"));
-        m_refresh->setObjectName("socratiCodeRefresh");
-        m_refresh->setAutoDefault(false);
-        row->addWidget(m_refresh);
+        // At most two buttons show at once (start or stop, and connect); none
+        // shrinks below its label.
+        for (auto *button : {m_action, m_connect, m_stop}) button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         row->addStretch();
         layout->addLayout(row);
         m_details = new QLabel;

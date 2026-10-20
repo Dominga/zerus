@@ -39,6 +39,8 @@ public:
     // Items: id, text, submitted_at, status, attachments (file references), error.
     void setLocalMessages(const QJsonArray &messages);
     void setTheme(bool dark);
+    // WhiteWh fork: the user's messages as bubbles on the right.
+    void setBubbles(bool bubbles) { if (bubbles == m_bubbles) return; m_bubbles = bubbles; render(true); }
     // Enlarges the transcript and queued input, not the overlay controls.
     void setContentScale(double scale);
     // Centers the transcript and queued input in a column of at most this
@@ -144,7 +146,7 @@ private:
     QCursor m_copyCursor;
     bool m_copyHover = false;
     QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
-    bool m_dark = false, m_tracked = true, m_initial = true;
+    bool m_dark = false, m_tracked = true, m_initial = true, m_bubbles = false;
     bool m_compactJump = false;
     bool m_rendering = false, m_followLatest = true, m_followScheduled = false;
     quint64 m_renderGeneration = 0, m_contentRevision = 0;

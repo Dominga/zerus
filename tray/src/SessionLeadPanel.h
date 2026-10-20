@@ -23,11 +23,12 @@ public:
         m_layout->setContentsMargins(8, 6, 8, 8);
         m_layout->setSpacing(5);
         auto *title = new QLabel(tr("Hierarchy"));
-        title->setObjectName("detailsIdentityTitle");
+        title->setObjectName("inspectorPanelTitle");
         m_layout->addWidget(title);
         m_body = new QVBoxLayout;
         m_body->setSpacing(5);
         m_layout->addLayout(m_body);
+        hide();
     }
     std::function<void(const QString &identity, const QString &lead)> setLead;
     std::function<void(const QString &identity)> open;
@@ -48,12 +49,12 @@ public:
             auto *b = new QPushButton(text); b->setObjectName(name); b->setAutoDefault(false); return b;
         };
         if (!lead.first.isEmpty()) {
-            auto *row = new QHBoxLayout; row->setSpacing(6);
+            auto *rowWidget = new QWidget; auto *row = new QHBoxLayout(rowWidget); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(6);
             auto *label = new QLabel(tr("Reports to <b>%1</b>").arg(lead.second.toHtmlEscaped()));
             label->setObjectName("sessionLeadName"); label->setTextFormat(Qt::RichText);
             row->addWidget(label, 1);
-            m_body->addLayout(row);
-            auto *actions = new QHBoxLayout; actions->setSpacing(6);
+            add(rowWidget);
+            auto *actionsWidget = new QWidget; auto *actions = new QHBoxLayout(actionsWidget); actions->setContentsMargins(0, 0, 0, 0); actions->setSpacing(6);
             auto *openLead = button(tr("Open"), "openSessionLead");
             connect(openLead, &QPushButton::clicked, this, [this, id = lead.first] { if (open) open(id); });
             auto *report = button(tr("Send report"), "sendSessionReport");
@@ -62,41 +63,43 @@ public:
             auto *detach = button(tr("Detach"), "detachSessionLead");
             connect(detach, &QPushButton::clicked, this, [this] { if (setLead) setLead(m_identity, {}); });
             actions->addWidget(openLead); actions->addWidget(report); actions->addWidget(detach); actions->addStretch();
-            m_body->addLayout(actions);
+            add(actionsWidget);
             return;
         }
         if (!subordinates.isEmpty()) {
             auto *label = new QLabel(tr("Leads"));
             label->setObjectName("sessionSubordinatesTitle");
-            m_body->addWidget(label);
+            add(label);
             for (const auto &session : subordinates) {
-                auto *row = new QHBoxLayout; row->setSpacing(6);
+                auto *rowWidget = new QWidget; auto *row = new QHBoxLayout(rowWidget); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(6);
                 auto *name = button(session.second, "openSessionSubordinate");
                 name->setFlat(true);
                 connect(name, &QPushButton::clicked, this, [this, id = session.first] { if (open) open(id); });
                 auto *release = button(tr("Release"), "releaseSessionSubordinate");
                 connect(release, &QPushButton::clicked, this, [this, id = session.first] { if (setLead) setLead(id, {}); });
                 row->addWidget(name, 1); row->addWidget(release);
-                m_body->addLayout(row);
+                add(rowWidget);
             }
             return;
         }
         if (candidates.isEmpty()) {
             auto *hint = new QLabel(tr("No other session in this project can lead this one."));
             hint->setObjectName("sessionLeadHint"); hint->setWordWrap(true);
-            m_body->addWidget(hint);
+            add(hint);
             return;
         }
-        auto *row = new QHBoxLayout; row->setSpacing(6);
+        auto *rowWidget = new QWidget; auto *row = new QHBoxLayout(rowWidget); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(6);
         auto *choice = new QComboBox; choice->setObjectName("sessionLeadChoice"); choice->setAccessibleName(tr("Lead session"));
         for (const auto &session : candidates) choice->addItem(session.second, session.first);
         auto *link = button(tr("Report to"), "linkSessionLead");
         connect(link, &QPushButton::clicked, this, [this, choice] { if (setLead) setLead(m_identity, choice->currentData().toString()); });
         row->addWidget(link); row->addWidget(choice, 1);
-        m_body->addLayout(row);
+        add(rowWidget);
     }
 
 private:
+    // Rows come and go while the panel shows; each is shown explicitly.
+    void add(QWidget *widget) { m_body->addWidget(widget); widget->show(); }
     static void clear(QLayout *layout)
     {
         while (auto *item = layout->takeAt(0)) {

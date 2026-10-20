@@ -1324,10 +1324,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // WhiteWh fork: the SocratiCode index of this session's folder.
     m_socratiCode=new SocratiCodePanel(&m_client);detailsLayout->addWidget(m_socratiCode);
     // WhiteWh fork: the iron rules of this session's project.
-    m_ironRules=new IronRulesPanel;detailsLayout->addWidget(m_ironRules);
+    // WhiteWh fork: Tasks & agents holds the agent's text, then the session's
+    // place in its project and the project's iron rules.
+    auto *agentsPage=new QWidget;auto *agentsLayout=new QVBoxLayout(agentsPage);agentsLayout->setContentsMargins(0,0,0,0);agentsLayout->setSpacing(8);
+    agentsLayout->addWidget(m_children,1);
+    m_ironRules=new IronRulesPanel;
     m_ironRules->changed=[this](int count){m_composer->setIronRulesCount(count);};
     // WhiteWh fork: lead and subordinate sessions of this project.
-    m_leadPanel=new SessionLeadPanel;detailsLayout->addWidget(m_leadPanel);
+    m_leadPanel=new SessionLeadPanel;agentsLayout->addWidget(m_leadPanel);agentsLayout->addWidget(m_ironRules);
     m_leadPanel->setLead=[this](const QString &identity,const QString &lead){
         if(!SessionLeads::setLead(identity,lead)){showNotice(tr("A lead cannot report to another session, and a subordinate cannot lead."),true);return;}
         rebuild();updateLeadPanel();
@@ -1336,7 +1340,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         for(const auto &entry:m_entries)if(entry.identity==identity){showSession(entry.host,entry.session.name);return;}
     };
     m_leadPanel->sendReport=[this]{sendReportToLead();};
-    m_inspector->addTab(m_children, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
+    m_inspector->addTab(agentsPage, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
@@ -2036,15 +2040,12 @@ void SessionsWindow::applyWorkspaceView()
     if (m_sessionsToggle) m_sessionsToggle->setVisible(!cards);
     const bool compact = skin.view(QStringLiteral("composer")) == QLatin1String("compact");
     if (m_composer) m_composer->setCompact(compact);
+    if (m_activityView) m_activityView->setBubbles(skin.view(QStringLiteral("activity")) == QLatin1String("bubbles"));
     if (m_subagentComposer) m_subagentComposer->setCompact(compact);
     if (m_socratiCode) if (auto *layout = qobject_cast<QBoxLayout *>(m_socratiCode->parentWidget() ? m_socratiCode->parentWidget()->layout() : nullptr)) {
-        // Cards: SocratiCode, then the iron rules, lead the page; classic: both close it.
-        for (QWidget *panel : {static_cast<QWidget *>(m_socratiCode), static_cast<QWidget *>(m_ironRules)}) {
-            if (!panel) continue;
-            const int at = layout->indexOf(panel);
-            const int wanted = cards ? (panel == m_socratiCode ? 0 : 1) : layout->count() - 1;
-            if (at >= 0 && at != wanted) { layout->removeWidget(panel); layout->insertWidget(wanted, panel); }
-        }
+        // Cards: SocratiCode leads the page; classic: it closes it.
+        const int at = layout->indexOf(m_socratiCode), wanted = cards ? 0 : layout->count() - 1;
+        if (at >= 0 && at != wanted) { layout->removeWidget(m_socratiCode); layout->insertWidget(wanted, m_socratiCode); }
     }
 }
 
@@ -3912,8 +3913,9 @@ QString SessionsWindow::foldInspectorSections(const QString &html) const
         const QString heading = parts[at].left(end), body = parts[at].mid(end + 5);
         const QString key = QString(heading).remove(tags).simplified();
         const bool closed = folded.contains(key);
-        result += QStringLiteral("<h3><a href='hgs-fold:%1' style='color:%2;text-decoration:none'>%3&nbsp;%4</a></h3>")
-            .arg(QString::fromLatin1(QUrl::toPercentEncoding(key)), m_fg, closed ? QStringLiteral("▸") : QStringLiteral("▾"), heading);
+        // A small capitalized title, as the skin's other panels have.
+        result += QStringLiteral("<p style='margin-top:14px;margin-bottom:6px;font-size:11px;font-weight:600;'><a href='hgs-fold:%1' style='color:%2;text-decoration:none'>%3&nbsp;&nbsp;%4</a></p>")
+            .arg(QString::fromLatin1(QUrl::toPercentEncoding(key)), m_muted, closed ? QStringLiteral("▸") : QStringLiteral("▾"), key.toUpper().toHtmlEscaped());
         if (!closed) result += body;
     }
     return result;

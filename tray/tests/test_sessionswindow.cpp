@@ -680,8 +680,8 @@ void TestSessionsWindow::subordinateSessionsFollowTheirLead()
 
 void TestSessionsWindow::whiteWhWorkspaceView()
 {
-    QSettings().setValue("workspace/skin", "whitewh");
-    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); sessionCardTileInset() = 0; });
+    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", "dark");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); QSettings().remove("workspace/theme"); sessionCardTileInset() = 0; });
     const auto state = fleet();
     SessionsWindow window(FakeCli::program(script())); window.resize(1280, 760); window.setFleet(state); window.show();
     window.showSession({}, state.local().sessions[0].name);
@@ -696,7 +696,16 @@ void TestSessionsWindow::whiteWhWorkspaceView()
     toggle->click(); QTRY_VERIFY(railNew->isVisible());
     toggle->click(); QTRY_VERIFY(!railNew->isVisible());
     const auto preview = qEnvironmentVariable("HGS_WHITEWH_PREVIEW");
-    if (!preview.isEmpty()) { QDir().mkpath(preview); QTest::qWait(300); QVERIFY(window.grab().save(preview + "/workspace.png")); }
+    if (!preview.isEmpty()) {
+        QDir().mkpath(preview);
+        auto *inspector = window.findChild<QTabWidget *>("sessionInspector");
+        if (!inspector->isVisible()) window.findChild<QPushButton *>("toggleInspector")->click();
+        QTRY_VERIFY(inspector->isVisible());
+        for (int tab = 0; tab < inspector->count(); ++tab) {
+            inspector->setCurrentIndex(tab); QTest::qWait(250);
+            QVERIFY(window.grab().save(preview + QString("/workspace-%1.png").arg(tab)));
+        }
+    }
     QSettings().remove("workspace/skin"); window.applySkin();
     QTRY_VERIFY(!toggle->isVisible()); QVERIFY(railNew->isVisible()); QCOMPARE(sessionCardTileInset(), 0);
     QVERIFY(!composer->findChild<QFrame *>("composerCard")->isVisible());

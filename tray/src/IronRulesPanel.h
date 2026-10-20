@@ -21,7 +21,7 @@ public:
         layout->setSpacing(5);
         auto *head = new QHBoxLayout;
         auto *title = new QLabel(tr("Iron rules"));
-        title->setObjectName("detailsIdentityTitle");
+        title->setObjectName("inspectorPanelTitle");
         head->addWidget(title);
         m_count = new QLabel;
         m_count->setObjectName("ironRulesCount");

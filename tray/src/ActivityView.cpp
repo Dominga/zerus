@@ -494,7 +494,7 @@ struct ActivityRenderResult {
     QHash<QString, QPair<QString, QString>> m_messageActions;
     QHash<QString, QImage> m_previews;
     QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
-    bool m_dark = false, m_tracked = true, processesEnabled = false, content = false;
+    bool m_dark = false, m_tracked = true, processesEnabled = false, content = false, m_bubbles = false;
     double m_scale = 1.;
     quint64 generation = 0, contentRevision = 0;
     qreal width = 0;
@@ -747,6 +747,9 @@ struct ActivityRenderResult {
                 "<td align='right' valign='top'><img src='%2' width='14' height='14'></td></tr></table>").arg(title, copyButton("copy", copyKey));
         }
         // The spacer goes before each card, so nothing pads the journal below the last one.
+        if (m_bubbles && user && !notice && !boundary && !thinking)
+            return QString("<p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0'><tr><td width='18%'></td><td bgcolor='%1' style='padding:10px 14px;'>%2%3</td></tr></table>")
+                .arg(userSurface, header, content);
         return QString("<p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0'><tr><td width='3' bgcolor='%1'></td><td bgcolor='%2' style='padding:11px 13px;'>"
             "%3%4</td></tr></table>")
             .arg(boundary ? warning : thinking ? thinkingBar : notice ? violet : user ? accent : blue,
@@ -1777,7 +1780,7 @@ void ActivityView::startRender()
     result->m_expanded = m_expanded; result->m_deliveryKeys = m_deliveryKeys; result->m_attachmentBindings = m_attachmentBindings;
     result->m_previews = m_previews;
     result->m_voiceError=m_voiceError;
-    result->m_dark = m_dark; result->m_tracked = m_tracked; result->m_scale = m_scale;
+    result->m_dark = m_dark; result->m_tracked = m_tracked; result->m_scale = m_scale; result->m_bubbles = m_bubbles;
     result->processesEnabled = ProcessSettings::enabled();
     result->width = m_browser->viewport()->width();
     result->viewportHeight = m_browser->viewport()->height();

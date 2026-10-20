@@ -1248,7 +1248,7 @@ void MessageComposer::setTheme(bool dark)
         QFrame#composerCard QPlainTextEdit#messageInput, QFrame#composerCard QPlainTextEdit#messageInput:focus { background:transparent; border:0; padding:6px 4px; }
         QFrame#composerCard QPushButton#attachMessageFile { border:0; border-radius:9px; }
         QFrame#composerCard QPushButton#sendMessage { padding:0; border-radius:9px; }
-        QPushButton#sessionModelSettings { border:0; }
+        QPushButton#sessionModelSettings { border:1px solid transparent; }
     )").arg(dark ? "#1b1f26" : "#ffffff", dark ? "#2c323b" : "#dce2e8", dark ? "#7dd3b0" : "#167357") : QString()));
     updateControls();
 }

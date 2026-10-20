@@ -111,6 +111,7 @@ protected:
     void hideEvent(QHideEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void changeEvent(QEvent *event) override;
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 
 private:
     ArchiveBrowser *m_archiveBrowser = nullptr;
@@ -372,6 +373,10 @@ private:
     class SocratiCodePanel *m_socratiCode=nullptr;
     class IronRulesPanel *m_ironRules=nullptr;
     class SessionLeadPanel *m_leadPanel=nullptr;
+    // WhiteWh fork: the skin's own title bar in place of the system one.
+    class WindowTitleBar *m_titleBar=nullptr;
+    bool m_framelessMain=false;
+    void applyWindowFrame();
     void updateLeadPanel();
     void sendReportToLead();
     // WhiteWh fork: the project (organization group) a session belongs to.

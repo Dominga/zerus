@@ -27,6 +27,7 @@
 #include "WorktreePanel.h"
 #include "SocratiCodePanel.h"
 #include "Extensions.h"
+#include "WindowTitleBar.h"
 #include "IronRulesPanel.h"
 #include "SessionLeadPanel.h"
 #include "SessionLeads.h"
@@ -300,7 +301,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_organization = SessionOrganization(savedProjects);
     m_pendingLaunches = QJsonDocument::fromJson(settings.value("workspace/pendingLaunches").toByteArray()).object();
     if (!settings.value("sessions/geometry").toByteArray().isEmpty()) restoreGeometry(settings.value("sessions/geometry").toByteArray());
-    auto *root = new QHBoxLayout(this); root->setContentsMargins(0, 0, 0, 0); root->setSpacing(0);
+    // WhiteWh fork: a skin may put its own title bar above the rail and the pages.
+    auto *frame = new QVBoxLayout(this); frame->setContentsMargins(0, 0, 0, 0); frame->setSpacing(0);
+    m_titleBar = new WindowTitleBar; m_titleBar->hide(); frame->addWidget(m_titleBar);
+    m_titleBar->search = [this] { openGoTo(); };
+    auto *root = new QHBoxLayout; root->setContentsMargins(0, 0, 0, 0); root->setSpacing(0); frame->addLayout(root, 1);
     auto *sidebar = new QWidget; sidebar->setObjectName("sidebar"); sidebar->setFixedWidth(56);
     auto *side = new QVBoxLayout(sidebar); side->setContentsMargins(7, 10, 7, 10); side->setSpacing(8);
     auto iconButton = [](const QString &glyph, const QString &caption, const char *name) {
@@ -1460,7 +1465,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     m_settingsPage->appearanceChanged=[this]{
         m_sessions->setProperty("compact",QSettings().value("workspace/compact",false).toBool());m_sessions->doItemsLayout();
-        m_sessionDock->setStripWidth(SessionStrip::width(m_sessions->property("compact").toBool()));
+        m_sessionDock->setStripWidth(sessionCardTileInset() ? 0 : SessionStrip::width(m_sessions->property("compact").toBool()));
         m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());
         const auto usageIndicator=AccountUsage::indicator();m_accountUsage->setIndicator(usageIndicator);m_dashboard->setUsageIndicator(usageIndicator);
         applyTheme();rebuild();
@@ -1950,6 +1955,7 @@ void SessionsWindow::applyTheme()
         button->setIcon(workspaceIcon(button->property("glyph").toString(), QColor(button->objectName() == "updatesAvailable" || button->objectName() == "restartToUpdate" ? m_accent : m_muted)));
     updateWindowPinAppearance(); updateWorktreeCleanupOffer();
     if (m_sessionDock) m_sessionDock->setEdgeColor(QColor(m_border));
+    if (m_titleBar) m_titleBar->setColors(QColor(bg), QColor(m_border), QColor(colors.inset), QColor(m_border), QColor(m_fg), QColor(m_muted), QColor(hover));
     if (m_brand) m_brand->setAppearance(m_dark ? QColor(Qt::white) : QColor(m_accent), QColor(m_dark ? "#ffda76" : "#a66000"),
         m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
     m_sessions->setProperty("hgsDark", m_dark);
@@ -2038,6 +2044,12 @@ void SessionsWindow::applyWorkspaceView()
     m_sessions->viewport()->update();
     const bool docked = !m_sessionDock || m_sessionDock->mode() == SessionPanelDock::Docked;
     if (m_railSessionsToggle) m_railSessionsToggle->setVisible(cards);
+    // Cards: a collapsed list leaves only the rail, which expands it again.
+    if (m_sessionDock) m_sessionDock->setStripWidth(cards ? 0 : SessionStrip::width(m_sessions->property("compact").toBool()));
+    const bool compactComposer = skin.view(QStringLiteral("composer")) == QLatin1String("compact");
+    // The compact composer shows the model; the header does not repeat it.
+    if (m_model) m_model->setVisible(!compactComposer && !m_model->text().isEmpty() && selected());
+    if (m_titleBar) applyWindowFrame();
     if (m_railNewSession) m_railNewSession->setVisible(!cards || !docked);
     if (m_sessionsToggle) m_sessionsToggle->setVisible(!cards);
     const bool compact = skin.view(QStringLiteral("composer")) == QLatin1String("compact");
@@ -2129,7 +2141,8 @@ void SessionsWindow::updateInspectorMinimum()
         const auto body=m_splitter->parentWidget()->layout()->contentsMargins();
         const auto detail=m_workSplitter->parentWidget()->layout()->contentsMargins();
         const auto frame=m_detailStack->contentsMargins();
-        const int rail=layout()->itemAt(0)->widget()->width();
+        const auto *sidebar=findChild<QWidget *>(QStringLiteral("sidebar"),Qt::FindDirectChildrenOnly);
+        const int rail=sidebar?sidebar->width():0;
         // An explicit window minimum overrides Qt's automatic layout minimum.
         // Account for the full header through both nested splitters and margins.
         minimum=qMax(minimum,rail+body.left()+body.right()+detail.left()+detail.right()+frame.left()+frame.right()
@@ -3593,7 +3606,8 @@ void SessionsWindow::renderDetails()
     if (const auto elision = modelText + '\n' + m_model->font().key(); elision != m_modelElision) {
         m_modelElision = elision; m_model->setText(m_model->fontMetrics().elidedText(modelText, Qt::ElideMiddle, 260)); m_model->setToolTip(modelText);
     }
-    m_model->setAccessibleName(modelText); m_model->setVisible(!modelText.isEmpty());
+    m_model->setAccessibleName(modelText);
+    m_model->setVisible(!modelText.isEmpty() && WorkspaceSkin::current().view(QStringLiteral("composer")) != QLatin1String("compact"));
     const bool archived = s.state == "archived";
     m_forkAction->setEnabled(!terminating && entry->online && !m_pending && m_forkKey.isEmpty() && !m_settingsRequest && !m_composer->isSending(m_selectedKey)
         && m_details.value("fork_supported").toBool());
@@ -5457,9 +5471,37 @@ void SessionsWindow::terminateSession()
     renderDetails();
 }
 
+bool SessionsWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
+{
+    if (m_framelessMain && FramelessWindow::nativeEvent(this, m_titleBar, message, result)) return true;
+    return QWidget::nativeEvent(eventType, message, result);
+}
+
+// WhiteWh fork: a skin with "window":{"main":"frameless"} replaces the system
+// title bar with its own (Windows only; other systems keep theirs).
+void SessionsWindow::applyWindowFrame()
+{
+#ifdef Q_OS_WIN
+    const bool frameless = WorkspaceSkin::current().framelessMain();
+#else
+    const bool frameless = false;
+#endif
+    m_titleBar->setVisible(frameless);
+    m_titleBar->setShortcut(ShortcutRegistry::instance().keys(QStringLiteral("go.anywhere")).value(0).toString(QKeySequence::NativeText));
+    m_titleBar->setMark(windowIcon().pixmap(18, 18));
+    if (frameless == m_framelessMain) return;
+    m_framelessMain = frameless;
+    const bool shown = isVisible(); const auto geometry = saveGeometry();
+    // Changing the flag recreates the native window, which then shows again.
+    setWindowFlag(Qt::FramelessWindowHint, frameless);
+    if (shown) { restoreGeometry(geometry); show(); }
+    if (frameless && testAttribute(Qt::WA_WState_Created)) FramelessWindow::apply(this);
+}
+
 void SessionsWindow::showEvent(QShowEvent *event)
 {
-    QWidget::showEvent(event); rebuild(); if (m_dashboardStale) updateDashboard();
+    QWidget::showEvent(event);
+    if (m_framelessMain) FramelessWindow::apply(this); rebuild(); if (m_dashboardStale) updateDashboard();
     m_timer.start(); m_readTimer.start(); emit refreshRequested(); inspect();
 }
 bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
@@ -5496,6 +5538,7 @@ void SessionsWindow::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
     if (event->type() == QEvent::WindowStateChange && m_brand) m_brand->syncAnimation();
+    if (event->type() == QEvent::WindowStateChange && m_titleBar) m_titleBar->setMaximized(isMaximized());
     // A runtime light/dark switch of the system reaches a window only as PaletteChange:
     // QWidget::event() consumes ApplicationPaletteChange. The window's own stylesheet
     // also sends PaletteChange, so re-theme later and only when Follow system appearance

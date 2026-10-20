@@ -177,6 +177,8 @@ private:
         const int width = m_mode == Docked && !animating() ? m_slot->width()
             : qRound(m_stripWidth + (expandedWidth() - m_stripWidth) * m_expansion);
         m_panel->setGeometry(at.x(), at.y(), width, m_slot->height());
+        // A skin may collapse the list to nothing (strip width 0).
+        m_panel->setVisible(width > 0);
         const qreal alpha = m_decorated ? m_expansion : 0;
         // Only a shadow at the panel edge; the conversation is not dimmed.
         m_shadow->alpha = alpha; m_shadow->setGeometry(at.x() + width, at.y(), 18, m_slot->height());

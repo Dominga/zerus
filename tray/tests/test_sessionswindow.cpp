@@ -698,8 +698,17 @@ void TestSessionsWindow::whiteWhWorkspaceView()
     QVERIFY(composer->findChild<QFrame *>("composerCard")); QVERIFY(composer->findChild<QFrame *>("composerCard")->isVisible());
     auto *socratic = window.findChild<QWidget *>("socratiCodePanel"); QVERIFY(socratic);
     QCOMPARE(qobject_cast<QBoxLayout *>(socratic->parentWidget()->layout())->indexOf(socratic), 0);
+    // The compact composer shows the model, so the header does not repeat it.
+    QVERIFY(!window.findChild<QLabel *>("sessionModel")->isVisible());
+#ifdef Q_OS_WIN
+    // The skin's own title bar replaces the system one; the window keeps its width.
+    QTRY_VERIFY(window.findChild<QWidget *>("windowTitleBar")->isVisible()); QVERIFY(window.windowFlags() & Qt::FramelessWindowHint);
+#endif
+    auto *listPanel = window.findChild<QWidget *>("sessionListPanel"); QVERIFY(listPanel);
     toggle->click(); QTRY_VERIFY(railNew->isVisible());
-    toggle->click(); QTRY_VERIFY(!railNew->isVisible());
+    // Collapsed, the cards list leaves no strip: only the rail remains.
+    QTRY_VERIFY(!listPanel->isVisible());
+    toggle->click(); QTRY_VERIFY(!railNew->isVisible()); QTRY_VERIFY(listPanel->isVisible());
     const auto preview = qEnvironmentVariable("HGS_WHITEWH_PREVIEW");
     if (!preview.isEmpty()) {
         QDir().mkpath(preview);
@@ -712,6 +721,8 @@ void TestSessionsWindow::whiteWhWorkspaceView()
         }
     }
     QSettings().remove("workspace/skin"); window.applySkin();
+    QVERIFY(!window.findChild<QWidget *>("windowTitleBar")->isVisible()); QVERIFY(!(window.windowFlags() & Qt::FramelessWindowHint));
+    QVERIFY(window.width() < 2000);
     QTRY_VERIFY(!toggle->isVisible()); QVERIFY(railNew->isVisible()); QCOMPARE(sessionCardTileInset(), 0);
     QVERIFY(!composer->findChild<QFrame *>("composerCard")->isVisible());
 }

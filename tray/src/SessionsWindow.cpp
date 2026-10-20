@@ -306,8 +306,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_titleBar = new WindowTitleBar; m_titleBar->hide(); frame->addWidget(m_titleBar);
     m_titleBar->search = [this] { openGoTo(); };
     auto *root = new QHBoxLayout; root->setContentsMargins(0, 0, 0, 0); root->setSpacing(0); frame->addLayout(root, 1);
-    auto *sidebar = new QWidget; sidebar->setObjectName("sidebar"); sidebar->setFixedWidth(56);
-    auto *side = new QVBoxLayout(sidebar); side->setContentsMargins(7, 10, 7, 10); side->setSpacing(8);
+    auto *sidebar = m_sidebar = new QWidget; sidebar->setObjectName("sidebar"); sidebar->setFixedWidth(56);
+    auto *side = m_railLayout = new QVBoxLayout(sidebar); side->setContentsMargins(7, 10, 7, 10); side->setSpacing(8);
     auto iconButton = [](const QString &glyph, const QString &caption, const char *name) {
         auto *button = new QPushButton; button->setObjectName(QLatin1String(name));
         button->setProperty("glyph", glyph); button->setToolTip(caption); button->setAccessibleName(caption);
@@ -346,7 +346,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     windowPin->setFixedSize(42, 44); windowPin->setIconSize(QSize(24,24)); side->addWidget(windowPin);
     auto *settingsButton = m_settingsNav = iconButton("settings", tr("Settings"), "workspaceSettings"); settingsButton->setCheckable(true); settingsButton->setFixedSize(42, 44); settingsButton->setIconSize(QSize(24,24)); side->addWidget(settingsButton);
     connect(settingsButton, &QPushButton::clicked, this, &SessionsWindow::showWorkspaceSettings);
-    auto *versionButton = new QPushButton(UpdateController::buildInfo()["versionName"].toString().section('-', 0, 0));
+    auto *versionButton = m_versionButton = new QPushButton(UpdateController::buildInfo()["versionName"].toString().section('-', 0, 0));
     versionButton->setObjectName("appVersion"); versionButton->setFixedSize(42, 24);
     versionButton->setCursor(Qt::PointingHandCursor); versionButton->setAutoDefault(false);
     versionButton->setAccessibleName(tr("About Zerus"));
@@ -1505,7 +1505,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *workspace = new QVBoxLayout; workspace->setContentsMargins(0, 0, 0, 0); workspace->setSpacing(0);
     workspace->addWidget(m_pages, 1);
     auto *statusBar = new QFrame; statusBar->setObjectName("workspaceStatus"); statusBar->setFixedHeight(28);
-    auto *statusLayout = new QHBoxLayout(statusBar); statusLayout->setContentsMargins(12, 3, 12, 3);
+    auto *statusLayout = m_statusLayout = new QHBoxLayout(statusBar); statusLayout->setContentsMargins(12, 3, 12, 3);
     m_connectionStatus = new StatusMessage; m_connectionStatus->setObjectName("workspaceConnectionStatus");
     statusLayout->addWidget(m_connectionStatus, 1);
     auto *updateEntry = new QPushButton(tr("New version"));
@@ -1849,6 +1849,8 @@ void SessionsWindow::applyTheme()
         QPushButton#railButton:hover, QPushButton#workspaceSettings:hover, QPushButton#windowPin:hover { background:%7; }
         QPushButton#workspaceSettings:checked { background:%7; border-color:%4; }
         QPushButton#windowPin:focus[keyboardFocus="true"] { border-color:%5; }
+        QWidget#windowTitleBar QPushButton#railButton, QWidget#windowTitleBar QPushButton#workspaceSettings, QWidget#windowTitleBar QPushButton#windowPin,
+        QWidget#windowTitleBar QPushButton#brandMark, QWidget#windowTitleBar QPushButton#newSession, QWidget#windowTitleBar QPushButton#railSessionsToggle { min-height:28px; max-height:28px; border-radius:7px; }
         QFrame#settingsCard { background:%3;border:1px solid %4;border-radius:9px; }
         QListWidget#settingsSections { background:transparent;color:%2;border:0;outline:0; }
         QListWidget#settingsSections::item { padding:11px 10px;margin-bottom:5px;border-radius:6px; }
@@ -5471,6 +5473,45 @@ void SessionsWindow::terminateSession()
     renderDetails();
 }
 
+void SessionsWindow::placeRailControls(bool inTitle)
+{
+    if (inTitle == m_railInTitle || !m_railLayout) return;
+    m_railInTitle = inTitle;
+    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav};
+    const QList<QPushButton *> trailing{m_windowPin, m_settingsNav};
+    QList<QPushButton *> all{m_brand}; all << leading << trailing;
+    // Moving a widget hides it; each keeps whether it was shown.
+    QHash<QWidget *, bool> hidden;
+    for (auto *button : all) {
+        if (!button->property("railSize").isValid()) { button->setProperty("railSize", button->maximumSize()); button->setProperty("railIcon", button->iconSize()); }
+        hidden.insert(button, button->isHidden()); m_railLayout->removeWidget(button);
+    }
+    m_railLayout->removeWidget(m_versionButton); m_statusLayout->removeWidget(m_versionButton);
+    if (inTitle) {
+        // Compact controls: the mark leads the bar, navigation follows the name,
+        // and the pin and Settings stand before the window buttons.
+        m_titleBar->setMarkVisible(false);
+        m_titleBar->markSlot()->addWidget(m_brand); m_brand->setFixedSize(30, 30);
+        for (auto *button : leading) { m_titleBar->leading()->addWidget(button); button->setFixedSize(30, 28); button->setIconSize(QSize(17, 17)); }
+        for (auto *button : trailing) { m_titleBar->trailing()->addWidget(button); button->setFixedSize(30, 28); button->setIconSize(QSize(17, 17)); }
+        m_attentionBadge->setGeometry(16, 0, 14, 13);
+        m_statusLayout->addWidget(m_versionButton); m_versionButton->setFixedSize(40, 22);
+    } else {
+        m_titleBar->setMarkVisible(true);
+        // Back to the rail: the mark, its spacing, then the navigation; the pin and
+        // Settings after the stretch, the version last.
+        m_railLayout->insertWidget(0, m_brand);
+        for (int at = 0; at < leading.size(); ++at) m_railLayout->insertWidget(2 + at, leading[at]);
+        for (int at = 0; at < trailing.size(); ++at) m_railLayout->insertWidget(3 + leading.size() + at, trailing[at]);
+        m_railLayout->addWidget(m_versionButton); m_versionButton->setFixedSize(42, 24);
+        for (auto *button : all) { button->setFixedSize(button->property("railSize").toSize()); button->setIconSize(button->property("railIcon").toSize()); }
+        m_attentionBadge->setGeometry(24, 3, 17, 16);
+    }
+    for (auto *button : all) button->setVisible(!hidden.value(button));
+    m_versionButton->show();
+    m_sidebar->setVisible(!inTitle);
+}
+
 bool SessionsWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
 {
     if (m_framelessMain && FramelessWindow::nativeEvent(this, m_titleBar, message, result)) return true;
@@ -5487,6 +5528,7 @@ void SessionsWindow::applyWindowFrame()
     const bool frameless = false;
 #endif
     m_titleBar->setVisible(frameless);
+    placeRailControls(frameless);
     m_titleBar->setShortcut(ShortcutRegistry::instance().keys(QStringLiteral("go.anywhere")).value(0).toString(QKeySequence::NativeText));
     m_titleBar->setMark(windowIcon().pixmap(18, 18));
     if (frameless == m_framelessMain) return;

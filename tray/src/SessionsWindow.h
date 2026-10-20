@@ -375,8 +375,12 @@ private:
     class SessionLeadPanel *m_leadPanel=nullptr;
     // WhiteWh fork: the skin's own title bar in place of the system one.
     class WindowTitleBar *m_titleBar=nullptr;
-    bool m_framelessMain=false;
+    bool m_framelessMain=false, m_railInTitle=false;
     void applyWindowFrame();
+    // Moves the rail's controls into the title bar (and the version into the
+    // status bar) or back to the rail.
+    void placeRailControls(bool inTitle);
+    QWidget *m_sidebar=nullptr; class QVBoxLayout *m_railLayout=nullptr; class QHBoxLayout *m_statusLayout=nullptr; QPushButton *m_versionButton=nullptr;
     void updateLeadPanel();
     void sendReportToLead();
     // WhiteWh fork: the project (organization group) a session belongs to.

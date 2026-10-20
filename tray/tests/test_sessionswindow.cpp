@@ -703,6 +703,11 @@ void TestSessionsWindow::whiteWhWorkspaceView()
 #ifdef Q_OS_WIN
     // The skin's own title bar replaces the system one; the window keeps its width.
     QTRY_VERIFY(window.findChild<QWidget *>("windowTitleBar")->isVisible()); QVERIFY(window.windowFlags() & Qt::FramelessWindowHint);
+    // The rail's controls move into the title bar, and the version into the status bar.
+    QVERIFY(!window.findChild<QWidget *>("sidebar")->isVisible());
+    QVERIFY(window.findChild<QWidget *>("windowTitleBar")->isAncestorOf(toggle));
+    QVERIFY(window.findChild<QWidget *>("windowTitleBar")->isAncestorOf(window.findChild<QWidget *>("brandMark")));
+    QVERIFY(window.findChild<QWidget *>("workspaceStatus")->isAncestorOf(window.findChild<QWidget *>("appVersion")));
 #endif
     auto *listPanel = window.findChild<QWidget *>("sessionListPanel"); QVERIFY(listPanel);
     toggle->click(); QTRY_VERIFY(railNew->isVisible());
@@ -722,6 +727,8 @@ void TestSessionsWindow::whiteWhWorkspaceView()
     }
     QSettings().remove("workspace/skin"); window.applySkin();
     QVERIFY(!window.findChild<QWidget *>("windowTitleBar")->isVisible()); QVERIFY(!(window.windowFlags() & Qt::FramelessWindowHint));
+    QVERIFY(window.findChild<QWidget *>("sidebar")->isVisible()); QVERIFY(window.findChild<QWidget *>("sidebar")->isAncestorOf(railNew));
+    QVERIFY(window.findChild<QWidget *>("sidebar")->isAncestorOf(window.findChild<QWidget *>("appVersion")));
     QVERIFY(window.width() < 2000);
     QTRY_VERIFY(!toggle->isVisible()); QVERIFY(railNew->isVisible()); QCOMPARE(sessionCardTileInset(), 0);
     QVERIFY(!composer->findChild<QFrame *>("composerCard")->isVisible());

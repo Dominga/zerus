@@ -21,12 +21,16 @@ public:
         setObjectName("windowTitleBar");
         setFixedHeight(40);
         auto *row = new QHBoxLayout(this);
-        row->setContentsMargins(14, 0, 6, 1);
+        row->setContentsMargins(8, 0, 6, 1);
         row->setSpacing(10);
+        // The window may lend the bar its own controls: one in place of the
+        // mark, a group after the name and a group before the window buttons.
+        m_markSlot = new QHBoxLayout; m_markSlot->setContentsMargins(0, 0, 0, 0); m_markSlot->setSpacing(0);
         m_mark = new QLabel; m_mark->setObjectName("windowTitleMark"); m_mark->setFixedSize(18, 18);
-        row->addWidget(m_mark);
+        m_markSlot->addWidget(m_mark); row->addLayout(m_markSlot);
         m_name = new QLabel(QStringLiteral("Zerus")); m_name->setObjectName("windowTitleName");
         row->addWidget(m_name);
+        m_leading = new QHBoxLayout; m_leading->setContentsMargins(4, 0, 0, 0); m_leading->setSpacing(2); row->addLayout(m_leading);
         row->addStretch(1);
         m_search = new QPushButton; m_search->setObjectName("windowTitleSearch");
         m_search->setAccessibleName(tr("Search sessions, IDs and messages"));
@@ -41,6 +45,7 @@ public:
         searchRow->addWidget(m_searchIcon); searchRow->addWidget(m_searchText, 1); searchRow->addWidget(m_shortcut);
         row->addWidget(m_search, 3);
         row->addStretch(1);
+        m_trailing = new QHBoxLayout; m_trailing->setContentsMargins(0, 0, 6, 0); m_trailing->setSpacing(2); row->addLayout(m_trailing);
         connect(m_search, &QPushButton::clicked, this, [this] { if (search) search(); });
         const auto button = [this, row](Glyph glyph, const QString &caption, const char *name) {
             auto *b = new GlyphButton(glyph, this); b->setObjectName(QLatin1String(name));
@@ -57,6 +62,10 @@ public:
 
     void setShortcut(const QString &text) { m_shortcut->setText(text); m_shortcut->setVisible(!text.isEmpty()); }
     void setMark(const QPixmap &pixmap) { m_mark->setPixmap(pixmap); }
+    void setMarkVisible(bool visible) { m_mark->setVisible(visible); }
+    QHBoxLayout *markSlot() const { return m_markSlot; }
+    QHBoxLayout *leading() const { return m_leading; }
+    QHBoxLayout *trailing() const { return m_trailing; }
     // Colors come from the workspace theme, so the bar follows dark and light.
     void setColors(const QColor &background, const QColor &border, const QColor &field, const QColor &fieldBorder,
                    const QColor &text, const QColor &muted, const QColor &chip)
@@ -127,6 +136,7 @@ private:
     };
     QLabel *m_mark, *m_name, *m_searchIcon, *m_searchText, *m_shortcut;
     QPushButton *m_search;
+    QHBoxLayout *m_markSlot, *m_leading, *m_trailing;
     GlyphButton *m_maximize;
     QList<GlyphButton *> m_buttons;
     QColor m_background = QColor("#12161b"), m_border = QColor("#1f242c");

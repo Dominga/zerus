@@ -116,20 +116,33 @@ Get-ChildItem -LiteralPath $Root -Directory -Filter 'app-*' | Where-Object { $_.
 )PS";
 }
 
+namespace {
+// A folder with its links resolved. Qt 6.10 on Windows keeps a junction in
+// canonicalFilePath(), so a junction resolves through its target first.
+QString resolvedFolder(const QString &path)
+{
+    const QFileInfo info(path);
+    QString target = path;
+    if (info.isJunction()) target = info.junctionTarget();
+    else if (info.isSymLink()) target = info.symLinkTarget();
+    const QString canonical = QFileInfo(target).canonicalFilePath();
+    return canonical.isEmpty() ? QFileInfo(target).absoluteFilePath() : canonical;
+}
+}
+
 ForkUpdater::Layout ForkUpdater::layoutFor(const QString &executable)
 {
     const QFileInfo exe(executable);
     Layout layout;
     const QString launched = exe.absolutePath();
-    const QString real = QFileInfo(launched).canonicalFilePath();
-    layout.install = real.isEmpty() ? launched : real;
+    layout.install = resolvedFolder(launched);
     // Started as <root>\current\hgs-tray.exe or straight from <root>\app-<N>.
     const QFileInfo parent(QFileInfo(launched).fileName() == QLatin1String("current")
         ? QFileInfo(launched).absolutePath() : QFileInfo(layout.install).absolutePath());
     const QString root = parent.canonicalFilePath().isEmpty() ? parent.absoluteFilePath() : parent.canonicalFilePath();
     const QFileInfo link(QDir(root).filePath(QStringLiteral("current")));
     if (link.isSymLink() || link.isJunction()) {
-        if (link.canonicalFilePath() == layout.install) {
+        if (resolvedFolder(link.absoluteFilePath()) == layout.install) {
             layout.versioned = true;
             layout.root = root;
             layout.link = link.absoluteFilePath();

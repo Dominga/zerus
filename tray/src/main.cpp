@@ -9,6 +9,10 @@
 #include <QLocalSocket>
 #include <QSettings>
 #include "ForkUpdater.h"
+#ifdef Q_OS_WIN
+#include "RelayConfiguration.h"
+#include "WindowsMobileServices.h"
+#endif
 #include <QStringList>
 #include <QSystemTrayIcon>
 #include <QTextStream>
@@ -376,6 +380,11 @@ int main(int argc, char *argv[])
     // KSNI derives its persistent tray ID from the initial display name. Rename
     // the UI only after constructing the icon to preserve Plasma's visibility setting.
     TrayAgent agent(cfg);
+#ifdef Q_OS_WIN
+    // WhiteWh fork: the bundled mobile connector (and a chosen local relay),
+    // once this is the running tray.
+    WindowsMobileServices::ensureInBackground(RelaySettings::configPath());
+#endif
 #ifndef Q_OS_WIN
     // A service stop (SIGTERM) quits like the tray menu, so aboutToQuit flushes drafts.
     TerminationSignals termination([](int) { QCoreApplication::quit(); });

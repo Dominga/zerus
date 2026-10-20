@@ -57,7 +57,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: fork-windows-cli-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}
+            services/mobile/connector/target
+            services/mobile/relay/target
+          key: fork-windows-cli-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock', 'services/mobile/connector/Cargo.lock', 'services/mobile/relay/Cargo.lock') }}
           restore-keys: fork-windows-cli-${{ steps.rust.outputs.rustc }}-
       # The runner gives every step a synchronous pipe as stdin; hgs must not inherit it.
       - name: Rust tests and release build
@@ -65,6 +67,10 @@ jobs:
           mkdir -p artifacts/test-results
           cargo test --locked --features socraticode </dev/null 2>&1 | tee artifacts/test-results/rust.log
           cargo build --release --locked --features socraticode
+          # WhiteWh fork: the mobile gateway's connector and relay (docs/fork-updates.md).
+          cargo test --locked --lib --manifest-path services/mobile/connector/Cargo.toml </dev/null 2>&1 | tee artifacts/test-results/connector.log
+          cargo build --release --locked --manifest-path services/mobile/connector/Cargo.toml
+          cargo build --release --locked --manifest-path services/mobile/relay/Cargo.toml
       - name: Save Rust cache
         if: steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -73,6 +79,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            services/mobile/connector/target
+            services/mobile/relay/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Pinned ConPTY pair
         run: python scripts/fetch-conpty.py --output "$RUNNER_TEMP/conpty" </dev/null
@@ -125,6 +133,8 @@ jobs:
       - name: Portable zip from the tested executables
         run: |
           python scripts/package-windows.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \
+            --mobile-connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
+            --mobile-relay services/mobile/relay/target/release/zerus-relay.exe \
             --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
           python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \
             </dev/null 2>&1 | tee artifacts/test-results/portable.log

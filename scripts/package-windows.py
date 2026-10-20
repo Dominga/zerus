@@ -109,6 +109,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cli", type=Path, required=True, help="tested hgs.exe")
     parser.add_argument("--gui", type=Path, required=True, help="tested hgs-tray.exe")
+    # WhiteWh fork: the mobile gateway's programs (docs/fork-updates.md).
+    parser.add_argument("--mobile-connector", type=Path, help="tested zerus-mobile-connector.exe")
+    parser.add_argument("--mobile-relay", type=Path, help="tested zerus-relay.exe")
     parser.add_argument("--output", type=Path, required=True, help="zip to write")
     parser.add_argument("--qt-root", type=Path, default=os.environ.get("QT_ROOT_DIR"),
                         help="Qt installation, e.g. .../6.10.3/msvc2022_64 [default: $QT_ROOT_DIR]")
@@ -144,6 +147,10 @@ def main():
             pair = conpty_pair.fetch(Path(temporary) / "conpty")
         copy(args.cli, stage / "hgs.exe")
         copy(args.gui, stage / "hgs-tray.exe")
+        if args.mobile_connector:
+            copy(args.mobile_connector, stage / "zerus-mobile-connector.exe")
+        if args.mobile_relay:
+            copy(args.mobile_relay, stage / "zerus-relay.exe")
         # Qt libraries, plugins and translations. The SVG image and icon plugins
         # are loaded at run time only, so windeployqt cannot infer them from
         # imports. QML debugging and TUIO touch plugins are not used; the NMEA
@@ -184,7 +191,14 @@ def main():
             require((args.rust_licenses / "inventory.json").is_file(), "Collect dependency license texts first.")
             shutil.copytree(args.rust_licenses, licenses / "rust")
         else:
-            subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust")],
+            manifests = []
+            if args.mobile_connector or args.mobile_relay:
+                manifests = ["--manifest-path", str(ROOT / "Cargo.toml")]
+                if args.mobile_connector:
+                    manifests += ["--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml")]
+                if args.mobile_relay:
+                    manifests += ["--manifest-path", str(ROOT / "services/mobile/relay/Cargo.toml")]
+            subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust"), *manifests],
                            cwd=ROOT, check=True)
         for text in sorted((ROOT / "packaging/windows/licenses").glob("*.txt")):
             copy(text, licenses / "qt" / text.name)

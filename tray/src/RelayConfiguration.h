@@ -1,4 +1,5 @@
 #pragma once
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -100,7 +101,12 @@ inline std::optional<Prepared> prepare(const Snapshot &old,const Edit &edit,QStr
         out.insert("identity_url",previousIdentity);
     else if(!newState&&previousIdentity==relay)out.remove("identity_url");
     else if(newState)out.remove("identity_url");
+#ifdef Q_OS_WIN
+    // WhiteWh fork: a Windows gateway runs the hgs.exe bundled beside Zerus.
+    if(!old.exists){out.insert("hgs_path",QDir::toNativeSeparators(QCoreApplication::applicationDirPath()+"/hgs.exe"));out.insert("poll_interval",5);}
+#else
     if(!old.exists){out.insert("hgs_path","hgs");out.insert("poll_interval",5);}
+#endif
     return Prepared{out,newState};
 }
 

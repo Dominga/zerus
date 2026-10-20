@@ -16,6 +16,7 @@ class QProcess;
 // fork-windows.yml publishes as releases of the fork (docs/fork-updates.md).
 // It downloads and verifies a newer build in the background; Restart to finish
 // update then installs it once Zerus has quit, keeping one copy to roll back to.
+// The feed is read again while a build waits, and a newer build replaces it.
 // A plain portable folder is swapped with its sibling copies; a versioned root
 // (docs/fork-updates.md) keeps every build inside it and only re-points its
 // `current` junction. Native agents and the session host run from
@@ -62,10 +63,14 @@ private:
     void extracted();
     void finish(const QString &status);
     QString unpacked() const;
+    QString readyStatus() const;
 
     bool m_enabled = false, m_busy = false;
     Layout m_layout;
     QString m_install, m_stage, m_status;
+    // Where a download goes: the stage, or beside it while a ready build waits
+    // there, so that a newer build replaces it only once verified.
+    QString m_download;
     QNetworkAccessManager *m_network = nullptr;
     QPointer<QFile> m_file;
     QPointer<QProcess> m_extract;

@@ -38,7 +38,10 @@ Two minutes after start, then hourly, it reads the feed. When `build` is newer t
 its own, it downloads the zip into `<installation>.update`, beside the
 installation. Only HTTPS release URLs of this fork are accepted, up to 1 GiB. The
 zip must match the feed's size and SHA-256, and its `build-info.json` must name
-the feed's commit. Windows `tar.exe` unpacks it.
+the feed's commit. Windows `tar.exe` unpacks it. The feed is read hourly even
+while a build waits for the restart: a newer build downloads into
+`<stage>-next` and replaces the waiting one only once it is verified, so the
+restart always installs the newest build found.
 
 A verified build shows **Restart to finish update** in the tray menu and the
 sidebar, and posts one notification. Restarting quits Zerus as Quit does, so

@@ -320,7 +320,7 @@ QString ForkUpdater::unpacked() const
 
 void ForkUpdater::check()
 {
-    if (!m_enabled || m_busy || ready()) return;
+    if (!m_enabled || m_busy) return;
     m_busy = true;
     QNetworkRequest request{QUrl(QString::fromLatin1(feedUrl))};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -348,16 +348,19 @@ void ForkUpdater::feedFinished(QNetworkReply *reply)
         return finish(tr("The fork update feed is not valid."));
     if (m_build <= installedBuild())
         return finish(tr("Fork build %1 is the newest.").arg(installedBuild()));
+    if (m_build <= m_readyBuild) return finish(readyStatus());
     download();
 }
 
 void ForkUpdater::download()
 {
-    QDir stage(m_stage);
+    // A ready build stays where it is until the newer one is verified.
+    m_download = ready() ? m_stage + QStringLiteral("-next") : m_stage;
+    QDir stage(m_download);
     if (stage.exists() && !stage.removeRecursively())
-        return finish(tr("Could not clear %1.").arg(QDir::toNativeSeparators(m_stage)));
-    if (!QDir().mkpath(m_stage))
-        return finish(tr("Could not create %1.").arg(QDir::toNativeSeparators(m_stage)));
+        return finish(tr("Could not clear %1.").arg(QDir::toNativeSeparators(m_download)));
+    if (!QDir().mkpath(m_download))
+        return finish(tr("Could not create %1.").arg(QDir::toNativeSeparators(m_download)));
     m_file = new QFile(stage.filePath(QStringLiteral("update.zip")), this);
     if (!m_file->open(QIODevice::WriteOnly)) {
         m_file->deleteLater();
@@ -386,7 +389,7 @@ void ForkUpdater::downloadFinished(QNetworkReply *reply)
     const QString zip = m_file ? m_file->fileName() : QString();
     if (m_file) { m_file->close(); m_file->deleteLater(); }
     if (reply->error() != QNetworkReply::NoError || m_received != m_size || m_hash.result() != m_sha256) {
-        QDir(m_stage).removeRecursively();
+        QDir(m_download).removeRecursively();
         return finish(reply->error() != QNetworkReply::NoError
             ? tr("Fork build %1 did not download: %2").arg(m_build).arg(reply->errorString())
             : tr("Fork build %1 does not match its published size and SHA-256.").arg(m_build));
@@ -395,7 +398,7 @@ void ForkUpdater::downloadFinished(QNetworkReply *reply)
     // absolute and parent paths.
     auto *process = new QProcess(this);
     process->setProgram(QDir(qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"))).filePath(QStringLiteral("System32/tar.exe")));
-    process->setArguments({QStringLiteral("-xf"), QDir::toNativeSeparators(zip), QStringLiteral("-C"), QDir::toNativeSeparators(m_stage)});
+    process->setArguments({QStringLiteral("-xf"), QDir::toNativeSeparators(zip), QStringLiteral("-C"), QDir::toNativeSeparators(m_download)});
     process->setProcessChannelMode(QProcess::MergedChannels);
     connect(process, &QProcess::finished, this, &ForkUpdater::extracted);
     connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
@@ -411,21 +414,35 @@ void ForkUpdater::extracted()
     const bool unpackedOk = m_extract && m_extract->exitStatus() == QProcess::NormalExit && m_extract->exitCode() == 0;
     const auto output = m_extract ? QString::fromLocal8Bit(m_extract->readAll()).trimmed() : QString();
     if (m_extract) m_extract->deleteLater();
-    QFile::remove(QDir(m_stage).filePath(QStringLiteral("update.zip")));
-    const QDir build(unpacked());
+    QFile::remove(QDir(m_download).filePath(QStringLiteral("update.zip")));
+    const QDir build(QDir(m_download).filePath(QString::fromLatin1(top)));
     QFile manifest(build.filePath(QStringLiteral("build-info.json")));
     const bool complete = unpackedOk && build.exists(QStringLiteral("hgs-tray.exe")) && build.exists(QStringLiteral("hgs.exe"))
         && manifest.open(QIODevice::ReadOnly);
     // The zip must be the build of the commit the feed names.
     const auto info = complete ? QJsonDocument::fromJson(manifest.read(feedLimit)).object() : QJsonObject();
     if (!complete || info.value("source_commit").toString() != m_commit) {
-        QDir(m_stage).removeRecursively();
+        QDir(m_download).removeRecursively();
         return finish(output.isEmpty() ? tr("Fork build %1 is incomplete.").arg(m_build)
                                        : tr("Could not unpack fork build %1: %2").arg(m_build).arg(output));
     }
+    // The newer build takes the waiting one's place.
+    if (m_download != m_stage) {
+        manifest.close();
+        if (!QDir(m_stage).removeRecursively() || !QDir().rename(m_download, m_stage)) {
+            QDir(m_download).removeRecursively();
+            if (!QFileInfo::exists(unpacked())) m_readyBuild = 0;
+            return finish(ready() ? readyStatus() : tr("Could not replace the waiting fork update in %1.").arg(QDir::toNativeSeparators(m_stage)));
+        }
+    }
     m_readyBuild = m_build;
-    finish(tr("Fork build %1 is ready. Restart Zerus to finish the update.").arg(m_build));
+    finish(readyStatus());
     emit buildReady(m_build);
+}
+
+QString ForkUpdater::readyStatus() const
+{
+    return tr("Fork build %1 is ready. Restart Zerus to finish the update.").arg(m_readyBuild);
 }
 
 bool ForkUpdater::startInstall()

@@ -8,6 +8,7 @@
 #include <QJsonDocument>
 #include <QLocalSocket>
 #include <QSettings>
+#include "ForkUpdater.h"
 #include <QStringList>
 #include <QSystemTrayIcon>
 #include <QTextStream>
@@ -275,6 +276,10 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationName(QStringLiteral("hgs-tray"));
     QCoreApplication::setApplicationVersion(QLatin1String(HGS_TRAY_VERSION));
     QApplication::setQuitOnLastWindowClosed(false);
+    // WhiteWh fork: the fork's published builds open in the WhiteWh skin until
+    // the person picks another one in Settings → Appearance.
+    if (ForkUpdater::installedBuild() > 0 && !QSettings().contains(QStringLiteral("workspace/skin")))
+        QSettings().setValue(QStringLiteral("workspace/skin"), QStringLiteral("whitewh"));
     ZerusTranslator translator;
     QTranslator qtTranslator;
     if (!installZerusTranslation(app, translator, qtTranslator))

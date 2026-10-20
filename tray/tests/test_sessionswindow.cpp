@@ -724,6 +724,10 @@ void TestSessionsWindow::whiteWhWorkspaceView()
             inspector->setCurrentIndex(tab); QTest::qWait(250);
             QVERIFY(window.grab().save(preview + QString("/workspace-%1.png").arg(tab)));
         }
+        // Settings → Appearance, where the skin is chosen.
+        window.findChild<QPushButton *>("workspaceSettings")->click(); QTest::qWait(300);
+        QVERIFY(window.grab().save(preview + "/settings.png"));
+        window.findChild<QPushButton *>("railButton")->click(); QTest::qWait(100);
     }
     QSettings().remove("workspace/skin"); window.applySkin();
     QVERIFY(!window.findChild<QWidget *>("windowTitleBar")->isVisible()); QVERIFY(!(window.windowFlags() & Qt::FramelessWindowHint));

@@ -109,7 +109,7 @@ inline Skin parse(const QJsonObject &data, const QString &id, const QString &pat
 // session and session cards. Its light theme keeps the Zerus colors.
 inline const char *whiteWhJson()
 {
-    return R"({"schema":1,"name":"WhiteWh",
+    return R"({"schema":1,"name":"Compact",
 "dark":{"background":"#14181d","foreground":"#e6e8eb","muted":"#9aa3ad","surface":"#1b1f26","border":"#2c323b","accent":"#7dd3b0",
         "accentText":"#0f1a16","accentHover":"#a8e6cc","hover":"#1f242c","selected":"#1b2621","inset":"#151920"},
 "light":{"background":"#f5f7f9","foreground":"#1a2733","muted":"#627082","surface":"#ffffff","border":"#dce2e8","accent":"#167357",

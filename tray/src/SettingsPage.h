@@ -113,11 +113,12 @@ public:
         auto *duplicateSkin=new QPushButton(tr("Duplicate…"));duplicateSkin->setObjectName("duplicateWorkspaceSkin");duplicateSkin->setAutoDefault(false);
         auto *skinFolder=new QPushButton(tr("Open skins folder"));skinFolder->setObjectName("openWorkspaceSkins");skinFolder->setAutoDefault(false);
         auto *skinRow=new QHBoxLayout;skinRow->setSpacing(8);skinRow->addWidget(skin,1);skinRow->addWidget(duplicateSkin);skinRow->addWidget(skinFolder);
-        appearance->addWidget(new QLabel(tr("Skin")));appearance->addLayout(skinRow);
+        // Right under Theme: the skin changes the whole window, so it leads the page.
+        appearance->insertWidget(3,new QLabel(tr("Skin")));appearance->insertLayout(4,skinRow);
         // One short line: a wrapping label would move the rows below as the page width changes.
         auto *skinHint=new QLabel(tr("Colors, window shape and screen layouts. Duplicate a skin to edit it."));
         skinHint->setObjectName("muted");skinHint->setToolTip(tr("A duplicate is a JSON file in the skins folder; saved changes apply at once."));
-        appearance->addWidget(skinHint);
+        appearance->insertWidget(5,skinHint);
         connect(skin,&QComboBox::currentIndexChanged,this,[this,skin]{QSettings().setValue("workspace/skin",skin->currentData());if(appearanceChanged)appearanceChanged();});
         connect(duplicateSkin,&QPushButton::clicked,this,[this,fillSkins]{
             const auto current=WorkspaceSkin::current();bool ok=false;

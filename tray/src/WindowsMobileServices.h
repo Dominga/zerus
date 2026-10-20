@@ -124,6 +124,28 @@ inline void ensureInBackground(const QString &config)
     thread->start();
 }
 
+// WhiteWh fork: a session host that stays for other computers. A Windows SSH
+// peer (src/windows_peer.rs) never starts the host itself, and a host exits a
+// few seconds after its last session, so this computer keeps one running with
+// `hgs session-host start` while the option is on.
+inline bool residentHost() { return QSettings().value(QStringLiteral("machines/residentHost"), false).toBool(); }
+inline void keepResidentHost(const QString &hgs)
+{
+    if (!residentHost() || hgs.isEmpty()) return;
+    QProcess process;
+    process.setProgram(hgs);
+    process.setArguments({QStringLiteral("session-host"), QStringLiteral("start"), QStringLiteral("--json")});
+    process.setStandardInputFile(QProcess::nullDevice());
+    process.setStandardOutputFile(QProcess::nullDevice());
+    process.setStandardErrorFile(QProcess::nullDevice());
+#ifdef Q_OS_WIN
+    process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments) {
+        arguments->flags |= 0x08000000; // CREATE_NO_WINDOW
+    });
+#endif
+    process.startDetached();
+}
+
 // The fork's options under the Windows Mobile connection panel.
 inline QWidget *optionsPanel()
 {

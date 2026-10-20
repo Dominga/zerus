@@ -20,14 +20,16 @@ use super::{
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-pub const USAGE: &str = "usage: hgs session-host install | status | stop | uninstall [--json]";
+pub const USAGE: &str = "usage: hgs session-host install | status | start | stop | uninstall [--json]";
 /// The line `hgs --help` adds on Windows.
-pub const HELP: &str = "       hgs session-host install | status | stop | uninstall [--json]   local sessions on this Windows computer\n";
+pub const HELP: &str = "       hgs session-host install | status | start | stop | uninstall [--json]   local sessions on this Windows computer (start: a host that stays for SSH peers)\n";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Install,
     Status,
+    // WhiteWh fork: start a host that stays without sessions.
+    Start,
     Stop,
     Uninstall,
 }
@@ -44,6 +46,7 @@ pub fn parse(args: &[String]) -> Option<Request> {
     let (action, options) = args.split_first()?;
     let action = match action.as_str() {
         "install" => Action::Install,
+        "start" => Action::Start,
         "status" => Action::Status,
         "stop" => Action::Stop,
         "uninstall" => Action::Uninstall,
@@ -470,6 +473,7 @@ mod native {
                 }
                 Ok(0)
             }
+            Action::Start => start(&config.state, request.json),
             Action::Stop => stop(&config.state, request.json),
             Action::Uninstall => uninstall(&layout, &config.state, request.json),
         }
@@ -483,6 +487,36 @@ mod native {
             print_json(&install_json(&report, layout, VERSION));
         } else {
             print!("{}", install_text(&report, layout, VERSION));
+        }
+        Ok(0)
+    }
+
+    /// WhiteWh fork: `hgs session-host start` brings up a host that stays
+    /// without sessions until `stop`, so other computers (a Windows SSH peer)
+    /// can start sessions here: an SSH session itself never starts the host.
+    /// A host that already runs is left as it is.
+    fn start(state: &Path, json: bool) -> Result<i32> {
+        if !platform::local_sessions() {
+            return Err(Error::new(1, "Local sessions are not enabled on this computer: run hgs session-host install first."));
+        }
+        let running = matches!(query(state), Host::Running { .. });
+        if !running {
+            // The host takes this process's environment (D8).
+            // SAFETY: set before any thread of this short-lived command starts.
+            unsafe { std::env::set_var(crate::host::registry::RESIDENT_ENV, "1") };
+            std::fs::create_dir_all(state)?;
+            let state = platform::canonical(state)?;
+            client::connect_or_start(&state, Role::Cli, &|| {
+                crate::host::gate::host_image(&state).map_err(client::ClientError::Start)
+            })
+            .map_err(|error| Error::new(1, format!("cannot start the session host: {error}")))?;
+        }
+        if json {
+            print_json(&json!({"was_running": running, "running": true}));
+        } else if running {
+            println!("The session host already runs.");
+        } else {
+            println!("The session host runs and stays until hgs session-host stop.");
         }
         Ok(0)
     }
@@ -595,6 +629,7 @@ mod tests {
         for (words, action) in [
             (&["install"][..], Action::Install),
             (&["status"], Action::Status),
+            (&["start"], Action::Start),
             (&["stop"], Action::Stop),
             (&["uninstall"], Action::Uninstall),
         ] {
@@ -613,7 +648,7 @@ mod tests {
         assert!(HELP.contains(USAGE.trim_start_matches("usage: ")));
         for words in [
             &[][..],
-            &["start"],
+            &["restart"],
             &["Install"],
             &["--json", "install"],
             &["install", "--json", "--json"],

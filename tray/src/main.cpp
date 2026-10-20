@@ -384,6 +384,11 @@ int main(int argc, char *argv[])
     // WhiteWh fork: the bundled mobile connector (and a chosen local relay),
     // once this is the running tray.
     WindowsMobileServices::ensureInBackground(RelaySettings::configPath());
+    // WhiteWh fork: a host for SSH peers, checked again every minute.
+    WindowsMobileServices::keepResidentHost(cfg.hgsPath);
+    QTimer residentHost;
+    QObject::connect(&residentHost, &QTimer::timeout, &residentHost, [&cfg] { WindowsMobileServices::keepResidentHost(cfg.hgsPath); });
+    residentHost.start(60 * 1000);
 #endif
 #ifndef Q_OS_WIN
     // A service stop (SIGTERM) quits like the tray menu, so aboutToQuit flushes drafts.

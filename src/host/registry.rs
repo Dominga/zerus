@@ -51,6 +51,11 @@ use std::{
 
 /// How long an idle host waits for a new session before it exits.
 pub(crate) const LINGER: Duration = Duration::from_secs(5);
+/// WhiteWh fork: how long a resident host (`hgs session-host start`) lingers
+/// without sessions: in effect until `stop`. It is set in the environment the
+/// starting client hands the host.
+pub(crate) const RESIDENT: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
+pub(crate) const RESIDENT_ENV: &str = "HGS_HOST_RESIDENT";
 /// How long the host waits for a supervisor's answer.
 const INPUT_STATE_TIMEOUT: Duration = Duration::from_secs(3);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);

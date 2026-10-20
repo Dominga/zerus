@@ -144,6 +144,14 @@ public:
         auto *optionalQuestions=new QCheckBox(tr("Notify about optional questions"));optionalQuestions->setObjectName("notifyOptionalQuestions");optionalQuestions->setChecked(QuestionNotificationSettings::enabled());sessions->addWidget(optionalQuestions);
         auto *optionalHint=new QLabel(tr("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify."));optionalHint->setWordWrap(true);sessions->addWidget(optionalHint);
         connect(optionalQuestions,&QCheckBox::toggled,this,[](bool on){QuestionNotificationSettings::setEnabled(on);});
+#ifdef Q_OS_WIN
+        // WhiteWh fork: other computers start sessions here over SSH (src/windows_peer.rs).
+        auto *residentHost=new QCheckBox(tr("Keep the session host running for other computers"));residentHost->setObjectName("residentSessionHost");
+        residentHost->setChecked(WindowsMobileServices::residentHost());sessions->addWidget(residentHost);
+        auto *residentHint=new QLabel(tr("Off by default. On: Zerus keeps this computer's session host running, so the Zerus desktop of another computer can start sessions here over SSH. A session host is never started from an SSH session."));
+        residentHint->setWordWrap(true);sessions->addWidget(residentHint);
+        connect(residentHost,&QCheckBox::toggled,this,[executable](bool on){QSettings().setValue(QStringLiteral("machines/residentHost"),on);if(on)WindowsMobileServices::keepResidentHost(executable);});
+#endif
         auto *hint=new QLabel(tr("Closing Zerus keeps agents running. Projects and the arrangement of your workspace are saved on this device."));hint->setWordWrap(true);sessions->addWidget(hint);sessions->addStretch();
         sync=new RecoverySync(executable,this);recovery=new RecoverySettings(sync);recovery->setMaximumWidth(850);addPage(recovery);
         auto *processes=makePage(tr("Processes"));

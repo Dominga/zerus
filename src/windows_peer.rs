@@ -64,20 +64,15 @@ pub fn quote(argument: &str) -> Result<String> {
     Ok(format!("\"{argument}{}\"", "\\".repeat(trailing)))
 }
 
-/// `cmd /c` drops the first and the last quote of a line that starts with one,
-/// so the whole line travels inside one more pair.
-pub fn wrap(line: &str) -> String {
-    format!("\"{line}\"")
-}
-
 /// The remote command line that runs hgs with `args` on a Windows computer.
+/// Windows OpenSSH quotes the whole line for `cmd /c` itself.
 pub fn command(args: &[String]) -> Result<String> {
     let mut line = REMOTE_HGS.to_owned();
     for argument in args {
         line.push(' ');
         line.push_str(&quote(argument)?);
     }
-    Ok(wrap(&line))
+    Ok(line)
 }
 
 /// The remote command line that runs hgs with `args` on `alias`, whichever
@@ -108,7 +103,7 @@ mod tests {
         }
         assert_eq!(
             command(&["ls".into(), "--local".into(), "--json".into()]).unwrap(),
-            r#"""%USERPROFILE%\.local\bin\hgs.exe" "ls" "--local" "--json"""#
+            r#""%USERPROFILE%\.local\bin\hgs.exe" "ls" "--local" "--json""#
         );
     }
 }

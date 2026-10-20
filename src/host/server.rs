@@ -501,7 +501,13 @@ mod windows {
                 .spawn(move || accept(&host, &listener, &identity, &reply))
                 .map_err(|e| failed(e.to_string()))?
         };
-        host.wait_for_exit(LINGER);
+        // WhiteWh fork: a host started by `hgs session-host start` stays for
+        // other computers' sessions (src/windows_peer.rs) until it is stopped.
+        host.wait_for_exit(if std::env::var_os(crate::host::registry::RESIDENT_ENV).is_some() {
+            crate::host::registry::RESIDENT
+        } else {
+            LINGER
+        });
         // Clients that lose this race see no host, or a connection that ends
         // before their hello is answered, and start a new host (D3). Those
         // accepted before the decision may still send their request.

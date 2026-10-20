@@ -136,3 +136,8 @@ adds, under Settings -> Mobile connection (`tray/src/WindowsMobileServices.h`):
   Provision the computer once with the relay stopped:
   `zerus-relay --database <db> provision --name <workspace> --computer-name <name>`,
   then save the printed computer credential in Mobile connection.
+
+## Windows SSH peers
+
+The desktop on one Windows PC can manage another Windows PC over SSH; see
+[fork-windows-peers.md](fork-windows-peers.md).

@@ -394,7 +394,7 @@ fn check(config: &Config, alias: &str) -> Result<Value> {
 /// WhiteWh fork: the check of a Windows computer, or `None` when `alias` is
 /// not one. Its CLI comes with Zerus there (`hgs session-host install`).
 fn check_windows(config: &Config, alias: &str) -> Result<Option<Value>> {
-    let probe = crate::windows_peer::wrap(crate::windows_peer::PROBE);
+    let probe = crate::windows_peer::PROBE;
     let out = platform::ssh_output(
         platform::ssh()
             .args(ssh_options(config, alias))
@@ -406,7 +406,7 @@ fn check_windows(config: &Config, alias: &str) -> Result<Option<Value>> {
                 "-o",
                 "StrictHostKeyChecking=yes",
                 alias,
-                probe.as_str(),
+                probe,
             ])
             .stdin(Stdio::null()),
     )?;

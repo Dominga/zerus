@@ -7,6 +7,12 @@ import shutil
 import subprocess
 
 
+# WhiteWh fork: reviewed crates that publish no license file, each offered
+# under Apache-2.0 among others (the relay's sqlx needs crc-catalog).
+APACHE_WITHOUT_TEXT = {"crc-catalog"}
+ROOT = Path(__file__).resolve().parent.parent
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
@@ -36,6 +42,17 @@ def main():
         if package.get("license_file"):
             notices.append(source / package["license_file"])
         notices = sorted(set(notices))
+        if not notices and package["name"] in APACHE_WITHOUT_TEXT and "Apache-2.0" in (package.get("license") or ""):
+            # Used under Apache-2.0, distributed here with its full text.
+            folder = destination / f"{package['name']}-{package['version']}"
+            folder.mkdir(parents=True, exist_ok=True)
+            text = (ROOT / "packaging/windows/licenses/Apache-2.0.txt").read_text(encoding="utf-8")
+            (folder / "LICENSE-APACHE").write_text(
+                f"{package['name']} {package['version']} by {', '.join(package.get('authors') or [])}\n"
+                f"{package.get('repository') or ''}\nLicensed {package['license']}; used under Apache-2.0.\n\n{text}",
+                encoding="utf-8")
+            inventory.append({key: package.get(key) for key in ("name", "version", "license", "repository")})
+            continue
         if not notices:
             raise SystemExit(f"No license text found for {package['name']} {package['version']}; review before distribution.")
         folder = destination / f"{package['name']}-{package['version']}"

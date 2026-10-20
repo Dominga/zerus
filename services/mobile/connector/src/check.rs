@@ -14,7 +14,6 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -160,9 +159,7 @@ fn state_dir(directory: &Path, binding: &str) -> Value {
 /// Reads the journal in one short read-only transaction.
 fn journal(path: &Path, binding: &str, lock: LockState) -> Value {
     let mut header = [0u8; 100];
-    let read = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+    let read = fsguard::open_no_follow(std::fs::OpenOptions::new().read(true))
         .open(path)
         .and_then(|mut file| file.read(&mut header));
     match read {

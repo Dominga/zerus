@@ -4,6 +4,8 @@
 //! `sizes.jsonl`, the capability markers of `operations.json` and the fixed
 //! receipts of `receipts.json`. Native calls are scripted by argv; operations
 //! this build does not implement must be refused as unsupported.
+// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
+#![cfg(unix)]
 mod common;
 
 use common::*;

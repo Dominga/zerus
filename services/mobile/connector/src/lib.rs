@@ -3,8 +3,8 @@
 //! mutation never executes twice. This library holds the parts the binary and
 //! its tests share; `services/mobile/connector/README.md` records where the
 //! Rust connector deliberately differs from the Python one.
-#[cfg(not(unix))]
-compile_error!("the mobile connector supports only Unix gateways (Linux and macOS)");
+#[cfg(not(any(unix, windows)))]
+compile_error!("the mobile connector supports Unix gateways (Linux and macOS) and Windows");
 
 pub mod accounts;
 pub mod archives;
@@ -16,6 +16,11 @@ pub mod error;
 pub mod execute;
 pub mod files;
 pub mod fleet;
+#[cfg(unix)]
+pub mod fsguard;
+// WhiteWh fork: a Windows gateway keeps its state under the profile's ACL.
+#[cfg(windows)]
+#[path = "fsguard_windows.rs"]
 pub mod fsguard;
 pub mod git_status;
 pub mod hook_health;
@@ -197,6 +202,7 @@ async fn serve(
 
 /// SIGTERM or SIGINT stops claiming; a second signal exits at once without
 /// touching any child, leaving a running request for restart recovery.
+#[cfg(unix)]
 async fn signals(stopping: &runtime::Event) {
     use tokio::signal::unix::{signal, SignalKind};
     let (Ok(mut terminate), Ok(mut interrupt)) = (
@@ -222,6 +228,36 @@ async fn signals(stopping: &runtime::Event) {
                 "Connector stopped at once; restart recovers a request in progress",
             );
             std::process::exit(128 + number);
+        }
+        runtime::log("INFO", "Connector stopping after the request in progress");
+        stopping.set();
+    }
+}
+
+/// WhiteWh fork: on Windows, Ctrl+C, Ctrl+Break or closing the console stop
+/// claiming the same way; a second one exits at once.
+#[cfg(windows)]
+async fn signals(stopping: &runtime::Event) {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close};
+    let (Ok(mut interrupt), Ok(mut brk), Ok(mut close)) = (ctrl_c(), ctrl_break(), ctrl_close()) else {
+        return std::future::pending().await;
+    };
+    let mut received = 0;
+    loop {
+        {
+            let int = std::pin::pin!(interrupt.recv());
+            let br = std::pin::pin!(brk.recv());
+            let cl = std::pin::pin!(close.recv());
+            let first = futures_util::future::select(int, br);
+            let _ = futures_util::future::select(first, cl).await;
+        }
+        received += 1;
+        if received > 1 {
+            runtime::log(
+                "WARNING",
+                "Connector stopped at once; restart recovers a request in progress",
+            );
+            std::process::exit(130);
         }
         runtime::log("INFO", "Connector stopping after the request in progress");
         stopping.set();

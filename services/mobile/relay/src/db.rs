@@ -187,6 +187,14 @@ impl Tx {
         Ok(())
     }
 }
+/// The SQLite URL of a database file. WhiteWh fork: a Windows path keeps its
+/// drive letter as a path, not a URL host (`sqlite:///C:/…`).
+fn sqlite_url(path: &Path) -> String {
+    if cfg!(windows) && path.is_absolute() {
+        return format!("sqlite:///{}?mode=rw", path.display().to_string().replace('\\', "/"));
+    }
+    format!("sqlite://{}?mode=rw", path.display())
+}
 impl Db {
     pub async fn open(path: &Path, cfg: Arc<Config>) -> Result<Self> {
         sqlx::any::install_default_drivers();
@@ -199,7 +207,7 @@ impl Db {
         let url = cfg
             .database_url
             .clone()
-            .unwrap_or_else(|| format!("sqlite://{}?mode=rw", path.display()));
+            .unwrap_or_else(|| sqlite_url(path));
         let options = AnyConnectOptions::from_str(&url)?.disable_statement_logging();
         let pool = AnyPoolOptions::new()
             .min_connections(if pg { cfg.pool_min } else { 1 })

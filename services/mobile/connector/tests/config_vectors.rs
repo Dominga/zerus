@@ -1,5 +1,7 @@
 //! `config.jsonl`, `identities.json`, `request_hash.jsonl` and the operation
 //! sets of `operations.json`, against the library.
+// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
+#![cfg(unix)]
 mod common;
 
 use common::*;

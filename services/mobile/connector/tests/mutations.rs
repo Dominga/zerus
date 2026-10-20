@@ -3,6 +3,8 @@
 //! the stop rule of divergence h for a write that never started, and the
 //! sessions an authoritative action target makes inspectable. Native calls
 //! are scripted by argv.
+// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
+#![cfg(unix)]
 mod common;
 
 use common::*;

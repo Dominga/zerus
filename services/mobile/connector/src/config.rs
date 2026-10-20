@@ -6,6 +6,7 @@ use crate::pyjson::{self, Value};
 use crate::url::{self, Transport};
 use std::fs::Metadata;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -76,6 +77,14 @@ pub struct Finding {
 }
 
 /// Divergence e: `hgs_path` is executed, so only this user may change the file.
+#[cfg(windows)]
+pub fn file_findings(_metadata: &Metadata, _euid: u32) -> Vec<Finding> {
+    // WhiteWh fork: Windows has no owner uid or mode bits; the configuration
+    // stays private through the profile's ACL.
+    Vec::new()
+}
+
+#[cfg(unix)]
 pub fn file_findings(metadata: &Metadata, euid: u32) -> Vec<Finding> {
     let mut findings = Vec::new();
     if metadata.uid() != euid || metadata.mode() & 0o022 != 0 {

@@ -1,5 +1,7 @@
 //! The built binary: `main()` vectors of `config.jsonl`, `--version`, the
 //! run-mode startup refusals and the read-only `--check` report.
+// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
+#![cfg(unix)]
 mod common;
 
 use common::*;

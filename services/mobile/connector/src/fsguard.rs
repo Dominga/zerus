@@ -61,6 +61,11 @@ pub fn check_private_directory(path: &Path) -> Result<()> {
 }
 
 fn open_flags(options: &mut OpenOptions) -> &mut OpenOptions {
+    open_no_follow(options)
+}
+
+/// Opens without following a symlink (O_NOFOLLOW).
+pub fn open_no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
     options.custom_flags(OFlags::NOFOLLOW.bits() as i32)
 }
 

@@ -1,4 +1,6 @@
 //! Private aggregate transport, with synthetic native replies and journals.
+// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
+#![cfg(unix)]
 mod common;
 
 use common::{Scratch, EPOCH};

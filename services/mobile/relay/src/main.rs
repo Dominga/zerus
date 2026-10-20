@@ -108,10 +108,19 @@ async fn run(cli: Cli) -> Result<()> {
                 let shutdown = CancellationToken::new();
                 let signal = shutdown.clone();
                 tokio::spawn(async move {
-                    let mut term =
-                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                            .expect("signal handler");
-                    tokio::select! {_=tokio::signal::ctrl_c()=>{},_=term.recv()=>{}}
+                    #[cfg(unix)]
+                    {
+                        let mut term =
+                            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                                .expect("signal handler");
+                        tokio::select! {_=tokio::signal::ctrl_c()=>{},_=term.recv()=>{}}
+                    }
+                    // WhiteWh fork: Windows stops on Ctrl+C or Ctrl+Break.
+                    #[cfg(windows)]
+                    {
+                        let mut brk = tokio::signal::windows::ctrl_break().expect("signal handler");
+                        tokio::select! {_=tokio::signal::ctrl_c()=>{},_=brk.recv()=>{}}
+                    }
                     signal.cancel();
                 });
                 eprintln!("zerus-relay ready");

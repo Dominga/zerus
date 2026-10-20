@@ -1,4 +1,6 @@
 //! Synthetic checkout reads: native projection, exact argv and durable read identity.
+// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
+#![cfg(unix)]
 mod common;
 
 use common::{Scratch, EPOCH};

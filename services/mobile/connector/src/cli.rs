@@ -3,7 +3,6 @@
 //! a repeated option keeps its last value, `--config=PATH` works, and any
 //! usage error exits 2.
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 pub const USAGE: &str =
@@ -39,7 +38,7 @@ pub enum Command {
 /// like an option: it starts with `-`, is not `-` itself or a negative number,
 /// and has no space.
 fn is_value(argument: &OsStr) -> bool {
-    let bytes = argument.as_bytes();
+    let bytes = argument.as_encoded_bytes();
     let negative = |text: &[u8]| {
         let digits = &text[1..];
         let (whole, fraction) = match digits.iter().position(|&b| b == b'.') {
@@ -58,15 +57,30 @@ fn is_value(argument: &OsStr) -> bool {
     !bytes.starts_with(b"-") || bytes == b"-" || negative(bytes) || bytes.contains(&b' ')
 }
 
+/// The path after `--config=`, byte for byte on Unix.
+#[cfg(unix)]
+fn config_value(_argument: &OsStr, value: &[u8]) -> OsString {
+    use std::os::unix::ffi::OsStrExt;
+    OsStr::from_bytes(value).to_owned()
+}
+
+/// Windows arguments are UTF-16; a path that is not valid Unicode is not one
+/// a configuration file names.
+#[cfg(windows)]
+fn config_value(argument: &OsStr, _value: &[u8]) -> OsString {
+    let text = argument.to_string_lossy();
+    OsString::from(&text["--config=".len()..])
+}
+
 pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let (mut config, mut allow, mut check, mut json, mut version, mut help) =
         (None, false, false, false, false, false);
     let mut unknown = Vec::new();
     while let Some(argument) = arguments.next() {
-        let bytes = argument.as_bytes();
+        let bytes = argument.as_encoded_bytes();
         if let Some(value) = bytes.strip_prefix(b"--config=") {
-            config = Some(PathBuf::from(OsStr::from_bytes(value)));
+            config = Some(PathBuf::from(config_value(&argument, value)));
             continue;
         }
         match bytes {
@@ -164,6 +178,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn non_utf8_paths_pass_through() {
         use std::os::unix::ffi::OsStringExt;

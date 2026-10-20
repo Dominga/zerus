@@ -61,6 +61,44 @@ them. On its first start, the new build refreshes the staged CLI through
 The first fork build is installed by hand. Builds made elsewhere, including
 upstream releases, have no fork build number and never update this way.
 
+### Versioned root
+
+The plain layout above puts `.update`, `.previous`, `.failed` and the log next to
+the installation, that is, in whatever folder holds it. A versioned root keeps all
+of it inside one folder and never moves the running build:
+
+```
+C:\Tools\Zerus\
+  current\      junction to the build that starts; shortcuts point here
+  app-24\       the previous build, kept for rollback
+  app-25\       the current build
+  .update\      a newer build while it downloads and waits for the restart
+  update.log
+```
+
+The updater uses it when `<root>\current` is a junction to the folder Zerus runs
+from, started either as `current\hgs-tray.exe` or from that build's own folder.
+After **Restart to finish update** the helper waits for Zerus to quit, moves the
+verified build to `<root>\app-<build>`, re-points `current` at it and starts it.
+Nothing has to stop running from the old build, so the two-minute wait of the
+plain layout never applies. A build that exits within 15 seconds hands `current`
+back to the previous one. After a successful start the two newest `app-*` builds
+stay and older ones are removed.
+
+When `current` points to another build than the one running, that build does not
+update at all: start Zerus from `current`.
+
+Switching an existing installation, with Zerus closed (`app` is its folder):
+
+```powershell
+cd C:\Tools\Zerus
+New-Item -ItemType Junction -Path current -Target app
+```
+
+Then start `C:\Tools\Zerus\current\hgs-tray.exe` and point shortcuts, including the
+Startup one, there. The first update goes to `app-<build>`; the original `app`
+folder is not an `app-*` build and stays until it is removed by hand.
+
 ## Optional extensions
 
 Integrations with optional third-party tools stay outside the core as

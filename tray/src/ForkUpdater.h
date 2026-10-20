@@ -14,13 +14,29 @@ class QProcess;
 // WhiteWh/zerus only; upstream Zerus has no such updater. A portable Windows
 // build of this fork installs the newer builds that .github/workflows/
 // fork-windows.yml publishes as releases of the fork (docs/fork-updates.md).
-// It downloads and verifies a newer build in the background, next to the
-// installation; Restart to finish update then replaces the portable folder once
-// Zerus has quit, keeping one copy to roll back to. Native agents and the session
-// host run from %USERPROFILE%\.local and are never stopped.
+// It downloads and verifies a newer build in the background; Restart to finish
+// update then installs it once Zerus has quit, keeping one copy to roll back to.
+// A plain portable folder is swapped with its sibling copies; a versioned root
+// (docs/fork-updates.md) keeps every build inside it and only re-points its
+// `current` junction. Native agents and the session host run from
+// %USERPROFILE%\.local and are never stopped.
 class ForkUpdater : public QObject {
     Q_OBJECT
 public:
+    // Where the running build lives and where its updates go.
+    struct Layout {
+        // The folder of the running build, links resolved.
+        QString install;
+        // Versioned root: <root>\current is a junction to the running build, and
+        // the builds, the staged update and the log all stay inside <root>.
+        bool versioned = false;
+        QString root, link;
+        // Another build is current in this versioned root: this one stays put.
+        bool superseded = false;
+        // Where a newer build is downloaded and unpacked.
+        QString stage;
+    };
+    static Layout layoutFor(const QString &executable);
     static ForkUpdater *instance();
     // The fork workflow's run number, or 0 for a build made elsewhere.
     static qint64 installedBuild();
@@ -48,6 +64,7 @@ private:
     QString unpacked() const;
 
     bool m_enabled = false, m_busy = false;
+    Layout m_layout;
     QString m_install, m_stage, m_status;
     QNetworkAccessManager *m_network = nullptr;
     QPointer<QFile> m_file;

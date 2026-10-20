@@ -73,6 +73,73 @@ if ($started.HasExited) {
 Log "Updated to the build in $Install."
 Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
 )PS";
+
+// The versioned root's helper: the running build is never moved, so nothing has to
+// stop running from it. Once Zerus quits, the verified build becomes <root>\app-<N>,
+// <root>\current is re-pointed at it and started; a build that exits within 15
+// seconds hands current back. The two newest builds stay, older app-* go.
+const char *versionedScript = R"PS(param([int]$ParentPid, [string]$Root, [string]$Link, [string]$New, [string]$Target, [string]$Stage)
+$ErrorActionPreference = 'Stop'
+$log = Join-Path $Root 'update.log'
+function Log([string]$message) { try { Add-Content -LiteralPath $log -Value ("{0:u} {1}" -f (Get-Date), $message) } catch { } }
+function Point([string]$folder) {
+    # rmdir removes the junction itself and never the build it points to.
+    if (Test-Path -LiteralPath $Link) { cmd /c rmdir "$Link" | Out-Null }
+    New-Item -ItemType Junction -Path $Link -Target $folder | Out-Null
+}
+$gui = Join-Path $Link 'hgs-tray.exe'
+$previous = ([string]((Get-Item -LiteralPath $Link).Target | Select-Object -First 1)).TrimEnd('\')
+try { Wait-Process -Id $ParentPid -Timeout 120 -ErrorAction Stop } catch { }
+if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) { Log 'Zerus did not quit; the update waits for the next restart.'; exit 1 }
+try {
+    if (Test-Path -LiteralPath $Target) { Remove-Item -LiteralPath $Target -Recurse -Force }
+    Move-Item -LiteralPath $New -Destination $Target
+    Point $Target
+} catch {
+    Log "Could not switch to the new build: $_"
+    if (-not (Test-Path -LiteralPath $Link)) { Point $previous }
+    Start-Process -FilePath $gui; exit 1
+}
+$started = Start-Process -FilePath $gui -PassThru
+Start-Sleep -Seconds 15
+if ($started.HasExited) {
+    Log "The new build exited with code $($started.ExitCode); current points to $previous again."
+    Point $previous
+    Start-Process -FilePath $gui
+    exit 1
+}
+Log "Updated: current is $Target, the previous build stays in $previous."
+Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath $Root -Directory -Filter 'app-*' | Where-Object { $_.FullName -ne $Target -and $_.FullName -ne $previous } | ForEach-Object {
+    try { Remove-Item -LiteralPath $_.FullName -Recurse -Force } catch { Log "Kept $($_.FullName): $_" }
+}
+)PS";
+}
+
+ForkUpdater::Layout ForkUpdater::layoutFor(const QString &executable)
+{
+    const QFileInfo exe(executable);
+    Layout layout;
+    const QString launched = exe.absolutePath();
+    const QString real = QFileInfo(launched).canonicalFilePath();
+    layout.install = real.isEmpty() ? launched : real;
+    // Started as <root>\current\hgs-tray.exe or straight from <root>\app-<N>.
+    const QFileInfo parent(QFileInfo(launched).fileName() == QLatin1String("current")
+        ? QFileInfo(launched).absolutePath() : QFileInfo(layout.install).absolutePath());
+    const QString root = parent.canonicalFilePath().isEmpty() ? parent.absoluteFilePath() : parent.canonicalFilePath();
+    const QFileInfo link(QDir(root).filePath(QStringLiteral("current")));
+    if (link.isSymLink() || link.isJunction()) {
+        if (link.canonicalFilePath() == layout.install) {
+            layout.versioned = true;
+            layout.root = root;
+            layout.link = link.absoluteFilePath();
+            layout.stage = QDir(root).filePath(QStringLiteral(".update"));
+            return layout;
+        }
+        layout.superseded = true;
+    }
+    layout.stage = layout.install + QStringLiteral(".update");
+    return layout;
 }
 
 ForkUpdater *ForkUpdater::instance()
@@ -92,12 +159,14 @@ qint64 ForkUpdater::installedBuild()
 
 ForkUpdater::ForkUpdater(QObject *parent) : QObject(parent)
 {
-    m_install = QFileInfo(QCoreApplication::applicationFilePath()).canonicalPath();
-    m_stage = m_install + QStringLiteral(".update");
+    m_layout = layoutFor(QCoreApplication::applicationFilePath());
+    m_install = m_layout.install;
+    m_stage = m_layout.stage;
 #ifdef Q_OS_WIN
     // Only the portable zip carries build-info.json next to hgs-tray.exe.
     m_enabled = *feedUrl && QString::fromLatin1(feedUrl).startsWith(QLatin1String(releasePrefix))
-        && !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json"));
+        && !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json"))
+        && !m_layout.superseded;
 #endif
     m_status = m_enabled ? tr("Fork updates have not been checked.") : QString();
     if (!m_enabled) return;
@@ -236,16 +305,23 @@ bool ForkUpdater::startInstall()
     if (!ready() || !QFileInfo::exists(unpacked())) return false;
     const QString script = QDir::temp().filePath(QStringLiteral("zerus-fork-install-%1.ps1").arg(m_readyBuild));
     QFile file(script);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(installScript) < 0) return false;
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        || file.write(m_layout.versioned ? versionedScript : installScript) < 0) return false;
     file.close();
     const auto native = [](const QString &path) { return QDir::toNativeSeparators(path); };
-    QProcess process;
-    process.setProgram(QDir(qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"))).filePath(QStringLiteral("System32/WindowsPowerShell/v1.0/powershell.exe")));
-    process.setArguments({QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
+    QStringList args{QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
                           QStringLiteral("-WindowStyle"), QStringLiteral("Hidden"), QStringLiteral("-File"), native(script),
                           QStringLiteral("-ParentPid"), QString::number(QCoreApplication::applicationPid()),
-                          QStringLiteral("-Install"), native(m_install), QStringLiteral("-New"), native(unpacked()),
-                          QStringLiteral("-Previous"), native(m_install + QStringLiteral(".previous")), QStringLiteral("-Stage"), native(m_stage)});
+                          QStringLiteral("-New"), native(unpacked()), QStringLiteral("-Stage"), native(m_stage)};
+    if (m_layout.versioned)
+        args << QStringLiteral("-Root") << native(m_layout.root) << QStringLiteral("-Link") << native(m_layout.link)
+                  << QStringLiteral("-Target") << native(QDir(m_layout.root).filePath(QStringLiteral("app-%1").arg(m_readyBuild)));
+    else
+        args << QStringLiteral("-Install") << native(m_install)
+                  << QStringLiteral("-Previous") << native(m_install + QStringLiteral(".previous"));
+    QProcess process;
+    process.setProgram(QDir(qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"))).filePath(QStringLiteral("System32/WindowsPowerShell/v1.0/powershell.exe")));
+    process.setArguments(args);
 #ifdef Q_OS_WIN
     // CREATE_NO_WINDOW: the helper outlives Zerus without a console window.
     process.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments) { arguments->flags |= 0x08000000; });

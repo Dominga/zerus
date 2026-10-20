@@ -3,6 +3,36 @@
 Build requirements are documented in `docs/installation.md`. Keep fixtures synthetic and
 machine connection settings local. `AGENTS.md` describes the Beads workflow.
 
+## Proposals and repository labels
+
+A feature PR is a proposal until maintainers accept its product scope. Before
+adopting it, establish the use cases, configuration and lifecycle behavior, and
+behavior on every supported platform. Optional third-party tools can be useful
+extension proposals without belonging in the Zerus core. Deferring one does not
+commit the project to implementing it or to a particular extension API.
+
+Keep the existing `bug`, `enhancement`, `documentation` and technical labels.
+Use these additional labels to retain product decisions on issues and PRs:
+
+| Label | Meaning |
+| --- | --- |
+| `proposal` | An idea whose product scope has not been accepted. |
+| `deferred` | Retained for future consideration, without an active implementation or release commitment. |
+| `extensions` | An optional third-party integration suited to a future plugin or extension. |
+| `partially-adopted` | Part of a PR was adopted separately; the closing comment records what happened to the rest. |
+
+Close deferred implementation PRs with a short explanation and retain their
+labels, commits and discussion. Use `wontfix` for work the project does not plan
+to take, rather than for an idea being kept for later. When a PR mixes a bug fix
+and an unaccepted feature, investigate and take the fix separately with author
+attribution; explain exactly what was adopted before closing the original PR.
+Beads continues to own accepted implementation tasks and blockers.
+
+To revisit retained ideas, search GitHub for
+`is:pr is:closed label:proposal label:deferred`; add `label:extensions` to find
+plugin candidates. Search `is:pr is:closed label:partially-adopted` to find PRs
+whose fixes were taken separately.
+
 ## Local checks
 
 ```sh
@@ -212,7 +242,17 @@ HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -X utf8 scripts/ci/agent-compatibility.py </dev/null
 export QT_ROOT_DIR="$(cygpath -w ~/Qt/6.10.3/msvc2022_64)"
 bash scripts/ci/gui.sh </dev/null
+cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --lib windows_management::tests
+cargo +1.99.1 test --locked --manifest-path services/mobile/connector/Cargo.toml --test windows_gateway
+cargo +1.99.1 build --release --locked --manifest-path services/mobile/connector/Cargo.toml
+HGS_TEST_CONNECTOR="$(cygpath -w "$PWD/services/mobile/connector/target/release/zerus-mobile-connector.exe")" \
+HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
+HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
+  python scripts/ci/outside-job.py --custody-only --timeout 900 \
+    --log artifacts/test-results/windows-mobile-gateway.log -- \
+    python -m unittest discover -s tests -p test_windows_mobile_gateway.py -v </dev/null
 python scripts/package-windows.py --cli target/release/hgs.exe \
+    --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
     --gui .ci-build/gui/hgs-tray.exe --conpty target/conpty \
     --output artifacts/zerus-windows-x86_64.zip
 python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest
@@ -262,3 +302,26 @@ rewrites arguments that look like POSIX paths when it starts a Windows program: 
 [the real-peer smoke](docs/ci-and-aur.md#real-peer-smoke-on-a-windows-pc).
 `tray/tools/export-windows-icon.py` (Pillow) regenerates the checked-in Windows icon
 after artwork changes.
+
+`test_windows_mobile_gateway.py` needs Git for Windows' `openssl` on PATH and
+runs outside a job that forbids breakaway, as do the other session-host suites.
+Before that fixture, the two `windows_management::tests` library cases exercise
+actual management-lock contention and expiry, and the six `windows_gateway`
+integration cases exercise private configuration, revision admission, ACLs and
+independent ownership of temporary fixture roots.
+They must execute on Windows; Linux excludes them and is not runtime evidence.
+It creates only a throwaway profile, tracked fake Codex session, copied gateway
+bundle and HTTPS loopback protocol fixture. It checks actual connector Start,
+duplicate Start, published capabilities, Terminal snapshot/input and duplicate
+receipts, phone-list/invitation APIs, graceful Stop and the same surviving native
+host/session. Startup custody is reserved before Start, including failed or
+timed-out launches. Recovery verifies the private revision/generation/control
+and unique copied process image, pins a Windows process handle and rechecks
+control. Cleanup requires confirmed handle exit; an unknown final wait retains
+the private root and fails the gate. Forced termination is limited to that owned
+handle and also fails the graceful-stop gate. The separate `--custody-only`
+launcher forbids executable-pattern cleanup and retains unknown timeout state;
+there is no PID/tree fallback for the connector. It does not install
+into an owner profile, contact a production relay or pair a real phone. Run the
+production relay's existing contract suites separately. A skipped or unavailable
+Windows suite is not evidence of supported runtime behavior.

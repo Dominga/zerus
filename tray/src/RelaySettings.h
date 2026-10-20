@@ -7,8 +7,6 @@
 #include <QFileInfo>
 #include <functional>
 #include <QFormLayout>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QProcess>
@@ -17,11 +15,6 @@
 #include <QVBoxLayout>
 #ifdef Q_OS_UNIX
 #include <unistd.h>
-#endif
-#ifdef Q_OS_WIN
-#include "WindowsMobileServices.h"
-#include <QCheckBox>
-#include <QSettings>
 #endif
 
 namespace RelaySettings {
@@ -81,36 +74,6 @@ public:
         protectCommand=addCommand(QStringLiteral("connectorProtectCommand"),QStringLiteral("mkdir -p ~/.config/systemd/user/zerus-mobile-connector.service.d && printf '[Service]\\nKillMode=process\\n' > ~/.config/systemd/user/zerus-mobile-connector.service.d/50-zerus-killmode.conf && systemctl --user daemon-reload"),tr("Copy protection command"));protectCommand->hide();
         restartCommand=addCommand(QStringLiteral("connectorRestartCommand"),QStringLiteral("systemctl --user restart zerus-mobile-connector.service"),tr("Copy restart command"));restartCommand->hide();
 #endif
-#ifdef Q_OS_WIN
-        // WhiteWh fork: Zerus runs the bundled connector (and, when chosen, a
-        // relay for this computer) as hidden background programs.
-        auto *serviceRow=new QHBoxLayout;
-        startButton=new QPushButton(tr("Start connector"));startButton->setObjectName("startWindowsConnector");serviceRow->addWidget(startButton);
-        restartButton=new QPushButton(tr("Restart connector"));restartButton->setObjectName("restartWindowsConnector");serviceRow->addWidget(restartButton);
-        serviceRow->addStretch();layout->addLayout(serviceRow);
-        auto *autoStart=new QCheckBox(tr("Start the connector with Zerus"));autoStart->setObjectName("windowsConnectorAutostart");
-        autoStart->setChecked(WindowsMobileServices::runConnector());layout->addWidget(autoStart);
-        connect(autoStart,&QCheckBox::toggled,this,[](bool on){QSettings().setValue(QStringLiteral("mobile/runConnector"),on);});
-        auto *localRelay=new QCheckBox(tr("Run a relay on this computer (127.0.0.1:%1)").arg(WindowsMobileServices::relayPort()));localRelay->setObjectName("windowsLocalRelay");
-        localRelay->setChecked(WindowsMobileServices::runRelay());layout->addWidget(localRelay);
-        auto *relayHint=new QLabel(tr("For a phone the relay needs HTTPS, for example over Tailscale: tailscale serve --bg --https=443 http://127.0.0.1:%1. Its database is %2.").arg(WindowsMobileServices::relayPort()).arg(WindowsMobileServices::relayDatabase()));
-        relayHint->setWordWrap(true);relayHint->setTextInteractionFlags(Qt::TextSelectableByMouse);layout->addWidget(relayHint);
-        connect(localRelay,&QCheckBox::toggled,this,[this](bool on){
-            QSettings().setValue(QStringLiteral("mobile/localRelay"),on);
-            if(on&&!WindowsMobileServices::relayRunning())WindowsMobileServices::startRelay();
-            if(!on)WindowsMobileServices::stopRelay();
-            probeService();
-        });
-        connect(startButton,&QPushButton::clicked,this,[this]{
-            if(!WindowsMobileServices::startConnector(store.path()))notice->setText(tr("The connector could not be started."));
-            QTimer::singleShot(1500,this,[this]{probeService();});
-        });
-        connect(restartButton,&QPushButton::clicked,this,[this]{
-            WindowsMobileServices::stopConnector();
-            if(!WindowsMobileServices::startConnector(store.path()))notice->setText(tr("The connector could not be started."));
-            QTimer::singleShot(1500,this,[this]{probeService();});
-        });
-#endif
         auto *docs=new QLabel(tr("Connector setup is documented in docs/mobile-deployment.md in the Zerus source checkout."));docs->setWordWrap(true);layout->addWidget(docs);
         layout->addStretch();
         connect(reload,&QPushButton::clicked,this,[this]{loadConfiguration();probeService();});
@@ -133,7 +96,6 @@ private:
     ConfigStore store;Snapshot loaded;bool loadedOk=false;
     QLabel *configured,*status,*notice,*killMode=nullptr,*implementation=nullptr;
     QWidget *protectCommand=nullptr,*restartCommand=nullptr,*startCommand=nullptr;
-    QPushButton *startButton=nullptr,*restartButton=nullptr;
     QLineEdit *url,*token,*directory;
     QPushButton *saveButton;
     QProcess *probe=nullptr;QByteArray probeOutput;
@@ -260,22 +222,6 @@ private:
             status->setText(configurationFirst(state==QLatin1String("running")?tr("Connector service: running. Relay connectivity is not verified here.")
                                                 :tr("Connector service: loaded, not running")));
             showImplementation(implementationText(program,false));
-        });
-#elif defined(Q_OS_WIN)
-        if(!WindowsMobileServices::available()){
-            status->setText(tr("Connector: not bundled with this Zerus (zerus-mobile-connector.exe is missing)."));
-            startButton->hide();restartButton->hide();return;
-        }
-        runProbe(WindowsMobileServices::connector(),{QStringLiteral("--check"),QStringLiteral("--json"),QStringLiteral("--config"),store.path()},
-                 [this](const QByteArray &output,int){
-            const auto report=QJsonDocument::fromJson(output).object();
-            const bool valid=report.value(QStringLiteral("configuration")).toObject().value(QStringLiteral("valid")).toBool();
-            const bool running=report.value(QStringLiteral("state")).toObject().value(QStringLiteral("lock")).toString()==QLatin1String("held");
-            startButton->setVisible(loaded.exists&&valid&&!running);restartButton->setVisible(loaded.exists&&valid&&running);
-            QString service=!valid?tr("Connector: the configuration is not valid yet.")
-                :running?tr("Connector: running. Relay connectivity is not verified here."):tr("Connector: stopped");
-            if(WindowsMobileServices::runRelay())service+=WindowsMobileServices::relayRunning()?tr(" Local relay: running."):tr(" Local relay: stopped.");
-            status->setText(configurationFirst(service));
         });
 #else
         status->setText(tr("Connector service: unknown (automatic status checks are available on Linux and macOS). Follow the setup documentation."));

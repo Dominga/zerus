@@ -383,7 +383,7 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN
     // WhiteWh fork: the bundled mobile connector (and a chosen local relay),
     // once this is the running tray.
-    WindowsMobileServices::ensureInBackground(RelaySettings::configPath(), cfg.hgsPath);
+    WindowsMobileServices::ensureInBackground(RelaySettings::configPath());
 #endif
 #ifndef Q_OS_WIN
     // A service stop (SIGTERM) quits like the tray menu, so aboutToQuit flushes drafts.

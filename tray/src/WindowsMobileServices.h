@@ -1,4 +1,5 @@
 #pragma once
+#include <QCheckBox>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -6,39 +7,23 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QSettings>
 #include <QThread>
+#include <QVBoxLayout>
 
-// WhiteWh fork: the mobile gateway on Windows. The connector and, optionally,
-// a relay for this computer alone ship next to hgs-tray.exe and run as hidden
-// background programs that Zerus starts: Windows has no user service manager
-// like systemd or launchd. They outlive Zerus; native agents never run inside
-// them, so stopping the connector stops only the connector (a request in
-// progress is recovered at its next start). They run from a copy under
-// %USERPROFILE%\.local\share\hgs\mobile\<hash>, like the session host: a
-// program running from the portable folder would block its update.
+// WhiteWh fork, Windows: what the fork adds around the bundled mobile gateway.
+// The connector itself is managed through its own `--manage` interface
+// (WindowsMobileSettings.h); Zerus may ask it to start when Zerus starts.
+// A relay for this computer alone can run beside it on 127.0.0.1, from a copy
+// under %USERPROFILE%\.local\share\hgs\mobile\<hash> so that the program never
+// runs from the portable folder an update replaces.
 namespace WindowsMobileServices {
 inline QString bundled(const QString &name) { return QDir(QCoreApplication::applicationDirPath()).filePath(name); }
-inline bool available() { return QFileInfo(bundled(QStringLiteral("zerus-mobile-connector.exe"))).isExecutable(); }
-// The bundled program's copy for this exact build, made once.
-inline QString program(const QString &name)
-{
-    const auto source = bundled(name);
-    QFile file(source);
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file)) return source;
-    const auto folder = QDir::homePath() + QStringLiteral("/.local/share/hgs/mobile/") + QString::fromLatin1(hash.result().toHex().left(16));
-    const auto target = QDir(folder).filePath(name);
-    if (QFileInfo::exists(target)) return target;
-    QDir().mkpath(folder);
-    const auto partial = target + QStringLiteral(".partial");
-    QFile::remove(partial);
-    if (!QFile::copy(source, partial) || !QFile::rename(partial, target)) { QFile::remove(partial); return source; }
-    return target;
-}
-inline QString connector() { return program(QStringLiteral("zerus-mobile-connector.exe")); }
-inline QString relay() { return program(QStringLiteral("zerus-relay.exe")); }
+inline QString connector() { return bundled(QStringLiteral("zerus-mobile-connector.exe")); }
+inline bool relayBundled() { return QFileInfo(bundled(QStringLiteral("zerus-relay.exe"))).isExecutable(); }
 inline QString stateDirectory()
 {
     const auto path = QDir::homePath() + QStringLiteral("/.local/state/hgs");
@@ -53,7 +38,24 @@ inline QString relayDatabase()
 inline int relayPort() { return QSettings().value(QStringLiteral("mobile/localRelayPort"), 8787).toInt(); }
 // Off until chosen: most gateways use a relay elsewhere.
 inline bool runRelay() { return QSettings().value(QStringLiteral("mobile/localRelay"), false).toBool(); }
-inline bool runConnector() { return QSettings().value(QStringLiteral("mobile/runConnector"), true).toBool(); }
+inline bool startConnectorWithZerus() { return QSettings().value(QStringLiteral("mobile/runConnector"), true).toBool(); }
+
+// The bundled relay's copy for this exact build, made once.
+inline QString relay()
+{
+    const auto source = bundled(QStringLiteral("zerus-relay.exe"));
+    QFile file(source);
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file)) return source;
+    const auto folder = QDir::homePath() + QStringLiteral("/.local/share/hgs/mobile/") + QString::fromLatin1(hash.result().toHex().left(16));
+    const auto target = QDir(folder).filePath(QStringLiteral("zerus-relay.exe"));
+    if (QFileInfo::exists(target)) return target;
+    QDir().mkpath(folder);
+    const auto partial = target + QStringLiteral(".partial");
+    QFile::remove(partial);
+    if (!QFile::copy(source, partial) || !QFile::rename(partial, target)) { QFile::remove(partial); return source; }
+    return target;
+}
 
 // A hidden program that outlives Zerus, its output appended to a log.
 inline bool startHidden(const QString &program, const QStringList &arguments, const QString &log)
@@ -72,20 +74,6 @@ inline bool startHidden(const QString &program, const QStringList &arguments, co
 #endif
     return process.startDetached();
 }
-
-// `--check --json` reads the journal lock without connecting: "held" means a
-// connector runs for this configuration.
-inline QString connectorState(const QString &config)
-{
-    QProcess check;
-    check.start(connector(), {QStringLiteral("--check"), QStringLiteral("--json"), QStringLiteral("--config"), config});
-    if (!check.waitForFinished(5000)) { check.kill(); check.waitForFinished(1000); return QStringLiteral("unknown"); }
-    const auto report = QJsonDocument::fromJson(check.readAllStandardOutput()).object();
-    if (report.isEmpty()) return QStringLiteral("unknown");
-    if (!report.value(QStringLiteral("configuration")).toObject().value(QStringLiteral("valid")).toBool()) return QStringLiteral("invalid");
-    const auto lock = report.value(QStringLiteral("state")).toObject().value(QStringLiteral("lock")).toString();
-    return lock == QLatin1String("held") ? QStringLiteral("running") : QStringLiteral("stopped");
-}
 inline bool relayRunning()
 {
     QProcess check;
@@ -93,63 +81,79 @@ inline bool relayRunning()
     if (!check.waitForFinished(5000)) { check.kill(); check.waitForFinished(1000); return false; }
     return check.exitStatus() == QProcess::NormalExit && check.exitCode() == 0;
 }
-inline bool startConnector(const QString &config)
-{
-    return startHidden(connector(), {QStringLiteral("--config"), config}, stateDirectory() + QStringLiteral("/mobile-connector.log"));
-}
 inline bool startRelay()
 {
     return startHidden(relay(), {QStringLiteral("--database"), relayDatabase(), QStringLiteral("serve"), QStringLiteral("--port"), QString::number(relayPort())},
                        stateDirectory() + QStringLiteral("/relay.log"));
-}
-inline void stopConnector()
-{
-    QProcess::execute(QStringLiteral("taskkill"), {QStringLiteral("/F"), QStringLiteral("/IM"), QStringLiteral("zerus-mobile-connector.exe")});
 }
 inline void stopRelay()
 {
     QProcess::execute(QStringLiteral("taskkill"), {QStringLiteral("/F"), QStringLiteral("/IM"), QStringLiteral("zerus-relay.exe")});
 }
 
-// The connector runs `hgs_path`; it names the stable hgs the desktop uses (the
-// session host's copy), never one inside the portable folder. True when the
-// configuration changed.
-inline bool pinHgs(const QString &config, const QString &hgs)
+// One `--manage` call, its JSON input on stdin, as WindowsMobileSettings sends it.
+inline QJsonObject manage(const QString &action, const QString &config, const QJsonObject &input)
 {
-    if (hgs.isEmpty() || !QFileInfo(hgs).isAbsolute()) return false;
-    QFile file(config);
-    if (!file.open(QIODevice::ReadOnly) || file.size() > 65536) return false;
-    auto object = QJsonDocument::fromJson(file.readAll()).object();
-    file.close();
-    const auto native = QDir::toNativeSeparators(hgs);
-    if (object.isEmpty() || object.value(QStringLiteral("hgs_path")).toString() == native) return false;
-    object.insert(QStringLiteral("hgs_path"), native);
-    QFile out(config + QStringLiteral(".tmp"));
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
-    out.write(QJsonDocument(object).toJson());
-    out.close();
-    QFile::remove(config + QStringLiteral(".previous"));
-    if (!QFile::rename(config, config + QStringLiteral(".previous"))) { QFile::remove(out.fileName()); return false; }
-    if (!QFile::rename(out.fileName(), config)) { QFile::rename(config + QStringLiteral(".previous"), config); return false; }
-    QFile::remove(config + QStringLiteral(".previous"));
-    return true;
+    QProcess process;
+    auto environment = QProcessEnvironment::systemEnvironment();
+    for (const auto *key : {"HGS_SESSION", "HGS_RUN_ID", "HGS_EXPECTED_ID", "HGS_AGENT", "HGS_HOST_PANE", "HGS_HOST_SESSION", "TMUX", "TMUX_PANE"})
+        environment.remove(QLatin1String(key));
+    process.setProcessEnvironment(environment);
+    process.start(connector(), {QStringLiteral("--manage"), action, QStringLiteral("--config"), config});
+    if (!process.waitForStarted(5000)) return {};
+    process.write(QJsonDocument(input).toJson(QJsonDocument::Compact));
+    process.closeWriteChannel();
+    if (!process.waitForFinished(12000)) { process.kill(); process.waitForFinished(1000); return {}; }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) return {};
+    return QJsonDocument::fromJson(process.readAllStandardOutput()).object();
 }
 
 // At Zerus start, off the GUI thread: the chosen relay, then a configured
-// connector, each only when it is not running already. A connector whose hgs
-// changed restarts.
-inline void ensureInBackground(const QString &config, const QString &hgs)
+// connector that is not running, started through its own management interface.
+inline void ensureInBackground(const QString &config)
 {
-    if (!available()) return;
-    auto *thread = QThread::create([config, hgs] {
-        if (runRelay() && QFileInfo(bundled(QStringLiteral("zerus-relay.exe"))).isExecutable() && !relayRunning()) { startRelay(); QThread::sleep(1); }
-        if (!runConnector() || !QFileInfo::exists(config)) return;
-        const bool changed = pinHgs(config, hgs);
-        const auto state = connectorState(config);
-        if (state == QLatin1String("running") && changed) { stopConnector(); QThread::sleep(1); startConnector(config); }
-        else if (state == QLatin1String("stopped")) startConnector(config);
+    if (!QFileInfo(connector()).isExecutable()) return;
+    auto *thread = QThread::create([config] {
+        if (runRelay() && relayBundled() && !relayRunning()) { startRelay(); QThread::sleep(1); }
+        if (!startConnectorWithZerus() || !QFileInfo::exists(config)) return;
+        const auto status = manage(QStringLiteral("status"), config, {{QStringLiteral("revision"), QString()}});
+        if (!status.value(QStringLiteral("configured")).toBool() || status.value(QStringLiteral("running")).toBool()) return;
+        manage(QStringLiteral("start"), config, {{QStringLiteral("revision"), status.value(QStringLiteral("revision")).toString()}});
     });
     QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     thread->start();
+}
+
+// The fork's options under the Windows Mobile connection panel.
+inline QWidget *optionsPanel()
+{
+    auto *panel = new QWidget;
+    panel->setObjectName("windowsMobileForkOptions");
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(0, 0, 12, 0);
+    layout->setSpacing(8);
+    auto *autostart = new QCheckBox(QCoreApplication::translate("WindowsMobileServices", "Start the connector when Zerus starts"));
+    autostart->setObjectName("windowsConnectorAutostart");
+    autostart->setChecked(startConnectorWithZerus());
+    layout->addWidget(autostart);
+    QObject::connect(autostart, &QCheckBox::toggled, panel, [](bool on) { QSettings().setValue(QStringLiteral("mobile/runConnector"), on); });
+    if (relayBundled()) {
+        auto *local = new QCheckBox(QCoreApplication::translate("WindowsMobileServices", "Run a relay on this computer (127.0.0.1:%1)").arg(relayPort()));
+        local->setObjectName("windowsLocalRelay");
+        local->setChecked(runRelay());
+        layout->addWidget(local);
+        auto *hint = new QLabel(QCoreApplication::translate("WindowsMobileServices",
+            "A phone reaches it only over HTTPS, for example with Tailscale: tailscale serve --bg --https=443 http://127.0.0.1:%1. Its database is %2.")
+            .arg(relayPort()).arg(relayDatabase()));
+        hint->setWordWrap(true);
+        hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        layout->addWidget(hint);
+        QObject::connect(local, &QCheckBox::toggled, panel, [](bool on) {
+            QSettings().setValue(QStringLiteral("mobile/localRelay"), on);
+            if (on && !relayRunning()) startRelay();
+            if (!on) stopRelay();
+        });
+    }
+    return panel;
 }
 }

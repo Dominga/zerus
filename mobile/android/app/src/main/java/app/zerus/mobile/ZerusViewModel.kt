@@ -16,6 +16,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
@@ -820,7 +821,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         frames[frame.target.key] = frame
         while (frames.size > 20 || frames.values.sumOf { it.bytes.toLong() } > 20L * 1024 * 1024) frames.remove(frames.keys.first())
     }
-    private fun installFrame(incoming: Frame, verified: Boolean) {
+    private fun installFrame(source: Frame, verified: Boolean) {
+        val retained=listOfNotNull(activeFrame?.takeIf { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw,
+            selected?.takeIf { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw,
+            catalogSessions.firstOrNull { SessionNotificationPreferences.sameConversation(it.target,source.target) }?.raw)
+        val raw=SessionNotificationPreferences.mergeDetail(source.raw,source.target,retained,messageState.sessionActions)
+        val incoming=if(raw===source.raw) source else source.copy(raw=raw)
         val window=historyWindows[incoming.target.key]
         val priorInspection=activeFrame?.takeIf { previous -> previous.target==incoming.target }?.inspectedEvents.orEmpty()
         val changed=window!=null && incoming.window!=window && HistoryInspection.changed(window,incoming.inspectedEvents,priorInspection)
@@ -897,13 +903,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             if (activityVerified) openPendingAgent()
         }
     }
-    private suspend fun inspectOnce(connection: Connection, target: Target): Deferred<Frame> {
-        while (inspections.size >= 4 && inspections[target.key] == null) {
-            runCatching { inspections.values.first().second.await() }
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
-            inspections.entries.removeAll { it.value.second.isCompleted }
-        }
-        inspections[target.key]?.let { return it.second }
+    private suspend fun inspectOnce(connection: Connection, target: Target, fresh: Boolean = false,
+        current: () -> Boolean = { true }): Deferred<Frame> {
+        InspectionFlights.existing(inspections,target.key,fresh,current)?.let { return it }
         val observedAt = System.currentTimeMillis()
         val task = viewModelScope.async {
             val settingsInspectionStartNanos=android.os.SystemClock.elapsedRealtimeNanos()
@@ -947,7 +949,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             finalFrame
         }
         inspections[target.key] = target to task
-        task.invokeOnCompletion { viewModelScope.launch { if (inspections[target.key]?.second === task) inspections.remove(target.key) } }
+        task.invokeOnCompletion { viewModelScope.launch { InspectionFlights.retire(inspections,target.key,task) } }
         return task
     }
     private fun authorizedSettingsReason(target:Target,args:JSONObject,authorized:SessionAction,frame:Frame?,retry:ScheduledSettingsRetry.Grant?=null):String {
@@ -1401,13 +1403,44 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private var terminalVerified=false
     private var terminalReceivedAt=0L
     private var terminalJob:Job?=null
+    private var terminalAvailabilityJob:Job?=null
+    private var terminalAvailabilitySequence=0L
+    private var terminalAvailabilityTarget by mutableStateOf<Target?>(null)
     private val emptyTerminalBuffers=mutableMapOf<String,TerminalBuffer>()
+    fun terminalAvailabilityChecking(target:Target)=terminalAvailabilityTarget==target
+    /** Explicit opening checks discovery again, even when a previous catalog cached a refusal. */
+    fun prepareTerminal(target:Target) {
+        if(selected?.target!=target || target.agentId.isNotBlank() || target.archiveId.isNotBlank() || demo || updateInstallPreparing) return
+        cancelTerminalAvailability()
+        val sequence=++terminalAvailabilitySequence
+        val navigation=navigationId
+        terminalAvailabilityTarget=target
+        terminalAvailabilityJob=viewModelScope.launch {
+            fun current()=terminalAvailabilitySequence==sequence && terminalAvailabilityTarget==target && navigationId==navigation && selected?.target==target
+            try {
+                TerminalAvailabilityRefresh.run(current=::current,
+                    catalogIdle={ snapshotFlow { catalogBusy }.first { !it } },refreshCatalog={ refresh(explicit=true) },
+                    detailIdle={ snapshotFlow { detailBusy }.first { !it } },
+                    refreshDetail={ refreshActivity(explicit=true,freshInspection=true,ownerCurrent=::current) })
+            } finally {
+                if(terminalAvailabilitySequence==sequence) terminalAvailabilityTarget=null
+            }
+        }
+    }
+    fun cancelTerminalAvailability() {
+        terminalAvailabilitySequence++
+        terminalAvailabilityJob?.cancel();terminalAvailabilityJob=null;terminalAvailabilityTarget=null
+    }
     fun terminalOpenReason(target:Target):String {
         if(selected?.target != target || target.agentId.isNotBlank() || target.archiveId.isNotBlank()) return "Terminal is available only for the live parent session."
-        val row=activity?.takeIf { it.string("run_id")==target.run && it.string("conversation_id")==target.conversation } ?: sessions.find { it.target==target }?.raw
-        val nativeReason=SessionActionsMenu.nativeTerminalReason(target,row);if(nativeReason.isNotBlank()) return nativeReason
-        if("terminal_snapshot" !in relayOperations[target.connectionId].orEmpty() || "terminal_snapshot" !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return "This native adapter does not provide remote Terminal."
-        return ""
+        if(demo) return "Unavailable in preview."
+        if(terminalAvailabilityChecking(target)) return TerminalAvailability.checking
+        val row=activity?.takeIf { activityVerified && it.string("run_id")==target.run && it.string("conversation_id")==target.conversation &&
+            it.string("archive_id").isBlank() && it.string("agent_id").isBlank() && it.string("state")!="archived" &&
+            (it.string("name").isBlank() || it.string("name")==target.session) } ?: sessions.find { it.target==target }?.raw
+        val machine=machines.find { it.connectionId==target.connectionId && it.id==target.computerId }
+        return TerminalAvailability.reason(target,row,machine?.let { it.online && !it.lastKnown }==true,
+            relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])
     }
     private fun terminalCurrent(target:Target,binding:String):Boolean {
         val raw=terminalState ?: return false
@@ -1521,6 +1554,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if (operation !in SessionActionPolicies.operations || operation !in relayOperations[target.connectionId].orEmpty() || operation !in machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty()) return "This gateway or computer does not support this action."
         if (target.archiveId.isNotBlank() && operation !in setOf("restore", "forget", "rename", "fork")) return "This archived conversation is read-only."
         if (target.archiveId.isBlank() && operation == "restore") return "Select an archived version first."
+        if(operation == SessionNotificationPreferences.operation) SessionNotificationPreferences.reason(target,raw).takeIf { it.isNotBlank() }?.let { return it }
         if(operation in SessionActionPolicies.lifecycle && raw.optJSONArray("allowed_actions")?.let { value -> (0 until value.length()).any { value.optString(it) == operation } } != true) return raw.optJSONObject("action_reasons")?.string(operation).orEmpty().ifBlank { "Native session controls are unavailable for this action." }
         if (contextBlocked(target) || outgoing.any { it.belongsTo(target) && it.blocksSending } || target.key in preparingTargets || compactContinuationActive) return "Resolve the pending delivery or action first."
         if (attachmentImporting || attachmentPreparing || pickerDraft?.target == target || drafts.any { it.target == target && it.status in listOf("submitting", "uncertain") }) return "Wait for the current answer or file selection."
@@ -1554,12 +1588,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return SessionActionsMenu.items(SessionMenuFacts(target,session.raw,SessionFilters.state(session),SessionFilters.archived(session),online,
             relayOperations[target.connectionId].orEmpty() intersect machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty(),
             blocked,if(busy) "Resolve the pending delivery or action first." else "",SessionFilters.needsAttention(session,online),read,
-            reference.uri,session.raw.string("cwd"),reference.reason))
+            reference.uri,session.raw.string("cwd"),reference.reason,
+            TerminalAvailability.reason(target,session.raw,online,relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])))
     }
     var sessionMenuRequest by mutableStateOf<SessionMenuRequest?>(null); private set
     /** A Sessions action opens its exact session; the conversation header then confirms it against fresh native details. */
     fun openWithSessionAction(session: Session, operation: String) {
-        if(operation != "terminal" && operation !in SessionActionPolicies.lifecycle) return
+        if(operation != "terminal" && operation != SessionNotificationPreferences.operation && operation !in SessionActionPolicies.lifecycle) return
         open(session,preserveProject = true)
         sessionMenuRequest = SessionMenuRequest(session.target,operation,navigationId)
     }
@@ -1603,7 +1638,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 if(operation == "terminal_input") check(terminalCurrent(target,arguments.string("terminal_binding_id"))) { "Terminal binding expired before delivery. Input was not sent." }
                 if(operation != "terminal_input") check(SessionActionPolicies.evidence(operation,live,arguments) == evidence) { "The displayed native action details changed before delivery." }
                 check(SessionActionPolicies.inspectReason(target,operation,arguments,live).isBlank()) { "The native action target or catalog changed before delivery." }
-                val payload = JSONObject(arguments.toString()).put("request_id",action.requestId).put("expected_run_id",target.run).put("expected_conversation_id",target.conversation)
+                val payload = if(operation == SessionNotificationPreferences.operation) SessionNotificationPreferences.payload(target,arguments)
+                    else JSONObject(arguments.toString()).put("request_id",action.requestId).put("expected_run_id",target.run).put("expected_conversation_id",target.conversation)
                 if(target.archiveId.isNotBlank()) payload.put("archive_id",target.archiveId)
                 attempted=true
                 val initial=try { api.submit(connection,target,operation,payload,action.requestId) }
@@ -1618,7 +1654,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                         activityVerified=false;activeFrameVerified=false;historyCached=activity != null
                         resolveActionResult(completed,navigation,target)
                     }
-                    SessionActionFollowUp.Kind.Refresh -> refreshActivity()
+                    SessionActionFollowUp.Kind.Refresh -> {
+                        refreshActivity()
+                    }
                     SessionActionFollowUp.Kind.None -> Unit
                 }
             } catch(e:Exception) {
@@ -1697,12 +1735,34 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             written.sessionActions.find { it.applyAttemptId == action.requestId }?.let { next=next.action(it) }
             next
         })
+        if(action.operation == SessionNotificationPreferences.operation) {
+            if(result.status=="completed") confirmNotificationPreference(result)
+            refresh(explicit=true)
+            SessionNotifications.enqueue(getApplication(),action.target.connectionId,forceCatalog=true)
+        }
         // Only this process's authorized submit callback can establish another cycle.
         // Receipt checking/restoration deliberately uses the default null authorization.
         if(scheduledAuthorization!=null && result.operation=="settings" && result.status=="scheduled") {
             val original=messageState.sessionActions.find { it.requestId==scheduledAuthorization.requestId && it.applyAttemptId==action.requestId } ?: return
             val child=messageState.sessionActions.find { it.requestId==action.requestId && it==result } ?: return
             receipt.optJSONObject("result")?.let { scheduledSettingsRetry.register(original,child,android.os.SystemClock.elapsedRealtimeNanos(),it) }
+        }
+    }
+    private var notificationPreferenceRevision=0L
+    private suspend fun confirmNotificationPreference(result:SessionAction) {
+        notificationPreferenceRevision++
+        while(true) {
+            val rows=catalogSessions;val actions=messageState.sessionActions + result
+            val version=notificationPreferenceRevision
+            val merged=withContext(Dispatchers.Default) { SessionNotificationPreferences.mergeRows(rows,rows,actions) }
+            if(version!=notificationPreferenceRevision || rows!==catalogSessions) continue
+            catalogSessions=merged
+            selected?.let { row ->
+                val raw=SessionNotificationPreferences.mergeDetail(row.raw,row.target,emptyList(),actions)
+                if(raw!==row.raw) selected=row.copy(raw=raw)
+            }
+            activeFrame?.let { frame -> installFrame(frame,activeFrameVerified) }
+            return
         }
     }
     fun recoveryActionReason(target:Target,jobId:String,choice:String):String {
@@ -1963,16 +2023,22 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     if (explicit || connection.id !in relayOperations) {
                         try {
-                            val capabilities = api.call(connection.url, connection.token, "/v1/capabilities")
-                            val operations = capabilities.optJSONArray("operations")
+                            val capabilities = api.capabilities(connection)
+                            val operations = OperationCapabilities.parse(capabilities,requireVersion=false)
+                            if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                             relayFeatures=relayFeatures + (connection.id to capabilities.optJSONArray("features")?.let { value -> (0 until value.length()).map { value.optString(it) }.toSet() }.orEmpty())
-                            relayOperations = relayOperations + (connection.id to operations?.let { value -> (0 until value.length()).map { value.optString(it) }.toSet() }.orEmpty())
+                            relayOperations = OperationCapabilities.replace(relayOperations,connection.id,operations)
                         } catch (e: CancellationException) { throw e }
-                        catch (_: Exception) { /* Session discovery remains available if optional capability discovery fails. */ }
+                        catch (_: Exception) {
+                            // Session discovery remains available; failed discovery is unknown, not an adapter refusal.
+                            if (catalogGate.owns(operation.id) && connections == originalConnections)
+                                relayOperations = relayOperations - connection.id
+                        }
                     }
                     val computers = api.computers(connection)
+                    val retained=catalogSessions;val actions=messageState.sessionActions
                     val prepared = withContext(Dispatchers.Default) {
-                        SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty())
+                        SessionCatalogParser.parse(connection, computers.optJSONArray("computers")?.objects().orEmpty(),retained,actions)
                     }
                     if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                     newAccounts += prepared.accounts; newMachines += prepared.machines
@@ -1997,6 +2063,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             }
             newMachines += machines.filter { it.connectionId in unavailable }.map { it.copy(online=false,lastKnown=true) }
             newProjects += projects.filter { it.key.connectionId in unavailable }
+            // A receipt or newer catalog may arrive while background parsing is suspended.
+            while(true) {
+                val retained=catalogSessions;val actions=messageState.sessionActions;val version=notificationPreferenceRevision
+                val merged=withContext(Dispatchers.Default) { SessionNotificationPreferences.mergeRows(newSessions,retained,actions) }
+                if(!catalogGate.owns(operation.id) || connections!=originalConnections) return@launch
+                if(version!=notificationPreferenceRevision || retained!==catalogSessions) continue
+                newSessions.clear();newSessions.addAll(merged);break
+            }
             accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
             androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
                 sessions = newSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations
@@ -2112,6 +2186,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         pendingNotification = Triple(connection, computer, session); refresh()
     }
     private fun cancelDetail() {
+        cancelTerminalAvailability()
         if(detailReadErrorOwner!=null) error=""
         detailGate.cancel(); detailJob?.cancel(); detailTimer?.cancel()
         detailBusy = false; detailProgress = false
@@ -2128,6 +2203,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         else selectedProject = null
     }
     fun refreshActivity(explicit: Boolean = false) {
+        refreshActivity(explicit,freshInspection=false)
+    }
+    private fun refreshActivity(explicit: Boolean, freshInspection: Boolean, ownerCurrent: () -> Boolean = { true }) {
         if (demo || terminalVisible) return
         val original = selected ?: return
         pendingActionResult(original.target)?.let { action -> openSessionActionResult(action);return }
@@ -2145,8 +2223,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
         detailJob = viewModelScope.launch {
         try {
-            val frame = inspectOnce(connection, original.target).await()
-            if (detailGate.owns(operation.id) && navigationId == navigation && selected?.target == original.target) {
+            val frame = inspectOnce(connection, original.target,fresh=freshInspection,current={
+                !freshInspection || ownerCurrent() && detailGate.owns(operation.id) && navigationId==navigation && selected?.target==original.target
+            }).await()
+            if (detailGate.owns(operation.id) && navigationId == navigation && selected?.target == original.target && (!freshInspection || ownerCurrent())) {
                 if(detailReadErrorOwner==(original.target to navigation)) error=""
                 val clear = clearExpectation?.takeIf { it.navigation == navigation && ContextPolicies.sameSessionRun(it.target, frame.target) }
                 if (clear != null && frame.target.conversation != clear.target.conversation && !clear.confirmed) {

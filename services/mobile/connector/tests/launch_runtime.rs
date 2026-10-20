@@ -1,11 +1,10 @@
+#![cfg(unix)]
 //! Launch, folder, worktree, archive and account behaviour that needs an
 //! injected clock or a stop in the middle of a native call: the 5 s launch
 //! verification and its project assignment, the 45 s archive snapshot rule,
 //! a stop during a mutation (divergence h), the account cache's 30 s
 //! catalog and 300 s usage clocks with its projections and bounds, the
 //! reaping of an abandoned usage refresh.
-// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
-#![cfg(unix)]
 mod common;
 
 use common::*;

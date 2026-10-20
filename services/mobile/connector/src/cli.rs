@@ -3,6 +3,7 @@
 //! a repeated option keeps its last value, `--config=PATH` works, and any
 //! usage error exits 2.
 use std::ffi::{OsStr, OsString};
+
 use std::path::PathBuf;
 
 pub const USAGE: &str =
@@ -37,6 +38,22 @@ pub enum Command {
 /// argparse takes a following argument as the option's value unless it looks
 /// like an option: it starts with `-`, is not `-` itself or a negative number,
 /// and has no space.
+fn config_argument(argument: &OsStr, value: &[u8]) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let _ = argument;
+        OsStr::from_bytes(value).to_os_string()
+    }
+    #[cfg(windows)]
+    {
+        let _ = value;
+        // The ASCII prefix is a valid boundary; keep all UTF-16 path units.
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        OsString::from_wide(&argument.encode_wide().skip(9).collect::<Vec<_>>())
+    }
+}
+
 fn is_value(argument: &OsStr) -> bool {
     let bytes = argument.as_encoded_bytes();
     let negative = |text: &[u8]| {
@@ -57,21 +74,6 @@ fn is_value(argument: &OsStr) -> bool {
     !bytes.starts_with(b"-") || bytes == b"-" || negative(bytes) || bytes.contains(&b' ')
 }
 
-/// The path after `--config=`, byte for byte on Unix.
-#[cfg(unix)]
-fn config_value(_argument: &OsStr, value: &[u8]) -> OsString {
-    use std::os::unix::ffi::OsStrExt;
-    OsStr::from_bytes(value).to_owned()
-}
-
-/// Windows arguments are UTF-16; a path that is not valid Unicode is not one
-/// a configuration file names.
-#[cfg(windows)]
-fn config_value(argument: &OsStr, _value: &[u8]) -> OsString {
-    let text = argument.to_string_lossy();
-    OsString::from(&text["--config=".len()..])
-}
-
 pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let (mut config, mut allow, mut check, mut json, mut version, mut help) =
@@ -80,7 +82,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, S
     while let Some(argument) = arguments.next() {
         let bytes = argument.as_encoded_bytes();
         if let Some(value) = bytes.strip_prefix(b"--config=") {
-            config = Some(PathBuf::from(config_value(&argument, value)));
+            config = Some(PathBuf::from(config_argument(&argument, value)));
             continue;
         }
         match bytes {

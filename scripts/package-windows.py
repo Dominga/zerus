@@ -108,9 +108,9 @@ def write_zip(stage, output, date_time):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cli", type=Path, required=True, help="tested hgs.exe")
+    parser.add_argument("--connector", type=Path, required=True, help="tested zerus-mobile-connector.exe")
     parser.add_argument("--gui", type=Path, required=True, help="tested hgs-tray.exe")
-    # WhiteWh fork: the mobile gateway's programs (docs/fork-updates.md).
-    parser.add_argument("--mobile-connector", type=Path, help="tested zerus-mobile-connector.exe")
+    # WhiteWh fork: a relay for this computer alone (docs/fork-updates.md).
     parser.add_argument("--mobile-relay", type=Path, help="tested zerus-relay.exe")
     parser.add_argument("--output", type=Path, required=True, help="zip to write")
     parser.add_argument("--qt-root", type=Path, default=os.environ.get("QT_ROOT_DIR"),
@@ -131,7 +131,7 @@ def main():
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     manifest = {"product": "Zerus", "version": version, "cli_version": cli_version, "platform": "Windows",
-                "architecture": "x86_64", "qt_version": qt_version(qt_root), "native_agents_bundled": False,
+                "architecture": "x86_64", "qt_version": qt_version(qt_root), "native_agents_bundled": False, "mobile_connector_bundled": True,
                 "source_commit": source_commit()}
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -147,8 +147,7 @@ def main():
             pair = conpty_pair.fetch(Path(temporary) / "conpty")
         copy(args.cli, stage / "hgs.exe")
         copy(args.gui, stage / "hgs-tray.exe")
-        if args.mobile_connector:
-            copy(args.mobile_connector, stage / "zerus-mobile-connector.exe")
+        copy(args.connector, stage / "zerus-mobile-connector.exe")
         if args.mobile_relay:
             copy(args.mobile_relay, stage / "zerus-relay.exe")
         # Qt libraries, plugins and translations. The SVG image and icon plugins
@@ -191,14 +190,10 @@ def main():
             require((args.rust_licenses / "inventory.json").is_file(), "Collect dependency license texts first.")
             shutil.copytree(args.rust_licenses, licenses / "rust")
         else:
-            manifests = []
-            if args.mobile_connector or args.mobile_relay:
-                manifests = ["--manifest-path", str(ROOT / "Cargo.toml")]
-                if args.mobile_connector:
-                    manifests += ["--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml")]
-                if args.mobile_relay:
-                    manifests += ["--manifest-path", str(ROOT / "services/mobile/relay/Cargo.toml")]
-            subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust"), *manifests],
+            relay = ["--manifest-path", str(ROOT / "services/mobile/relay/Cargo.toml")] if args.mobile_relay else []
+            subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust"),
+                            "--manifest-path", str(ROOT / "Cargo.toml"),
+                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"), *relay],
                            cwd=ROOT, check=True)
         for text in sorted((ROOT / "packaging/windows/licenses").glob("*.txt")):
             copy(text, licenses / "qt" / text.name)

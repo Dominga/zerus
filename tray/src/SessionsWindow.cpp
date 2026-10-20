@@ -3,6 +3,7 @@
 #include "SessionsWindow.h"
 #include <QStandardPaths>
 #include "WorktreeBatchCleanupDialog.h"
+#include "SessionNotifications.h"
 #include "DownloadCache.h"
 #include "SessionFileDrop.h"
 #include "SessionCommands.h"
@@ -28,9 +29,6 @@
 #include "SocratiCodePanel.h"
 #include "Extensions.h"
 #include "WindowTitleBar.h"
-#ifdef Q_OS_WIN
-#include "WindowsMobileServices.h"
-#endif
 #include "IronRulesPanel.h"
 #include "SessionLeadPanel.h"
 #include "SessionLeads.h"
@@ -41,6 +39,7 @@
 #include "NativeBrowserPlugin.h"
 #include "NativeUiView.h"
 #include "MessageComposer.h"
+#include "OpenCodeModels.h"
 #include "speech/SpeechComposer.h"
 #include "QuestionCard.h"
 #include "RecoveryWidgets.h"
@@ -124,6 +123,14 @@
 #include <algorithm>
 
 namespace {
+
+QString fileReferenceContext(const SessionInfo &session, const QJsonObject &details, const QString &childConversation = {})
+{
+    // Either source can first reveal a replacement run. Never let an older
+    // accepted inspection conceal a newer listing identity while a dialog is open.
+    return QString::fromUtf8(QJsonDocument(QJsonArray{session.runId, session.conversationId,
+        details.value("run_id"), details.value("conversation_id"), childConversation}).toJson(QJsonDocument::Compact));
+}
 
 QJsonObject sendEvidence(const QJsonObject &data)
 {
@@ -297,6 +304,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     QSettings settings;
     const auto expanded = settings.value("workspace/expandedSessions").toStringList();
     m_expandedSessions = QSet<QString>(expanded.begin(), expanded.end());
+    m_sessionRowPreferences = SessionRowPreferences(settings.value("workspace/collapsedSessionRows").toByteArray());
     m_savedOrganization = settings.value("workspace/organization").toByteArray();
     const auto savedProjects = QJsonDocument::fromJson(m_savedOrganization).object();
     if (!savedProjects.isEmpty() && !savedProjects.contains("projects") && !settings.contains("workspace/organizationBeforeProjects"))
@@ -384,13 +392,20 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const auto groups = m_organization.groups(); for (const auto &g : groups) m_organization.setCollapsed(g.id, collapse);
         saveOrganization(); rebuild();
     });
+    m_expandAllRowsAction = new QAction(tr("Expand all collapsed"), this); m_expandAllRowsAction->setObjectName("expandAllCollapsedSessionRows");
+    m_expandAllRowsAction->setToolTip(tr("Restore full session rows, including sessions hidden by filters"));
+    m_expandAllRowsAction->setEnabled(!m_sessionRowPreferences.empty());
+    connect(m_expandAllRowsAction, &QAction::triggered, this, [this] {
+        m_sessionRowPreferences.expandAll(); saveSessionRowPreferences(); updateSessionRowPresentation();
+    });
+    groupsMenu->addAction(m_expandAllRowsAction);
     m_markAllReadAction = new QAction(tr("Mark all as read"), this); m_markAllReadAction->setObjectName("markAllSessionsRead");
     m_markAllReadAction->setToolTip(tr("Mark current replies across all machines as read, including hidden sessions. Pending approvals, questions and errors stay highlighted. Sessions you marked as needing attention keep their reply unread."));
     m_markAllReadAction->setEnabled(false);
     connect(m_markAllReadAction, &QAction::triggered, this, &SessionsWindow::markAllRepliesRead);
     // Right-clicking the Sessions icon in the rail offers the same action.
     auto *railMenu = new QMenu(m_sessionsNav); railMenu->setObjectName("sessionsNavMenu"); railMenu->setToolTipsVisible(true);
-    railMenu->addAction(m_markAllReadAction); m_sessionsNav->setContextMenuPolicy(Qt::CustomContextMenu);
+    railMenu->addAction(m_markAllReadAction); railMenu->addAction(m_expandAllRowsAction); m_sessionsNav->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_sessionsNav, &QWidget::customContextMenuRequested, railMenu, [this, railMenu](const QPoint &at) { railMenu->popup(m_sessionsNav->mapToGlobal(at)); });
     groupsMenu->addSeparator(); groupsMenu->addAction(m_markAllReadAction); groupsMenu->setToolTipsVisible(true);
     m_clearArchiveAction = new QAction(tr("Clear archive…"), this); m_clearArchiveAction->setObjectName("clearArchive");
@@ -524,6 +539,28 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         } else m_expandedSessions.insert(key);
         QSettings().setValue("workspace/expandedSessions", QStringList(m_expandedSessions.begin(), m_expandedSessions.end()));
         rebuild();
+    });
+    connect(m_sessions, &SessionList::rowExpanded, this, [this](const QString &key) {
+        const auto found = std::find_if(m_entries.cbegin(), m_entries.cend(), [&key](const Entry &e) { return e.key == key; });
+        if (found != m_entries.cend()) setSessionRowCollapsed(*found, false);
+    });
+    connect(&m_client, &HgsClient::notificationsFinished, this, [this](quint64 request, bool ok, const QJsonObject &result, const QString &error) {
+        const auto found = m_pendingNotifications.find(request); if (found == m_pendingNotifications.end()) return;
+        const auto original = found->entry; m_pendingNotifications.erase(found);
+        const auto *box = original.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(original.host);
+        const bool current = box && std::any_of(box->sessions.cbegin(), box->sessions.cend(), [&](const SessionInfo &s) {
+            return s.name == original.session.name && s.runId == original.session.runId
+                && s.conversationId == original.session.conversationId && s.created == original.session.created && s.state != "archived";
+        });
+        if (!current) return; // A late answer cannot touch or refresh a replacement run.
+        if (!ok) { showNotice(error, true); return; }
+        const auto preferences = result.value("preferences").toObject();
+        if (!m_fleet.applyNotificationPreferences(original.host, original.session, preferences)) {
+            showNotice(tr("The shared notification setting changed while this request was pending. Refresh the session."), true); return;
+        }
+        rebuild(); updateDashboard();
+        emit notificationPreferencesChanged(original.host, original.session.name, original.session.runId,
+                                            original.session.conversationId, preferences);
     });
     connect(m_sessions, &SessionList::sessionMoved, this, [this](const QString &id, const QString &group, const QString &before) {
         m_organization.moveSession(id, group, before); saveOrganization(); rebuild();
@@ -1226,6 +1263,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         m_detailTabs->setCurrentWidget(m_terminal); m_terminal->connectSession();
     });
     connect(m_composer, &MessageComposer::settingsRequested, this, &SessionsWindow::changeModelSettings);
+    connectOpenCodeModels();
     connect(&m_client, &HgsClient::settingsFinished, this, [this](quint64 request, bool ok, const QJsonObject &receipt, const QString &error) {
         if (request != m_settingsRequest) return;
         m_settingsRequest = 0;
@@ -2195,6 +2233,39 @@ void SessionsWindow::setInspectorVisible(bool visible)
     updateWorktrees();
 }
 
+void SessionsWindow::saveSessionRowPreferences()
+{
+    QSettings().setValue("workspace/collapsedSessionRows", m_sessionRowPreferences.save());
+    m_expandAllRowsAction->setEnabled(!m_sessionRowPreferences.empty());
+}
+
+void SessionsWindow::setSessionRowCollapsed(const Entry &entry, bool collapsed)
+{
+    if (!m_sessionRowPreferences.setCollapsed(entry.host, entry.session, collapsed)) {
+        if (collapsed && !m_sessionRowPreferences.collapsed(entry.host, entry.session))
+            showNotice(tr("The compact row limit has been reached. Expand another session row first."), true);
+        return;
+    }
+    saveSessionRowPreferences(); updateSessionRowPresentation();
+}
+
+void SessionsWindow::updateSessionRowPresentation()
+{
+    QHash<QString, bool> collapsed;
+    for (const auto &entry : m_entries) collapsed.insert(entry.key, m_sessionRowPreferences.collapsed(entry.host, entry.session));
+    for (int i = 0; i < m_sessions->count(); ++i) {
+        auto *item = m_sessions->item(i);
+        if (item->data(SessionRoles::Header).toBool() || !item->data(SessionRoles::ChildId).toString().isEmpty()
+            || !item->data(SessionRoles::LaunchId).toString().isEmpty()) continue;
+        const bool value = collapsed.value(item->data(KeyRole).toString());
+        item->setData(SessionRoles::RowCollapsed, value);
+        item->setData(Qt::AccessibleDescriptionRole, value ? tr("Collapsed session row. Press Right to expand.")
+            : GitStatusBadge::tooltip(item->data(SessionRoles::GitStatus).toJsonObject()));
+    }
+    // A density edit changes no selection, native state, inspection or read mark.
+    m_sessions->doItemsLayout(); m_sessions->syncRowExpandButtons(); m_sessions->syncActivityAnimation(); m_sessions->viewport()->update();
+}
+
 void SessionsWindow::saveOrganization()
 {
     if(m_swarm)m_swarm->edit(m_organization.toJson());
@@ -2389,13 +2460,7 @@ void SessionsWindow::setFleet(const FleetState &fleet) {
     for (const auto &host : fleet.peerNames()) if (const auto *before=m_fleet.peer(host)) completed(*before,*fleet.peer(host),host);
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions, LocalSessionHost::canEnable(fleet.local())); m_settingsPage->setPeers(fleet.peerNames());
-    bool mobileGateway=fleet.local().localSessions&&MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Posix;
-#ifdef Q_OS_WIN
-    // WhiteWh fork: a Windows computer with local sessions and the bundled
-    // connector (WindowsMobileServices.h) can be the mobile gateway.
-    mobileGateway=mobileGateway||(fleet.local().localSessions&&WindowsMobileServices::available());
-#endif
-    m_settingsPage->setMobileGateway(mobileGateway);
+    m_settingsPage->setMobileGateway(fleet.local().localSessions||MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Windows);
     m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
@@ -2567,7 +2632,7 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
             addMachine(host, *box, box->ok && QDateTime::currentMSecsSinceEpoch()
                 - m_fleet.peerPolledAt(host) < FleetState::kPeerStaleMs);
     if (menu->actions().isEmpty()) menu->addAction(tr("Waiting for machines…"))->setEnabled(false);
-    menu->addSeparator(); menu->addAction(m_markAllReadAction);
+    menu->addSeparator(); menu->addAction(m_expandAllRowsAction); menu->addAction(m_markAllReadAction);
     menu->addAction(m_clearArchiveAction);
 }
 
@@ -2856,6 +2921,7 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     roles.insert(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(git));
     roles.insert(SessionRoles::Attention, !terminating && (s.reviewLater || (e.online && !s.attentionAcknowledged && (s.needsAction() || childNeedsAction(e)))));
     roles.insert(SessionRoles::ReviewLater, s.reviewLater);
+    roles.insert(SessionRoles::Muted, s.muted);
     roles.insert(SessionRoles::Failure, s.phase=="error");
     roles.insert(SessionRoles::Draft, m_composer->hasDraft(e.key));
     roles.insert(SessionRoles::Unread, !terminating && s.visibleUnreadReply(e.online));
@@ -2883,7 +2949,7 @@ QMap<int,QVariant> SessionsWindow::childCardRoles(const Entry &e,const QString &
         {DetailRole,child.value("detail").toString(child.value("task").toString()).simplified()},
         {SessionRoles::Working,!isTerminating(e)&&currentActivity(s,e.online)&&childState(child)=="working"},
         {SessionRoles::Attention,currentActivity(s,e.online)&&childAction(child)},
-        {SessionRoles::Unread,false},{SessionRoles::ChildId,id},
+        {SessionRoles::Unread,false},{SessionRoles::Muted,s.muted},{SessionRoles::ChildId,id},
         {SessionRoles::MachineName,e.machine},{SessionRoles::MachineColor,MachineAppearance::color(e.machine)},{HostRole,e.machine}};
 }
 
@@ -2935,6 +3001,9 @@ void SessionsWindow::rebuild()
         return a.key < b.key;
     });
     for (auto &entry : m_entries) entry.identity = m_organization.observe(entry.machine, entry.session.name, entry.session.runId, entry.session.archiveId);
+    bool rowPreferencesChanged = false;
+    for (const auto &entry : m_entries) rowPreferencesChanged |= m_sessionRowPreferences.observe(entry.host, entry.session);
+    if (rowPreferencesChanged) saveSessionRowPreferences();
     placeLaunchedSessions();
     saveOrganization();
     // Entries, attention and the organization above stay current for other pages.
@@ -2977,7 +3046,7 @@ void SessionsWindow::rebuild()
         if (s.state == "archived") { ++archived; continue; }
         ++total;
         const bool needsAttention = entryNeedsAttention(entry);
-        if (needsAttention) ++attention;
+        if (needsAttention && !s.muted) ++attention;
         if (needsAttention || SessionPresentation::active(s, entry.online, drafts.contains(entry.key))) ++active;
         if (s.state != "running") ++saved;
     }
@@ -3106,6 +3175,7 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::WorkingSince, 0.0);
         item->setData(SessionRoles::Scheduled, false);
         item->setData(SessionRoles::OptionalQuestions, 0);
+        item->setData(SessionRoles::RowCollapsed, false);
         item->setData(SessionRoles::GitStatus, QJsonObject());
         item->setData(SessionRoles::MetaIcon, QString());
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
@@ -3132,8 +3202,8 @@ void SessionsWindow::rebuild()
             for (const auto &candidate : rows) if (candidate.group == row.group && !candidate.launch.isEmpty()) ++total;
             // Attention remains visible even when a search or state filter hides a member.
             for (const auto &e : m_entries) if (m_organization.groupFor(e.identity) == row.group) {
-                if (e.session.reviewLater || (e.online && !e.session.attentionAcknowledged && (e.session.needsAction() || childNeedsAction(e)))) ++alerts;
-                if (e.session.visibleUnreadReply(e.online)) ++unread;
+                if (!e.session.muted && (e.session.reviewLater || (e.online && !e.session.attentionAcknowledged && (e.session.needsAction() || childNeedsAction(e))))) ++alerts;
+                if (!e.session.muted && e.session.visibleUnreadReply(e.online)) ++unread;
                 if (SessionPresentation::working(e.session, e.online)) ++busy;
             }
             item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsDropEnabled | Qt::ItemIsDragEnabled);
@@ -3166,8 +3236,10 @@ void SessionsWindow::rebuild()
         if (!row.hidden && firstVisible < 0) firstVisible = i;
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled);
         item->setData(SessionRoles::Identity, e.identity);
+        item->setData(SessionRoles::RowCollapsed, m_sessionRowPreferences.collapsed(e.host, s));
         const auto roles = sessionCardRoles(e);
         for (auto role = roles.cbegin(); role != roles.cend(); ++role) item->setData(role.key(), role.value());
+        if (item->data(SessionRoles::RowCollapsed).toBool()) item->setData(Qt::AccessibleDescriptionRole, tr("Collapsed session row. Press Right to expand."));
         const auto rowStatus = roles.value(StatusRole).toString(), desc = roles.value(DetailRole).toString();
         const auto meta = roles.value(MetaRole).toString(), gitPath = roles.value(SessionRoles::GitPath).toString();
         if (e.online && !gitPath.isEmpty()) m_client.requestGitStatus(e.host, gitPath);
@@ -3180,6 +3252,7 @@ void SessionsWindow::rebuild()
         const int optionalQuestions = roles.value(SessionRoles::OptionalQuestions).toInt();
         if (optionalQuestions > 0) accessibleFields << SessionPresentation::optionalQuestionsLabel(optionalQuestions);
         if (s.reviewLater) accessibleFields << tr("Marked needs attention: review later");
+        if (s.muted) accessibleFields << (s.sharedNotifications && e.online ? tr("Muted on all devices") : tr("Muted on all devices (last confirmed)"));
         accessibleFields << desc;
         if (!childCount(s, false, e.online, includeCompleted).isEmpty()) accessibleFields << tr("Subagents: %1").arg(childCount(s, true, e.online, includeCompleted));
         if (!currentActivity(s, e.online) && !s.currentTool.isEmpty()) accessibleFields << tr("Last recorded: %1").arg(s.currentTool + " / " + s.toolDetail);
@@ -3211,7 +3284,7 @@ void SessionsWindow::rebuild()
     m_sessions->verticalScrollBar()->setValue(scroll);
     int visibleWorking = 0, visibleAttention = 0;
     for (const auto &e : visible) {
-        if (entryNeedsAttention(e)) ++visibleAttention;
+        if (!e.session.muted && entryNeedsAttention(e)) ++visibleAttention;
         if (SessionPresentation::working(e.session, e.online)) ++visibleWorking;
     }
     m_count->setText(visible.isEmpty() ? tr("No matching sessions") : tr("%1 shown, %2 working, %3 attention").arg(visible.size()).arg(visibleWorking).arg(visibleAttention));
@@ -3235,7 +3308,7 @@ void SessionsWindow::rebuild()
 void SessionsWindow::updateAttentionIndicator()
 {
     m_attentionCount = std::count_if(m_entries.cbegin(),m_entries.cend(),[this](const Entry &entry) {
-        return entry.session.state != "archived" && entryNeedsAttention(entry);
+        return entry.session.state != "archived" && !entry.session.muted && entryNeedsAttention(entry);
     });
     m_attentionBadge->setText(m_attentionCount > 99 ? "99+" : QString::number(m_attentionCount));
     setWorkspaceStyle(m_attentionBadge, QString("QLabel{background:%1;color:%2;border-radius:7px;font-size:9px;font-weight:700;}")
@@ -3300,6 +3373,7 @@ void SessionsWindow::selectSession()
     const QString child = item ? item->data(SessionRoles::ChildId).toString() : QString();
     const QString key = item ? item->data(child.isEmpty() ? KeyRole : SessionRoles::ParentKey).toString() : QString();
     if (key != m_selectedKey) {
+        m_subagentComposer->setFileReferenceTarget({}, {}, {});
         pushSelectionChanged(key);
         m_readCandidate.clear(); m_readSelectionKey.clear();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear();
@@ -3382,8 +3456,11 @@ void SessionsWindow::openSubagent(const QString &id)
     const auto roster = entry ? childRoster(*entry) : QJsonObject();
     if (!entry || !roster.contains(id)) return;
     if (m_subagentId == id) return;
+    m_composer->setFileReferenceTarget({}, {}, {});
     m_subagentDetails = {}; m_subagentComposer->setInputVisible(false);
     m_subagentComposer->setSessionKey(childKey(*entry, id));
+    m_subagentComposer->setFileReferenceTarget(childKey(*entry, id), entry->host, entry->machine,
+        fileReferenceContext(entry->session, m_details));
     m_subagentId = id; m_subagentConversation = m_details.value("conversation_id").toString(entry->session.conversationId);
     m_subagentCwd = selectedDirectory();
     m_subagentTitle->setText(childName(roster.value(id).toObject(), id));
@@ -3400,6 +3477,7 @@ void SessionsWindow::closeSubagent()
 {
     const bool wasOpen = !m_subagentId.isEmpty();
     m_subagentId.clear(); m_subagentConversation.clear(); m_subagentCwd.clear(); m_subagentDetails = {};
+    m_subagentComposer->setFileReferenceTarget({}, {}, {});
     m_activityStack->setCurrentIndex(0);
     const QSignalBlocker block(m_sessions);
     for (int i = 0; i < m_sessions->count(); ++i) if (m_sessions->item(i)->data(KeyRole).toString() == m_selectedKey) { m_sessions->setCurrentRow(i); break; }
@@ -3567,6 +3645,8 @@ void SessionsWindow::renderDetails()
         m_terminal->setAvailable(false, tr("Select a running session."));
         m_composer->setAvailability(false, tr("Select a session.")); return;
     }
+    m_composer->setFileReferenceTarget(m_subagentId.isEmpty() ? entry->key : QString(), entry->host, entry->machine,
+        fileReferenceContext(entry->session, m_details));
     auto s = entry->session;
     if (m_details.value("tracked").toBool() && m_details.value("last_event_at").toDouble() >= s.lastEventAt
         && m_details.value("provider_status_at").toDouble() >= s.providerStatusAt) {
@@ -3611,6 +3691,7 @@ void SessionsWindow::renderDetails()
     const bool waiting=entry->online && SessionPresentation::waitingIdle(s);
     m_badge->setText(waiting?SessionPresentation::waitingCaption(s):state); const auto color = waiting
         ? QColor(m_dark ? "#edd096" : "#795913")
+        : s.muted && (state==tr("Needs approval") || state==tr("Needs input") || state==tr("Sign in")) ? SessionStatusBadge::mutedTone(m_dark)
         : tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
@@ -3740,6 +3821,8 @@ void SessionsWindow::renderDetails()
         !m_details.value("interrupt_supported").toBool()?tr("Interrupt is unavailable. Open Terminal to stop this turn."):QString());
     const QString settingsProblem = modelSettingsBlockReason(*entry);
     m_composer->setSettingsTerminalAvailable(s.cmd == "claude" && entry->online && s.state == "running");
+    m_composer->setOpenCodeContext(OpenCodeModels::catalogSupported(m_details), m_details.value("model_options_truncated").toBool(), entry->online, entry->machine,
+        entry->host, m_details.value("cwd").toString(entry->session.cwd));
     m_composer->setModelSettings(m_details.value("settings_model").toString(s.model), s.effort, m_details.value("model_options").toArray(), settingsProblem.isEmpty(),
         settingsProblem.isEmpty() ? m_details.value("settings_change_reason").toString() : settingsProblem,
         m_details.value("pending_model").toString(), m_details.value("pending_effort").toString(),
@@ -3878,6 +3961,8 @@ void SessionsWindow::renderDetails()
     }
     if (!m_subagentId.isEmpty()) {
         const auto child = childRoster(*entry).value(m_subagentId).toObject();
+        m_subagentComposer->setFileReferenceTarget(childKey(*entry, m_subagentId), entry->host, entry->machine,
+            fileReferenceContext(entry->session, m_details, m_subagentDetails.value("conversation_id").toString()));
         children = QString("<h3>%1</h3><p>%2</p><p>%3</p><h3>%4</h3>")
             .arg(htmlText(childName(child, m_subagentId)), htmlText(childStatus(child)),
                 htmlText(child.value("task").toString(child.value("detail").toString())), tr("Tasks"));
@@ -4033,6 +4118,70 @@ void SessionsWindow::changeModelSettings(const QString &key, const QString &mode
     m_settingsHost = entry->host; m_settingsName = entry->session.name; m_settingsAutomatic = false;
     m_settingsRequest = m_client.requestSettings(entry->host, entry->session.name, model, effort, m_settingsRun, m_settingsConversation, {}, entry->session.cmd == "opencode");
     renderDetails();
+}
+
+// OpenCode's grouped model picker in the composer. All models reads the session's own
+// folder catalog on its computer; a star changes one favorite there, confirmed by hgs.
+void SessionsWindow::connectOpenCodeModels()
+{
+    connect(m_composer, &MessageComposer::openCodeCatalogRequested, this, [this](const QString &key) {
+        const auto *entry = selected();
+        if (!entry || entry->key != key || entry->session.cmd != "opencode") return;
+        if (!entry->online) { m_composer->setOpenCodeCatalogFailed(key, tr("%1 is offline.").arg(entry->machine)); return; }
+        const auto cwd = m_details.value("cwd").toString(entry->session.cwd);
+        const auto request = m_client.requestOpenCodeModels(entry->host, cwd);
+        m_openCodeCatalogRequests.insert(request, {key, entry->host, cwd, m_composer->openCodeGeneration()}); m_openCodeCatalogLatest.insert(key, request);
+    });
+    connect(&m_client, &HgsClient::openCodeModelsReady, this, [this](quint64 request, const QString &host, const QString &location, const QJsonObject &catalog) {
+        const auto key = openCodeCatalogSession(request, host, location);
+        if (!key.isEmpty()) m_composer->setOpenCodeCatalog(key, catalog);
+    });
+    connect(&m_client, &HgsClient::openCodeModelsFailed, this, [this](quint64 request, const QString &host, const QString &location, const QString &error) {
+        const auto key = openCodeCatalogSession(request, host, location);
+        if (const auto *entry = selected(); !key.isEmpty() && entry) m_composer->setOpenCodeCatalogFailed(key, OpenCodeModels::errorText(error, entry->machine));
+    });
+    connect(m_composer, &MessageComposer::openCodeFavoriteRequested, this, [this](const QString &key, const QString &value, bool favorite) {
+        const auto *entry = selected();
+        if (!entry || entry->key != key || entry->session.cmd != "opencode") return;
+        if (!entry->online) { m_composer->setOpenCodeFavorite(key, value, !favorite, tr("%1 is offline.").arg(entry->machine)); return; }
+        m_openCodeFavoriteRequests.insert(m_client.requestOpenCodeFavorite(entry->host, value, favorite),
+                                          {key, entry->host, value, favorite, m_composer->openCodeGeneration()});
+    });
+    connect(&m_client, &HgsClient::openCodeFavoriteReady, this, [this](quint64 request, const QString &, const QJsonObject &) {
+        if (!m_openCodeFavoriteRequests.contains(request)) return;
+        const auto change = m_openCodeFavoriteRequests.take(request);
+        // A star from a picker context left since is neither shown nor read again.
+        if (change.context != m_composer->openCodeGeneration()) return;
+        // The composer ignores it unless that session is still shown; that session reads its details again.
+        m_composer->setOpenCodeFavorite(change.key, change.value, change.favorite, {});
+        if (const auto *entry = selected(); entry && entry->key == change.key && entry->host == change.host) inspect();
+    });
+    connect(&m_client, &HgsClient::openCodeFavoriteFailed, this, [this](quint64 request, const QString &, const QString &error) {
+        if (!m_openCodeFavoriteRequests.contains(request)) return;
+        const auto change = m_openCodeFavoriteRequests.take(request);
+        if (change.context != m_composer->openCodeGeneration()) return;
+        const auto *entry = selected();
+        const auto machine = entry && entry->host == change.host ? entry->machine : change.host;
+        m_composer->setOpenCodeFavorite(change.key, change.value, !change.favorite, OpenCodeModels::errorText(error, machine));
+    });
+}
+
+// The session an `account models` answer may be shown for, or empty. Only the newest
+// request issued for a session answers it, and only while that session is selected
+// with the computer and folder the request was made for, in the same picker context.
+QString SessionsWindow::openCodeCatalogSession(quint64 id, const QString &host, const QString &location)
+{
+    if (!m_openCodeCatalogRequests.contains(id)) return {};
+    const auto request = m_openCodeCatalogRequests.take(id);
+    const bool newest = m_openCodeCatalogLatest.value(request.key) == id;
+    // With nothing of that session pending, no older answer can come any more.
+    if (std::none_of(m_openCodeCatalogRequests.cbegin(), m_openCodeCatalogRequests.cend(),
+                     [&](const OpenCodeCatalogRequest &pending) { return pending.key == request.key; }))
+        m_openCodeCatalogLatest.remove(request.key);
+    const auto *entry = selected();
+    if (!newest || request.context != m_composer->openCodeGeneration() || host != request.host || location != request.cwd || !entry || entry->key != request.key
+        || entry->host != request.host || m_details.value("cwd").toString(entry->session.cwd) != request.cwd) return {};
+    return request.key;
 }
 
 QByteArray SessionsWindow::settingsIdentity(const QString &key, const PendingSettings &pending)
@@ -5035,6 +5184,11 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     };
     qDeleteAll(m_sessionMenu->findChildren<QMenu *>(QString(), Qt::FindDirectChildrenOnly));
     m_sessionMenu->clear();
+    const bool rowCollapsed = m_sessionRowPreferences.collapsed(original.host, target);
+    add(rowCollapsed ? tr("Expand session row") : tr("Compact session row"), "contextSessionRowDensity",
+        rowCollapsed ? SessionMenuAction::ExpandRow : SessionMenuAction::CollapseRow, true);
+    m_sessionMenu->addAction(m_expandAllRowsAction);
+    m_sessionMenu->addSeparator();
     if (!archived) add(original.session.cmd == "dsh" ? tr("Open native DeepSeek UI") : tr("Open terminal"), "contextOpenTerminal", SessionMenuAction::OpenTerminal, available && (target.cmd=="dsh"||NativeSessionCapabilities::terminal(target,selectedTarget?m_details:QJsonObject())),
         NativeSessionCapabilities::terminal(target,selectedTarget?m_details:QJsonObject())||target.cmd=="dsh"?QString():NativeSessionCapabilities::terminalReason(target,selectedTarget?m_details:QJsonObject()));
     if (!archived && SessionPresentation::backgroundIdle(original.session))
@@ -5050,6 +5204,20 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
         (archived || NativeSessionCapabilities::terminal(target)) && (!archived || !original.session.archiveId.isEmpty()));
     if (!archived) {
         m_sessionMenu->addSeparator();
+        const bool pending = std::any_of(m_pendingNotifications.cbegin(), m_pendingNotifications.cend(), [&](const PendingNotifications &p) {
+            return p.entry.host == original.host && p.entry.session.conversationId == target.conversationId;
+        });
+        QString muteReason = target.muted ? tr("Allow future notifications for this session on all devices") : tr("Mute notifications for this session on all devices");
+        const bool notifications = original.online && (!original.host.isEmpty() || m_connectionError.isEmpty()) && target.sharedNotifications
+            && target.notificationPreferencesError.isEmpty() && SessionNotifications::identity(target.runId,128) && SessionNotifications::identity(target.conversationId,256)
+            && !pending && m_pendingNotifications.size() < 16;
+        if (!original.online || (original.host.isEmpty() && !m_connectionError.isEmpty())) muteReason = tr("Connect to this session's host to change shared notifications.");
+        else if (!target.sharedNotifications) muteReason = tr("Update hgs on this session's host to support shared notification preferences.");
+        else if (!SessionNotifications::identity(target.runId,128) || !SessionNotifications::identity(target.conversationId,256)) muteReason = tr("Refresh this session's identity before changing shared notifications.");
+        else if (!target.notificationPreferencesError.isEmpty()) muteReason = tr("Conflicting shared notification preferences. Refresh the session.");
+        else if (pending || m_pendingNotifications.size() >= 16) muteReason = tr("A shared notification change is pending. Wait for its result.");
+        auto *mute = add(target.muted ? tr("Unmute") : tr("Mute"), "contextToggleMute", SessionMenuAction::ToggleMute, notifications, muteReason);
+        mute->setIcon(workspaceIcon(target.muted ? "attention" : "mute", SessionStatusBadge::mutedTone(m_dark)));
         if (entryNeedsAttention(original))
             add(tr("Mark as read"), "contextMarkRead", SessionMenuAction::MarkRead, true);
         else
@@ -5128,6 +5296,22 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
     const Entry current = *found;
     const auto directory = current.key == m_selectedKey && m_subagentId.isEmpty() ? selectedDirectory() : current.session.cwd;
     switch (action) {
+    case SessionMenuAction::ToggleMute: {
+        if (!current.online || (current.host.isEmpty() && !m_connectionError.isEmpty()) || !current.session.sharedNotifications
+            || !current.session.notificationPreferencesError.isEmpty() || current.session.runId != original.session.runId
+            || !SessionNotifications::identity(current.session.runId,128) || !SessionNotifications::identity(current.session.conversationId,256)
+            || current.session.notificationPreferences != original.session.notificationPreferences || m_pendingNotifications.size() >= 16
+            || std::any_of(m_pendingNotifications.cbegin(), m_pendingNotifications.cend(), [&](const PendingNotifications &p) {
+                return p.entry.host == current.host && p.entry.session.conversationId == current.session.conversationId;
+            })) return;
+        const QJsonObject payload{{"run_id", current.session.runId}, {"conversation_id", current.session.conversationId},
+            {"muted", !current.session.muted}, {"expected_revision", current.session.notificationPreferences.value("revision")}};
+        const auto request = m_client.requestNotifications(current.host, current.session.name, payload);
+        m_pendingNotifications.insert(request, {current}); return;
+    }
+    case SessionMenuAction::CollapseRow:
+    case SessionMenuAction::ExpandRow:
+        setSessionRowCollapsed(current, action == SessionMenuAction::CollapseRow); return;
     case SessionMenuAction::MarkRead:
     case SessionMenuAction::ReviewLater: {
         const bool changed = action == SessionMenuAction::MarkRead ? m_fleet.markSessionRead(original.host, original.session)

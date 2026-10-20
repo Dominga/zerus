@@ -1,11 +1,10 @@
+#![cfg(unix)]
 //! The runtime against the golden vectors: `validation/*.jsonl`, the
 //! `Connector.execute` runs, the heartbeat snapshot and the pure projections
 //! of `projections.jsonl`, the bounded inspections and receipt limits of
 //! `sizes.jsonl`, the capability markers of `operations.json` and the fixed
 //! receipts of `receipts.json`. Native calls are scripted by argv; operations
 //! this build does not implement must be refused as unsupported.
-// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
-#![cfg(unix)]
 mod common;
 
 use common::*;
@@ -255,7 +254,7 @@ fn validation_matches_the_python_connector_for_implemented_operations() {
         }
     }
     // The common Python vectors include both hook health and analytics reads.
-    assert_eq!((checked, refused), (254, 2));
+    assert_eq!((checked, refused), (255, 2));
 }
 
 /// Python's `capable(node)`: every flag, the vectors' sessions and archive.

@@ -133,7 +133,7 @@ jobs:
       - name: Portable zip from the tested executables
         run: |
           python scripts/package-windows.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \
-            --mobile-connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
+            --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
             --mobile-relay services/mobile/relay/target/release/zerus-relay.exe \
             --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
           python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \

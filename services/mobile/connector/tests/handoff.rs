@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The Rust and Python connectors on one journal: each lock excludes the
 //! other in both directions, `hgs status` sees the Rust lock, a Rust-written
 //! journal reopens under the Python `Journal` unchanged, and `--check` never
@@ -6,8 +7,6 @@
 //! `ZERUS_CONNECTOR_TEST_PYTHON` names an interpreter with aiohttp (the
 //! Python connector's only import outside this tree); `ZERUS_CONNECTOR_TEST_HGS`
 //! names a built `hgs`. Without them these tests skip, except in CI.
-// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
-#![cfg(unix)]
 mod common;
 
 use common::*;

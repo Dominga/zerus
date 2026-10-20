@@ -112,3 +112,24 @@ turns extensions on by default.
 
 - `socraticode`: `hgs socraticode …` and the SocratiCode strip in Details, with
   its native-Qdrant option.
+
+## Windows mobile gateway additions
+
+Upstream's Windows gateway (`docs/superpowers/specs/2026-10-20-windows-mobile-gateway-design.md`)
+manages the bundled connector through `zerus-mobile-connector --manage`. The fork
+adds, under Settings -> Mobile connection (`tray/src/WindowsMobileServices.h`):
+
+- **Start the connector when Zerus starts** (`mobile/runConnector`, on by
+  default): at startup Zerus asks `--manage status` and, for a configured
+  connector that is not running, `--manage start` with that revision. It never
+  stops or kills the connector.
+- **Run a relay on this computer** (`mobile/localRelay`, off by default): the
+  bundled `zerus-relay.exe` serves `127.0.0.1:8787` with its SQLite database in
+  `%USERPROFILE%\.local\state\hgs\relay`, from a per-build copy under
+  `%USERPROFILE%\.local\share\hgs\mobile\<hash>` so the portable folder stays
+  replaceable. A phone needs HTTPS: publish it inside the tailnet with
+  `tailscale serve --bg --https=443 http://127.0.0.1:8787` (Tailscale's HTTPS
+  certificates must be enabled; Serve stays tailnet-only, unlike Funnel).
+  Provision the computer once with the relay stopped:
+  `zerus-relay --database <db> provision --name <workspace> --computer-name <name>`,
+  then save the printed computer credential in Mobile connection.

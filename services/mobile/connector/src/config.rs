@@ -4,6 +4,7 @@
 use crate::error::*;
 use crate::pyjson::{self, Value};
 use crate::url::{self, Transport};
+#[cfg(unix)]
 use std::fs::Metadata;
 use std::io::Read;
 #[cfg(unix)]
@@ -77,13 +78,6 @@ pub struct Finding {
 }
 
 /// Divergence e: `hgs_path` is executed, so only this user may change the file.
-#[cfg(windows)]
-pub fn file_findings(_metadata: &Metadata, _euid: u32) -> Vec<Finding> {
-    // WhiteWh fork: Windows has no owner uid or mode bits; the configuration
-    // stays private through the profile's ACL.
-    Vec::new()
-}
-
 #[cfg(unix)]
 pub fn file_findings(metadata: &Metadata, euid: u32) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -109,10 +103,32 @@ pub fn file_findings(metadata: &Metadata, euid: u32) -> Vec<Finding> {
 /// which Python also reads.
 pub fn read_file(path: &Path, euid: u32) -> Result<(String, Vec<Finding>)> {
     let unreadable = || ConnectorError::new(UNREADABLE_CONFIGURATION);
+    #[cfg(unix)]
     let mut file = std::fs::File::open(path).map_err(|_| unreadable())?;
+    #[cfg(windows)]
+    let mut file =
+        zerus_windows_private::open_file(path, false, false).map_err(|_| unreadable())?;
+    #[cfg(unix)]
     let findings = file_findings(&file.metadata().map_err(|_| unreadable())?, euid);
+    #[cfg(windows)]
+    let findings = {
+        let _ = euid;
+        zerus_windows_private::verify(&file, false).map_err(|_| unreadable())?;
+        Vec::new()
+    };
     let mut bytes = Vec::new();
+    #[cfg(unix)]
     file.read_to_end(&mut bytes).map_err(|_| unreadable())?;
+    #[cfg(windows)]
+    {
+        file.by_ref()
+            .take(65_537)
+            .read_to_end(&mut bytes)
+            .map_err(|_| unreadable())?;
+        if bytes.len() > 65_536 {
+            return Err(unreadable());
+        }
+    }
     // Path.read_text() decodes strict UTF-8, refusing encoded surrogates too.
     let text = String::from_utf8(bytes).map_err(|_| ConnectorError::new(INVALID_JSON))?;
     Ok((text, findings))
@@ -163,6 +179,19 @@ pub fn validate(
         value => string(value)
             .filter(|path| !path.is_empty() && !path.contains('\0'))
             .ok_or_else(|| ConnectorError::new(INVALID_HGS))?,
+    };
+    #[cfg(windows)]
+    let hgs_path = {
+        let _ = hgs_path;
+        // Portable folders may move between starts. The bundle, not PATH or
+        // a stale saved installation path, selects its matching native CLI.
+        std::env::current_exe()
+            .map_err(|_| ConnectorError::new(INVALID_HGS))?
+            .parent()
+            .ok_or_else(|| ConnectorError::new(INVALID_HGS))?
+            .join("hgs.exe")
+            .to_string_lossy()
+            .into_owned()
     };
     let poll_interval = match config.get("poll_interval") {
         None => 5.0,

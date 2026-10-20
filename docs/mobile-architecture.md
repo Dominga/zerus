@@ -593,8 +593,21 @@ may add `provider_label`, `free`, and up to eight `effort_options` with
 `effort_labels` in the same order. An effort id keeps the native catalog's rule
 (non-empty, at most 40 UTF-8 bytes, no whitespace, control character or `/`); a
 malformed id drops only that entry. All fields are additive and appear only when
-the computer reports them; the whole projection stays within 128 KiB (over the bound, `effort_labels` and
-then `effort_options` are dropped before the projection is refused).
+the computer reports them. OpenCode rows may also carry `providers` (at most
+64 entries of `id`, `label`, `kind`, `credential_count`, `model_count` and
+`active_label`), `providers_truncated`, `model_options_truncated` and
+`catalog_at`; each model entry may carry `favorite` and `default` marks, sent
+only when `true`. Provider and model `settings`, `headers`, `body`, `options`,
+base URLs, connection status text and URLs, credential IDs and values and
+environment names never leave the connector. The launch catalog carries the
+marks and truncation flags but never providers. The whole projection stays
+within 128 KiB (over the bound, `effort_labels`, `effort_options` and then
+`providers` are dropped, setting `providers_truncated`, before the projection
+is refused). The connector keeps only OpenCode provider IDs that a phone
+launch accepts (an ASCII letter, digit or `_`, then letters, digits, `_`, `.`
+or `-`, at most 80 bytes): a provider outside that rule is dropped on phones
+together with its short-list models, without setting either truncation flag.
+The desktop and `hgs` still offer them.
 An unavailable catalog can indicate an older native CLI; it is not an empty
 list of verified accounts.
 
@@ -660,6 +673,14 @@ The relay allows each credential
 keeps its invitation limits; global and per-address limits belong to the reverse
 proxy (see [Mobile deployment](mobile-deployment.md)). Terminal remains capability-gated for
 unsupported native adapters, archived sessions and child activity views.
+Android opening or explicitly refreshing Terminal rechecks gateway capabilities,
+the computer catalog and the exact session before requesting a screen. An existing
+shared inspection settles first and cannot supply this fresh check. Missing,
+malformed or failed operation discovery remains unavailable metadata; an actual
+empty operation list is a reported lack of support. The explanation distinguishes
+gateway support, computer support and the native session's explicit refusal.
+Refreshing availability only reads metadata and session inspection; input still
+requires the separately verified fresh native Terminal binding.
 
 ### Conversation history and composition
 
@@ -1067,6 +1088,26 @@ transition is stored as an ordinary event, which refreshes phone state, and as
 an alert candidate. Push payloads contain only generic wake information, never
 conversation text, project names or credentials. Opening a notification
 refreshes the authenticated session state.
+
+The live parent conversation offers Mute notifications and Unmute notifications
+when both relay and computer advertise `session_notifications` and report valid
+`notification_preferences`. This host-owned setting follows the conversation
+across rename and resume and applies on every device. Its exact run/conversation
+and expected revision are checked by the durable request; no client changes the
+setting optimistically. Archives and child sessions cannot change it. Missing
+metadata leaves the control unavailable rather than creating a phone-only mute.
+
+Muted conversations retain their native state, unread replies, pending requests
+and Needs attention/Active membership. Attention and unread styling becomes
+neutral with a mute icon; Working and error signals remain visible. Notification
+cards, sounds and overflow totals exclude muted conversations. Unmute captures
+the host's complete current reply, main/child attention and optional-question
+identities, so an offline device cannot replay them. New identities can notify.
+The quiet `notification_preferences` event triggers refresh and withdrawal but
+never announces a transition. Clients retain the highest confirmed preference
+revision through late catalog/detail reads; receipt proofs share the existing
+bounded action history, deduplicate by computer/provider/conversation and use at most
+1 MiB of encoded proof storage. Evicting a proof keeps its request and outcome.
 
 ### Presence-aware delivery
 

@@ -459,6 +459,27 @@ input, approvals, errors and unread main-agent replies. An offline host retains
 its last total but adds no live attention requests; a dot marks incomplete data.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
+The session menu's **Mute** disables notifications for that conversation on all
+devices and removes it from their notification counters and bells. The session's
+host stores the preference; other desktops and phones receive it in their next
+host snapshot. A crossed-out bell and neutral gray or white attention and unread
+badges identify a muted session. The preference survives restart, rename and
+resume of the same conversation. Muting preserves the agent's actual state,
+unread replies, questions, approvals and review reminders. The menu requires an
+online host with shared notification preferences and a configured local `hgs`
+that advertises `session-notifications-v1`; older hosts show an explanation
+instead of a separate local-only preference. A pending or failed change never
+replaces the last confirmed host value.
+If a host later becomes unavailable or stops reporting this feature, its last
+confirmed muted display is retained and labelled as such; it does not enable a
+new change. Concurrent changes use the host's revision and require a fresh
+snapshot after a conflict. Unmute records the host's current notification
+identities, so a device that missed the muted interval does not announce those
+old events when it reconnects. This does not mark the underlying work as read.
+**Unmute** restores future notifications without replaying events seen while
+muted or acknowledging pending work. Muted sessions remain available in the
+Needs attention filter.
+
 Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
@@ -586,6 +607,13 @@ the conversation and press **Voice** again; opening settings does not start a
 recording. If settings cannot open, the dialog keeps the manual navigation path.
 
 Session rows show provider, machine, current action, model, effort and Git context.
+Right-click a session and choose **Compact session row** to show only its name,
+status and agent type. The expand icon or the Right key restores the full row;
+the row remains selectable and keeps its normal context actions. This device
+remembers the preference for that conversation across restarts. **Expand all
+collapsed** in the Sessions menu restores every compact row, including sessions
+hidden by the current filters. Row density never compacts the agent's context
+or changes its runtime state. A muted session keeps its mute icon in either size.
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
 and a green cloud check for a clean checkout matching its verified upstream.
@@ -905,6 +933,18 @@ subagent. They survive GUI crashes, restarts, unavailable machines and ended
 sessions, even if the original attachment file is gone. Storage is a private
 directory next to the desktop's Qt settings file (`<settings-file>.drafts`),
 outside P2P configuration sync.
+
+Use **Reference an existing file** (the link button beside Attach, or its Files
+menu in a narrow column) when the file
+already exists on the agent's computer, including very large files. Locally,
+choose a file or enter its absolute path. For a remote session, enter an absolute
+path (including Windows drive or UNC paths) or `~/` path on the named remote
+computer; a file on your desktop is not uploaded
+or made accessible to that computer. Zerus inserts an editable, quoted path into
+the draft and saves it as ordinary message text. Review it and press Send when
+ready. This action does not read, copy or Base64-encode the file and has no file
+size limit. It refers to the existing file, whose contents may change; the agent
+decides how to use it. Ordinary attachment uploads retain their existing limits.
 
 Session refresh, connection and recovery errors appear on one line beside the
 attachment button, with the complete diagnostic in its tooltip and an explicit
@@ -2055,6 +2095,12 @@ or revoke for another relay or workspace, and a code for another workspace is
 never shown. A revocation that fails or cannot be confirmed stays reported until
 **Refresh**; it is never retried automatically.
 
+On Windows, these phone-management commands pass a nonempty `CURL_CA_BUNDLE`
+path explicitly to curl's `--cacert`, so Schannel verifies the relay using that
+PEM CA bundle. If the variable is absent or empty, curl keeps its default
+trust behavior. An invalid bundle or failed certificate verification refuses
+the request; there is no fallback to an unverified connection.
+
 Multiple machine filters narrow both sessions and content search. Label color,
 Bright/Soft mode and appearance previews are local. Color pickers cancel on an
 outside click or Escape; only explicit confirmation saves a color. Project
@@ -2208,6 +2254,10 @@ running, and `hgs [@host] account start native-opencode` starts it explicitly
 (**Start OpenCode**). Inspection, listings and sending never start it. OpenCode's
 official user install, `~/.opencode/bin`, is discoverable from GUI, service and
 SSH launches; an `opencode` found earlier on PATH keeps precedence.
+
+`hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID` stars a model on that computer (at most 64; stored in `opencode-favorites.json` beside the account catalog). A retried request identity returns its first change, with today's favorites list.
+
+`hgs [@host] account models native-opencode [--location DIR] --json` lists every available model of that computer and folder (connected providers only, at most 10,000 models and 4 MiB; `models_truncated` reports a cut). It never starts OpenCode; with the service stopped it reports `not_running` and, for the home folder, the last known short list.
 
 <a id="deepseek"></a>
 
@@ -2827,7 +2877,13 @@ it is listed at most once every 15 seconds. With local sessions enabled, New
 session and Accounts offer this computer without DeepSeek and OpenCode, the shell
 entry is **Run PowerShell**, voice messages to its sessions are disabled with the
 reason as the tooltip, and it is listed at most once every 5 seconds. In both modes,
-Settings → Mobile connection is hidden and no desktop presence is recorded.
+Settings → Mobile connection configures the bundled outbound Rust connector on
+Windows, including before local sessions are enabled. Start and Stop are explicit;
+closing the GUI preserves the connector, session host and native agents. The
+first Windows transport controls existing local Codex/Claude/Kimi sessions and
+refuses mobile creation, path/worktree/Git/file operations, peers and voice/speech.
+Windows desktop presence is not recorded, so desktop activity does not delay
+phone alerts. See [Windows gateway setup](mobile-deployment.md#windows-gateway).
 Attention notices are tray notifications with the Zerus icon and a taskbar
 badge. A start without options opens the workspace, because Windows 11 first
 hides a new notification

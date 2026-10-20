@@ -43,6 +43,11 @@ struct SessionInfo {
     double backgroundStarted = 0, backgroundObservedAt = 0;
     QString backgroundCommand;
     bool reviewLater = false, attentionAcknowledged = false;
+    // Confirmed notification preference from the session's host, shared by devices.
+    bool muted = false;
+    bool sharedNotifications = false;
+    QJsonObject notificationPreferences;
+    QString notificationPreferencesError;
     // Shared read state from the session's host. sharedRead is false for hosts
     // whose hgs predates `hgs read`; those keep this device's own marks.
     bool sharedRead = false;
@@ -64,7 +69,7 @@ struct SessionInfo {
     QJsonArray subagentPreviews;
     QJsonObject subagents;
     QString processState, conversationState, runtimeState;
-    double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0;
+    double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0, attentionStarted = 0;
     int subagentCount = 0;
     // Pending optional Codex questions ("optional_questions"): the exact count,
     // the IDs the host lists (the newest ones) and the newest question's time.
@@ -193,6 +198,11 @@ public:
     quint64 requestClaudeAppSessions(const QString &host);
     void resumeClaudeAppSession(const QString &host, const QString &id, const QString &name, const QString &launchId, bool force);
     quint64 requestSocratiCode(const QString &host, const QString &action, const QString &path, bool nativeQdrant = false);
+    // `hgs [@host] account models native-opencode --location DIR --json`: 30 s, at most 5 MiB of output.
+    quint64 requestOpenCodeModels(const QString &host, const QString &location);
+    // `hgs [@host] account favorite native-opencode --model VALUE --favorite on|off --request-id UUID --json`:
+    // a fresh request identity per call. A failure is reported, never retried.
+    quint64 requestOpenCodeFavorite(const QString &host, const QString &value, bool favorite);
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     // hgs [@host] mobile …: phones of the workspace that host's mobile connection
     // reaches. Probes the host CLI first, so an older one is never asked.
@@ -273,6 +283,7 @@ public:
     // `hgs [@host] read <session> --json`: the host applies each field only while
     // it is current. A JSON answer, including not_found, is delivered.
     quint64 requestRead(const QString &host, const QString &name, const QJsonObject &payload);
+    quint64 requestNotifications(const QString &host, const QString &name, const QJsonObject &payload);
 
     // Чистые функции разбора: тестируются без запуска процессов.
     void cancelArchivePages();
@@ -330,6 +341,10 @@ signals:
     void claudeAppSessionsFailed(quint64 request, const QString &host, const QString &error);
     void socratiCodeReady(quint64 request, const QString &host, const QString &path, const QString &action, const QJsonObject &result);
     void socratiCodeFailed(quint64 request, const QString &host, const QString &path, const QString &action, const QString &error);
+    void openCodeModelsReady(quint64 request, const QString &host, const QString &location, const QJsonObject &catalog);
+    void openCodeModelsFailed(quint64 request, const QString &host, const QString &location, const QString &error);
+    void openCodeFavoriteReady(quint64 request, const QString &host, const QJsonObject &receipt);
+    void openCodeFavoriteFailed(quint64 request, const QString &host, const QString &error);
     void mobileReady(quint64 request, const QString &host, const QJsonObject &result);
     void mobileFailed(quint64 request, const QString &host, const QString &error);
     void machinesReady(quint64 request, const QJsonObject &result);
@@ -346,6 +361,7 @@ signals:
     void questionAnswerFailed(quint64 request, const QString &host, const QString &name,
                               const QString &detail, bool deliveryUncertain);
     void readFinished(quint64 request, bool delivered, const QJsonObject &result, const QString &error);
+    void notificationsFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void queueSendFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
     void messageSent(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void messageFailed(quint64 request, const QString &host, const QString &name, const QString &detail, bool deliveryUncertain);
@@ -450,6 +466,7 @@ private:
     QSet<QString> m_messagesInFlight;
     quint64 m_answerRequest = 0;
     quint64 m_readRequest = 0;
+    quint64 m_notificationsRequest = 0;
     bool m_presenceInFlight = false, m_presencePending = false;
     QPair<double, bool> m_pendingPresence;
     QSet<QString> m_answersInFlight;

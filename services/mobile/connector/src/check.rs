@@ -14,6 +14,8 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -159,9 +161,14 @@ fn state_dir(directory: &Path, binding: &str) -> Value {
 /// Reads the journal in one short read-only transaction.
 fn journal(path: &Path, binding: &str, lock: LockState) -> Value {
     let mut header = [0u8; 100];
-    let read = fsguard::open_no_follow(std::fs::OpenOptions::new().read(true))
-        .open(path)
-        .and_then(|mut file| file.read(&mut header));
+    #[cfg(unix)]
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path);
+    #[cfg(windows)]
+    let opened = zerus_windows_private::open_file(path, false, false);
+    let read = opened.and_then(|mut file| file.read(&mut header));
     match read {
         // The connector pre-creates an empty file before SQLite writes to it.
         Ok(0) => return json!({"status": "empty", "binding": "unbound"}),

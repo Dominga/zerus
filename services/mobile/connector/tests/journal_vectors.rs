@@ -1,8 +1,7 @@
+#![cfg(unix)]
 //! `journal_traces.jsonl` and `journal_expect.json`: the Rust journal replays
 //! every step the Python `Journal` was recorded taking, on fresh state and on
 //! Python-written, legacy, foreign and capped fixtures.
-// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
-#![cfg(unix)]
 mod common;
 
 use common::*;

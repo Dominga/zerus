@@ -1,6 +1,5 @@
-//! Optional prompt dismissal preserves ordinary clear bytes and durable no-replay identities.
-// The black-box suites drive Unix shells and modes; a Windows gateway runs the unit tests.
 #![cfg(unix)]
+//! Optional prompt dismissal preserves ordinary clear bytes and durable no-replay identities.
 mod common;
 
 use common::{Scratch, EPOCH};

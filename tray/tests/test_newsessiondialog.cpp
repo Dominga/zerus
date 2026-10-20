@@ -354,15 +354,27 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         const auto pick=[&](const QString &key){for(auto *button:dialog.findChildren<QAbstractButton *>("denseAgent"))if(button->property("agent").toString()==key)button->click();};
         // Ollama follows Claude Code: a local model account is a Claude Code profile.
         QTRY_COMPARE(agents(),QStringList({"codex","claude","dsh","ollama","sh"}));
-        // Two Codex accounts: a menu names them.
-        auto *accounts=dialog.findChild<QToolButton *>("denseAccounts");QTRY_VERIFY(accounts->isVisible());QCOMPARE(accounts->menu()->actions().size(),2);
+        const auto preview=qEnvironmentVariable("ZERUS_DENSE_PREVIEW");
+        // Two Codex accounts: the line under the rail is a chip, and its list
+        // chooses the account the session uses.
+        auto *chip=dialog.findChild<QAbstractButton *>("denseAccountChip");auto *info=dialog.findChild<QWidget *>("denseInfo");
+        QTRY_VERIFY(chip->isVisible());QVERIFY(!info->isVisible());QVERIFY(chip->accessibleName().startsWith("Account: "));
+        QCOMPARE(chip->toolTip().split('\n').size(),2);
+        const auto first=choices(dialog)->currentItem()->data(Qt::UserRole).toString();
+        chip->click();auto *list=dialog.findChild<QWidget *>("denseAccountList");QTRY_VERIFY(list->isVisible());
+        if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-accounts.png")&&list->grab().save(preview+"/dense-account-list.png"));
+        QTest::keyClick(list,static_cast<NewSessionDense::AccountChip *>(chip)->chosen()==0?Qt::Key_Down:Qt::Key_Up);QTest::keyClick(list,Qt::Key_Return);QTRY_VERIFY(!list->isVisible());
+        const auto second=choices(dialog)->currentItem()->data(Qt::UserRole).toString();
+        QVERIFY(second!=first);QVERIFY(QStringList({"work","other"}).contains(second));
+        // Esc closes the list without a choice.
+        chip->click();QTRY_VERIFY(list->isVisible());QTest::keyClick(list,Qt::Key_Escape);QTRY_VERIFY(!list->isVisible());
+        QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),second);
         pick("claude");
         QTRY_COMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude"));
-        QVERIFY(!accounts->isVisible());
-        auto *info=dialog.findChild<QWidget *>("denseInfo");
+        QVERIFY(!chip->isVisible());QVERIFY(info->isVisible());
         QTRY_VERIFY(info->accessibleName().contains("shared@example.invalid"));
         QVERIFY2(info->accessibleName().contains("5h 17% used")&&info->accessibleName().contains("week 78% used"),qPrintable(info->accessibleName()));
-        const auto preview=qEnvironmentVariable("ZERUS_DENSE_PREVIEW");if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-claude.png"));
+        if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-claude.png"));
         // A signed-out agent offers its own action and does not start.
         auto *start=dialog.findChild<QPushButton *>("primary");
         pick("dsh");QTRY_VERIFY(!start->isEnabled());

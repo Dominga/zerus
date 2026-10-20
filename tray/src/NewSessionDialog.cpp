@@ -1100,9 +1100,16 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
     agentColumn->addWidget(m_denseRail);
     auto *infoRow=new QHBoxLayout;infoRow->setSpacing(8);infoRow->setContentsMargins(0,0,0,0);
     m_denseInfo=new InfoLine(t);infoRow->addWidget(m_denseInfo,1);
-    m_denseAccounts=new QToolButton;m_denseAccounts->setObjectName("denseAccounts");m_denseAccounts->setPopupMode(QToolButton::InstantPopup);
-    m_denseAccounts->setText(tr("Account"));m_denseAccounts->setToolTip(tr("Choose the account"));m_denseAccounts->setMenu(new QMenu(m_denseAccounts));m_denseAccounts->hide();
-    infoRow->addWidget(m_denseAccounts);
+    // Several accounts of one agent: the line becomes a chip with their list.
+    m_denseChip=new AccountChip(t);m_denseChip->hide();infoRow->addWidget(m_denseChip,1);
+    m_denseList=new AccountList(t,this);
+    m_denseList->chosen=[this](int row){if(row>=0&&row<m_account->count())m_account->setCurrentRow(row);};
+    m_denseList->addAccount=[this]{const auto provider=m_denseKey;reject();emit accountSetupRequested(host(),provider,QString());};
+    m_denseList->closed=[this]{m_denseChip->setOpen(false);};
+    connect(m_denseChip,&QAbstractButton::clicked,this,[this]{
+        if(m_denseChip->accounts().size()<2)return;
+        m_denseChip->setOpen(true);m_denseList->open(m_denseChip->accounts(),m_denseChip->chosen(),m_denseChip);
+    });
     m_refreshAccounts->setText(QString());m_refreshAccounts->setIcon(workspaceIcon("refresh",t.label));m_refreshAccounts->setIconSize(QSize(11,11));
     m_refreshAccounts->setProperty("denseRefresh",true);infoRow->addWidget(m_refreshAccounts);
     m_denseSignIn=new QPushButton;m_denseSignIn->setObjectName("denseSignIn");m_denseSignIn->setAutoDefault(false);m_denseSignIn->setFixedHeight(20);m_denseSignIn->hide();
@@ -1137,6 +1144,8 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
     layout->addWidget(footerBox);
     for(const auto key:{QKeySequence(Qt::CTRL|Qt::Key_Return),QKeySequence(Qt::CTRL|Qt::Key_Enter)})
         connect(new QShortcut(key,this),&QShortcut::activated,this,[this]{if(m_start->isEnabled())start();});
+    // Reset times count down while the dialog stays open.
+    auto *minute=new QTimer(this);minute->setInterval(60*1000);connect(minute,&QTimer::timeout,this,&NewSessionDialog::refreshDense);minute->start();
     // Permission modes move into the ··· menu.
     m_densePermissions=m_worktreeOptions->menu()->addMenu(tr("Permissions"));m_densePermissions->setObjectName("densePermissions");
     m_densePermissionsSeparator=m_worktreeOptions->menu()->insertSeparator(m_densePermissions->menuAction());
@@ -1290,6 +1299,7 @@ void NewSessionDialog::refreshDense()
     for(int row=0;row<m_account->count();++row){const auto key=denseKey(row);claude|=key=="claude"||key=="ollama";if(!keys.contains(key))keys<<key;}
     const bool windows=folderStyle(m_fleet,host())==MachinePlatform::Style::Windows;
     QList<Agent> agents;
+    const QStringList signedOut{"signed_out","expired","credentials_locked","credentials_unavailable","desktop_session_unavailable"};
     for(const auto *value:{"codex","claude","kimi","dsh","ollama","opencode","sh"}){
         const QString key=QString::fromLatin1(value);
         if(!keys.contains(key)&&!(key=="ollama"&&claude))continue;
@@ -1302,9 +1312,26 @@ void NewSessionDialog::refreshDense()
         const int row=denseRow(key);
         const auto usage=row<0?QJsonObject():m_account->item(row)->data(ProfileRole).toJsonObject()["usage"].toObject();
         const auto status=usage["status"].toString();
-        agent.connected=key=="sh"||(row>=0&&!QStringList{"signed_out","expired","credentials_locked","credentials_unavailable","desktop_session_unavailable"}.contains(status));
+        agent.connected=key=="sh"||(row>=0&&!signedOut.contains(status));
         agent.busy=m_denseSigningIn&&key==m_denseKey;
         const auto email=usage["identity"].toObject()["email"].toString();
+        // Every account of a subscription agent, for the dots, the chip and its list.
+        if(agent.kind=="subscription")for(int other=0;other<m_account->count();++other){
+            if(denseKey(other)!=key)continue;
+            const auto data=m_account->item(other)->data(ProfileRole).toJsonObject()["usage"].toObject();
+            Account account;account.row=other;
+            account.email=data["identity"].toObject()["email"].toString();
+            if(account.email.isEmpty())account.email=m_account->item(other)->text().section('\n',0,0);
+            account.connected=!signedOut.contains(data["status"].toString());
+            for(const auto &windowValue:AccountUsage::launchMeterData(data)["windows"].toArray()){
+                const auto meter=windowValue.toObject();const int minutes=meter["window_minutes"].toInt();
+                if(minutes==300){account.fiveHour=meter["used_percent"].toDouble();account.reset=resetText(meter);}
+                if(minutes==10080)account.week=meter["used_percent"].toDouble();
+            }
+            if(account.reset.isEmpty())account.reset=QStringLiteral("—");
+            if(other==row)agent.chosen=int(agent.accounts.size());
+            agent.accounts<<account;
+        }
         QStringList tip{email.isEmpty()?agent.name:agent.name+" · "+email};
         for(const auto &windowValue:AccountUsage::launchMeterData(usage)["windows"].toArray()){
             const auto meter=windowValue.toObject();const int minutes=meter["window_minutes"].toInt();
@@ -1321,6 +1348,13 @@ void NewSessionDialog::refreshDense()
         }
         if(!agent.connected)tip<<(agent.kind=="balance"?tr("No API key"):tr("Not connected"));
         agent.tooltip=tip.join('\n');
+        if(agent.multi()){
+            QStringList lines{tr("%1 · %n accounts","",int(agent.accounts.size())).arg(agent.name)};
+            for(const auto &account:agent.accounts)
+                lines<<(account.connected?tr("%1 — 5h %2% · wk %3%").arg(account.email).arg(qRound(qMax(0.0,account.fiveHour))).arg(qRound(qMax(0.0,account.week)))
+                                         :tr("%1 — not signed in").arg(account.email));
+            agent.tooltip=lines.join('\n');
+        }
         agents<<agent;
     }
     if(!keys.isEmpty()&&!agents.isEmpty()&&std::none_of(agents.cbegin(),agents.cend(),[this](const Agent &a){return a.key==m_denseKey;}))m_denseKey=agents.first().key;
@@ -1350,19 +1384,14 @@ void NewSessionDialog::refreshDense()
     } else if(m_denseKey=="opencode"){title=current->name;details=tr("native provider configuration");}
     else {title=current->name;details=tr("interactive terminal session");}
     m_denseInfo->setText(title,details,warn);
+    const bool multi=current&&current->multi();
+    m_denseInfo->setVisible(!multi);m_denseChip->setVisible(multi);
+    if(multi)m_denseChip->setAccounts(current->accounts,current->chosen);else if(m_denseList->isVisible())m_denseList->hide();
     m_denseSignIn->setText(action);m_denseSignIn->setVisible(!action.isEmpty());m_denseSignIn->setEnabled(!m_denseSigningIn);
     m_refreshAccounts->setVisible(action.isEmpty());
     const qint64 checked=qint64(usage["checked_at"].toDouble());
     const auto updated=checked>0?age(QDateTime::currentSecsSinceEpoch()-checked):QString();
     m_refreshAccounts->setText(updated);m_refreshAccounts->setToolTip(updated.isEmpty()?tr("Refresh accounts"):tr("Updated %1 ago").arg(updated));
-    // Several accounts of one agent: a menu names them.
-    auto *menu=m_denseAccounts->menu();menu->clear();int count=0;
-    for(int other=0;other<m_account->count();++other){
-        if(denseKey(other)!=m_denseKey)continue;++count;
-        auto *choice=menu->addAction(m_account->item(other)->text());choice->setCheckable(true);choice->setChecked(other==m_account->currentRow());
-        connect(choice,&QAction::triggered,this,[this,other]{m_account->setCurrentRow(other);});
-    }
-    m_denseAccounts->setVisible(count>1);
     // The Model row: Ollama's models or OpenCode's model and effort.
     const bool ollama=m_denseKey=="ollama"&&row>=0,openCode=m_denseKey=="opencode";
     for(auto *widget:QList<QWidget *>{m_denseModelCaption,m_denseModelField,m_denseMetaBox})widget->setVisible(ollama||openCode);

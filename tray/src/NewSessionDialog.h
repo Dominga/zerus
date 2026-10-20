@@ -74,7 +74,9 @@ private:
     NewSessionDense::InfoLine *m_denseInfo = nullptr;
     QWidget *m_denseHeader = nullptr, *m_denseModelCaption = nullptr, *m_denseMetaBox = nullptr;
     QStackedWidget *m_denseModelField = nullptr, *m_denseMetaField = nullptr;
-    QToolButton *m_denseAccounts = nullptr, *m_denseRescan = nullptr;
+    NewSessionDense::AccountChip *m_denseChip = nullptr;
+    NewSessionDense::AccountList *m_denseList = nullptr;
+    QToolButton *m_denseRescan = nullptr;
     QPushButton *m_denseSignIn = nullptr;
     QComboBox *m_localModel = nullptr;
     QLabel *m_denseModelMeta = nullptr;

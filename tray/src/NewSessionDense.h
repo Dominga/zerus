@@ -12,6 +12,7 @@
 #include <QStyleOptionComboBox>
 #include <QStylePainter>
 #include <QWidget>
+#include <functional>
 
 // WhiteWh fork: the widgets of the dense New session view, drawn to the
 // designer's handoff (design/new-session-dialog/HANDOFF.md in the fork's
@@ -166,18 +167,61 @@ private:
     QColor m_head, m_leaf;
 };
 
+// One account of a subscription agent (handoff section 4, several accounts).
+struct Account {
+    int row = -1; // in the dialog's account list
+    QString email;
+    bool connected = true;
+    double fiveHour = -1, week = -1; // percent used
+    QString reset;
+};
+
 // One agent of the rail and what its button shows (handoff section 4).
 struct Agent {
     QString key, name, kind; // kind: subscription, balance, local or terminal
     QIcon icon;
-    bool connected = true, busy = false;
+    bool connected = true, busy = false; // connected: the chosen account
     double fiveHour = -1, week = -1; // percent used
     QString reset, balance, tooltip;
     double balanceValue = -1;
+    // A subscription agent's accounts and the one the session uses.
+    QList<Account> accounts;
+    int chosen = -1;
     bool narrow() const { return kind == QLatin1String("local") || kind == QLatin1String("terminal"); }
+    bool multi() const { return accounts.size() > 1; }
 };
 
 inline QColor usageColor(double used, const Tokens &t) { return used >= 85 ? t.danger : used >= 65 ? t.warn : t.accent; }
+inline QColor usageText(double used, const Tokens &t) { return used >= 65 ? usageColor(used, t) : t.text3; }
+
+// "5h ▬ 15%": a dim caption, a 12x2 bar of the share used and the percent.
+inline int miniWidth(const QString &caption, double used, const QFont &font)
+{
+    const QFontMetrics metrics(font);
+    return metrics.horizontalAdvance(caption) + 3 + 12 + 3
+        + metrics.horizontalAdvance(used >= 0 ? QString::number(qRound(used)) + '%' : QStringLiteral("—"));
+}
+inline int drawMini(QPainter &p, int x, const QRect &line, const QString &caption, double used, const Tokens &t, const QFont &font)
+{
+    const QFontMetrics metrics(font);
+    p.setFont(font);
+    p.setPen(t.dim);
+    p.drawText(QRect(x, line.y(), metrics.horizontalAdvance(caption) + 1, line.height()), Qt::AlignLeft | Qt::AlignVCenter, caption);
+    int at = x + metrics.horizontalAdvance(caption) + 3;
+    const QRectF bar(at, line.center().y() - 0.5, 12, 2);
+    p.setPen(Qt::NoPen);
+    p.setBrush(t.track);
+    p.drawRect(bar);
+    if (used >= 0) {
+        p.setBrush(usageColor(used, t));
+        p.drawRect(QRectF(bar.x(), bar.y(), qMax(1.0, 12 * qBound(0.0, used, 100.0) / 100.0), 2));
+    }
+    at += 12 + 3;
+    const auto text = used >= 0 ? QString::number(qRound(used)) + '%' : QStringLiteral("—");
+    p.setPen(used >= 0 ? usageText(used, t) : t.dim);
+    p.drawText(QRect(at, line.y(), metrics.horizontalAdvance(text) + 1, line.height()), Qt::AlignLeft | Qt::AlignVCenter, text);
+    return miniWidth(caption, used, font);
+}
 
 class AgentButton : public QAbstractButton {
 public:
@@ -218,16 +262,34 @@ protected:
             p.drawRoundedRect(box, 6, 6);
         }
         const int iconSize = m_agent.kind == QLatin1String("local") ? 22 : 24;
-        const bool off = !m_agent.connected && !m_agent.narrow();
+        // An agent with several accounts never shows the offline state.
+        const bool off = !m_agent.connected && !m_agent.narrow() && !m_agent.multi();
         const auto lines = this->lines();
         int contentWidth = iconSize;
-        if (!lines.isEmpty()) contentWidth += 6 + blockWidth(lines);
+        if (m_agent.multi()) contentWidth += 6 + multiWidth();
+        else if (!lines.isEmpty()) contentWidth += 6 + blockWidth(lines);
         int x = (width() - contentWidth) / 2;
         const auto pixmap = m_agent.icon.pixmap(QSize(iconSize, iconSize), devicePixelRatioF(), off ? QIcon::Disabled : QIcon::Normal);
         p.save();
         if (off) p.setOpacity(0.45);
         p.drawPixmap(QRect(x, (height() - iconSize) / 2, iconSize, iconSize), pixmap);
         p.restore();
+        if (m_agent.multi()) {
+            // "N acc" over one dot per account, colored by its 5h use.
+            x += iconSize + 6;
+            const auto font = mono(11, QFont::Medium);
+            const int top = (height() - (kLine + 3 + kDot)) / 2;
+            p.setFont(font);
+            p.setPen(m_tokens.text2);
+            p.drawText(QRect(x, top, 80, kLine), Qt::AlignLeft | Qt::AlignVCenter, countText());
+            p.setPen(Qt::NoPen);
+            for (int i = 0; i < m_agent.accounts.size(); ++i) {
+                const auto &account = m_agent.accounts[i];
+                p.setBrush(!account.connected ? m_tokens.borderNeutral : account.fiveHour >= 0 ? usageColor(account.fiveHour, m_tokens) : m_tokens.dim);
+                p.drawRoundedRect(QRectF(x + i * (kDot + 3), top + kLine + 3, kDot, kDot), kDot / 2.0, kDot / 2.0);
+            }
+            return;
+        }
         if (lines.isEmpty()) return;
         x += iconSize + 6;
         if (m_agent.kind == QLatin1String("subscription") && m_agent.connected) {
@@ -267,8 +329,14 @@ protected:
     }
 
 private:
-    static constexpr int kMeter = 10, kRow = 12, kBar = 18, kLine = 14;
+    static constexpr int kMeter = 10, kRow = 12, kBar = 18, kLine = 14, kDot = 5;
     struct Line { QString text; QColor color; QFont font; };
+    QString countText() const { return QStringLiteral("%1 acc").arg(m_agent.accounts.size()); }
+    int multiWidth() const
+    {
+        const int dots = int(m_agent.accounts.size()) * (kDot + 3) - 3;
+        return qMax(QFontMetrics(mono(11, QFont::Medium)).horizontalAdvance(countText()), dots);
+    }
     QList<Line> lines() const
     {
         if (m_agent.narrow()) return {};
@@ -358,6 +426,249 @@ private:
     Tokens m_tokens;
     QStringList m_keys;
     QList<AgentButton *> m_buttons;
+};
+
+// The line under the rail for an agent with several accounts: the chosen one
+// with its limits, opening the list of all (handoff section 4).
+class AccountChip : public QAbstractButton {
+public:
+    explicit AccountChip(const Tokens &tokens, QWidget *parent = nullptr) : QAbstractButton(parent), m_tokens(tokens)
+    {
+        setObjectName("denseAccountChip");
+        setFixedHeight(20);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::TabFocus);
+        // A click on the chip while its list is open only closes the list.
+        setAttribute(Qt::WA_NoMouseReplay);
+    }
+    void setAccounts(const QList<Account> &accounts, int chosen)
+    {
+        m_accounts = accounts;
+        m_chosen = chosen >= 0 && chosen < accounts.size() ? chosen : -1;
+        const auto email = m_chosen < 0 ? QString() : accounts[m_chosen].email;
+        setAccessibleName(QObject::tr("Account: %1").arg(email));
+        QStringList tip;
+        for (const auto &account : accounts)
+            tip << (account.connected ? QObject::tr("%1 — 5h %2% · wk %3%").arg(account.email).arg(qRound(qMax(0.0, account.fiveHour))).arg(qRound(qMax(0.0, account.week)))
+                                      : QObject::tr("%1 — not signed in").arg(account.email));
+        setToolTip(tip.join('\n'));
+        update();
+    }
+    const QList<Account> &accounts() const { return m_accounts; }
+    int chosen() const { return m_chosen; }
+    void setOpen(bool open) { m_open = open; update(); }
+    QSize sizeHint() const override { return {200, 20}; }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(m_open || hasFocus() ? m_tokens.accent : m_tokens.borderField);
+        p.setBrush(m_tokens.field);
+        p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 4, 4);
+        if (m_chosen < 0) return;
+        const auto &account = m_accounts[m_chosen];
+        auto count = font();
+        count.setPixelSize(10);
+        count.setWeight(QFont::Medium);
+        const auto countText = QStringLiteral("%1 acc").arg(m_accounts.size());
+        int x = 7;
+        p.setFont(count);
+        p.setPen(m_tokens.text2);
+        p.drawText(QRect(x, 0, 60, height()), Qt::AlignLeft | Qt::AlignVCenter, countText);
+        x += QFontMetrics(count).horizontalAdvance(countText) + 8;
+        // The chevron, turned over while the list is open.
+        const double cx = width() - 7 - 8, cy = height() / 2.0;
+        QPainterPath chevron;
+        const double up = m_open ? -1 : 1;
+        chevron.moveTo(cx + 1.5, cy - 1.5 * up);
+        chevron.lineTo(cx + 4, cy + 1 * up);
+        chevron.lineTo(cx + 6.5, cy - 1.5 * up);
+        p.setPen(QPen(m_tokens.label, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(chevron);
+        const auto mini = mono(9), email = mono(10);
+        const QString absent = QObject::tr("not signed in");
+        const int metersWidth = account.connected
+            ? miniWidth(QStringLiteral("5h"), account.fiveHour, mini) + 6 + miniWidth(QStringLiteral("wk"), account.week, mini) + 6 + QFontMetrics(mini).horizontalAdvance(account.reset)
+            : QFontMetrics(mini).horizontalAdvance(absent);
+        const int meters = int(cx) - 8 - metersWidth;
+        p.setFont(email);
+        p.setPen(account.connected ? m_tokens.text : m_tokens.label);
+        p.drawText(QRect(x, 0, qMax(0, meters - 8 - x), height()), Qt::AlignLeft | Qt::AlignVCenter,
+                   QFontMetrics(email).elidedText(account.email, Qt::ElideRight, qMax(0, meters - 8 - x)));
+        const QRect line(0, 0, width(), height());
+        if (!account.connected) {
+            p.setFont(mini);
+            p.setPen(m_tokens.warn);
+            p.drawText(QRect(meters, 0, metersWidth + 1, height()), Qt::AlignLeft | Qt::AlignVCenter, absent);
+            return;
+        }
+        int at = meters + drawMini(p, meters, line, QStringLiteral("5h"), account.fiveHour, m_tokens, mini) + 6;
+        at += drawMini(p, at, line, QStringLiteral("wk"), account.week, m_tokens, mini) + 6;
+        p.setFont(mini);
+        p.setPen(m_tokens.text3);
+        p.drawText(QRect(at, 0, width() - at, height()), Qt::AlignLeft | Qt::AlignVCenter, account.reset);
+    }
+
+private:
+    Tokens m_tokens;
+    QList<Account> m_accounts;
+    int m_chosen = -1;
+    bool m_open = false;
+};
+
+// The accounts of one agent under the chip, floating over the form and past the
+// window's edge: a check, the email, 5h, week and the 5h reset, then Add account.
+// A choice, a click outside, Esc or another agent closes it.
+class AccountList : public QWidget {
+public:
+    explicit AccountList(const Tokens &tokens, QWidget *parent = nullptr)
+        : QWidget(parent, Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint), m_tokens(tokens)
+    {
+        setObjectName("denseAccountList");
+        setAccessibleName(QObject::tr("Accounts"));
+        setAttribute(Qt::WA_TranslucentBackground);
+        setMouseTracking(true);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+    std::function<void(int row)> chosen;
+    std::function<void()> addAccount, closed;
+    void open(const QList<Account> &accounts, int current, QWidget *anchor)
+    {
+        m_accounts = accounts;
+        m_current = m_hover = current;
+        resize(anchor->width() + 2 * kShadow, 2 * kShadow + 2 + 4 + int(accounts.size()) * kRow + kAdd);
+        move(anchor->mapToGlobal(QPoint(-kShadow, anchor->height() + 3 - kShadow)));
+        show();
+        setFocus(Qt::PopupFocusReason);
+    }
+    int count() const { return int(m_accounts.size()); }
+
+protected:
+    QRect panel() const { return rect().adjusted(kShadow, kShadow, -kShadow, -kShadow); }
+    QRect rowRect(int index) const
+    {
+        const auto box = panel();
+        if (index < count()) return {box.left() + 3, box.top() + 3 + index * kRow, box.width() - 6, kRow};
+        return {box.left() + 1, box.top() + 3 + count() * kRow + 1, box.width() - 2, kAdd};
+    }
+    int at(const QPoint &point) const
+    {
+        for (int index = 0; index <= count(); ++index)
+            if (rowRect(index).contains(point)) return index;
+        return -1;
+    }
+    void activate(int index)
+    {
+        if (index < 0) return;
+        hide();
+        if (index < count()) { if (chosen) chosen(m_accounts[index].row); }
+        else if (addAccount) addAccount();
+    }
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        // A soft shadow, 0 8px 24px in the handoff, drawn as fading frames.
+        p.setPen(Qt::NoPen);
+        for (int step = kShadow; step > 0; --step) {
+            p.setBrush(QColor(0, 0, 0, 7));
+            p.drawRoundedRect(QRectF(panel()).adjusted(-step + 1, -step / 2.0 + 2, step - 1, step + 2), 6 + step, 6 + step);
+        }
+        const auto box = panel();
+        p.setPen(m_tokens.borderField);
+        p.setBrush(m_tokens.field);
+        p.drawRoundedRect(QRectF(box).adjusted(0.5, 0.5, -0.5, -0.5), 6, 6);
+        const auto email = mono(10), mini = mono(9);
+        for (int index = 0; index < count(); ++index) {
+            const auto &account = m_accounts[index];
+            const auto row = rowRect(index);
+            if (index == m_current || index == m_hover) {
+                p.setPen(Qt::NoPen);
+                p.setBrush(index == m_current ? m_tokens.selected : m_tokens.btnNeutral);
+                p.drawRoundedRect(row, 4, 4);
+            }
+            // 10px | email | 48px | 48px | 42px, 8px apart.
+            const int left = row.left() + 6, right = row.right() - 6;
+            const int reset = right - 42, week = reset - 8 - 48, five = week - 8 - 48, mail = left + 10 + 8;
+            if (index == m_current) {
+                QPainterPath check;
+                const double cy = row.center().y() + 0.5;
+                check.moveTo(left + 1.2, cy);
+                check.lineTo(left + 3.4, cy + 2.2);
+                check.lineTo(left + 8, cy - 2.6);
+                p.setPen(QPen(m_tokens.accent, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                p.setBrush(Qt::NoBrush);
+                p.drawPath(check);
+            }
+            p.setFont(email);
+            p.setPen(account.connected ? m_tokens.text : m_tokens.label);
+            p.drawText(QRect(mail, row.y(), qMax(0, five - 8 - mail), row.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                       QFontMetrics(email).elidedText(account.email, Qt::ElideRight, qMax(0, five - 8 - mail)));
+            if (!account.connected) {
+                p.setFont(mini);
+                p.setPen(m_tokens.warn);
+                p.drawText(QRect(five, row.y(), right - five, row.height()), Qt::AlignLeft | Qt::AlignVCenter, QObject::tr("not signed in"));
+                continue;
+            }
+            drawMini(p, five, row, QStringLiteral("5h"), account.fiveHour, m_tokens, mini);
+            drawMini(p, week, row, QStringLiteral("wk"), account.week, m_tokens, mini);
+            p.setFont(mini);
+            p.setPen(m_tokens.text3);
+            p.drawText(QRect(reset, row.y(), 42, row.height()), Qt::AlignLeft | Qt::AlignVCenter, account.reset);
+        }
+        // Add account, under a rule.
+        const auto add = rowRect(count());
+        p.setPen(m_tokens.border);
+        p.drawLine(add.left(), add.top(), add.right(), add.top());
+        if (m_hover == count()) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(m_tokens.btnNeutral);
+            p.drawRoundedRect(QRectF(add).adjusted(2, 1, -2, -2), 4, 4);
+        }
+        const double cx = add.left() + 8 + 4.5, cy = add.center().y() + 0.5;
+        p.setPen(QPen(m_hover == count() ? m_tokens.text : m_tokens.muted, 1.4, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(QPointF(cx, cy - 3.5), QPointF(cx, cy + 3.5));
+        p.drawLine(QPointF(cx - 3.5, cy), QPointF(cx + 3.5, cy));
+        auto label = font();
+        label.setPixelSize(10);
+        p.setFont(label);
+        p.drawText(QRect(add.left() + 8 + 9 + 8, add.y(), add.width(), add.height()), Qt::AlignLeft | Qt::AlignVCenter, QObject::tr("Add account"));
+    }
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        const int index = at(event->position().toPoint());
+        if (index != m_hover) { m_hover = index; update(); }
+    }
+    void leaveEvent(QEvent *) override { m_hover = -1; update(); }
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton) activate(at(event->position().toPoint()));
+    }
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        switch (event->key()) {
+        case Qt::Key_Down: m_hover = qBound(0, m_hover + 1, count()); update(); return;
+        case Qt::Key_Up: m_hover = qBound(0, m_hover < 0 ? count() : m_hover - 1, count()); update(); return;
+        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Space: activate(m_hover); return;
+        case Qt::Key_Escape: hide(); return;
+        default: QWidget::keyPressEvent(event);
+        }
+    }
+    void hideEvent(QHideEvent *event) override
+    {
+        QWidget::hideEvent(event);
+        if (closed) closed();
+    }
+
+private:
+    static constexpr int kShadow = 12, kRow = 22, kAdd = 20;
+    Tokens m_tokens;
+    QList<Account> m_accounts;
+    int m_current = -1, m_hover = -1;
 };
 
 // The line under the rail: a title, then details, elided at the end.

@@ -295,7 +295,12 @@ fn validate(request: &LocalRequest) -> Result<()> {
             }
         }
         "swarm" => {
-            if rest == ["assign-launch", "--json"] {
+            if rest == ["session-project", "--json"] || rest == ["assign-session", "--json"] {
+                let payload = request.payload.as_ref().context("project assignment request required")?;
+                crate::swarm::validate_session_project(payload, rest[0] == "assign-session")?;
+                ensure!(payload["expected_machine_id"] == request.target_machine_id, "project assignment target computer changed");
+                ensure!(payload["name"].as_str().is_some_and(session), "invalid native session");
+            } else if rest == ["assign-launch", "--json"] {
                 scoped(&request.payload)?;
                 ensure!(
                     request
@@ -485,7 +490,7 @@ fn validate(request: &LocalRequest) -> Result<()> {
             scoped(&request.payload)?;
             ensure!(request.payload.as_ref().and_then(Value::as_object).is_some_and(|object| object.len()==3 && object.keys().all(|key| ["request_id","expected_run_id","expected_conversation_id"].contains(&key.as_str()))), "hook health is read-only");
         }
-        "history" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
+        "history" | "history-projection" | "terminal" | "session-action" | "send" | "send-now" | "settings" | "answer"
         | "interrupt" | "clear-context" | "compact-context" | "effort" | "file-read" => {
             ensure!(
                 rest.len() == 2 && session(&rest[0]) && rest[1] == "--json",
@@ -1133,7 +1138,7 @@ fn execute(config: &Config, args: &[String]) -> Result<i32> {
                 direct(config, &request.via),
                 "mobile route is not an enabled direct peer"
             );
-            let max_output = if local.argv.first().is_some_and(|op| op == "analytics") {
+            let max_output = if local.argv.first().is_some_and(|op| op == "analytics" || op == "history-projection") {
                 1024 * 1024
             } else { MAX_BYTES };
             let output = transport(
@@ -1171,6 +1176,27 @@ mod tests {
 
     fn scope() -> Value {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
+    }
+
+    #[test]
+    fn peer_fixed_projection_shape_preserves_the_exact_scope() {
+        let mut payload = scope();
+        payload["history_epoch"] = json!("epoch");
+        payload["projection_after"] = json!(0);
+        payload["projection_until"] = json!(7);
+        let argv = ["history-projection", "codex/project", "--json"];
+        assert!(validate(&request(&argv, Some(payload.clone()))).is_ok());
+        for argv in [vec!["history-projection"], vec!["history-projection", "codex/project"],
+            vec!["history-projection", "codex/project", "--json", "--clear"],
+            vec!["history-projection", "@next", "--json"]] {
+            assert!(validate(&request(&argv, Some(payload.clone()))).is_err());
+        }
+        for payload in [None, Some(json!({})), Some(Value::Null)] {
+            assert!(validate(&request(&argv, payload)).is_err());
+        }
+        let mut wrong = request(&argv, Some(payload));
+        wrong.target_machine_id = "not-a-machine-uuid".into();
+        assert!(validate(&wrong).is_err());
     }
 
     #[test]
@@ -1350,6 +1376,21 @@ mod tests {
         ))
         .is_ok());
         assert!(validate(&request(&["swarm", "assign-launch", "--json"], None)).is_err());
+    }
+
+    #[test]
+    fn project_grouping_peer_calls_keep_exact_fixed_commands_and_machine() {
+        for command in ["session-project","assign-session"] {
+            let argv=["swarm",command,"--json"];
+            let mut payload=scope();payload["name"]=json!("codex/example/task");payload["expected_machine_id"]=json!(ID);
+            if command=="assign-session" { payload["swarm_id"]=json!(ID);payload["project_id"]=json!("logical");payload["membership_token"]=json!("a".repeat(64));payload["catalog_epoch"]=json!("b".repeat(64)); }
+            assert!(validate(&request(&argv,Some(payload.clone()))).is_ok());
+            for (field,value) in [("directory",json!("/unexpected")),("organization",json!({})),("name",json!("@peer")),("expected_machine_id",json!("22222222-2222-4222-8222-222222222222"))] {
+                let mut bad=payload.clone();bad[field]=value;assert!(validate(&request(&argv,Some(bad))).is_err());
+            }
+            assert!(validate(&request(&["swarm",command,"--json","@next"],Some(payload))).is_err());
+            assert!(validate(&request(&argv,None)).is_err());
+        }
     }
 
     #[test]

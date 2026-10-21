@@ -331,6 +331,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val historyWindows=LinkedHashMap<String,HistoryWindow>(20,0.75f,true)
     private var currentHistoryHeads by mutableStateOf<Set<String>>(emptySet())
     private val historyFlights=mutableMapOf<String,Pair<Target,Deferred<HistoryPage>>>()
+    private val projectionJobs=mutableMapOf<String,Pair<Target,Job>>()
+    private val projectionHeads=LinkedHashMap<String,Pair<String,Long>>()
     private var olderJob:Job?=null
     private var viewportPageJob:Job?=null
     private var historyHeadJob:Job?=null
@@ -361,6 +363,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             val reason=historyNetworkReason(target)
             if(reason.isNotBlank()) throw java.io.IOException(reason)
             val page=api.history(connection,target,direction,cursor,limit)
+            projectionHeads[target.key]=page.epoch to page.projectionApplied
+            while(projectionHeads.size>20) projectionHeads.remove(projectionHeads.keys.first())
+            scheduleProjection(target)
             viewModelScope.launch { runCatching { HistoryPageRetention.retain(limit,page,direction) { pageCache.write(target,direction,cursor,it.raw) } } }
             page
         }
@@ -380,11 +385,70 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val window=if(page.atHead && inspected!=null) page.copy(inbox=HistoryInspection.inbox(inspected)) else page
         historyWindows[target.key]=window
         while(historyWindows.size>20) historyWindows.remove(historyWindows.keys.first())
+        scheduleProjection(target)
         if(selected?.target != target) return
         if(!readPositionReady) pendingHistoryPosition=target.key
         pendingHistoryPublication=target.key
         val head=frames[target.key] ?: activeFrame?.takeIf { it.target==target } ?: return
         installFrame(head.copy(events=window.displayed,presentation=null,truncated=head.truncated || window.hasBefore || window.hasAfter,window=window,indexComplete=complete,indexing=indexing,unreadBoundary=boundary),activityVerified)
+    }
+    /** Projection responses are display evidence only: never call observeHistoryHead,
+     * readWriter.supersede, installFrame or the ordinary delivery-settling presentation path. */
+    private fun scheduleProjection(target:Target) {
+        val window=historyWindows[target.key] ?: return
+        val head=projectionHeads[target.key]?.takeIf { it.first==window.epoch } ?: return
+        if(head.second<=window.projectionApplied || target.key in projectionJobs || projectionJobs.size>=4) return
+        fun supported()=connections.any { it.id==target.connectionId } &&
+            HistoryProjection.supported(relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])
+        if(!supported()) return
+        val epoch=window.epoch;val start=window.projectionApplied;val until=head.second
+        val job=viewModelScope.launch(start=kotlinx.coroutines.CoroutineStart.LAZY) {
+            var progress=HistoryProjection.Run(start,until)
+            try {
+                while(progress.canRead) {
+                    if(!supported() || historyWindows[target.key]?.epoch!=epoch) return@launch
+                    val connection=connections.firstOrNull { it.id==target.connectionId } ?: return@launch
+                    val page=api.historyProjection(connection,target,epoch,progress.after,until)
+                    val applied=page.applied(progress.after)
+                    val initial=historyWindows[target.key] ?: return@launch
+                    val candidate=withContext(Dispatchers.Default) { HistoryProjection.apply(initial,target,epoch,start,page.prefix,applied) }
+                    val rebased=HistoryInspection.rebase(initial,candidate,{ historyWindows[target.key] }) { latest ->
+                        withContext(Dispatchers.Default) { latest?.let { HistoryProjection.apply(it,target,epoch,start,page.prefix,applied) } }
+                    }
+                    val next=rebased.value ?: return@launch
+                    if(!supported()) return@launch
+                    historyWindows[target.key]=next
+                    // Reprepare the visible rows without settling outbox, changing the divider or read metadata.
+                    val frame=activeFrame?.takeIf { it.target==target && selected?.target==target }
+                    if(frame!=null) {
+                        val revision=presentationRevision
+                        val messages=outgoing.filter { it.belongsTo(target) }
+                        val questions=conversationQuestions
+                        val display=withContext(Dispatchers.Default) { if(target.archiveId.isBlank()) ConversationMerge.merge(target,next.displayed,messages).events else next.displayed }
+                        if(activeFrame===frame && historyWindows[target.key]===next && selected?.target==target &&
+                            presentationRevision==revision && outgoing.filter { it.belongsTo(target) }==messages && conversationQuestions==questions) {
+                            presentationJob?.cancel();presentationRevision++
+                            val updated=frame.copy(events=next.displayed,window=next,presentation=Presentation(messages,display,questions))
+                            activeFrame=updated;rememberFrame(updated)
+                            conversationEvents=display
+                        }
+                    }
+                    // Rows and their coverage marker are always serialized in one encrypted page value.
+                    val latest=historyWindows[target.key]?.takeIf { it.epoch==epoch } ?: return@launch
+                    val saved=readState.record(target)?.viewport?.cursor.orEmpty()
+                    val anchor=saved.takeIf { cursor -> latest.events.any { it.historyCursor==cursor } }
+                        ?: latest.events.lastOrNull { it.historyCursor.isNotBlank() }?.historyCursor
+                    if(anchor!=null) {
+                        val raw=withContext(Dispatchers.Default) { HistoryPage.retained(latest,anchor) }
+                        if(raw!=null) pageCache.write(target,"around",saved.ifBlank { anchor },raw)
+                    }
+                    progress=progress.accepted(page)
+                }
+            } catch(error:CancellationException) { throw error }
+            catch(_:Exception) { /* A later verified history page can resume the unchanged display prefix. */ }
+            finally { if(projectionJobs[target.key]?.second===kotlin.coroutines.coroutineContext[Job]) projectionJobs.remove(target.key) }
+        }
+        projectionJobs[target.key]=target to job;job.start()
     }
     private fun loadHistory(target:Target,direction:String,cursor:String="",latest:Boolean=false):Job? {
         if(selected?.target != target || olderLoading) return null
@@ -1582,6 +1646,55 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     })
     fun processStop(target: Target, processId: String, generation: String? = null) = sessionAction(target,"process_stop",JSONObject().put("process_id",processId).also { if(generation != null) it.put("generation",generation) })
     fun sessionAction(target: Target, operation: String, args: JSONObject = JSONObject())=submitSessionAction(target,operation,args)
+    /** Logical grouping uses its own exact scoped metadata ABI, independent of launch folders. */
+    internal fun projectAssignmentReason(target:Target):String {
+        val key=MachineKey(target.connectionId,target.computerId)
+        val machine=machines.singleOrNull { it.connectionId==key.connectionId && it.id==key.computerId }
+        return when {
+            demo || !storageReady -> "Connect a computer and wait for private storage."
+            updateInstallPreparing -> "Saving drafts for an app update."
+            target.archiveId.isNotBlank() || target.agentId.isNotBlank() -> "Project grouping belongs to the parent session."
+            target.run.isBlank() -> "Wait for the session identity to finish loading."
+            connections.count { it.id==target.connectionId }!=1 -> "The original workspace is disconnected."
+            machine==null || !machine.online || machine.lastKnown -> "The selected computer is offline."
+            !AttachmentPolicy.validId(machine.machineId) || machine.route==MachineRoute.Unknown -> "Refresh to verify this computer's identity and route."
+            !relayOperations[target.connectionId].orEmpty().containsAll(SessionProjectProtocol.operations) || SessionProjectProtocol.feature !in relayFeatures[target.connectionId].orEmpty() -> "Update this gateway to move session project grouping."
+            !machineOperations[key].orEmpty().containsAll(SessionProjectProtocol.operations) || SessionProjectProtocol.feature !in machineFeatures[key].orEmpty() -> "Update Zerus on this computer to move session project grouping."
+            else -> ""
+        }
+    }
+    internal val sessionProjects by lazy {
+        val owner=this
+        SessionProjectController(object:SessionProjectAccess {
+        override fun capture(target:Target):SessionProjectHost? {
+            if(projectAssignmentReason(target).isNotBlank()) return null
+            val connection=connections.singleOrNull { it.id==target.connectionId } ?: return null
+            val machine=machines.singleOrNull { it.connectionId==target.connectionId && it.id==target.computerId } ?: return null
+            return SessionProjectHost(target,connection,machine,navigationId,connections)
+        }
+        override fun current(captured:SessionProjectHost):Boolean = captured.connectionGeneration===connections &&
+            captured.navigation==navigationId && selected?.target==captured.target && projectAssignmentReason(captured.target).isBlank() &&
+            capture(captured.target)?.let { it.connection==captured.connection && it.route==captured.route }==true
+        override fun reason(target:Target)=projectAssignmentReason(target)
+        override fun mutationReason(target:Target,ownRequest:String):String = projectAssignmentReason(target).ifBlank {
+            if(clearExpectation?.let { ContextPolicies.sameSessionRun(it.target,target) }==true ||
+                contextOperations.any { ContextPolicies.sameSessionRun(it.target,target) && it.blocksSending } ||
+                sessionActions.any { it.target==target && it.blocksSending && it.requestId!=ownRequest } ||
+                outgoing.any { it.belongsTo(target) && it.blocksSending } || target.key in preparingTargets)
+                "Resolve the pending delivery or action first." else ""
+        }
+        override fun actions()=sessionActions
+        override fun flight(id:String,active:Boolean) { actionFlights=if(active) actionFlights+id else actionFlights-id }
+        override suspend fun persist(action:SessionAction) {
+            durable({ state ->
+                val old=state.sessionActions.find { it.requestId==action.requestId }
+                check(old==null || old.target==action.target && old.operation==action.operation && old.arguments==action.arguments) { "The saved project request changed." }
+                if(old==null || old.blocksSending) state.action(action) else state
+            })
+        }
+        override suspend fun settle(action:SessionAction,receipt:JSONObject) { settleSessionAction(action,receipt) }
+        override fun refresh() { owner.refresh(explicit=true) }
+    },viewModelScope,api) }
     /** Presentation for one Sessions row's long-press actions; the opened conversation re-verifies before any native request. */
     fun sessionMenu(session: Session): List<List<SessionMenuItem>> {
         val target = session.target
@@ -1604,12 +1717,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             relayOperations[target.connectionId].orEmpty() intersect machineOperations[MachineKey(target.connectionId,target.computerId)].orEmpty(),
             blocked,if(busy) "Resolve the pending delivery or action first." else "",SessionFilters.needsAttention(session,online),read,
             reference.uri,session.raw.string("cwd"),reference.reason,
-            TerminalAvailability.reason(target,session.raw,online,relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])))
+            TerminalAvailability.reason(target,session.raw,online,relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)]),projectAssignmentReason(target)))
     }
     var sessionMenuRequest by mutableStateOf<SessionMenuRequest?>(null); private set
     /** A Sessions action opens its exact session; the conversation header then confirms it against fresh native details. */
     fun openWithSessionAction(session: Session, operation: String) {
-        if(operation != "terminal" && operation != SessionNotificationPreferences.operation && operation !in SessionActionPolicies.lifecycle) return
+        if(operation != "terminal" && operation != SessionNotificationPreferences.operation && operation != SessionProjectProtocol.assign && operation !in SessionActionPolicies.lifecycle) return
         open(session,preserveProject = true)
         sessionMenuRequest = SessionMenuRequest(session.target,operation,navigationId)
     }
@@ -1790,6 +1903,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         sessionAction(target,"recovery_action",JSONObject().put("job_id",jobId).put("action",choice))
     }
     fun checkSessionAction(action: SessionAction) {
+        if(action.operation==SessionProjectProtocol.assign) { sessionProjects.check(action);return }
         if(action.requestId in actionFlights) return
         val connection=connections.find { it.id == action.target.connectionId } ?: return
         actionFlights += action.requestId
@@ -1997,6 +2111,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             editState { state -> state.copy(conversationIndex=state.conversationIndex.filterNot { it.target.connectionId == connection.id }) }
             val removedReadKeys=readState.records.filter { it.target.connectionId==connection.id }.map { ConversationReadPolicies.key(it.target) }.toSet()
             readWriter?.let { readState=it.edit { state -> state.copy(records=state.records.filterNot { it.target.connectionId == connection.id }) } };flushDrafts()
+            projectionJobs.values.filter { it.first.connectionId==connection.id }.forEach { it.second.cancel() }
+            projectionJobs.entries.removeAll { it.value.first.connectionId==connection.id }
+            projectionHeads.keys.removeAll { key -> historyWindows[key]?.target?.connectionId==connection.id }
             historyWindows.entries.removeAll { it.value.target.connectionId==connection.id }
             historySnapshotHints.keys.removeAll { it in removedReadKeys };currentHistoryHeads-=removedReadKeys
             historyFlights.values.filter { it.first.connectionId==connection.id }.forEach { it.second.cancel() }

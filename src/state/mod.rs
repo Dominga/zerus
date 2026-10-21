@@ -93,6 +93,8 @@ pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
 }
 mod launch_project;
 pub(crate) use launch_project::with_launch_binding;
+mod session_project;
+pub(crate) use session_project::with_session_project_binding;
 pub(crate) mod launches;
 
 use serde_json::{json, Value};
@@ -690,6 +692,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "read" { return read_marks::dispatch(args); }
     if command == "notifications" { return notifications::dispatch(args); }
     if command == "history" { return conversation_history::dispatch(args); }
+    if command == "history-projection" { return conversation_history::projection_dispatch(args); }
     if command == "terminal" { return terminal::dispatch(args); }
     if command == "session-action" { return session_action::dispatch(args); }
     if command == "compact-context" { return compact_context::dispatch(args); }

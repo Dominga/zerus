@@ -233,6 +233,8 @@ private slots:
     void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
     void groupsPersistFilterAndRevealAttention();
+    void rebuildKeepsProjectOrderAtScale_data();
+    void rebuildKeepsProjectOrderAtScale();
     void emptyProjectsSettingPreservesArchiveAndProjects();
     void contentScaleLeavesWorkspaceChrome();
     void activityReadingColumnFollowsSettingsAndEdges();
@@ -293,6 +295,7 @@ private slots:
     void processPollingFollowsVisibilityAndSettings();
     void recoveryCountdownKeepsHistoryDraftAndFocus();
     void recoveryEndingReturnsKeyboardFocusToField();
+    void resumedRecoveryLeavesTheWorkingTurnUnmarked();
     void recoverySettingsValidateAndSaveForSelectedMachine();
     void recoverySettingsValidateAndSaveForSelectedMachine_data();
     void sessionLimitRecoveryShowsResetAndKeepsDraft();
@@ -1454,6 +1457,61 @@ void TestSessionsWindow::groupsPersistFilterAndRevealAttention()
     QVERIFY(!newList->currentItem()->isHidden());
 }
 
+void TestSessionsWindow::rebuildKeepsProjectOrderAtScale_data()
+{
+    QTest::addColumn<int>("count");
+    QTest::addColumn<bool>("storedOrder");
+    for (int count : {400, 3000, 6000}) {
+        QTest::newRow(qPrintable(QString("observed-%1").arg(count))) << count << false;
+        QTest::newRow(qPrintable(QString("stored-%1").arg(count))) << count << true;
+    }
+}
+
+void TestSessionsWindow::rebuildKeepsProjectOrderAtScale()
+{
+    QFETCH(int, count);
+    QFETCH(bool, storedOrder);
+    BoxState box; box.host = "arch"; box.ok = true;
+    box.metrics = QJsonObject{{"platform", "linux"}};
+    QStringList names, identities;
+    for (int i = 0; i < count; ++i) {
+        SessionInfo session; session.name = QString("codex/scaling/session-%1").arg(i, 5, 10, QChar('0'));
+        session.cmd = "codex"; session.project = "scaling"; session.tag = QString::number(i);
+        session.state = "running"; session.activity = "idle"; session.phase = "idle"; session.tracked = true;
+        session.muted = i % 2;
+        names.append(session.name); identities.append(box.host + '\n' + session.name); box.sessions.append(session);
+    }
+    auto ordered = identities;
+    if (storedOrder) std::reverse(ordered.begin(), ordered.end());
+    SessionOrganization organization(QJsonObject{{"projects", QJsonArray{QJsonObject{
+        {"id", "ungrouped"}, {"name", "General"},
+        {"sessions", storedOrder ? QJsonArray::fromStringList(ordered) : QJsonArray{}}}}}});
+    organization.markImported(box.host);
+    QSettings().setValue("workspace/organization", QJsonDocument(organization.toJson()).toJson(QJsonDocument::Compact));
+    FleetState state; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.show();
+    QElapsedTimer elapsed; elapsed.start(); window.setFleet(state);
+    const auto first = elapsed.nsecsElapsed();
+    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    QCOMPARE(list->count(), count);
+    for (int i = 0; i < count; ++i) {
+        QCOMPARE(list->item(i)->data(SessionRoles::Identity).toString(), ordered[i]);
+        const auto source = storedOrder ? count - 1 - i : i;
+        QCOMPARE(list->item(i)->data(SessionRoles::Muted).toBool(), bool(source % 2));
+    }
+    window.showSession({}, names.last());
+    QCOMPARE(list->currentItem()->data(SessionRoles::Identity).toString(), identities.last());
+    elapsed.restart(); window.setFleet(state);
+    const auto refresh = elapsed.nsecsElapsed();
+    QCOMPARE(list->currentItem()->data(SessionRoles::Identity).toString(), identities.last());
+    QCOMPARE(list->count(), count);
+    for (int i = 0; i < count; ++i) QCOMPARE(list->item(i)->data(SessionRoles::Identity).toString(), ordered[i]);
+    qInfo().nospace() << "REBUILD_SCALING count=" << count << " stored=" << storedOrder
+                     << " first_ns=" << first << " refresh_ns=" << refresh;
+    // Timings are observations for an identical base/fixed campaign, never a
+    // wall-clock assertion. The row count, order, Mute and selection are exact.
+}
+
 void TestSessionsWindow::projectSwarmFollowsWorkspaceTheme()
 {
     const QJsonObject organization{{"version",2},{"projects",QJsonArray{}}};
@@ -2347,6 +2405,33 @@ void TestSessionsWindow::recoveryEndingReturnsKeyboardFocusToField()
     auto *now=panel->findChild<QPushButton *>("recoveryNow");now->setFocus();QTRY_VERIFY(now->hasFocus());
     job["state"]="succeeded";details["recovery"]=job;client->inspectionReady({},"codex/hgs/dashboard",details);
     QVERIFY(chip->isHidden());QVERIFY(!panel->isVisible());QTRY_VERIFY(editor->hasFocus());
+}
+
+void TestSessionsWindow::resumedRecoveryLeavesTheWorkingTurnUnmarked()
+{
+    SessionsWindow window(program()); window.resize(1280,900); window.setFleet(fleet()); window.show();
+    auto *client=window.findChild<HgsClient *>(); QSignalSpy inspections(client,&HgsClient::inspectionReady);
+    window.showSession({},"codex/hgs/dashboard");QTRY_VERIFY(!inspections.isEmpty());
+    const auto at=QDateTime::currentMSecsSinceEpoch()/1000.0;
+    QJsonObject job{{"id","episode"},{"name","codex/hgs/dashboard"},{"state","retrying"},{"action","continue_message"},
+        {"acknowledged",true},{"sent_at",at-60},{"user_at",at-59},{"attempt",1},{"class_attempt",1},{"delays",QJsonArray{15,30,60,300,0}}};
+    QJsonObject details{{"tracked",true},{"conversation_id","conversation-one"},{"run_id","run-one"},
+        {"activity","busy"},{"phase","tool"},{"last_event_at",at},{"cursor",1},{"recovery",job}};
+    client->inspectionReady({},"codex/hgs/dashboard",details);
+    auto *chip=window.findChild<ToolbarChip *>("recoveryChip");
+    QVERIFY(chip->isVisible());QCOMPARE(chip->fullLabel(),QString("Recovery in progress"));
+    // Provider progress after the accepted continuation: the turn is ordinary work again,
+    // although the episode stays open to keep its attempt budget until the turn ends.
+    job["resumed_at"]=at-30;details["recovery"]=job;client->inspectionReady({},"codex/hgs/dashboard",details);
+    QVERIFY(chip->isHidden());QCOMPARE(RecoveryUi::status(job),QString("Agent resumed after recovery"));
+    // A further failure in that turn shows the provider error at once, before rescheduling.
+    details["phase"]="error";details["activity"]="attention";
+    details["provider_error"]=QJsonObject{{"source","native"},{"at",at},{"detail","API Error: 529 Overloaded"}};
+    client->inspectionReady({},"codex/hgs/dashboard",details);
+    QVERIFY(chip->isVisible());QCOMPARE(chip->tone(),ChipTone::Danger);
+    job.remove("resumed_at");job["state"]="waiting";job["due_at"]=at+20;details["recovery"]=job;
+    client->inspectionReady({},"codex/hgs/dashboard",details);
+    QVERIFY(chip->isVisible());QVERIFY(chip->fullLabel().startsWith("Retry in"));
 }
 
 void TestSessionsWindow::recoveryCountdownKeepsHistoryDraftAndFocus()
@@ -8418,7 +8503,7 @@ else: print('{}')
     QCOMPARE(notice->property("error").toBool(), outcome == "failed");
     if (outcome == "failed") {
         QVERIFY(notice->text().contains("Native interruption could not be verified"));
-        QVERIFY(notice->text().contains("Refresh status or open Terminal"));
+        QVERIFY(notice->text().contains("Open Terminal to check the agent"));
         QVERIFY(notice->toolTip().contains("Terminal"));
         // An older information timeout must not erase the newer error.
         QTest::qWait(5100); QVERIFY(notice->isVisible()); QVERIFY(dismiss->isVisible());

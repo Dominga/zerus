@@ -14,13 +14,13 @@ from __future__ import annotations
 import json
 import uuid
 
-from zerus_mobile import analytics, archives, hook_health, file_reads, speech, speech_config, voice, session_notifications
+from zerus_mobile import analytics, archives, hook_health, file_reads, speech, speech_config, voice, session_notifications, session_projects
 from zerus_mobile.attachments import validate_read, validate_send
 from zerus_mobile.context import validate_clear_context
 from zerus_mobile.context import (COMPUTER_OPERATIONS, CONTEXT_COMMANDS, LIFECYCLE_OPERATIONS, OPERATIONS,
                                   validate_context, validate_core, validate_inspect, validate_lifecycle,
                                   validate_mark_read, validate_mobile_delivery)
-from zerus_mobile.history import validate_history
+from zerus_mobile.history import validate_history, validate_history_projection
 from zerus_mobile.launch import OPERATIONS as LAUNCH_OPERATIONS, validate as validate_launch
 from zerus_mobile.recovery import validate_recovery
 from zerus_mobile.terminal import OPERATIONS as TERMINAL_OPERATIONS, validate as validate_terminal
@@ -121,11 +121,17 @@ def validate_request(value):
     if op == "recovery_action":
         validate_recovery(payload,request_id)
         return
+    if op in session_projects.OPERATIONS:
+        session_projects.validate(op,payload,request_id)
+        return
     if op == "hooks_status":
         hook_health.validate(payload,request_id)
         return
     if op == "history":
         validate_history(payload,request_id)
+        return
+    if op == "history_projection":
+        validate_history_projection(payload, request_id)
         return
     if op == "file_read":
         file_reads.validate(payload, request_id)

@@ -16,9 +16,11 @@ pub const READS: &[&str] = &[
     "speech_config_status",
     "inspect",
     "history",
+    "history_projection",
     "hooks_status",
     "git_status",
     "process_output",
+    "project_assignment",
     "terminal_snapshot",
     "catalog",
     "dirs",
@@ -94,6 +96,7 @@ pub const OPERATIONS: &[&str] = &[
     "forget",
     "fork",
     "history",
+    "history_projection",
     "hooks_status",
     "git_status",
     "inspect",
@@ -103,7 +106,9 @@ pub const OPERATIONS: &[&str] = &[
     "session_notifications",
     "pause",
     "process_output",
+    "project_assignment",
     "process_stop",
+    "project_assign",
     "recovery_action",
     "remove_queued",
     "rename",
@@ -130,6 +135,7 @@ pub const FEATURES: &[&str] = &[
     "inspect_agent",
     "opencode_launch_effort",
     "presence_alerts",
+    "session_project_assignment_v1",
     "send_agent",
     "voice_video",
 ];
@@ -187,6 +193,52 @@ fn analytics_day(value: &Value) -> Result<u32> {
         + previous / 400
         + months[..(month - 1) as usize].iter().sum::<u32>()
         + day)
+}
+
+/// Logical session grouping only: no directory, worktree, launch or full
+/// organization replacement can enter this additive, session-scoped ABI.
+pub fn session_project(payload: &Value, request_id: &str, mutation: bool) -> Result<()> {
+    let required = [
+        "request_id",
+        "expected_run_id",
+        "expected_conversation_id",
+        "expected_machine_id",
+    ];
+    let assignment = [
+        "swarm_id",
+        "membership_token",
+        "catalog_epoch",
+        "project_id",
+    ];
+    let mut all = required.to_vec();
+    if mutation {
+        all.extend(assignment);
+    }
+    fields(payload, &all, if mutation { &[] } else { &["cursor"] })?;
+    uuid(&payload["request_id"], true)?;
+    uuid(&payload["expected_machine_id"], true)?;
+    if payload["request_id"] != request_id {
+        return Err(Error::BAD);
+    }
+    let bounded = |key: &str, max: usize, empty: bool| -> Result<()> {
+        let value = payload[key].as_str().ok_or(Error::BAD)?;
+        if value.len() > max || (!empty && value.is_empty()) || value.chars().any(char::is_control)
+        {
+            return Err(Error::BAD);
+        }
+        Ok(())
+    };
+    bounded("expected_run_id", 128, false)?;
+    bounded("expected_conversation_id", 2048, true)?;
+    if mutation {
+        uuid(&payload["swarm_id"], true)?;
+        hex(&payload["membership_token"])?;
+        hex(&payload["catalog_epoch"])?;
+        bounded("project_id", 128, false)?;
+    } else if payload.get("cursor").is_some() {
+        bounded("cursor", 512, false)?;
+    }
+    Ok(())
 }
 
 /// Mobile analytics are strictly read-only and span at most 90 inclusive days.
@@ -463,6 +515,8 @@ pub fn request(v: &Value) -> Result<()> {
         if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
             return Err(Error::BAD);
         }
+    } else if matches!(op, "project_assignment" | "project_assign") {
+        session_project(p, id, op == "project_assign")?;
     } else if op == "inspect" {
         fields(
             p,
@@ -548,6 +602,13 @@ pub fn request(v: &Value) -> Result<()> {
             "settings" => &["model", "effort", "expected_pending_id"],
             "process_output" => &["process_id", "generation", "archive_id"],
             "process_stop" => &["process_id", "generation"],
+            "history_projection" => &[
+                "archive_id",
+                "agent_id",
+                "history_epoch",
+                "projection_after",
+                "projection_until",
+            ],
             "history" => &[
                 "archive_id",
                 "agent_id",
@@ -591,6 +652,7 @@ pub fn request(v: &Value) -> Result<()> {
                 "compact_context",
                 "clear_context",
                 "history",
+                "history_projection",
                 "recovery_action",
                 "send_now",
                 "attachment_read",
@@ -697,6 +759,7 @@ pub fn request(v: &Value) -> Result<()> {
                 }
             }
             "history" => history(p)?,
+            "history_projection" => history_projection(p)?,
             "recovery_action" => {
                 uuid(&p["job_id"], true)?;
                 if p["action"] != "now" && p["action"] != "cancel" {
@@ -777,6 +840,49 @@ fn tag(v: &Value, launch: bool) -> Result<()> {
     }
     Ok(())
 }
+/// The new projection ABI has byte-bounded native identities and literal i64 positions.
+/// It never borrows ordinary history's optional selectors or coerces JSON numbers.
+pub fn history_projection(p: &Value) -> Result<()> {
+    fields(
+        p,
+        &[
+            "request_id",
+            "expected_run_id",
+            "expected_conversation_id",
+            "history_epoch",
+            "projection_after",
+            "projection_until",
+        ],
+        &["archive_id", "agent_id"],
+    )?;
+    uuid(&p["request_id"], true)?;
+    let native_text = |value: &Value, maximum: usize| {
+        value.as_str().is_some_and(|s| {
+            !s.is_empty() && s.len() <= maximum && !s.chars().any(char::is_control)
+        })
+    };
+    if !native_text(&p["expected_run_id"], 128)
+        || !native_text(&p["expected_conversation_id"], 256)
+        || !native_text(&p["history_epoch"], 128)
+    {
+        return Err(Error::BAD);
+    }
+    if let Some(value) = p.get("agent_id") {
+        if !native_text(value, 160) || value.as_str().is_some_and(|s| s.contains(['/', '\\'])) {
+            return Err(Error::BAD);
+        }
+    }
+    if let Some(value) = p.get("archive_id") {
+        uuid(value, true)?;
+    }
+    let after = p["projection_after"].as_i64().ok_or(Error::BAD)?;
+    let until = p["projection_until"].as_i64().ok_or(Error::BAD)?;
+    if after < 0 || until < after {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
+
 fn history(p: &Value) -> Result<()> {
     if let Some(v) = p.get("limit") {
         if v.as_i64().is_none_or(|n| !(1..=100).contains(&n)) {

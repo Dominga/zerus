@@ -1211,7 +1211,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             || error.trimmed() == "This turn is no longer working";
         if (ok) showNotice(tr("Interrupt sent to %1. Waiting for the agent to stop…").arg(target));
         else if (alreadyStopped) showNotice(tr("Stop %1: the turn already ended or is waiting for input. No action needed.").arg(target));
-        else showNotice(tr("Stop %1 failed: %2\nRefresh status or open Terminal to check the agent before trying again.").arg(target, error), true);
+        else showNotice(tr("Stop %1 failed: %2\nOpen Terminal to check the agent before trying again.").arg(target, error), true);
         if(m_selectedKey==m_interruptKey)inspect();
         emit refreshRequested();
         renderDetails();
@@ -3107,9 +3107,14 @@ void SessionsWindow::rebuild()
     const bool hasGroups = m_organization.groups().size() > 1;
     const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
     const bool hideEmptyProjects = QSettings().value("workspace/hideEmptyProjects", true).toBool();
+    QStringList visibleIdentities;
+    visibleIdentities.reserve(visible.size());
+    for (const auto &entry : visible) visibleIdentities.append(entry.identity);
+    const auto projectMembers = m_organization.orderedMembers(visibleIdentities);
+    const auto leads = SessionLeads::all();   // WhiteWh fork: read once per rebuild
     for (const auto &group : m_organization.groups()) {
         if (!m_projectFilters.isEmpty() && !m_projectFilters.contains(group.id)) continue;
-        QList<int> members;
+        auto members = projectMembers.value(group.id);
         QStringList launches;
         if (m_filter == "all"&&m_folderFilterPath.isEmpty()) for (auto it = m_pendingLaunches.begin(); it != m_pendingLaunches.end(); ++it) {
             const auto launch = it.value().toObject();
@@ -3121,24 +3126,29 @@ void SessionsWindow::rebuild()
             const QString host = launch.value("host").toString();
             if (destination == group.id && (m_hostFilters.isEmpty() || m_hostFilters.contains(host.isEmpty() ? "@local" : host))) launches.append(it.key());
         }
-        for (int i = 0; i < visible.size(); ++i) if (m_organization.groupFor(visible[i].identity) == group.id) members.append(i);
-        std::stable_sort(members.begin(), members.end(), [&](int a, int b) {
-            return group.sessions.indexOf(visible[a].identity) < group.sessions.indexOf(visible[b].identity);
-        });
-        {
-            // WhiteWh fork: a subordinate follows its lead when both are listed here.
-            const auto leadAt = [&](int i) {
-                const auto lead = SessionLeads::lead(visible[i].identity);
-                if (!lead.isEmpty()) for (int j : members) if (visible[j].identity == lead && SessionLeads::lead(lead).isEmpty()) return j;
-                return -1;
-            };
-            QList<int> ordered;
+        if (!leads.isEmpty()) {
+            // WhiteWh fork: a subordinate follows its lead when both are listed
+            // here and the lead reports to no one. One pass: a project can list
+            // thousands of sessions.
+            QHash<QString, int> at;
+            for (int i : members) if (!at.contains(visible[i].identity)) at.insert(visible[i].identity, i);
+            QHash<int, QList<int>> followers;
+            QSet<int> following;
             for (int i : members) {
-                if (leadAt(i) >= 0) continue;
-                ordered.append(i);
-                for (int j : members) if (j != i && leadAt(j) == i) { ordered.append(j); subordinateRows.insert(j); }
+                const auto lead = leads.value(visible[i].identity).toString();
+                const int j = lead.isEmpty() ? -1 : at.value(lead, -1);
+                if (j < 0 || j == i || !leads.value(lead).toString().isEmpty()) continue;
+                followers[j].append(i); following.insert(i);
             }
-            members = ordered;
+            if (!following.isEmpty()) {
+                QList<int> ordered;
+                for (int i : members) {
+                    if (following.contains(i)) continue;
+                    ordered.append(i);
+                    for (int j : followers.value(i)) { ordered.append(j); subordinateRows.insert(j); }
+                }
+                members = ordered;
+            }
         }
         if (members.isEmpty() && launches.isEmpty() && (filtering || hideEmptyProjects || !group.accessible)) continue;
         if (hasGroups) rows.append({group.id, -1, false});
@@ -3596,7 +3606,7 @@ void SessionsWindow::renderDetails()
     const auto recoveryState=recoveryDetails.value("recovery").toObject().value("state").toString();
     const bool providerFailure=recoveryDetails.value("phase")=="error" && !recoveryDetails.value("provider_error").toObject().isEmpty();
     auto *recoveryFocus=QApplication::focusWidget();
-    if(!providerFailure&&(recoveryState.isEmpty()||recoveryState=="succeeded")&&m_recovery->isVisible()&&recoveryFocus
+    if(!providerFailure&&(recoveryState.isEmpty()||recoveryState=="succeeded"||RecoveryUi::resumed(recoveryDetails.value("recovery").toObject()))&&m_recovery->isVisible()&&recoveryFocus
         &&(recoveryFocus==m_recovery||m_recovery->isAncestorOf(recoveryFocus)))m_composer->editor()->setFocus(Qt::OtherFocusReason);
     m_recovery->setState(recoveryDetails,entry && entry->online);
     m_markRead->setActive(entry && entry->session.state!="archived" && entryNeedsAttention(*entry));

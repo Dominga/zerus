@@ -32,6 +32,7 @@ protected:
 private:
     void render();
     void selectionChanged();
+    bool changing() const;
     void add();
     void copy(const QString &target = QStringLiteral("*"));
     void setupOllama(const QString &host, const QString &accountLabel);

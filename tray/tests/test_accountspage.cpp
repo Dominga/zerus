@@ -64,6 +64,7 @@ private slots:
     void openCodeReasonsAndExplicitStart();
     void openCodeProvidersShowConnectionAndCounts();
     void addAccountUsesProviderRows();
+    void aSlowPeerListingDoesNotHoldAddAccount();
     void addAccountKeepsItsLayoutAcrossAgents();
     void repliesFromRemovedMachineAreIgnored();
     void explicitMachineOutsidePollingSurvivesRefreshAndExpiresWithFilter();
@@ -971,6 +972,19 @@ void TestAccountsPage::localWindowsOffersDeepSeekButNoOpenCode()
         machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(current(), QString("claude"));
     });
     add->click();
+}
+
+// WhiteWh fork: the listing repeats every 30 seconds and may wait on a slow
+// peer; only a change in flight holds the actions.
+void TestAccountsPage::aSlowPeerListingDoesNotHoldAddAccount()
+{
+    QFile hold(m_dir.filePath("hold-remote-catalog")); QVERIFY(hold.open(QIODevice::WriteOnly)); hold.close();
+    AccountsPage page(FakeCli::program(m_script)); page.setFleet(fleet()); page.resize(1000,700); page.show();
+    auto *add = page.findChild<QPushButton *>("addAccount");
+    QTRY_COMPARE(page.profiles().size(),4);
+    QTest::qWait(100); QVERIFY(QFile::exists(hold.fileName()));
+    QVERIFY(add->isEnabled());
+    QVERIFY(QFile::remove(hold.fileName())); QTRY_COMPARE(page.profiles().size(),8); QVERIFY(add->isEnabled());
 }
 
 void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()

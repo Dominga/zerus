@@ -290,7 +290,7 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     connect(m_remove, &QPushButton::clicked, this, &AccountsPage::remove);
     connect(m_startOpenCode, &QPushButton::clicked, this, [this] {
         const auto p = selected();
-        if (p["provider"] != "opencode" || p["catalog_state"] != "not_running" || !m_requests.isEmpty()) return;
+        if (p["provider"] != "opencode" || p["catalog_state"] != "not_running" || changing()) return;
         request(p["host"].toString(), {"start", "native-opencode", "--json"});
     });
     connect(m_rename, &QPushButton::clicked, this, &AccountsPage::rename);
@@ -549,9 +549,16 @@ void AccountsPage::render()
     m_list->verticalScrollBar()->setValue(scroll);
     selectionChanged();
 }
+// WhiteWh fork: a change in flight holds the actions; a background `ls`, which
+// repeats every 30 seconds and may wait on a slow peer, does not.
+bool AccountsPage::changing() const
+{
+    for (const auto &request : m_requests) if (request.second != "ls") return true;
+    return false;
+}
 void AccountsPage::selectionChanged()
 {
-    const auto p = selected(); const bool has = !p.isEmpty(); const bool idle = m_requests.isEmpty();
+    const auto p = selected(); const bool has = !p.isEmpty(); const bool idle = !changing();
     m_machineCard->setVisible(has);m_providerBadge->setVisible(has);
     const bool nativeConfig=p["provider"]=="opencode";
     m_rename->setToolTip({});m_remove->setToolTip({});m_install->setToolTip({});
@@ -685,13 +692,13 @@ void AccountsPage::renderMachines()
     hosts.removeIf([&](const QString &host) { return !launchable(m_fleet, host, account["provider"].toString()); });
     for (const auto &host : hosts) signature << host << QString::number(online(host));
     int available = 0; for (const auto &host : hosts) if (!account.isEmpty() && !present.contains(host)) ++available;
-    m_copy->setEnabled(!account.isEmpty() && m_requests.isEmpty() && available > 0);
+    m_copy->setEnabled(!account.isEmpty() && !changing() && available > 0);
     for (int i = 0; i < m_machineTags->count(); ++i) if (auto *tag = m_machineTags->itemAt(i)->widget(); tag && tag->objectName()=="accountDestinationTag")
-        tag->setEnabled(m_requests.isEmpty() && online(tag->property("host").toString()));
+        tag->setEnabled(!changing() && online(tag->property("host").toString()));
     if (m_machineSignature == signature.join('\n')) return;
     m_machineSignature = signature.join('\n');
     while (auto *item = m_machineTags->takeAt(0)) { if (item->widget()) { item->widget()->hide(); item->widget()->deleteLater(); } delete item; }
-    const bool idle = m_requests.isEmpty();
+    const bool idle = !changing();
     const auto tagStyle=QString("QPushButton { padding:5px 10px; border:1px solid %1; border-radius:6px; } QPushButton:checked { background:%2; border-color:%3; }")
         .arg(m_dark ? "#34414b" : "#c7d3dc", m_dark ? "#24473e" : "#d8eee5", m_dark ? "#8bdfc0" : "#167357");
     QStringList addedHosts;
@@ -1014,7 +1021,7 @@ void AccountsPage::setupDeepSeek(const QString &host, const QString &accountLabe
 }
 void AccountsPage::remove()
 {
-    const auto p = selected(); if (p.isEmpty() || !m_requests.isEmpty() || !online(p["host"].toString())) return;
+    const auto p = selected(); if (p.isEmpty() || changing() || !online(p["host"].toString())) return;
     const QString host = p["host"].toString(), machine = p["machine"].toString();
     const QString revision = m_catalogs[host]["revision"].toString();
     QMessageBox dialog(QMessageBox::Question, tr("Remove account from Zerus"),
@@ -1033,7 +1040,7 @@ void AccountsPage::remove()
 void AccountsPage::useSavedProfile(const QJsonObject &p)
 {
     const auto host=p["host"].toString();
-    if(p["id"].toString().isEmpty() || !online(host) || !m_requests.isEmpty())return;
+    if(p["id"].toString().isEmpty() || !online(host) || changing())return;
     m_activeProfile=m_requestedProfile=profileKey(host,p["id"].toString());
     {const QSignalBlocker blocker(m_machine);m_machine->setCurrentIndex(0);}
     request(host,{"restore",p["id"].toString(),"--revision",m_catalogs[host]["revision"].toString()});

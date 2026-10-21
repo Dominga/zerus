@@ -30,6 +30,30 @@ the phone reaches every PC through the relay.
   its Zerus then runs `hgs session-host start`, a host that stays without
   sessions until `hgs session-host stop`, and checks it every minute.
 
+## A lasting connection
+
+Windows OpenSSH cannot share one connection between ssh processes, so each
+command to a Windows peer used to open its own: a new handshake and a new sshd
+session, seconds each over a relayed tailnet path. `src/peer_channel.rs` keeps
+one connection per Windows peer instead:
+
+- the first request starts a broker, `hgs __peer broker <alias>`, which opens
+  one ssh connection running `hgs __peer serve` on the peer;
+- this computer's hgs processes hand their requests to the broker over a named
+  pipe that only this user can open; the peer runs each as its own `hgs.exe`
+  with the request's arguments, several at once, so no argument passes through
+  `cmd.exe`;
+- the broker leaves after ten idle minutes or when its connection ends.
+
+Polling and JSON commands use it (`ls`, `inspect`, `archives`, `worktrees`,
+`git-status`, `dirs`, `project`, `analytics`, `account ls|inspect`, and
+`terminal`, `send`, `settings`, `effort`, `history` with `--json`). Interactive
+commands, launches and everything else keep their own ssh. A request that no
+broker took uses its own ssh as before. When a broker cannot connect, for example
+to a peer whose hgs predates the channel, it records that in
+`~/.config/hgs/peer-channel/<alias>.failed` and requests use their own ssh for
+ten minutes. `HGS_PEER_CHANNEL=0` turns the channel off.
+
 ## Setting up a peer
 
 On the **peer** (the PC to be managed):

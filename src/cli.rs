@@ -13,6 +13,7 @@ use std::process::Command;
 use std::{
     borrow::Cow,
     env, fmt, fs,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
     time::Instant,
@@ -397,6 +398,10 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
     }
     let config = Config::load()?;
+    // WhiteWh fork: both ends of the lasting channel to a Windows peer.
+    if args.first().is_some_and(|a| a == "__peer") {
+        return crate::peer_channel::command(&config, &args[1..]);
+    }
     // The existing swarm namespace fails closed on unknown operations in older
     // installations, so transport helpers cannot fall through to agent launch.
     if args.first().is_some_and(|a| a == "swarm")
@@ -831,6 +836,20 @@ fn peer_ls(config: &Config, peer: &str, archives: bool) -> String {
     crate::windows_peer::hgs(config, peer, &args).unwrap_or_default()
 }
 fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
+    // WhiteWh fork: a Windows peer answers through its lasting channel.
+    if crate::windows_peer::is_windows(config, peer) {
+        let mut args: Vec<String> = ["ls", "--local", "--json"].map(String::from).into();
+        if !archives {
+            args.push("--no-archives".into());
+        }
+        if let Some(Ok(answer)) = crate::peer_channel::request(config, peer, &args, None) {
+            if answer.code == 0 {
+                if let Ok(value @ Value::Object(_)) = serde_json::from_slice::<Value>(&answer.stdout) {
+                    return value;
+                }
+            }
+        }
+    }
     let output = platform::ssh_output(
         platform::ssh()
             .args(crate::machines::ssh_options(config, peer))
@@ -981,6 +1000,36 @@ fn remote(
         if command == "analytics" {
             windows_args.push("--read-only".into());
         }
+        // Listed commands use the lasting channel (src/peer_channel.rs); `ls --json`
+        // does so in peer_json_archives below.
+        let json_listing = command == "ls" && has(&args, "--json");
+        if let Some(reads_stdin) = crate::peer_channel::routed(command, &args).filter(|_| !json_listing && !global_dry && !has(&args, "--dry-run")) {
+            let input = if reads_stdin {
+                let mut bytes = Vec::new();
+                io::stdin().read_to_end(&mut bytes)?;
+                Some(bytes)
+            } else {
+                None
+            };
+            match crate::peer_channel::request(config, target, &windows_args, input.clone()) {
+                Some(Ok(answer)) => {
+                    if command == "ls" {
+                        println!("{target}:");
+                    }
+                    io::stdout().write_all(&answer.stdout)?;
+                    io::stdout().flush()?;
+                    io::stderr().write_all(&answer.stderr)?;
+                    return Ok(answer.code);
+                }
+                Some(Err(error)) => return Err(Error::new(3, error)),
+                // No broker took it: the command's own ssh, with the stdin already read.
+                None => {
+                    if let Some(input) = input {
+                        return run_with_input(&mut ssh, flags, target, crate::windows_peer::command(&windows_args)?, input);
+                    }
+                }
+            }
+        }
         crate::windows_peer::command(&windows_args)?
     } else if command == "wait" {
         // Old peers otherwise interpret an unknown command as an agent launch.
@@ -1028,6 +1077,42 @@ fn remote(
                 format!("link to {target} dropped; the session is still there, rerun to reattach"),
             ));
         }
+        return Err(Error::new(3, format!("{target} unreachable")));
+    }
+    Ok(rc)
+}
+
+/// WhiteWh fork: a Windows peer's command whose stdin was read for the channel,
+/// run over its own ssh with that input when no broker took it.
+fn run_with_input(ssh: &mut std::process::Command, mut flags: Vec<String>, target: &str, remote: String, input: Vec<u8>) -> Result<i32> {
+    flags.push(target.into());
+    flags.push(remote);
+    let mut child = platform::spawn_ssh(ssh.args(flags), true, true, true)?;
+    let mut stdin = child.stdin.take();
+    let writer = std::thread::spawn(move || {
+        if let Some(stdin) = stdin.as_mut() {
+            let _ = stdin.write_all(&input);
+        }
+    });
+    let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    let errors = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(err) = err.as_mut() {
+            let _ = err.read_to_end(&mut bytes);
+        }
+        bytes
+    });
+    let mut output = Vec::new();
+    if let Some(out) = out.as_mut() {
+        out.read_to_end(&mut output)?;
+    }
+    let status = child.child.wait()?;
+    let _ = writer.join();
+    let errors = errors.join().unwrap_or_default();
+    io::stdout().write_all(&output)?;
+    io::stderr().write_all(&errors)?;
+    let rc = platform::code(status);
+    if rc == 255 {
         return Err(Error::new(3, format!("{target} unreachable")));
     }
     Ok(rc)

@@ -23,6 +23,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use zerus_relay::{json, protocol};
 
+/// The conversation of a launch the agent has not confirmed yet, as clients send it.
+static EMPTY_CONVERSATION: Value = Value::String(String::new());
+
 /// Python's catch-all receipt text for an unexpected exception.
 pub const GENERIC: &str = "connector could not record native outcome";
 pub const TOO_LARGE: &str = "native result exceeds relay size limit";
@@ -396,7 +399,14 @@ impl<N: Native + 'static> Connector<N> {
                 ("expected_run_id", "run_id"),
                 ("expected_conversation_id", "conversation_id"),
             ] {
-                if payload.get(expected).is_some_and(|v| v != &detail[field]) {
+                // A launch the agent has not confirmed yet (Codex creates its
+                // conversation with the first message) reports no conversation;
+                // clients address it as "", like the native context check.
+                let actual = match &detail[field] {
+                    Value::Null if field == "conversation_id" => &EMPTY_CONVERSATION,
+                    other => other,
+                };
+                if payload.get(expected).is_some_and(|v| v != actual) {
                     return Err(Failure::text("fresh native target identity did not match"));
                 }
             }

@@ -93,11 +93,12 @@ async fn media_and_path_refusals_are_durable_and_cannot_replay_after_scope_chang
         },
         Box::new(|| EPOCH),
     );
+    // WhiteWh fork: `launch` is allowed in project working folders
+    // (src/windows_paths.rs) and refused elsewhere with its own message.
     for (index, operation) in [
         "voice_submit",
         "speech_submit",
         "file_read",
-        "launch",
         "worktree_create",
         "git_status",
     ]

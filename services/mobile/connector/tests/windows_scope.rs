@@ -67,14 +67,20 @@ fn windows_advertisement_rejects_unix_and_unsupported_provider_features() {
     // WhiteWh fork: new sessions from the phone, folders as /D:/... (windows_paths.rs).
     for operation in ["launch", "catalog", "dirs"] {
         assert!(
-            offered["operations"].as_array().unwrap().contains(&json!(operation)),
+            offered["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(operation)),
             "{operation}"
         );
     }
     // The phone does not create folders on a Windows gateway.
     for operation in ["directory_create"] {
         assert!(
-            !offered["operations"].as_array().unwrap().contains(&json!(operation)),
+            !offered["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(operation)),
             "{operation}"
         );
     }
@@ -408,9 +414,16 @@ async fn windows_send_reaches_a_launch_whose_conversation_is_not_confirmed_yet()
             if delivered { "completed" } else { "failed" },
             "{reported} {expected} {answer}"
         );
-        assert_eq!(connector.native.writes.get(), usize::from(delivered), "{reported} {expected}");
+        assert_eq!(
+            connector.native.writes.get(),
+            usize::from(delivered),
+            "{reported} {expected}"
+        );
         if !delivered {
-            assert_eq!(answer["error"], "fresh native target identity did not match", "{answer}");
+            assert_eq!(
+                answer["error"], "fresh native target identity did not match",
+                "{answer}"
+            );
         }
     }
 }

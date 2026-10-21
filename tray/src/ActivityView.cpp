@@ -1,4 +1,5 @@
 #include "ActivityView.h"
+#include "MediaViewer.h"
 #include "IronRules.h"
 #include "ActivityWidth.h"
 #include "ContentScale.h"
@@ -69,6 +70,43 @@
 #include <cmath>
 #include <functional>
 #include <utility>
+
+namespace ActivityMedia {
+// A media preview: 320 x 180 in the document, drawn at twice that.
+constexpr int Width = 320, Height = 180;
+QImage tile(const QImage &content, const QString &name, bool play, const QString &note)
+{
+    QImage tile(Width * 2, Height * 2, QImage::Format_ARGB32_Premultiplied);
+    tile.fill(Qt::transparent);
+    QPainter p(&tile);
+    p.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform | QPainter::TextAntialiasing);
+    QPainterPath frame; frame.addRoundedRect(QRectF(tile.rect()).adjusted(1, 1, -1, -1), 16, 16);
+    p.fillPath(frame, QColor(0x1b, 0x1f, 0x26));
+    p.setClipPath(frame);
+    if (!content.isNull()) {
+        const auto size = content.size().scaled(tile.size(), Qt::KeepAspectRatio);
+        p.drawImage(QRect(QPoint((tile.width() - size.width()) / 2, (tile.height() - size.height()) / 2), size), content);
+    }
+    if (play) {
+        const QPointF centre(tile.width() / 2.0, tile.height() / 2.0 - 14);
+        p.setPen(Qt::NoPen); p.setBrush(QColor(0, 0, 0, 150)); p.drawEllipse(centre, 44, 44);
+        QPainterPath triangle; triangle.moveTo(centre + QPointF(-14, -22)); triangle.lineTo(centre + QPointF(24, 0)); triangle.lineTo(centre + QPointF(-14, 22)); triangle.closeSubpath();
+        p.fillPath(triangle, QColor(0xf2, 0xf4, 0xf6));
+    }
+    auto font = p.font(); font.setPixelSize(22);
+    const QRect strip(0, tile.height() - 48, tile.width(), 48);
+    p.fillRect(strip, QColor(0, 0, 0, content.isNull() ? 0 : 150));
+    p.setFont(font); p.setPen(QColor(0xe6, 0xe8, 0xeb));
+    p.drawText(strip.adjusted(18, 0, -18, 0), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(font).elidedText(name, Qt::ElideMiddle, strip.width() - 36));
+    if (content.isNull() && !note.isEmpty()) {
+        p.setPen(QColor(0x9a, 0xa3, 0xad));
+        p.drawText(QRect(18, play ? tile.height() / 2 + 40 : 0, tile.width() - 36, play ? 40 : tile.height() - 48), Qt::AlignCenter, note);
+    }
+    p.setClipping(false);
+    p.setPen(QPen(QColor(0x39, 0x40, 0x4a), 2)); p.setBrush(Qt::NoBrush); p.drawPath(frame);
+    return tile;
+}
+}
 
 namespace {
 // A slow, smooth cycle independent of the platform's busy-bar speed.
@@ -437,10 +475,13 @@ bool isExcerptOf(QString excerpt, const QString &full)
     return !excerpt.isEmpty() && full.startsWith(excerpt);
 }
 
-QString markdown(const QString &text, const MarkdownTheme &theme, QHash<QString, QString> &fileLinks)
+// WhiteWh fork: `media` collects the file references that name a picture,
+// animation or video, for the previews under the message.
+QString markdown(const QString &text, const MarkdownTheme &theme, QHash<QString, QString> &fileLinks, QStringList *media = nullptr)
 {
-    return MarkdownHtml::render(text, theme, [&fileLinks](const QString &href) -> MarkdownLink {
+    return MarkdownHtml::render(text, theme, [&fileLinks, media](const QString &href) -> MarkdownLink {
         const auto file = SessionFileReference::parse(href);
+        if (file.valid() && media && MediaFiles::kind(file.path) != MediaFiles::Kind::None && !media->contains(href)) media->append(href);
         if (file.valid()) {
             const QString key = QString::fromLatin1(QCryptographicHash::hash(href.toUtf8(), QCryptographicHash::Sha256).toHex());
             fileLinks.insert(key, href);
@@ -493,6 +534,9 @@ struct ActivityRenderResult {
     QString m_voiceError;
     QHash<QString, QPair<QString, QString>> m_messageActions;
     QHash<QString, QImage> m_previews;
+    // WhiteWh fork: media previews by key, and the reference each one shows.
+    QHash<QString, QImage> m_mediaTiles;
+    QHash<QString, QString> m_mediaLinks;
     QSet<QString> m_knownEvents, m_toggleKeys, m_processLinks;
     bool m_dark = false, m_tracked = true, processesEnabled = false, content = false, m_bubbles = false;
     double m_scale = 1.;
@@ -723,6 +767,24 @@ struct ActivityRenderResult {
             }
             result+=QString("<table cellspacing='0' cellpadding='8' style='margin-top:8px;border:1px solid %1;'><tr>%2<td>%3</td></tr></table>").arg(border,preview,
                 available?QString("<a href='hgs-attachment:%1' style='color:%2;'>%3</a>").arg(key,accent,caption):tr("Attachment: %1").arg(escaped(name)));
+        }
+        return result;
+    };
+    // WhiteWh fork: a preview under the message for each picture, animation or
+    // video it names; the owner reads the file from the session's computer.
+    const auto mediaTiles = [&](const QStringList &references) {
+        QString result;
+        for (const auto &href : references) {
+            const auto key = QString::fromLatin1(QCryptographicHash::hash((m_sessionKey + '\n' + href).toUtf8(), QCryptographicHash::Sha256).toHex());
+            m_mediaLinks.insert(key, href);
+            const auto file = SessionFileReference::parse(href).path;
+            const auto name = QFileInfo(file).fileName();
+            const bool video = MediaFiles::kind(file) == MediaFiles::Kind::Video;
+            document->addResource(QTextDocument::ImageResource, QUrl("hgs-media:" + key),
+                                  m_mediaTiles.value(key, ActivityMedia::tile({}, name, video, tr("Loading…"))));
+            result += QString("<table cellspacing='0' cellpadding='0' style='margin-top:8px;'><tr><td width='%2' height='%3'>"
+                              "<a href='hgs-media:%1'><img src='hgs-media:%1' width='%2' height='%3'></a></td></tr></table>")
+                          .arg(key).arg(ActivityMedia::Width).arg(ActivityMedia::Height);
         }
         return result;
     };
@@ -965,14 +1027,16 @@ struct ActivityRenderResult {
                 }
                 stamp += "  " + (accepted ? tr("Sent") : tr("Queued at this time"));
             }
+            QStringList media;
             auto body = role == "user" ? (replies.isEmpty() ? userMessage(text) : questionReplyBody(replies, muted, accent, codeSurface, border))
-                                       : markdown(text, agentTheme, m_fileLinks);
+                                       : markdown(text, agentTheme, m_fileLinks, &media);
             if(event.value("type")=="LocalMessage") {
                 const auto state=event.value("status").toString();stamp=state=="sending"?tr("Sending…"):state=="error"?tr("Not sent"):tr("Submitted to terminal");
                 if(state=="error" && event.value("uncertain").toBool())stamp=tr("Delivery not confirmed");
                 if(state=="error")body+=QString("<p style='font-size:11px;color:%1;'>%2</p>").arg(warning,escaped(event.value("error").toString()));
             }
             body+=attachmentCards(event.value("attachments").toArray(),eventKey(event));
+            body+=mediaTiles(media);
             if(event.value("type")=="LocalMessage" && event.value("status")=="error" && !event.value("id").toString().isEmpty()) {
                 const auto button=[&](const QString &action,const QString &label) {
                     const auto key=QString::fromLatin1(QCryptographicHash::hash((m_sessionKey+':'+event.value("id").toString()+':'+action).toUtf8(),QCryptographicHash::Sha256).toHex());
@@ -1235,6 +1299,7 @@ void ActivityView::setSessionKey(const QString &key)
     m_sessionKey = key; m_conversation.clear(); m_expanded.clear(); m_knownEvents.clear();
     m_attachmentLinks.clear();m_fileLinks.clear();
     m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear(); m_attachmentBindings.clear();
+    clearMedia();
     m_messageActions.clear(); m_copyTexts.clear();
     m_localMessages = {}; m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
     m_initial = true; m_followLatest = true; m_unseen = 0; m_html.clear(); m_activityInput = {};
@@ -1272,6 +1337,7 @@ void ActivityView::setActivity(const QJsonObject &details, const QJsonArray &eve
         m_voiceKey.clear();m_voicePlaying.clear();m_voiceLoading.clear();m_voiceLinks.clear();m_voicePositions.clear();
         m_voicePressed.clear();m_voicePosition=0;m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;
         m_previewFiles.clear(); m_previews.clear(); m_deliveryKeys.clear(); m_attachmentBindings.clear();
+        clearMedia();
         m_searchResult = {}; m_searchQuery.clear(); m_browser->setExtraSelections({});
         m_fileLinks.clear(); m_attachmentLinks.clear(); m_messageActions.clear(); m_copyTexts.clear();
         clearDocument();
@@ -1618,6 +1684,8 @@ void ActivityView::activateLink(const QUrl &url)
         m_followLatest = false; render(false); updateJumpButton();
     } else if (url.scheme() == "hgs-file" && m_fileLinks.contains(url.path())) {
         emit fileReferenceActivated(m_fileLinks.value(url.path()));
+    } else if (url.scheme() == "hgs-media" && m_mediaLinks.contains(url.path())) {
+        emit mediaActivated(url.path(), m_mediaLinks.value(url.path()), m_mediaPaths.value(url.path()));
     } else if(url.scheme()=="hgs-attachment" && m_attachmentLinks.contains(url.path())) {
         emit attachmentActivated(m_attachmentLinks.value(url.path()));
     } else if(url.scheme()=="hgs-voice" && m_voiceLinks.contains(url.path())) {
@@ -1722,6 +1790,49 @@ void ActivityView::copyMarkdown(const QString &key)
     });
 }
 
+void ActivityView::clearMedia()
+{
+    qDeleteAll(m_movies); m_movies.clear();
+    m_mediaTiles.clear(); m_mediaLinks.clear(); m_mediaPaths.clear(); m_mediaRequested.clear();
+}
+
+void ActivityView::setMediaPreview(const QString &key, const QString &path, const QString &error)
+{
+    if (!m_mediaLinks.contains(key)) return;
+    const auto href = m_mediaLinks.value(key);
+    const auto file = SessionFileReference::parse(href).path;
+    const auto name = QFileInfo(file).fileName();
+    const auto kind = MediaFiles::kind(file);
+    const auto install = [this, key](const QImage &tile) {
+        m_mediaTiles.insert(key, tile);
+        paintDocument(m_browser->document())->addResource(QTextDocument::ImageResource, QUrl("hgs-media:" + key), tile);
+        // A preview keeps its reserved size: JournalImages draws the current
+        // resource, so a repaint shows it without a relayout.
+        m_browser->viewport()->update();
+    };
+    if (!path.isEmpty()) m_mediaPaths.insert(key, path);
+    if (path.isEmpty() || !error.isEmpty()) {
+        install(ActivityMedia::tile({}, name, kind == MediaFiles::Kind::Video, error.isEmpty() ? tr("Click to open") : error));
+        return;
+    }
+    const QSize bound(ActivityMedia::Width * 2, ActivityMedia::Height * 2);
+    if (kind == MediaFiles::Kind::Animation) {
+        delete m_movies.take(key);
+        auto *movie = new QMovie(path, {}, this);
+        m_movies.insert(key, movie);
+        connect(movie, &QMovie::frameChanged, this, [install, movie, name] { install(ActivityMedia::tile(movie->currentImage(), name, false, {})); });
+        if (isVisible()) movie->start(); else movie->jumpToFrame(0);
+        return;
+    }
+    if (kind == MediaFiles::Kind::Video) {
+        install(ActivityMedia::tile({}, name, true, {}));
+        MediaFiles::poster(path, this, [install, name](const QImage &frame) { install(ActivityMedia::tile(frame, name, true, {})); });
+        return;
+    }
+    const auto image = MediaFiles::picture(path, bound);
+    install(ActivityMedia::tile(image, name, false, image.isNull() ? tr("This picture cannot be shown") : QString()));
+}
+
 void ActivityView::setAttachmentPreview(const QString &key, const QImage &image)
 {
     if (image.isNull() || !m_previewFiles.contains(key) || !m_attachmentLinks.contains(key)) return;
@@ -1779,6 +1890,7 @@ void ActivityView::startRender()
     result->m_fallbackPrompt = m_fallbackPrompt;
     result->m_expanded = m_expanded; result->m_deliveryKeys = m_deliveryKeys; result->m_attachmentBindings = m_attachmentBindings;
     result->m_previews = m_previews;
+    result->m_mediaTiles = m_mediaTiles;
     result->m_voiceError=m_voiceError;
     result->m_dark = m_dark; result->m_tracked = m_tracked; result->m_scale = m_scale; result->m_bubbles = m_bubbles;
     result->processesEnabled = ProcessSettings::enabled();
@@ -1926,6 +2038,10 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
     for (auto it = result->m_previewFiles.cbegin(); it != result->m_previewFiles.cend(); ++it)
         if (!m_previewFiles.contains(it.key())) requestPreviews.append(it.key());
     m_previewFiles = result->m_previewFiles;
+    QStringList requestMedia;
+    for (auto it = result->m_mediaLinks.cbegin(); it != result->m_mediaLinks.cend(); ++it)
+        if (!m_mediaRequested.contains(it.key())) { m_mediaRequested.insert(it.key()); requestMedia.append(it.key()); }
+    m_mediaLinks = result->m_mediaLinks;
     if (hasContent) m_initial = false;
     const auto anchors = bookmarks(m_browser->document());
     const auto cursor = m_browser->textCursor();
@@ -1945,6 +2061,8 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
     // dimensions permit the current resource to be installed without relayout.
     for (auto it = m_previews.cbegin(); it != m_previews.cend(); ++it)
         paintDocument(document)->addResource(QTextDocument::ImageResource, QUrl("hgs-thumbnail:" + it.key()), it.value());
+    for (auto it = m_mediaTiles.cbegin(); it != m_mediaTiles.cend(); ++it)
+        paintDocument(document)->addResource(QTextDocument::ImageResource, QUrl("hgs-media:" + it.key()), it.value());
     document->setParent(m_browser);
     m_browser->setDocument(document);
     for(const auto &key:m_voiceLinks.keys())updateVoiceImage(key);
@@ -1976,6 +2094,12 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
     } else if (follow) { jumpToLatest(); scheduleFollow(); }
     else updateJumpButton();
     m_browser->setUpdatesEnabled(updatesEnabled);
+    for (const auto &key : requestMedia) {
+        const auto session = m_sessionKey;
+        QTimer::singleShot(0, this, [this, key, session] {
+            if (session == m_sessionKey && m_mediaLinks.contains(key)) emit mediaPreviewRequested(key, m_mediaLinks.value(key));
+        });
+    }
     for (const auto &key : requestPreviews) {
         const auto session = m_sessionKey, conversation = m_conversation;
         QTimer::singleShot(0, this, [this, key, session, conversation] {
@@ -1988,6 +2112,7 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
 void ActivityView::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
+    for (auto *movie : std::as_const(m_movies)) movie->state() == QMovie::Paused ? movie->setPaused(false) : movie->start();
     if (m_renderDirty) render(false);
 }
 
@@ -2033,6 +2158,7 @@ void ActivityView::playVoice(const QString &key,const QString &path,const QStrin
 }
 void ActivityView::hideEvent(QHideEvent *event)
 {
+    for (auto *movie : std::as_const(m_movies)) movie->setPaused(true);
     if(m_videoDialog)m_videoDialog->close();
     m_voicePendingSeek=-1;m_voiceStartAfterLoad=false;m_voicePressed.clear();
     if(m_voicePlayer)m_voicePlayer->stop();m_voiceLoading.clear();updateVoiceImage(m_voiceKey);

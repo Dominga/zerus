@@ -60,6 +60,8 @@ public:
     // The document as copied: chips and list markers spelled out.
     QString plainText() const;
     void setAttachmentPreview(const QString &key, const QImage &image);
+    // WhiteWh fork: the file of a media preview on this computer, or why there is none.
+    void setMediaPreview(const QString &key, const QString &path, const QString &error = {});
     void playVoice(const QString &key, const QString &path, const QString &error = {});
     // Journal HTML generations. Tests verify that unchanged polls skip them.
     int renderPasses() const { return m_renderPasses; }
@@ -75,6 +77,9 @@ signals:
     void attachmentActivated(const QJsonObject &file);
     void attachmentPreviewRequested(const QString &key, const QJsonObject &file);
     void voicePlaybackRequested(const QString &key, const QJsonObject &file);
+    // WhiteWh fork: a picture, animation or video the agent names; `path` is set once read.
+    void mediaPreviewRequested(const QString &key, const QString &href);
+    void mediaActivated(const QString &key, const QString &href, const QString &path);
     void queueSendNowRequested(const QString &queueId);
     void messageActionRequested(const QString &id, const QString &action);
     void processRequested(const QString &id);
@@ -97,6 +102,7 @@ private:
     void updateJumpButton();
     void positionJumpButton();
     void activateLink(const QUrl &url);
+    void clearMedia();
     void copyMarkdown(const QString &key);
     QString copyButton(const QString &state, const QString &key) const;
     QString copyKeyAt(const QPoint &position) const;
@@ -140,6 +146,10 @@ private:
     bool m_voiceStartAfterLoad = false;
     QHash<QString, QJsonObject> m_previewFiles;
     QHash<QString, QImage> m_previews;
+    QHash<QString, QImage> m_mediaTiles;
+    QHash<QString, QString> m_mediaLinks, m_mediaPaths;
+    QSet<QString> m_mediaRequested;
+    QHash<QString, class QMovie *> m_movies;
     QHash<QString, QPair<QString, QString>> m_messageActions;
     QHash<QString, QString> m_copyTexts;   // copy button key -> the reply's Markdown source
     QString m_copyPressed;

@@ -30,6 +30,7 @@
 #include <QSplitter>
 #include <QScrollBar>
 #include <QListWidget>
+#include "WorkingLine.h"
 #include "GoToDialog.h"
 #include "ShortcutsDialog.h"
 #include <QPushButton>
@@ -6183,6 +6184,18 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     auto *roster = window.findChild<QTextBrowser *>("subagents"); const auto text = roster->toPlainText();
     QVERIFY(text.contains("Inspect <source> & hooks")); QVERIFY(text.contains("1 of 2 completed"));
     QVERIFY(text.contains("In progress")); QVERIFY(text.contains("Reviewer")); QVERIFY(text.contains("Last recorded"));
+    {   // WhiteWh fork: while the session works, the line above the message field names the plan's current step.
+        auto *working = static_cast<WorkingLine *>(window.findChild<QWidget *>("workingLine")); QVERIFY(working); QVERIFY(!working->isVisible());
+        auto busy = data; busy["activity"] = "busy"; busy["phase"] = "tool"; busy["tool_detail"] = "cargo build";
+        busy["turn_started"] = double(QDateTime::currentSecsSinceEpoch() - 75);
+        client->inspectionReady({}, "codex/hgs/dashboard", busy);
+        QTRY_VERIFY(working->isVisible()); QCOMPARE(working->text(), QString("Implement right panel"));
+        if (const auto preview = qEnvironmentVariable("HGS_WORKING_PREVIEW"); !preview.isEmpty()) QVERIFY(working->grab().save(preview));
+        busy["task_lists"] = QJsonObject{}; client->inspectionReady({}, "codex/hgs/dashboard", busy);
+        QTRY_COMPARE(working->text(), QString("cargo build"));
+        QCOMPARE(WorkingLine::elapsed(564), QString("9m 24s")); QCOMPARE(WorkingLine::elapsed(3900), QString("1h 05m"));
+        client->inspectionReady({}, "codex/hgs/dashboard", data); QTRY_VERIFY(!working->isVisible());
+    }
     inspector->setCurrentIndex(2); QCOMPARE(tabs->currentIndex(), 0);
     splitter->setSizes({420, 310});
     QTest::mouseClick(toggle, Qt::LeftButton); QTest::qWait(40);

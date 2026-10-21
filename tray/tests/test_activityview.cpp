@@ -221,6 +221,7 @@ private slots:
     void groupsToolsAndKeepsExpansion();
     void idleNotificationsStayOutOfTheTimeline();
     void rejectsMarkupResourcesAndUnsafeLinks();
+    void agentMediaShowsPreviewsUnderTheMessage();
     void preservesLiteralUserMessages_data();
     void preservesLiteralUserMessages();
     void nativeQuestionReplies_data();
@@ -1887,6 +1888,44 @@ void TestActivityView::groupsToolsAndKeepsExpansion()
     QVERIFY(browser->toPlainText().size() < expandedAttentionLength);
     view.setSessionKey("mac/new"); view.setActivity({}, events);
     QVERIFY(!browser->toPlainText().contains("hidden-command-first"));
+}
+
+// WhiteWh fork: a picture or video the agent names gets a preview under its
+// message; the owner hands the file over and a click opens it.
+void TestActivityView::agentMediaShowsPreviewsUnderTheMessage()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto picture = dir.filePath("shot.png");
+    QImage red(40, 30, QImage::Format_RGB32); red.fill(Qt::red); QVERIFY(red.save(picture));
+    SettledActivityView view; view.resize(560, 520); view.show();
+    QSignalSpy wanted(&view, &ActivityView::mediaPreviewRequested);
+    const auto text = QString("Done: ![shot](%1)\n\nRecorded [the clip](%2) and [notes](%3).")
+        .arg(QUrl::fromLocalFile(picture).toString(), QUrl::fromLocalFile(dir.filePath("clip.mp4")).toString(), QUrl::fromLocalFile(dir.filePath("notes.txt")).toString());
+    view.setActivity({}, {journalEvent(1, "Stop", text)});
+    QTRY_COMPARE(wanted.size(), 2);
+    auto *browser = view.browser();
+    QStringList tiles;
+    for (auto block = browser->document()->begin(); block.isValid(); block = block.next())
+        for (auto it = block.begin(); !it.atEnd(); ++it)
+            if (it.fragment().charFormat().isImageFormat() && it.fragment().charFormat().toImageFormat().name().startsWith("hgs-media:"))
+                tiles.append(it.fragment().charFormat().toImageFormat().name());
+    QCOMPARE(tiles.size(), 2);
+    QString pictureKey;
+    for (const auto &request : wanted) if (request[1].toString().endsWith("shot.png")) pictureKey = request[0].toString();
+    QVERIFY(!pictureKey.isEmpty());
+    const auto placeholder = browser->document()->resource(QTextDocument::ImageResource, QUrl("hgs-media:" + pictureKey)).value<QImage>();
+    view.setMediaPreview(pictureKey, picture);
+    const auto shown = browser->document()->resource(QTextDocument::ImageResource, QUrl("hgs-media:" + pictureKey)).value<QImage>();
+    QVERIFY(!shown.isNull()); QVERIFY(shown != placeholder);
+    QCOMPARE(QColor(shown.pixel(shown.width() / 2, shown.height() / 3)), QColor(Qt::red));
+    if (const auto preview = qEnvironmentVariable("HGS_MEDIA_PREVIEW"); !preview.isEmpty()) { QTest::qWait(100); QVERIFY(view.grab().save(preview)); }
+    QSignalSpy opened(&view, &ActivityView::mediaActivated);
+    activate(browser, "hgs-media:" + pictureKey);
+    QCOMPARE(opened.size(), 1); QCOMPARE(opened[0][2].toString(), picture);
+    // A refresh keeps the loaded preview.
+    view.setActivity({}, {journalEvent(1, "Stop", text), journalEvent(2, "PreToolUse", "ls")});
+    QTRY_VERIFY(browser->document()->resource(QTextDocument::ImageResource, QUrl("hgs-media:" + pictureKey)).value<QImage>() == shown);
+    QCOMPARE(wanted.size(), 2);
 }
 
 void TestActivityView::rejectsMarkupResourcesAndUnsafeLinks()

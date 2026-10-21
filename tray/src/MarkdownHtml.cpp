@@ -288,6 +288,10 @@ public:
             break;
         }
         case MD_SPAN_IMG:
+            // WhiteWh fork: the policy sees the picture's source, so that Activity can
+            // show a picture of the session's computer under the message. Nothing
+            // here loads it.
+            if (m_links) m_links(attribute(static_cast<MD_SPAN_IMG_DETAIL *>(detail)->src));
             if (!m_hidden) m_frames.last().html += run(QObject::tr("[Image attachment]"));
             ++m_hidden;
             break;

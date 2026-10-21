@@ -32,6 +32,8 @@
 #include "IronRulesPanel.h"
 #include "SessionLeadPanel.h"
 #include "SessionLeads.h"
+#include "WorkingLine.h"
+#include "MediaViewer.h"
 #include "NewSessionDialog.h"
 #include "ActivityView.h"
 #include "ProcessView.h"
@@ -1033,6 +1035,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         }
         emit refreshRequested();
     });
+    // WhiteWh fork: what the selected session is doing, above the message field.
+    m_workingLine = new WorkingLine; inputColumn->addWidget(m_workingLine);
     inputColumn->addWidget(m_composer);
     connect(m_composer, &MessageComposer::sessionRefreshRequested, this, [this](const QString &key) {
         if (key != m_selectedKey) return;
@@ -1122,6 +1126,28 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 });
         });
     }
+    // WhiteWh fork: pictures, animations and videos the agent names, read from the
+    // session's computer: in place on this one, through the download cache from a peer.
+    for (auto *view : {m_activityView, m_subagentView}) {
+        connect(view, &ActivityView::mediaPreviewRequested, this, [this, view](const QString &key, const QString &href) {
+            if (view == m_subagentView && m_subagentId.isEmpty()) return;
+            loadMedia(view, key, href, false);
+        });
+        connect(view, &ActivityView::mediaActivated, this, [this, view](const QString &key, const QString &href, const QString &path) {
+            if (!path.isEmpty() && QFileInfo::exists(path)) { (new MediaViewer(path, QFileInfo(path).fileName() + tr(" — Zerus"), this))->show(); return; }
+            loadMedia(view, key, href, true);
+        });
+    }
+    connect(&m_client, &HgsClient::fileDownloaded, this, [this](quint64 request, const QString &destination) {
+        const auto media = m_mediaDownloads.take(request); if (!media.view) return;
+        media.view->setMediaPreview(media.key, destination);
+        if (media.open) (new MediaViewer(destination, QFileInfo(destination).fileName() + tr(" — Zerus"), this))->show();
+    });
+    connect(&m_client, &HgsClient::fileDownloadFailed, this, [this](quint64 request, const QString &error) {
+        const auto media = m_mediaDownloads.take(request); if (!media.view) return;
+        media.view->setMediaPreview(media.key, {}, error);
+        if (media.open) showNotice(error, true);
+    });
     m_activityStack->addWidget(subagentPage);
     for (auto *view : {m_activityView, m_subagentView}) {
         // Activity's column edges and menu change the preference for every column.
@@ -1841,6 +1867,14 @@ void SessionsWindow::applyTheme()
     const QString bg = colors.background;
     const QString hover = colors.hover;
     const QString selected = colors.selected;
+    // WhiteWh fork: selected text needs a colour apart from the canvas. A skin whose
+    // selected rows are a faint tint of it (Compact) selects text in its accent instead.
+    QString textSelection = selected;
+    if (qAbs(QColor(selected).lightness() - QColor(bg).lightness()) < 24) {
+        const QColor accent(m_accent), canvas(bg);
+        const auto mix = [](int a, int b) { return qRound(a * 0.38 + b * 0.62); };
+        textSelection = QColor(mix(accent.red(), canvas.red()), mix(accent.green(), canvas.green()), mix(accent.blue(), canvas.blue())).name();
+    }
     // A saved change to a user skin applies at once; editors may replace the file.
     if (!m_skinWatcher) {
         m_skinWatcher = new QFileSystemWatcher(this);
@@ -1997,6 +2031,9 @@ void SessionsWindow::applyTheme()
     )").arg(bg, m_fg, m_surface, m_border, m_accent, m_muted, hover,
               colors.accentText, colors.accentHover, selected,
               colors.inset, tone("Error", m_dark).name()) + workspaceScrollbars(m_dark) + skin.stylesheet);
+    if (textSelection != selected)
+        setStyleSheet(styleSheet().replace(QStringLiteral("selection-background-color:") + selected + ';',
+            QStringLiteral("selection-background-color:") + textSelection + QStringLiteral("; selection-color:") + m_fg + ';'));
     for (auto *button : findChildren<QPushButton *>()) if (button != m_windowPin && !button->property("glyph").toString().isEmpty())
         button->setIcon(workspaceIcon(button->property("glyph").toString(), QColor(button->objectName() == "updatesAvailable" || button->objectName() == "restartToUpdate" ? m_accent : m_muted)));
     updateWindowPinAppearance(); updateWorktreeCleanupOffer();
@@ -3595,6 +3632,54 @@ template<typename Control> void explainContextAction(Control *control, const QSt
 }
 }
 
+// WhiteWh fork: a media file the agent names. A preview of a peer's video waits
+// for a click: it would download the whole file.
+void SessionsWindow::loadMedia(ActivityView *view, const QString &key, const QString &href, bool open)
+{
+    const auto *entry = selected(); if (!entry) return;
+    const bool local = entry->host.isEmpty();
+    const auto target = SessionFileReference::parse(href);
+    const auto path = SessionFileReference::resolve(target, m_subagentId.isEmpty() ? selectedDirectory() : m_subagentCwd, local ? QDir::homePath() : QString());
+    if (path.isEmpty()) { view->setMediaPreview(key, {}, tr("The session folder is unknown")); return; }
+    if (local) {
+        const QFileInfo file(path);
+        if (!file.isFile()) { view->setMediaPreview(key, {}, tr("Not found on this computer")); return; }
+        if (!open && file.size() > MediaFiles::PreviewLimit) { view->setMediaPreview(key, {}, tr("Too large for a preview")); return; }
+        view->setMediaPreview(key, path);
+        if (open) (new MediaViewer(path, file.fileName() + tr(" — Zerus"), this))->show();
+        return;
+    }
+    if (!entry->online) { view->setMediaPreview(key, {}, tr("%1 is offline").arg(entry->machine)); return; }
+    if (!open && MediaFiles::kind(path) == MediaFiles::Kind::Video) { view->setMediaPreview(key, {}, tr("On %1 · click to play").arg(entry->machine)); return; }
+    if (open) showNotice(tr("Loading %1 from %2…").arg(QFileInfo(path).fileName(), entry->machine));
+    m_mediaDownloads.insert(m_client.downloadFileToCache(entry->host, path), {view, key, open});
+}
+
+// WhiteWh fork: the working line shows the plan's current step, else the tool
+// in use, else the activity the agent reports, while the selected live session works.
+void SessionsWindow::updateWorkingLine(const Entry *entry)
+{
+    if (!m_workingLine) return;
+    const QString phase = m_details.value("phase").toString(), activity = m_details.value("activity").toString();
+    const bool working = entry && entry->online && entry->session.state == "running" && entry->session.processState != "exited"
+        && m_inspectError.isEmpty() && activity == "busy" && phase != "approval" && phase != "question";
+    QString text;
+    if (working) {
+        const auto main = m_details.value("task_lists").toObject().value("main").toObject();
+        if (main.value("run_id").toString() == m_details.value("run_id").toString())
+            for (const auto &value : main.value("items").toArray())
+                if (value.toObject().value("status") == "in_progress") { text = value.toObject().value("title").toString(); break; }
+        if (text.isEmpty()) text = m_details.value("tool_detail").toString();
+        if (text.isEmpty()) text = m_details.value("current_tool").toString();
+        if (text.isEmpty()) text = m_details.value("activity_detail").toString();
+        if (text.isEmpty()) text = m_details.value("activity_summary").toString();
+        text = text.simplified();
+        if (text.isEmpty()) text = tr("Working");
+    }
+    m_workingLine->setColors(QColor(m_accent), QColor(m_fg), QColor(m_muted));
+    m_workingLine->setWorking(working, text, m_details.value("turn_started").toDouble());
+}
+
 void SessionsWindow::renderDetails()
 {
     updateWorktreeCleanupOffer();
@@ -3615,6 +3700,7 @@ void SessionsWindow::renderDetails()
         : tr("Mark this session's current notification as read. This does not answer a pending question."));
     renderAccountUsage();
     updateWorktrees();
+    updateWorkingLine(entry);
     const bool recorded=!entry || !entry->online || entry->session.state=="archived" || entry->session.state=="paused" || entry->session.processState=="exited" || !m_inspectError.isEmpty();
     if(ProcessSettings::enabled())m_processes->setSession(entry?entry->host:QString(),entry?entry->session.name:QString(),entry?entry->session.archiveId:QString(),entry?m_details:QJsonObject(),entry&&entry->online,!recorded);
     const auto processData=m_details.value("processes").toObject();

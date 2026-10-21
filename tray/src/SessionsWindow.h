@@ -9,6 +9,7 @@ class ToolbarChip;
 class SettingsPage;
 class SwarmController;
 
+#include <QPointer>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QTimer>
@@ -158,6 +159,10 @@ private:
     bool entryNeedsAttention(const Entry &entry) const;
     bool entryHasDraft(const Entry &entry) const;
     void renderDetails();
+    void updateWorkingLine(const Entry *entry);
+    void loadMedia(class ActivityView *view, const QString &key, const QString &href, bool open);
+    struct MediaDownload { QPointer<class ActivityView> view; QString key; bool open = false; };
+    QHash<quint64, MediaDownload> m_mediaDownloads;   // WhiteWh fork
     void updateWorktrees();
     void filterFolder(const QString &host, const QString &path, bool checkout);
     void openRelatedSession(const QString &host, const QString &name, const QString &archive);
@@ -519,6 +524,7 @@ private:
     QSet<QString> m_expandedSessions;
     QJsonObject m_subagentDetails;
     MessageComposer *m_composer = nullptr, *m_subagentComposer = nullptr;
+    class WorkingLine *m_workingLine = nullptr;   // WhiteWh fork
     QHash<quint64, QString> m_childMessages;
     QuestionCard *m_question = nullptr;
     QList<ActivityWidth::ColumnLayout *> m_activityColumns;   // content sharing Activity's reading column

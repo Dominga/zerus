@@ -349,3 +349,67 @@ fn held_admission_refuses_changed_revision_before_journal_or_runtime() {
     // This exercises the shared admission routine, not Windows lock/process
     // behavior. The native Save/Start ordering case remains a separate gate.
 }
+
+/// `inspect` reports this conversation; a send reaches native afterwards.
+struct Unconfirmed {
+    conversation: Value,
+    writes: Cell<usize>,
+}
+impl Native for Unconfirmed {
+    async fn call(&self, call: Call) -> NativeResult {
+        if call.argv.first().map(String::as_str) == Some("inspect") {
+            return Ok(Output::Json(
+                json!({"name":"codex/project/test","run_id":"run","conversation_id":self.conversation,"agent":"codex"}),
+            ));
+        }
+        assert_eq!(call.argv.first().map(String::as_str), Some("send"));
+        self.writes.set(self.writes.get() + 1);
+        Ok(Output::Json(json!({"status":"submitted"})))
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn windows_send_reaches_a_launch_whose_conversation_is_not_confirmed_yet() {
+    // (conversation inspect reports, conversation the phone expects, delivered)
+    for (reported, expected, delivered) in [
+        (Value::Null, json!(""), true),
+        (json!(""), json!(""), true),
+        (json!("conversation"), json!("conversation"), true),
+        (Value::Null, json!("conversation"), false),
+        (json!("conversation"), json!(""), false),
+        (json!("conversation"), json!("other"), false),
+    ] {
+        let scratch = Scratch::new("windows-unconfirmed");
+        let connector = Connector::new(
+            Unconfirmed {
+                conversation: reported.clone(),
+                writes: Cell::new(0),
+            },
+            Journal::open(&scratch.path("state"), "fixture", EPOCH).unwrap(),
+            Settings {
+                interval: 5.0,
+                binding: "fixture".into(),
+                default_timeout: 45.0,
+                clock_scale: 1.0,
+            },
+            Box::new(|| EPOCH),
+        );
+        connector.flags.set(Flags::default().windows_local());
+        connector
+            .state
+            .borrow_mut()
+            .sessions
+            .insert("codex/project/test".into());
+        let request = json!({"request_id":"00000000-0000-4000-8000-000000000012","operation":"send","session":"codex/project/test",
+            "payload":{"request_id":"00000000-0000-4000-8000-000000000012","text":"fixture input","expected_run_id":"run","expected_conversation_id":expected}});
+        let answer = finished(connector.execute(request).await.unwrap());
+        assert_eq!(
+            answer["state"],
+            if delivered { "completed" } else { "failed" },
+            "{reported} {expected} {answer}"
+        );
+        assert_eq!(connector.native.writes.get(), usize::from(delivered), "{reported} {expected}");
+        if !delivered {
+            assert_eq!(answer["error"], "fresh native target identity did not match", "{answer}");
+        }
+    }
+}

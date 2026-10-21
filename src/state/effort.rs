@@ -114,7 +114,7 @@ fn claude_settings(
                 .as_str()
                 .or(event["content"].as_str())?;
             let (name, effort) = claude_receipt(text)?;
-            let model = models.iter().find(|model| model.label == name)?;
+            let model = models.iter().find(|model| model.label.eq_ignore_ascii_case(&name) || model.id == name)?;
             Some((model.id.clone(), effort))
         }
         _ => None,
@@ -124,21 +124,54 @@ fn claude_settings(
 /// Claude's /model result: "Set model to `Name` for this session only", or
 /// "... and saved as your default for new sessions", with an optional
 /// " with `level` effort" when the picker changed effort.
+/// WhiteWh fork: newer Claude Code (2.1.25x) writes "Model set to Name for this
+/// session only", its name and effort level with or without backticks, and may
+/// color them; both forms are read.
 fn claude_receipt(text: &str) -> Option<(String, String)> {
     let text = text
         .strip_prefix("<local-command-stdout>")?
         .strip_suffix("</local-command-stdout>")?;
-    let (name, rest) = text.strip_prefix("Set model to `")?.split_once('`')?;
-    let rest = rest
-        .strip_prefix(" for this session only")
-        .or_else(|| rest.strip_prefix(" and saved as your default for new sessions"))?;
+    let text = strip_ansi(text);
+    let rest = text
+        .strip_prefix("Set model to ")
+        .or_else(|| text.strip_prefix("Model set to "))?;
+    const SCOPES: [&str; 2] = [" for this session only", " and saved as your default for new sessions"];
+    let (name, rest) = match rest.strip_prefix('`') {
+        Some(quoted) => quoted.split_once('`')?,
+        None => {
+            let end = SCOPES.iter().filter_map(|scope| rest.find(scope)).min()?;
+            rest.split_at(end)
+        }
+    };
+    let rest = SCOPES.iter().find_map(|scope| rest.strip_prefix(scope))?;
     let effort = rest
-        .strip_prefix(" with `")
-        .and_then(|rest| rest.split_once("` effort"))
-        .map(|(level, _)| level)
+        .strip_prefix(" with ")
+        .and_then(|rest| rest.split_once(" effort"))
+        .map(|(level, _)| level.trim_matches('`'))
         .filter(|level| valid(level))
         .unwrap_or_default();
+    let name = name.trim();
     (!name.is_empty()).then(|| (name.to_owned(), effort.to_owned()))
+}
+
+/// The text without terminal color sequences (ESC [ ... letter).
+fn strip_ansi(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        plain.push(ch);
+    }
+    plain
 }
 
 /// An unindented full-width rule, such as the borders of Claude's composer.
@@ -345,7 +378,7 @@ fn history(record: &Value) -> Settings {
                 }
                 let markers: &[&[u8]] = match agent {
                     "kimi" => &[b"thinkingEffort"],
-                    "claude" => &[b"\"requestedModel\"", b"Set model to `"],
+                    "claude" => &[b"\"requestedModel\"", b"Set model to ", b"Model set to "],
                     _ => &[b"turn_context"],
                 };
                 if !markers
@@ -1639,7 +1672,7 @@ fn claude_receipt_since(path: &Path, conversation: &str, offset: u64, name: &str
         }
         let text = event["message"]["content"].as_str().or(event["content"].as_str());
         if let Some((receipt, effort)) = text.and_then(claude_receipt) {
-            if receipt == name && text.is_some_and(|text| text.contains("` for this session only")) {
+            if receipt.eq_ignore_ascii_case(name) && text.is_some_and(|text| strip_ansi(text).contains(" for this session only")) {
                 return Ok(Some(effort));
             }
         }
@@ -2835,6 +2868,14 @@ mod tests {
         }
         assert_eq!(claude_receipt("<local-command-stdout>Set model to `Sonnet 5.5` and saved as your default for new sessions</local-command-stdout>"),
             Some(("Sonnet 5.5".into(), String::new())));
+        // WhiteWh fork: the wording of Claude Code 2.1.25x, plain or colored.
+        assert_eq!(claude_receipt("<local-command-stdout>Model set to Opus 5.5 for this session only</local-command-stdout>"),
+            Some(("Opus 5.5".into(), String::new())));
+        assert_eq!(claude_receipt("<local-command-stdout>Model set to \u{1b}[1mHaiku 5.5\u{1b}[22m for this session only with high effort</local-command-stdout>"),
+            Some(("Haiku 5.5".into(), "high".into())));
+        assert_eq!(claude_receipt("<local-command-stdout>Model set to `Sonnet 5.5` and saved as your default for new sessions with `low` effort</local-command-stdout>"),
+            Some(("Sonnet 5.5".into(), "low".into())));
+        assert_eq!(claude_receipt("<local-command-stdout>Model set to Opus 5.5 (session-scoped, not persisted)</local-command-stdout>"), None);
         let other = json!({"agent":"claude","agent_home":home.path(),"conversation_id":"another","transcript":path});
         assert!(history(&other).model.is_empty());
         assert!(settings_reason(&other, &catalog(&other)).contains("confirm this conversation"));

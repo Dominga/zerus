@@ -85,6 +85,13 @@ pub fn hgs(config: &Config, alias: &str, args: &[String]) -> Result<String> {
     }
 }
 
+/// The `ConnectTimeout` option for `alias`: a Windows computer's sshd starts a
+/// session process before its banner, which over a relayed tailnet path can take
+/// longer than the few seconds a POSIX peer gets.
+pub fn connect_timeout(config: &Config, alias: &str, seconds: u32) -> String {
+    format!("ConnectTimeout={}", if is_windows(config, alias) { seconds.max(10) } else { seconds })
+}
+
 /// `cmd.exe` lines of the check report: the same keys the POSIX probe prints.
 pub const PROBE: &str = r#"echo.& echo __HGS_MACHINE__& echo os=%OS%& echo arch=%PROCESSOR_ARCHITECTURE%& (if exist "%USERPROFILE%\.local\bin\hgs.exe" ("%USERPROFILE%\.local\bin\hgs.exe" --version) else (echo.))"#;
 

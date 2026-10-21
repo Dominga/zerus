@@ -838,7 +838,7 @@ fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
                 "-o",
                 "BatchMode=yes",
                 "-o",
-                "ConnectTimeout=3",
+                &crate::windows_peer::connect_timeout(config, peer, 3),
                 peer,
                 peer_ls(config, peer, archives).as_str(),
             ])
@@ -908,7 +908,7 @@ fn remote(
                 "-o".into(),
                 "BatchMode=yes".into(),
                 "-o".into(),
-                "ConnectTimeout=3".into(),
+                crate::windows_peer::connect_timeout(config, target, 3),
             ];
             let mut all = vec!["ls".into(), "--local".into()];
             all.extend(args.clone());
@@ -943,7 +943,7 @@ fn remote(
                 "-o".into(),
                 "BatchMode=yes".into(),
                 "-o".into(),
-                "ConnectTimeout=3".into(),
+                crate::windows_peer::connect_timeout(config, target, 3),
             ];
             let mut all = vec![command.into()];
             all.extend(args.clone());
@@ -1149,7 +1149,7 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
                 "-o",
                 "BatchMode=yes",
                 "-o",
-                "ConnectTimeout=3",
+                &crate::windows_peer::connect_timeout(config, peer, 3),
                 peer,
             ]
             .into_iter()

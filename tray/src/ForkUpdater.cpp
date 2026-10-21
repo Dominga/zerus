@@ -154,10 +154,19 @@ Step 'Waiting for Zerus to close...' 10
 [void](WaitExit $ParentPid 120)
 if (-not (WaitIdle 120)) { Start-Process -FilePath $gui; Finish 'Programs still run from the installation; the update waits for the next restart.' $true; exit 1 }
 Step 'Setting the current build aside...' 45
+# The old rollback copy goes only once the current build can move; a scanner or
+# indexer may hold the folder for a moment, so the move is tried for 20 seconds.
+$aside = $Install.TrimEnd('') + '.aside'
+$problem = $null
+for ($try = 0; $try -lt 40; $try++) {
+    try { Move-Item -LiteralPath $Install -Destination $aside; $problem = $null; break }
+    catch { $problem = "$_"; Pump 500 }
+}
+if ($problem) { Start-Process -FilePath $gui; Finish "Could not set the current build aside: $problem" $true; exit 1 }
 try {
     if (Test-Path -LiteralPath $Previous) { Remove-Item -LiteralPath $Previous -Recurse -Force }
-    Move-Item -LiteralPath $Install -Destination $Previous
-} catch { Start-Process -FilePath $gui; Finish "Could not set the current build aside: $_" $true; exit 1 }
+    Move-Item -LiteralPath $aside -Destination $Previous
+} catch { Log "Kept the current build as $aside`: $_"; $Previous = $aside }
 Step 'Moving the new build in...' 60
 try { Move-Item -LiteralPath $New -Destination $Install }
 catch {
@@ -469,6 +478,8 @@ bool ForkUpdater::startInstall()
     QProcess process;
     process.setProgram(QDir(qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"))).filePath(QStringLiteral("System32/WindowsPowerShell/v1.0/powershell.exe")));
     process.setArguments(args);
+    // Never inside the folder it moves: a current directory there keeps it in use.
+    process.setWorkingDirectory(QDir::tempPath());
 #ifdef Q_OS_WIN
     // CREATE_NO_WINDOW: the helper outlives Zerus without a console window; its
     // banner is its only window.

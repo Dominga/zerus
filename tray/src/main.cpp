@@ -266,6 +266,18 @@ int main(int argc, char *argv[])
 #endif
     QApplication app(argc, argv);
 #ifdef Q_OS_WIN
+    // WhiteWh fork: started from its own folder (a double click in Explorer), Zerus
+    // and every program it starts would hold that folder as their current one,
+    // and the fork updater could not set the folder aside. Nothing reads relative
+    // paths against it.
+    {
+        const auto folder = QDir(QCoreApplication::applicationDirPath()).canonicalPath();
+        const auto current = QDir::current().canonicalPath();
+        if (!folder.isEmpty() && (current.compare(folder, Qt::CaseInsensitive) == 0 || current.startsWith(folder + '/', Qt::CaseInsensitive)))
+            QDir::setCurrent(QDir::homePath());
+    }
+#endif
+#ifdef Q_OS_WIN
     // One hgs.exe for every operation: bundled next to hgs-tray.exe, else PATH;
     // the stable CLI once local sessions are enabled (stableHgs below).
     const bool hgsConfigured = !cfg.hgsPath.isEmpty();

@@ -174,6 +174,9 @@ fn connect(config: &Config, name: &str, alias: &str) -> Option<crate::host::pipe
     let mut command = Command::new(program);
     command
         .args(["__peer", "broker", alias])
+        // Never the folder of the program that asked: a lasting broker would keep
+        // a portable installation in use for its updater.
+        .current_dir(&config.dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

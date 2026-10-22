@@ -242,7 +242,11 @@ class ArchivePageTests(OperationCase, BlackBoxCase):
         self.assertEqual(self.journal.row(request["request_id"])["state"], "failed")
 
     async def test_heartbeats_list_live_sessions_and_a_bounded_preview(self):
-        self.script(preview=archive_page(archived_row(PAGED, 20.0, prompt="p" * 300, private="kept"), total=5))
+        preferences = {"conversation_id": "saved-conversation", "muted": True, "revision": 2,
+                       "suppressed": {"reply_id": None, "attention_signature": None, "optional_question_ids": [],
+                                      "main_attention": None, "child_attention": {}}}
+        self.script(preview=archive_page(archived_row(PAGED, 20.0, prompt="p" * 300, private="kept",
+                                                      notification_preferences=preferences), total=5))
         process = await self.launch()
         await self.until(lambda: len(self.relay.heartbeats()) >= 2, what="two heartbeats", process=process)
         snapshot = self.relay.heartbeats()[-1].body["snapshot"]
@@ -252,6 +256,8 @@ class ArchivePageTests(OperationCase, BlackBoxCase):
         self.assertEqual(len(preview), 1)
         self.assertEqual(len(preview[0]["prompt"]), 240)
         self.assertNotIn("private", preview[0])
+        # The relay refuses a known conversation whose row lacks its preferences.
+        self.assertEqual(preview[0]["notification_preferences"], preferences)
         self.assertIn("archive_list", snapshot["mobile_capabilities"]["operations"])
         listings = self.since(0, "ls")
         self.assertTrue(listings and all(call["argv"] == ["ls", "--json", "--local", "--no-archives"]

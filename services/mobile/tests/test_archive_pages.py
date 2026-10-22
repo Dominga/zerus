@@ -20,6 +20,19 @@ class ArchiveValidation(unittest.TestCase):
             with self.assertRaises(ValueError):archives.validate(payload)
         with self.assertRaises(ValueError):validate_request(dict(request_id=str(uuid.uuid4()),computer_id=str(uuid.uuid4()),operation='archive_list',session='codex/example/x',payload={}))
 
+    def test_preview_keeps_notification_preferences_unchanged(self):
+        # The relay's preference ledger refuses a known conversation without them.
+        preferences={'conversation_id':'c','muted':True,'revision':3,'suppressed':{'reply_id':'r','attention_signature':None,
+            'optional_question_ids':[],'main_attention':None,'child_attention':{}}}
+        rows=[dict(name='claude/example/a',conversation_id='c',archive_id='10000000-0000-4000-8000-000000000002',state='archived',
+                   archived_at=200,notification_preferences=preferences),
+              dict(name='claude/example/b',conversation_id='d',archive_id='10000000-0000-4000-8000-000000000001',state='archived',
+                   archived_at=100,notification_preferences=None)]
+        value=dict(version=1,sessions=rows,next_cursor='',total=2,**{'from':0,'until':253402300800,'query':''})
+        preview,_=archives.preview(value)
+        self.assertEqual(preview[0]['notification_preferences'],preferences)
+        self.assertIn('notification_preferences',preview[1]);self.assertIsNone(preview[1]['notification_preferences'])
+
 class ArchiveConnector(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)

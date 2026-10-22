@@ -124,6 +124,45 @@ fn row() -> Value {
     json!({"name":"s","run_id":"r","conversation_id":"c","phase":"input","activity":"idle","attention_signature":"a","reply_id":"p","notification_preferences":{"conversation_id":"c","muted":false,"revision":0,"suppressed":{"reply_id":null,"attention_signature":null,"optional_question_ids":[],"main_attention":null,"child_attention":{}}}})
 }
 
+#[tokio::test]
+async fn an_archived_preview_row_of_a_known_conversation_must_carry_its_preferences() {
+    // A paging gateway lists live sessions and adds a preview of recent
+    // archives. Once a conversation the ledger knows is archived, only its
+    // preview row names it; without its preferences every heartbeat is refused.
+    let f = Fixture::new().await;
+    let mut live = row();
+    live["name"] = json!("claude/example/x");
+    live["conversation_id"] = json!("x");
+    live["notification_preferences"]["conversation_id"] = json!("x");
+    live["notification_preferences"]["muted"] = json!(true);
+    live["notification_preferences"]["revision"] = json!(1);
+    f.beat(&json!({"sessions":[live.clone()]})).await;
+    let archived = json!({"name":"claude/example/x","run_id":"r","conversation_id":"x",
+        "state":"archived","archive_id":"00000000-0000-4000-8000-00000000000a","archived_at":10.0,
+        "phase":"idle","activity":"idle","notification_preferences":live["notification_preferences"]});
+    let mut bare = archived.clone();
+    bare.as_object_mut()
+        .unwrap()
+        .remove("notification_preferences");
+    assert_eq!(
+        heartbeat(&f, &bare).await.unwrap_err().0,
+        zerus_relay::error::Error::CONFLICT.0
+    );
+    heartbeat(&f, &archived).await.unwrap();
+    f.close().await;
+}
+
+async fn heartbeat(f: &Fixture, row: &Value) -> zerus_relay::error::Result<()> {
+    let snapshot = json!({"sessions":[row]});
+    f.store
+        .heartbeat(
+            &f.node,
+            &json!({ "snapshot": snapshot }),
+            &canonical(&snapshot).unwrap(),
+        )
+        .await
+}
+
 #[test]
 fn payload_is_a_strict_mutation_not_a_read_or_acknowledgement() {
     let request = json!({"request_id":"00000000-0000-4000-8000-000000000001","computer_id":"00000000-0000-4000-8000-000000000002","operation":"session_notifications","session":"codex/example/session","payload":{"run_id":"r","conversation_id":"c","muted":true,"expected_revision":0}});

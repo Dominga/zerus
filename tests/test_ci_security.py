@@ -361,7 +361,8 @@ class WorkflowSecurityTests(unittest.TestCase):
             with self.subTest(forbidden=text):
                 self.assertNotIn(text, android.replace("$ANDROID_HOME/", ""))
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", android),
-                         ["actions/checkout", "actions/cache/restore", "actions/cache/save", "actions/upload-artifact"])
+                         ["actions/checkout", "actions/cache/restore", "actions/upload-artifact",
+                          "actions/cache/save", "actions/upload-artifact"])
         listed = self.checks_steps("android")
         names = [re.match(r"      - (?:name|uses): (.*)", step)[1] for step in listed]
         configure, gradle = (names.index("JDK 17 and synthetic Firebase configuration"),
@@ -378,6 +379,24 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("        working-directory: mobile/android\n"
                       "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true\n", listed[gradle])
         self.assertIn("-PzerusFirebase=true", signed)
+        # Retain the three actual JVM suites on success as well as failure, using
+        # only explicit files staged outside all cache paths. Missing any
+        # suite must fail collection rather than silently yielding partial proof.
+        collect = names.index("Collect approval publication and binding unit results")
+        retain = names.index("Retain approval publication and binding unit results")
+        self.assertLess(gradle, collect)
+        self.assertLess(collect, retain)
+        for step in (listed[collect], listed[retain]):
+            self.assertIn("        if: always()\n", step)
+        result_names = ("InspectionPublicationTest", "QuestionSendConfirmationTest", "QuestionReviewProbeTest")
+        self.assertEqual(re.findall(r"^          cp (.+)$", listed[collect], re.M), [
+            f"mobile/android/app/build/test-results/testDebugUnitTest/TEST-app.zerus.mobile.{name}.xml "
+            "artifacts/android-approval-unit-results/" for name in result_names])
+        self.assertNotIn("|| true", listed[collect])
+        self.assertEqual(self.step_paths(listed[retain]), [
+            f"artifacts/android-approval-unit-results/TEST-app.zerus.mobile.{name}.xml"
+            for name in result_names])
+        self.assertIn("          if-no-files-found: error\n", listed[retain])
         # The notices must list exactly the resolved release classpath, with its artifacts,
         # of the same Firebase build; the generator downloads only missing POM files.
         notices = names.index("Android library notices match the release classpath")
@@ -841,6 +860,35 @@ class WorkflowSecurityTests(unittest.TestCase):
                 save = next(step for step in self.checks_steps(name)
                             if f"key: ${{{{ steps.{step_id}.outputs.cache-primary-key }}}}" in step)
                 self.assertIn(f"if: inputs.save_caches && steps.{step_id}.outputs.cache-hit != 'true'\n", save)
+
+    def test_deepseek_fixture_installs_only_its_reviewed_lockfile(self):
+        version = re.search(r'(?m)^const VERSION: &str = "([^"]+)";$', (ROOT / "src/state/dsh.rs").read_text())[1]
+        fixture = ROOT / "scripts/ci/dsh-fixture"
+        manifest = json.loads((fixture / "package.json").read_text())
+        lock = json.loads((fixture / "package-lock.json").read_text())
+        # The adapter's exact version, with no range for npm to float.
+        self.assertEqual(manifest["dependencies"], {"@deepseek-ai/dsh": version})
+        self.assertEqual(lock["lockfileVersion"], 3)
+        packages = lock["packages"]
+        self.assertEqual(packages[""]["dependencies"], manifest["dependencies"])
+        self.assertEqual(packages["node_modules/@deepseek-ai/dsh"]["version"], version)
+        # Every transitive package is a registry tarball checked by SHA-512.
+        for path, entry in packages.items():
+            if not path:
+                continue
+            self.assertTrue(path.startswith("node_modules/"), path)
+            self.assertNotIn("link", entry, path)
+            name = path.rsplit("node_modules/", 1)[1]
+            tarball = f"{name.rsplit('/', 1)[-1]}-{entry['version']}.tgz"
+            self.assertEqual(entry["resolved"], f"https://registry.npmjs.org/{name}/-/{tarball}", path)
+            self.assertRegex(entry["integrity"], r"^sha512-[A-Za-z0-9+/]{86}==$", path)
+        step = next(step for step in self.checks_steps("cli") if "DeepSeek contract fixture" in step)
+        self.assertIn('cp scripts/ci/dsh-fixture/package.json scripts/ci/dsh-fixture/package-lock.json '
+                      '"$RUNNER_TEMP/dsh/"\n', step)
+        self.assertIn('npm ci --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund\n', step)
+        self.assertNotIn("npm install", job((ROOT / ".github/workflows/checks.yml").read_text(), "cli"))
+        workflows = "".join(path.read_text() for path in (ROOT / ".github/workflows").glob("*.yml"))
+        self.assertNotIn("@deepseek-ai/dsh@", workflows)
 
     def test_windows_conpty_pair_is_fetched_once_from_its_pin(self):
         windows = job((ROOT / ".github/workflows/checks.yml").read_text(), "windows-desktop")

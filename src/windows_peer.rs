@@ -81,7 +81,7 @@ pub fn hgs(config: &Config, alias: &str, args: &[String]) -> Result<String> {
     if is_windows(config, alias) {
         command(args)
     } else {
-        Ok(format!("~/.local/bin/hgs {}", platform::join(args)))
+        Ok(format!("~/.local/bin/hgs {}", platform::remote_join(args)))
     }
 }
 

@@ -2699,6 +2699,10 @@ same explicit flag wins again.
 
 See [installation.md](installation.md) for dependency and install commands.
 `~/.local/bin/hgs` must exist on peers because SSH calls use that path.
+The peer's login shell may be any POSIX shell or fish. Arguments are quoted so
+both read them alike, and commands with shell logic, such as the capability
+checks of `wait`, `hooks` and `guide`, `hgs machine check` and
+`hgs machine ssh --directory`, run under `sh -c`.
 
 `hgs status` only reads. For this computer and each peer it shows the hgs
 version, live sessions by what they need (working, needing attention, ready),
@@ -2838,7 +2842,7 @@ needs a console such as Windows Terminal, not the pipes of the mintty Git Bash
 window, and detaches with `Ctrl+B d`.
 
 **Commands.** Commands for another machine (`hgs @host …`) work as on Linux; the
-remote command stays `~/.local/bin/hgs` with POSIX quoting. Until local sessions
+remote command stays `~/.local/bin/hgs` with the same quoting as on Linux. Until local sessions
 are enabled, `ls`, `machine`, `project`, `swarm`, `presence` and `session-host`
 work locally. `account ls` and `account default` without an ID print an empty
 catalog, and `account copy` works between two remote machines. Every other local
@@ -3232,6 +3236,11 @@ from the screen first, so its old signature is no longer acknowledged. It prints
 an unknown session prints `{"ok": false, "error": "not_found"}` and exits with
 status 1. Marks live in `read-marks.json` in the hgs state directory, at most
 eight conversations per session, and follow `hgs rename`.
+Repeating an already-stored current mark reports it as applied without changing
+its timestamp or rewriting the file. Existing-owner writes retain other owners;
+admitting a new owner prunes abandoned entries using the current binding set.
+Unreadable or malformed existing storage is refused rather than reset. The
+global v1 JSON still has population-dependent parse and changed-write costs.
 OpenCode renames publish the new binding and its unchanged v1 read marks before
 retiring the old binding, in shared-read writer order. If a confirmed native title
 change is followed by a local persistence failure, the scoped action remains

@@ -474,6 +474,24 @@ jobs:
       - name: Unit tests and release lint
         working-directory: mobile/android
         run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true
+      - name: Collect approval publication and binding unit results
+        if: always()
+        run: |
+          mkdir -p artifacts/android-approval-unit-results
+          cp mobile/android/app/build/test-results/testDebugUnitTest/TEST-app.zerus.mobile.InspectionPublicationTest.xml artifacts/android-approval-unit-results/
+          cp mobile/android/app/build/test-results/testDebugUnitTest/TEST-app.zerus.mobile.QuestionSendConfirmationTest.xml artifacts/android-approval-unit-results/
+          cp mobile/android/app/build/test-results/testDebugUnitTest/TEST-app.zerus.mobile.QuestionReviewProbeTest.xml artifacts/android-approval-unit-results/
+      - name: Retain approval publication and binding unit results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-approval-unit-results
+          path: |
+            artifacts/android-approval-unit-results/TEST-app.zerus.mobile.InspectionPublicationTest.xml
+            artifacts/android-approval-unit-results/TEST-app.zerus.mobile.QuestionSendConfirmationTest.xml
+            artifacts/android-approval-unit-results/TEST-app.zerus.mobile.QuestionReviewProbeTest.xml
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
       # Third-party notices must list exactly what the published Firebase release
       # build resolves, with the notices inside its resolved artifacts.
       - name: Android library notices match the release classpath
@@ -528,7 +546,7 @@ jobs:
           persist-credentials: false
       - name: Linux test dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config fish
       - name: Pinned tmux with verified input-mode support
         if: runner.os == 'Linux'
         shell: bash
@@ -557,11 +575,16 @@ jobs:
             target
           key: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      # The reviewed lockfile fixes every transitive version and its SHA-512
+      # integrity. The copy keeps node_modules outside the workspace, caches and
+      # artifacts.
       - name: Keyless official DeepSeek contract fixture
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          npm install --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2
+          mkdir -p "$RUNNER_TEMP/dsh"
+          cp scripts/ci/dsh-fixture/package.json scripts/ci/dsh-fixture/package-lock.json "$RUNNER_TEMP/dsh/"
+          npm ci --prefix "$RUNNER_TEMP/dsh" --no-audit --no-fund
           echo "$RUNNER_TEMP/dsh/node_modules/.bin" >> "$GITHUB_PATH"
       - run: bash scripts/ci/cli.sh
       - name: Save Rust cache

@@ -118,9 +118,10 @@ fn http_json(url: &str, token: &str, extra: &[&str]) -> std::result::Result<Valu
         config.push_str(&format!("header = {}\n", json!(header)));
     }
     let mut cmd = Command::new("curl");
+    // The status code follows the body, so a refused token (UNAUTHORIZED)
+    // is told apart from an unreachable service.
     cmd.args([
         "--silent",
-        "--fail",
         "--proto",
         "=https",
         "--connect-timeout",
@@ -129,12 +130,27 @@ fn http_json(url: &str, token: &str, extra: &[&str]) -> std::result::Result<Valu
         "6",
         "--max-filesize",
         "1048576",
+        "--write-out",
+        "\n%{http_code}",
         "--config",
         "-",
     ]);
     let bytes = capture(cmd, config.as_bytes(), 7)?;
-    serde_json::from_slice(&bytes).map_err(|_| "Invalid native account response.".into())
+    let (body, code) = bytes
+        .rsplit(|b| *b == b'\n')
+        .next()
+        .map(|code| (&bytes[..bytes.len() - code.len()], code))
+        .ok_or("Invalid native account response.")?;
+    match code {
+        b"200" => {
+            serde_json::from_slice(body).map_err(|_| "Invalid native account response.".into())
+        }
+        b"401" => Err(UNAUTHORIZED.into()),
+        _ => Err("Native account request failed or timed out.".into()),
+    }
 }
+/// `http_json`'s error for a token the service refused.
+const UNAUTHORIZED: &str = "The native sign-in was refused.";
 fn window(
     id: &str,
     label: &str,
@@ -303,14 +319,21 @@ fn claude(home: &Path, native: bool) -> Value {
         // This is the short-lived usage access token, not the native account's
         // sign-in. Claude owns refreshing its grant; never contradict its auth
         // status or refresh credentials just to display a quota report.
+        // Say so, as for Kimi: opening Claude Code renews the grant, and a
+        // revoked one needs a new sign-in. "limits n/a" said neither.
+        result["status"] = json!("expired");
         return result;
     }
     // Native OAuth usage endpoint used by /usage; never sends a message or refreshes a grant.
-    if let Ok(usage) = http_json(
+    let usage = http_json(
         "https://api.anthropic.com/api/oauth/usage",
         auth["accessToken"].as_str().unwrap_or(""),
         &["anthropic-beta: oauth-2025-04-20"],
-    ) {
+    );
+    if usage.as_ref().is_err_and(|e| e == UNAUTHORIZED) {
+        result["status"] = json!("expired");
+    }
+    if let Ok(usage) = usage {
         let mut windows = Vec::new();
         for (key, label, minutes) in [
             ("five_hour", "", 300),

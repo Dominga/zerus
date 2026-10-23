@@ -3,6 +3,7 @@
 // the engine, credential copying, HTTP authentication bypass or PTY injection.
 import net from 'node:net';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
@@ -495,7 +496,8 @@ export function apply(ctx, config) {
       case 'catalog': return api.modelCatalog();
       case 'create': {
         checkPermissions(p.permissionMode);
-        if (typeof p.cwd !== 'string' || !p.cwd.startsWith('/') || !(await fs.stat(p.cwd)).isDirectory()) throw new Error('Choose an existing absolute folder');
+        // WhiteWh fork: an absolute folder on Windows starts with a drive or UNC prefix, not '/'.
+        if (typeof p.cwd !== 'string' || !path.isAbsolute(p.cwd) || !(await fs.stat(p.cwd)).isDirectory()) throw new Error('Choose an existing absolute folder');
         const sessionId = p.sessionId;
         if (typeof sessionId !== 'string' || !/^session-[0-9a-f-]{36}$/.test(sessionId)) throw new Error('Invalid native session ID');
         if (ctx.agents.get(sessionId)) {

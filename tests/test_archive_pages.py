@@ -18,6 +18,8 @@ class ArchivePages(unittest.TestCase):
         socket=self.root/'tmux-private';socket.mkdir(mode=0o700)
         self.env={k:v for k,v in os.environ.items() if not k.startswith('HGS_') and k not in ('TMUX','TMUX_PANE','TMUX_TMPDIR')}
         self.env.update(HOME=str(self.root),HGS_STATE_DIR=str(self.state),HGS_CONFIG_DIR=str(self.root/'config'),HGS_SELF='archive-fixture',HGS_PEERS='',TMUX_TMPDIR=str(socket))
+        # Metadata commands need the ordinary explicit local-session opt-in on Windows.
+        (self.root/'config').mkdir();(self.root/'config'/'local-sessions').touch()
     def record(self,index,at=100,**extra):
         ident=str(uuid.UUID(int=index+1));value=dict(version=1,name=f'codex/example/archived-{index}',agent='codex',run_id=f'run-{index}',conversation_id=f'conversation-{index}',state='archived',archive_id=ident,archived_at=at,created=1,cwd='/synthetic/project',**extra)
         path=self.archives/(ident+'.json');temp=path.with_suffix('.tmp');temp.write_text(json.dumps(value),encoding='utf-8');temp.replace(path)
@@ -89,6 +91,35 @@ class ArchivePages(unittest.TestCase):
         if hasattr(os,'mkfifo'):
             os.mkfifo(self.archives/(row['archive_id']+'.json'))
             self.assertNotEqual(lookup(value).returncode,0)
+    def preferences(self,args):
+        r=subprocess.run([str(HGS),*args],input='{}',capture_output=True,text=True,env=self.env,timeout=30)
+        self.assertEqual(r.returncode,0,r.stderr)
+        rows=[row for row in json.loads(r.stdout)['sessions'] if row.get('state')=='archived']
+        for row in rows:self.assertIn('notification_preferences',row)
+        return {row['archive_id']:row['notification_preferences'] for row in rows}
+    def test_archived_rows_carry_notification_preferences_exactly_as_ls(self):
+        # The relay's preference ledger refuses a known conversation whose row lacks them.
+        muted,plain=self.record(0,100),self.record(1,101)
+        stored=dict(conversation_id=muted['conversation_id'],muted=True,revision=4,suppressed=dict(reply_id=None,
+            attention_signature=None,optional_question_ids=[],main_attention=None,child_attention={}))
+        store=self.state/'notifications.json'
+        store.write_text(json.dumps(dict(version=1,sessions={muted['name']:{muted['conversation_id']:stored}})),encoding='utf-8')
+        listed=self.preferences(['ls','--json','--local'])
+        self.assertEqual(listed[muted['archive_id']],stored)
+        self.assertEqual(listed[plain['archive_id']],dict(stored,conversation_id=plain['conversation_id'],muted=False,revision=0))
+        self.assertEqual(self.preferences(['archives','--json']),listed)
+        # Unknown preferences are null, never a fabricated unmuted default.
+        store.write_text('{',encoding='utf-8')
+        self.assertEqual(self.preferences(['ls','--json','--local']),dict.fromkeys(listed))
+        self.assertEqual(self.preferences(['archives','--json']),dict.fromkeys(listed))
+    @unittest.skipUnless(os.name=='nt','the Windows mobile archive scope exists only on Windows')
+    def test_windows_mobile_archive_rows_carry_notification_preferences(self):
+        row=self.record(0,100)
+        stored=dict(conversation_id=row['conversation_id'],muted=True,revision=1,suppressed=dict(reply_id=None,
+            attention_signature=None,optional_question_ids=[],main_attention=None,child_attention={}))
+        (self.state/'notifications.json').write_text(json.dumps(dict(version=1,sessions={row['name']:{row['conversation_id']:stored}})),encoding='utf-8')
+        self.assertEqual(self.preferences(['archives','--json','--windows-mobile']),{row['archive_id']:stored})
+        self.assertEqual(self.preferences(['archives','--json']),{row['archive_id']:stored})
     def test_bidirectional_keysets_reach_all_rows_with_only_current_window_anchors(self):
         for i in range(257):self.record(i,100+i//4)
         expected=sorted([(100+i//4,str(uuid.UUID(int=i+1))) for i in range(257)],reverse=True)

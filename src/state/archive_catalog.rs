@@ -348,6 +348,9 @@ pub(crate) fn page(value: &Value) -> Result<Value> {
         .map(|(id, name, _)| archive::read_archive(name, id))
         .collect::<Result<Vec<_>>>()?;
     drop(_guard); // Journal summaries never block live hooks or lifecycle writers.
+    // The relay's preference ledger refuses a known conversation whose row
+    // lacks its preferences, so archived rows carry them exactly as `ls` does.
+    let preferences = notifications::load();
     let mut summaries = Vec::new();
     for ((id, name, at), record) in rows.iter().zip(&records) {
         let parts: Vec<_> = name.splitn(3, '/').collect();
@@ -356,6 +359,7 @@ pub(crate) fn page(value: &Value) -> Result<Value> {
         if let Some(title) = record["title"].as_str() {
             row["title"] = json!(title.chars().take(1024).collect::<String>());
         }
+        notifications::enrich(&mut row, preferences.as_ref(), journal::journal_name(record));
         summaries.push(row);
     }
     workspace::enrich(&mut summaries, &BTreeMap::new());

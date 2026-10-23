@@ -74,6 +74,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] history-projection <session> --json retired and refreshed history rows
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
+       hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin)
        hgs [@host] terminal <session> --json scoped terminal screen/input
        hgs [@host] AGENT DIRECTORY --new -n TAG -d --launch-id UUID
        hgs [@host] session-action <session> --json scoped native lifecycle action
@@ -182,7 +183,7 @@ fn local_sessions() -> Result<()> {
 // Repository preparation owns only its checkout and receipt. Like the existing
 // configuration/control commands, it does not require or enable a session host.
 fn needs_local_sessions(command: &str) -> bool {
-    !matches!(command, "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository")
+    !matches!(command, "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "team" | "mobile" | "hooks" | "repository")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -631,9 +632,10 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
-        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" => {
+        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" | "team" => {
             if command == "repository" && dry { return Err(Error::new(1,"Repository operations do not support --dry-run")); }
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
+            if command == "team" && dry { return Err(Error::new(1,"Team operations do not support --dry-run")); }
             if command == "graph" && dry { return Err(Error::new(1,"Graph reads do not support --dry-run")); }
             if command == "dirs" && has(args, "--create") && dry {
                 return Err(Error::new(1, "folder creation does not support --dry-run"));
@@ -955,7 +957,7 @@ fn remote(
             all
         }
         "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "team" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -998,6 +1000,9 @@ fn remote(
         // Probe the same installed executable without consuming JSON stdin.
         // These probes are POSIX scripts; a fish login shell runs them under sh.
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "team" {
+        // The same probe as wait, for peers without agent teams.
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] team OPERATION'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to use agent teams' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "notifications" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-notifications-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change notification preferences' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "hooks" {
@@ -2284,7 +2289,7 @@ mod tests {
     #[test]
     fn repository_preparation_does_not_admit_session_commands_on_control_consoles() {
         for command in ["ls", "machine", "presence", "swarm", "project", "account",
-            "speech", "analytics", "graph", "wait", "mobile", "hooks", "repository"] {
+            "speech", "analytics", "graph", "wait", "team", "mobile", "hooks", "repository"] {
             assert!(!needs_local_sessions(command), "{command}");
         }
         for command in ["a", "kill", "send", "send-now", "inspect", "history",

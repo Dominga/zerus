@@ -70,6 +70,7 @@ mod subagents;
 mod native_subagents;
 mod supervisor;
 mod tasks;
+pub(crate) mod teams;
 mod telemetry;
 mod terminate;
 mod session_action;
@@ -144,6 +145,12 @@ pub(crate) fn session_operations() -> Result<()> {
         return Ok(());
     }
     enabled
+}
+
+/// Whether the agent team dispatcher runs; nothing before the
+/// first team.
+pub(crate) fn team_worker_running() -> Option<bool> {
+    teams::store::path().exists().then(|| crate::status::locked(&teams::dispatcher::lock_path()))
 }
 
 /// Whether the automatic recovery worker holds its lock; unknown without local
@@ -645,6 +652,7 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 pub fn dispatch(args: &[String]) -> Result<i32> {
     // Coordination metadata never starts or controls a native session host.
     if args.first().map(String::as_str)==Some("wait") { return waits::dispatch(&args[1..]); }
+    if args.first().map(String::as_str)==Some("team") { return teams::commands::dispatch(&args[1..]); }
     if args.first().map(String::as_str)==Some("repository") { return repositories::dispatch(&args[1..]); }
     #[cfg(unix)]
     if args.first().map(String::as_str)==Some("repository-git-worker") { return repositories::git_worker(&args[1..]); }

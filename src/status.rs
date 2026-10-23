@@ -75,6 +75,7 @@ fn this(config: &Config) -> Result<Value> {
         "local_sessions":listing["local_sessions"] != false,"sessions":counts(&listing["sessions"]),
         "services":{"desktop":desktop(),"swarm_worker":swarm(config),
             "recovery_worker":crate::state::recovery_worker_running().map(running),
+            "team_worker":crate::state::team_worker_running().map(running),
             "mobile_connector":connector(config)}}))
 }
 
@@ -230,7 +231,7 @@ fn render(machine: &Value, this: bool) -> String {
         return text;
     }
     for (key, label) in [("desktop", "Desktop app"), ("swarm_worker", "Swarm worker"),
-        ("recovery_worker", "Recovery worker"), ("mobile_connector", "Mobile connector")] {
+        ("recovery_worker", "Recovery worker"), ("team_worker", "Team dispatcher"), ("mobile_connector", "Mobile connector")] {
         let state = match services[key].as_str() {
             Some("running") => "running",
             Some("stopped") => "not running",

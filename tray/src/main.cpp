@@ -21,6 +21,9 @@
 #include "AppConfig.h"
 #include "UpdateController.h"
 #include "ForkLog.h"
+#include "SandboxCheck.h"
+#include <QMessageBox>
+#include <QPushButton>
 #include "HgsClient.h"
 #include "MainThreadWatchdog.h"
 #include "TrayAgent.h"
@@ -387,6 +390,22 @@ int main(int argc, char *argv[])
         return 4;
     }
 
+    // WhiteWh fork: started from another program's sandbox, sessions, settings,
+    // folders and the log fail with "access denied" one by one; say so once,
+    // before anything is staged.
+    if (const auto sandbox = SandboxCheck::reason(); !sandbox.isEmpty()) {
+        ForkLog::write("warning", sandbox);
+        QMessageBox box(QMessageBox::Warning, QObject::tr("Zerus is in a sandbox"),
+                        sandbox + QStringLiteral("\n\n")
+                            + QObject::tr("Sessions cannot start from here, and settings, folders and the log may be refused "
+                                          "with \"access denied\". Quit, then start Zerus from the Start menu or Explorer."));
+        box.setObjectName(QStringLiteral("sandboxWarning"));
+        auto *quit = box.addButton(QObject::tr("Quit Zerus"), QMessageBox::AcceptRole);
+        box.addButton(QObject::tr("Continue anyway"), QMessageBox::RejectRole);
+        box.setDefaultButton(quit);
+        box.exec();
+        if (box.clickedButton() == quit) return 0;
+    }
 #ifdef Q_OS_WIN
     // Once this instance owns the tray: a second one never stages anything.
     cfg.hgsPath = stableHgs(cfg.hgsPath, hgsConfigured ? cfg.hgsPath : QString());

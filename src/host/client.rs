@@ -52,8 +52,9 @@ impl fmt::Display for ClientError {
             }
             Self::Refused(error) => f.write_str(&error.message),
             Self::InJob => f.write_str(
-                "the session host runs inside a job that does not let it break away, so its \
-                 sessions would end with that job; start hgs outside that job",
+                "the session host runs inside a job that does not let it break away (for \
+                 example an agent's sandbox), so its sessions would end with that job; start \
+                 Zerus from the Start menu or Explorer",
             ),
         }
     }

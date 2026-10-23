@@ -716,8 +716,10 @@ mod native {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
                 Self::BreakawayForbidden => f.write_str(
-                    "this process runs in a job that forbids breakaway, so a session host \
-                     started from here would end with it",
+                    "Windows does not let this hgs start the session host outside the program \
+                     that started it (a job that forbids breakaway, such as an agent's sandbox), \
+                     so its sessions would end with that program; start Zerus from the Start \
+                     menu or Explorer",
                 ),
                 Self::Spawn(error) => write!(f, "cannot start the session host: {error}"),
             }
@@ -736,6 +738,16 @@ mod native {
     /// retried without breakaway, which would tie the host's life to this
     /// process's job. Breakaway can also succeed and leave the process in a job
     /// further up; the host checks that itself (`job::join_host_job`).
+    /// WhiteWh fork: whether ERROR_ACCESS_DENIED from a breakaway start means a
+    /// job forbids it. The immediate job may allow breakaway while a job above
+    /// it does not (hgs's own job inside an agent's sandbox, say); Windows then
+    /// refuses the start the same way. A readable executable rules out the other
+    /// reason for that error.
+    pub(crate) fn breakaway_denied(application: &Path) -> bool {
+        matches!(job::current_job_allows_breakaway(), Ok(Some(false)))
+            || (matches!(job::in_any_job(), Ok(true)) && std::fs::File::open(application).is_ok())
+    }
+
     pub(crate) fn spawn_detached(command: &Command) -> Result<Child, LaunchError> {
         let command = Command {
             flags: Flags {
@@ -748,7 +760,7 @@ mod native {
         };
         spawn(&command).map_err(|error| {
             let denied = error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32);
-            if denied && matches!(job::current_job_allows_breakaway(), Ok(Some(false))) {
+            if denied && breakaway_denied(command.application) {
                 LaunchError::BreakawayForbidden
             } else {
                 LaunchError::Spawn(error)

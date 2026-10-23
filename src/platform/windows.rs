@@ -1835,6 +1835,20 @@ mod process {
         command
             .creation_flags(CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
             .spawn()
+            .map_err(|error| {
+                // WhiteWh fork: name the cause instead of a bare "access denied".
+                let program = Path::new(command.get_program());
+                if error.raw_os_error() == Some(5) && crate::host::spawn::breakaway_denied(program) {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Windows does not let hgs start a background process outside the program that \
+                         started it (a job that forbids breakaway, such as an agent's sandbox); start \
+                         Zerus from the Start menu or Explorer",
+                    )
+                } else {
+                    error
+                }
+            })
     }
 
     type Reader = thread::JoinHandle<io::Result<Vec<u8>>>;

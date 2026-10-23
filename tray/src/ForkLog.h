@@ -13,11 +13,19 @@
 
 namespace ForkLog {
 
+// The usual folder, or the temporary folder when that one cannot be written
+// (a profile Zerus may not change, a sandbox): the log still exists to open.
 inline QString path()
 {
-    const auto directory = QDir::homePath() + QStringLiteral("/.local/state/hgs");
-    QDir().mkpath(directory);
-    return directory + QStringLiteral("/zerus.log");
+    static const QString file = [] {
+        const auto directory = QDir::homePath() + QStringLiteral("/.local/state/hgs");
+        const auto usual = directory + QStringLiteral("/zerus.log");
+        QDir().mkpath(directory);
+        QFile probe(usual);
+        if (probe.open(QIODevice::Append)) return usual;
+        return QDir::temp().filePath(QStringLiteral("zerus.log"));
+    }();
+    return file;
 }
 
 inline QMutex &mutex()
@@ -79,11 +87,12 @@ inline void install()
     write("info", QStringLiteral("Zerus %1 started").arg(QCoreApplication::applicationVersion()));
 }
 
-inline void open()
+// False when no program could show it; the caller says where the file is.
+inline bool open()
 {
     if (!QFileInfo::exists(path()))
         write("info", QStringLiteral("Log opened"));
-    QDesktopServices::openUrl(QUrl::fromLocalFile(path()));
+    return QFileInfo::exists(path()) && QDesktopServices::openUrl(QUrl::fromLocalFile(path()));
 }
 
 } // namespace ForkLog

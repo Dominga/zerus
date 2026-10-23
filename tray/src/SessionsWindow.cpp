@@ -1699,7 +1699,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // WhiteWh fork: the full log behind the one-line notices of this bar.
     auto *openLog = new QPushButton(tr("Log")); openLog->setObjectName("openLog");
     openLog->setFlat(true); openLog->setToolTip(tr("Open the Zerus log")); statusLayout->addWidget(openLog);
-    connect(openLog, &QPushButton::clicked, this, [] { ForkLog::open(); });
+    connect(openLog, &QPushButton::clicked, this, [this] {
+        if (!ForkLog::open()) showNotice(tr("Could not open the log %1").arg(QDir::toNativeSeparators(ForkLog::path())), true);
+    });
     m_notice = new StatusMessage; m_notice->hide(); statusLayout->addWidget(m_notice, 1);
     m_sessionFeedback = new StatusMessage; m_sessionFeedback->setObjectName("sessionFeedback");
     m_sessionFeedback->hide(); statusLayout->addWidget(m_sessionFeedback, 1);

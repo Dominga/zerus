@@ -120,6 +120,15 @@ fn rpc(record: &Value, method: &str, params: Value) -> Result<Value> {
 fn search_rpc(record: &Value, params: Value) -> Result<Value> {
     rpc_within(record, "search-history", params, Duration::from_secs(7))
 }
+/// WhiteWh fork: the list rows of these conversations and their subagents. A
+/// bridge with `rows` reads only them; an older one lists every stored session
+/// of the host's home, which takes seconds on a long history.
+fn session_rows(record: &Value, conversations: &[&str]) -> Result<Value> {
+    match rpc(record, "rows", json!({ "sessionIds": conversations })) {
+        Err(error) if error == "Unsupported HGS native request" => rpc(record, "list", json!({})),
+        rows => rows,
+    }
+}
 fn rpc_within(record: &Value, method: &str, params: Value, read_timeout: Duration) -> Result<Value> {
     let request = json!({"method":method,"params":params}).to_string();
     let response = exchange(&endpoint(&host_dir(record)), &request, read_timeout)?;
@@ -464,7 +473,7 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     let Ok(files) = fs::read_dir(bindings()) else {
         return Ok(out);
     };
-    let mut hosts = BTreeMap::new();
+    let mut records = Vec::new();
     for file in files.flatten().take(5000) {
         if file.path().extension().is_none_or(|s| s != "json") {
             continue;
@@ -478,22 +487,32 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         if record["backend"] != "dsh" {
             continue;
         }
-        let key = string(&record, "agent_home").to_owned();
+        records.push(record);
+    }
+    // One request per host home, for exactly the conversations bound here.
+    let mut homes: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for record in &records {
+        homes.entry(string(record, "agent_home").to_owned()).or_default().push(string(record, "conversation_id"));
+    }
+    let mut hosts = BTreeMap::new();
+    for record in &records {
+        let key = string(record, "agent_home").to_owned();
         let list = hosts
-            .entry(key)
-            .or_insert_with(|| rpc(&record, "list", json!({})).unwrap_or(Value::Null));
-        let mut value = snapshot_from(&record, list);
-        notifications::enrich(&mut value, preferences.as_ref(), journal::journal_name(&record));
+            .entry(key.clone())
+            .or_insert_with(|| session_rows(record, &homes[&key]).unwrap_or(Value::Null));
+        let mut value = snapshot_from(record, list);
+        notifications::enrich(&mut value, preferences.as_ref(), journal::journal_name(record));
         out.push(value);
     }
     Ok(out)
 }
 
 /// The same listing projection, without opening every saved DeepSeek binding.
-/// The host's existing list RPC and its generation semantics are unchanged.
+/// The host's rows (or, on an older bridge, list) RPC and its generation
+/// semantics are unchanged.
 pub(super) fn snapshot(name: &str) -> Result<Value> {
     let record = binding(name)?;
-    let list = rpc(&record, "list", json!({})).unwrap_or(Value::Null);
+    let list = session_rows(&record, &[string(&record, "conversation_id")]).unwrap_or(Value::Null);
     Ok(snapshot_from(&record, &list))
 }
 
@@ -1058,7 +1077,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         "inspect",
         json!({"sessionId":record["conversation_id"],"agentId":agent_id,"includeProcesses":include_processes}),
     )?;
-    let listed = rpc(&record, "list", json!({}))?;
+    let listed = session_rows(&record, &[string(&record, "conversation_id")])?;
     let row = listed["items"]
         .as_array()
         .and_then(|rows| {
@@ -1201,7 +1220,10 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
 
 /// Read-only resident host methods; never ensure_host or a lifecycle RPC.
 pub(super) fn notification_snapshot(record: &Value) -> Result<(Value, Option<Vec<Value>>)> {
-    notification_snapshot_with(record, |method, params| rpc(record, method, params))
+    notification_snapshot_with(record, |method, params| match method {
+        "list" => session_rows(record, &[string(record, "conversation_id")]),
+        _ => rpc(record, method, params),
+    })
 }
 fn notification_snapshot_with(record: &Value, mut observe: impl FnMut(&str, Value) -> Result<Value>) -> Result<(Value, Option<Vec<Value>>)> {
     let inspected = observe("inspect", json!({"sessionId":record["conversation_id"],"includeProcesses":false}))?;

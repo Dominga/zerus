@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 export const name = 'hgs-native-dsh';
-export const inject = ['sessionController', 'agents', 'goals', 'llm', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'workspaceRegistry', 'subagents', 'permissionPresets', 'approval', 'commands'];
+export const inject = ['sessionController', 'agents', 'goals', 'llm', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'workspaceRegistry', 'subagents', 'permissionPresets', 'approval', 'commands', 'sessions'];
 
 export function apply(ctx, config) {
   const api = ctx.sessionController;
@@ -245,6 +245,37 @@ export function apply(ctx, config) {
       return own.some(event => event.type === 'step/start') ? 'missing' : 'unstarted';
     } finally { observation[Symbol.dispose](); }
   }
+  // WhiteWh fork: one Session's list summary, built as the native list builds
+  // it, without reading every stored Session of the host's home (the native
+  // list takes no filter and scans the whole store, seconds on a long history).
+  async function summaryOf(sessionId) {
+    const projections = await api.projections({ sessionId }, new AbortController().signal);
+    if (!projections) return null;
+    const session = ctx.sessions.get(sessionId);
+    const stored = session ? undefined : await ctx.get('sessionPersistence')?.stat(sessionId, { signal: new AbortController().signal });
+    const header = session?.header ?? stored?.header;
+    if (!header || (!session && header.cwd === undefined)) return null;
+    const metadata = projections.values?.sessionListMetadata;
+    const agent = ctx.agents.get(sessionId);
+    return { sessionId, updatedAt: Math.max(header.createdAt, metadata?.lastPromptAt ?? 0),
+      agentAvailable: Boolean(session) && agent?.session === session,
+      ...(session ? { formatStatus: 'current' } : stored?.formatStatus === undefined ? {} : { formatStatus: stored.formatStatus }),
+      running: Boolean(session) && agent?.status === 'running',
+      blank: metadata?.blank ?? (session ? session.seq === 0 : false),
+      ...(header.parentSession === undefined ? {} : { parentSessionId: header.parentSession }),
+      ...(header.origin === undefined ? {} : { origin: header.origin }),
+      ...(header.cwd === undefined ? {} : { cwd: header.cwd }),
+      projections };
+  }
+  // The list row as HGS reads it: the native summary and this host's state.
+  function listRow(row, status, scheduled) {
+    const agent = ctx.agents.get(row.sessionId);
+    const selection = agent ? selectionOf(agent, row.projections?.values) : null;
+    return { ...row, selection, accountStatus: status, authRequired: needsSignIn(selection, status),
+      goal: agent ? ctx.goals.get(agent) ?? null : row.projections?.values.goal ?? null,
+      pendingQuestions: publicQuestions(row.sessionId), nativeRecovery: recoveryPublic(row.sessionId),
+      ...(scheduled ? { schedules: scheduled.get(row.sessionId) ?? { count: 0, recurring: 0, nextAt: null } } : {}) };
+  }
   async function inspect(request) {
     const { sessionId, agentId } = request;
     let baseline = await api.projections({ sessionId }, new AbortController().signal);
@@ -259,8 +290,7 @@ export function apply(ctx, config) {
         ({ baseline, page, unstarted = false } = await childHistory(address));
     }
     page ??= await api.page({ address, throughSeq: baseline.asOfSeq, maxMessages: 150 }, new AbortController().signal);
-    const lifecycleRows = agentId ? null : await api.list({}, new AbortController().signal);
-    const lifecycleIdle = lifecycleRows?.items?.find(row => row.sessionId === sessionId)?.running === false;
+    const lifecycleIdle = agentId ? false : (await summaryOf(sessionId))?.running === false;
     const parentLive = ctx.agents.get(sessionId);
     const live = agentId ? ctx.agents.get(agentId) : parentLive;
     const selection = live ? selectionOf(live, baseline.values) : null;
@@ -401,20 +431,33 @@ export function apply(ctx, config) {
     if (closing) throw new Error('Native host is stopping');
     const p = request.params ?? {};
     switch (request.method) {
-      case 'ping': return { protocol: 1, version: '0.2.1-rc.2', generation, accountPermissions: true, sessionActions: true,
+      case 'ping': return { protocol: 1, version: '0.2.1-rc.2', generation, accountPermissions: true, sessionActions: true, sessionRows: true,
         nativeOperations: ['fork', 'history-search', 'schedules'], schedule: Boolean(scheduleService()) };
       case 'list': {
         const list = await api.list({}, new AbortController().signal);
         const status = await accountStatus();
         const scheduled = await scheduleSummaries();
-        return { ...list, generation, items: list.items.map(row => {
-          const agent = ctx.agents.get(row.sessionId);
-          const selection = agent ? selectionOf(agent, row.projections?.values) : null;
-          return { ...row, selection, accountStatus: status, authRequired: needsSignIn(selection, status),
-            goal: agent ? ctx.goals.get(agent) ?? null : row.projections?.values.goal ?? null,
-            pendingQuestions: publicQuestions(row.sessionId), nativeRecovery: recoveryPublic(row.sessionId),
-            ...(scheduled ? { schedules: scheduled.get(row.sessionId) ?? { count: 0, recurring: 0, nextAt: null } } : {}) };
-        }) };
+        return { ...list, generation, items: list.items.map(row => listRow(row, status, scheduled)) };
+      }
+      // WhiteWh fork: the list rows of these Sessions and their subagents only.
+      case 'rows': {
+        if (!Array.isArray(p.sessionIds) || p.sessionIds.length > 5000 || p.sessionIds.some(id => typeof id !== 'string'))
+          throw new Error('Invalid session rows request');
+        const status = await accountStatus();
+        const scheduled = await scheduleSummaries();
+        const items = [], seen = new Set();
+        const add = async sessionId => {
+          if (seen.has(sessionId)) return null;
+          seen.add(sessionId);
+          const row = await summaryOf(sessionId);
+          if (row) items.push(listRow(row, status, scheduled));
+          return row;
+        };
+        for (const sessionId of p.sessionIds) {
+          const row = await add(sessionId);
+          for (const child of row?.projections?.values?.subagentCatalog ?? []) if (typeof child?.id === 'string') await add(child.id);
+        }
+        return { generation, items };
       }
       case 'inspect': return inspect(p);
       case 'fork': return fork(p);
@@ -530,12 +573,12 @@ export function apply(ctx, config) {
         let changed = false;
         const answer = (status, error) => ({ sessionId:p.sessionId, action:p.action, generation, status, ...(error ? {error} : {}) });
         try {
-          const listed = p.action === 'pause' ? await api.list({},new AbortController().signal) : null;
+          const listed = p.action === 'pause' ? await summaryOf(p.sessionId) : null;
           if (p.generation !== generation) throw new Error('DeepSeek host changed; refresh before this action');
           if (!['pause','resume','rename','forget'].includes(p.action) || typeof p.sessionId !== 'string') throw new Error('Unsupported scoped lifecycle action');
           const live = ctx.agents.get(p.sessionId);
           const handle = owned.get(p.sessionId);
-          if (p.action === 'pause' && listed?.items?.find(row => row.sessionId === p.sessionId)?.running === true) throw new Error('Wait for the native turn before pausing');
+          if (p.action === 'pause' && listed?.running === true) throw new Error('Wait for the native turn before pausing');
           if (live && p.action !== 'rename' && handle?.agent !== live) throw new Error('This agent is owned by the native UI; manage it there');
           if (p.action === 'resume') {
             if (live || opening.has(p.sessionId)) throw new Error('This session is already running or opening');

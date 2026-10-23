@@ -49,12 +49,26 @@ inline QtMessageHandler &previous()
     return handler;
 }
 
-// Qt's warnings join the log; debug output stays on the console only.
+// Qt's warnings join the log; debug output stays on the console only. A
+// warning Qt repeats on every repaint is written once, then counted.
 inline void handler(QtMsgType type, const QMessageLogContext &context, const QString &message)
 {
     static const char *const levels[] = {"debug", "warning", "critical", "fatal", "info"};
-    if (type != QtDebugMsg && type >= 0 && type <= QtInfoMsg)
-        write(levels[type], message);
+    static QString last;
+    static int repeated = 0;
+    static QMutex order;
+    if (type != QtDebugMsg && type >= 0 && type <= QtInfoMsg) {
+        QMutexLocker locked(&order);
+        if (message == last && type != QtFatalMsg) {
+            ++repeated;
+        } else {
+            if (repeated)
+                write("info", QStringLiteral("previous message repeated %1 times").arg(repeated));
+            last = message;
+            repeated = 0;
+            write(levels[type], message);
+        }
+    }
     if (previous())
         previous()(type, context, message);
 }

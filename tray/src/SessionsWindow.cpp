@@ -2040,7 +2040,7 @@ void SessionsWindow::applyTheme()
         QFrame#workspaceStatus { background:%1; border:0; border-top:1px solid %4; }
         QLabel#notice { color:%6; font-size:11px; }
         QLabel#workspaceConnectionStatus { color:%12; font-size:11px; }
-        QPushButton#connectionRetry { color:%2; background:transparent; border:0; padding:0 6px; min-height:18px; font-size:11px; }
+        QPushButton#connectionRetry, QPushButton#openLog { color:%2; background:transparent; border:0; padding:0 6px; min-height:18px; font-size:11px; }
         QPushButton#dismissNotice { background:transparent; border:0; padding:0; min-height:0; }
         QPushButton#dismissNotice:hover { background:%7; border-radius:4px; }
         QPushButton#archivedWorktreeCleanup { color:%5; background:transparent; border:1px solid transparent; border-radius:4px; padding:0 6px; min-height:18px; max-height:18px; font-size:11px; }

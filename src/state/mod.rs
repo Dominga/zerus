@@ -80,6 +80,7 @@ mod conversation_history;
 mod usage;
 mod workspace;
 mod git_status;
+mod repositories;
 mod worktrees;
 mod worktree_cleanup;
 mod worktree_inspection;
@@ -91,6 +92,13 @@ pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
         return json!({"state":"unavailable","detail":detail,"stale":true,"worktrees":[]});
     }
     worktrees::catalog(path, true)
+}
+pub(crate) fn cached_worktree_catalog(path: &std::path::Path) -> Option<serde_json::Value> {
+    worktrees::cached_catalog(path)
+}
+/// One optional launch inference shares one total Git deadline.
+pub(crate) fn worktree_catalog_until(path: &std::path::Path, deadline: std::time::Instant) -> serde_json::Value {
+    worktrees::catalog_until(path, true, deadline)
 }
 mod launch_project;
 pub(crate) use launch_project::with_launch_binding;
@@ -252,10 +260,14 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
     });
     let truncated = entries.len() > 2000;
     entries.truncate(2000);
-    Ok(
-        json!({"path": directory, "parent": directory.parent().unwrap_or(Path::new("/")),
-        "home": home(), "directories": entries, "truncated": truncated}),
-    )
+    let mut result = json!({"path": directory, "parent": directory.parent().unwrap_or(Path::new("/")),
+        "home": home(), "directories": entries, "truncated": truncated});
+    if let Ok(config) = crate::config::Config::load() {
+        if let Some(project) = crate::swarm::directory_project(&config, &directory) {
+            result["project_inference"] = project;
+        }
+    }
+    Ok(result)
 }
 
 fn create_directory(path: &str, request_id: &str) -> Result<Value> {
@@ -633,6 +645,9 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 pub fn dispatch(args: &[String]) -> Result<i32> {
     // Coordination metadata never starts or controls a native session host.
     if args.first().map(String::as_str)==Some("wait") { return waits::dispatch(&args[1..]); }
+    if args.first().map(String::as_str)==Some("repository") { return repositories::dispatch(&args[1..]); }
+    #[cfg(unix)]
+    if args.first().map(String::as_str)==Some("repository-git-worker") { return repositories::git_worker(&args[1..]); }
     session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());

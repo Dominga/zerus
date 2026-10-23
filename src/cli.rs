@@ -122,6 +122,9 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes
        hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
+       hgs [@host] repository check|clone --url URL --parent PATH --name NAME --json
+       hgs [@host] repository status --request-id UUID --json
+       Repository acquisition ABI: repository-clone-v1
        Mobile Git status ABI: git-status-v1
        Mobile project assignment ABI: session-project-v1
        Mobile clear-context ABI: dismiss-prompt-v1
@@ -178,6 +181,12 @@ fn local_sessions() -> Result<()> {
     } else {
         Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED))
     }
+}
+
+// Repository preparation owns only its checkout and receipt. Like the existing
+// configuration/control commands, it does not require or enable a session host.
+fn needs_local_sessions(command: &str) -> bool {
+    !matches!(command, "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -566,7 +575,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks") {
+    if needs_local_sessions(command) {
         local_sessions()?;
     }
     // Only Unix has arms for these below; elsewhere they would reach the launch arm.
@@ -608,8 +617,9 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             }
             state_command(command, &args)
         }
-        "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
+        "inspect" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
         | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" => {
+            if command == "repository" && dry { return Err(Error::new(1,"Repository operations do not support --dry-run")); }
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
             if command == "graph" && dry { return Err(Error::new(1,"Graph reads do not support --dry-run")); }
             if command == "dirs" && has(args, "--create") && dry {
@@ -960,7 +970,7 @@ fn remote(
             all.extend(args.clone());
             all
         }
-        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
+        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
         | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
                 "-o".into(),
@@ -1035,6 +1045,8 @@ fn remote(
             }
         }
         crate::windows_peer::command(&windows_args)?
+    } else if command == "repository" {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "wait" {
         // Old peers otherwise interpret an unknown command as an agent launch.
         // Probe the same installed executable without consuming JSON stdin.
@@ -1257,7 +1269,6 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
 fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool) -> Result<i32> {
     const HELP: &str = "usage: hgs a <session> [--existing [--run-id ID]]";
     let session = require(args, 0, HELP)?;
-    if state::opencode::exists(session) {return Err(Error::new(1,state::backend::OPENCODE_ATTACH.text()));}
     if state::dsh::exists(session) {
         return crate::native_ui::open(config, "", session, dry || has(args, "--dry-run"));
     }
@@ -1278,6 +1289,9 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     }
     if run_id.is_some() && !existing {
         return Err(Error::new(1, "--run-id requires --existing"));
+    }
+    if state::opencode::exists(session) {
+        return state::opencode::attach(session, run_id, dry).map_err(|error| Error::new(1, error));
     }
     if !existing {
         return attach(config, session, client, dry);
@@ -2403,6 +2417,23 @@ fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_preparation_does_not_admit_session_commands_on_control_consoles() {
+        for command in ["ls", "machine", "presence", "swarm", "project", "account",
+            "speech", "analytics", "graph", "wait", "mobile", "hooks", "repository"] {
+            assert!(!needs_local_sessions(command), "{command}");
+        }
+        for command in ["a", "kill", "send", "send-now", "inspect", "history",
+            "history-projection", "processes", "terminal", "session-action", "interrupt",
+            "clear-context", "compact-context", "answer", "effort", "settings", "recovery",
+            "read", "notifications", "voice", "schedules", "attachment", "file-read",
+            "claude", "codex", "kimi", "sh", "resume", "pause", "fork", "reference",
+            "archive", "terminate", "dirs", "worktrees", "git-status", "__state", "__host",
+            "repository-git-worker", "Repository", "repository-extra", ""] {
+            assert!(needs_local_sessions(command), "{command}");
+        }
+    }
 
     #[test]
     fn shared_notifications_advertises_its_exact_standalone_marker_on_every_platform() {

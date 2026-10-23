@@ -156,6 +156,9 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.archivedAt = obj.value(QStringLiteral("archived_at")).toDouble();
     s.resumable = obj.value(QStringLiteral("resumable")).toBool();
     s.terminalReported = obj.value("terminal_supported").isBool();
+    s.terminalAttachReported = obj.value("terminal_attach_supported").isBool();
+    s.terminalAttachSupported = obj.value("terminal_attach_supported").toBool();
+    s.terminalAttachReason = obj.value("terminal_attach_reason").toString();
     s.terminalSupported = obj.value("terminal_supported").toBool(s.cmd != "dsh" && s.cmd != "opencode");
     s.bulkLifecycleSupported = obj.value("bulk_lifecycle_supported").toBool(s.cmd != "opencode");
     s.terminalReason = obj.value("terminal_reason").toString();
@@ -2218,4 +2221,42 @@ quint64 HgsClient::requestRead(const QString &host, const QString &name, const Q
         process->deleteLater();
     });
     timer->start(host.isEmpty() ? 15000 : 35000); process->start(); return request;
+}
+
+quint64 HgsClient::repositoryOperation(const QString &host,const QString &action,const QString &url,
+    const QString &parent,const QString &name,const QString &token)
+{
+    const auto request=++m_directoryRequest;
+    QStringList help{"--help"};if(!host.isEmpty())help.prepend('@'+host);
+    runHgs(m_hgs,help,15000,this,[this,request,host,action,url,parent,name,token](const QByteArray &help){
+        if(!help.contains("repository-clone-v1")){
+            emit repositoryFinished(request,false,{},tr("Update hgs on %1 to clone repositories.").arg(host.isEmpty()?tr("this computer"):host));return;
+        }
+        QStringList args{"repository",action,"--json"};
+        if(action!="status")args<<"--url"<<url<<"--parent"<<parent<<"--name"<<name;
+        if(action!="check")args<<"--request-id"<<token;
+        if(!host.isEmpty())args.prepend('@'+host);
+        auto process=processRequest(m_hgs,args);process.input=QByteArray();process.maximumOutputBytes=65536;
+        process.timeoutMs=action=="clone"?650000:30000;
+        ProcessRunner::run(std::move(process),this,[this,request,action,name,token,host](const ProcessRunner::Result &result){
+            if(result.outcome!=ProcessRunner::Result::Finished||result.exitStatus!=QProcess::NormalExit||result.exitCode!=0){
+                auto error=QString::fromUtf8(result.standardError).trimmed().left(4000);
+                if(error.isEmpty())error=tr("The computer did not confirm the repository operation. Check its result before trying again.");
+                emit repositoryFinished(request,false,{},error);return;
+            }
+            const auto data=QJsonDocument::fromJson(result.standardOutput).object();
+            const auto style=host.isEmpty()&&MachinePlatform::windowsShaped(data["parent"].toString())?MachinePlatform::Style::Windows:MachinePlatform::Style::Posix;
+            const auto status=data["status"].toString();
+            const auto expected=MachinePlatform::clean(data["parent"].toString()+'/'+name,style);
+            const bool receipt=action=="check"?status=="ready"&&data["name"]==name
+                &&MachinePlatform::same(data["path"].toString(),expected,style):
+                data["request_id"]==token&&(status=="cloned"||status=="failed"||status=="unconfirmed");
+            if(!receipt||!MachinePlatform::absolute(data["parent"].toString(),style)
+                ||!MachinePlatform::absolute(data["path"].toString(),style)){
+                emit repositoryFinished(request,false,{},tr("Invalid repository response. Check the destination before trying again."));return;
+            }
+            emit repositoryFinished(request,true,data,{});
+        });
+    },[this,request](const QString &,const QString &error){emit repositoryFinished(request,false,{},error);});
+    return request;
 }

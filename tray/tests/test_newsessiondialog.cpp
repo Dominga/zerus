@@ -14,6 +14,7 @@
 #include <QTreeWidget>
 #include <QUuid>
 #include "NewSessionDialog.h"
+#include "CloneRepositoryDialog.h"
 #include "OpenCodeModelPicker.h"
 #include "AccountUsageStore.h"
 #include "AccountUsage.h"
@@ -84,7 +85,7 @@ private slots:
         QSettings().clear();
         for(const auto &name:{"fail","removed","slow-mac","released","missing","ended","quota-probes","mac-started","duplicates","other-scope","machine-accounts","slow-catalog-mac","catalog-started","empty-catalog","opencode","uncached","hold-probes","opencode-models","opencode-stopped","service-started","opencode-ids",
             "model-calls","favorite-calls","favorite-fails","models-stopped","old-hgs","favorites","slow-models","slow-favorite","favorite-started",
-            "hold-next-models","models-held"})flag(name,false);
+            "hold-next-models","models-held","project-inference","canonical-directory","clone-calls","clone-worktree"})flag(name,false);
         QVERIFY(FakeCli::install(m_fixture.filePath("hgs"),R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent
@@ -126,7 +127,13 @@ def hold():
  for _ in range(500):
   if (root/'released').exists():break
   time.sleep(.02)
-if a[:2]==['account','start']:
+if a==['--help']:print('repository-clone-v1')
+elif a[:1]==['repository']:
+ def arg(k):return a[a.index(k)+1]
+ with open(root/'clone-calls','a') as calls:calls.write(json.dumps([host]+a)+'\n')
+ if a[1]=='check':print(json.dumps({'status':'ready','parent':'/workspace','path':'/workspace/'+arg('--name'),'name':arg('--name')}))
+ elif a[1]=='clone':print(json.dumps({'status':'cloned','request_id':arg('--request-id'),'parent':arg('--parent'),'path':arg('--parent')+'/'+arg('--name'),'name':arg('--name')}))
+elif a[:2]==['account','start']:
  with open(root/'service-started','a') as calls:calls.write(json.dumps([host]+a)+'\n')
  (root/'opencode-stopped').unlink(missing_ok=True)
  print(json.dumps(catalog()))
@@ -207,11 +214,80 @@ elif a[:2]==['account','favorite']:
  starred=[v for v in starred if v!=model]+([model] if on else [])
  (root/'favorites').write_text(json.dumps(starred))
  print(json.dumps({'status':'applied','request_id':a[a.index('--request-id')+1],'model':model,'favorite':on,'favorites':starred}))
-elif a and a[0]=='dirs':print(json.dumps({'path':a[-1],'directories':[]}))
-elif a and a[0]=='worktrees' and (root/'repo').exists():
- print(json.dumps({'state':'ok','path':'/workspace/example','selected_root':'/workspace/example','common_dir':'/workspace/example/.git','sampled_at':int(time.time()),'worktrees':[{'path':'/workspace/example','kind':'main','available':True}]}))
-elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]}))
+elif a and a[0]=='dirs':
+ answer={'path':(root/'canonical-directory').read_text() if (root/'canonical-directory').exists() else a[-1],'directories':[]}
+ if (root/'project-inference').exists():answer['project_inference']={'schema':1,'swarm_id':'swarm-fixture','project_id':(root/'project-inference').read_text()}
+ print(json.dumps(answer))
+elif a and a[0]=='worktrees':
+ if (root/'clone-worktree').exists() and (root/'clone-calls').exists():
+  def arg(k):return a[a.index(k)+1]
+  if len(a)>1 and a[1]=='create':print(json.dumps({'status':'created','request_id':arg('--request-id'),'branch':arg('--branch'),'common_dir':arg('--common-dir'),'path':arg('--destination')}))
+  else:print(json.dumps({'state':'ok','stale':False,'partial':False,'selected_root':'/workspace/fresh','common_dir':'/workspace/fresh/.git','worktrees':[{'path':'/workspace/fresh','kind':'main','available':True,'branch':'main'}]}))
+ elif (root/'repo').exists():print(json.dumps({'state':'ok','path':'/workspace/example','selected_root':'/workspace/example','common_dir':'/workspace/example/.git','sampled_at':int(time.time()),'worktrees':[{'path':'/workspace/example','kind':'main','available':True}]}))
+ else:print(json.dumps({'state':'not_repo','worktrees':[]}))
 )PY"));
+    }
+    void cloneCreatesProjectAndStartsOnSelectedComputer_data(){
+        QTest::addColumn<QString>("host");QTest::addColumn<bool>("worktree");
+        QTest::newRow("local-folder")<<QString()<<false;QTest::newRow("remote-folder")<<QString("mac")<<false;
+        QTest::newRow("local-worktree")<<QString()<<true;QTest::newRow("remote-worktree")<<QString("mac")<<true;
+    }
+    void cloneCreatesProjectAndStartsOnSelectedComputer(){
+        QFETCH(QString,host);QFETCH(bool,worktree);if(worktree)flag("clone-worktree");SessionOrganization projects;const auto initial=projects.createGroup("Existing");
+        NewSessionDialog dialog(program(),fleet(),host,"codex",initial,nullptr,nullptr,&projects);dialog.setGroups(projects,initial);dialog.show();
+        auto *clone=dialog.findChild<QPushButton *>("cloneLaunchRepository");QTRY_VERIFY(clone->isEnabled());
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);QSignalSpy changed(&dialog,&NewSessionDialog::organizationChanged);
+        QTimer::singleShot(0,&dialog,[&]{
+            auto *form=dialog.findChild<CloneRepositoryDialog *>();QVERIFY(form);
+            form->findChild<QLineEdit *>("cloneRepositoryUrl")->setText("git@example.invalid:team/fresh.git");
+            form->findChild<QLineEdit *>("cloneParentFolder")->setText("/workspace");
+            auto *project=form->findChild<QComboBox *>("cloneProject");project->setCurrentIndex(project->count()-1);
+            form->findChild<QPushButton *>("cloneRepositoryConfirm")->click();
+        });
+        QTimer::singleShot(10000,&dialog,[&]{if(auto *form=dialog.findChild<CloneRepositoryDialog *>())form->reject();});
+        clone->click();QTRY_COMPARE(launched.size(),1);QCOMPARE(changed.size(),1);
+        const auto args=launched.first();QCOMPARE(args[0].toString(),host);
+        if(worktree)QVERIFY(args[2].toString().startsWith("/workspace/fresh-work-"));else QCOMPARE(args[2].toString(),"/workspace/fresh");
+        const auto *project=projects.group(args[5].toString());QVERIFY(project);QCOMPARE(project->name,"fresh");QCOMPARE(project->folders.size(),1);
+        QCOMPARE(project->folders.first().machine,host.isEmpty()?QString("pc"):host);QCOMPARE(project->folders.first().path,"/workspace/fresh");
+    }
+    void cloneConfirmationKeepsItsProjectOverNativeInference_data(){
+        QTest::addColumn<QString>("host");QTest::addColumn<bool>("inbox");QTest::addColumn<bool>("worktree");
+        QTest::newRow("local-inbox")<<QString()<<true<<false;
+        QTest::newRow("remote-inbox")<<QString("mac")<<true<<false;
+        QTest::newRow("local-inbox-worktree")<<QString()<<true<<true;
+        QTest::newRow("remote-inbox-worktree")<<QString("mac")<<true<<true;
+        QTest::newRow("local-existing")<<QString()<<false<<false;
+        QTest::newRow("remote-existing")<<QString("mac")<<false<<false;
+    }
+    void cloneConfirmationKeepsItsProjectOverNativeInference(){
+        QFETCH(QString,host);QFETCH(bool,inbox);QFETCH(bool,worktree);
+        if(worktree)flag("clone-worktree");
+        SessionOrganization projects;const auto existing=projects.createGroup("Existing");
+        const auto competing=projects.createGroup("Native folder project");
+        QFile hint(m_fixture.filePath("project-inference"));QVERIFY(hint.open(QIODevice::WriteOnly));hint.write(competing.toUtf8());hint.close();
+        // Enter from the ordinary untouched Inbox; Clone confirmation itself
+        // makes even an unchanged Inbox selection explicit before launch.
+        NewSessionDialog dialog(program(),fleet(),host,"codex",{},nullptr,nullptr,&projects);
+        dialog.setGroups(projects,"ungrouped");dialog.setProjectExplicit(false);dialog.setProjectCatalogSwarm("swarm-fixture");dialog.show();
+        QVERIFY(dialog.implicitInbox());
+        auto *clone=dialog.findChild<QPushButton *>("cloneLaunchRepository");QTRY_VERIFY(clone->isEnabled());
+        const auto expected=inbox?QString("ungrouped"):existing;
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        QTimer::singleShot(0,&dialog,[&]{
+            auto *form=dialog.findChild<CloneRepositoryDialog *>();QVERIFY(form);
+            form->findChild<QLineEdit *>("cloneRepositoryUrl")->setText("git@example.invalid:team/fresh.git");
+            form->findChild<QLineEdit *>("cloneParentFolder")->setText("/workspace");
+            auto *project=form->findChild<QComboBox *>("cloneProject");const auto index=project->findData(expected);QVERIFY(index>=0);project->setCurrentIndex(index);
+            form->findChild<QPushButton *>("cloneRepositoryConfirm")->click();
+        });
+        QTimer::singleShot(10000,&dialog,[&]{if(auto *form=dialog.findChild<CloneRepositoryDialog *>())form->reject();});
+        clone->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][5].toString(),expected);QVERIFY(!dialog.implicitInbox());
+        if(worktree)QVERIFY(launched[0][2].toString().startsWith("/workspace/fresh-work-"));else QCOMPARE(launched[0][2].toString(),QString("/workspace/fresh"));
+        const auto *chosen=projects.group(expected);QVERIFY(chosen);QCOMPARE(chosen->folders.size(),1);
+        QCOMPARE(chosen->folders.first().machine,host.isEmpty()?QString("pc"):host);QCOMPARE(chosen->folders.first().path,QString("/workspace/fresh"));
+        QVERIFY(projects.group(competing)->folders.isEmpty());
     }
     void cleanup() {LocalSessionHost::resetOwnWindowsSessionForTests();}
     // macOS gives a new dialog's first focus to this list: its combo boxes and
@@ -406,6 +482,95 @@ elif a and a[0]=='worktrees':print(json.dumps({'state':'not_repo','worktrees':[]
         QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
         QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][10].toString(),QString("auto"));
         flag("permission-modes",false);
+    }
+    void untouchedInboxUsesNativeFolderInferenceAndExplicitInboxWins() {
+        for(int explicitChoice=0;explicitChoice<3;++explicitChoice){
+            SessionOrganization projects;const auto project=projects.createGroup("Work");
+            QFile hint(m_fixture.filePath("project-inference"));QVERIFY(hint.open(QIODevice::WriteOnly));hint.write(project.toUtf8());hint.close();
+            NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.setGroups(projects,"ungrouped");
+            dialog.setProjectCatalogSwarm("swarm-fixture");
+            dialog.setProjectExplicit(explicitChoice==1);dialog.selectPath("/workspace/example",false);dialog.show();
+            auto *choice=dialog.findChild<QComboBox *>("launchProject");QVERIFY(choice);
+            if(explicitChoice==2)QVERIFY(QMetaObject::invokeMethod(choice,"activated",Q_ARG(int,choice->currentIndex())));
+            QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");
+            QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+            QCOMPARE(launched[0][5].toString(),explicitChoice?QString("ungrouped"):project);
+            if(!explicitChoice)QVERIFY(launched[0][7].toString().isEmpty()); // already belongs; no duplicate folder
+        }
+    }
+    void unknownNativeProjectInferenceDoesNotChangeTheChosenProject() {
+        QFile hint(m_fixture.filePath("project-inference"));QVERIFY(hint.open(QIODevice::WriteOnly));hint.write("unknown-project");hint.close();
+        SessionOrganization projects;const auto project=projects.createGroup("Local project");
+        QVERIFY(!projects.addFolder(project,"pc","/workspace/example").isEmpty());
+        NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.setGroups(projects,"ungrouped");
+        dialog.setProjectCatalogSwarm("swarm-fixture");
+        dialog.selectPath("/workspace/example",false);QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        auto *start=dialog.findChild<QPushButton *>("primary");QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][5].toString(),QString("ungrouped"));
+    }
+    void anotherOrUnknownSwarmWithTheSameProjectIdDoesNotInferMembership() {
+        for(const auto &expectedSwarm : {QString(),QString("another-swarm")}) {
+            SessionOrganization projects;const auto project=projects.createGroup("Local project");
+            QVERIFY(!projects.addFolder(project,"pc","/workspace/example").isEmpty());
+            QFile hint(m_fixture.filePath("project-inference"));QVERIFY(hint.open(QIODevice::WriteOnly));hint.write(project.toUtf8());hint.close();
+            NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.setGroups(projects,"ungrouped");
+            dialog.setProjectCatalogSwarm(expectedSwarm);dialog.selectPath("/workspace/example",false);
+            QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");
+            QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+            QCOMPARE(launched[0][5].toString(),QString("ungrouped"));
+        }
+    }
+    void savedCanonicalFolderInfersOnlyOneProjectOnTheSelectedComputer_data() {
+        QTest::addColumn<bool>("windows");QTest::addColumn<QString>("savedHost");
+        QTest::addColumn<QString>("savedPath");QTest::addColumn<QString>("selectedPath");
+        QTest::addColumn<QString>("canonicalPath");QTest::addColumn<bool>("collision");
+        QTest::addColumn<int>("explicitChoice");QTest::addColumn<bool>("inferred");
+        QTest::newRow("Windows drive, case and separators")
+            <<true<<"pc"<<"C:/Work/Example"<<"c:/work/example"<<"C:\\Work\\Example"<<false<<0<<true;
+        QTest::newRow("Windows UNC, case and separators")
+            <<true<<"pc"<<"//Server/Share/Example"<<"//server/share/example"<<"\\\\SERVER\\Share\\example"<<false<<0<<true;
+        QTest::newRow("non-Git exact folder")
+            <<false<<"pc"<<"/workspace/example"<<"/workspace/example"<<"/workspace/example"<<false<<0<<true;
+        QTest::newRow("saved canonical target, requested alias")
+            <<false<<"pc"<<"/workspace/real"<<"/workspace/alias"<<"/workspace/real"<<false<<0<<true;
+        QTest::newRow("saved alias is not canonical evidence")
+            <<false<<"pc"<<"/workspace/alias"<<"/workspace/alias"<<"/workspace/real"<<false<<0<<false;
+        QTest::newRow("a child is not exact membership")
+            <<false<<"pc"<<"/workspace"<<"/workspace/example"<<"/workspace/example"<<false<<0<<false;
+        QTest::newRow("a different Windows drive")
+            <<true<<"pc"<<"D:/work/example"<<"C:/work/example"<<"C:/work/example"<<false<<0<<false;
+        QTest::newRow("same path, another computer")
+            <<false<<"mac"<<"/workspace/example"<<"/workspace/example"<<"/workspace/example"<<false<<0<<false;
+        QTest::newRow("Windows path, another computer")
+            <<true<<"mac"<<"C:/work/example"<<"C:/work/example"<<"C:/work/example"<<false<<0<<false;
+        QTest::newRow("same Windows path, two projects")
+            <<true<<"pc"<<"C:/Work/Example"<<"c:/work/example"<<"C:/Work/Example"<<true<<0<<false;
+        QTest::newRow("explicit Windows Inbox")
+            <<true<<"pc"<<"C:/work/example"<<"C:/work/example"<<"C:/work/example"<<false<<1<<false;
+        QTest::newRow("explicit other Windows project")
+            <<true<<"pc"<<"C:/work/example"<<"C:/work/example"<<"C:/work/example"<<false<<2<<false;
+    }
+    void savedCanonicalFolderInfersOnlyOneProjectOnTheSelectedComputer() {
+        QFETCH(bool,windows);QFETCH(QString,savedHost);QFETCH(QString,savedPath);QFETCH(QString,selectedPath);
+        QFETCH(QString,canonicalPath);QFETCH(bool,collision);QFETCH(int,explicitChoice);QFETCH(bool,inferred);
+        LocalSessionHost::setOwnWindowsSessionForTests(1);
+        SessionOrganization projects;const auto project=projects.createGroup("Folder owner");
+        const auto other=projects.createGroup("Other project");
+        const auto style=windows?MachinePlatform::Style::Windows:MachinePlatform::Style::Posix;
+        QVERIFY(!projects.addFolder(project,savedHost,savedPath,{},style).isEmpty());
+        if(collision)QVERIFY(!projects.addFolder(other,savedHost,MachinePlatform::native(savedPath,style).toLower(),{},style).isEmpty());
+        QFile canonical(m_fixture.filePath("canonical-directory"));QVERIFY(canonical.open(QIODevice::WriteOnly));
+        canonical.write(canonicalPath.toUtf8());canonical.close();
+        NewSessionDialog dialog(program(),windows?windowsFleet(1):fleet(),{},"codex");
+        dialog.setGroups(projects,explicitChoice==2?other:QString("ungrouped"));
+        dialog.setProjectExplicit(explicitChoice!=0);dialog.selectPath(selectedPath,false);dialog.show();
+        auto *choice=dialog.findChild<QComboBox *>("launchProject");QVERIFY(choice);
+        if(explicitChoice==1)QVERIFY(QMetaObject::invokeMethod(choice,"activated",Q_ARG(int,choice->currentIndex())));
+        QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);auto *start=dialog.findChild<QPushButton *>("primary");
+        QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][5].toString(),inferred?project:explicitChoice==2?other:QString("ungrouped"));
+        QCOMPARE(launched[0][2].toString(),canonicalPath);
+        if(inferred)QVERIFY(launched[0][7].toString().isEmpty());
     }
     void rememberedAndExplicitMissingAccounts() {
         QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));

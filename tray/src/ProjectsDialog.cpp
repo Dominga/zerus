@@ -1,4 +1,5 @@
 #include "ProjectsDialog.h"
+#include "CloneRepositoryDialog.h"
 #include "WorktreePanel.h"
 #include "WorktreesDialog.h"
 #include "ProjectAppearance.h"
@@ -111,6 +112,16 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(swarm,&QPushButton::clicked,this,&ProjectsDialog::swarmRequested);
     auto *hint = new QLabel(tr("Organize sessions and folders across your computers. A folder can be used by several projects."));
     hint->setWordWrap(true); hint->setObjectName("muted"); root->addWidget(hint);
+    m_swarmConnectionPanel = new QWidget; m_swarmConnectionPanel->setObjectName("projectConnectionGuide");
+    auto *connectionGuide = new QHBoxLayout(m_swarmConnectionPanel); connectionGuide->setContentsMargins(0,0,0,0);
+    m_swarmConnectionHint = new QLabel; m_swarmConnectionHint->setObjectName("projectConnectionHint");
+    m_swarmConnectionHint->setTextFormat(Qt::PlainText); m_swarmConnectionHint->setWordWrap(true); connectionGuide->addWidget(m_swarmConnectionHint,1);
+    m_connectSwarm = new QPushButton(tr("Connect project catalogs…")); m_connectSwarm->setObjectName("connectProjectCatalogs");
+    m_connectSwarm->setAutoDefault(false); connectionGuide->addWidget(m_connectSwarm); root->addWidget(m_swarmConnectionPanel);
+    connect(m_connectSwarm,&QPushButton::clicked,this,[this]{
+        if (!m_unconnectedComputers.isEmpty()) emit connectSwarmRequested(m_unconnectedComputers.first());
+    });
+    m_swarmConnectionPanel->hide();
     auto *catalogRow=new QHBoxLayout;
     m_allProjects=new QCheckBox(tr("All swarm projects"));m_allProjects->setObjectName("allSwarmProjects");
     m_allProjects->setToolTip(tr("Include projects on computers without a configured connection here."));
@@ -185,7 +196,9 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     m_editFolder = new QPushButton(tr("Edit folder…")); m_editFolder->setObjectName("editProjectFolder");
     m_removeFolder = new QPushButton(tr("Remove folder")); m_removeFolder->setObjectName("removeProjectFolder");
     m_removeFolder->setToolTip(tr("Remove this folder from the project. Files stay in place."));
-    folderActions->addWidget(addFolderButton); folderActions->addWidget(m_editFolder); folderActions->addWidget(m_removeFolder); folderActions->addStretch(); folderActions->addWidget(m_openFolder); folderLayout->addLayout(folderActions);
+    auto *clone=new QPushButton(tr("Clone repository…"));clone->setObjectName("cloneProjectRepository");clone->setAutoDefault(false);
+    connect(clone,&QPushButton::clicked,this,&ProjectsDialog::cloneRepository);
+    foldersHeading->insertWidget(foldersHeading->count()-1,clone);folderActions->addWidget(addFolderButton); folderActions->addWidget(m_editFolder); folderActions->addWidget(m_removeFolder); folderActions->addStretch(); folderActions->addWidget(m_openFolder); folderLayout->addLayout(folderActions);
     m_folders->setMinimumHeight(140);
     m_worktrees=new WorktreePanel(m_client,false,nullptr,WorktreePanel::Layout::Compact);m_folderSplitter->addWidget(m_worktrees);
     // The entire gap belongs to the handle, so its line sits between both action rows.
@@ -229,6 +242,23 @@ void ProjectsDialog::setSwarmStatus(const QString &text,bool error)
 {
     m_swarmStatus->setText(text);m_swarmStatus->setToolTip(text);
     m_swarmStatus->setStyleSheet(error?QStringLiteral("color: #db9f42;"):QString());
+}
+void ProjectsDialog::setSwarmSnapshot(const QJsonObject &snapshot)
+{
+    m_swarmSnapshot = snapshot; updateSwarmConnections();
+}
+void ProjectsDialog::updateSwarmConnections()
+{
+    m_unconnectedComputers.clear();
+    const auto peers = m_swarmSnapshot.value("peers").toObject();
+    // A configured SSH connection permits session access; it does not join
+    // independent project catalogs. Only the local swarm snapshot proves that.
+    for (const auto &computer : m_fleet.peerNames())
+        if (!peers.contains(computer)) m_unconnectedComputers.append(computer);
+    const bool known = !m_swarmSnapshot.value("node_id").toString().isEmpty();
+    m_swarmConnectionPanel->setVisible(known && !m_unconnectedComputers.isEmpty());
+    m_connectSwarm->setEnabled(known && !m_unconnectedComputers.isEmpty());
+    m_swarmConnectionHint->setText(tr("Session connections for %1 do not share project catalogs yet. Preview the other catalog, match projects, then explicitly join to share their grouping.").arg(m_unconnectedComputers.join(", ")));
 }
 void ProjectsDialog::refresh()
 {
@@ -289,7 +319,7 @@ void ProjectsDialog::selectProject(const QString &id)
 void ProjectsDialog::selectHost(const QString &host) { m_host=host; refresh(); }
 void ProjectsDialog::setFleet(const FleetState &fleet)
 {
-    m_fleet=fleet;
+    m_fleet=fleet; updateSwarmConnections();
     if (m_worktreeOverview) m_worktreeOverview->setContext(*m_projects, m_fleet, m_allProjects->isChecked());
     updateFolderActions();
     const auto request=[this](const QString &host,const QString &machine,bool online){
@@ -346,6 +376,30 @@ void ProjectsDialog::deleteProject(const QString &id)
     if(dialog.exec()!=QDialog::Accepted)return;
     if(m_projects->removeGroup(id,target->currentData().toString()))changed();
 }
+void ProjectsDialog::cloneRepository()
+{
+    QDialog choice(this);choice.setWindowTitle(tr("Clone repository"));choice.setObjectName("cloneRepositoryComputerDialog");
+    auto *layout=new QVBoxLayout(&choice);auto *label=new QLabel(tr("Clone on computer"));layout->addWidget(label);
+    auto *computer=new QComboBox;computer->setObjectName("cloneTargetComputer");
+    if(m_fleet.local().localSessions&&m_fleet.local().ok)computer->addItem(m_fleet.local().host,QString());
+    for(const auto &host:m_fleet.peerNames())if(const auto *box=m_fleet.peer(host);box&&box->ok)computer->addItem(host,host);
+    layout->addWidget(computer);
+    const auto suggested=selectedFolder().machine;
+    const auto preferred=suggested.isEmpty()?m_host:suggested==m_fleet.local().host?QString():suggested;
+    const auto index=computer->findData(preferred);if(index>=0)computer->setCurrentIndex(index);
+    auto *buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);buttons->button(QDialogButtonBox::Ok)->setText(tr("Continue"));buttons->button(QDialogButtonBox::Ok)->setEnabled(computer->count()>0);layout->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&choice,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&choice,&QDialog::reject);
+    if(choice.exec()!=QDialog::Accepted)return;
+    const auto host=computer->currentData().toString();const auto machine=host.isEmpty()?m_fleet.local().host:host;const auto style=folderStyle(machine);
+    CloneRepositoryDialog dialog(m_client,host,machine,style,*m_projects,currentId(),false,this);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    auto project=dialog.projectId();
+    if(!project.isEmpty()&&!m_projects->group(project)){m_status->setText(tr("Project changed. Checkout kept at %1 on %2.").arg(dialog.createdPath(),machine));return;}
+    if(project.isEmpty())project=m_projects->createGroup(dialog.newProjectName());
+    if(m_projects->addFolder(project,machine,dialog.createdPath(),{},style).isEmpty()){m_status->setText(tr("Checkout kept at %1. Add its folder to the project.").arg(dialog.createdPath()));return;}
+    changed();selectProject(project);
+}
+
 void ProjectsDialog::addFolder() { editFolder({}); }
 void ProjectsDialog::editFolder(const QString &id, const QString &projectId)
 {

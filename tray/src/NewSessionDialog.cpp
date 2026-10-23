@@ -1,4 +1,5 @@
 #include "NewSessionDialog.h"
+#include "CloneRepositoryDialog.h"
 #include "WorkspaceIcons.h"
 #include "DirectoryDialog.h"
 #include "WorktreePanel.h"
@@ -114,11 +115,36 @@ void markCatalogFavorite(QJsonObject &catalog,const QString &value,bool favorite
 MachinePlatform::Style folderStyle(const FleetState &fleet,const QString &host) {
     return MachinePlatform::of(fleet.metricsOf(host), host.isEmpty());
 }
+// Local Windows folders do not enter the POSIX Swarm catalog. Their saved
+// membership is still evidence when the selected computer confirms that exact
+// canonical path. Never turn a lexical prefix or an unverified alias into it.
+QString exactSavedProject(const SessionOrganization &projects,const FleetState &fleet,
+    const QString &host,const QString &canonical)
+{
+    if(projects.groups().size()>512)return {};
+    const auto style=folderStyle(fleet,host);
+    QString found;int folders=0;
+    for(const auto &project:projects.groups()){
+        for(const auto &folder:project.folders){
+            if(++folders>512)return {};
+            if(project.id=="ungrouped"||project.id.isEmpty()
+                ||(folder.machine==fleet.local().host?QString():folder.machine)!=host
+                ||!MachinePlatform::absolute(folder.path,style)
+                ||!MachinePlatform::same(folder.path,MachinePlatform::clean(folder.path,style),style)
+                ||!MachinePlatform::same(folder.path,canonical,style))continue;
+            // Even an inaccessible second project makes the placement ambiguous.
+            if(!found.isEmpty()&&found!=project.id)return {};
+            found=project.id;
+        }
+    }
+    return found;
+}
 }
 NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &selectedHost,
-    const QString &agent,const QString &project,QWidget *parent,AccountUsageStore *usage)
+    const QString &agent,const QString &project,QWidget *parent,AccountUsageStore *usage,SessionOrganization *projects)
     : QDialog(parent),m_client(hgsPath,this),m_fleet(fleet),m_initialProject(project),m_initialHost(selectedHost)
 {
+    m_liveProjects=projects;
     m_usageStore=usage?usage:new AccountUsageStore(hgsPath,this);m_usageStore->setFleet(fleet);
     setObjectName("newSessionDialog");setWindowTitle(tr("New session"));resize(660,730);setMinimumWidth(520);
     // The widgets and their logic are the same for every view; a skin's view
@@ -136,6 +162,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_folder->setMinimumContentsLength(16);m_folder->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_folder->setPlaceholderText(tr("Choose a folder…"));
     m_browse=new QPushButton(tr("Browse…"));m_browse->setObjectName("browseLaunchFolder");m_browse->setAutoDefault(false);
+    m_clone=new QPushButton(tr("Clone repository…"));m_clone->setObjectName("cloneLaunchRepository");m_clone->setAutoDefault(false);
     m_projectPath=plainLabel();m_projectPath->setObjectName("launchFolderPath");m_projectPath->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_projectPath->setWordWrap(false);
     m_projectPath->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
@@ -232,9 +259,11 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     connect(buttons,&QDialogButtonBox::rejected,this,&QDialog::reject);connect(m_start,&QPushButton::clicked,this,&NewSessionDialog::start);
     connect(m_manage,&QToolButton::clicked,this,[this]{const auto id=m_project->currentData().toString();reject();emit projectFoldersRequested(id);});
     connect(m_openMachines,&QPushButton::clicked,this,[this]{if(m_creation)return;reject();emit machinesRequested();});
+    connect(m_project,&QComboBox::activated,this,[this]{m_projectExplicit=true;updateForm();});
     connect(m_project,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;loadMachines();loadFolders();});
     connect(m_machine,&QComboBox::currentIndexChanged,this,[this]{m_prefillRequest=0;m_accountPreset=false;loadFolders();});
     connect(m_browse,&QPushButton::clicked,this,&NewSessionDialog::browseFolder);
+    connect(m_clone,&QPushButton::clicked,this,&NewSessionDialog::cloneRepository);
     connect(m_folder,&QComboBox::currentIndexChanged,this,[this]{
         m_prefillRequest=0;
         m_browsedFolders.remove(host());
@@ -277,9 +306,25 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
         if(m_startWithWorktree&&!automaticWorktreeAvailable()){
             m_error->setText(tr("The repository could not be confirmed. Choose a working folder again."));updateForm();return;
         }
-        // Listed folders and worktrees of them already belong to the project.
+        // Only an untouched Inbox is a fallback. The owning computer confirmed
+        // this exact directory; a selected project (including Inbox) always wins.
+        QString inferredId;
+        if(data.contains("project_inference")){
+            const auto inferred=data.value("project_inference").toObject();
+            if(inferred.value("schema").toInt()==1&&!m_projectCatalogSwarm.isEmpty()
+                &&inferred.value("swarm_id").toString()==m_projectCatalogSwarm)
+                inferredId=inferred.value("project_id").toString();
+            // A foreign or invalid hint never falls back to an unrelated local
+            // project with the same ID or path. Joining remains explicit.
+        }else if(!m_projectExplicit&&m_project->currentData()=="ungrouped")
+            inferredId=exactSavedProject(m_projects,m_fleet,host(),path);
+        const int inferredIndex=m_project->findData(inferredId);
+        const bool infer=!m_projectExplicit&&m_project->currentData()=="ungrouped"
+            &&!inferredId.isEmpty()&&inferredId!="ungrouped"&&inferredIndex>=0;
+        if(infer){const QSignalBlocker block(m_project);m_project->setCurrentIndex(inferredIndex);}
+        // Listed folders and verified worktrees already belong to the project.
         // Decide before creation: the selection then moves to the new worktree.
-        const auto addFolder=m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString())?path:QString();
+        const auto addFolder=!infer&&m_folder->currentData().toString().isEmpty()&&!projectWorktree(m_folder->currentData(Qt::UserRole+2).toString())?path:QString();
         if(m_startWithWorktree){
             m_creationCatalog=m_worktreeCatalog;m_creationFolder=addFolder;m_error->setText(tr("Creating worktree…"));
             m_creation=m_client.createWorktree(host(),path,m_creationCatalog["common_dir"].toString(),m_generatedBranch,"HEAD",automaticWorktreePath());updateForm();
@@ -385,12 +430,13 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     });
     setGroups(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()),project);
 }
-void NewSessionDialog::reject(){if(!m_creation)QDialog::reject();}
+void NewSessionDialog::reject(){if(!m_creation&&!m_cloning){m_cloneLaunchPending=false;QDialog::reject();}}
 QString NewSessionDialog::host() const {return m_machine->currentData().toString();}
 void NewSessionDialog::setFleet(const FleetState &fleet)
 {
     m_fleet=fleet;
     m_usageStore->setFleet(fleet);
+    if(m_cloning||m_cloneLaunchPending){updateForm();return;}
     if(folderStyle(m_fleet,host())!=m_accountStyle)updateAccounts();else refreshUsage();
     if(m_creation||m_validation){updateForm();return;}
     loadMachines();loadFolders();
@@ -496,6 +542,36 @@ void NewSessionDialog::browseFolder()
     m_browsedFolders[target]=MachinePlatform::clean(path,folderStyle(m_fleet,target));
 }
 
+void NewSessionDialog::cloneRepository()
+{
+    const auto target=host();const auto *machine=target.isEmpty()?&m_fleet.local():m_fleet.peer(target);
+    if(!machine||!machine->ok||m_cloning)return;
+    auto *projects=m_liveProjects?m_liveProjects:&m_projects;
+    const auto style=folderStyle(m_fleet,target);
+    const auto label=machine->host;
+    CloneRepositoryDialog dialog(&m_client,target,label,style,*projects,m_project->currentData().toString(),true,this);
+    m_cloning=true;updateForm();const auto result=dialog.exec();m_cloning=false;
+    if(result!=QDialog::Accepted){updateForm();return;}
+    auto project=dialog.projectId();
+    if(!project.isEmpty()&&!projects->group(project)){
+        m_error->setText(tr("The project changed. The checkout is available at %1 on %2.").arg(dialog.createdPath(),label));updateForm();return;
+    }
+    if(project.isEmpty())project=projects->createGroup(dialog.newProjectName());
+    const auto machineName=target.isEmpty()?m_fleet.local().host:target;
+    const auto folder=projects->addFolder(project,machineName,dialog.createdPath(),{},style);
+    emit organizationChanged();
+    const auto snapshot=*projects;setGroups(snapshot,project);
+    // Clone confirmation includes the project choice, even an unchanged Inbox.
+    setProjectExplicit(true);
+    const auto index=m_machine->findData(target);
+    if(index<0||folder.isEmpty()){
+        m_error->setText(tr("Checkout saved. Select its computer and folder to start a session."));updateForm();return;
+    }
+    m_machine->setCurrentIndex(index);
+    if(!selectFolder(folder)){selectPath(dialog.createdPath());}
+    m_cloneLaunchPending=true;updateForm();
+}
+
 void NewSessionDialog::updateForm()
 {
     const auto path=m_folder->currentData(Qt::UserRole+2).toString();
@@ -508,12 +584,14 @@ void NewSessionDialog::updateForm()
     m_preview->setStyleSheet(outside?QStringLiteral("color: %1;").arg(palette().color(QPalette::Window).lightness()<128?"#f0b65a":"#9b6300"):QString());
     m_preview->setText(m_prefillRequest?tr("Checking the session's main working folder…"):
         path.isEmpty()?tr("Browse to choose a folder on this computer."):
+        implicitInbox()?tr("A matching project is detected automatically.\nOtherwise this session stays in Inbox."):
         outside?tr("This folder is outside the project.\nStarting here will add it to this project."):
         QString());
     m_preview->setToolTip(m_preview->text());m_preview->ensurePolished();m_preview->setFixedHeight(2*m_preview->fontMetrics().lineSpacing());
     const QString nameProblem=SessionTag::problem(m_name->text());const bool validName=nameProblem.isEmpty();
     m_nameError->setText(nameProblem);m_nameError->setVisible(!validName);
-    const bool busy=m_validation||m_creation;
+    const bool busy=m_validation||m_creation||m_cloning;
+    const bool locked=busy||m_cloneLaunchPending;
     const bool noMachine=m_machine->count()==0;
     const bool automatic=m_autoPreferred&&automaticWorktreeAvailable();
     m_start->setEnabled(!noMachine&&m_account->currentItem()&&(!m_accountRequest||agent()=="sh")&&!busy&&!m_prefillRequest&&validName&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()
@@ -521,17 +599,19 @@ void NewSessionDialog::updateForm()
     if(m_denseRail&&m_denseBlocked){m_start->setEnabled(false);m_start->setToolTip(tr("Connect the account first"));}
     else if(m_denseRail)m_start->setToolTip(tr("Start session (Ctrl+Enter)"));
     m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):tr("Start session"));
-    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_model,m_effort,m_permissions,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!busy);
+    for(auto *widget:QList<QWidget *>{m_project,m_machine,m_folder,m_account,m_model,m_effort,m_permissions,m_name,m_manage,m_worktreeOptions})widget->setEnabled(!locked);
     m_refreshAccounts->setEnabled(!busy&&!noMachine&&!m_accountRequest);
     m_autoWorktree->setEnabled(!busy&&automaticWorktreeAvailable());m_plainFolder->setEnabled(!busy);m_cancel->setEnabled(!m_creation);
     m_autoWorktree->setChecked(automatic);m_plainFolder->setChecked(!automatic);
     m_worktreeTarget->setText(automatic?MachinePlatform::native(automaticWorktreePath(),folderStyle(m_fleet,host())):QString());m_worktreeTarget->setToolTip(automatic?tr("New branch: %1\nStart from: HEAD").arg(m_generatedBranch):QString());
     m_worktreeTarget->ensurePolished();m_worktreeTarget->setFixedHeight(2*m_worktreeTarget->fontMetrics().lineSpacing());
     const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
-    m_browse->setEnabled(!busy&&!noMachine&&machine&&machine->ok);
+    m_browse->setEnabled(!locked&&!noMachine&&machine&&machine->ok);
+    m_clone->setEnabled(!locked&&!noMachine&&machine&&machine->ok&&validName&&m_account->currentItem()&&!m_accountRequest);
     m_worktrees->setEnabled(!busy&&!m_catalogRequest&&!m_worktreeCatalog["stale"].toBool()&&!m_worktreeCatalog["worktrees"].toArray().isEmpty());
     m_newWorktree->setEnabled(!busy&&!m_catalogRequest&&machine&&machine->ok&&automaticWorktreeAvailable());
-    m_worktreeOptions->setEnabled(m_worktrees->isEnabled()||m_newWorktree->isEnabled());
+    // The dense view clones from this menu too.
+    m_worktreeOptions->setEnabled(m_worktrees->isEnabled()||m_newWorktree->isEnabled()||(m_denseRail&&m_clone->isEnabled()));
     m_openTerminal->setEnabled(!busy&&agent()!="dsh"&&agent()!="opencode");
     m_openTerminal->setToolTip(agent()=="dsh"?tr("DeepSeek opens in the workspace's Native UI."):agent()=="opencode"?tr("OpenCode runs through its native server and opens in Activity."):tr("Also open an external terminal for this session."));
     const auto offline=tr("This computer is unavailable. Choose another folder or reconnect it.");
@@ -548,6 +628,15 @@ void NewSessionDialog::updateForm()
     else if(m_error->text()==remoteOnly||m_error->text()==enableOrRemote)m_error->clear();
     m_openMachines->setVisible(noMachine);
     updateModelButton();updateOpenCodeService();
+    if(m_cloneLaunchPending&&m_start->isEnabled())QTimer::singleShot(0,this,[this]{
+        if(m_cloneLaunchPending&&m_start->isEnabled()){
+            m_cloneLaunchPending=false;
+            if(m_liveProjects&&!m_liveProjects->group(m_project->currentData().toString())){
+                m_error->setText(tr("Project changed. Select the checkout again before starting."));updateForm();return;
+            }
+            start();
+        }
+    });
 }
 void NewSessionDialog::start()
 {
@@ -574,6 +663,10 @@ QString NewSessionDialog::automaticWorktreePath() const
 {
     const QFileInfo root(m_worktreeCatalog["selected_root"].toString());
     return QDir(root.path()).filePath(root.fileName()+'-'+m_generatedBranch);
+}
+bool NewSessionDialog::implicitInbox() const
+{
+    return !m_projectExplicit && m_project->currentData()=="ungrouped";
 }
 void NewSessionDialog::launch(const QString &target,const QString &addFolder)
 {
@@ -1023,7 +1116,8 @@ void NewSessionDialog::buildClassicLayout(QDialogButtonBox *buttons)
     form->addRow(tr("Computer"),m_machine);
     auto *folderRow=new QHBoxLayout;folderRow->setSpacing(8);folderRow->addWidget(m_folder,1);folderRow->addWidget(m_browse);
     auto *folderField=new QVBoxLayout;folderField->setSpacing(6);folderField->addLayout(folderRow);
-    folderField->addWidget(m_projectPath);folderField->addWidget(m_preview);
+    auto *pathRow=new QHBoxLayout;pathRow->addWidget(m_projectPath,1);pathRow->addWidget(m_clone);folderField->addLayout(pathRow);
+    folderField->addWidget(m_preview);
     form->addRow(tr("Working folder"),folderField);
     auto *worktreeField=new QVBoxLayout;worktreeField->setSpacing(6);
     auto *worktreeRow=new QHBoxLayout;worktreeRow->setSpacing(8);
@@ -1061,7 +1155,11 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
     auto *layout=new QVBoxLayout(frame);layout->setContentsMargins(0,0,0,0);layout->setSpacing(0);
     // Widgets the design does not show keep working out of sight.
     auto *unseen=new QWidget(frame);unseen->hide();auto *unseenLayout=new QVBoxLayout(unseen);
-    for(auto *widget:QList<QWidget *>{m_account,m_accountStatus,m_projectPath,m_preview,m_worktreeTarget,m_permissionsLabel,m_permissions})unseenLayout->addWidget(widget);
+    for(auto *widget:QList<QWidget *>{m_account,m_accountStatus,m_projectPath,m_preview,m_worktreeTarget,m_permissionsLabel,m_permissions,m_clone})unseenLayout->addWidget(widget);
+    // Cloning moves into the ··· menu, enabled as the hidden button is.
+    auto *clone=m_worktreeOptions->menu()->addAction(workspaceIcon("git-branch",t.muted),tr("Clone repository…"));clone->setObjectName("denseCloneRepository");
+    connect(m_worktreeOptions->menu(),&QMenu::aboutToShow,this,[this,clone]{clone->setEnabled(m_clone->isEnabled());});
+    connect(clone,&QAction::triggered,m_clone,&QPushButton::click);
     const auto rule=[]{auto *line=new QFrame;line->setObjectName("denseRule");line->setFixedHeight(1);return line;};
     // Header, 52px: Name, the session name and Close.
     m_denseHeader=new QWidget;m_denseHeader->setObjectName("denseHeader");m_denseHeader->setFixedHeight(52);

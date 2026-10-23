@@ -30,13 +30,16 @@ class NewSessionDialog : public QDialog {
 public:
     NewSessionDialog(const QString &hgsPath,const FleetState &fleet,const QString &host = {},
                      const QString &agent = {},const QString &project = {},QWidget *parent = nullptr,
-                     AccountUsageStore *usage = nullptr);
+                     AccountUsageStore *usage = nullptr, SessionOrganization *projects = nullptr);
     void setFleet(const FleetState &fleet);
     void setGroups(const SessionOrganization &organization,const QString &selectedProject = {});
     bool selectFolder(const QString &folderId);
     void selectPath(const QString &path, bool automaticWorktree = true);
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
+    void setProjectExplicit(bool explicitChoice) { m_projectExplicit = explicitChoice; }
+    bool implicitInbox() const;
+    void setProjectCatalogSwarm(const QString &swarm) { m_projectCatalogSwarm = swarm; }
     void reject() override;
 protected:
     bool eventFilter(QObject *object, QEvent *event) override;
@@ -56,6 +59,7 @@ signals:
     // WhiteWh fork: continue a Claude desktop app session in its folder.
     void claudeAppResumeRequested(const QString &host, const QString &session, const QString &name, bool force, const QString &folder, const QString &project);
     void accountSetupRequested(const QString &host, const QString &provider, const QString &account);
+    void organizationChanged();
 private:
     // Views of the same widgets (WhiteWh fork skins, WorkspaceSkin.h).
     void buildClassicLayout(QDialogButtonBox *buttons);
@@ -88,6 +92,7 @@ private:
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
     void browseFolder();
+    void cloneRepository();
     void updateWorktrees();
     QString matchingProjectFolder(const QString &path, const QString &canonicalPath = {}) const;
     void finishFolderPrefill(const QJsonObject &catalog);
@@ -129,11 +134,15 @@ private:
     AccountUsageStore *m_usageStore;
     FleetState m_fleet;
     SessionOrganization m_projects;
-    QString m_initialProject,m_initialHost,m_accountHost;
+    SessionOrganization *m_liveProjects=nullptr;
+    bool m_cloneLaunchPending=false,m_cloning=false;
+    QPushButton *m_clone;
+    QString m_initialProject,m_initialHost,m_accountHost,m_projectCatalogSwarm;
     QString m_preferredAccount;
     QString m_preferredAgent;
     QStringList m_agents;
     bool m_accountPreset=false;
+    bool m_projectExplicit=false;
     bool m_accountCatalogLoaded=false;
     // Rows group the catalog when it arrives; later limits never regroup them.
     bool m_regroupAccounts=true,m_forceUsage=false;

@@ -590,12 +590,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *badges = new QHBoxLayout; badges->setSpacing(4);
     m_title = label({}, "detailTitle"); m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_title->setMinimumWidth(70);
     m_sessionLoading = new BusyIndicator(m_title); m_sessionLoading->setObjectName("sessionLoading");
-    m_sessionLoading->setAccessibleName(tr("Loading data from the remote machine"));
+    m_sessionLoading->setAccessibleName(tr("Loading activity…"));
     m_sessionLoadingTimer.setSingleShot(true);
     connect(&m_sessionLoadingTimer, &QTimer::timeout, this, &SessionsWindow::updateSessionLoading);
     connect(&m_client, &HgsClient::inspectionLoadingChanged, this,
         [this](const QString &host, const QString &name, const QString &archive, const QString &agent, bool loading) {
-            if (host.isEmpty()) return;
+            // WhiteWh fork: local reads count too; a DeepSeek host can be slow.
             const auto key = host + '\n' + name + '\n' + archive + '\n' + agent;
             if (loading) {
                 if (!m_sessionReads.contains(key)) {
@@ -1739,6 +1739,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::inspectionFailed, this, [this](const QString &host, const QString &name, const QString &error, const QString &archiveId) {
         if (!m_pending && !m_renameKey.isEmpty()) return;
         const auto *entry = selected(); if (!entry || entry->host != host || entry->session.name != name || entry->session.archiveId != archiveId) return;
+        // WhiteWh fork: a paused DeepSeek session has no running host until
+        // Resume starts one; that is its normal state, not a failed refresh. The
+        // last inspection's actions belonged to the running agent, so Resume
+        // falls back to the listing's.
+        if (entry->session.cmd == "dsh" && entry->session.state != "running" && error.contains("DeepSeek host is unavailable")) {
+            m_details.remove("allowed_actions"); m_inspectError.clear(); renderDetails(); return;
+        }
         m_inspectError = tr("Could not refresh activity: %1").arg(error); renderDetails();
     });
     connect(&m_client, &HgsClient::writeDone, this, [this](const QString &operation, bool ok, const QString &detail) {
@@ -2357,14 +2364,16 @@ void SessionsWindow::updateSessionLoading()
     const auto consider = [&](const QElapsedTimer &age) {
         pending = true; remaining = qMin(remaining, int(qMax<qint64>(0, 2000 - age.elapsed())));
     };
-    if (entry && entry->online && !entry->host.isEmpty()) {
-        if (m_remotePollAges.contains(entry->host)) consider(m_remotePollAges.value(entry->host));
+    if (entry && entry->online) {
+        if (!entry->host.isEmpty() && m_remotePollAges.contains(entry->host)) consider(m_remotePollAges.value(entry->host));
         for (const auto &read : m_sessionReads)
             if (read.host == entry->host && read.name == entry->session.name && read.archive == entry->session.archiveId
                 && (read.agent.isEmpty() || read.agent == m_subagentId)) consider(read.age);
     }
     m_sessionLoading->setRunning(pending && remaining == 0);
-    m_title->setAccessibleDescription(pending && remaining == 0 ? tr("Loading data from the remote machine") : QString());
+    m_title->setAccessibleDescription(pending && remaining == 0 ? tr("Loading activity…") : QString());
+    // WhiteWh fork: before the first answer the status line says so too.
+    if (m_selectedLoading != pending) { m_selectedLoading = pending; renderDetails(); }
     if (pending && remaining > 0) m_sessionLoadingTimer.start(remaining);
     else m_sessionLoadingTimer.stop();
 }
@@ -3941,7 +3950,8 @@ void SessionsWindow::renderDetails()
         && (m_details.value("expected_id").toString().isEmpty() || m_details.value("resume_message_can_send").toBool());
     m_changeAction->setEnabled(entry->online && !updating && (archived ? (s.resumable && !s.archiveId.isEmpty() && !occupied) :
         ((canPause && NativeSessionCapabilities::action(s,"pause",m_details)) || (s.state != "running" && s.resumable && NativeSessionCapabilities::action(s,"resume",m_details)))));
-    m_restore->setVisible(archived); m_restore->setEnabled(m_changeAction->isEnabled());
+    // WhiteWh fork: a paused or stopped session also shows Resume in its header.
+    m_restore->setVisible(archived || s.state == "paused" || s.state == "stopped"); m_restore->setEnabled(m_changeAction->isEnabled());
     m_restore->setAccessibleName(pauseCaption); m_restore->setIcon(workspaceIcon("play", QColor(m_accent)));
     m_more->setEnabled(entry->online && !updating && (!archived || !s.archiveId.isEmpty()));
     m_renameAction->setEnabled(NativeSessionCapabilities::action(s,"rename",m_details) && entry->online && !updating && !s.name.section('/', 0, 0).isEmpty() && !s.name.section('/', 1, 1).isEmpty() && (!archived || !s.archiveId.isEmpty()));
@@ -3952,7 +3962,7 @@ void SessionsWindow::renderDetails()
     m_forgetAction->setToolTip(NativeSessionCapabilities::forgetsBindingOnly(s,m_details) ? tr("Zerus forgets this session. The conversation stays in OpenCode.") : QString());
     m_forgetAction->setText(archived ? tr("Forget archived session…") : endOperation == "terminate" ? tr("Terminate session…") : tr("Forget saved session…"));
     const auto questionError=m_details.value("pending_questions_error").toString();
-    QString hint;
+    QString hint; bool loadingHint = false;
     if (terminating) hint = tr("Waiting for the session to stop. Its native conversation history is kept.");
     else if (!entry->online) hint = tr("Machine unavailable. Showing the last known state; actions will return when it reconnects.");
     else if (archived && !m_details.value("last_restore_error").toString().isEmpty())
@@ -3973,6 +3983,8 @@ void SessionsWindow::renderDetails()
         ? tr("The agent has replied, but a command is still running.") : tr("The agent has replied, but %1 commands are still running.").arg(s.backgroundProcesses))
         + QStringLiteral(" ") + (ProcessSettings::enabled() ? tr("Open Processes to follow their output or stop them.") : tr("Enable Settings > Processes to inspect them."))
         + QStringLiteral(" ") + tr("You can send another message.");
+    // WhiteWh fork: before the first answer of a read, say it is loading.
+    else if (m_selectedLoading && m_details.isEmpty()) { hint = tr("Loading activity…"); loadingHint = true; }
     else if (s.activity != "idle") hint = tr("Waiting for the agent to confirm its state. Open its terminal if it needs attention.");
     else hint = tr("Ready for your next message. Finishing a response does not mark the task complete.");
     m_hint->setText(hint);
@@ -3994,7 +4006,8 @@ void SessionsWindow::renderDetails()
         ? tr("Close the idle agent and save its conversation. Resume starts it again with the same history.") : hint}, 380).html);
     m_restore->setToolTip(m_changeAction->toolTip());
     const bool contextVisible = !entry->online || !m_inspectError.isEmpty() || !questionError.isEmpty()
-        || (archived && (occupied || !m_details.value("last_restore_error").toString().isEmpty()));
+        || (archived && (occupied || !m_details.value("last_restore_error").toString().isEmpty()))
+        || loadingHint;
     const bool contextError = !entry->online || !m_inspectError.isEmpty() || !questionError.isEmpty()
         || (archived && !m_details.value("last_restore_error").toString().isEmpty());
     m_hint->setProperty("active", contextVisible); m_hint->setProperty("error", contextError); m_hint->hide();

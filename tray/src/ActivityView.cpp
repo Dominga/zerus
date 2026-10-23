@@ -475,6 +475,29 @@ bool isExcerptOf(QString excerpt, const QString &full)
     return !excerpt.isEmpty() && full.startsWith(excerpt);
 }
 
+// WhiteWh fork: the pictures a tool group worked with, from its results: a
+// DeepSeek read (<path>…</path> with <type>image</type>), a file written, or
+// any absolute path to a picture in a finished tool's output. At most four.
+QStringList toolMedia(const QList<QJsonObject> &group)
+{
+    static const QRegularExpression read(QStringLiteral("<path>([^<\\r\\n]+)</path>\\s*<type>image</type>"));
+    static const QRegularExpression path(QStringLiteral("(?:[A-Za-z]:[\\\\/]|/)[^\\s\"'<>|*?]*\\.(?:png|jpe?g|gif|webp)"),
+                                         QRegularExpression::CaseInsensitiveOption);
+    QStringList media;
+    const auto add = [&](const QString &href) {
+        const auto file = SessionFileReference::parse(href.trimmed());
+        if (media.size() < 4 && file.valid() && MediaFiles::kind(file.path) != MediaFiles::Kind::None && MediaFiles::kind(file.path) != MediaFiles::Kind::Video && !media.contains(href.trimmed()))
+            media.append(href.trimmed());
+    };
+    for (const auto &event : group) {
+        if (event.value("type") != "PostToolUse") continue;
+        const auto detail = event.value("detail").toString();
+        for (auto it = read.globalMatch(detail); it.hasNext();) add(it.next().captured(1));
+        for (auto it = path.globalMatch(detail); it.hasNext();) add(it.next().captured(0));
+    }
+    return media;
+}
+
 // WhiteWh fork: `media` collects the file references that name a picture,
 // animation or video, for the previews under the message.
 QString markdown(const QString &text, const MarkdownTheme &theme, QHash<QString, QString> &fileLinks, QStringList *media = nullptr)
@@ -1111,6 +1134,8 @@ struct ActivityRenderResult {
             "<a href='hgs-activity:%3' style='color:%4;'><b>%5 %6</b></a><span style='font-size:10px;color:%7;'> &nbsp; %8</span>")
             .arg(border, escaped(key), key, color, expanded ? QStringLiteral("▾") : QStringLiteral("▸"), escaped(title), muted, escaped(timeText(last)));
         if (!expanded && !preview.isEmpty()) html += QString("<p style='color:%1;font-size:11px;margin:4px 0 0;'>%2</p>").arg(muted, escaped(preview));
+        // WhiteWh fork: the pictures these tools made or read, open or closed.
+        if (!thinking) html += mediaTiles(toolMedia(group));
         if(expanded && thinking)html+=markdown(event.value("detail").toString(),pageTheme,m_fileLinks);
         else if (expanded) for (const auto &e : group) {
             QString label = eventTitle(e.value("type").toString());

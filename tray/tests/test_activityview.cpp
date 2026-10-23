@@ -223,6 +223,7 @@ private slots:
     void idleNotificationsStayOutOfTheTimeline();
     void rejectsMarkupResourcesAndUnsafeLinks();
     void agentMediaShowsPreviewsUnderTheMessage();
+    void toolPicturesShowPreviewsInTheirGroup();
     void preservesLiteralUserMessages_data();
     void preservesLiteralUserMessages();
     void nativeQuestionReplies_data();
@@ -2026,6 +2027,25 @@ void TestActivityView::groupsToolsAndKeepsExpansion()
     QVERIFY(browser->toPlainText().size() < expandedAttentionLength);
     view.setSessionKey("mac/new"); view.setActivity({}, events);
     QVERIFY(!browser->toPlainText().contains("hidden-command-first"));
+}
+
+// WhiteWh fork: a picture a tool read or wrote, such as a DeepSeek screenshot
+// it then looked at, gets a preview in the tool group, even while it is closed.
+void TestActivityView::toolPicturesShowPreviewsInTheirGroup()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto shot = QDir::toNativeSeparators(dir.filePath("ui-home.png"));
+    const auto saved = QDir::toNativeSeparators(dir.filePath("state.png"));
+    SettledActivityView view; view.resize(560, 520); view.show();
+    QSignalSpy wanted(&view, &ActivityView::mediaPreviewRequested);
+    view.setActivity({}, {journalEvent(1, "PreToolUse", "{\"file_path\": \"x\"}", "read"),
+        journalEvent(2, "PostToolUse", QString("<path>%1</path>\n<type>image</type>\n<content>\nimage/png image, 1440x900\n</content>").arg(shot), "read"),
+        journalEvent(3, "PreToolUse", "screenshot", "bash"),
+        journalEvent(4, "PostToolUse", QString("52032 bytes written to file %1\nnotes.txt and %1 again").arg(saved), "bash")});
+    QTRY_COMPARE(wanted.size(), 2);
+    QStringList files;
+    for (const auto &request : wanted) files << QFileInfo(request[1].toString()).fileName();
+    files.sort(); QCOMPARE(files, QStringList({"state.png", "ui-home.png"}));
 }
 
 // WhiteWh fork: a picture or video the agent names gets a preview under its

@@ -452,6 +452,8 @@ private:
     int m_tick = 0, m_activityPollMs = 2500, m_noticeMs = 5000;
     QTimer m_timer;
     QTimer m_sessionLoadingTimer;
+    // WhiteWh fork: a read of the selected session is pending.
+    bool m_selectedLoading = false;
     struct SessionRead { QString host, name, archive, agent; QElapsedTimer age; };
     QHash<QString, SessionRead> m_sessionReads;
     QHash<QString, QElapsedTimer> m_remotePollAges;

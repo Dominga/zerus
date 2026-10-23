@@ -664,10 +664,10 @@ the conversation and press **Voice** again; opening settings does not start a
 recording. If settings cannot open, the dialog keeps the manual navigation path.
 
 Session rows show provider, machine, current action, model, effort and Git context.
-Use the compact icon in a session row's upper-right corner, or right-click and
-choose **Compact session row**, to show only its name, status and agent type.
-The expand icon in that same position or the Right key restores the full row;
-the row remains selectable and keeps its normal context actions. This device
+Double-click a session row to toggle between the full card and a compact row
+showing only its name, status and agent type. Right-click **Compact session row**
+is also available. Compact rows keep their expand icon; it or the Right key
+restores the full row. The row remains selectable and keeps its normal context actions. This device
 remembers the preference for that conversation across restarts. **Expand all
 collapsed** in the Sessions menu restores every compact row, including sessions
 hidden by the current filters. Row density never compacts the agent's context
@@ -713,6 +713,13 @@ local preferences. **Settings → Appearance → Content scale** adjusts Activit
 questions, the message field and Terminal from 75% to 200% in 5% steps, with 100%
 as the default; the session list, the side panel, the session header and its tabs
 keep their size.
+
+Drag the small handle above the message toolbar upward to enlarge the message
+field, or downward to shrink it. Double-click the handle to restore the default
+height. The height is a local preference shared by sessions and retained across
+restarts; smaller windows temporarily limit it so the conversation stays visible.
+With the handle focused, Up/Down resize it and Home restores the default.
+
 **Settings → Appearance → Activity width** keeps Activity readable in a wide or
 fullscreen window: the transcript, its queued input, questions and the message
 field share one centered column of at most 900 px by default (480–2400 px). The
@@ -958,8 +965,9 @@ Reading older history preserves scroll and selection; **Jump to latest** returns
 to live events without resizing the timeline. Its double-down-arrow icon sits beside
 Voice in the composer toolbar, outside the messages; the tooltip includes the
 number of new events. Subagents use the same icon in their own toolbar.
-Double-clicking a session or
-subagent row, or pressing Enter on it, opens Activity and performs the same jump.
+Pressing Enter on a session or subagent row opens Activity and performs the same
+jump. Double-clicking a subagent row also jumps to latest; double-clicking a
+session row toggles its compact presentation.
 Connect commands remain available through **Copy connect command** in the session
 menu. Claude hands finished
 background work and other sessions' messages back as a new turn. Activity never
@@ -1967,12 +1975,20 @@ that way. Absolute paths remain available directly from the CLI.
 
 ### Cloning a repository
 
-**Clone repository…** in the desktop **New session** dialog prepares a repository on the selected
-computer and starts the chosen agent. Enter an SSH or HTTPS address, choose an
-existing parent folder and review the suggested, editable folder name and full
-destination. Select an existing logical project or **New project…**. Parent
-folders are remembered separately for each computer. **Projects → Clone
-repository…** offers the same preparation without starting an agent.
+In desktop **New session**, choose **Working folder** for an existing checkout or
+ordinary folder, or **Git repository** to prepare a new checkout. Project,
+computer, agent, account and session name stay in this one form. The Git source
+accepts an SSH or HTTPS URL from GitHub or another Git server. **Clone to** shows
+the suggested complete destination; edit it to rename the target folder or use
+**Browse…** to choose its parent. A manual destination stays when the URL changes.
+Parent folders are remembered separately for each computer.
+Switching sources keeps the shared controls and action buttons in place.
+
+Select an existing logical project, Inbox, or **New project…**, then use the
+single **Clone and start** action. Progress, access errors and recovery controls
+stay inline. Switching source modes or opening the form never starts a clone.
+**Projects → Clone repository…** offers standalone preparation without starting
+an agent.
 
 **Clone and start** checks the selected computer's installed CLI, Git, parent
 folder, destination and repository access before cloning. Access uses that
@@ -2028,6 +2044,12 @@ result. Local paths, including Windows drive, UNC and device paths, are refused.
 A single-letter SSH alias must use an explicit address such as `ssh://c/repo`.
 
 ### Worktrees and ordinary folders
+
+New session keeps **Auto** available when the selected computer confirms the
+working checkout, even if the repository has more checkouts than its bounded
+catalog can list. Missing, bare, stale or unconfirmed folders remain ineligible.
+Opening the form or choosing a folder creates no worktree; creation starts only
+after **Start session**.
 
 Session cards show a checkout line of the form `folder / branch`, such as
 `zerus / work-1a2b`, preceded by a small Git branch icon; **detached HEAD**
@@ -2206,8 +2228,8 @@ not ownership evidence. Automatic cleanup has bounded checks and never changes
 a successful archive into a failed termination. A lost removal acknowledgement
 is reported as unconfirmed, with no automatic replay.
 
-The desktop reports successful automatic cleanup, or keeps **Review worktree:
-<folder>** after Terminate/Archive (**Check worktree:** when the outcome is
+The desktop reports successful automatic cleanup, or keeps **Folder kept:
+<folder>** after Terminate/Archive (**Cleanup unconfirmed:** when the outcome is
 unconfirmed). This global reminder names the retained checkout; its tooltip and
 accessible description identify the source session, computer, full folder and
 reason. It can remain while another session is selected and does not expire
@@ -2217,6 +2239,15 @@ confirmation before removal. Archives keep the exact branch/head needed to
 recreate an automatically removed checkout on explicit **Restore**; a changed
 branch or occupied destination is refused. Browsing and dry runs never recreate
 a folder. Plain Pause never cleans up.
+
+The cleanup review always shows integration evidence, even when local files
+remain. Git integration uses local refs, not a fresh remote check. The selected
+folder explains unsaved changes, local data loss and why automatic cleanup kept
+it. **Inspect files and commits…** opens the bounded file browser, including
+ignored files; a cache-like filename alone is not proof that data is disposable.
+**Keep folders** makes no removal. Local-data and unsaved-work deletion require
+separate consent. Manual removal keeps conversations and keeps branches by
+default; restoring an archive may require recreating its working folder.
 
 The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE

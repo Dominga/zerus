@@ -368,10 +368,17 @@ exact run, conversation, reply and attention signature to the session's
 computer, which shares them with every desktop and phone. A reply or request read
 elsewhere can be adopted here for the exact verified selected reply. Automatic
 adoption for a nonselected conversation is deferred: fleet hints do not prove
-which canonical incoming prefix belongs to that shared reply. Its unread indicator
-may stay stale until a verified selection or explicit Mark read / Read all.
+which canonical incoming prefix belongs to that shared reply. Canonical history
+counters can remain phone-local until a verified selection or explicit Mark read
+/ Read all. Sessions reply badges follow the owning computer's current reply
+identity and shared mark. When its bounded journal no longer lists a current
+reply ID but retains a conversation-scoped read mark, old phone history does not
+recreate a New reply badge. This changes no history watermark; a newly listed
+reply and an independent Review later reminder remain visible.
 Review later stays on this phone. This interim guard does not add native prefix
 proof or change explicit reading and Read all.
+Catalog refresh publishes rows and their local read decoration together, retaining
+unchanged card objects and the list viewport while background preparation runs.
 Bounded background metadata probes can prepare canonical heads for live sessions
 with reported reply evidence, without opening their conversations or fetching
 full history. Previously unvisited sessions with unknown evidence are not
@@ -949,12 +956,41 @@ Pairing QR codes use CameraX 1.6.2 and ZXing core 3.5.4 without Google Play serv
 
 CameraX is Apache 2.0 and includes libyuv under BSD-3-Clause; ZXing is Apache 2.0. Full license texts and source attribution are available in Third-party notices. Pins follow the [official CameraX releases](https://developer.android.com/jetpack/androidx/releases/camera) and [ZXing 3.5.4 release](https://github.com/zxing/zxing/releases/tag/zxing-3.5.4). CameraX requires compile SDK 36 and AGP 8.9.1 or newer, covered by this build.
 
-Accounts is a read-only viewer grouped by workspace and provider-reported account identity, matching desktop accounts. Each card contains its machine labels, using the same names and colors as Sessions. Provider account IDs and organization scope own identity; email-only reports join an ID only when unambiguous. Signed-out and unidentified profiles stay machine-local. Compact cards show account type and aligned period, remaining reset time and usage columns, with recurring-period and hourglass glyphs; tap a card for the full identity, limits, per-machine profiles and update times. Usage selects one best-quality report and never adds quotas across machines. It shows reported account identity, plan, usage windows and wallet balances when the connector provides them. Unknown limits stay unknown; ended windows need a provider refresh. Account snapshots use a separate encrypted private cache, so offline values remain available with their original provider update time and stale styling; offline and authentication problems stay visible. A connector advertising `accounts_snapshot` is required; Refresh reads its latest snapshot and does not force a provider refresh.
+Accounts is a read-only viewer grouped by workspace and provider-reported account identity, matching desktop accounts. Each card contains its machine labels, using the same names and colors as Sessions. Provider account IDs and organization scope own identity; email-only reports join an ID only when unambiguous. Signed-out and unidentified profiles stay machine-local. Compact cards show account type and aligned period, remaining reset time and usage columns, with recurring-period and hourglass glyphs; tap a card for the full identity, limits, per-machine profiles and update times. Authentication problems remain visible in the list; optional usage availability, refresh progress and probe failures are neutral diagnostics in details. Saved usage is labelled once rather than repeating each machine's timestamps. Usage selects one best-quality report and never adds quotas across machines. It shows reported account identity, plan, usage windows and wallet balances when the connector provides them. Unknown limits stay unknown; ended windows need a provider refresh. Account snapshots use a separate encrypted private cache, so offline values remain available with their original provider update time and stale styling. A connector advertising `accounts_snapshot` is required; Refresh reads its latest snapshot and does not force a provider refresh.
 
 ## Project and account selection
 
-New session is a full-screen form with Project, Folder, Worktree, Account and
-agent, and Session name sections. Account and agent pairs share one list: a
+New session is a full-screen form with Computer, Source, Project, Working folder,
+Worktree, Account and agent, and Session name sections. Computer is selected
+inside the form, initially preferring the current machine scope; there is no
+separate machine-selection step. Changing it resets native folder/account
+choices, retains the URL and session name, and keeps an explicit project/Inbox
+only within the same workspace and canonical swarm.
+
+Source offers **Working folder** and **Git repository**. A repository URL suggests
+the destination leaf; **Clone to** is editable and Browse chooses its parent.
+A manually entered destination is retained when the URL changes. **Clone and start**
+checks the selected computer, URL, destination and launch choices before creating
+anything. It clones into a new folder and starts there only after a definite
+native result. Existing folders are never replaced and Git is never initialized
+for an ordinary folder. This requires a current Rust connector and the guarded
+native mobile acquisition ABI; older/Python gateways show an update reason.
+A checkout interrupted by transport loss is kept as one durable original request.
+**Check original result** reads that clone's native receipt; a confirmed recovery
+offers **Use checkout** and never starts a session automatically. A created checkout
+also remains available after a later launch failure or closing the form. An
+unconfirmed attempt reserves its original destination; Inspect folder opens it
+for review, while a different destination can be used for a new explicit attempt.
+
+Repository recovery selects the attempt for the current Clone to destination and
+pages other unresolved attempts in bounded groups. Each Check original result
+reads that attempt's original native clone UUID; choosing another destination
+keeps it recoverable. A read-only check may resolve a parent alias (for example,
+`/var/tmp` to `/private/var/tmp` on macOS). The form shows that canonical path and
+requires a fresh explicit Clone and start before creating it; mutation and status
+receipts must keep the confirmed exact destination.
+
+ Account and agent pairs share one list: a
 large colored provider logo spans the email and one line of cached limits, or `limits n/a`.
 Small usage/elapsed rails and pace colors match the desktop status footer.
 Default labels, profile IDs and quota error details stay out of these rows;
@@ -980,11 +1016,12 @@ project, as the form states.
 
 Worktree mirrors desktop. **Auto** is the default when a fresh, complete catalog
 shows the selected folder inside an available checkout with a named root. The
-form shows the sibling `<root>-<branch>` path and new branch before launch.
+form shows the sibling `<root>-<branch>` path before launch; routine worktree
+explanations are omitted from the form.
 Create session then locks the form, creates that worktree from `HEAD` with a
 durable receipt, checks its folder and catalog, and launches there. A worktree
-of a project folder is placed as a related worktree; otherwise the form states
-that the new folder will be added. Opening the form and checking folders never
+of a project folder is placed as a related worktree; other explicit project
+placements retain their existing assignment checks. Opening the form and checking folders never
 create anything. **None** starts in the selected folder; ordinary non-Git folders, catalog errors
 and older computers use it, and never initialize Git. The options menu offers
 **Choose existing…** and **Create manually…** (branch, base and destination);

@@ -403,6 +403,8 @@ private slots:
     void terminatingWorktreeSessionOffersRemainingCleanupAndConsumesExactNativeOutcome();
     void nativeCleanupCanSupplyAnUncachedFolderAndArchiveTransitionsExpireOnlyTheirRepository();
     void renameValidationCancelAndSelection();
+    void renameValidationKeepsDialogGeometry_data();
+    void renameValidationKeepsDialogGeometry();
     void forkValidationCancelAndPinnedPayload();
     void forkKeepsSourceAndGroup_data();
     void forkKeepsSourceAndGroup();
@@ -4392,7 +4394,15 @@ void TestSessionsWindow::failedMessagesReconcileAndRetryWithoutLosingDrafts()
     script.write(R"PY(#!/usr/bin/env python3
 import json,pathlib,sys,time
 root=pathlib.Path(__file__).parent;args=sys.argv[1:]
-if args[0]=='inspect':print((root/'inspect.json').read_text())
+if args[0]=='inspect':
+ if (root/'hold-inspection').exists():
+  (root/'inspection-entered').write_text('held')
+  end=time.monotonic()+3
+  while not (root/'release-inspection').exists():
+   if time.monotonic()>=end:sys.exit('held inspection gate expired')
+   time.sleep(.01)
+  print('held fixture inspection refused',file=sys.stderr);sys.exit(1)
+ print((root/'inspect.json').read_text())
 elif args[0]=='send':
  p=json.load(sys.stdin)
  with (root/'requests.jsonl').open('a') as f:f.write(json.dumps(p)+'\n')
@@ -4403,9 +4413,19 @@ elif args[0]=='send':
     QJsonObject details{{"tracked",true},{"run_id","run-ready"},{"conversation_id","conversation-ready"},{"runtime_state","live"},{"process_state","running"},{"activity","idle"},{"phase","idle"},{"events",QJsonArray{}},{"cursor",0}};
     // Atomic: a background inspection must never read a truncated file and reset the run identity a retry checks.
     const auto save=[&]{return FakeCli::replace(directory.filePath("inspect.json"),QJsonDocument(details).toJson());};QVERIFY(save());
-    SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
+    SessionsWindow window(FakeCli::program(program));keepDetailsPollsOut(window);window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
     auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *send=composer->findChild<QPushButton *>("sendMessage");
     auto *client=window.findChild<HgsClient *>();auto *view=composer->parentWidget()->findChild<ActivityView *>();QVERIFY(view);
+    const auto key=composer->sessionKey();QCOMPARE(key,QString("\ncodex/hgs/dashboard"));
+    const auto attachmentAdmission=[&] {
+        return QString::fromUtf8(QJsonDocument(QJsonObject{{"key",composer->sessionKey()},
+            {"draft_loading",composer->isDraftLoading(key)},{"sending",composer->isSending(key)},
+            {"preparing",composer->isPreparingSending(key)},{"waiting",composer->isWaitingToSend(key)},
+            {"editable",composer->canEditAttachments()},{"attachments",composer->canAttachFiles()},
+            {"read_only",composer->editor()->isReadOnly()},{"session_blocked",composer->editor()->property("sessionBlocked").toBool()},
+            {"status",composer->findChild<QLabel *>("messageStatus")->text()},
+            {"inspection",client->inspectionInFlight({},"codex/hgs/dashboard")}}).toJson(QJsonDocument::Compact));
+    };
     QSignalSpy failures(client,&HgsClient::messageFailed),sent(client,&HgsClient::messageSent);
     setComposerText(composer, "Original request");QTRY_VERIFY(send->isEnabled());send->click();QTRY_COMPARE(failures.size(),1);
     QTRY_VERIFY(view->browser()->toPlainText().contains("Not sent"));
@@ -4413,14 +4433,40 @@ elif args[0]=='send':
     const auto now=QDateTime::currentMSecsSinceEpoch()/1000.;
     QJsonArray events{QJsonObject{{"seq",1},{"type","TurnStarted"},{"detail","Original request"},{"at",now-600}},
         QJsonObject{{"seq",2},{"type","TurnStarted"},{"detail","Original request"},{"at",now+1},{"agent_id","child"}}};
-    details["events"]=events;details["cursor"]=2;QVERIFY(save());client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["events"]=events;details["cursor"]=2;QVERIFY(save());
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);client->inspectionReady({},"codex/hgs/dashboard",details);
     QTRY_VERIFY(view->browser()->toPlainText().contains("Not sent"));
     events.append(QJsonObject{{"seq",3},{"type","TurnStarted"},{"detail","Original request"},{"at",now+2}});
-    details["events"]=events;details["cursor"]=3;QVERIFY(save());client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["events"]=events;details["cursor"]=3;QVERIFY(save());
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);client->inspectionReady({},"codex/hgs/dashboard",details);
     QTRY_VERIFY(!view->browser()->toPlainText().contains("Not sent"));QCOMPARE(composer->editor()->toPlainText(),QString("Keep this different draft"));
-    setComposerText(composer, "Retry with a file");QVERIFY(composer->addAttachment("original.txt","text/plain","original"));send->click();QTRY_COMPARE(failures.size(),2);
+    // Receipt reconciliation and current input admission are independent. A
+    // deliberately held inspection can fail after the receipt disappeared;
+    // only a subsequent confirmed read unlocks this exact draft. This models
+    // the missing fixture precondition, not the unrecorded Windows failure state.
+    const auto marker=[&](const QString &name) { QFile file(directory.filePath(name));return file.open(QIODevice::WriteOnly)&&file.write("gate")==4; };
+    const auto releaseInspection=qScopeGuard([&] { marker("release-inspection");QFile::remove(directory.filePath("hold-inspection")); });
+    QVERIFY(marker("hold-inspection"));QSignalSpy inspectionErrors(client,&HgsClient::inspectionFailed);
+    composer->sessionRefreshRequested(key);QTRY_VERIFY(QFileInfo::exists(directory.filePath("inspection-entered")));
+    QVERIFY(client->inspectionInFlight({},"codex/hgs/dashboard"));QVERIFY(composer->canAttachFiles());
+    QVERIFY(marker("release-inspection"));QVERIFY(QFile::remove(directory.filePath("hold-inspection")));
+    QTRY_VERIFY(std::any_of(inspectionErrors.cbegin(),inspectionErrors.cend(),[](const QList<QVariant> &reply) {
+        return reply[0].toString().isEmpty()&&reply[1].toString()=="codex/hgs/dashboard"
+            &&reply[2].toString().contains("held fixture inspection refused");
+    }));
+    QVERIFY(!view->browser()->toPlainText().contains("Not sent"));QCOMPARE(composer->sessionKey(),key);
+    QCOMPARE(composer->editor()->toPlainText(),QString("Keep this different draft"));
+    QVERIFY(!composer->canAttachFiles());QVERIFY(!composer->canEditAttachments());QVERIFY(composer->editor()->isReadOnly());
+    QCOMPARE(failures.size(),1);QCOMPARE(sent.size(),0);
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
+    QTRY_VERIFY2(composer->sessionKey()==key&&composer->canAttachFiles(),qPrintable(attachmentAdmission()));
+    setComposerText(composer, "Retry with a file");QCOMPARE(composer->editor()->toPlainText(),QString("Retry with a file"));
+    QVERIFY2(composer->sessionKey()==key&&composer->canAttachFiles(),qPrintable(attachmentAdmission()));QVERIFY(composer->addAttachment("original.txt","text/plain","original"));send->click();QTRY_COMPARE(failures.size(),2);
     const auto id=QString::number(failures[1][0].toULongLong());QTRY_VERIFY(view->browser()->toPlainText().contains("Not sent"));
-    setComposerText(composer, "Next draft");composer->findChild<QPushButton *>("removeAttachment")->click();QVERIFY(composer->addAttachment("next.txt","text/plain","next"));
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);
+    QTRY_VERIFY2(composer->sessionKey()==key&&composer->canAttachFiles(),qPrintable(attachmentAdmission()));
+    setComposerText(composer, "Next draft");QCOMPARE(composer->editor()->toPlainText(),QString("Next draft"));composer->findChild<QPushButton *>("removeAttachment")->click();
+    QVERIFY2(composer->sessionKey()==key&&composer->canAttachFiles(),qPrintable(attachmentAdmission()));QVERIFY(composer->addAttachment("next.txt","text/plain","next"));
     QFile success(directory.filePath("succeed"));QVERIFY(success.open(QIODevice::WriteOnly));success.close();
     {
         QSemaphore entered,release;std::atomic<int> reads=0;
@@ -4454,7 +4500,8 @@ elif args[0]=='send':
     composer->findChild<QPushButton *>("removeAttachment")->click();setComposerText(composer, "Sent through Terminal");
     send->click();QTRY_COMPARE(failures.size(),4);
     events.append(QJsonObject{{"seq",4},{"type","TurnStarted"},{"detail","Sent through Terminal"},{"at",QDateTime::currentMSecsSinceEpoch()/1000.+2}});
-    details["events"]=events;details["cursor"]=4;QVERIFY(save());client->inspectionReady({},"codex/hgs/dashboard",details);
+    details["events"]=events;details["cursor"]=4;QVERIFY(save());
+    settleSelectedInspection(composer,client,{},"codex/hgs/dashboard",details);client->inspectionReady({},"codex/hgs/dashboard",details);
     QTRY_VERIFY(!view->browser()->toPlainText().contains("Not sent"));QVERIFY(composer->editor()->toPlainText().isEmpty());
 }
 
@@ -5457,15 +5504,28 @@ void TestSessionsWindow::activityEscapingAndActions()
     scroll->setValue(0);
     auto cursor = activity->textCursor(); cursor.movePosition(QTextCursor::Start); cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 5);
     activity->setTextCursor(cursor);
+    const auto selectionAnchor = cursor.anchor(), selectionPosition = cursor.position();
+    const auto selectedText = cursor.selectedText();
+    const auto selectedKey = list->currentItem()->data(SessionRoles::Key).toString();
+    const bool initiallyCollapsed = list->currentItem()->data(SessionRoles::RowCollapsed).toBool();
     const auto point = list->visualItemRect(list->currentItem()).center();
     QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, point);
     QCOMPARE(scroll->value(), 0); QVERIFY(activity->textCursor().hasSelection());
+    // Double-click changes only row density, including the release at the
+    // original point after the row's height changes. Keep the reading position.
     QTest::mouseDClick(list->viewport(), Qt::LeftButton, {}, point);
-    QTRY_COMPARE(scroll->value(), scroll->maximum()); QVERIFY(!activity->textCursor().hasSelection()); QVERIFY(view->jumpButton()->isHidden());
+    QTest::mouseRelease(list->viewport(), Qt::LeftButton, {}, point);
+    QCOMPARE(list->currentItem()->data(SessionRoles::RowCollapsed).toBool(), !initiallyCollapsed);
+    QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selectedKey); QVERIFY(list->currentItem()->isSelected());
+    QCOMPARE(scroll->value(), 0);
+    QCOMPARE(activity->textCursor().anchor(), selectionAnchor); QCOMPARE(activity->textCursor().position(), selectionPosition);
+    QCOMPARE(activity->textCursor().selectedText(), selectedText);
     QCOMPARE(opened.size(), 0); QCOMPARE(copied.size(), 0); QCOMPARE(composer->editor()->toPlainText(), QString("Keep my draft"));
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); tabs->setCurrentIndex(1);
     scroll->setValue(0); QTest::keyClick(list, Qt::Key_Return);
     QCOMPARE(tabs->currentIndex(), 0); QTRY_COMPARE(scroll->value(), scroll->maximum());
+    QVERIFY(!activity->textCursor().hasSelection()); QVERIFY(view->jumpButton()->isHidden());
+    QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selectedKey);
     QCOMPARE(opened.size(), 0); QCOMPARE(copied.size(), 0); QCOMPARE(composer->editor()->toPlainText(), QString("Keep my draft"));
     window.findChild<QAction *>("openSessionAction")->trigger(); QCOMPARE(opened.size(), 1);
     QCOMPARE(opened[0][1].toString(), QStringLiteral("codex/hgs/dashboard"));
@@ -5510,6 +5570,18 @@ void TestSessionsWindow::compactSessionRowActionsPreserveSelectionAndDraft()
     QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected); QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
     QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(reads.size(), 0); QCOMPARE(activated.size(), 0);
     QVERIFY(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty());
+    // Double-click is the compact/expand gesture on the open conversation.
+    // It persists density without a native action or a lost composer draft.
+    for (bool collapsed : {true, false}) {
+        const auto point = list->visualItemRect(list->currentItem()).center();
+        QTest::mouseDClick(list->viewport(), Qt::LeftButton, {}, point);
+        QTest::mouseRelease(list->viewport(), Qt::LeftButton, {}, point);
+        QCOMPARE(list->currentItem()->data(SessionRoles::RowCollapsed).toBool(), collapsed);
+        QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), selected);
+        QCOMPARE(composer->editor()->toPlainText(), QString("Keep this other conversation draft"));
+        QCOMPARE(QSettings().value("workspace/collapsedSessionRows").toByteArray().isEmpty(), !collapsed);
+        QCOMPARE(writes.size(), 0); QCOMPARE(sends.size(), 0); QCOMPARE(reads.size(), 0); QCOMPARE(activated.size(), 0);
+    }
 }
 
 void TestSessionsWindow::selectedSessionRowsCompactAndExpandLocally()
@@ -8087,7 +8159,7 @@ void TestSessionsWindow::archivingLastWorktreeSessionOffersCleanup()
         QTRY_VERIFY(offer->isVisible()); QVERIFY(offer->toolTip().contains("/workspace/website-nav")); bool opened = false;
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = window.findChild<QDialog *>("worktreeBatchCleanupDialog"); QVERIFY(dialog); QTimer::singleShot(3000, dialog, [dialog] { dialog->done(0); });
-            QCOMPARE(dialog->windowTitle(), QString("Review cleanup"));
+            QCOMPARE(dialog->windowTitle(), QString("Remove working folders"));
             const auto target = dialog->findChild<QTreeWidget *>("batchCleanupList")->topLevelItem(0)->data(0,Qt::UserRole).toJsonObject();
             QCOMPARE(target["row"].toObject()["path"].toString(),QString("/workspace/website-nav")); opened = true; dialog->reject();
         });
@@ -8122,7 +8194,7 @@ void TestSessionsWindow::keptWorktreeFooterFitsAndNamesItsSource()
     auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
     window.findChild<QAction *>("archiveSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 1);
     auto *offer = window.findChild<QPushButton *>("archivedWorktreeCleanup"); QTRY_VERIFY(offer->isVisible());
-    QCOMPARE(offer->text(), QString("Review worktree: kept-checkout"));
+    QCOMPARE(offer->text(), QString("Folder kept: kept-checkout"));
     QVERIFY(offer->toolTip().contains("codex/website/navigation")); QVERIFY(offer->toolTip().contains("arch"));
     QVERIFY(offer->toolTip().contains("/workspace/kept-checkout"));
     QVERIFY(offer->accessibleName().contains("codex/website/navigation"));
@@ -8160,7 +8232,7 @@ void TestSessionsWindow::keptWorktreeReviewFollowsItsStoredTargetAndRechecksOccu
     // Once no live session uses the folder, the unresolved review remains reachable.
     occupied.sessions.removeIf([&](const SessionInfo &session) { return session.name == source; });
     updated.setLocal(occupied, QDateTime::currentMSecsSinceEpoch()); window.setFleet(updated);
-    QVERIFY(offer->isVisible()); QCOMPARE(offer->text(), QString("Check worktree: retained-checkout"));
+    QVERIFY(offer->isVisible()); QCOMPARE(offer->text(), QString("Cleanup unconfirmed: retained-checkout"));
     QVERIFY(offer->toolTip().contains("Outcome unknown"));
     auto shared = occupied;
     for (auto &session : shared.sessions) if (session.name == "codex/hgs/dashboard") session.gitRoot = root;
@@ -8174,6 +8246,7 @@ void TestSessionsWindow::keptWorktreeReviewFollowsItsStoredTargetAndRechecksOccu
         auto *list = dialog->findChild<QTreeWidget *>("batchCleanupList"); QVERIFY(list);
         const auto target = list->topLevelItem(0)->data(0, Qt::UserRole).toJsonObject();
         QCOMPARE(target["row"].toObject()["path"].toString(), root); QCOMPARE(target["common_dir"].toString(), common);
+        QCOMPARE(target["cleanup_reason"].toString(), QString("Outcome unknown"));
         reviewed = true;
     });
     offer->click(); QVERIFY(reviewed); QVERIFY(!offer->isVisible()); QCOMPARE(writes.size(), 1);
@@ -8262,7 +8335,7 @@ void TestSessionsWindow::keptWorktreeReviewFormatsTheSourceMachinePath()
         auto *client = window.findChild<HgsClient *>(); QSignalSpy writes(client, &HgsClient::writeDone);
         window.findChild<QAction *>("archiveSessionAction")->trigger(); QTRY_COMPARE(writes.size(), 1);
         auto *offer = window.findChild<QPushButton *>("archivedWorktreeCleanup"); QTRY_VERIFY(offer->isVisible());
-        QCOMPARE(offer->text(), QString("Review worktree: kept-checkout"));
+        QCOMPARE(offer->text(), QString("Folder kept: kept-checkout"));
         QVERIFY(offer->toolTip().contains("Folder: " + context.shown));
         QVERIFY(offer->accessibleDescription().contains("Folder: " + context.shown));
     }
@@ -8494,6 +8567,47 @@ void TestSessionsWindow::renameValidationCancelAndSelection()
     client->inspectionFailed({}, "codex/hgs/dashboard", "late old failure");
     QVERIFY(!activity->toPlainText().contains("stale rename response"));
     QVERIFY(!window.findChild<QLabel *>("hint")->text().contains("late old failure"));
+}
+
+void TestSessionsWindow::renameValidationKeepsDialogGeometry_data()
+{
+    QTest::addColumn<QString>("theme"); QTest::addColumn<int>("width");
+    for (const auto &theme : {QString("dark"), QString("light")})
+        for (const int width : {430, 640}) QTest::newRow(qPrintable(theme + QString::number(width))) << theme << width;
+}
+
+void TestSessionsWindow::renameValidationKeepsDialogGeometry()
+{
+    QFETCH(QString, theme); QFETCH(int, width); QSettings().setValue("workspace/theme", theme);
+    auto state = fleet(); auto box = state.local();
+    auto occupied = box.sessions[0]; occupied.name = "codex/hgs/taken"; occupied.tag = "taken"; box.sessions.append(occupied);
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); window.setFleet(state); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    QSignalSpy writes(window.findChild<HgsClient *>(), &HgsClient::writeDone);
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()); QVERIFY(dialog);
+        const auto close = qScopeGuard([dialog] { dialog->reject(); });
+        dialog->resize(width, dialog->height()); QTest::qWait(30);
+        auto *name = dialog->findChild<QLineEdit *>("renameSessionName"); QVERIFY(name);
+        auto *preview = dialog->findChild<QLabel *>("renameFullName"); auto *error = dialog->findChild<QLabel *>("renameError");
+        auto *buttons = dialog->findChild<QDialogButtonBox *>(); QVERIFY(preview && error && buttons);
+        auto *save = buttons->button(QDialogButtonBox::Save); auto *cancel = buttons->button(QDialogButtonBox::Cancel);
+        const auto rectangles = [&] { return QList<QRect>{dialog->geometry(), name->geometry(), preview->geometry(),
+            error->geometry(), buttons->geometry(), save->geometry(), cancel->geometry()}; };
+        const auto before = rectangles();
+        for (const auto &tag : QStringList{"new name", "new name ", "new name", "", " leading", "a/b", "a:b", "a.b", "a\tb", "taken", "Новый план", QString(300, 'a'), "final name"}) {
+            name->setText(tag); QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest); QTest::qWait(10);
+            QCOMPARE(rectangles(), before);
+            QCOMPARE(preview->text(), "codex/hgs/" + tag); QCOMPARE(save->isEnabled(), error->text().isEmpty());
+        }
+        QCOMPARE(preview->toolTip(), preview->text()); QCOMPARE(error->toolTip(), error->text());
+        const auto directory = qEnvironmentVariable("HGS_RENAME_PREVIEW");
+        if (!directory.isEmpty()) {
+            QVERIFY(QDir().mkpath(directory)); name->setText("final name "); QTest::qWait(10);
+            QVERIFY(dialog->grab().save(directory + "/rename-" + theme + QString::number(width) + ".png"));
+        }
+    });
+    window.findChild<QAction *>("renameSessionAction")->trigger(); QCOMPARE(writes.size(), 0);
 }
 
 void TestSessionsWindow::renameOtherSessionKinds()

@@ -5734,12 +5734,12 @@ void SessionsWindow::updateWorktreeCleanupOffer()
     const auto platform = MachinePlatform::of(m_fleet.metricsOf(host), host.isEmpty());
     const auto folder = MachinePlatform::leaf(path, platform);
     const auto shortFolder = m_worktreeCleanup->fontMetrics().elidedText(folder, Qt::ElideMiddle, 150);
-    const auto label = (m_worktreeCleanupUnconfirmed ? tr("Check worktree: %1") : tr("Review worktree: %1")).arg(shortFolder);
+    const auto label = (m_worktreeCleanupUnconfirmed ? tr("Cleanup unconfirmed: %1") : tr("Folder kept: %1")).arg(shortFolder);
     m_worktreeCleanup->setText(QString(label).replace('&', "&&"));
     const auto context = tr("Worktree cleanup for %1 on %2.\nFolder: %3\n%4")
         .arg(name, machine, MachinePlatform::native(path, platform), m_worktreeCleanupReason);
     m_worktreeCleanup->setToolTip(context);
-    m_worktreeCleanup->setAccessibleName(tr("Review worktree for %1 on %2").arg(name, machine));
+    m_worktreeCleanup->setAccessibleName(tr("Review retained folder for %1 on %2").arg(name, machine));
     m_worktreeCleanup->setAccessibleDescription(context);
     m_worktreeCleanup->show();
 }
@@ -5750,7 +5750,8 @@ void SessionsWindow::cleanUpArchivedWorktree()
     const auto offer = m_archivedWorktree; m_archivedWorktree.clear(); m_worktreeCleanupOffered = false; ++m_worktreeCleanupRevision; m_worktreeCleanup->hide();
     // The common directory still answers after the worktree folder is gone.
     WorktreeBatchCleanupDialog dialog(&m_client, {QJsonObject{{"host",offer[0]}, {"machine",offer[0].isEmpty() ? m_fleet.local().host : offer[0]},
-        {"common_dir",offer[3].isEmpty() ? offer[2] : offer[3]}, {"row",QJsonObject{{"path",offer[2]}, {"kind","linked"}}}}}, this);
+        {"common_dir",offer[3].isEmpty() ? offer[2] : offer[3]}, {"cleanup_reason", m_worktreeCleanupReason},
+        {"row",QJsonObject{{"path",offer[2]}, {"kind","linked"}}}}}, this);
     dialog.exec();
     if (dialog.changed()) { emit refreshRequested(); updateWorktrees(); }
 }
@@ -5817,6 +5818,12 @@ void SessionsWindow::renameSession()
     preview->setStyleSheet(QString("color:%1; font-size:12px").arg(m_muted)); layout->addWidget(preview);
     auto *error = label({}, "renameError"); error->setWordWrap(true);
     error->setStyleSheet(QString("color:%1").arg(m_dark ? "#ff9298" : "#b52b3d")); layout->addWidget(error);
+    // Typing changes content, never the form's geometry. Keep two measured lines
+    // for both the full-name preview and validation, including the empty state.
+    for (auto *message : {preview, error}) {
+        message->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); message->ensurePolished();
+        message->setFixedHeight(2 * message->fontMetrics().lineSpacing());
+    }
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
     auto *save = buttons->button(QDialogButtonBox::Save); save->setText(tr("Rename")); save->setObjectName("primary");
     save->style()->unpolish(save); save->style()->polish(save);
@@ -5830,8 +5837,8 @@ void SessionsWindow::renameSession()
     };
     const auto validate = [&]() {
         const QString invalid = problem(name->text());
-        error->setText(invalid); error->setVisible(!invalid.isEmpty());
-        preview->setText(prefix + name->text());
+        error->setText(invalid); error->setToolTip(invalid);
+        preview->setText(prefix + name->text()); preview->setToolTip(preview->text());
         save->setEnabled(invalid.isEmpty() && name->text() != oldTag);
     };
     connect(name, &QLineEdit::textChanged, &dialog, validate);

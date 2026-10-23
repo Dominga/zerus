@@ -72,6 +72,9 @@ pub const IMPLEMENTED: &[&str] = &[
     "dirs",
     "file_read",
     "git_status",
+    "repository_check",
+    "repository_clone",
+    "repository_status",
     "history",
     "history_projection",
     "hooks_status",
@@ -137,6 +140,7 @@ pub enum Gate {
     Lifecycle,
     /// The bounded, computer-scoped Git checkout projection.
     GitStatus,
+    Repository,
 }
 
 impl Gate {
@@ -145,6 +149,7 @@ impl Gate {
         match self {
             Gate::Lifecycle => flags.lifecycle,
             Gate::GitStatus => flags.git_status,
+            Gate::Repository => flags.repository,
         }
     }
 
@@ -154,6 +159,7 @@ impl Gate {
         match self {
             Gate::Lifecycle => "lifecycle",
             Gate::GitStatus => "git_status",
+            Gate::Repository => "repository",
         }
     }
 
@@ -162,6 +168,7 @@ impl Gate {
         match self {
             Gate::Lifecycle => "hgs session-action <session> --json",
             Gate::GitStatus => crate::git_status::HELP_MARKER,
+            Gate::Repository => crate::repositories::HELP_MARKER,
         }
     }
 }
@@ -192,6 +199,21 @@ pub const CONNECTOR_ONLY: &[ConnectorOnly] = &[
     ConnectorOnly {
         operation: "git_status",
         gate: Gate::GitStatus,
+        class: Class::Read,
+    },
+    ConnectorOnly {
+        operation: "repository_check",
+        gate: Gate::Repository,
+        class: Class::Read,
+    },
+    ConnectorOnly {
+        operation: "repository_clone",
+        gate: Gate::Repository,
+        class: Class::Mutation,
+    },
+    ConnectorOnly {
+        operation: "repository_status",
+        gate: Gate::Repository,
         class: Class::Read,
     },
 ];
@@ -266,6 +288,7 @@ pub struct Flags {
     pub attachment_read: bool,
     pub file_read: bool,
     pub git_status: bool,
+    pub repository: bool,
     pub clear_context_dismiss: bool,
     pub speech: bool,
     pub voice: bool,
@@ -303,6 +326,9 @@ impl Flags {
             preference: has("swarm preference set mobile_delivery"),
             attachment_read: has("attachment <session> --request ID --index N"),
             file_read: has("file-read <session> --json"),
+            repository: help
+                .lines()
+                .any(|line| line.trim() == crate::repositories::HELP_MARKER),
             git_status: help
                 .lines()
                 .any(|line| line.trim() == crate::git_status::HELP_MARKER),
@@ -343,6 +369,7 @@ impl Flags {
         self.file_read = false;
         self.attachment_read = false;
         self.git_status = false;
+        self.repository = false;
         self.analytics = false;
         self
     }

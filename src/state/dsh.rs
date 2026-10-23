@@ -1396,12 +1396,16 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                     .map(|f| string(f, "reference"))
                     .collect::<Vec<_>>();
                 attachments::validate_references(&references)?;
-                for file in &files {
-                    if !["image/png", "image/jpeg", "image/webp", "image/gif"]
-                        .contains(&string(file, "mime"))
-                    {
-                        return Err("This DeepSeek composer supports image attachments; use the native UI for other files".into());
-                    }
+                let image = |file: &Value| {
+                    ["image/png", "image/jpeg", "image/webp", "image/gif"].contains(&string(file, "mime"))
+                };
+                // WhiteWh fork: other files go through the host's own upload
+                // service, as its native composer sends them; an older bridge
+                // takes images only.
+                if !files.iter().all(image)
+                    && rpc(&record, "ping", json!({}))?["fileAttachments"] != true
+                {
+                    return Err("This DeepSeek composer supports image attachments; use the native UI for other files".into());
                 }
                 let mut content = Vec::new();
                 for part in attachments::ordered_parts(text, &references) {
@@ -1416,7 +1420,11 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                             if !references[index].is_empty() && !text.contains(references[index]) {
                                 content.push(json!({"type":"text","text":references[index]}));
                             }
-                            content.push(json!({"type":"image","mediaType":file["mime"],"data":file["data_base64"],"name":file["name"]}));
+                            if image(file) {
+                                content.push(json!({"type":"image","mediaType":file["mime"],"data":file["data_base64"],"name":file["name"]}));
+                            } else {
+                                content.push(json!({"type":"file","data":file["data_base64"],"name":file["name"]}));
+                            }
                         }
                     }
                 }

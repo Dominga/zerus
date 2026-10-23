@@ -311,6 +311,13 @@ void SessionList::mousePressEvent(QMouseEvent *e)
     }
     if (e->button() == Qt::LeftButton) { m_bulkSelecting = false; emit bulkSelectionChanged(); }
     if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()) { e->accept(); return; }
+    m_pressedTeam.clear();
+    if (e->button() == Qt::LeftButton && item && !item->data(SessionRoles::TeamId).toString().isEmpty()) {
+        // WhiteWh fork: a team header selects its team; its chevron collapses it.
+        m_pressedTeam = item->data(SessionRoles::TeamId).toString();
+        m_pressedTeamToggle = teamToggleRect(visualItemRect(item)).contains(m_press);
+        setFocus(); e->accept(); return;
+    }
     if (e->button() == Qt::LeftButton && item && item->data(SessionRoles::Header).toBool()) {
         m_pressedGroup = item->data(SessionRoles::Group).toString(); setFocus(); e->accept(); return;
     }
@@ -419,6 +426,15 @@ void SessionList::mouseReleaseEvent(QMouseEvent *e)
             && (e->position().toPoint() - m_press).manhattanLength() < QApplication::startDragDistance()) emit childrenToggled(key);
         e->accept(); return;
     }
+    if (!m_pressedTeam.isEmpty()) {
+        const QString id = m_pressedTeam; m_pressedTeam.clear();
+        const auto *item = itemAt(e->position().toPoint());
+        if (e->button() == Qt::LeftButton && item && item->data(SessionRoles::TeamId).toString() == id
+            && (e->position().toPoint() - m_press).manhattanLength() < QApplication::startDragDistance()) {
+            if (m_pressedTeamToggle) emit teamToggled(id); else emit teamActivated(id);
+        }
+        e->accept(); return;
+    }
     if (!m_pressedGroup.isEmpty()) {
         const QString id = m_pressedGroup; m_pressedGroup.clear();
         const auto *item = itemAt(e->position().toPoint());
@@ -487,10 +503,11 @@ SessionList::Placement SessionList::placement(const QPoint &point, bool movingGr
         target.before = target.group;
         int line = rect.top();
         int headerRow = row(over);
-        while (headerRow > 0 && !item(headerRow)->data(SessionRoles::Header).toBool()) --headerRow;
+        const auto groupHeader = [this](int n) { return item(n)->data(SessionRoles::Header).toBool() && item(n)->data(SessionRoles::TeamId).toString().isEmpty(); };
+        while (headerRow > 0 && !groupHeader(headerRow)) --headerRow;
         if (!header || point.y() > rect.center().y()) {
             int next = row(over) + 1;
-            while (next < count() && !item(next)->data(SessionRoles::Header).toBool()) ++next;
+            while (next < count() && !groupHeader(next)) ++next;
             target.before = next < count() ? item(next)->data(SessionRoles::Group).toString() : QString();
             line = next < count() ? visualItemRect(item(next)).top() : rect.bottom();
         } else line = visualItemRect(item(headerRow)).top();
@@ -577,7 +594,8 @@ void SessionList::keyPressEvent(QKeyEvent *e)
             e->accept(); return;
         }
         const auto id = currentItem()->data(SessionRoles::Group).toString();
-        for (int i = 0; i < count(); ++i) if (item(i)->data(SessionRoles::Header).toBool() && item(i)->data(SessionRoles::Group).toString() == id) {
+        for (int i = 0; i < count(); ++i) if (item(i)->data(SessionRoles::Header).toBool() && item(i)->data(SessionRoles::TeamId).toString().isEmpty()
+                                             && item(i)->data(SessionRoles::Group).toString() == id) {
             if (item(i)->data(SessionRoles::Collapsed).toBool() == (e->key() == Qt::Key_Right)) emit groupToggled(id);
             e->accept(); return;
         }

@@ -27,6 +27,8 @@
 #include "SwarmDialog.h"
 #include "WorktreePanel.h"
 #include "SocratiCodePanel.h"
+#include "TeamController.h"   // WhiteWh fork: agent teams
+#include "TeamPanel.h"
 #include "Extensions.h"
 #include "WindowTitleBar.h"
 #include "IronRulesPanel.h"
@@ -516,7 +518,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const auto *item = m_sessions->itemAt(position);
         const auto global = m_sessions->viewport()->mapToGlobal(position);
         if (selectionEntries().size() > 1) { showSelectionMenu(global); return; }
-        if (item && item->data(SessionRoles::Header).toBool()) showGroupMenu(item->data(SessionRoles::Group).toString(), global);
+        if (item && !item->data(SessionRoles::TeamId).toString().isEmpty()) showTeam(item->data(SessionRoles::TeamId).toString());   // WhiteWh fork
+        else if (item && item->data(SessionRoles::Header).toBool()) showGroupMenu(item->data(SessionRoles::Group).toString(), global);
         else if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()) {
             const auto id = item->data(SessionRoles::LaunchId).toString();
             auto *menu = new QMenu(this); menu->setObjectName("pendingLaunchMenu");
@@ -1423,6 +1426,30 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_leadPanel->sendReport=[this]{sendReportToLead();};
     m_inspector->addTab(agentsPage, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
+    // WhiteWh fork: agent teams. The Team tab shows the selected session's team
+    // or a team selected in the list; `?N` counts questions in member sessions.
+    m_teams=new TeamController(new HgsClient(hgsPath,this),this);
+    m_teamPanel=new TeamPanel(m_teams);
+    m_teamPanel->openSession=[this](const QString &host,const QString &name){showSession(host,name);};
+    m_teamPanel->sendMessage=[this](const QString &host,const QString &name,const QString &text){
+        for(const auto &entry:m_entries)if(entry.host==host&&entry.session.name==name&&entry.session.state!="archived"){
+            m_client.requestSendMessage(host,name,text,{},entry.session.runId,entry.session.conversationId);showNotice(tr("Reminder sent to %1").arg(name));return;}
+        showNotice(tr("%1 is not listed; open it to send the reminder").arg(name),true);
+    };
+    m_teamPanel->answersChanged=[this](int answers){
+        const int index=m_inspector->indexOf(m_teamPanel);
+        if(index>=0)m_inspector->setTabText(index,answers?tr("Team ?%1").arg(answers):tr("Team"));
+    };
+    m_teamPanel->setLive([this](const Teams::Member &member){return teamLive(member);});
+    m_collapsedTeams=[]{const auto list=QSettings().value("workspace/collapsedTeams").toStringList();return QSet<QString>(list.cbegin(),list.cend());}();
+    connect(m_sessions,&SessionList::teamActivated,this,&SessionsWindow::showTeam);
+    connect(m_sessions,&SessionList::teamToggled,this,[this](const QString &team){
+        if(m_collapsedTeams.contains(team))m_collapsedTeams.remove(team);else m_collapsedTeams.insert(team);
+        QSettings().setValue("workspace/collapsedTeams",QStringList(m_collapsedTeams.cbegin(),m_collapsedTeams.cend()));
+        rebuild();
+    });
+    m_inspector->addTab(m_teamPanel, tr("Team"));
+    connect(m_teams,&TeamController::teamsChanged,this,[this]{rebuild();updateTeamPanel();});
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
     m_workSplitter->addWidget(m_inspectorPanel);
@@ -1832,6 +1859,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const bool background=m_detailTabs->currentWidget()==m_terminal || m_detailTabs->currentWidget()==m_nativeUi;
         const int interval=background?ProcessSettings::backgroundMs():m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():m_activityPollMs;
         if(!m_inspectionAge.isValid() || m_inspectionAge.elapsed()>=interval)inspect();
+        if (m_teams) m_teams->setActive(isVisible());   // WhiteWh fork: agent teams poll while shown
         if (++m_tick % 10 == 0) {
             emit refreshRequested();
             for (const auto &entry : m_entries) {
@@ -2089,6 +2117,7 @@ void SessionsWindow::applyTheme()
     m_archiveBrowser->setTheme(m_dark);
     m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
+    if (m_teamPanel) m_teamPanel->setTheme(m_dark);   // WhiteWh fork: agent teams
     m_processes->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
     applyWorkspaceView();
@@ -3251,9 +3280,10 @@ void SessionsWindow::rebuild()
         m_machineFilter->setSessionCounts(machineCounts, countCaption + (m_projectFilters.isEmpty() ? QString() : tr(" / selected projects"))); }
     { const QSignalBlocker block(m_projectFilter); m_projectFilter->setSelection(m_projectFilters); m_projectFilter->setProjects(m_organization.groups());
         m_projectFilter->setSessionCounts(projectCounts, countCaption + (m_hostFilters.isEmpty() ? QString() : tr(" / selected machines"))); }
-    struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
+    struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch, team; };
     QList<Row> rows;
     QSet<int> subordinateRows;   // WhiteWh fork: visible entries listed under their lead
+    QSet<int> teamMemberRows, teamHiddenRows;   // WhiteWh fork: agent team members under their header
     const bool hasGroups = m_organization.groups().size() > 1;
     const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
     const bool hideEmptyProjects = QSettings().value("workspace/hideEmptyProjects", true).toBool();
@@ -3300,11 +3330,41 @@ void SessionsWindow::rebuild()
                 members = ordered;
             }
         }
+        // WhiteWh fork: agent teams. A team whose lead is listed here gets a
+        // header above its lead; its members listed here follow, indented. A
+        // collapsed team keeps only members with a problem.
+        QHash<int, QString> teamHeads;
+        if (m_teams) for (const auto &team : m_teams->teams()) {
+            if (team.status == "archived") continue;
+            int lead = -1; QList<int> follow;
+            for (int i : members) {
+                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
+                if (!member) continue;
+                if (member->lead) lead = i; else follow.append(i);
+            }
+            if (lead < 0 || teamHeads.contains(lead)) continue;
+            const QSet<int> following(follow.cbegin(), follow.cend());
+            QList<int> ordered;
+            for (int i : members) {
+                if (following.contains(i)) continue;
+                ordered.append(i);
+                if (i == lead) ordered += follow;
+            }
+            members = ordered;
+            teamHeads.insert(lead, team.id);
+            const bool collapsed = m_collapsedTeams.contains(team.id) && query.isEmpty();
+            for (int i : follow) {
+                teamMemberRows.insert(i); subordinateRows.insert(i);
+                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
+                if (collapsed && !Teams::memberStatus(team, *member, teamLive(*member)).problem) teamHiddenRows.insert(i);
+            }
+        }
         if (members.isEmpty() && launches.isEmpty() && (filtering || hideEmptyProjects || !group.accessible)) continue;
         if (hasGroups) rows.append({group.id, -1, false});
         for (int i : members) {
             const bool hidden = hasGroups && group.collapsed && query.isEmpty();
-            rows.append({group.id, i, hidden, {}});
+            if (teamHeads.contains(i)) rows.append({group.id, -1, hidden, {}, {}, teamHeads.value(i)});
+            rows.append({group.id, i, hidden || teamHiddenRows.contains(i), {}});
             if (m_expandedSessions.contains(visible[i].key)) {
                 const auto roster = childRoster(visible[i]);
                 // Stable ID order avoids moving a row under the pointer when a child finishes.
@@ -3315,7 +3375,7 @@ void SessionsWindow::rebuild()
         }
         for (const auto &id : launches) rows.append({group.id, -1, hasGroups && group.collapsed, {}, id});
     }
-    const auto rowKey = [&](const Row &row) { return !row.launch.isEmpty() ? "#launch\n" + row.launch : row.entry < 0 ? "#group\n" + row.group : visible[row.entry].key + (row.child.isEmpty() ? QString() : "\n#child\n" + row.child); };
+    const auto rowKey = [&](const Row &row) { return !row.team.isEmpty() ? "#team\n" + row.team : !row.launch.isEmpty() ? "#launch\n" + row.launch : row.entry < 0 ? "#group\n" + row.group : visible[row.entry].key + (row.child.isEmpty() ? QString() : "\n#child\n" + row.child); };
     bool sameRows = m_sessions->count() == rows.size();
     for (int i = 0; sameRows && i < rows.size(); ++i) sameRows = m_sessions->item(i)->data(KeyRole).toString() == rowKey(rows[i]);
     const int scroll = m_sessions->verticalScrollBar()->value();
@@ -3341,6 +3401,26 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
         item->setData(Qt::AccessibleDescriptionRole, QString());
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
+        item->setData(SessionRoles::TeamId, row.team);   // WhiteWh fork: agent teams
+        item->setData(SessionRoles::TeamMember, row.entry >= 0 && row.child.isEmpty() && teamMemberRows.contains(row.entry));
+        if (!row.team.isEmpty()) {
+            const auto *team = m_teams->team(row.team);
+            const auto live = [this](const Teams::Member &member) { return teamLive(member); };
+            const QString status = Teams::displayStatus(*team, live);
+            QVariantList tones; for (auto tone : Teams::progress(*team)) tones.append(int(tone));
+            const int answers = Teams::answers(*team, live);
+            item->setFlags(Qt::ItemIsEnabled);
+            item->setData(TitleRole, team->name); item->setData(SessionRoles::TeamStatus, status);
+            item->setData(DetailRole, Teams::statusLabel(status)); item->setData(StatusRole, int(Teams::statusTone(status)));
+            item->setData(SessionRoles::TeamProgress, tones);
+            item->setData(MetaRole, QStringLiteral("%1/%2").arg(Teams::accepted(*team)).arg(team->tasks.size()));
+            item->setData(SessionRoles::Attention, answers); item->setData(SessionRoles::TeamMembers, int(team->members.size()));
+            item->setData(SessionRoles::Collapsed, m_collapsedTeams.contains(team->id));
+            const QString description = tr("Team %1: %2, %3 of %4 tasks accepted, %5 members, %6 questions. Click to open the team; the chevron collapses it.")
+                .arg(team->name, Teams::statusLabel(status)).arg(Teams::accepted(*team)).arg(team->tasks.size()).arg(team->members.size()).arg(answers);
+            item->setData(Qt::AccessibleTextRole, description);
+            continue;
+        }
         if (!row.launch.isEmpty()) {
             const auto launch = m_pendingLaunches.value(row.launch).toObject();
             const QString name = launch.value("tag").toString(), host = launch.value("host").toString();
@@ -3534,6 +3614,7 @@ void SessionsWindow::selectSession()
     const QString child = item ? item->data(SessionRoles::ChildId).toString() : QString();
     const QString key = item ? item->data(child.isEmpty() ? KeyRole : SessionRoles::ParentKey).toString() : QString();
     if (key != m_selectedKey) {
+        m_selectedTeam.clear();   // WhiteWh fork: a chosen session shows its own team
         m_subagentComposer->setFileReferenceTarget({}, {}, {});
         pushSelectionChanged(key);
         m_readCandidate.clear(); m_readSelectionKey.clear();
@@ -6056,6 +6137,43 @@ void SessionsWindow::updateWorktrees()
         m_composer->setIronRulesCount(m_ironRules->rules().size());
     }
     updateLeadPanel();
+    updateTeamPanel();
+}
+// WhiteWh fork: the Team tab follows the selected session's team, unless a
+// team header in the list was chosen.
+void SessionsWindow::updateTeamPanel()
+{
+    if(!m_teamPanel||!m_teams)return;
+    QString team=m_selectedTeam;
+    if(team.isEmpty()||!m_teams->team(team)){
+        m_selectedTeam.clear();
+        const auto *entry=selected();
+        const auto *found=entry?m_teams->teamOfSession(entry->host,entry->session.name):nullptr;
+        team=found?found->id:QString();
+    }
+    m_teamPanel->showTeam(team);
+    m_teamPanel->render();
+}
+Teams::Live SessionsWindow::teamLive(const Teams::Member &member) const
+{
+    Teams::Live live;
+    for(const auto &entry:m_entries)if(entry.host==member.host&&entry.session.name==member.session&&entry.session.state!="archived"){
+        const auto &s=entry.session;
+        live.known=true;live.offline=!entry.online;
+        live.attention=entry.online&&s.needsAction();
+        live.working=SessionPresentation::working(s,entry.online);
+        live.attentionText=s.activitySummary.isEmpty()?s.toolDetail:s.activitySummary;
+        return live;
+    }
+    return live;
+}
+void SessionsWindow::showTeam(const QString &team)
+{
+    m_selectedTeam=team;
+    if(!m_teamPanel)return;
+    setInspectorVisible(true);
+    m_inspector->setCurrentWidget(m_teamPanel);
+    updateTeamPanel();
 }
 void SessionsWindow::filterFolder(const QString &host,const QString &path,bool checkout)
 {

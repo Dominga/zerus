@@ -50,6 +50,9 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             QPainterPath path; path.moveTo(right ? 9 : 15, 6); path.lineTo(right ? 15 : 9, 12); path.lineTo(right ? 9 : 15, 18); p.drawPath(path);
         } else if (name == "machines") {
             p.drawRoundedRect(QRectF(3, 4, 18, 12), 2, 2); p.drawLine(12, 16, 12, 20); p.drawLine(8, 20, 16, 20);
+        } else if (name == "team") {   // WhiteWh fork: agent teams, a lead above two members
+            p.drawEllipse(QPointF(12, 6), 2.5, 2.5); p.drawEllipse(QPointF(6, 18), 2.5, 2.5); p.drawEllipse(QPointF(18, 18), 2.5, 2.5);
+            p.drawLine(QPointF(10.8, 8.2), QPointF(7.2, 15.8)); p.drawLine(QPointF(13.2, 8.2), QPointF(16.8, 15.8));
         } else if (name == "terminal") {
             p.drawRoundedRect(QRectF(3, 4, 18, 16), 2, 2);
             p.drawLine(7, 9, 10, 12); p.drawLine(10, 12, 7, 15); p.drawLine(13, 15, 17, 15);

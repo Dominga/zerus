@@ -21,6 +21,7 @@ class SwarmController;
 #include "HgsClient.h"
 #include "SessionOrganization.h"
 #include "SessionRowPreferences.h"
+#include "TeamModel.h"   // WhiteWh fork: agent teams
 
 class QAction;
 class QFileSystemWatcher;
@@ -392,6 +393,15 @@ private:
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
     class SocratiCodePanel *m_socratiCode=nullptr;
+    // WhiteWh fork: agent teams on this computer and the inspector's Team tab.
+    class TeamController *m_teams=nullptr;
+    class TeamPanel *m_teamPanel=nullptr;
+    // The team header the user selected in the list; a selected session shows its own team.
+    QString m_selectedTeam;
+    void updateTeamPanel();
+    void showTeam(const QString &team);
+    Teams::Live teamLive(const Teams::Member &member) const;
+    QSet<QString> m_collapsedTeams;
     class IronRulesPanel *m_ironRules=nullptr;
     class SessionLeadPanel *m_leadPanel=nullptr;
     // WhiteWh fork: the skin's own title bar in place of the system one.

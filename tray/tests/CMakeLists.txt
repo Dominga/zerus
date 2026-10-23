@@ -596,6 +596,12 @@ target_include_directories(test_socraticodepanel PRIVATE ../src)
 target_link_libraries(test_socraticodepanel PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(socraticodepanel test_socraticodepanel)
 set_tests_properties(socraticodepanel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# WhiteWh fork: agent teams (TeamModel, TeamController, TeamPanel).
+add_executable(test_teams test_teams.cpp)
+target_include_directories(test_teams PRIVATE ../src)
+target_link_libraries(test_teams PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(teams test_teams)
+set_tests_properties(teams PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # WhiteWh fork: Claude desktop app sessions continued in Zerus.
 add_executable(test_claudeappsessions test_claudeappsessions.cpp)
 target_include_directories(test_claudeappsessions PRIVATE ../src)

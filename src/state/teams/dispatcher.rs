@@ -161,7 +161,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     for id in ready {
         let Some(task) = team.task(id) else { continue };
         let Some(member) = team.member(&task.assignee) else { continue };
-        if member.state == MemberState::Removed || busy.contains(member.id.as_str()) {
+        if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) {
             continue;
         }
         if member.session.is_none() {
@@ -291,6 +291,16 @@ fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Duration) -> a
     std::io::Read::read_to_end(&mut stdout, &mut output.stdout)?;
     std::io::Read::read_to_end(&mut stderr, &mut output.stderr)?;
     Ok(output)
+}
+
+/// The last reply of a member's session, for Use last reply as report.
+pub(crate) fn last_reply(session: &SessionRef) -> anyhow::Result<String> {
+    let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
+    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
+    let text = record["last_message"].as_str().unwrap_or_default().trim().to_owned();
+    anyhow::ensure!(!text.is_empty(), "The member's session has no reply yet");
+    Ok(text)
 }
 
 /// The result of one `hgs send`.
@@ -709,6 +719,13 @@ mod tests {
         team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Refused, sent_at: 90.0, ..Default::default() });
         assert!(!steps(&team, &[session("codex/x/dev", "r1", true)], 100.0).iter().any(|s| matches!(s, Step::HandOut { .. })));
         assert!(steps(&team, &[session("codex/x/dev", "r1", true)], 130.0).iter().any(|s| matches!(s, Step::HandOut { .. })));
+    }
+
+    #[test]
+    fn a_paused_member_gets_nothing() {
+        let mut team = team();
+        team.members[1].state = MemberState::Paused;
+        assert!(!steps(&team, &[session("codex/x/dev", "r1", true)], 100.0).iter().any(|s| matches!(s, Step::HandOut { .. })));
     }
 
     #[test]

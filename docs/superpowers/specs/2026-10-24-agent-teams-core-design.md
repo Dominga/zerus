@@ -131,3 +131,21 @@ host or DeepSeek host that a launch starts, and it closes stdin. After a
 refused hand-off the member gets none for 30 s. `hgs status` reports it as `team_worker`. M1 starts the worker from
 `hgs team approve`/`resume` when none is running (detached); it exits when its executable is replaced or after five
 minutes without a running team. The GUI supervises it later like the swarm worker.
+
+## Desktop (M2)
+
+- `TeamController` (tray core) polls `hgs team list` every 3 s while the window is shown, and `team status` plus the
+  newest `team events` page for the team on screen; an unchanged answer changes nothing on screen. Changes go out
+  once with their own `request_id` and `"by":"human"`; a refusal is shown in the panel.
+- `TeamModel` derives what the desktop shows: a member's team status (Created on approval, Failed to start, Paused,
+  Offline, Needs your answer, Delivery unconfirmed, No report, Working on #N, Submitted, Idle; problems first),
+  Stuck (a running team where no open task can move without you), progress, the Next line and feed lines.
+- Session list: a team whose lead is listed in a project gets a header row (`SessionRoles::TeamId`) above the lead;
+  its members listed in the same project follow, indented with a connector. The header opens the Team tab; its
+  chevron keeps only members with a problem (`workspace/collapsedTeams`).
+- Inspector tab **Team** (`?N` = questions in member sessions): header with progress, Pause/Resume/Stop…/Archive,
+  plan errors with Approve & Run / Discard plan… while planning, Stuck with Show what blocks, Needs your answer,
+  members with each problem's actions (Check session / It arrived / Send again / Cancel attempt; Remind / Use last
+  reply as report / Reassign…; Reassign… / Wait; Go to question; Start again), tasks as a graph from 400 px (soft
+  dependencies dashed) or a list by layer, and the paged feed. A task opens a menu of its actions until M3's card.
+- `use-last-reply` without text reads the member's last reply (`hgs [@host] inspect`) on the lead's computer.

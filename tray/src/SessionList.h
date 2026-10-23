@@ -11,6 +11,9 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             ChildId, ParentKey, HasChildren, Expanded, ProjectColor, ProjectVivid, LaunchId, WorkingSince, ReviewLater, Draft, Failure,
             GitStatus, GitHost, GitPath, MetaIcon, Scheduled, OptionalQuestions, ModifiedAt, CoordinationWait, Waiting,
             Subordinate,
+            // WhiteWh fork: agent teams. A team header is a Header row with a
+            // TeamId; its lead and members are Subordinate rows with TeamMember.
+            TeamId, TeamStatus, TeamProgress, TeamMembers, TeamMember,
             Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
 }
 class QToolButton;
@@ -41,6 +44,9 @@ signals:
     void rowCompacted(const QString &key);
     void sessionMoved(const QString &identity, const QString &group, const QString &before);
     void groupMoved(const QString &group, const QString &before);
+    // WhiteWh fork: a team header was clicked, or its chevron.
+    void teamActivated(const QString &team);
+    void teamToggled(const QString &team);
     void dragFinished();
 protected:
     QStringList mimeTypes() const override { return {QStringLiteral("application/x-hgs-session-placement")}; }
@@ -55,6 +61,10 @@ protected:
     void mouseMoveEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
     void keyPressEvent(QKeyEvent *) override;
+public:
+    // WhiteWh fork: the chevron of a team header.
+    static QRect teamToggleRect(const QRect &row) { return {row.right() - 30, row.top() + 6, 24, 22}; }
+protected:
     void paintEvent(QPaintEvent *) override;
     void showEvent(QShowEvent *) override;
     void hideEvent(QHideEvent *) override;
@@ -85,7 +95,7 @@ private:
     struct Placement { QString group, before; QRect indicator; bool onGroup = false; };
     Placement placement(const QPoint &point, bool group) const;
     QPoint m_press;
-    QString m_pressedGroup;
+    QString m_pressedTeam; bool m_pressedTeamToggle = false; QString m_pressedGroup;
     QString m_pressedParent;
     bool m_dragging = false;
     QRect m_indicator;

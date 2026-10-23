@@ -1,13 +1,14 @@
 // Read native public account projections through the released authenticated web API.
 // Launch credentials arrive on stdin and never leave this process; an API key
-// goes only to DeepSeek's own balance endpoint. Without a running native UI
-// (request.url is null) only the API key file and environment are read.
+// goes only to DeepSeek's own balance endpoint. Without a reachable native UI
+// only the API key file and environment are read.
 const result = {identity: {}, windows: [], source: 'DeepSeek Harness', status: 'unavailable'};
 const DEFAULT_REF = 'DEEPSEEK_API_KEY';
 try {
-  let ref = DEFAULT_REF, source = 'file';
-  if (request.url) {
-    const call = await accountClient(request.url);
+  let ref = DEFAULT_REF, source = 'file', call = null;
+  // host.log outlives its host: an unreachable UI reads the key as if there were none.
+  if (request.url) call = await accountClient(request.url).catch(() => null);
+  if (call) {
     try {
       ref = await apiKeyReference(call);
       const credential = (await call('credentials/describe', {refs: [ref]}))[ref];
@@ -30,7 +31,7 @@ try {
       }
     }
   }
-  if (!request.url || result.api_key_configured) {
+  if (!call || result.api_key_configured) {
     // The environment wins over the file, as in the harness.
     const key = source === 'env' || process.env[ref] ? process.env[ref] : await apiKey(request.home, ref);
     if (typeof key === 'string' && key) {
@@ -42,8 +43,10 @@ try {
     }
   }
 } catch {}
+// No process.exit: on Windows, Node 24 can abort with a libuv assertion when
+// it exits right after fetch, and the nonzero status discards this answer.
+// The script ends on its own once stdout is flushed.
 process.stdout.write(JSON.stringify(result));
-process.exit(0);
 
 // The released harness's own credentials parser, found next to its executable:
 // a symlink into the package on Unix, an npm shim beside node_modules on Windows.

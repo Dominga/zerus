@@ -8,6 +8,7 @@
 
 #include "FleetState.h"
 #include "UpdateController.h"
+#include "ForkLog.h"
 
 namespace {
 
@@ -205,6 +206,11 @@ void TrayMenu::rebuild(const FleetState &state)
 
     // Reuse the submenu and its actions so DBusMenu keeps stable item IDs.
     m_menu->addMenu(m_openModeMenu);
+
+    // WhiteWh fork: Zerus's log in the system's text viewer.
+    QAction *log = m_menu->addAction(tr("Open log"));
+    log->setObjectName("openLog");
+    connect(log, &QAction::triggered, this, [] { ForkLog::open(); });
 
     QAction *refresh = m_menu->addAction(QStringLiteral("Refresh"));
     connect(refresh, &QAction::triggered, this, [this]() { emit refreshRequested(); });

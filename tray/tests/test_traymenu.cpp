@@ -57,7 +57,7 @@ void TestTrayMenu::quickAccessOnly()
 {
     TrayMenu tm(kModes, "clipboard", false); tm.rebuild(twoBoxFleet());
     QCOMPARE(labels(tm.menu()), QStringList({"Open Zerus", "---", "arch", "claude/infra", "● codex/games",
-        "---", "mac", "● kimi/docs", "---", "Open in", "Refresh", "Quit"}));
+        "---", "mac", "● kimi/docs", "---", "Open in", "Open log", "Refresh", "Quit"}));
     QSignalSpy opened(&tm, &TrayMenu::sessionsRequested);
     tm.menu()->actions().first()->trigger(); QCOMPARE(opened.size(), 1);
 }
@@ -134,7 +134,7 @@ void TestTrayMenu::emitsIntentOnClick()
     QCOMPARE(activated.at(0), QList<QVariant>({QString(), QString("codex/games"), QString("/dev/pts/3")}));
     tm.menu()->actions().at(7)->trigger();
     QCOMPARE(activated.at(1), QList<QVariant>({QString("mac"), QString("kimi/docs"), QString()}));
-    tm.menu()->actions().at(10)->trigger(); tm.menu()->actions().at(11)->trigger();
+    tm.menu()->actions().at(11)->trigger(); tm.menu()->actions().at(12)->trigger();
     QCOMPARE(refresh.size(), 1); QCOMPARE(quit.size(), 1);
 }
 
@@ -168,10 +168,10 @@ void TestTrayMenu::controlOnlyComputerHasNoSessionSection()
     auto state = twoBoxFleet(); auto local = state.local(); local.sessions.clear(); local.localSessions = false;
     state.setLocal(local, 1000);
     TrayMenu tm(kModes, "auto", false); tm.rebuild(state);
-    QCOMPARE(labels(tm.menu()), QStringList({"Open Zerus", "---", "mac", "● kimi/docs", "---", "Open in", "Refresh", "Quit"}));
+    QCOMPARE(labels(tm.menu()), QStringList({"Open Zerus", "---", "mac", "● kimi/docs", "---", "Open in", "Open log", "Refresh", "Quit"}));
     FleetState alone; alone.setLocal(local, 1000);
     tm.rebuild(alone);
-    QCOMPARE(labels(tm.menu()), QStringList({"Open Zerus", "---", "No remote machines", "---", "Open in", "Refresh", "Quit"}));
+    QCOMPARE(labels(tm.menu()), QStringList({"Open Zerus", "---", "No remote machines", "---", "Open in", "Open log", "Refresh", "Quit"}));
     QVERIFY(!tm.menu()->actions()[2]->isEnabled());
 }
 

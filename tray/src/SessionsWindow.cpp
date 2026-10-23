@@ -50,6 +50,7 @@
 #include "ContentScale.h"
 #include "ActivityWidth.h"
 #include "UpdateController.h"
+#include "ForkLog.h"
 #include "WorkspaceSkin.h"
 #include <QFileSystemWatcher>
 #include "ProcessSettings.h"
@@ -1668,6 +1669,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_connectionRetry = new QPushButton(tr("Retry now")); m_connectionRetry->setObjectName("connectionRetry");
     m_connectionRetry->setFlat(true); m_connectionRetry->hide(); statusLayout->addWidget(m_connectionRetry);
     connect(m_connectionRetry, &QPushButton::clicked, this, &SessionsWindow::refreshRequested);
+    // WhiteWh fork: the full log behind the one-line notices of this bar.
+    auto *openLog = new QPushButton(tr("Log")); openLog->setObjectName("openLog");
+    openLog->setFlat(true); openLog->setToolTip(tr("Open the Zerus log")); statusLayout->addWidget(openLog);
+    connect(openLog, &QPushButton::clicked, this, [] { ForkLog::open(); });
     m_notice = new StatusMessage; m_notice->hide(); statusLayout->addWidget(m_notice, 1);
     m_sessionFeedback = new StatusMessage; m_sessionFeedback->setObjectName("sessionFeedback");
     m_sessionFeedback->hide(); statusLayout->addWidget(m_sessionFeedback, 1);
@@ -2607,6 +2612,9 @@ void SessionsWindow::updateConnectionStatus()
         const auto *peer = m_fleet.peer(host);
         if (!peer || !peer->ok) add(host, host, peer ? peer->error : QString(), m_fleet.peerPolledAt(host) == 0);
     }
+    // WhiteWh fork: each change of the connection line, and its recovery, is logged.
+    if (const auto line = messages.join("; "); line != m_connectionStatus->text())
+        ForkLog::write("connection", line.isEmpty() ? QStringLiteral("all computers connected") : line);
     m_connectionStatus->setText(messages.join("; "));
     m_connectionStatus->setToolTip(Qt::convertFromPlainText(messages.join('\n')));
     m_connectionRetry->setVisible(!messages.isEmpty());
@@ -5310,6 +5318,7 @@ void SessionsWindow::showNotice(const QString &message, bool error)
     m_notice->show();
     m_noticeDismiss->show();
     m_notice->setText(message.isEmpty() ? tr("Operation failed. Open the terminal for details.") : message);
+    ForkLog::write(error ? "error" : "notice", m_notice->text());
     m_notice->setToolTip(Qt::convertFromPlainText(m_notice->text()));
     m_notice->setProperty("error", error);
     m_notice->style()->unpolish(m_notice); m_notice->style()->polish(m_notice); m_notice->update();

@@ -109,6 +109,14 @@ Then start `C:\Tools\Zerus\current\hgs-tray.exe` and point shortcuts, including 
 Startup one, there. The first update goes to `app-<build>`; the original `app`
 folder is not an `app-*` build and stays until it is removed by hand.
 
+## Log
+
+Zerus writes its warnings, every status-bar notice and each change of the
+connection line to `~/.local/state/hgs/zerus.log`, beside the relay's
+`relay.log`. **Open log** in the tray menu and **Log** in the status bar open it
+in the system's text viewer. Past 4 MiB the file moves to `zerus.log.1`,
+replacing the older copy.
+
 ## Optional extensions
 
 Integrations with optional third-party tools stay outside the core as

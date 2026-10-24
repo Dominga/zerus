@@ -63,6 +63,12 @@ def confirm_cla(github, login, url, version, wait_for_prompt=False):
         require(status == 200, f"Cannot inspect CLA proposal {url}.")
         return pull
 
+    def identity(pull):
+        base, head = pull.get("base", {}), pull.get("head", {})
+        return (pull.get("state"), pull.get("user", {}).get("login"),
+                (base.get("repo") or {}).get("full_name"), base.get("ref"), base.get("sha"),
+                (head.get("repo") or {}).get("full_name"), head.get("ref"), head.get("sha"))
+
     def agreed():
         for page in range(1, 6):
             status, comments = github.request("GET", f"repos/{UPSTREAM}/issues/{match[1]}/comments?per_page=100&page={page}", timeout=10)
@@ -77,21 +83,23 @@ def confirm_cla(github, login, url, version, wait_for_prompt=False):
     pull = read_pull()
     if pull.get("state") != "open" or pull.get("user", {}).get("login") != login:
         return
-    require(pull.get("base", {}).get("repo", {}).get("full_name") == UPSTREAM
+    require((pull.get("base", {}).get("repo") or {}).get("full_name") == UPSTREAM
             and pull["base"].get("ref") == "master"
-            and pull.get("head", {}).get("repo", {}).get("full_name") == f"{login}/winget-pkgs"
+            and (pull.get("head", {}).get("repo") or {}).get("full_name") == f"{login}/winget-pkgs"
             and pull["head"].get("ref") == f"{winget_manifest.IDENTIFIER}-{version}",
             f"CLA proposal identity differs from the owner's Zerus fork: {url}")
     status, files = github.request("GET", path + "/files?per_page=100", timeout=10)
     expected = {f"{winget_manifest.PACKAGE_PATH}/{version}/{winget_manifest.IDENTIFIER}{suffix}"
                 for suffix in (".yaml", ".installer.yaml", ".locale.en-US.yaml")}
     require(status == 200 and isinstance(files, list) and len(files) == 3
-            and {item.get("filename") for item in files} == expected,
+            and {item.get("filename") for item in files} == expected
+            and all(item.get("status") in {"added", "modified"} and not item.get("previous_filename")
+                    for item in files),
             f"CLA proposal must change only the three Zerus manifests: {url}")
     if agreed():
         print(f"Author CLA reply already present: {url}")
         return
-    original_head = pull["head"]["sha"]
+    original_identity = identity(pull)
     deadline = time.monotonic() + (60 if wait_for_prompt else 0)
     while not any(label.get("name") == "Needs-CLA" for label in pull.get("labels", [])):
         remaining = deadline - time.monotonic()
@@ -100,15 +108,15 @@ def confirm_cla(github, login, url, version, wait_for_prompt=False):
             return
         time.sleep(min(5, remaining))
         pull = read_pull()
-        require(pull.get("state") == "open" and pull.get("head", {}).get("sha") == original_head,
+        require(identity(pull) == original_identity,
                 f"CLA proposal changed while waiting for its prompt: {url}")
-    # Recheck the head and author replies immediately before the only write.
-    latest = read_pull()
-    require(latest.get("state") == "open" and latest.get("head", {}).get("sha") == original_head,
-            f"CLA proposal changed before the author reply: {url}")
     if agreed():
         print(f"Author CLA reply already present: {url}")
         return
+    # Bind the file-scope proof to the same author/base/head tuple at the only write.
+    latest = read_pull()
+    require(identity(latest) == original_identity,
+            f"CLA proposal changed before the author reply: {url}")
     status, comment = github.request("POST", f"repos/{UPSTREAM}/issues/{match[1]}/comments", {"body": CLA_REPLY}, timeout=10)
     require(status == 201 and comment.get("user", {}).get("login") == login and comment.get("body") == CLA_REPLY,
             f"CLA reply result is unknown; inspect {url} before any retry.")

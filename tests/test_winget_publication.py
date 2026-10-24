@@ -43,7 +43,7 @@ CLA_COMMENTS = "repos/microsoft/winget-pkgs/issues/1/comments"
 def cla_pull(labels=("Needs-CLA",), author="ufna", state="open", head="4" * 40):
     return dict(state=state, user=dict(login=author), html_url=CLA_URL,
                 labels=[dict(name=name) for name in labels],
-                base=dict(ref="master", repo=dict(full_name="microsoft/winget-pkgs")),
+                base=dict(ref="master", sha="1" * 40, repo=dict(full_name="microsoft/winget-pkgs")),
                 head=dict(sha=head, ref="ufna.Zerus-0.44.0", repo=dict(full_name="ufna/winget-pkgs")))
 
 
@@ -57,7 +57,7 @@ def cla_answers(comments=None, pull=None):
 
     return {
         ("GET", CLA_PULL): (200, pull or cla_pull()),
-        ("GET", CLA_PULL + "/files"): (200, [dict(filename=PREFIX + name) for name in
+        ("GET", CLA_PULL + "/files"): (200, [dict(filename=PREFIX + name, status="added") for name in
             ["ufna.Zerus.yaml", "ufna.Zerus.installer.yaml", "ufna.Zerus.locale.en-US.yaml"]]),
         ("GET", CLA_COMMENTS): (200, comments),
         ("POST", CLA_COMMENTS): post,
@@ -272,6 +272,29 @@ class ClaConsentTests(unittest.TestCase):
             [dict(user=dict(login="ufna"), body="Already authorized: " + publish_winget.CLA_REPLY)])
         github = FakeGitHub(answers); self.confirm(github)
         self.assertFalse(any(method == "POST" for method, _, _ in github.calls))
+
+    def test_expected_destinations_renamed_from_another_package_are_not_confirmed(self):
+        answers = cla_answers()
+        files = answers[("GET", CLA_PULL + "/files")][1]
+        for item in files:
+            item.update(status="renamed", previous_filename="manifests/e/Example/Other/1.0.0/" + Path(item["filename"]).name)
+        github = FakeGitHub(answers)
+        with self.assertRaises(ValueError): self.confirm(github)
+        self.assertFalse(any(method == "POST" for method, _, _ in github.calls))
+
+    def test_same_head_with_a_retargeted_base_is_refused_during_wait_and_final_admission(self):
+        for phase in ("wait", "final"):
+            with self.subTest(phase=phase):
+                answers = cla_answers(); reads = []
+                def read(_):
+                    reads.append(1)
+                    pull = cla_pull(labels=() if phase == "wait" and len(reads) == 1 else ("Needs-CLA",))
+                    if len(reads) >= 2: pull["base"]["ref"] = "different-base"
+                    return 200, pull
+                answers[("GET", CLA_PULL)] = read; github = FakeGitHub(answers)
+                with patch.object(publish_winget.time, "sleep"), self.assertRaises(ValueError):
+                    self.confirm(github, wait_for_prompt=True)
+                self.assertFalse(any(method == "POST" for method, _, _ in github.calls))
 
     def test_an_agreement_arriving_during_the_final_read_is_not_duplicated(self):
         answers = cla_answers(); reads = []

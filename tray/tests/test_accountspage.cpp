@@ -204,6 +204,15 @@ void TestAccountsPage::modelDefaultsUseTheSelectedMachineAndNativeCatalog()
 {
     AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
     page.showAccount("mac","native-codex");
+    auto *list=page.findChild<QListWidget *>("accountProfiles");
+    const auto selectedRemote=[&] {
+        if(!list->currentItem())return false;
+        const auto members=list->currentItem()->data(Qt::UserRole).toJsonObject()["members"].toArray();
+        return std::any_of(members.cbegin(),members.cend(),[](const QJsonValue &value){
+            const auto p=value.toObject();return p["host"]=="mac" && p["id"]=="native-codex";
+        });
+    };
+    QTRY_VERIFY(selectedRemote());
     auto *button=page.findChild<QPushButton *>("accountModelDefaults");
     QTRY_VERIFY(button->isVisible() && button->isEnabled());
     QTimer poll;

@@ -2780,7 +2780,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let breakaway = match spawn_detached(&mut cmd) {
-            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+            Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) || error.kind() == io::ErrorKind::PermissionDenied => {
                 "denied".to_owned()
             }
             Err(error) => error.to_string(),

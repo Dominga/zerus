@@ -672,9 +672,9 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
                                                {"state", "approved"}, {"tasks", QJsonArray{3, 4}}}};
     waiting["pending_phase"] = QJsonValue();
     waiting["waiting_for_lead"] = true;
+    // A request may already be in flight; keep polling until the new team shows.
     setTeam(waiting);
-    controller.refresh();
-    QTRY_VERIFY(workspace.findChild<QWidget *>("teamBarWaitingForLead"));
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QWidget *>("teamBarWaitingForLead") != nullptr; })());
     QVERIFY(!workspace.findChild<QWidget *>("teamBarPendingPhase"));
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceFinish"));
     shot(&workspace, "d3-phases-waiting");
@@ -725,15 +725,19 @@ void TestTeamsUi::pinMarkAndFinishedTeamShowWhoFinished()
     panel.setLive(live); panel.resize(420, 1100); panel.show();
     controller.refresh();
     panel.showTeam("team-1");
-    QTRY_VERIFY(panel.findChild<QLabel *>("teamFinishBy"));
+    // A request may already be in flight; keep polling until the new team
+    // shows, as every poll rebuilds the panel.
+    const auto refreshed = [&](const QJsonObject &value, const std::function<bool()> &shown) {
+        setTeam(value);
+        QTRY_VERIFY(([&] { controller.refresh(); return shown(); })());
+    };
+    QTRY_VERIFY(([&] { controller.refresh(); return panel.findChild<QLabel *>("teamFinishBy") != nullptr; })());
     QCOMPARE(panel.findChild<QLabel *>("teamFinishBy")->text(), QStringLiteral("Finished by Lead"));
     QCOMPARE(panel.findChild<QLabel *>("teamFinishSummaryText")->text(), QStringLiteral("Phases 1–2 are delivered; the retest is #11."));
     QVERIFY(!panel.findChild<QPushButton *>("teamFinish"));   // Done is final
     shot(&panel, "team-done-finish");
     // The inspector repeats both header chips.
-    setTeam(phasedTeam());
-    controller.refresh();
-    QTRY_VERIFY(panel.findChild<QWidget *>("teamPendingPhase"));
+    refreshed(phasedTeam(), [&] { return panel.findChild<QWidget *>("teamPendingPhase") != nullptr; });
     QVERIFY(!panel.findChild<QWidget *>("teamWaitingForLead"));
     auto waiting = phasedTeam();
     auto waitingTasks = waiting["tasks"].toArray();
@@ -742,9 +746,7 @@ void TestTeamsUi::pinMarkAndFinishedTeamShowWhoFinished()
     waiting["pending_phase"] = QJsonValue();
     waiting["phases"] = QJsonArray{QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "approved"}, {"tasks", QJsonArray{3, 4}}}};
     waiting["waiting_for_lead"] = true;
-    setTeam(waiting);
-    controller.refresh();
-    QTRY_VERIFY(panel.findChild<QWidget *>("teamWaitingForLead"));
+    refreshed(waiting, [&] { return panel.findChild<QWidget *>("teamWaitingForLead") != nullptr; });
     QVERIFY(panel.findChild<QPushButton *>("teamFinish"));
 }
 

@@ -45,7 +45,7 @@ Missing your agent or a feature?
 [let us know](https://github.com/ufna/zerus/issues).
 
 <p align="center">
-  <img src="docs/assets/readme/workspace.webp" alt="Zerus workspace with multiple agents, Activity, subagents and tasks in one window" width="1100" />
+  <img src="docs/assets/readme/workspace.webp" alt="Zerus on Windows in the Compact skin: a Claude lead with its DeepSeek, Codex and Kimi team members, Activity and the task list" width="1100" />
 </p>
 
 ## Features
@@ -57,7 +57,7 @@ Missing your agent or a feature?
       <p>See machines, running sessions and requests for attention in one overview. Search, filters and project groups help you work with dozens or hundreds of agents. Machine load and account limits are right alongside them.</p>
     </td>
     <td width="58%">
-      <a href="docs/assets/readme/fleet.webp"><img src="docs/assets/readme/fleet.webp" alt="Overview of 112 synthetic sessions on four machines, with activity and resource use" width="640" /></a>
+      <a href="docs/assets/readme/fleet.webp"><img src="docs/assets/readme/fleet.webp" alt="Overview of a Windows workstation, a MacBook and two Linux servers, with their load, shared accounts and the sessions at work" width="640" /></a>
     </td>
   </tr>
   <tr>
@@ -66,7 +66,7 @@ Missing your agent or a feature?
       <p>A project brings together folders and agents on your laptop, workstation and servers. The project catalog, session assignments and shared recovery settings sync peer to peer over SSH. Each machine keeps a copy, with no permanent main machine. Switch to another connected computer and keep the same project organization. Offline peers catch up when they reconnect; SSH access, credentials and appearance stay local.</p>
     </td>
     <td>
-      <a href="docs/assets/readme/projects.webp"><img src="docs/assets/readme/projects.webp" alt="The Orbit project connects folders on a workstation, a MacBook and two servers" width="640" /></a>
+      <a href="docs/assets/readme/projects.webp"><img src="docs/assets/readme/projects.webp" alt="The Orbit project connects folders on a Windows workstation, a MacBook and two Linux servers" width="640" /></a>
     </td>
   </tr>
   <tr>
@@ -75,8 +75,33 @@ Missing your agent or a feature?
       <p>Know when an agent finishes, asks a question, requests approval or hits an error. A click takes you to that session's Activity, including remote sessions. Read replies, send messages and images, and follow subagents and tasks alongside the conversation.</p>
     </td>
     <td>
-      <a href="docs/assets/readme/attention.webp"><img src="docs/assets/readme/attention.webp" alt="A remote DeepSeek Harness session waiting for a review-scope choice in Activity" width="640" /></a>
+      <a href="docs/assets/readme/attention.webp"><img src="docs/assets/readme/attention.webp" alt="A remote DeepSeek Harness session asks in Activity which changes to review first" width="640" /></a>
     </td>
+  </tr>
+</table>
+
+### Agent teams
+
+A session can lead a team of agents from different providers, on this computer
+or on others. The lead plans tasks with dependencies, and nothing runs until you
+approve the plan. Zerus then hands each ready task to a free member with the right
+role; the members' reports and questions go to the lead, which accepts the work or
+sends it back. The **Team** tab next to Activity shows the plan as a graph, a board
+or layers beside the members and the lead's conversation, and **New team** starts a
+team from a template, with the Team designer to help write its goal and protocol.
+
+<p align="center">
+  <a href="docs/assets/readme/team-graph.webp"><img src="docs/assets/readme/team-graph.webp" alt="The Team tab: a seven-task plan as a graph in layers, the members with their states and the lead's conversation" width="1100" /></a>
+</p>
+
+<table>
+  <tr>
+    <th width="50%">The same team as a board</th>
+    <th width="50%">New team with the Team designer</th>
+  </tr>
+  <tr>
+    <td valign="top"><a href="docs/assets/readme/team-board.webp"><img src="docs/assets/readme/team-board.webp" alt="The team's tasks on a board in Pending, Active, Submitted and Accepted columns" width="520" /></a></td>
+    <td valign="top"><a href="docs/assets/readme/team-new.webp"><img src="docs/assets/readme/team-new.webp" alt="New team: a template, the goal, the team protocol, the Team designer's draft and three members with agent, model and effort" width="520" /></a></td>
   </tr>
 </table>
 

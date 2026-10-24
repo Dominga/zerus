@@ -262,6 +262,72 @@ wire_api="responses"
         self.assertFalse(fresh.get('session_clear'))
         self.assertEqual(fresh['session_usage']['context']['used'], 109000)
 
+    def test_native_failed_turn_can_clear_without_an_idle_hook(self):
+        import test_clear_context
+        class Rejected(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 <= length <= 1024 * 1024:
+                    self.send_error(413)
+                    return
+                self.rfile.read(length)
+                self.server.requests += 1
+                body = json.dumps(dict(error=dict(message='Synthetic fixture request rejected',
+                                  type='invalid_request_error', code='fixture_rejected'))).encode()
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Rejected)
+        server.requests = 0
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        config = self.native_home / 'config.toml'
+        config.write_text(config.read_text().replace('http://127.0.0.1:1/v1',
+                          f'http://127.0.0.1:{server.server_port}/v1')
+                          + 'request_max_retries=0\nstream_max_retries=0\n')
+        previous = self.record['pid']
+        self.tmux('kill-session', '-t', '=' + self.name)
+        for _ in range(250):
+            if subprocess.run(['ps', '-p', str(previous)], capture_output=True).returncode:
+                break
+            time.sleep(.02)
+        self.launch(self.root, 'resume', self.conversation_id)
+        started = time.time()
+        self.record.update(activity='busy', phase='working', main_done=False,
+                           turn_started=started, last_main_progress_at=started)
+        self.write_record()
+        message = 'Exercise one synthetic provider failure.'
+        self.tmux('send-keys', '-t', self.pane, '-l', message)
+        self.wait_for(lambda: message in self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        def failed():
+            info = test_clear_context.ClearContext.inspect(self)
+            return info if info['phase'] == 'error' and info['clear_context_supported'] else None
+        info = self.settle(failed, 'The native failed completion did not enable explicit clear')
+        self.assertFalse(info['compact_context_supported'])
+        # A native release may make several transport attempts for one turn.
+        # Clearing must add none; the transcript proves one submitted user turn.
+        requests_before_clear = server.requests
+        self.assertGreaterEqual(requests_before_clear, 1)
+        rows=[json.loads(line) for line in Path(self.record['transcript']).read_text().splitlines()]
+        submitted=[row for row in rows if row.get('type')=='event_msg'
+                   and row.get('payload',{}).get('type')=='user_message'
+                   and row['payload'].get('message')==message]
+        self.assertEqual(len(submitted),1)
+        self.assertEqual(json.loads(self.record_path.read_text())['phase'], 'working',
+                         'The fixture intentionally has no idle hook')
+        receipt = test_clear_context.ClearContext.clear(self)
+        self.assertEqual(receipt['status'], 'confirmed')
+        self.assert_reset_decoration()
+        current = json.loads(self.record_path.read_text())
+        self.assertEqual((current['pid'], current['run_id']), (self.record['pid'], self.run_id))
+        self.assertEqual(server.requests, requests_before_clear, 'Clear never replays the failed model request')
+
     def test_header_above_an_answered_first_message_is_not_a_clear(self):
         # A new Codex session keeps its header, here with a folder outside the
         # fixture home printed in full, above the first answered message.

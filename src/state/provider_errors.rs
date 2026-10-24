@@ -390,6 +390,7 @@ fn codex_transcript(record: &Value) -> Result<(Vec<Value>, f64)> {
             failure["codex_error_info"], detail
         )));
         if !string(payload, "turn_id").is_empty() { error["turn_id"] = payload["turn_id"].clone(); }
+        error["native_turn_complete"] = json!(matches!(string(payload, "type"), "task_complete" | "turn_complete"));
         errors.push(error);
     }
     if errors.len() > 8 {
@@ -406,7 +407,7 @@ thread_local! { static TRANSCRIPT_SCANS: std::cell::Cell<usize> = const { std::c
 fn codex_transcript_cached(record: &Value) -> Result<(Vec<Value>, f64)> {
     let path = PathBuf::from(string(record, "transcript"));
     let mut failure = None;
-    let value = scan_cache::cached("codex-provider-errors-v2", &path, string(record, "conversation_id"), || {
+    let value = scan_cache::cached("codex-provider-errors-v3", &path, string(record, "conversation_id"), || {
         codex_transcript(record)
             .map(|(errors, progress)| json!({"errors": errors, "progress": progress}))
             .map_err(|error| failure = Some(error))
@@ -417,6 +418,18 @@ fn codex_transcript_cached(record: &Value) -> Result<(Vec<Value>, f64)> {
     }
     let mut value = value.ok_or("Conversation transcript unavailable")?;
     Ok((value["errors"].as_array_mut().map(std::mem::take).unwrap_or_default(), value["progress"].as_f64().unwrap_or(0.0)))
+}
+
+/// Native completion of the current failed turn, independent of stale hooks.
+/// Log text and a standalone error event never prove that a turn has ended.
+pub(super) fn completed_failure(record: &Value) -> bool {
+    if record["agent"] != "codex" { return false; }
+    let Ok((errors, progress)) = codex_transcript_cached(record) else { return false; };
+    let progress = progress.max(record["turn_started"].as_f64().unwrap_or(0.0))
+        .max(record["last_main_progress_at"].as_f64().unwrap_or(0.0));
+    errors.last().is_some_and(|error| error["native_turn_complete"] == true
+        && !string(error,"turn_id").is_empty()
+        && error["at"].as_f64().unwrap_or(0.0) > progress)
 }
 
 fn codex(record: &Value) -> (Vec<Value>, f64) {
@@ -511,6 +524,32 @@ pub(super) fn enrich(record: &Value, output: &mut Value, live: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_turn_needs_native_completion_after_the_latest_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("rollout-{conversation}.jsonl"));
+        let header = json!({"type":"session_meta","payload":{"id":conversation}});
+        let mut record = json!({"agent":"codex","conversation_id":conversation,"transcript":path,
+            "turn_started":90.0,"last_main_progress_at":90.0});
+        let failure = |kind: &str| json!({"type":"event_msg","timestamp":"1970-01-01T00:01:40Z",
+            "payload":{"type":kind,"turn_id":"failed-turn","message":"Synthetic request rejected",
+                "error":{"message":"Synthetic request rejected"}}});
+        std::fs::write(&path,format!("{header}\n{}\n",failure("error"))).unwrap();
+        assert!(!completed_failure(&record),"a standalone native error is not completion");
+        std::fs::write(&path,format!("{header}\n{}\n",failure("task_complete"))).unwrap();
+        assert!(completed_failure(&record));
+        record["last_main_progress_at"] = json!(101.0);
+        assert!(!completed_failure(&record));
+        record["last_main_progress_at"] = json!(90.0);
+        let started = json!({"type":"event_msg","timestamp":"1970-01-01T00:01:41Z",
+            "payload":{"type":"task_started","turn_id":"next-turn"}});
+        std::fs::write(&path,format!("{header}\n{}\n{started}\n",failure("task_complete"))).unwrap();
+        assert!(!completed_failure(&record),"a later native start revokes the old completion");
+        record["conversation_id"] = json!(uuid::Uuid::new_v4().to_string());
+        assert!(!completed_failure(&record),"another conversation cannot borrow completion");
+    }
     const KIMI_WINDOW: &str = "429 You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends. To continue now, purchase extra usage or upgrade your plan: https://example.invalid/subscription?tab=quota";
 
     #[test]

@@ -77,13 +77,28 @@ void TeamController::loadOlder()
     m_olderRequest = m_client->requestTeam({}, QStringLiteral("events"), {{"team", m_watch}, {"before", m_feedCursor}});
 }
 
-void TeamController::act(const QString &operation, QJsonObject input, const std::function<void(bool, const QString &)> &done)
+void TeamController::act(const QString &operation, QJsonObject input, const Done &done)
 {
     if (!input.contains("team")) input.insert("team", m_watch);
     input.insert("by", "human");
     input.insert("request_id", QUuid::createUuid().toString(QUuid::WithoutBraces));
     const quint64 request = m_client->requestTeam({}, operation, input);
     m_actions.insert(request, done);
+}
+
+void TeamController::approvePhase(int phase, const Done &done)
+{
+    act(QStringLiteral("approve-phase"), {{"phase", phase}}, done);
+}
+
+void TeamController::discardPhase(int phase, const Done &done)
+{
+    act(QStringLiteral("discard-phase"), {{"phase", phase}}, done);
+}
+
+void TeamController::finishTeam(const QString &summary, const Done &done)
+{
+    act(QStringLiteral("finish"), {{"summary", summary}}, done);
 }
 
 void TeamController::call(const QString &operation, QJsonObject input, const Reply &done, bool change)

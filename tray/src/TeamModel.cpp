@@ -63,6 +63,12 @@ const Task *Team::task(int id) const
     return nullptr;
 }
 
+const Phase *Team::phase(int n) const
+{
+    for (const auto &p : phases) if (p.n == n) return &p;
+    return nullptr;
+}
+
 QString Team::roleOf(const QString &id) const
 {
     if (id == lead) return tr("Lead");
@@ -79,6 +85,8 @@ Team parse(const QJsonObject &v)
     const auto settings = v.value("settings").toObject();
     team.allHard = settings.value("all_hard").toBool();
     team.reportTimeout = settings.value("report_timeout_seconds").toInt(120);
+    team.approval = str(settings, "approval");
+    team.phaseApproval = str(settings, "phase_approval");
     for (const auto &value : v.value("members").toArray()) {
         const auto m = value.toObject();
         if (str(m, "state") == "removed") continue;
@@ -96,7 +104,8 @@ Team parse(const QJsonObject &v)
     for (const auto &value : v.value("tasks").toArray()) {
         const auto t = value.toObject();
         Task task;
-        task.id = t.value("id").toInt(); task.title = str(t, "title"); task.description = str(t, "description");
+        task.id = t.value("id").toInt(); task.phase = t.value("phase").toInt(1); task.pinned = t.value("pinned").toBool();
+        task.title = str(t, "title"); task.description = str(t, "description");
         task.status = str(t, "status"); task.assignee = str(t, "assignee");
         task.decidedBy = str(t, "decided_by"); task.reason = str(t, "decision_reason");
         for (const auto &c : t.value("criteria").toArray()) task.criteria.append(c.toString());
@@ -114,6 +123,28 @@ Team parse(const QJsonObject &v)
         else if (t.value("attempt").isObject()) task.attempts.append(readAttempt(t.value("attempt").toObject()));
         team.tasks.append(task);
     }
+    for (const auto &value : v.value("phases").toArray()) {
+        const auto p = value.toObject();
+        Phase phase;
+        phase.n = p.value("n").toInt(); phase.title = str(p, "title"); phase.barrier = p.value("barrier").toBool();
+        phase.approval = str(p, "approval"); phase.state = str(p, "state");
+        phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
+        phase.addedAt = p.value("added_at").toDouble(); phase.decidedAt = p.value("decided_at").toDouble();
+        for (const auto &id : p.value("tasks").toArray()) phase.tasks.append(id.toInt());
+        team.phases.append(phase);
+    }
+    team.idle = str(v, "idle");
+    if (v.value("finish").isObject()) {
+        const auto f = v.value("finish").toObject();
+        team.hasFinish = true;
+        team.finish.by = str(f, "by"); team.finish.summary = str(f, "summary"); team.finish.at = f.value("at").toDouble();
+    }
+    // hgs derives both; a team file without them (an older hgs) gets the same
+    // answer from the tasks and the phase records.
+    team.waitingForLead = v.value("waiting_for_lead").toBool() || (team.status == "running" && allDecided(team));
+    team.pendingPhase = v.value("pending_phase").toInt();
+    if (!team.pendingPhase)
+        for (const auto &phase : team.phases) if (phase.draft()) { team.pendingPhase = phase.n; break; }
     if (v.contains("layers")) {
         team.full = true;
         const auto layers = v.value("layers").toObject();
@@ -341,6 +372,13 @@ int accepted(const Team &team)
     return n;
 }
 
+bool allDecided(const Team &team)
+{
+    if (team.tasks.isEmpty()) return false;
+    for (const auto &task : team.tasks) if (!task.finished()) return false;
+    return true;
+}
+
 int answers(const Team &team, const LiveLookup &live)
 {
     int n = 0;
@@ -397,6 +435,17 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "stopped") { t = tr("Stopped the team"); line.tone = Tone::Danger; }
     else if (k == "archived") t = tr("Archived the team");
     else if (k == "done") { t = tr("Done · %1 of %2 tasks accepted").arg(d.value("accepted").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Done; }
+    else if (k == "phase_added") {
+        const int n = d.value("phase").toInt();
+        const QString title = d.value("title").toString();
+        t = title.isEmpty() ? tr("Added phase %1 · %2 tasks").arg(n).arg(d.value("tasks").toInt())
+                            : tr("Added phase %1 · %2 · %3 tasks").arg(n).arg(title).arg(d.value("tasks").toInt());
+    }
+    else if (k == "phase_approved") t = tr("Approved phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt());
+    else if (k == "phase_discarded") { t = tr("Discarded phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Muted; }
+    else if (k == "all_decided") { t = tr("All tasks decided · waiting for the lead"); line.tone = Tone::Active; }
+    else if (k == "finished") { t = tr("Finished · %1 of %2 tasks accepted").arg(d.value("accepted").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Done; }
+    else if (k == "lead_told" && d.value("kind").toString() == "all_decided") t = tr("Told the Lead that all tasks are decided");
     else if (k == "handed_out") { line.by = tr("Lead"); t = tr("Task to %1 · %2%3").arg(d.value("to").toString(), ref, attempt); }
     else if (k == "delivered") t = tr("Delivered %1%2").arg(ref, attempt);
     else if (k == "refused") { t = tr("Not delivered %1%2 (%3); handed out again later").arg(ref, attempt, d.value("error").toString()); line.tone = Tone::Warn; }
@@ -445,7 +494,8 @@ Template parseTemplate(const QJsonObject &v)
 {
     Template t;
     t.id = str(v, "id"); t.name = str(v, "name"); t.description = str(v, "description"); t.leadProtocol = str(v, "lead_protocol");
-    t.planning = str(v, "planning"); t.approval = str(v, "approval"); t.maxMembers = v.value("max_members").toInt(6);
+    t.planning = str(v, "planning"); t.approval = str(v, "approval"); t.phaseApproval = str(v, "phase_approval");
+    t.maxMembers = v.value("max_members").toInt(6);
     for (const auto &seat : v.value("roster").toArray()) {
         const auto o = seat.toObject();
         t.roster.append({str(o, "role"), o.value("count").toInt(1), o.value("optional").toBool()});
@@ -468,7 +518,8 @@ QJsonObject Template::json() const
         skeleton.append(QJsonObject{{"title", k.title}, {"role", k.role}, {"deps", deps}});
     }
     return {{"id", id}, {"name", name}, {"description", description}, {"lead_protocol", leadProtocol}, {"roster", seats},
-            {"tasks", skeleton}, {"planning", planning}, {"approval", approval}, {"max_members", maxMembers}};
+            {"tasks", skeleton}, {"planning", planning}, {"approval", approval}, {"phase_approval", phaseApproval},
+            {"max_members", maxMembers}};
 }
 
 Rule parseRule(const QJsonObject &v) { return {str(v, "id"), str(v, "when"), str(v, "template"), str(v, "approval")}; }

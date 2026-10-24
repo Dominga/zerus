@@ -32,7 +32,13 @@ public:
     bool feedHasOlder() const { return !m_feedCursor.isNull(); }
     void loadOlder();
     // A change: `operation` with `input`; team, by and request_id are added.
-    void act(const QString &operation, QJsonObject input, const std::function<void(bool ok, const QString &message)> &done = {});
+    using Done = std::function<void(bool ok, const QString &message)>;
+    void act(const QString &operation, QJsonObject input, const Done &done = {});
+    // Owner: approve or discard the one draft phase. Fresh request ids.
+    void approvePhase(int phase, const Done &done = {});
+    void discardPhase(int phase, const Done &done = {});
+    // Lead or owner: finish a team whose tasks are all decided.
+    void finishTeam(const QString &summary, const Done &done = {});
     // Any `hgs team` operation ("catalog get", "create", ...) with its whole
     // answer. Changes get by and request_id like act().
     using Reply = std::function<void(bool ok, const QJsonObject &result, const QString &error)>;

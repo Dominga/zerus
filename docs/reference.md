@@ -314,6 +314,24 @@ and any conditional matchers rather than treating a successful file edit as
 proof that hooks are effective. Existing partial Kimi blocks require manual review
 or a supervised launch: explicit repair refuses to rewrite them lossily.
 
+Complete account-wide Kimi tracking registrations, including legacy Python
+compatibility commands, are reused without adding another managed block. If
+that block was already added and contains only the same HGS callbacks and
+options, launch or compatible explicit repair removes the redundant block while
+retaining the original commands and personal settings/hooks. Different options
+or personal entries prevent removal. This edits registration only; a running
+provider's already-loaded settings are not retrofitted.
+
+Activity recognizes duplicate Kimi callbacks by their native turn ID within the
+same run and conversation. Equal captions in separate native turns or cleared
+conversations remain separate messages.
+For older attachment callbacks that lack that ID, a complete bounded native
+history and a unique exact staged-file input can associate their rich file card
+with the one native turn. The confirmed local delivery can supply the receipt
+before its durable inspection metadata arrives; both copies share one delivery
+ID. Incomplete or ambiguous evidence never authorizes this native-turn
+association. The original journal is retained.
+
 The additive mobile operation `hooks_status` exposes only the exact-session
 read, and only when the selected CLI advertises `hooks-health-v1`. Both outbound
 connectors preserve the request/run/conversation identity. The relay and gateway
@@ -2632,6 +2650,10 @@ Small jitter is applied. Class counters persist within an episode when errors ch
 Temporary overload covers HTTP 500, 502–504 and 529, model capacity errors and the
 520–524 gateway failures that Cloudflare reports for an unreachable or timed-out
 provider, often without a response body.
+Kimi's explicit HTTP 429 message about its rolling 5-hour window uses the
+**Rate limit** schedule, including when the message calls it a quota and offers
+an upgrade. It provides no reset timestamp, so recovery does not invent one.
+Monthly quota, billing and sign-in failures still require manual action.
 
 **Session usage limit** is separate from a temporary rate limit. Its default mode,
 **Wait for reset**, schedules a continuation at the provider's reset time, using

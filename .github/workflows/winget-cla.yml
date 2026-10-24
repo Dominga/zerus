@@ -1,0 +1,37 @@
+name: Confirm authorized winget CLA
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+concurrency:
+  group: winget-cla-consent
+  cancel-in-progress: false
+
+jobs:
+  confirm:
+    if: github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run credential-free consent contracts
+        run: python3 -m unittest discover -s tests -p test_winget_publication.py
+      - name: Confirm only the owner's pending Zerus CLA prompts
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -z "$WINGET_TOKEN" ]; then
+            echo "::warning::release/WINGET_TOKEN is not configured; pending winget CLA prompts were not checked."
+            exit 0
+          fi
+          python3 scripts/publish-winget.py --confirm-pending

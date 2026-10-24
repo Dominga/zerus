@@ -9,7 +9,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,13 +22,15 @@ import winget_manifest
 
 UPSTREAM = "microsoft/winget-pkgs"
 API = "https://api.github.com/"
+CLA_OWNER = "ufna"
+CLA_REPLY = "@microsoft-github-policy-service agree"
 
 
 class GitHub:
     def __init__(self, token):
         self.token = token
 
-    def request(self, method, path, body=None, raw=False):
+    def request(self, method, path, body=None, raw=False, timeout=60):
         """Returns (status, payload); 404 and 422 are answers, other errors raise."""
         url = path if path.startswith("https://") else API + path
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
@@ -36,7 +40,7 @@ class GitHub:
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 content = response.read(1024 * 1024 + 1)
                 require(len(content) <= 1024 * 1024, f"Oversized GitHub response: {path}")
                 return response.status, content if raw else json.loads(content or b"null")
@@ -44,6 +48,97 @@ class GitHub:
             if error.code in (404, 422):
                 return error.code, None
             raise ValueError(f"GitHub {method} {path} failed with HTTP {error.code}.") from None
+
+
+def confirm_cla(github, login, url, version, wait_for_prompt=False):
+    """Apply the owner's standing personal consent to this exact Zerus proposal once."""
+    match = re.fullmatch(r"https://github\.com/microsoft/winget-pkgs/pull/([1-9][0-9]*)", url)
+    if login != CLA_OWNER or not match:
+        return
+    winget_manifest.require_version(version)
+    path = f"repos/{UPSTREAM}/pulls/{match[1]}"
+
+    def read_pull():
+        status, pull = github.request("GET", path, timeout=10)
+        require(status == 200, f"Cannot inspect CLA proposal {url}.")
+        return pull
+
+    def identity(pull):
+        base, head = pull.get("base", {}), pull.get("head", {})
+        return (pull.get("state"), pull.get("user", {}).get("login"),
+                (base.get("repo") or {}).get("full_name"), base.get("ref"), base.get("sha"),
+                (head.get("repo") or {}).get("full_name"), head.get("ref"), head.get("sha"))
+
+    def agreed():
+        for page in range(1, 6):
+            status, comments = github.request("GET", f"repos/{UPSTREAM}/issues/{match[1]}/comments?per_page=100&page={page}", timeout=10)
+            require(status == 200 and isinstance(comments, list), f"Cannot inspect author replies on {url}.")
+            if any(comment.get("user", {}).get("login") == login and CLA_REPLY in comment.get("body", "")
+                   for comment in comments):
+                return True
+            if len(comments) < 100:
+                return False
+        raise ValueError(f"Too many comments to establish CLA reply uniqueness on {url}.")
+
+    pull = read_pull()
+    if pull.get("state") != "open" or pull.get("user", {}).get("login") != login:
+        return
+    require((pull.get("base", {}).get("repo") or {}).get("full_name") == UPSTREAM
+            and pull["base"].get("ref") == "master"
+            and (pull.get("head", {}).get("repo") or {}).get("full_name") == f"{login}/winget-pkgs"
+            and pull["head"].get("ref") == f"{winget_manifest.IDENTIFIER}-{version}",
+            f"CLA proposal identity differs from the owner's Zerus fork: {url}")
+    status, files = github.request("GET", path + "/files?per_page=100", timeout=10)
+    expected = {f"{winget_manifest.PACKAGE_PATH}/{version}/{winget_manifest.IDENTIFIER}{suffix}"
+                for suffix in (".yaml", ".installer.yaml", ".locale.en-US.yaml")}
+    require(status == 200 and isinstance(files, list) and len(files) == 3
+            and {item.get("filename") for item in files} == expected
+            and all(item.get("status") in {"added", "modified"} and not item.get("previous_filename")
+                    for item in files),
+            f"CLA proposal must change only the three Zerus manifests: {url}")
+    if agreed():
+        print(f"Author CLA reply already present: {url}")
+        return
+    original_identity = identity(pull)
+    deadline = time.monotonic() + (60 if wait_for_prompt else 0)
+    while not any(label.get("name") == "Needs-CLA" for label in pull.get("labels", [])):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"No Needs-CLA prompt yet; scheduled reconciliation will check {url}")
+            return
+        time.sleep(min(5, remaining))
+        pull = read_pull()
+        require(identity(pull) == original_identity,
+                f"CLA proposal changed while waiting for its prompt: {url}")
+    if agreed():
+        print(f"Author CLA reply already present: {url}")
+        return
+    # Bind the file-scope proof to the same author/base/head tuple at the only write.
+    latest = read_pull()
+    require(identity(latest) == original_identity,
+            f"CLA proposal changed before the author reply: {url}")
+    status, comment = github.request("POST", f"repos/{UPSTREAM}/issues/{match[1]}/comments", {"body": CLA_REPLY}, timeout=10)
+    require(status == 201 and comment.get("user", {}).get("login") == login and comment.get("body") == CLA_REPLY,
+            f"CLA reply result is unknown; inspect {url} before any retry.")
+    print(f"Posted the owner's personal CLA reply: {comment['html_url']}")
+
+
+def confirm_pending(github):
+    """Reconcile delayed Needs-CLA labels without creating or changing a proposal."""
+    status, user = github.request("GET", "user")
+    require(status == 200 and user.get("login") == CLA_OWNER, "Standing CLA consent is only for the ufna account.")
+    query = urllib.parse.quote(f"repo:{UPSTREAM} is:pr is:open author:{CLA_OWNER} label:Needs-CLA in:title {winget_manifest.IDENTIFIER}")
+    status, results = github.request("GET", f"search/issues?q={query}&per_page=100")
+    require(status == 200 and not results.get("incomplete_results")
+            and results.get("total_count") == len(results.get("items", [])) <= 100,
+            "Cannot establish the complete pending Zerus CLA proposal set.")
+    for item in results.get("items", []):
+        status, pull = github.request("GET", f"repos/{UPSTREAM}/pulls/{item['number']}")
+        require(status == 200, "Cannot inspect a pending CLA proposal.")
+        branch = pull.get("head", {}).get("ref", "")
+        prefix = winget_manifest.IDENTIFIER + "-"
+        if branch.startswith(prefix):
+            confirm_cla(github, user["login"], pull["html_url"], branch[len(prefix):])
 
 
 def published_zip(github, version):
@@ -94,6 +189,7 @@ def submit(github, version, files, run_url=""):
     existing = proposal(github, login, version, branch)
     if existing:
         print(f"{winget_manifest.IDENTIFIER} {version} is already proposed: {existing}")
+        confirm_cla(github, login, existing, version)
         return existing
     # Base the commit on the fork's master once it matches upstream: upstream moves on
     # every few minutes, and the fork must hold every object the new tree refers to.
@@ -129,17 +225,24 @@ def submit(github, version, files, run_url=""):
         "title": title, "head": f"{login}:{branch}", "base": "master", "body": body, "maintainer_can_modify": True})
     require(status == 201, "Cannot open the winget-pkgs pull request.")
     print(f"Opened {pull['html_url']}")
+    confirm_cla(github, login, pull["html_url"], version, wait_for_prompt=True)
     return pull["html_url"]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--version", required=True, help="published stable version, without v")
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--version", help="published stable version, without v")
+    action.add_argument("--confirm-pending", action="store_true", help="answer delayed CLA prompts on the owner's existing Zerus PRs")
     parser.add_argument("--output", type=Path, help="write the manifests here instead of submitting them")
     arguments = parser.parse_args()
-    winget_manifest.require_version(arguments.version)
     token = os.environ.get("WINGET_TOKEN", "")
     github = GitHub(token)
+    if arguments.confirm_pending:
+        require(token and arguments.output is None, "Pending CLA confirmation requires WINGET_TOKEN and no --output.")
+        confirm_pending(github)
+        return
+    winget_manifest.require_version(arguments.version)
     sha256, date = published_zip(github, arguments.version)
     files = winget_manifest.manifests(arguments.version, sha256, date)
     if arguments.output:

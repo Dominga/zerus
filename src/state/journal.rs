@@ -254,6 +254,13 @@ fn turn_origin<'a>(record: &Value, event: &'a Value) -> Option<&'a str> {
     .then_some(origin)
 }
 
+fn kimi_turn_id(record: &Value, event: &Value) -> Option<u64> {
+    if string(record, "agent") != "kimi" || string(event, "hook_event_name") != "TurnStarted" {
+        return None;
+    }
+    event["turn_id"].as_u64().filter(|id| *id <= i64::MAX as u64)
+}
+
 pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
     // Kimi's heartbeat and Claude's model switch change state, not Activity;
     // the model selector shows the switch.
@@ -276,6 +283,10 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
     }
     if let Some(origin) = turn_origin(record, event) {
         data["turn_origin"] = json!(origin);
+    }
+    if let Some(id) = kimi_turn_id(record, event) {
+        data["kimi_turn_id"] = json!(id);
+        data["kimi_conversation_id"] = record["conversation_id"].clone();
     }
     if let Some(question) = questions::from_hook(record, event) {
         data["question_request"] = question;
@@ -813,7 +824,14 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));
     cache_hint::enrich(&record,&mut output,archive_id.is_none()&&panes.is_some());
-    match provider_messages::read(&record) {
+    let messages = if string(&record, "agent") == "kimi" {
+        kimi_messages::read_with_turns(&record).map(|(messages, turns, complete)| {
+            output["kimi_turns"] = json!(turns);
+            output["kimi_turns_complete"] = json!(complete);
+            messages
+        })
+    } else { provider_messages::read(&record) };
+    match messages {
         Ok(messages) => output["provider_messages"] = json!(messages),
         Err(error) => output["provider_messages_error"] = json!(error),
     }
@@ -832,6 +850,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["prompt"] = json!("");
         output["last_message"] = json!("");
         output["provider_messages"] = json!([]);
+        output["kimi_turns"] = json!([]);
+        output["kimi_turns_complete"] = json!(false);
         output["cache_hint"] = Value::Null;
     }
     let db = event_db()?;
@@ -1228,13 +1248,19 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                     &detail(event),
                     "provider_hook",
                 );
-                let category = provider_errors::category(&format!(
+                // Keep native type/code evidence when the rolling-window text
+                // would otherwise erase a permanent refusal during projection.
+                if provider_errors::rolling_rate_limit(&detail(event)) {
+                    failure["native_error_type"] = json!(clipped(&event["error_type"], 1200));
+                    failure["native_error_code"] = json!(clipped(&event["error"], 1200));
+                }
+                let category = provider_errors::native_kind(&failure).unwrap_or_else(|| provider_errors::category(&format!(
                     "{} {} {}",
                     string(event, "error_type"),
                     string(event, "error"),
                     detail(event)
-                ));
-                if category != "provider" {
+                )));
+                if category != "provider" || provider_errors::native_kind(&failure).is_some() {
                     failure["error_kind"] = json!(category);
                 }
                 // Keep a provider deadline separate from the chosen backoff.
@@ -1391,6 +1417,23 @@ pub(super) fn settle_children(record: &mut Value) {
 #[cfg(test)]
 mod attention_regressions {
     use super::*;
+
+    #[test]
+    fn native_kimi_turn_identity_retains_zero_without_inventing_ids_for_other_hooks() {
+        let record = json!({"agent":"kimi"});
+        let mut event = json!({"hook_event_name":"TurnStarted", "turn_id":0});
+        assert_eq!(kimi_turn_id(&record, &event), Some(0));
+        event["turn_id"] = json!(1);
+        assert_eq!(kimi_turn_id(&record, &event), Some(1));
+        assert_eq!(kimi_turn_id(&json!({"agent":"claude"}), &event), None);
+        event["hook_event_name"] = json!("UserPromptSubmit");
+        assert_eq!(kimi_turn_id(&record, &event), None);
+        event["hook_event_name"] = json!("TurnStarted");
+        for invalid in [Value::Null, json!(-1), json!("0"), json!(u64::MAX)] {
+            event["turn_id"] = invalid;
+            assert_eq!(kimi_turn_id(&record, &event), None);
+        }
+    }
 
     #[test]
     fn a_terminal_chooser_holds_back_forks_and_immediate_settings_as_dispatch_does() {

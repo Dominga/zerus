@@ -159,6 +159,16 @@ assets. Pure VCS version bumps do not create AUR commits. Stable releases after
 unchanged; it stays GitHub-only (not mirrored or in the v1 feed). Dev builds have
 no Windows asset. `publish.yml` proposes each stable zip to winget as `ufna.Zerus`;
 its manifest relies on the zip's `zerus-windows-x86_64/hgs-tray.exe` layout.
+The owner has already personally agreed to the Microsoft CLA for every
+`ufna.Zerus` proposal opened by `ufna` in `microsoft/winget-pkgs`. When its bot
+requests consent, post `@microsoft-github-policy-service agree` once after
+checking the author's existing replies; do not ask the owner again. This is
+personal consent, with no company or employer representation. The winget
+publisher handles this automatically; `winget-cla.yml` reconciles delayed
+prompts from trusted main. Ordinary author confirmations on external PRs opened
+from the owner's account are already authorized; substantive package questions
+still go to the owner. Moderator review and actual winget availability are
+separate from CLA consent.
 The Homebrew casks `zerus` (stable), `zerus@nightly` and `zerus@dev` (tap
 `ufna/homebrew-zerus`) ship signed, notarized Apple Silicon `Zerus.app` once
 `MACOS_CASKS_ENABLED` is set. Dev also requires `DEV_UPDATES_ENABLED`, follows

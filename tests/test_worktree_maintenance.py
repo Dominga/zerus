@@ -142,12 +142,16 @@ class Maintenance(Repository, unittest.TestCase):
             child.wait(timeout=5)
 
     def test_executable_running_from_checkout_protects_it_with_another_cwd(self):
-        if not shutil.which('sleep'):self.skipTest('sleep fixture unavailable')
-        # System macOS executables carry restricted file flags. The fixture
-        # needs their bytes and executable mode, not those system-only flags.
-        tree=self.managed();image=tree/'fixture-sleep';shutil.copyfile(shutil.which('sleep'),image);image.chmod(0o755)
+        compiler=shutil.which('cc');self.assertIsNotNone(compiler,'a native C fixture compiler is required')
+        # A copied system Mach-O can be killed by macOS platform-signature
+        # policy. Compile our own inert child and prove it is actually live.
+        tree=self.managed();image=tree/'fixture-sleep'
+        build=subprocess.run([compiler,'-x','c','-','-o',str(image)],input='#include <unistd.h>\nint main(void){sleep(30);return 0;}\n',
+                             env=self.env,text=True,capture_output=True,timeout=30)
+        self.assertEqual(build.returncode,0,build.stdout+build.stderr)
         child=subprocess.Popen([str(image),'30'],cwd=self.root,env=self.env)
         try:
+            self.assertIsNone(child.poll(),'the executable fixture must be live before review')
             r=self.call('review','--path',str(self.repo),'--worktree',str(tree),'--json')['worktrees'][0]
             self.assertIn('processes',[r['code'] for r in r['reasons']])
         finally:child.terminate();child.wait(timeout=5)

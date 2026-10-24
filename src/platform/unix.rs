@@ -748,11 +748,20 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
     let deadline=deadline.min(std::time::Instant::now()+std::time::Duration::from_secs(2));
     let uid=unsafe {libc::getuid()};
     let error=||"Running process coverage is incomplete; review the worktree manually".to_owned();
+    fn gone(pid:i32)->bool {
+        (unsafe {libc::kill(pid,0)})<0 && std::io::Error::last_os_error().raw_os_error()==Some(libc::ESRCH)
+    }
     fn identity(pid:i32)->std::io::Result<libc::proc_bsdinfo> {
         let mut info:libc::proc_bsdinfo=unsafe {std::mem::zeroed()};
         let size=std::mem::size_of_val(&info) as libc::c_int;
         let read=unsafe {libc::proc_pidinfo(pid,libc::PROC_PIDTBSDINFO,0,&mut info as *mut _ as *mut libc::c_void,size)};
-        if read!=size {return Err(std::io::Error::last_os_error());}
+        if read!=size {
+            // libproc can return zero for an exited PID without setting errno.
+            // Only an independent ESRCH probe proves absence; stale errno must
+            // never hide an inaccessible live process from the owned roster.
+            return Err(if gone(pid) {std::io::Error::from_raw_os_error(libc::ESRCH)}
+                else {std::io::Error::other("Owned process metadata is unavailable")});
+        }
         Ok(info)
     }
     // Kernel uid-filtered rosters establish ownership before inspection. A
@@ -792,8 +801,11 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
             Err(_)=>return Err(error()),
         };
         if after.pbi_status==libc::SZOMB {continue;}
-        if after.pbi_pid!=pid as u32 || (before.pbi_start_tvsec,before.pbi_start_tvusec,before.pbi_uid,before.pbi_ruid)!=(after.pbi_start_tvsec,after.pbi_start_tvusec,after.pbi_uid,after.pbi_ruid)
-            || read!=size || length<=0 {return Err(error());}
+        if after.pbi_pid!=pid as u32 || (before.pbi_start_tvsec,before.pbi_start_tvusec,before.pbi_uid,before.pbi_ruid)!=(after.pbi_start_tvsec,after.pbi_start_tvusec,after.pbi_uid,after.pbi_ruid) {return Err(error());}
+        if read!=size || length<=0 {
+            if gone(pid) {continue;}
+            return Err(error());
+        }
         let path=&info.pvi_cdir.vip_path;
         let bytes=unsafe {std::slice::from_raw_parts(path.as_ptr() as *const u8,std::mem::size_of_val(path))};
         let end=bytes.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(error)?;

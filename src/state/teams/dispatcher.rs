@@ -319,6 +319,81 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     steps
 }
 
+/// Bounds for the dependency reports a hand-off carries.
+const DEPENDENCY_REPORT_CHARS: usize = 2_000;
+const DEPENDENCY_REPORTS_CHARS: usize = 6_000;
+
+/// The stored report a hand-off shows for one dependency: the reported attempt
+/// that accepted it, else the latest attempt with a report. Only report text
+/// stored with the attempt is used; journals are never read.
+fn dependency_attempt(task: &Task) -> Option<&Attempt> {
+    if task.status == TaskStatus::Accepted {
+        task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported && attempt.report.is_some())
+    } else {
+        task.attempts.iter().rev().find(|attempt| attempt.report.is_some())
+    }
+}
+
+/// Where a dependency's member works, prefixed with its computer when that is
+/// not the lead's. The lead's own tasks show the team's folder.
+fn dependency_folder(team: &Team, member_id: &str) -> String {
+    if member_id == team.lead {
+        return team.folder.clone();
+    }
+    let Some(member) = team.member(member_id) else { return String::new() };
+    let folder = member_folder_path(team, member).unwrap_or_default();
+    let lead_host = team.member(&team.lead).map(|lead| lead.computer.as_str()).unwrap_or_default();
+    if !member.computer.is_empty() && member.computer != lead_host {
+        format!("{}:{folder}", member.computer)
+    } else {
+        folder
+    }
+}
+
+/// The "From dependencies" section: every dependency with a stored report, in
+/// `deps` order, each report bounded to 2,000 characters and 6,000 in total.
+fn dependencies_text(team: &Team, task: &Task) -> String {
+    let mut text = String::new();
+    let mut used = 0usize;
+    for dep in &task.deps {
+        let Some(found) = team.task(dep.task) else { continue };
+        let Some(attempt) = dependency_attempt(found) else { continue };
+        let Some(report) = attempt.report.as_ref() else { continue };
+        let status = serde_json::to_value(found.status).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
+        text += &format!(
+            "#{} {} ({}) by {} ({}), folder: {}\n",
+            found.id,
+            found.title,
+            status.replace('_', " "),
+            attempt.member,
+            team.role_of(&attempt.member),
+            dependency_folder(team, &attempt.member)
+        );
+        let total = report.text.chars().count();
+        let room = DEPENDENCY_REPORTS_CHARS.saturating_sub(used);
+        if room == 0 {
+            text += "[report omitted: limit reached]\n";
+            continue;
+        }
+        let shown = total.min(DEPENDENCY_REPORT_CHARS).min(room);
+        text += &report.text.chars().take(shown).collect::<String>();
+        if shown < total {
+            text += &format!(
+                "\n[cut: shown {shown} of {total} characters; full report: hgs team status --json, task #{}]\n",
+                found.id
+            );
+        } else {
+            text.push('\n');
+        }
+        used += shown;
+    }
+    if text.is_empty() {
+        text
+    } else {
+        format!("\nFrom dependencies:\n{text}")
+    }
+}
+
 /// The message that gives a member its task.
 pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_host: &str, member_host: &str) -> String {
     let mut text = format!(
@@ -356,6 +431,7 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     if !deps.is_empty() {
         text += &format!("\nDepends on: {}\n", deps.join(", "));
     }
+    text += &dependencies_text(team, task);
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
         text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
     }
@@ -603,9 +679,9 @@ fn tag(text: &str) -> String {
     tag.chars().take(24).collect()
 }
 
-/// The folder the member works in: the team's (or its own) folder, or a new
-/// worktree of it.
-fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
+/// The folder the member works in, computed without creating anything: the
+/// team's (or its own) folder, or the worktree path a writing member gets.
+fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result<String> {
     let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
     anyhow::ensure!(!folder.is_empty(), "The team has no folder");
     if member.folder != MemberFolder::Worktree {
@@ -614,12 +690,23 @@ fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
     let short = &team.id[..8.min(team.id.len())];
     let path = Path::new(&folder);
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("project");
-    let destination = path
+    Ok(path
         .parent()
         .unwrap_or(path)
         .join(format!("{name}-team-{short}-{}", tag(&member.id)))
         .display()
-        .to_string();
+        .to_string())
+}
+
+/// The folder the member works in: the team's (or its own) folder, or a new
+/// worktree of it, created now.
+fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
+    let destination = member_folder_path(team, member)?;
+    if member.folder != MemberFolder::Worktree {
+        return Ok(destination);
+    }
+    let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
+    let short = &team.id[..8.min(team.id.len())];
     let branch = format!("team/{short}/{}", tag(&member.id));
     let output = hgs(
         &member.computer,
@@ -1739,5 +1826,114 @@ mod tests {
         assert!(text.starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #1 \u{b7} attempt: 2]"));
         assert!(text.contains("hgs @msi team report --json") && text.contains("\"attempt\":\"A-ID\""));
         assert!(hand_off_text(&team, task, &attempt, "msi", "").contains("hgs team report --json"));
+    }
+
+    fn attempt_with_report(member: &str, text: &str, state: AttemptState) -> Attempt {
+        Attempt { n: 1, member: member.into(), state, report: Some(Report { text: text.into(), at: 0.0 }), ..Default::default() }
+    }
+
+    #[test]
+    fn a_hand_off_lists_dependencies_with_their_folders_and_reports() {
+        let mut team = team();
+        team.folder = "work".into();
+        let dep = team.task_mut(1).unwrap();
+        dep.status = TaskStatus::Accepted;
+        dep.attempts = vec![
+            attempt_with_report("dev", "the accepted report", AttemptState::Reported),
+            attempt_with_report("dev", "a later rejected report", AttemptState::Rejected),
+        ];
+        let task = team.task(3).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "A".into(), member: "qa".into(), ..Default::default() };
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        assert!(text.contains("From dependencies:\n#1 API (accepted) by dev (Backend), folder: work"), "{text}");
+        // An accepted dependency shows the report that accepted it, not a later one.
+        assert!(text.contains("the accepted report"), "{text}");
+        assert!(!text.contains("a later rejected report"), "{text}");
+        assert!(text.find("From dependencies:").unwrap() > text.find("Depends on:").unwrap());
+        // A soft dependency counts too, and an unaccepted one shows its latest report.
+        team.task_mut(1).unwrap().status = TaskStatus::Rejected;
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        assert!(text.contains("a later rejected report"), "{text}");
+        assert!(!text.contains("the accepted report"), "{text}");
+        // A member on another computer shows which; the lead shows the team's folder.
+        team.members.iter_mut().find(|m| m.id == "dev").unwrap().computer = "msi".into();
+        assert!(hand_off_text(&team, &task, &attempt, "", "").contains("folder: msi:work"));
+        team.members.iter_mut().find(|m| m.id == "dev").unwrap().folder = MemberFolder::Worktree;
+        team.members.iter_mut().find(|m| m.id == "dev").unwrap().computer.clear();
+        assert!(hand_off_text(&team, &task, &attempt, "", "").contains("folder: work-team-t-dev"));
+        team.members.iter_mut().find(|m| m.id == "lead").unwrap().directory = "lead-dir".into();
+        team.task_mut(1).unwrap().attempts = vec![attempt_with_report("lead", "lead report", AttemptState::Reported)];
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        assert!(text.contains("by lead (Lead), folder: work"), "{text}");
+        assert!(!text.contains("lead-dir"), "{text}");
+    }
+
+    #[test]
+    fn a_dependency_without_a_report_is_not_listed() {
+        let mut team = team();
+        team.folder = "work".into();
+        team.task_mut(3).unwrap().deps =
+            vec![Dependency { task: 1, kind: DependencyKind::Hard }, Dependency { task: 2, kind: DependencyKind::Soft }];
+        let task = team.task(3).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "A".into(), member: "qa".into(), ..Default::default() };
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        assert!(text.contains("Depends on: #1 API (pending), #2 More API (pending)"), "{text}");
+        assert!(!text.contains("From dependencies:"), "{text}");
+    }
+
+    #[test]
+    fn dependency_reports_are_cut_to_two_thousand_characters() {
+        let mut team = team();
+        team.folder = "work".into();
+        let dep = team.task_mut(1).unwrap();
+        dep.status = TaskStatus::Accepted;
+        dep.attempts = vec![attempt_with_report("dev", &"é".repeat(2500), AttemptState::Reported)];
+        let task = team.task(3).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "A".into(), member: "qa".into(), ..Default::default() };
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        // Cut at a character boundary, with the note.
+        assert_eq!(text.matches('é').count(), 2000);
+        assert!(text.contains("[cut: shown 2000 of 2500 characters; full report: hgs team status --json, task #1]"), "{text}");
+        // A report within the bound is whole, with no note.
+        team.task_mut(1).unwrap().attempts = vec![attempt_with_report("dev", &"ζ".repeat(2000), AttemptState::Reported)];
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        assert_eq!(text.matches('ζ').count(), 2000);
+        assert!(!text.contains("[cut:"), "{text}");
+    }
+
+    #[test]
+    fn dependency_reports_stop_at_the_total_limit() {
+        let mut team = team();
+        team.folder = "work".into();
+        team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+        team.task_mut(1).unwrap().attempts = vec![attempt_with_report("dev", &"α".repeat(500), AttemptState::Reported)];
+        for (id, letter) in [(4, 'β'), (5, 'γ'), (6, 'δ'), (7, 'ε')] {
+            team.tasks.push(Task {
+                id,
+                title: format!("Dep {id}"),
+                status: TaskStatus::Accepted,
+                assignee: "dev".into(),
+                attempts: vec![attempt_with_report("dev", &letter.to_string().repeat(3000), AttemptState::Reported)],
+                ..Default::default()
+            });
+        }
+        team.task_mut(3).unwrap().deps = [1, 4, 5, 6, 7]
+            .into_iter()
+            .map(|task| Dependency { task, kind: DependencyKind::Hard })
+            .collect();
+        let task = team.task(3).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "A".into(), member: "qa".into(), ..Default::default() };
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        // 500 shown whole, then 2,000 + 2,000, then the last 1,500 of the 6,000.
+        assert!(text.contains("α".repeat(500).as_str()), "{text}");
+        assert!(!text.contains("task #1]"), "{text}");
+        assert!(text.contains("[cut: shown 2000 of 3000 characters; full report: hgs team status --json, task #4]"), "{text}");
+        assert!(text.contains("[cut: shown 1500 of 3000 characters; full report: hgs team status --json, task #6]"), "{text}");
+        assert!(text.contains("#7 Dep 7 (accepted) by dev (Backend), folder: work\n[report omitted: limit reached]"), "{text}");
+        assert_eq!(text.matches('α').count(), 500);
+        assert_eq!(text.matches('β').count(), 2000);
+        assert_eq!(text.matches('γ').count(), 2000);
+        assert_eq!(text.matches('δ').count(), 1500);
+        assert_eq!(text.matches('ε').count(), 0);
     }
 }

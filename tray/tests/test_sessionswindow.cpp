@@ -489,6 +489,8 @@ private slots:
     void terminalChordReturnsToActivity();
     void shortcutsInModalDialogsStayLocal();
     void queueChordUsesTheExistingSendNowPath();
+    void queueFailureNotices_data();
+    void queueFailureNotices();
     void zoomChordsChangeContentScale();
     void reboundChordsApplyAtOnce();
     void projectListKeepsItsReorderKeys();
@@ -12275,6 +12277,70 @@ void TestSessionsWindow::queueChordUsesTheExistingSendNowPath()
     pressCommand(&window, "queue.sendNow");
     QCOMPARE(window.findChild<QLabel *>("notice")->text(), QString("Nothing queued can be sent now"));
     QTest::qWait(150); QCOMPARE(requests(), QStringList{"q1"}); QCOMPARE(sent.size(), 0);
+}
+
+void TestSessionsWindow::queueFailureNotices_data()
+{
+    QTest::addColumn<QString>("error");
+    QTest::addColumn<QString>("expectedNotice");
+    QTest::addColumn<bool>("transient");
+    QTest::newRow("stale native queue")
+        << QString("hgs: The native queue is no longer visible; nothing was sent")
+        << QString("The native queue is no longer visible; nothing was sent. Activity is being refreshed; check Terminal or the current queue before retrying.")
+        << true;
+    const QString generic("hgs: Queue action failed. Check Terminal before retrying.");
+    QTest::newRow("generic queue failure") << generic << generic << false;
+}
+
+void TestSessionsWindow::queueFailureNotices()
+{
+    QFETCH(QString, error); QFETCH(QString, expectedNotice); QFETCH(bool, transient);
+    QTemporaryDir fixture; QFile fake(fixture.filePath("hgs")), original(script());
+    QVERIFY(original.open(QIODevice::ReadOnly)); QVERIFY(fake.open(QIODevice::WriteOnly));
+    fake.write(original.readAll().replace("for value in sys.argv[1:]:print(value,file=sys.stderr)\n", "").replace("if False:pass\n", "if False:pass\n"
+        "elif c=='inspect':print(open(__file__+'.details').read())\n"
+        "elif c=='send-now':\n payload=json.loads(sys.stdin.read())\n"
+        " open(__file__+'.send-now','a').write(payload['queue_id']+'\\n')\n"
+        " print(open(__file__+'.error').read(),file=sys.stderr)\n"
+        " sys.exit(1)\n"));
+    fake.close(); QVERIFY(FakeCli::makeRunnable(fake.fileName()));
+    QFile failure(fake.fileName() + ".error"); QVERIFY(failure.open(QIODevice::WriteOnly));
+    failure.write(error.toUtf8()); failure.close();
+    const QJsonObject details{{"tracked", true}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"runtime_state", "live"},
+        {"process_state", "running"}, {"activity", "busy"}, {"phase", "working"}, {"events", QJsonArray{}}, {"cursor", 0},
+        {"input_queue", QJsonObject{{"id", "q1"}, {"text", "❯ run the release checks"}, {"can_send_now", true}}}};
+    QVERIFY(FakeCli::replace(fake.fileName() + ".details", QJsonDocument(details).toJson(QJsonDocument::Compact)));
+    constexpr int noticeMs = 200;
+    SessionsWindow window(FakeCli::program(fake.fileName())); keepDetailsPollsOut(window); window.setNoticeDurationForTests(noticeMs);
+    window.setFleet(fleet()); window.show(); window.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&window));
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *client = window.findChild<HgsClient *>(); auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    settleSelectedInspection(composer, client, {}, "codex/hgs/dashboard", details);
+    auto *sendNow = window.findChild<ActivityView *>("mainActivity")->findChild<QPushButton *>("queueSendNow");
+    QTRY_VERIFY(sendNow->isVisible()); QVERIFY(sendNow->isEnabled());
+    QSignalSpy finished(client, &HgsClient::queueSendFinished), refreshed(client, &HgsClient::inspectionReady);
+    QSignalSpy sent(composer, &MessageComposer::sendRequested);
+    sendNow->click(); QTRY_COMPARE(finished.size(), 1);
+    QVERIFY(!finished[0][1].toBool()); QCOMPARE(finished[0][3].toString(), error);
+    QCOMPARE(notice(window), expectedNotice); QVERIFY(noticeIsError(window));
+    QVERIFY(window.findChild<QLabel *>("notice")->isVisible());
+    if (transient) {
+        QVERIFY(expectedNotice.contains("nothing was sent"));
+        QVERIFY(expectedNotice.contains("Activity is being refreshed"));
+        QVERIFY(expectedNotice.contains("Terminal")); QVERIFY(expectedNotice.contains("before retrying"));
+    }
+    QTRY_VERIFY(!refreshed.isEmpty());
+    if (transient) {
+        QTRY_VERIFY(notice(window).isEmpty());
+        QVERIFY(window.findChild<QLabel *>("notice")->isHidden());
+    } else {
+        QTest::qWait(3 * noticeMs);
+        QCOMPARE(notice(window), expectedNotice); QVERIFY(noticeIsError(window));
+        QVERIFY(window.findChild<QLabel *>("notice")->isVisible());
+    }
+    QFile log(fake.fileName() + ".send-now"); QVERIFY(log.open(QIODevice::ReadOnly));
+    QCOMPARE(QString::fromUtf8(log.readAll()).split('\n', Qt::SkipEmptyParts), QStringList{"q1"});
+    QCOMPARE(sent.size(), 0);
 }
 
 void TestSessionsWindow::zoomChordsChangeContentScale()

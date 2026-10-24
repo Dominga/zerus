@@ -38,20 +38,25 @@ pub(super) fn recover(record: &Value, events: &[Value]) -> Vec<Value> {
     pending.into_values().collect()
 }
 
-fn card(record: &Value, event: &Value) -> Option<Value> {
+pub(super) fn card(record: &Value, event: &Value) -> Option<Value> {
     let id = string(event, "id");
     let tool = string(event, "toolCallId");
     let request = &event["request"];
     let display = &request["display"];
+    // Kimi's plan hooks can name only the tool while its wire carries the call ID.
+    let active = record["active_tools"]
+        .get(tool)
+        .is_some_and(|active| string(active, "name") == "ExitPlanMode")
+        || record["active_tools"]
+            .get("ExitPlanMode")
+            .is_some_and(|active| string(active, "name") == "ExitPlanMode");
     if id.is_empty()
         || id.len() > 240
         || tool.is_empty()
         || tool.len() > 200
         || string(request, "toolName") != "ExitPlanMode"
         || string(display, "kind") != "plan_review"
-        || !record["active_tools"]
-            .get(tool)
-            .is_some_and(|active| string(active, "name") == "ExitPlanMode")
+        || !active
     {
         return None;
     }
@@ -276,9 +281,7 @@ pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
     }
     let native = Native::new(record, card);
     let current = native.identity()?;
-    if questions::wire_response(&current, string(card, "question_id"))?.is_some() {
-        return Err("This plan review was already answered; nothing was sent".into());
-    }
+    kimi_approval::bound_plan(&current, card)?;
     match parse(&Native::capture(&current)?, &labels(card)?)? {
         Panel::Choosing => Ok(()),
         Panel::Feedback(_) => Err("Finish the Revise feedback in Terminal".into()),
@@ -388,6 +391,15 @@ mod tests {
         let cards = recover(&record(), &[request(options)]);
         assert_eq!(labels(&cards[0]).unwrap(), ["Script", "Manual", "Reject", "Revise"]);
         assert_eq!(cards[0]["questions"][0]["options"][0]["description"], "Rotate with a script");
+    }
+
+    #[test]
+    fn a_name_only_active_tool_does_not_hide_the_plan() {
+        let mut record = record();
+        record["active_tools"] = json!({"ExitPlanMode":{"name":"ExitPlanMode"}});
+        let cards = recover(&record, &[request(Value::Null)]);
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0]["question_id"], "approval_plan");
     }
 
     #[test]

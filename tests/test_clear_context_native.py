@@ -214,6 +214,7 @@ wire_api="responses"
 
     def test_ultra_picker_returns_to_a_sendable_composer_and_clears(self):
         import test_clear_context
+        screen=lambda:self.tmux('capture-pane','-p','-t',self.pane)
         models=[dict(slug='gpt-6.1-sol',display_name='GPT-6.1-Sol',default_reasoning_level='medium',
                      supported_reasoning_levels=[dict(effort=e) for e in ['low','medium','high','xhigh','max','ultra']])]
         (self.native_home/'models_cache.json').write_text(json.dumps(dict(models=models)))
@@ -224,14 +225,14 @@ wire_api="responses"
                          expected_conversation_id=self.conversation_id,model='gpt-6.1-sol',effort=level)
             result=subprocess.run([str(test_input.HGS),'settings',self.name,'--json'],
                                   input=json.dumps(request),env=self.env,text=True,capture_output=True,timeout=20)
-            self.assertEqual(result.returncode,0,result.stderr+'\n'+self.screen())
+            self.assertEqual(result.returncode,0,result.stderr+'\n'+screen())
             self.assertEqual(json.loads(result.stdout)['status'],'applied')
             current=json.loads(self.record_path.read_text())
             self.assertNotIn('settings_unconfirmed_at',current)
             self.assertEqual(current['resume_settings'],dict(model='gpt-6.1-sol',effort=level))
         before=(self.native_home/'config.toml').read_bytes()
         change('ultra')
-        self.assertTrue(any(row.startswith('» ') for row in self.screen().splitlines()),self.screen())
+        self.assertTrue(any(row.startswith('» ') for row in screen().splitlines()),screen())
         change('high')
         change('ultra')
         self.assertTrue(test_clear_context.ClearContext.inspect(self)['clear_context_supported'])

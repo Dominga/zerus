@@ -10,12 +10,12 @@ use super::store::{self, canonical_uuid, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|approve-phase|discard-phase|approve|answer|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|approve-phase|discard-phase|finish|approve|answer|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
 
 const MUTATIONS: &[&str] = &[
-    "plan", "extend", "approve-phase", "discard-phase", "approve", "discard", "pause", "resume", "stop", "archive",
-    "report", "accept", "reject", "reassign", "take-over", "cancel", "retry", "check", "use-last-reply", "relaunch",
-    "add-member", "pause-member", "resume-member", "remove-member",
+    "plan", "extend", "approve-phase", "discard-phase", "finish", "approve", "discard", "pause", "resume", "stop",
+    "archive", "report", "accept", "reject", "reassign", "take-over", "cancel", "retry", "check", "use-last-reply",
+    "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -54,6 +54,17 @@ fn actor(team: &Team, op: &str, input: &Value) -> anyhow::Result<Actor> {
     Ok(Actor::Human)
 }
 
+/// A running team whose every task is decided waits for the lead to extend it
+/// or finish it.
+fn waiting_for_lead(team: &Team) -> bool {
+    team.status == TeamStatus::Running && ops::all_decided(team)
+}
+
+/// The phase record still waiting for the owner, if any.
+fn pending_phase(team: &Team) -> Option<u32> {
+    team.phases.iter().find(|phase| phase.state == PhaseState::Draft).map(|phase| phase.n)
+}
+
 /// The team with what Zerus derives from it: plan findings, layers and the
 /// tasks ready to hand out.
 pub(crate) fn view(team: &Team) -> Value {
@@ -62,6 +73,8 @@ pub(crate) fn view(team: &Team) -> Value {
     value["layers"] = json!(plan::layers(&team.tasks));
     value["cycle"] = json!(plan::cycle_tasks(&team.tasks));
     value["ready"] = json!(plan::ready(team));
+    value["waiting_for_lead"] = json!(waiting_for_lead(team));
+    value["pending_phase"] = json!(pending_phase(team));
     value
 }
 
@@ -92,6 +105,7 @@ fn summary(team: &Team) -> Value {
         "lead":team.lead,"members":members,"tasks":tasks,
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "revision":team.revision,"updated":team.updated,
+        "waiting_for_lead":waiting_for_lead(team),"pending_phase":pending_phase(team),
     })
 }
 
@@ -300,9 +314,32 @@ mod tests {
 
     #[test]
     fn the_phase_commands_are_mutations_named_in_the_usage() {
-        for op in ["extend", "approve-phase", "discard-phase"] {
+        for op in ["extend", "approve-phase", "discard-phase", "finish"] {
             assert!(MUTATIONS.contains(&op), "{op} is not a mutation");
             assert!(USAGE.contains(op), "{op} is not in the usage");
         }
+    }
+
+    #[test]
+    fn status_shows_waiting_for_lead_and_the_pending_phase() {
+        let team = Team {
+            id: "t".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            tasks: vec![Task { id: 1, title: "Done".into(), status: TaskStatus::Accepted, assignee: "lead".into(), ..Default::default() }],
+            phases: vec![Phase { n: 2, state: PhaseState::Draft, ..Default::default() }],
+            ..Default::default()
+        };
+        let value = view(&team);
+        assert_eq!(value["waiting_for_lead"], true);
+        assert_eq!(value["pending_phase"], 2);
+        // A paused team with every task decided is Paused, not waiting.
+        let mut paused = team.clone();
+        paused.status = TeamStatus::Paused;
+        assert_eq!(view(&paused)["waiting_for_lead"], false);
+        // The session list carries both too.
+        let listed = summary(&paused);
+        assert_eq!((listed["waiting_for_lead"].as_bool(), listed["pending_phase"].as_u64()), (Some(false), Some(2)));
     }
 }

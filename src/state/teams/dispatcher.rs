@@ -99,6 +99,8 @@ pub(crate) enum Step {
     NotifyLead { task: u32 },
     /// The planning brief of a team created from the desktop.
     Brief,
+    /// Tells the lead once that every task is decided: extend or finish.
+    AllDecided,
     /// A DeepSeek member's model and effort, before its first message.
     Settings { member: String },
     /// A member's question for the lead to answer.
@@ -212,6 +214,12 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     }
     if team.status != TeamStatus::Running {
         return steps;
+    }
+    // The lead hears once that every task is decided; the next work re-arms it.
+    if team.idle == Notice::Pending
+        && team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free)
+    {
+        steps.push(Step::AllDecided);
     }
     // A member that stopped on its task: the lead hears once, when free.
     if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
@@ -403,6 +411,23 @@ pub(crate) fn brief_text(team: &Team) -> String {
         serde_json::to_string(&tasks).unwrap_or_default()
     );
     text
+}
+
+/// The one message that tells the lead every task is decided.
+pub(crate) fn all_decided_text(team: &Team) -> String {
+    let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} all tasks decided]\nTeam: {}. All {} tasks are decided ({} accepted, {} rejected, {} cancelled).\n\
+         Add the next phase with hgs team extend --json, or finish the team with a summary (hgs guide team-lead):\n  \
+         {{\"request_id\":\"{}\",\"team\":\"{}\",\"summary\":\"...\"}} | hgs team finish --json",
+        team.name,
+        team.tasks.len(),
+        count(TaskStatus::Accepted),
+        count(TaskStatus::Rejected),
+        count(TaskStatus::Cancelled),
+        uuid::Uuid::new_v4(),
+        team.id
+    )
 }
 
 /// A member's question as the lead reads it, with the answer to send back.
@@ -945,9 +970,41 @@ fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     })
 }
 
+/// The lead hears once that every task is decided: a refusal leaves the
+/// message pending, anything else marks it sent (an uncertain one is never
+/// re-sent). New work clears `idle` and re-arms the message.
+fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let mut message = None;
+    change(store, team_id, |team, _| {
+        anyhow::ensure!(team.status == TeamStatus::Running && team.idle == Notice::Pending, "nothing to tell");
+        let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+        message = Some((lead, all_decided_text(team)));
+        team.idle = Notice::Sending;
+        Ok(())
+    })?;
+    let (lead, text) = message.unwrap();
+    let outcome = send(&lead, &message_id, &text);
+    change(store, team_id, |team, events| {
+        if team.idle != Notice::Sending {
+            return Ok(());
+        }
+        team.idle = match &outcome {
+            Sent::Delivered => Notice::Sent,
+            Sent::Refused(_) => Notice::Pending,
+            Sent::Uncertain(_) => Notice::Unconfirmed,
+        };
+        if !matches!(outcome, Sent::Refused(_)) {
+            events.push(Event::new("lead_told", json!({"member":"Lead","kind":"all_decided"})));
+        }
+        Ok(())
+    })
+}
+
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
     match step {
         Step::Brief => send_brief(store, &team.id),
+        Step::AllDecided => send_all_decided(store, &team.id),
         Step::Question { member } => forward_question(store, team, member),
         Step::Stalled { task, kind } => tell_lead_stalled(store, team, *task, kind),
         Step::Quiet { member, session, muted, revision } => {
@@ -1062,6 +1119,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
 fn recover(store: &mut Store) -> anyhow::Result<()> {
     for team in store.teams(false, 10_000)? {
         let stuck = team.brief == Notice::Sending
+            || team.idle == Notice::Sending
             || team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.state == AttemptState::Delivering || a.notice == Notice::Sending);
         if !stuck {
             continue;
@@ -1069,6 +1127,9 @@ fn recover(store: &mut Store) -> anyhow::Result<()> {
         change(store, &team.id, |team, events| {
             if team.brief == Notice::Sending {
                 team.brief = Notice::Unconfirmed;
+            }
+            if team.idle == Notice::Sending {
+                team.idle = Notice::Unconfirmed;
             }
             for task in &mut team.tasks {
                 for attempt in &mut task.attempts {
@@ -1560,6 +1621,35 @@ mod tests {
             team.task_mut(id).unwrap().attempts[0].told_lead.push("rebalanced".into());
         }
         assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::Rebalanced { .. })));
+    }
+
+    #[test]
+    fn the_lead_hears_once_that_every_task_is_decided() {
+        let mut team = team();
+        for task in &mut team.tasks {
+            task.status = TaskStatus::Accepted;
+        }
+        team.idle = Notice::Pending;
+        let lead = session("claude/x/lead", "r0", true);
+        let seen = vec![lead, session("codex/x/dev", "r1", true)];
+        assert!(steps(&team, &seen, 1.0).contains(&Step::AllDecided));
+        // A busy lead hears it once it is free.
+        let busy = vec![session("claude/x/lead", "r0", false), session("codex/x/dev", "r1", true)];
+        assert!(!steps(&team, &busy, 1.0).iter().any(|s| matches!(s, Step::AllDecided)));
+        // Once sent, no second message for the same state.
+        team.idle = Notice::Sent;
+        assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::AllDecided)));
+        // New work clears it; deciding the new work arms one message again.
+        team.idle = Notice::None;
+        assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::AllDecided)));
+        team.idle = Notice::Pending;
+        team.status = TeamStatus::Paused;
+        assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::AllDecided)));
+        team.status = TeamStatus::Running;
+        assert!(steps(&team, &seen, 1.0).contains(&Step::AllDecided));
+        let text = all_decided_text(&team);
+        assert!(text.contains("All 3 tasks are decided (3 accepted, 0 rejected, 0 cancelled)"), "{text}");
+        assert!(text.contains("hgs team extend") && text.contains("hgs team finish"), "{text}");
     }
 
     #[test]

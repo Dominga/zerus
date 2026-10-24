@@ -371,12 +371,31 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     Some(attempt.n)
 }
 
-fn finish_if_done(team: &mut Team, events: &mut Vec<Event>) {
-    if team.status == TeamStatus::Running && !team.tasks.is_empty() && team.tasks.iter().all(|task| task.status.finished()) {
-        team.status = TeamStatus::Done;
-        let accepted = team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
-        events.push(Event::new("done", json!({"accepted":accepted,"tasks":team.tasks.len()})));
-    }
+/// Every task is finished and there is at least one: the team waits for the
+/// lead to extend it or finish it.
+pub(crate) fn all_decided(team: &Team) -> bool {
+    !team.tasks.is_empty() && team.tasks.iter().all(|task| task.status.finished())
+}
+
+/// Ends the team with the lead's or your summary; Done is final.
+fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you finish the team");
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+    let summary = clean(text(input, "summary").trim(), 4000, "A summary")?;
+    ensure!(!summary.is_empty(), "A summary is required");
+    let open = team.tasks.iter().filter(|task| !task.status.finished()).count();
+    ensure!(open == 0, "{open} task(s) are not decided: decide or cancel them first");
+    let by = actor.label(team);
+    let accepted = team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
+    let summary_chars = summary.chars().count();
+    team.finish = Some(Finish { by: by.clone(), summary, at: now() });
+    team.idle = Notice::None;
+    team.status = TeamStatus::Done;
+    events.push(Event::new(
+        "finished",
+        json!({"by":by,"accepted":accepted,"tasks":team.tasks.len(),"summary_chars":summary_chars}),
+    ));
+    Ok(json!({"status":"finished"}))
 }
 
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -450,7 +469,6 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         json!({"by":label,"task":id,"title":title,"attempt":n,"reason":reason,"manual":manual}),
     ));
     let status = serde_json::to_value(team.task(id).unwrap().status)?;
-    finish_if_done(team, events);
     Ok(json!({"status":status,"task":id}))
 }
 
@@ -506,7 +524,6 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let revoked = revoke(task, "cancelled");
     task.status = TaskStatus::Cancelled;
     events.push(Event::new("cancelled", json!({"by":label,"task":id,"revoked_attempt":revoked})));
-    finish_if_done(team, events);
     Ok(json!({"status":"cancelled","task":id,"revoked_attempt":revoked}))
 }
 
@@ -540,11 +557,13 @@ fn check(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
 /// changes directly.
 pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let human_or_lead = matches!(actor, Actor::Human) || actor.is_lead(team);
+    let was_decided = all_decided(team);
     let result = match op {
         "plan" => plan(team, input, actor, events),
         "extend" => extend(team, input, actor, offline, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
+        "finish" => finish(team, input, actor, events),
         "approve" => approve(team, actor, offline, events),
         "discard" => {
             ensure!(human_or_lead, "Only the lead or you discard a plan");
@@ -648,6 +667,22 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         }
         _ => bail!("Unknown team operation {op}"),
     }?;
+    // A running team with every task decided waits for the lead: it hears once
+    // and hears again only after new work is decided.
+    if matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+        let decided = all_decided(team);
+        if !was_decided && decided {
+            team.idle = Notice::Pending;
+            let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
+            events.push(Event::new(
+                "all_decided",
+                json!({"accepted":count(TaskStatus::Accepted),"rejected":count(TaskStatus::Rejected),
+                    "cancelled":count(TaskStatus::Cancelled),"tasks":team.tasks.len()}),
+            ));
+        } else if was_decided && !decided {
+            team.idle = Notice::None;
+        }
+    }
     Ok(result)
 }
 
@@ -1114,17 +1149,77 @@ mod tests {
     }
 
     #[test]
-    fn the_team_is_done_when_every_task_is_decided() {
+    fn a_decided_team_waits_for_the_lead_instead_of_closing() {
         let mut team = running_team();
         let mut events = Vec::new();
+        let none = BTreeSet::new();
         for id in [1, 2] {
             let attempt = hand_out(&mut team, id);
             let member = team.task(id).unwrap().assignee.clone();
             report(&mut team, &json!({"task":id,"attempt":attempt,"text":"ok"}), &Actor::Member(member), &mut events).unwrap();
         }
-        decide(&mut team, &json!({"task":1}), &Actor::Human, true, &mut events).unwrap();
-        cancel(&mut team, &json!({"task":2}), &Actor::Human, &mut events).unwrap();
-        assert_eq!(team.status, TeamStatus::Done);
+        apply(&mut team, "accept", &json!({"task":1}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((team.status, team.idle), (TeamStatus::Running, Notice::None));
+        apply(&mut team, "cancel", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((team.status, team.idle), (TeamStatus::Running, Notice::Pending));
+        assert_eq!(events.last().unwrap().kind, "all_decided");
+        assert_eq!(events.last().unwrap().payload["accepted"], 1);
+        assert_eq!(events.last().unwrap().payload["cancelled"], 1);
+        assert_eq!(events.last().unwrap().payload["tasks"], 2);
+        assert!(!events.iter().any(|event| event.kind == "done"));
+        // New work clears the waiting state; deciding it arms one message again.
+        team.settings.phase_approval = Some(Approval::Auto);
+        apply(&mut team, "extend", &json!({"tasks":[{"id":3,"title":"More","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.idle, Notice::None);
+        apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.idle, Notice::Pending);
+        assert_eq!(events.iter().filter(|event| event.kind == "all_decided").count(), 2);
+    }
+
+    #[test]
+    fn finish_ends_a_decided_team_with_a_bounded_summary() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let error = apply(&mut team, "finish", &json!({"summary":"Done"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "2 task(s) are not decided: decide or cancel them first");
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        let error = apply(&mut team, "finish", &json!({"summary":"Done"}), &Actor::Member("dev".into()), &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Only the lead or you finish the team");
+        let error = apply(&mut team, "finish", &json!({"summary":"  "}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "A summary is required");
+        let error = apply(&mut team, "finish", &json!({"summary":"x".repeat(4001)}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "A summary is too long");
+        let done = apply(&mut team, "finish", &json!({"summary":"  Shipped  "}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(done["status"], "finished");
+        assert_eq!((team.status, team.idle), (TeamStatus::Done, Notice::None));
+        let finish = team.finish.as_ref().unwrap();
+        assert_eq!((finish.by.as_str(), finish.summary.as_str()), ("Lead", "Shipped"));
+        assert_eq!(events.last().unwrap().kind, "finished");
+        assert_eq!(events.last().unwrap().payload["accepted"], 0);
+        assert_eq!(events.last().unwrap().payload["tasks"], 2);
+        assert_eq!(events.last().unwrap().payload["summary_chars"], 7);
+        // Done is final: neither finish nor stop works again.
+        let error = apply(&mut team, "finish", &json!({"summary":"Again"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "The team is not running");
+        assert!(apply(&mut team, "stop", &json!({}), &Actor::Human, &none, &mut events).is_err());
+    }
+
+    #[test]
+    fn you_finish_a_paused_decided_team() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        apply(&mut team, "pause", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.status, TeamStatus::Paused);
+        let done = apply(&mut team, "finish", &json!({"summary":"Stopped by me"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(done["status"], "finished");
+        assert_eq!(team.finish.unwrap().by, "You");
     }
 
     #[test]

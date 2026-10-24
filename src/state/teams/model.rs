@@ -251,6 +251,21 @@ pub(crate) enum Notice {
     Unconfirmed,
 }
 
+impl Notice {
+    fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+/// Who finished the team, and with what summary.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Finish {
+    /// The lead or you.
+    pub by: String,
+    pub summary: String,
+    pub at: f64,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Report {
     pub text: String,
@@ -411,6 +426,12 @@ pub(crate) struct Team {
     pub brief: Notice,
     #[serde(default)]
     pub brief_id: String,
+    /// The "all tasks decided" message to the lead: sent once per such state.
+    #[serde(default, skip_serializing_if = "Notice::is_none")]
+    pub idle: Notice,
+    /// Who finished the team and with what summary; set by `finish`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<Finish>,
     /// The template's lead protocol when the team was created, given to the
     /// lead with the planning brief.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -509,6 +530,22 @@ mod tests {
         assert_eq!(value["phases"][0]["barrier"], json!(true));
         assert_eq!(value["phases"][0]["decided_at"], Value::Null);
         assert_eq!(value["settings"]["phase_approval"], json!("auto"));
+    }
+
+    #[test]
+    fn the_waiting_and_finish_fields_round_trip() {
+        let mut team = phased_team();
+        team.idle = Notice::Pending;
+        team.finish = Some(Finish { by: "Lead".into(), summary: "Shipped it".into(), at: 1.5 });
+        let text = serde_json::to_string(&team).unwrap();
+        let back: Team = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, team);
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["idle"], "pending");
+        assert_eq!(value["finish"]["summary"], "Shipped it");
+        // Without them, the old record still has neither key.
+        let old: Value = serde_json::to_value(serde_json::from_value::<Team>(old_team()).unwrap()).unwrap();
+        assert!(old.get("idle").is_none() && old.get("finish").is_none());
     }
 
     #[test]

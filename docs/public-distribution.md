@@ -393,6 +393,21 @@ with the `public_repo` scope of the account that owns the fork) the job only
 warns. Run `scripts/publish-winget.py --version VERSION --output DIR` to write the
 manifests of a published release locally without submitting them.
 
+The owner has standing personal Microsoft CLA consent for all `ufna.Zerus`
+proposals from `ufna`. The publisher checks the exact PR author, fork, version
+branch and three manifest paths, then posts
+`@microsoft-github-policy-service agree` once if `Needs-CLA` is present and the
+author has not already replied. New proposals wait up to one minute for the
+bot's label. Existing proposals are checked again on publication retries.
+The trusted-main **Confirm authorized winget CLA** workflow runs hourly and
+supports manual dispatch to reconcile later prompts with the same helper; it
+never opens or changes a proposal or its package files. Both paths serialize
+through `winget-cla-consent`, use only the existing `release/WINGET_TOKEN`, and
+never execute external PR code. Other accounts and corporate consent are not
+covered. A comment whose result is unknown requires inspection before a retry;
+an existing author agreement is not posted again. Moderator review and listing
+in winget remain independent of this confirmation.
+
 AUR versions are read from the published recipe archive, including epoch and
 package release. In particular `zerus-git` is a VCS recipe, not an invented copy
 of the stable version. The feed describes the release recipes; live AUR

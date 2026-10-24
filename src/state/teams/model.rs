@@ -149,6 +149,11 @@ pub(crate) struct Member {
     /// hash; the most recent ones only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<String>,
+    /// The conversation whose notifications the dispatcher muted: a member
+    /// works for the lead, so its replies do not call the owner. Muted once
+    /// per conversation; the owner may unmute it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub quieted: String,
 }
 
 impl Member {

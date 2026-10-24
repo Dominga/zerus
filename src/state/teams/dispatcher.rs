@@ -43,6 +43,10 @@ pub(crate) struct Seen {
     /// Its working folder, where a member that may not write the team's
     /// files leaves its report.
     pub cwd: String,
+    /// Its notifications are muted, and the revision of that preference
+    /// (None when the host does not know it).
+    pub muted: bool,
+    pub notify_revision: Option<u64>,
 }
 
 /// Every session of this computer and its peers from one listing.
@@ -75,6 +79,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 live,
                 cwd: field("cwd").to_owned(),
+                muted: record["notification_preferences"]["muted"] == true,
+                notify_revision: record["notification_preferences"]["revision"].as_u64(),
             });
         }
     }
@@ -100,6 +106,9 @@ pub(crate) enum Step {
     /// Tells the lead about a member that stopped on its task (its session
     /// ended, paused or is gone; or its turn ended with neither report nor reply).
     Stalled { task: u32, kind: String },
+    /// Mutes a member's notifications (unless they already are): its
+    /// replies are for the lead.
+    Quiet { member: String, session: SessionRef, muted: bool, revision: u64 },
 }
 
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
@@ -139,6 +148,17 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                 steps.push(Step::Adopt {
                     member: member.id.clone(),
                     session: SessionRef { run_id: found.run_id.clone(), conversation_id: found.conversation_id.clone(), ..session.clone() },
+                });
+            }
+        }
+        // A member works for the lead: its replies do not call the owner.
+        if let Some(found) = session_of(member, seen).filter(|_| member.id != team.lead) {
+            if let Some(revision) = found.notify_revision.filter(|_| found.live && !found.conversation_id.is_empty() && member.quieted != found.conversation_id) {
+                steps.push(Step::Quiet {
+                    member: member.id.clone(),
+                    session: SessionRef { host: found.host.clone(), name: found.name.clone(), run_id: found.run_id.clone(), conversation_id: found.conversation_id.clone() },
+                    muted: found.muted,
+                    revision,
                 });
             }
         }
@@ -832,6 +852,19 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::Brief => send_brief(store, &team.id),
         Step::Question { member } => forward_question(store, team, member),
         Step::Stalled { task, kind } => tell_lead_stalled(store, team, *task, kind),
+        Step::Quiet { member, session, muted, revision } => {
+            if !*muted {
+                let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id,"muted":true,"expected_revision":revision});
+                let output = hgs(&session.host, &["notifications", &session.name, "--json"], Some(&input), Duration::from_secs(60))?;
+                // A changed preference is read again on the next pass.
+                anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+            }
+            change(store, &team.id, |team, _| {
+                let quiet = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
+                quiet.quieted = session.conversation_id.clone();
+                Ok(())
+            })
+        }
         Step::Adopt { member, session } => change(store, &team.id, |team, events| {
             let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
             let started = found.session.is_none();
@@ -1280,6 +1313,27 @@ mod tests {
         assert!(text.contains("member stopped") && text.contains("Backend's session stopped"), "{text}");
         team.task_mut(id).unwrap().attempts.last_mut().unwrap().told_lead.push("stopped".into());
         assert!(!steps(&team, &[lead, gone], 1.0).iter().any(|s| matches!(s, Step::Stalled { .. })));
+    }
+
+    #[test]
+    fn members_replies_are_muted_for_the_owner_once_per_conversation() {
+        let mut team = team();
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.notify_revision = Some(3);
+        let mut lead = session("claude/x/lead", "r0", true);
+        lead.notify_revision = Some(0);
+        let quiet = |steps: &[Step]| steps.iter().filter_map(|s| match s { Step::Quiet { member, revision, muted, .. } => Some((member.clone(), *revision, *muted)), _ => None }).collect::<Vec<_>>();
+        // The member's replies are for the lead; the lead's are for you.
+        assert_eq!(quiet(&steps(&team, &[lead.clone(), dev.clone()], 1.0)), [("dev".to_owned(), 3, false)]);
+        // Once muted for this conversation, never again: you may unmute it.
+        team.members.iter_mut().find(|m| m.id == "dev").unwrap().quieted = "c".into();
+        assert!(quiet(&steps(&team, &[lead.clone(), dev.clone()], 1.0)).is_empty());
+        // A new conversation is muted again; a host that does not know the
+        // preference is left alone.
+        dev.conversation_id = "c2".into();
+        assert_eq!(quiet(&steps(&team, &[lead.clone(), dev.clone()], 1.0)).len(), 1);
+        dev.notify_revision = None;
+        assert!(quiet(&steps(&team, &[lead, dev], 1.0)).is_empty());
     }
 
     #[test]

@@ -51,6 +51,23 @@ class HostedMacAdmission(unittest.TestCase):
                 scope.signal_scope('_fixture', 60000, {'GeneratedUID': 'original'}, 'TERM')
             command.assert_not_called()
 
+    def test_unknown_launchd_error_never_proves_domain_absence(self):
+        with patch.object(scope, 'privileged', return_value=subprocess.CompletedProcess(
+                [], 1, '', 'Could not print domain: 1: Operation not permitted')):
+            with self.assertRaisesRegex(ValueError, 'could not be verified'):
+                scope.user_domain(60000)
+        with patch.object(scope, 'privileged', return_value=subprocess.CompletedProcess(
+                [], 113, '', 'Could not find domain for user 60000')):
+            self.assertFalse(scope.user_domain(60000))
+
+    def test_preexisting_or_changed_domain_never_authorizes_bootout(self):
+        for absent, actual in [(False, {'UniqueID': '60000'}), (True, {'UniqueID': 'different'})]:
+            with self.subTest(absent=absent), patch.object(scope, 'identity', return_value=actual), \
+                    patch.object(scope, 'privileged') as privileged:
+                with self.assertRaisesRegex(ValueError, 'no bootout is authorized'):
+                    scope.close_domain('_fixture', 60000, {'UniqueID': '60000'}, absent)
+                privileged.assert_not_called()
+
 
 class IntegrationScheduling(unittest.TestCase):
     def test_mac_process_scope_keeps_all_three_whole_modules(self):

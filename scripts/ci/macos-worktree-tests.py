@@ -76,6 +76,32 @@ def identity(name):
     return dict(line.split(": ", 1) for line in result.stdout.splitlines() if ": " in line)
 
 
+def user_domain(uid):
+    result = privileged("/bin/launchctl", "print", "user/" + str(uid), check=False)
+    if result.returncode == 0:
+        if len(result.stdout) > 1024**2 or not result.stdout.startswith("user/" + str(uid) + " = {"):
+            raise ValueError("Unexpected private launchd domain identity")
+        return True
+    message = result.stdout + result.stderr
+    if any(marker in message for marker in ("Could not find domain", "Could not find specified domain",
+                                           "Could not find specified service")):
+        return False
+    raise ValueError("Private launchd domain could not be verified: " + message[:300])
+
+
+def close_domain(name, uid, expected, absent_before):
+    if not absent_before or identity(name) != expected or expected.get("UniqueID") != str(uid):
+        raise ValueError("Private launchd ownership changed; no bootout is authorized")
+    if user_domain(uid):
+        # This domain did not exist before this locked fixture UID was allocated.
+        # Its OS services respawn after pkill until the domain itself is closed.
+        privileged("/bin/launchctl", "bootout", "user/" + str(uid))
+        if user_domain(uid):
+            raise ValueError("Private launchd domain survived bootout")
+        return True
+    return False
+
+
 def signal_scope(name, uid, expected, signal):
     if identity(name) != expected:
         raise ValueError("Private fixture identity changed; no signal is authorized")
@@ -101,7 +127,8 @@ def run(module, binary):
     binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
     inventory = dscl("-list", "/Users", "UniqueID").stdout
     used = {int(row.split()[-1]) for row in inventory.splitlines() if row.split() and row.split()[-1].isdigit()}
-    uid = next((candidate for candidate in range(60000, 60128) if candidate not in used and not pids(candidate)), None)
+    uid = next((candidate for candidate in range(60000, 60128)
+                if candidate not in used and not pids(candidate) and not user_domain(candidate)), None)
     if uid is None:
         raise ValueError("No empty private fixture UID is available")
     root = Path(tempfile.mkdtemp(prefix="zwt-user-", dir="/private/tmp"))
@@ -111,7 +138,8 @@ def run(module, binary):
     home, runtime, code = root/"home", root/"tmp", root/"source"
     expected = {"GeneratedUID": generated, "UniqueID": str(uid), "NFSHomeDirectory": str(home)}
     report = dict(source=source, module=module, uid=uid, user=name, generated=generated,
-                  root=str(root), binary_sha256=binary_hash, account_removed=False, tests_started=False)
+                  root=str(root), binary_sha256=binary_hash, account_removed=False, tests_started=False,
+                  user_domain_absent_before=True)
     output = ROOT/"artifacts/test-results/mac-worktree-scope"
     output.mkdir(parents=True, exist_ok=True)
     destination = output/(module + ".json")
@@ -203,6 +231,10 @@ def run(module, binary):
                 report["processes_after_tests_details"] = [line[:512] for line in detail.stdout.splitlines()
                     if len(line.split()) >= 4 and line.split()[1:3] == [str(uid), str(uid)]]
                 signal_scope(name, uid, expected, "TERM")
+            if created:
+                report["private_user_domain_closed"] = close_domain(name, uid, expected,
+                                                                   report["user_domain_absent_before"])
+                remaining = pids(uid)
             while remaining and time.monotonic() < end:
                 time.sleep(.05)
                 remaining = pids(uid)
@@ -210,7 +242,8 @@ def run(module, binary):
                     signal_scope(name, uid, expected, "KILL")
                     report["scope_kill_sent"] = True
             report["remaining_processes"] = sorted(remaining)
-            if created and not remaining and identity(name) == expected:
+            report["user_domain_remaining"] = user_domain(uid) if created else None
+            if created and not remaining and not report["user_domain_remaining"] and identity(name) == expected:
                 dscl("-delete", "/Users/" + name)
                 report["account_removed"] = identity(name) is None
             if created and (remaining or not report["account_removed"]):

@@ -90,8 +90,10 @@ and real interpreter preflight establish this scope; no process is filtered from
 an individual CLI call. After the tests, lingering fixture processes receive
 TERM, then bounded KILL if necessary, as that unprivileged user with both real and
 effective UID pinned and its directory-service identity rechecked before each
-signal. The account is removed only after an empty UID inventory and matching
-directory-service identity. Uncertain cleanup fails and retains the
+signal. The harness also closes only that private user's launchd domain, proven
+absent before allocation, so per-user OS services stop respawning. The account is
+removed only after the domain is absent, the UID inventory is empty and the
+directory-service identity matches. Uncertain cleanup fails and retains the
 scope for VM disposal. Owner Macs and other hosts refuse account creation before
 allocation or sudo; local macOS checks continue under the current user. No test is
 excluded and the production guard remains strict.

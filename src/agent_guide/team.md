@@ -31,6 +31,9 @@ Lead, from your own session:
   Members' permission requests come the same way ([Zerus team · from: ROLE ·
   permission]; options allow and deny): allow only what the task needs inside
   the team's folder, deny the rest, and ask the owner when in doubt.
+  Zerus tells you when a member stops on its task ([Zerus team · from: Zerus ·
+  ... member stopped]): message it to go on, retry or reassign the task, or
+  ask the owner. A member that ran no report command reports with its last reply.
   The owner's decisions are final; yours cannot undo them.
 
 Member: a task arrives as a message that begins with [Zerus team. Do it,

@@ -272,6 +272,10 @@ pub(crate) struct Attempt {
     pub notice_id: String,
     #[serde(default)]
     pub error: String,
+    /// What the lead was told about this attempt's member on its own
+    /// (stopped, no_report), once each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told_lead: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

@@ -38,6 +38,8 @@ pub(crate) struct Seen {
     pub reply_at: Option<f64>,
     /// Waiting on an answer: a question or a permission request.
     pub asking: bool,
+    /// Its process or native session runs.
+    pub live: bool,
 }
 
 /// Every session of this computer and its peers from one listing.
@@ -67,6 +69,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 idle,
                 reply_at: record["reply_at"].as_f64(),
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
+                live,
             });
         }
     }
@@ -89,6 +92,9 @@ pub(crate) enum Step {
     Settings { member: String },
     /// A member's question for the lead to answer.
     Question { member: String },
+    /// Tells the lead about a member that stopped on its task (its session
+    /// ended, paused or is gone; or its turn ended with neither report nor reply).
+    Stalled { task: u32, kind: String },
 }
 
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
@@ -173,6 +179,24 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     }
     if team.status != TeamStatus::Running {
         return steps;
+    }
+    // A member that stopped on its task: the lead hears once, when free.
+    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
+        for task in &team.tasks {
+            let Some(attempt) = task.open_attempt() else { continue };
+            let Some(member) = team.member(&attempt.member).filter(|m| m.id != team.lead && m.session.is_some()) else { continue };
+            let kind = if attempt.no_report {
+                "no_report"
+            } else if !session_of(member, seen).is_some_and(|s| s.live) {
+                "stopped"
+            } else {
+                continue;
+            };
+            if !attempt.told_lead.iter().any(|k| k == kind) {
+                steps.push(Step::Stalled { task: task.id, kind: kind.to_owned() });
+                break;
+            }
+        }
     }
     // A member asks the lead, not the owner, once the lead is free; one at a
     // time. Its permission requests go to the lead as well (the owner's
@@ -682,6 +706,39 @@ fn notify_lead(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result
     })
 }
 
+/// The message that tells the lead a member stopped on its task.
+pub(crate) fn stalled_text(team: &Team, task: &Task, attempt: &Attempt, kind: &str) -> String {
+    let role = team.role_of(&attempt.member);
+    let what = if kind == "no_report" {
+        format!("{role} ended its turn on task #{} {} with neither a report nor a reply.", task.id, task.title)
+    } else {
+        format!("{role}'s session stopped (ended, paused or gone) while on task #{} {}.", task.id, task.title)
+    };
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} member stopped]\n{what}\n\
+         Look at it and decide: send it a message to go on, retry or reassign the task (hgs guide team), \
+         or ask the owner if it needs them (a relaunch, a sign-in).",
+        task.id
+    )
+}
+
+fn tell_lead_stalled(store: &mut Store, team: &Team, task_id: u32, kind: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.open_attempt().context("no open attempt")?.clone();
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &stalled_text(team, task, &attempt, kind));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(&attempt.member);
+        let found = team.task_mut(task_id).and_then(|t| t.attempts.iter_mut().find(|a| a.id == attempt.id)).context("unknown attempt")?;
+        found.told_lead.push(kind.to_owned());
+        events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":kind})));
+        Ok(())
+    })
+}
+
 /// Gives the lead the member's first question or permission request it has not
 /// had. Inspection runs at most every 20 seconds per member.
 fn forward_question(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
@@ -758,6 +815,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
     match step {
         Step::Brief => send_brief(store, &team.id),
         Step::Question { member } => forward_question(store, team, member),
+        Step::Stalled { task, kind } => tell_lead_stalled(store, team, *task, kind),
         Step::Settings { member } => {
             let found = team.member(member).cloned().context("unknown member")?;
             let result = apply_settings(&found);
@@ -983,7 +1041,7 @@ mod tests {
         team
     }
     fn session(name: &str, run: &str, free: bool) -> Seen {
-        Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, ..Default::default() }
+        Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
     }
 
     #[test]
@@ -1123,6 +1181,24 @@ mod tests {
         assert!(launch_args(&team, &claude, "D:/w").windows(4).any(|w| w == ["--model", "opus", "--effort", "high"]));
         let dsh = Member { agent: "dsh".into(), ..codex };
         assert!(!launch_args(&team, &dsh, "D:/w").iter().any(|a| a == "--" || a == "-d"));
+    }
+
+    #[test]
+    fn the_lead_hears_once_when_a_member_stops_on_its_task() {
+        let mut team = team();
+        let lead = session("claude/x/lead", "r0", true);
+        let mut gone = session("codex/x/dev", "r1", false);
+        gone.live = false;
+        // A member with an open attempt whose session stopped.
+        let task = team.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        let id = task.id;
+        let steps_now = steps(&team, &[lead.clone(), gone.clone()], 1.0);
+        assert!(steps_now.contains(&Step::Stalled { task: id, kind: "stopped".into() }), "{steps_now:?}");
+        let text = stalled_text(&team, team.task(id).unwrap(), team.task(id).unwrap().attempts.last().unwrap(), "stopped");
+        assert!(text.contains("member stopped") && text.contains("Backend's session stopped"), "{text}");
+        team.task_mut(id).unwrap().attempts.last_mut().unwrap().told_lead.push("stopped".into());
+        assert!(!steps(&team, &[lead, gone], 1.0).iter().any(|s| matches!(s, Step::Stalled { .. })));
     }
 
     #[test]

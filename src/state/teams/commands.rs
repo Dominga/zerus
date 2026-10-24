@@ -159,6 +159,13 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             }
             let limit = input["limit"].as_i64().unwrap_or(200).clamp(1, 1000);
             let teams = Store::open(false)?.teams(input["include_archived"].as_bool() == Some(true), limit)?;
+            // The desktop lists teams while it shows them: a dispatcher that
+            // stopped (an update, a crash) starts again while a team needs one.
+            if teams.iter().any(|t| t.status == TeamStatus::Running || (t.status == TeamStatus::Planning && t.brief == Notice::Pending)) {
+                if let Err(error) = super::dispatcher::ensure_worker() {
+                    eprintln!("hgs: the team dispatcher did not start: {error}");
+                }
+            }
             Ok(json!({"items":teams.iter().map(summary).collect::<Vec<_>>()}))
         }
         "status" => {

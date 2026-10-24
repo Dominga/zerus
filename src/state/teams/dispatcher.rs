@@ -883,7 +883,7 @@ pub(crate) fn worker() -> Result<i32> {
     if fs2::FileExt::try_lock_exclusive(&file).is_err() {
         return Ok(0);
     }
-    let _lock = crate::platform::FileLock::held(file);
+    let lock = crate::platform::FileLock::held(file);
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let started = fs::metadata(&executable).and_then(|m| m.modified()).ok();
     let config = crate::config::Config::load().map_err(|e| e.to_string())?;
@@ -893,6 +893,11 @@ pub(crate) fn worker() -> Result<i32> {
     let mut last_work = Instant::now();
     loop {
         if fs::metadata(&executable).and_then(|m| m.modified()).ok() != started {
+            // An update replaced hgs: the new one carries on with the teams.
+            drop(lock);
+            if let Err(error) = ensure_worker() {
+                eprintln!("hgs team worker: the updated dispatcher did not start: {error}");
+            }
             return Ok(0);
         }
         match tick(&mut store, host) {

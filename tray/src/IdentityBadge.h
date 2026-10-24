@@ -86,9 +86,16 @@ inline void paintRow(QPainter *p, const QStyleOptionViewItem &option, bool dark,
     // Selection has the same neutral surface in every list and every state.
     // The edge retains draft ownership even when its composer is open.
     const QColor accent = emphasisColor(dark, emphasis);
-    const QColor border = selected ? QColor(dark ? "#8295a9" : "#7a91a6") : Qt::transparent;
-    const QColor background = selected ? QColor(dark ? "#303b47" : "#dde7ef")
+    QColor border = selected ? QColor(dark ? "#8295a9" : "#7a91a6") : Qt::transparent;
+    QColor background = selected ? QColor(dark ? "#303b47" : "#dde7ef")
         : hovered ? QColor(dark ? "#242c34" : "#edf1f4") : Qt::transparent;
+    // A list in the skin's "cards" view sets these colors, and
+    // every card then has a surface and an edge of its own.
+    if (const auto *list = option.widget; list && list->property("cardSurface").isValid()) {
+        const auto color = [list](const char *name) { return list->property(name).value<QColor>(); };
+        background = selected ? color("cardSelected") : hovered ? color("cardHover") : color("cardSurface");
+        border = selected ? color("cardSelectedBorder") : color("cardBorder");
+    }
     p->setPen(QPen(border, 1)); p->setBrush(background);
     p->drawRoundedRect(r, 8, 8);
     if (emphasis != Normal) paintEdge(p, option.rect, accent);

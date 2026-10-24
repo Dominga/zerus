@@ -32,6 +32,9 @@ inline QRect workingIndicatorRect(const QRect &rect) {
     const auto c = indicatorCenter(rect);
     return QRectF(c.x() - 6, c.y() - 6, 12, 12).toAlignedRect().intersected(rect);
 }
+// The cards view outlines calm states and keeps the ones that
+// ask for the user filled. Set by the window with the skin.
+inline bool &outlined() { static bool value = false; return value; }
 // labelOpacity fades the caption while the collapsed session strip grows into cards.
 inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind, bool dark, qreal pulse = 0, qreal labelOpacity = 1, bool indicatorOnly = false) {
     p->save(); p->setRenderHint(QPainter::Antialiasing); p->setClipRect(rect, Qt::IntersectClip);
@@ -51,7 +54,13 @@ inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind
         : kind == Paused ? QColor(dark ? "#dec3ff" : "#634187")
         : kind == Draft ? QColor(dark ? "#9cc0ec" : "#2f5f93")
         : kind == Scheduled ? QColor(dark ? "#9fe0f0" : "#165a6b") : QColor(dark ? "#b6c2d0" : "#566575");
-    p->setPen(Qt::NoPen); p->setBrush(background); p->drawRoundedRect(rect, 5, 5);
+    const bool calls = kind == Attention || kind == Unread || kind == Error;
+    if (outlined() && !calls) {
+        QColor tone = edge(kind, dark).isValid() ? edge(kind, dark) : QColor(dark ? "#8b939e" : "#8a96a3");
+        QColor fill = tone; fill.setAlphaF(dark ? .12 : .10);
+        QColor line = tone; line.setAlphaF(.5);
+        p->setPen(QPen(line, 1)); p->setBrush(fill); p->drawRoundedRect(QRectF(rect).adjusted(.5, .5, -.5, -.5), rect.height() / 2., rect.height() / 2.);
+    } else { p->setPen(Qt::NoPen); p->setBrush(background); p->drawRoundedRect(rect, 5, 5); }
     const QPointF center = indicatorCenter(rect);
     p->setFont(font(p->font())); p->setPen(foreground);
     if (kind == Working) {

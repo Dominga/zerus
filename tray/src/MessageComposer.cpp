@@ -28,6 +28,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
+#include <QMenu>
+#include <QTextDocument>
+#include <QAbstractTextDocumentLayout>
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QInputMethodEvent>
@@ -460,6 +463,8 @@ int MessageComposer::boundedEditorHeight(int height) const
 
 void MessageComposer::updateEditorHeight()
 {
+    // The compact composer's field grows with its text instead.
+    if (m_compact) { fitEditor(); return; }
     auto *edit = static_cast<ComposeEdit *>(m_editor);
     edit->setMinimumHeight(ContentScale::px(DefaultEditorHeight, m_scale));
     const int height = boundedEditorHeight(qRound(m_editorHeight * m_scale));
@@ -1076,7 +1081,7 @@ bool MessageComposer::eventFilter(QObject *watched, QEvent *event)
 void MessageComposer::setInputVisible(bool visible)
 {
     if (!visible) m_settingsPopup->hide();
-    m_resizeHandle->setVisible(visible);
+    m_resizeHandle->setVisible(visible && !m_compact);
     m_input->setVisible(visible);
 }
 
@@ -1133,8 +1138,10 @@ void MessageComposer::updateControls()
         : m_attachmentsAvailable ? tr("Attach files, paste an image, or drop files onto this session") : m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
-    m_send->setText(draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send"));
-    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : tr("Send: Enter; new line: Shift+Enter"));
+    const QString sendText = draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send");
+    // The compact card's Send is a pill that says Send; other states keep only the icon.
+    m_send->setText(m_compact && sendText != tr("Send") ? QString() : sendText); m_send->setAccessibleName(sendText);
+    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_compact ? sendText + " · " + tr("Enter; new line: Shift+Enter") : tr("Send: Enter; new line: Shift+Enter"));
     m_retry->setVisible(draft.uncertain && !operationLocked);
     m_refreshStatus->setVisible(!m_sessionStatus.isEmpty() && m_sessionStatusError);
     m_refreshStatus->setEnabled(!operationLocked);
@@ -1164,7 +1171,8 @@ void MessageComposer::updateControls()
     if (!showSettings) m_settingsPopup->hide();
     // Do not transfer an unfinished settings interaction to the Stop action.
     if (returnFocus) m_editor->setFocus(Qt::OtherFocusReason);
-    m_actions->setStretch(2, status.isEmpty() ? 1 : 0);
+    // The stretch before the status; the compact composer moves the toolbar into this row.
+    m_actions->setStretch(m_actions->indexOf(m_status) - 1, status.isEmpty() ? 1 : 0);
     setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg(ownError || (status == m_sessionStatus && m_sessionStatusError)
         ? (m_dark ? "#f4ab9b" : "#a13224") : waiting ? (m_dark ? "#efc978" : "#92641b") : (m_dark ? "#a2adbc" : "#627082")));
     emit controlsChanged();
@@ -1368,6 +1376,7 @@ void MessageComposer::updateSettingsButton()
 void MessageComposer::openSettings()
 {
     if (m_key.isEmpty()) return;
+    if (m_compact && m_settingsEnabled) { showSettingsMenu(); return; }
     m_popupKey = m_key;
     const QString model = m_pendingModel.isEmpty() ? m_model : m_pendingModel;
     const QSignalBlocker blocker(m_models); m_models->clear();
@@ -1656,7 +1665,16 @@ void MessageComposer::setTheme(bool dark)
         QPushButton#allowMessageRetry { padding:7px 10px; font-size:11px; }
     )").arg(dark ? "#171d24" : "#f8fafb", dark ? "#e8edf4" : "#1a2733", dark ? "#3d4855" : "#dce2e8",
              dark ? "#365b4d" : "#c7eadd", dark ? "#8bdfc0" : "#167357", dark ? "#10231b" : "#ffffff", dark ? "#85909e" : "#6d7784")
-        .arg(ContentScale::px(9, m_scale)).arg(ContentScale::px(13, m_scale)) + workspaceScrollbars(dark));
+        .arg(ContentScale::px(9, m_scale)).arg(ContentScale::px(13, m_scale)) + workspaceScrollbars(dark)
+        // The compact composer's card frames the field and its buttons.
+        + (m_compact ? QString(R"(
+        QFrame#composerCard { background:%1; border:1px solid %2; border-radius:12px; }
+        QFrame#composerCard:focus-within { border-color:%3; }
+        QFrame#composerCard QPlainTextEdit#messageInput, QFrame#composerCard QPlainTextEdit#messageInput:focus { background:transparent; border:0; padding:6px 4px; }
+        QFrame#composerCard QPushButton#sendMessage { padding:0 12px; border-radius:9px; min-width:34px; min-height:30px; max-height:30px; }
+        QPushButton#attachMessageFile { border:0; border-radius:8px; background:transparent; }
+        QPushButton#sessionModelSettings { border:1px solid transparent; }
+    )").arg(dark ? "#1b1f26" : "#ffffff", dark ? "#2c323b" : "#dce2e8", dark ? "#7dd3b0" : "#167357") : QString()));
     updateControls();
 }
 
@@ -1668,4 +1686,91 @@ void MessageComposer::setContentScale(double scale)
     // Keep the same number of visible lines as at the native size.
     updateEditorHeight();
     setTheme(m_dark);
+}
+
+void MessageComposer::fitEditor()
+{
+    if (!m_compact) { updateEditorHeight(); return; }
+    // One line to start, at most six; the field scrolls beyond them.
+    const int line = m_editor->fontMetrics().lineSpacing();
+    const int lines = qBound(1, int(m_editor->document()->documentLayout()->documentSize().height()), 6);
+    // The field's padding (6px) and the document margin above and below the text.
+    m_editor->setFixedHeight(qMax(34, lines * line + 2 * int(m_editor->document()->documentMargin()) + 14));
+}
+
+void MessageComposer::setCompact(bool compact)
+{
+    if (compact == m_compact) return;
+    m_compact = compact;
+    m_resizeHandle->setVisible(!compact && !m_input->isHidden());
+    auto *inputLayout = static_cast<QVBoxLayout *>(m_input->layout());
+    if (compact) {
+        if (!m_card) {
+            m_card = new QFrame; m_card->setObjectName("composerCard");
+            m_cardRow = new QHBoxLayout(m_card); m_cardRow->setContentsMargins(10, 5, 5, 5); m_cardRow->setSpacing(4);
+            connect(m_editor->document(), &QTextDocument::contentsChanged, this, [this] { if (m_compact) fitEditor(); });
+        }
+        inputLayout->removeWidget(m_editor); m_actions->removeWidget(m_send);
+        m_cardRow->addWidget(m_editor, 1); m_cardRow->addWidget(m_send, 0, Qt::AlignBottom);
+        inputLayout->insertWidget(0, m_card);
+        // Attach stays first in the row under the card; the toolbar (voice,
+        // video, attachments) follows it, left of the model.
+        static_cast<QBoxLayout *>(layout())->removeWidget(m_toolbar); m_actions->insertWidget(1, m_toolbar);
+        m_send->setMinimumSize(34, 30); m_send->setMaximumSize(QWIDGETSIZE_MAX, 30); m_send->setLayoutDirection(Qt::LeftToRight);
+        m_card->show();
+    } else {
+        m_cardRow->removeWidget(m_editor); m_cardRow->removeWidget(m_send);
+        inputLayout->removeWidget(m_card); m_card->hide();
+        m_actions->removeWidget(m_toolbar); static_cast<QBoxLayout *>(layout())->insertWidget(0, m_toolbar);
+        inputLayout->insertWidget(0, m_editor);
+        m_actions->addWidget(m_send);
+        m_send->setMinimumSize(0, 0); m_send->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX); m_send->setLayoutDirection(Qt::RightToLeft);
+    }
+    fitEditor(); updateControls(); setTheme(m_dark);
+}
+
+// The compact menu: the models, then the effort of the chosen one. A choice
+// applies at once, through the same request as Apply.
+void MessageComposer::showSettingsMenu()
+{
+    m_popupKey = m_key;
+    const QString model = m_pendingModel.isEmpty() ? m_model : m_pendingModel;
+    {
+        const QSignalBlocker blocker(m_models); m_models->clear();
+        for (const auto &value : m_modelOptions) {
+            const auto option = value.toObject(); const auto id = option.value("id").toString();
+            if (!id.isEmpty() && m_models->findData(id) < 0) m_models->addItem(option.value("label").toString(id), id);
+        }
+        if (m_models->findData(model) < 0 && !model.isEmpty()) m_models->insertItem(0, model, model);
+        m_models->setCurrentIndex(m_models->findData(model));
+    }
+    updateSettingsEfforts(); updateSettingsApply();
+    auto *menu = new QMenu(this); menu->setObjectName("sessionSettingsMenu"); menu->setAttribute(Qt::WA_DeleteOnClose);
+    const auto apply = [this] { updateSettingsApply(); if (m_applySettings->isEnabled()) m_applySettings->click(); };
+    for (int index = 0; index < m_models->count(); ++index) {
+        auto *action = menu->addAction(m_models->itemText(index));
+        action->setCheckable(true); action->setChecked(index == m_models->currentIndex()); action->setEnabled(m_models->isEnabled() || index == m_models->currentIndex());
+        if (index < 9) action->setShortcut(QKeySequence(QString::number(index + 1)));
+        connect(action, &QAction::triggered, this, [this, index, apply] {
+            if (m_popupKey != m_key) return;
+            m_models->setCurrentIndex(index); updateSettingsEfforts(); apply();
+        });
+    }
+    if (m_efforts->count()) {
+        menu->addSeparator();
+        auto *efforts = menu->addMenu(tr("Effort") + QStringLiteral("  ·  ") + m_efforts->currentText());
+        efforts->setEnabled(m_efforts->isEnabled());
+        for (int index = 0; index < m_efforts->count(); ++index) {
+            auto *action = efforts->addAction(m_efforts->itemText(index));
+            action->setCheckable(true); action->setChecked(index == m_efforts->currentIndex());
+            connect(action, &QAction::triggered, this, [this, index, apply] {
+                if (m_popupKey != m_key) return;
+                m_efforts->setCurrentIndex(index); apply();
+            });
+        }
+    }
+    menu->addSeparator();
+    auto *note = menu->addAction(m_settingsHint->text().section('\n', 0, 0)); note->setEnabled(false);
+    const QSize size = menu->sizeHint();
+    menu->popup(m_settings->mapToGlobal(QPoint(m_settings->width() - size.width(), -size.height() - 6)));
 }

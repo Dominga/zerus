@@ -232,6 +232,8 @@ private slots:
     void independentWaitRemainsVisibleWithoutExpandingHeader_data();
     void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
+    void compactSkinWorkspaceView();
+    void compactSkinStartsWithACollapsedList();
     void groupsPersistFilterAndRevealAttention();
     void rebuildKeepsProjectOrderAtScale_data();
     void rebuildKeepsProjectOrderAtScale();
@@ -667,6 +669,79 @@ FleetState TestSessionsWindow::fleet() const
     BoxState mac; mac.host = "mac"; mac.ok = true; mac.sessions = {approval};
     FleetState result; result.setLocal(arch, QDateTime::currentMSecsSinceEpoch()); result.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
     return result;
+}
+
+// The Compact skin's workspace view. The rail holds the list toggle and hides
+// New session while the list is docked, cards make room for the agent tile,
+// the composer is compact and inspector sections fold. The default skin
+// restores all of it.
+void TestSessionsWindow::compactSkinWorkspaceView()
+{
+    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", "dark");
+    const auto restore = qScopeGuard([] {
+        QSettings().remove("workspace/skin"); QSettings().remove("workspace/theme"); QSettings().remove("workspace/foldedInspector");
+        sessionCardTileInset() = 0; SessionStatusBadge::outlined() = false;
+    });
+    const auto state = fleet();
+    SessionsWindow window(FakeCli::program(script())); window.resize(1280, 760); window.setFleet(state); window.show();
+    window.showSession({}, state.local().sessions[0].name);
+    auto *toggle = window.findChild<QPushButton *>("railSessionsToggle"); auto *railNew = window.findChild<QPushButton *>("newSession");
+    QVERIFY(toggle); QVERIFY(railNew);
+    QTRY_VERIFY(toggle->isVisible()); QVERIFY(!railNew->isVisible()); QVERIFY(!window.findChild<QPushButton *>("sessionPanelToggle")->isVisible());
+    QCOMPARE(sessionCardTileInset(), 38); QVERIFY(SessionStatusBadge::outlined());
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QVERIFY(composer->findChild<QFrame *>("composerCard")); QVERIFY(composer->findChild<QFrame *>("composerCard")->isVisible());
+    // The compact composer shows the model, so the header does not repeat it.
+    QVERIFY(!window.findChild<QLabel *>("sessionModel")->isVisible());
+    // Inspector sections fold from their headings.
+    auto *info = window.findChild<QTextBrowser *>("subagents"); QVERIFY(info);
+    QTRY_VERIFY(info->toHtml().contains("hgs-fold:"));
+#ifdef Q_OS_WIN
+    // The skin's own title bar replaces the system one; the window keeps its width.
+    QTRY_VERIFY(window.findChild<QWidget *>("windowTitleBar")->isVisible()); QVERIFY(window.windowFlags() & Qt::FramelessWindowHint);
+    // The rail's controls move into the title bar, and the version into the status bar.
+    QVERIFY(!window.findChild<QWidget *>("sidebar")->isVisible());
+    QVERIFY(window.findChild<QWidget *>("windowTitleBar")->isAncestorOf(toggle));
+    QVERIFY(window.findChild<QWidget *>("windowTitleBar")->isAncestorOf(window.findChild<QWidget *>("brandMark")));
+    QVERIFY(window.findChild<QWidget *>("workspaceStatus")->isAncestorOf(window.findChild<QWidget *>("appVersion")));
+#endif
+    auto *listPanel = window.findChild<QWidget *>("sessionListPanel"); QVERIFY(listPanel);
+    toggle->click(); QTRY_VERIFY(railNew->isVisible());
+    // Collapsed, the cards list leaves no strip: only the rail remains.
+    QTRY_VERIFY(!listPanel->isVisible());
+    toggle->click(); QTRY_VERIFY(!railNew->isVisible()); QTRY_VERIFY(listPanel->isVisible());
+    // Other pages have no session list, so no list toggle.
+    window.findChild<QPushButton *>("workspaceSettings")->click(); QTRY_VERIFY(!toggle->isVisible());
+    window.findChild<QPushButton *>("railButton")->click(); QTRY_VERIFY(toggle->isVisible());
+    QSettings().remove("workspace/skin"); window.applySkin();
+    QVERIFY(!window.findChild<QWidget *>("windowTitleBar")->isVisible()); QVERIFY(!(window.windowFlags() & Qt::FramelessWindowHint));
+    QVERIFY(window.findChild<QWidget *>("sidebar")->isVisible()); QVERIFY(window.findChild<QWidget *>("sidebar")->isAncestorOf(railNew));
+    QVERIFY(window.findChild<QWidget *>("sidebar")->isAncestorOf(window.findChild<QWidget *>("appVersion")));
+    QVERIFY(window.width() < 2000);
+    QTRY_VERIFY(!toggle->isVisible()); QVERIFY(railNew->isVisible()); QCOMPARE(sessionCardTileInset(), 0); QVERIFY(!SessionStatusBadge::outlined());
+    QVERIFY(!composer->findChild<QFrame *>("composerCard")->isVisible());
+    QTRY_VERIFY(!info->toHtml().contains("hgs-fold:"));
+}
+
+// A list collapsed when Zerus quit restores while the window is still being
+// built, before its pages and status bar exist.
+void TestSessionsWindow::compactSkinStartsWithACollapsedList()
+{
+    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/sessionsCollapsed", true);
+    const auto restore = qScopeGuard([] {
+        QSettings().remove("workspace/skin"); QSettings().remove("workspace/sessionsCollapsed"); sessionCardTileInset() = 0; SessionStatusBadge::outlined() = false;
+    });
+    const auto state = fleet();
+    SessionsWindow window(FakeCli::program(script())); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *listPanel = window.findChild<QWidget *>("sessionListPanel"); QVERIFY(listPanel);
+    QTRY_VERIFY(!listPanel->isVisible());
+    auto *toggle = window.findChild<QPushButton *>("railSessionsToggle"); QVERIFY(toggle);
+    QTRY_VERIFY(toggle->isVisible());
+#ifdef Q_OS_WIN
+    QVERIFY(window.findChild<QWidget *>("windowTitleBar")->isAncestorOf(toggle));
+    QVERIFY(window.findChild<QWidget *>("workspaceStatus")->isAncestorOf(window.findChild<QWidget *>("appVersion")));
+#endif
+    toggle->click(); QTRY_VERIFY(listPanel->isVisible());
 }
 
 void TestSessionsWindow::gitPublicationChecksKeepDraftFocusAndSharedCards()

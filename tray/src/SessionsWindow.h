@@ -20,8 +20,10 @@ class SwarmController;
 #include "HgsClient.h"
 #include "SessionOrganization.h"
 #include "SessionRowPreferences.h"
+#include "WorkspaceSkin.h"
 
 class QAction;
+class QFileSystemWatcher;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -104,12 +106,16 @@ signals:
     void accountInstallRequested(const QString &host, const QString &provider);
     void machineSshRequested(const QString &alias);
 
+public:
+    // Applies the selected skin again, as after a change in Settings.
+    void applySkin() { applyTheme(); }
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void changeEvent(QEvent *event) override;
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 
 private:
     ArchiveBrowser *m_archiveBrowser = nullptr;
@@ -167,6 +173,11 @@ private:
     void applySessionStrip();
     SessionPanelDock *m_sessionDock = nullptr;
     QPushButton *m_sessionsToggle = nullptr, *m_stripSearch = nullptr, *m_batchButton = nullptr, *m_panelNewSession = nullptr;
+    // The rail's New session and its session list toggle (cards view).
+    QPushButton *m_railNewSession = nullptr, *m_railSessionsToggle = nullptr;
+    void applyWorkspaceView();
+    QString foldInspectorSections(const QString &html) const;
+    void toggleInspectorSection(const QString &key);
     QHBoxLayout *m_sessionHeader = nullptr, *m_filterRow = nullptr;
     QString m_countFull, m_countShort;
     bool m_focusSearch = false;
@@ -376,6 +387,17 @@ private:
     bool m_folderFilterCheckout=false;
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
+    // The cards view's branch chip in the session header.
+    class QFrame *m_branchChip=nullptr;
+    class QLabel *m_branchIcon=nullptr,*m_branchText=nullptr;
+    // The skin's own title bar in place of the system one.
+    class WindowTitleBar *m_titleBar=nullptr;
+    bool m_framelessMain=false, m_railInTitle=false;
+    void applyWindowFrame();
+    // Moves the rail's controls into the title bar (and the version into the
+    // status bar) or back to the rail.
+    void placeRailControls(bool inTitle);
+    QWidget *m_sidebar=nullptr; class QVBoxLayout *m_railLayout=nullptr; class QHBoxLayout *m_statusLayout=nullptr; QPushButton *m_versionButton=nullptr;
     QSet<QString> m_hostFilters, m_projectFilters;
     QString selectedHostTarget() const;
     void updateDashboard();
@@ -429,7 +451,7 @@ private:
     QElapsedTimer m_processPollAge,m_inspectionAge;
     SessionList *m_sessions;
     SessionSearch *m_searchResults;
-    QStackedWidget *m_listStack;
+    QStackedWidget *m_listStack = nullptr;
     MachinesPage *m_machinesPage;
     MachineFilter *m_machineFilter;
     ProjectFilter *m_projectFilter;
@@ -532,14 +554,18 @@ private:
     struct PendingNotifications { Entry entry; };
     QHash<quint64, PendingNotifications> m_pendingNotifications;
     bool m_confirmingQuestionCache = false;
-    QStackedWidget *m_detailStack;
+    QStackedWidget *m_detailStack = nullptr;
     QSplitter *m_splitter;
-    QStackedWidget *m_pages;
+    // Null until the pages exist: restoring a collapsed list runs earlier.
+    QStackedWidget *m_pages = nullptr;
     SettingsPage *m_settingsPage;
     QPushButton *m_settingsNav;
     QPushButton *m_windowPin = nullptr;
     ProjectsDialog *m_projectsPage;
     QPushButton *m_projectsNav;
     bool m_dark = false;
+    QFileSystemWatcher *m_skinWatcher = nullptr;
+    // The selected skin, read by applyTheme().
+    WorkspaceSkin::Skin m_skin;
     QString m_fg, m_muted, m_surface, m_border, m_accent;
 };

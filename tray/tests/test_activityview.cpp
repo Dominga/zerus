@@ -197,6 +197,7 @@ class TestActivityView : public QObject {
 private slots:
     void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
+    void compactTranscriptReadsFlat();
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive();
@@ -334,6 +335,31 @@ void TestActivityView::archiveRestoreKeepsVisibleHistoryAndSelection()
     QCOMPARE(view.plainText(), text); QCOMPARE(browser->textCursor().selectedText(), selected);
     QCOMPARE(browser->verticalScrollBar()->value(), scroll);
     view.setSessionKey("another-conversation"); QVERIFY(view.plainText().isEmpty());
+}
+
+// With the skin's bubbles, agent replies read as text in the column and tool
+// groups as one-line rows; the user's messages stay bubbles, and every card
+// gives its square background to the rounded one painted beneath it.
+void TestActivityView::compactTranscriptReadsFlat()
+{
+    SettledActivityView view; view.resize(760, 640);
+    view.setBubbles(true); view.setTheme(true);
+    view.setActivity({}, {journalEvent(0, "UserPromptSubmit", "Keep the earlier changes and fix cursor pagination."),
+                          journalEvent(1, "UserPromptSubmit", "Add cursor pagination to GET /cards."),
+                          journalEvent(2, "PreToolUse", "src/api/cards.ts", "Read"), journalEvent(3, "PostToolUse", "src/api/cards.ts", "Read"),
+                          journalEvent(4, "PreToolUse", "src/api/cards.ts", "Edit"), journalEvent(5, "PostToolUse", "src/api/cards.ts", "Edit"),
+                          journalEvent(6, "PreToolUse", "pnpm test cards", "Bash"), journalEvent(7, "PostToolUse", "23 passed", "Bash"),
+                          journalEvent(8, "Stop", "Adding cursor pagination to `GET /cards` and scoping lookups by user.\n\n```ts\nconst page = await cards.list({ cursor, limit: 20 });\n```\n\nTests: 23 passed."),
+                          journalEvent(9, "Notification", "Codex wants to run: pnpm prisma migrate dev")});
+    const auto text = view.browser()->toPlainText();
+    QVERIFY(text.contains("Keep the earlier changes"));
+    QVERIFY(text.contains("Add cursor pagination"));
+    QVERIFY(text.contains("Read  src/api/cards.ts"));
+    QVERIFY(text.contains("Edited  src/api/cards.ts"));
+    QVERIFY(text.contains("Ran  pnpm test cards"));
+    QVERIFY(text.contains("Tests: 23 passed."));
+    view.setBubbles(false);
+    QTRY_VERIFY(!view.browser()->toPlainText().contains("Edited  src/api/cards.ts"));
 }
 
 void TestActivityView::hiddenSnapshotsDoNotBuildDocuments()

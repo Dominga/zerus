@@ -56,6 +56,10 @@ public:
     void setTheme(bool dark);
     // Enlarges the message field; its actions keep the workspace size.
     void setContentScale(double scale);
+    // The skin's compact composer. The field and Send sit in one card with
+    // Attach under it, the field grows with its text, and the model and effort
+    // are chosen from a menu that applies a choice at once.
+    void setCompact(bool compact);
     // modelDefaultEffort: an empty effort is a choice, the model's own default
     // (OpenCode variants); the popup then offers "Default" first.
     void setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
@@ -250,6 +254,11 @@ private:
     QHash<int, QPixmap> m_previews;   // decoded once per list; a null pixmap marks a non-image
     QHBoxLayout *m_actions;
     bool m_narrow = false;
+    bool m_compact = false;
+    class QFrame *m_card = nullptr;
+    QHBoxLayout *m_cardRow = nullptr;
+    void fitEditor();
+    void showSettingsMenu();
     // Composer-scope commands (Shortcuts.h) on the field.
     QAction *m_sendAction, *m_pushAction;
     bool m_pushEnabled = false, m_pushing = false;

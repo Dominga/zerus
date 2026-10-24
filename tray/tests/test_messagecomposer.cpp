@@ -1,3 +1,4 @@
+#include <QMenu>
 #include "MessageComposer.h"
 #include "OpenCodeModelPicker.h"
 #include "SessionCardDelegate.h"
@@ -188,6 +189,7 @@ class TestMessageComposer : public QObject {
     Q_OBJECT
 private slots:
     void unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval();
+    void compactComposerAppliesMenuChoicesAtOnce();
     void initTestCase();
     void voiceInsertionRequiresUnchangedDraftAndNavigation();
     void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); QSettings().remove("workspace/messageEditorHeight"); }
@@ -1439,6 +1441,31 @@ void TestMessageComposer::modelSettingsPreserveDraftAndDistinguishPending()
     setSessionReady(composer, "mac/other"); QVERIFY(!composer.findChild<QFrame *>("sessionSettingsPopup")->isVisible());
     apply->click(); QCOMPARE(changes.size(), 1);
     setSessionReady(composer, "arch/session"); QCOMPARE(composer.editor()->toPlainText(), QString("[File #1] Keep this draft"));
+}
+
+// The compact composer keeps Send and the field in one card and applies a
+// model or effort from its menu at once; the classic layout returns.
+void TestMessageComposer::compactComposerAppliesMenuChoicesAtOnce()
+{
+    MessageComposer composer; composer.resize(640, 220); setSessionReady(composer, "arch/session");
+    const QJsonArray options{QJsonObject{{"id", "model-one"}, {"effort_options", QJsonArray{"low", "high"}}},
+        QJsonObject{{"id", "model-two"}, {"label", "Second model"}, {"effort_options", QJsonArray{"low", "high"}}}};
+    composer.setModelSettings("model-one", "high", options, true, {});
+    composer.setCompact(true); composer.show(); QTest::qWait(20);
+    auto *send = sendButton(composer); auto *card = composer.findChild<QFrame *>("composerCard");
+    QVERIFY(card && card->isVisible()); QCOMPARE(send->text(), QString("Send")); QCOMPARE(send->accessibleName(), QString("Send"));
+    QVERIFY(card->isAncestorOf(send)); QVERIFY(card->isAncestorOf(composer.editor()));
+    const int oneLine = composer.editor()->height();
+    composer.editor()->setPlainText("one\ntwo\nthree"); QTRY_VERIFY(composer.editor()->height() > oneLine);
+    QSignalSpy changes(&composer, &MessageComposer::settingsRequested);
+    composer.findChild<QPushButton *>("sessionModelSettings")->click();
+    QMenu *menu = nullptr; QTRY_VERIFY((menu = composer.findChild<QMenu *>("sessionSettingsMenu")));
+    QAction *second = nullptr; for (auto *action : menu->actions()) if (action->text() == "Second model") second = action;
+    QVERIFY(second); QVERIFY(!second->isChecked()); second->trigger();
+    QCOMPARE(changes.size(), 1); QCOMPARE(changes[0], QVariantList({"arch/session", "model-two", "high"}));
+    menu->close();
+    composer.setCompact(false); QVERIFY(!card->isVisible()); QCOMPARE(send->text(), QString("Send"));
+    QVERIFY(!card->isAncestorOf(send)); QCOMPARE(composer.editor()->height(), 76);
 }
 
 // OpenCode effort is a variant of the model, and no variant is the model's own

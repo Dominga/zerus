@@ -42,6 +42,9 @@
 #include "ContentScale.h"
 #include "ActivityWidth.h"
 #include "UpdateController.h"
+#include "WindowTitleBar.h"
+#include "WorkspaceSkin.h"
+#include <QFileSystemWatcher>
 #include "ProcessSettings.h"
 #include "TerminalView.h"
 #include "TerminalScreen.h"
@@ -304,9 +307,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_organization = SessionOrganization(savedProjects);
     m_pendingLaunches = QJsonDocument::fromJson(settings.value("workspace/pendingLaunches").toByteArray()).object();
     if (!settings.value("sessions/geometry").toByteArray().isEmpty()) restoreGeometry(settings.value("sessions/geometry").toByteArray());
-    auto *root = new QHBoxLayout(this); root->setContentsMargins(0, 0, 0, 0); root->setSpacing(0);
-    auto *sidebar = new QWidget; sidebar->setObjectName("sidebar"); sidebar->setFixedWidth(56);
-    auto *side = new QVBoxLayout(sidebar); side->setContentsMargins(7, 10, 7, 10); side->setSpacing(8);
+    // A skin may put its own title bar above the rail and the pages.
+    auto *frame = new QVBoxLayout(this); frame->setContentsMargins(0, 0, 0, 0); frame->setSpacing(0);
+    m_titleBar = new WindowTitleBar; m_titleBar->hide(); frame->addWidget(m_titleBar);
+    m_titleBar->search = [this] { openGoTo(); };
+    auto *root = new QHBoxLayout; root->setContentsMargins(0, 0, 0, 0); root->setSpacing(0); frame->addLayout(root, 1);
+    auto *sidebar = m_sidebar = new QWidget; sidebar->setObjectName("sidebar"); sidebar->setFixedWidth(56);
+    auto *side = m_railLayout = new QVBoxLayout(sidebar); side->setContentsMargins(7, 10, 7, 10); side->setSpacing(8);
     auto iconButton = [](const QString &glyph, const QString &caption, const char *name) {
         auto *button = new QPushButton; button->setObjectName(QLatin1String(name));
         button->setProperty("glyph", glyph); button->setToolTip(caption); button->setAccessibleName(caption);
@@ -316,8 +323,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_brand->setFixedSize(42,44); m_brand->setCheckable(true); m_brand->setProperty("caption", tr("Home — Zerus %1").arg(version)); m_brand->setAccessibleName(tr("Home dashboard"));
     connect(m_brand,&QPushButton::clicked,this,[this] { m_pages->setCurrentIndex(3); m_brand->setChecked(true); emit refreshRequested(); });
     side->addWidget(m_brand); side->addSpacing(8);
+    // The cards view collapses and expands the session list here.
+    m_railSessionsToggle = iconButton("collapse-sessions", tr("Collapse session list"), "railSessionsToggle");
+    m_railSessionsToggle->setFixedSize(42, 36); m_railSessionsToggle->hide(); side->addWidget(m_railSessionsToggle);
+    connect(m_railSessionsToggle, &QPushButton::clicked, this, [this] { if (m_sessionDock) m_sessionDock->toggle(); });
     auto *create = iconButton("add", tr("New session"), "newSession");
-    create->setFixedSize(42,44);create->setIconSize(QSize(24,24));side->addWidget(create);
+    create->setFixedSize(42,44);create->setIconSize(QSize(24,24));side->addWidget(create); m_railNewSession = create;
     connect(create, &QPushButton::clicked, this, [this]() { showNewSession({}, {}, selectedHostTarget()); });
     m_sessionsNav = iconButton("sessions", tr("Sessions"), "railButton"); m_sessionsNav->setCheckable(true); m_sessionsNav->setChecked(true);
     m_projectsNav = iconButton("projects", tr("Projects"), "railButton"); m_projectsNav->setCheckable(true);
@@ -341,7 +352,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     windowPin->setFixedSize(42, 44); windowPin->setIconSize(QSize(24,24)); side->addWidget(windowPin);
     auto *settingsButton = m_settingsNav = iconButton("settings", tr("Settings"), "workspaceSettings"); settingsButton->setCheckable(true); settingsButton->setFixedSize(42, 44); settingsButton->setIconSize(QSize(24,24)); side->addWidget(settingsButton);
     connect(settingsButton, &QPushButton::clicked, this, &SessionsWindow::showWorkspaceSettings);
-    auto *versionButton = new QPushButton(UpdateController::buildInfo()["versionName"].toString().section('-', 0, 0));
+    auto *versionButton = m_versionButton = new QPushButton(UpdateController::buildInfo()["versionName"].toString().section('-', 0, 0));
     versionButton->setObjectName("appVersion"); versionButton->setFixedSize(42, 24);
     versionButton->setCursor(Qt::PointingHandCursor); versionButton->setAutoDefault(false);
     versionButton->setAccessibleName(tr("About Zerus"));
@@ -651,7 +662,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_meta->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_providerBadge = new IdentityBadge(IdentityBadges::Provider); m_providerBadge->setObjectName("sessionProviderBadge");
     m_machineBadge = new IdentityBadge(IdentityBadges::Machine); m_machineBadge->setObjectName("sessionMachineBadge");
-    auto *metadata = new QHBoxLayout; metadata->setSpacing(6); metadata->addWidget(m_providerBadge); metadata->addWidget(m_machineBadge); metadata->addWidget(m_meta, 1); metadata->addWidget(m_model);
+    // The cards view names the session's branch as a chip too.
+    m_branchChip = new QFrame; m_branchChip->setObjectName("sessionBranchChip"); m_branchChip->setFixedHeight(18); m_branchChip->hide();
+    {auto *h=new QHBoxLayout(m_branchChip);h->setContentsMargins(5,0,6,0);h->setSpacing(3);
+     m_branchIcon=new QLabel;m_branchText=new QLabel;m_branchText->setObjectName("sessionBranchText");h->addWidget(m_branchIcon);h->addWidget(m_branchText);}
+    auto *metadata = new QHBoxLayout; metadata->setSpacing(6); metadata->addWidget(m_providerBadge); metadata->addWidget(m_machineBadge); metadata->addWidget(m_branchChip); metadata->addWidget(m_meta, 1); metadata->addWidget(m_model);
     detail->addLayout(metadata);
     m_usageStore=new AccountUsageStore(hgsPath,this);
     m_usageStrip=new QWidget;m_usageStrip->setObjectName("sessionUsageStrip");m_usageStrip->setFixedHeight(22);m_usageStrip->hide();
@@ -1307,8 +1322,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_children = browser(); m_children->setObjectName("subagents"); m_children->setAccessibleName(tr("Subagents")); m_children->viewport()->installEventFilter(this);
     connect(m_children, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
         if (url.scheme() == "hgs-agent") openSubagent(url.path(QUrl::FullyDecoded));
+        else if (url.scheme() == "hgs-fold") toggleInspectorSection(url.path(QUrl::FullyDecoded));
     });
     m_info = browser(); m_info->setObjectName("sessionInfo"); m_info->setAccessibleName(tr("Session details"));
+    connect(m_info, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
+        if (url.scheme() == "hgs-fold") toggleInspectorSection(url.path(QUrl::FullyDecoded));
+    });
     tabs->addTab(m_activityStack, tr("Activity")); tabs->addTab(m_terminal, tr("Terminal"));
     m_nativeUi = new NativeUiView(&m_client, [] { return NativeBrowserPlugin::factory(); });
     tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
@@ -1478,7 +1497,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     m_settingsPage->appearanceChanged=[this]{
         m_sessions->setProperty("compact",QSettings().value("workspace/compact",false).toBool());m_sessions->doItemsLayout();
-        m_sessionDock->setStripWidth(SessionStrip::width(m_sessions->property("compact").toBool()));
+        m_sessionDock->setStripWidth(sessionCardTileInset() ? 0 : SessionStrip::width(m_sessions->property("compact").toBool()));
         m_sessionDock->setHoverExpands(QSettings().value("workspace/expandSessionsOnHover",true).toBool());
         const auto usageIndicator=AccountUsage::indicator();m_accountUsage->setIndicator(usageIndicator);m_dashboard->setUsageIndicator(usageIndicator);
         applyTheme();rebuild();
@@ -1517,7 +1536,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *workspace = new QVBoxLayout; workspace->setContentsMargins(0, 0, 0, 0); workspace->setSpacing(0);
     workspace->addWidget(m_pages, 1);
     auto *statusBar = new QFrame; statusBar->setObjectName("workspaceStatus"); statusBar->setFixedHeight(28);
-    auto *statusLayout = new QHBoxLayout(statusBar); statusLayout->setContentsMargins(12, 3, 12, 3);
+    auto *statusLayout = m_statusLayout = new QHBoxLayout(statusBar); statusLayout->setContentsMargins(12, 3, 12, 3);
     m_connectionStatus = new StatusMessage; m_connectionStatus->setObjectName("workspaceConnectionStatus");
     statusLayout->addWidget(m_connectionStatus, 1);
     auto *updateEntry = new QPushButton(tr("New version"));
@@ -1606,6 +1625,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_sessionFeedback = new StatusMessage; m_sessionFeedback->setObjectName("sessionFeedback");
     m_sessionFeedback->hide(); statusLayout->addWidget(m_sessionFeedback, 1);
     connect(m_pages, &QStackedWidget::currentChanged, this, [this] { updateSessionFeedback(); });
+    connect(m_pages, &QStackedWidget::currentChanged, this, [this](int index) {
+        if (m_railSessionsToggle) m_railSessionsToggle->setVisible(sessionCardTileInset() && index == 0);
+    });
     m_noticeDismiss = new QPushButton; m_noticeDismiss->setObjectName("dismissNotice");
     m_noticeDismiss->setProperty("glyph", "close"); m_noticeDismiss->setIconSize(QSize(14, 14));
     m_noticeDismiss->setFixedSize(20, 20); m_noticeDismiss->setFlat(true);
@@ -1806,14 +1828,35 @@ void SessionsWindow::applyTheme()
     const QString theme = QSettings().value("workspace/theme", "system").toString();
     m_dark = theme == "dark" || (theme != "light" && qApp->palette().color(QPalette::Window).lightness() < 128);
     m_sessionLoading->setTheme(m_dark);
-    m_fg = m_dark ? "#e8edf4" : "#1a2733";
-    m_muted = m_dark ? "#a2adbc" : "#627082";
-    m_surface = m_dark ? "#1c2229" : "#ffffff";
-    m_border = m_dark ? "#333c47" : "#dce2e8";
-    m_accent = m_dark ? "#8bdfc0" : "#167357";
-    const QString bg = m_dark ? "#161b21" : "#f5f7f9";
-    const QString hover = m_dark ? "#2b3540" : "#edf2f5";
-    const QString selected = m_dark ? "#233d35" : "#e0f0e9";
+    // The selected skin supplies the workspace colors and may
+    // append its own stylesheet (WorkspaceSkin.h); Zerus keeps these exactly.
+    // Read once per theme pass; the views below and renderDetails() use this copy.
+    m_skin = WorkspaceSkin::current();
+    const auto &skin = m_skin;
+    const auto &colors = skin.palette(m_dark);
+    m_fg = colors.foreground;
+    m_muted = colors.muted;
+    m_surface = colors.surface;
+    m_border = colors.border;
+    m_accent = colors.accent;
+    const QString bg = colors.background;
+    const QString hover = colors.hover;
+    const QString selected = colors.selected;
+    // Selected text needs a colour apart from the canvas. A skin whose
+    // selected rows are a faint tint of it (Compact) selects text in its accent instead.
+    QString textSelection = selected;
+    if (qAbs(QColor(selected).lightness() - QColor(bg).lightness()) < 24) {
+        const QColor accent(m_accent), canvas(bg);
+        const auto mix = [](int a, int b) { return qRound(a * 0.38 + b * 0.62); };
+        textSelection = QColor(mix(accent.red(), canvas.red()), mix(accent.green(), canvas.green()), mix(accent.blue(), canvas.blue())).name();
+    }
+    // A saved change to a user skin applies at once; editors may replace the file.
+    if (!m_skinWatcher) {
+        m_skinWatcher = new QFileSystemWatcher(this);
+        connect(m_skinWatcher, &QFileSystemWatcher::fileChanged, this, [this] { QTimer::singleShot(150, this, &SessionsWindow::applyTheme); });
+    }
+    if (!m_skinWatcher->files().isEmpty()) m_skinWatcher->removePaths(m_skinWatcher->files());
+    if (!skin.path.isEmpty()) m_skinWatcher->addPath(skin.path);
     setStyleSheet(QString(R"(
         QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QColorDialog#workspaceColorDialog { background:%1; color:%2; }
@@ -1859,6 +1902,8 @@ void SessionsWindow::applyTheme()
         QPushButton#railButton:hover, QPushButton#workspaceSettings:hover, QPushButton#windowPin:hover { background:%7; }
         QPushButton#workspaceSettings:checked { background:%7; border-color:%4; }
         QPushButton#windowPin:focus[keyboardFocus="true"] { border-color:%5; }
+        QWidget#windowTitleBar QPushButton#railButton, QWidget#windowTitleBar QPushButton#workspaceSettings, QWidget#windowTitleBar QPushButton#windowPin,
+        QWidget#windowTitleBar QPushButton#brandMark, QWidget#windowTitleBar QPushButton#newSession, QWidget#windowTitleBar QPushButton#railSessionsToggle { min-height:28px; max-height:28px; border-radius:7px; }
         QFrame#settingsCard { background:%3;border:1px solid %4;border-radius:9px; }
         QListWidget#settingsSections { background:transparent;color:%2;border:0;outline:0; }
         QListWidget#settingsSections::item { padding:11px 10px;margin-bottom:5px;border-radius:6px; }
@@ -1959,12 +2004,16 @@ void SessionsWindow::applyTheme()
         QTabWidget#sessionInspector QTabBar::tab { font-size:12px; padding:8px 7px; }
         QTabWidget#sessionInspector QTextBrowser { padding:10px 2px 0; }
     )").arg(bg, m_fg, m_surface, m_border, m_accent, m_muted, hover,
-              m_dark ? "#12372b" : "#ffffff", m_dark ? "#aae9d2" : "#115d46", selected,
-              m_dark ? "#151b21" : "#f3f6f8", tone("Error", m_dark).name()) + workspaceScrollbars(m_dark));
+              colors.accentText, colors.accentHover, selected,
+              colors.inset, tone("Error", m_dark).name()) + workspaceScrollbars(m_dark) + skin.stylesheet);
+    if (textSelection != selected)
+        setStyleSheet(styleSheet().replace(QStringLiteral("selection-background-color:") + selected + ';',
+            QStringLiteral("selection-background-color:") + textSelection + QStringLiteral("; selection-color:") + m_fg + ';'));
     for (auto *button : findChildren<QPushButton *>()) if (button != m_windowPin && !button->property("glyph").toString().isEmpty())
         button->setIcon(workspaceIcon(button->property("glyph").toString(), QColor(button->objectName() == "updatesAvailable" || button->objectName() == "restartToUpdate" ? m_accent : m_muted)));
     updateWindowPinAppearance(); updateWorktreeCleanupOffer();
     if (m_sessionDock) m_sessionDock->setEdgeColor(QColor(m_border));
+    if (m_titleBar) m_titleBar->setColors(QColor(bg), QColor(m_border), QColor(colors.inset), QColor(m_border), QColor(m_fg), QColor(m_muted), QColor(hover));
     if (m_brand) m_brand->setAppearance(m_dark ? QColor(Qt::white) : QColor(m_accent), QColor(m_dark ? "#ffda76" : "#a66000"),
         m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
     m_sessions->setProperty("hgsDark", m_dark);
@@ -1985,6 +2034,7 @@ void SessionsWindow::applyTheme()
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
+    applyWorkspaceView();
 }
 
 // The exact text sent from Activity when it is this turn's prompt, otherwise
@@ -2027,6 +2077,44 @@ void SessionsWindow::updateSessionsToggle()
         : mode == SessionPanelDock::Collapsed ? tr("Expand session list") : tr("Keep session list open");
     m_sessionsToggle->setProperty("glyph", glyph); m_sessionsToggle->setToolTip(caption); m_sessionsToggle->setAccessibleName(caption);
     m_sessionsToggle->setIcon(workspaceIcon(glyph, QColor(m_muted)));
+    if (m_railSessionsToggle) {
+        m_railSessionsToggle->setProperty("glyph", glyph); m_railSessionsToggle->setToolTip(caption); m_railSessionsToggle->setAccessibleName(caption);
+        m_railSessionsToggle->setIcon(workspaceIcon(glyph, QColor(m_muted)));
+    }
+    applyWorkspaceView();
+}
+
+// The skin's views of the workspace. In the "cards" view each session card has
+// its own surface, and the rail holds the list toggle and offers New session
+// only while the list is collapsed (the list header has its own).
+void SessionsWindow::applyWorkspaceView()
+{
+    const auto &skin = m_skin;
+    const bool cards = skin.view(QStringLiteral("sessions")) == QLatin1String("cards");
+    const QStringList names{"cardSurface", "cardBorder", "cardHover", "cardSelected", "cardSelectedBorder"};
+    const QStringList keys{"card", "cardBorder", "cardHover", "cardSelected", "cardSelectedBorder"};
+    for (int at = 0; at < names.size(); ++at) {
+        const auto value = skin.named(m_dark, keys[at]);
+        m_sessions->setProperty(names[at].toLatin1().constData(), cards && !value.isEmpty() ? QVariant(QColor(value)) : QVariant());
+    }
+    sessionCardTileInset() = cards ? 38 : 0;
+    SessionStatusBadge::outlined() = cards;
+    m_sessions->viewport()->update();
+    const bool docked = !m_sessionDock || m_sessionDock->mode() == SessionPanelDock::Docked;
+    // The list toggle belongs to Sessions; other pages have no session list.
+    if (m_railSessionsToggle) m_railSessionsToggle->setVisible(cards && (!m_pages || m_pages->currentIndex() == 0));
+    // Cards: a collapsed list leaves only the rail, which expands it again.
+    if (m_sessionDock) m_sessionDock->setStripWidth(cards ? 0 : SessionStrip::width(m_sessions->property("compact").toBool()));
+    const bool compactComposer = skin.view(QStringLiteral("composer")) == QLatin1String("compact");
+    // The compact composer shows the model; the header does not repeat it.
+    if (m_model) m_model->setVisible(!compactComposer && !m_model->text().isEmpty() && selected());
+    if (m_titleBar) applyWindowFrame();
+    if (m_railNewSession) m_railNewSession->setVisible(!cards || !docked);
+    if (m_sessionsToggle) m_sessionsToggle->setVisible(!cards);
+    const bool compact = skin.view(QStringLiteral("composer")) == QLatin1String("compact");
+    if (m_composer) m_composer->setCompact(compact);
+    if (m_activityView) m_activityView->setBubbles(skin.view(QStringLiteral("activity")) == QLatin1String("bubbles"));
+    if (m_subagentComposer) m_subagentComposer->setCompact(compact);
 }
 
 // The strip keeps the list and swaps the panel chrome for compact controls:
@@ -2107,7 +2195,8 @@ void SessionsWindow::updateInspectorMinimum()
         const auto body=m_splitter->parentWidget()->layout()->contentsMargins();
         const auto detail=m_workSplitter->parentWidget()->layout()->contentsMargins();
         const auto frame=m_detailStack->contentsMargins();
-        const int rail=layout()->itemAt(0)->widget()->width();
+        const auto *sidebar=findChild<QWidget *>(QStringLiteral("sidebar"),Qt::FindDirectChildrenOnly);
+        const int rail=sidebar?sidebar->width():0;
         // An explicit window minimum overrides Qt's automatic layout minimum.
         // Account for the full header through both nested splitters and margins.
         minimum=qMax(minimum,rail+body.left()+body.right()+detail.left()+detail.right()+frame.left()+frame.right()
@@ -2599,6 +2688,12 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     connect(&dialog, &NewSessionDialog::manageProjectsRequested, this, &SessionsWindow::showProjects);
     connect(&dialog, &NewSessionDialog::projectFoldersRequested, this, [this](const QString &id) { showProjects(); m_projectsPage->selectProject(id); });
     connect(&dialog, &NewSessionDialog::machinesRequested, this, [this] { runShortcut(QStringLiteral("go.machines")); m_machinesPage->selectMachine({}); });
+    // The dense view signs in to an account here, or sets one up in Accounts.
+    connect(&dialog, &NewSessionDialog::accountLoginRequested, this, &SessionsWindow::accountLoginRequested);
+    connect(&dialog, &NewSessionDialog::accountSetupRequested, this, [this](const QString &host, const QString &, const QString &id) {
+        m_pages->setCurrentIndex(4);
+        if (id.isEmpty()) m_accountsPage->showMachine(host); else m_accountsPage->showAccount(host, id);
+    });
     dialog.exec();
 }
 
@@ -3655,6 +3750,13 @@ void SessionsWindow::renderDetails()
     QString meta = entry->machine + QStringLiteral("  /  ") + s.cmd + QStringLiteral("  /  ") + projectContext(s);
     m_fullMeta = projectContext(s);
     m_providerBadge->setValue(s.cmd); m_machineBadge->setValue(entry->machine);
+    {const bool cards=m_skin.view(QStringLiteral("sessions"))==QLatin1String("cards");
+     const QString branch=s.gitDetached?QString():s.gitBranch;
+     m_branchText->setText(m_branchText->fontMetrics().elidedText(branch,Qt::ElideMiddle,220));m_branchChip->setToolTip(branch);
+     m_branchIcon->setPixmap(workspaceIcon("git-branch",QColor(m_dark?"#9aa3ad":"#627082")).pixmap(11,11));
+     m_branchChip->setStyleSheet(QStringLiteral("QFrame#sessionBranchChip{border:1px solid %1;border-radius:5px;} QLabel{color:%2;font-size:11px;background:transparent;border:0;}")
+         .arg(m_dark?"#2c323b":"#dce2e8",m_dark?"#c4cad1":"#40505f"));
+     m_branchChip->setVisible(cards&&!branch.isEmpty());}
     meta += '\n' + (s.cwd.isEmpty() ? s.name : s.cwd);
     if (s.state == "archived" && s.archivedAt > 0) meta += '\n' + tr("Archived %1").arg(QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM yyyy HH:mm:ss"));
     if (s.state == "archived") {
@@ -3668,6 +3770,12 @@ void SessionsWindow::renderDetails()
         ? QColor(m_dark ? "#edd096" : "#795913")
         : s.muted && (state==tr("Needs approval") || state==tr("Needs input") || state==tr("Sign in")) ? SessionStatusBadge::mutedTone(m_dark)
         : tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
+    // The cards view outlines the status, as its pills are drawn.
+    if (m_skin.view(QStringLiteral("sessions")) == QLatin1String("cards")) {
+        QColor edge = color; edge.setAlphaF(.55);
+        setWorkspaceStyle(m_badge, QString("color:%1; background:transparent; border:1px solid %2; border-radius:9px; padding:3px 9px; font-size:11px; font-weight:600;")
+                              .arg(color.name(), edge.name(QColor::HexArgb)));
+    } else
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
     m_badge->setMinimumWidth(state == "Background" ? m_badge->fontMetrics().horizontalAdvance(state) + 16 : 0);
@@ -3677,7 +3785,8 @@ void SessionsWindow::renderDetails()
     if (const auto elision = modelText + '\n' + m_model->font().key(); elision != m_modelElision) {
         m_modelElision = elision; m_model->setText(m_model->fontMetrics().elidedText(modelText, Qt::ElideMiddle, 260)); m_model->setToolTip(modelText);
     }
-    m_model->setAccessibleName(modelText); m_model->setVisible(!modelText.isEmpty());
+    m_model->setAccessibleName(modelText);
+    m_model->setVisible(!modelText.isEmpty() && m_skin.view(QStringLiteral("composer")) != QLatin1String("compact"));
     const bool archived = s.state == "archived";
     m_forkAction->setEnabled(!terminating && entry->online && !awaitingRestoredInspection(*entry) && !m_pending && m_forkKey.isEmpty() && !m_settingsRequest && !m_composer->isSending(m_selectedKey)
         && m_details.value("fork_supported").toBool());
@@ -3955,7 +4064,7 @@ void SessionsWindow::renderDetails()
         m_goal->hide(); m_model->hide(); m_restore->hide(); m_more->hide();
         m_forkAction->setEnabled(false); m_renameAction->setEnabled(false);
     } else m_more->show();
-    updateBrowser(m_children, children, m_childrenHtml);
+    updateBrowser(m_children, foldInspectorSections(children), m_childrenHtml);
     const auto conversation = m_details.value("conversation_id").toString(s.conversationId);
     const auto run = m_details.value("run_id").toString(s.runId);
     QString identity = conversation.isEmpty() ? run : conversation;
@@ -3985,8 +4094,41 @@ void SessionsWindow::renderDetails()
     info += SessionUsage::html((m_subagentId.isEmpty() ? m_details : m_subagentDetails).value("session_usage").toObject(), m_muted, !m_subagentId.isEmpty());
     const QStringList infoContext{entry->key, m_details.value("conversation_id").toString(s.conversationId), m_subagentId};
     auto previousInfo = m_info->property("inspectorHtml").toString();
-    updateBrowser(m_info, info, previousInfo, m_info->property("context").toStringList() == infoContext);
+    updateBrowser(m_info, foldInspectorSections(info), previousInfo, m_info->property("context").toStringList() == infoContext);
     m_info->setProperty("inspectorHtml", previousInfo); m_info->setProperty("context", infoContext);
+}
+
+// The skin's foldable inspector. Each <h3> section of an
+// inspector page gets a disclosure link; a folded section keeps only its
+// heading. Folded headings are remembered by their text.
+QString SessionsWindow::foldInspectorSections(const QString &html) const
+{
+    if (m_skin.view(QStringLiteral("inspector")) != QLatin1String("foldable")) return html;
+    const QStringList folded = QSettings().value(QStringLiteral("workspace/foldedInspector")).toStringList();
+    const auto parts = html.split(QStringLiteral("<h3>"));
+    QString result = parts.value(0);
+    static const QRegularExpression tags(QStringLiteral("<[^>]*>"));
+    for (int at = 1; at < parts.size(); ++at) {
+        const int end = parts[at].indexOf(QStringLiteral("</h3>"));
+        if (end < 0) { result += QStringLiteral("<h3>") + parts[at]; continue; }
+        const QString heading = parts[at].left(end), body = parts[at].mid(end + 5);
+        const QString key = QString(heading).remove(tags).simplified();
+        const bool closed = folded.contains(key);
+        // A small capitalized title, as the skin's other panels have.
+        result += QStringLiteral("<p style='margin-top:14px;margin-bottom:6px;font-size:11px;font-weight:600;'><a href='hgs-fold:%1' style='color:%2;text-decoration:none'>%3&nbsp;&nbsp;%4</a></p>")
+            .arg(QString::fromLatin1(QUrl::toPercentEncoding(key)), m_muted, closed ? QStringLiteral("▸") : QStringLiteral("▾"), key.toUpper().toHtmlEscaped());
+        if (!closed) result += body;
+    }
+    return result;
+}
+
+void SessionsWindow::toggleInspectorSection(const QString &key)
+{
+    QSettings settings;
+    auto folded = settings.value(QStringLiteral("workspace/foldedInspector")).toStringList();
+    if (!folded.removeAll(key)) folded << key;
+    settings.setValue(QStringLiteral("workspace/foldedInspector"), folded);
+    m_childrenHtml.clear(); m_info->setProperty("inspectorHtml", QString()); renderDetails();
 }
 
 QString SessionsWindow::modelSettingsBlockReason(const Entry &entry) const
@@ -5580,9 +5722,79 @@ void SessionsWindow::terminateSession()
     renderDetails();
 }
 
+void SessionsWindow::placeRailControls(bool inTitle)
+{
+    // A collapsed list restores before the status bar exists; the theme places
+    // the controls once the window is complete.
+    if (inTitle == m_railInTitle || !m_railLayout || !m_statusLayout || !m_titleBar) return;
+    m_railInTitle = inTitle;
+    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav};
+    const QList<QPushButton *> trailing{m_windowPin, m_settingsNav};
+    QList<QPushButton *> all{m_brand}; all << leading << trailing;
+    // Moving a widget hides it; each keeps whether it was shown.
+    QHash<QWidget *, bool> hidden;
+    for (auto *button : all) {
+        if (!button->property("railSize").isValid()) { button->setProperty("railSize", button->maximumSize()); button->setProperty("railIcon", button->iconSize()); }
+        hidden.insert(button, button->isHidden()); m_railLayout->removeWidget(button);
+    }
+    m_railLayout->removeWidget(m_versionButton); m_statusLayout->removeWidget(m_versionButton);
+    if (inTitle) {
+        // Compact controls: the mark leads the bar, navigation follows the name,
+        // and the pin and Settings stand before the window buttons.
+        m_titleBar->setMarkVisible(false);
+        m_titleBar->markSlot()->addWidget(m_brand); m_brand->setFixedSize(30, 30);
+        for (auto *button : leading) { m_titleBar->leading()->addWidget(button); button->setFixedSize(30, 28); button->setIconSize(QSize(17, 17)); }
+        for (auto *button : trailing) { m_titleBar->trailing()->addWidget(button); button->setFixedSize(30, 28); button->setIconSize(QSize(17, 17)); }
+        m_attentionBadge->setGeometry(16, 0, 14, 13);
+        m_statusLayout->addWidget(m_versionButton); m_versionButton->setFixedSize(40, 22);
+    } else {
+        m_titleBar->setMarkVisible(true);
+        // Back to the rail: the mark, its spacing, then the navigation; the pin and
+        // Settings after the stretch, the version last.
+        m_railLayout->insertWidget(0, m_brand);
+        for (int at = 0; at < leading.size(); ++at) m_railLayout->insertWidget(2 + at, leading[at]);
+        for (int at = 0; at < trailing.size(); ++at) m_railLayout->insertWidget(3 + leading.size() + at, trailing[at]);
+        m_railLayout->addWidget(m_versionButton); m_versionButton->setFixedSize(42, 24);
+        for (auto *button : all) { button->setFixedSize(button->property("railSize").toSize()); button->setIconSize(button->property("railIcon").toSize()); }
+        m_attentionBadge->setGeometry(24, 3, 17, 16);
+    }
+    for (auto *button : all) button->setVisible(!hidden.value(button));
+    m_versionButton->show();
+    m_sidebar->setVisible(!inTitle);
+}
+
+bool SessionsWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
+{
+    if (m_framelessMain && FramelessWindow::nativeEvent(this, m_titleBar, message, result)) return true;
+    return QWidget::nativeEvent(eventType, message, result);
+}
+
+// A skin with "window":{"main":"frameless"} replaces the system
+// title bar with its own (Windows only; other systems keep theirs).
+void SessionsWindow::applyWindowFrame()
+{
+#ifdef Q_OS_WIN
+    const bool frameless = m_skin.framelessMain();
+#else
+    const bool frameless = false;
+#endif
+    m_titleBar->setVisible(frameless);
+    placeRailControls(frameless);
+    m_titleBar->setShortcut(ShortcutRegistry::instance().keys(QStringLiteral("go.anywhere")).value(0).toString(QKeySequence::NativeText));
+    m_titleBar->setMark(windowIcon().pixmap(18, 18));
+    if (frameless == m_framelessMain) return;
+    m_framelessMain = frameless;
+    const bool shown = isVisible(); const auto geometry = saveGeometry();
+    // Changing the flag recreates the native window, which then shows again.
+    setWindowFlag(Qt::FramelessWindowHint, frameless);
+    if (shown) { restoreGeometry(geometry); show(); }
+    if (frameless && testAttribute(Qt::WA_WState_Created)) FramelessWindow::apply(this);
+}
+
 void SessionsWindow::showEvent(QShowEvent *event)
 {
-    QWidget::showEvent(event); rebuild(); if (m_dashboardStale) updateDashboard();
+    QWidget::showEvent(event);
+    if (m_framelessMain) FramelessWindow::apply(this); rebuild(); if (m_dashboardStale) updateDashboard();
     m_timer.start(); m_readTimer.start(); emit refreshRequested(); inspect();
 }
 bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
@@ -5619,6 +5831,7 @@ void SessionsWindow::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
     if (event->type() == QEvent::WindowStateChange && m_brand) m_brand->syncAnimation();
+    if (event->type() == QEvent::WindowStateChange && m_titleBar) m_titleBar->setMaximized(isMaximized());
     // A runtime light/dark switch of the system reaches a window only as PaletteChange:
     // QWidget::event() consumes ApplicationPaletteChange. The window's own stylesheet
     // also sends PaletteChange, so re-theme later and only when Follow system appearance

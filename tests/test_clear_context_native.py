@@ -232,7 +232,7 @@ wire_api="responses"
             self.assertEqual(current['resume_settings'],dict(model='gpt-6.1-sol',effort=level))
         before=(self.native_home/'config.toml').read_bytes()
         change('ultra')
-        self.assertTrue(any(row.startswith('» ') for row in screen().splitlines()),screen())
+        self.assertTrue(any(row.startswith('»') for row in screen().splitlines()),screen())
         change('high')
         change('ultra')
         self.assertTrue(test_clear_context.ClearContext.inspect(self)['clear_context_supported'])

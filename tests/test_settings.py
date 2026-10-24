@@ -135,7 +135,7 @@ class SessionSettings(test_effort.EffortTransport):
         self.assertEqual(self.inspect()['effort'],'ultra')
         self.assertTrue(self.received().endswith(b's'))
         self.assertNotIn('ultra',self.inspect()['effort_options']) # legacy hotkey API stays guarded
-        self.assertIn('» ', self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.assertIn('»', self.tmux('capture-pane', '-p', '-t', self.pane).splitlines())
         self.assertNotIn('settings_unconfirmed_at', json.loads(self.record_path.read_text()))
         lower=self.payload('high');lower['model']='gpt-6-sol'
         self.assertEqual(self.settings(lower)['status'], 'applied')

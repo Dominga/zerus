@@ -1453,7 +1453,7 @@ void TestMessageComposer::compactComposerAppliesMenuChoicesAtOnce()
     composer.setModelSettings("model-one", "high", options, true, {});
     composer.setCompact(true); composer.show(); QTest::qWait(20);
     auto *send = sendButton(composer); auto *card = composer.findChild<QFrame *>("composerCard");
-    QVERIFY(card && card->isVisible()); QVERIFY(send->text().isEmpty()); QCOMPARE(send->accessibleName(), QString("Send"));
+    QVERIFY(card && card->isVisible()); QCOMPARE(send->text(), QString("Send")); QCOMPARE(send->accessibleName(), QString("Send"));
     QVERIFY(card->isAncestorOf(send)); QVERIFY(card->isAncestorOf(composer.editor()));
     const int oneLine = composer.editor()->height();
     composer.editor()->setPlainText("one\ntwo\nthree"); QTRY_VERIFY(composer.editor()->height() > oneLine);

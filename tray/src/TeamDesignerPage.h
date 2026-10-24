@@ -1,4 +1,5 @@
 #pragma once
+#include <QJsonObject>
 #include <QWidget>
 #include <functional>
 #include "TeamModel.h"
@@ -28,7 +29,8 @@ public:
     // The designer session of that project, if it runs; and its live state.
     std::function<QString()> designerSession;
     std::function<Teams::Live()> designerLive;
-    std::function<void(const QString &folder, const QString &goal)> startDesigner;
+    // agent: {"agent", "model", "effort"} of the designer's session.
+    std::function<void(const QString &folder, const QString &goal, const QJsonObject &agent)> startDesigner;
     std::function<void(const QString &session)> openDesigner;
     std::function<bool(const QString &name, const QString &title, const QString &text, const QString &action)> confirm;
     // After the session list or the catalog changes.
@@ -49,6 +51,7 @@ private:
     QScrollArea *m_proposals;
     QLabel *m_title, *m_status, *m_reads, *m_proposes, *m_version;
     QPlainTextEdit *m_goal = nullptr;
+    class QComboBox *m_agent = nullptr, *m_model = nullptr, *m_effort = nullptr;
     QPushButton *m_start = nullptr, *m_open;
     bool m_dark = true;
 };

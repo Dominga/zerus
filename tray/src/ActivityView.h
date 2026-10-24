@@ -43,7 +43,7 @@ public:
     void setLocalMessages(const QJsonArray &messages);
     void setTheme(bool dark);
     // WhiteWh fork: the user's messages as bubbles on the right.
-    void setBubbles(bool bubbles) { if (bubbles == m_bubbles) return; m_bubbles = bubbles; render(true); }
+    void setBubbles(bool bubbles) { if (bubbles == m_bubbles) return; m_bubbles = bubbles; setTheme(m_dark); render(true); }
     // Enlarges the transcript and queued input, not the overlay controls.
     void setContentScale(double scale);
     // Centers the transcript and queued input in a column of at most this

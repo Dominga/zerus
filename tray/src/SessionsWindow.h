@@ -404,7 +404,7 @@ private:
     void openTeamTask(int task);
     void showNewTeam();
     void showTeamDesigner();
-    void startTeamDesigner(const QString &folder,const QString &goal);
+    void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
     QString m_teamDesignerFolder,m_teamDesignerProject;
     QString teamDesignerSession() const;
     class TeamCatalogEditor *m_teamCatalog=nullptr;
@@ -412,6 +412,8 @@ private:
     // The Team designer mode on the rail, and New team next to Activity: the
     // selected session leads the team built there; once created, Team follows.
     class TeamDesignerPage *m_teamDesignerPage=nullptr;
+    class QFrame *m_branchChip=nullptr;
+    class QLabel *m_branchIcon=nullptr,*m_branchText=nullptr;
     class QPushButton *m_teamDesignerNav=nullptr;
     int m_teamDesignerPageIndex=-1;
     QWidget *m_teamNewTab=nullptr;

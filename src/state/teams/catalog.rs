@@ -357,14 +357,42 @@ fn designer(input: &Value) -> anyhow::Result<Value> {
     let folder = input["folder"].as_str().unwrap_or_default();
     ensure!(!folder.is_empty(), "Choose the project folder the designer reads");
     let agent = input["agent"].as_str().filter(|a| !a.is_empty()).unwrap_or("claude");
+    ensure!(["claude", "codex", "kimi", "dsh", "opencode"].contains(&agent), "Unknown agent {agent}");
+    // A model or effort is one word, as a provider's command line takes it.
+    let word = |key: &str| -> anyhow::Result<String> {
+        let value = input[key].as_str().unwrap_or_default().trim().to_owned();
+        ensure!(value.len() <= 120 && !value.contains(char::is_whitespace) && !value.starts_with('-'), "Invalid {key}");
+        Ok(value)
+    };
+    let (model, effort) = (word("model")?, word("effort")?);
     let launch_id = uuid::Uuid::new_v4().to_string();
     let brief = designer_brief(&load()?, input["goal"].as_str().unwrap_or_default());
-    let mut args = vec![agent, folder, "--new", "-n", "team-designer", "--launch-id", launch_id.as_str(), "-d"];
-    let model = input["model"].as_str().unwrap_or_default();
-    if agent == "opencode" && !model.is_empty() {
-        args.extend(["--model", model]);
+    let mut args: Vec<String> = [agent, folder, "--new", "-n", "team-designer", "--launch-id", launch_id.as_str()].map(String::from).to_vec();
+    // As a new session from the desktop: a terminal agent runs detached and
+    // takes the model on its own command line; OpenCode takes it from hgs.
+    let terminal = agent != "dsh" && agent != "opencode";
+    if terminal {
+        args.push("-d".into());
     }
-    args.extend(["--", brief.as_str()]);
+    if agent == "opencode" && !model.is_empty() {
+        args.extend(["--model".into(), model.clone()]);
+        if !effort.is_empty() {
+            args.extend(["--effort".into(), effort.clone()]);
+        }
+    }
+    args.push("--".into());
+    if terminal && !model.is_empty() {
+        args.extend(["--model".into(), model.clone()]);
+        if !effort.is_empty() {
+            match agent {
+                "claude" => args.extend(["--effort".into(), effort.clone()]),
+                "codex" => args.extend(["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]),
+                _ => {}
+            }
+        }
+    }
+    args.push(brief);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = super::dispatcher::hgs("", &args, None, std::time::Duration::from_secs(120))?;
     ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     let stdout = String::from_utf8_lossy(&output.stdout);

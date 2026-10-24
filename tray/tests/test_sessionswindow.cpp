@@ -775,19 +775,21 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     const auto tabNamed = [tabs](const QString &text) { for (int i = 0; i < tabs->count(); ++i) if (tabs->tabText(i) == text) return i; return -1; };
     window.showSession({}, "codex/hgs/dashboard");
     QTRY_VERIFY(tabNamed("Team") >= 0);
-    QCOMPARE(tabNamed("+ New team"), -1);
+    QCOMPARE(tabNamed("New team"), -1);
     QString loner;
     for (const auto &s : state.local().sessions) if (s.name != "codex/hgs/dashboard" && s.name != "kimi/hgs/tester" && s.state != "archived") { loner = s.name; break; }
     QVERIFY(!loner.isEmpty());
     window.showSession({}, loner);
-    QTRY_VERIFY(tabNamed("+ New team") >= 0);
+    QTRY_VERIFY(tabNamed("New team") >= 0);
     QCOMPARE(tabNamed("Team"), -1);
-    tabs->setCurrentIndex(tabNamed("+ New team"));
+    tabs->setCurrentIndex(tabNamed("New team"));
     QTRY_VERIFY(tabs->currentWidget()->findChild<QWidget *>("teamNewDialog"));
     auto *form = dynamic_cast<TeamNewTab *>(tabs->currentWidget()->findChild<QWidget *>("teamNewDialog"));
     QVERIFY(form); QCOMPARE(form->leadSession(), loner);
     // The rail's Team designer opens its own mode.
-    auto *designerNav = window.findChild<QPushButton *>("teamDesignerNav");
+    QPushButton *designerNav = nullptr;
+    for (auto *b : window.findChildren<QPushButton *>("railButton")) if (b->property("teamDesignerNav").toBool()) designerNav = b;
+    QVERIFY(designerNav && !designerNav->isChecked());   // only while its page shows
     QVERIFY(designerNav);
     designerNav->click();
     QTRY_VERIFY(window.findChild<QWidget *>("teamDesignerPage") && window.findChild<QWidget *>("teamDesignerPage")->isVisible());

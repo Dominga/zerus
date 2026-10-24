@@ -100,6 +100,7 @@ void TeamConversation::setTheme(bool dark)
                       .arg(c.border.name(), c.surface.name(), c.fg.name()));
     // After the sheet: a repolish would reset the Activity canvas palette.
     m_view->setTheme(dark);
+    m_view->setBubbles(WorkspaceSkin::current().view(QStringLiteral("activity")) == QLatin1String("bubbles"));
 }
 
 void TeamConversation::setPlaceholder(const QString &text) { m_input->setPlaceholderText(text); }

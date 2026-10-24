@@ -198,6 +198,7 @@ private slots:
     void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
     void teamMessagesReadAsPlaques();
+    void whiteWhTranscriptReadsFlat();
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive();
@@ -366,6 +367,29 @@ void TestActivityView::teamMessagesReadAsPlaques()
     QMetaObject::invokeMethod(view.browser(), "anchorClicked", Q_ARG(QUrl, QUrl("hgs-team-task:3")));
     QCOMPARE(task.count(), 1);
     QCOMPARE(task.first().first().toInt(), 3);
+}
+
+// WhiteWh fork: with the skin's bubbles, agent replies read as text in the
+// column and tool groups as one-line rows; the user's messages stay bubbles.
+void TestActivityView::whiteWhTranscriptReadsFlat()
+{
+    SettledActivityView view; view.resize(760, 640);
+    view.setBubbles(true); view.setTheme(true);
+    const QString handOff = QString::fromUtf8("[Zerus team · from: Lead · task: #3 · attempt: 2]\n"
+        "Team: Checkout. Your role: Backend.\n\nTask #3: Saved cards API\nKeep everything from attempt 1 and fix cursor pagination.");
+    view.setActivity({}, {journalEvent(0, "UserPromptSubmit", handOff), journalEvent(1, "UserPromptSubmit", "Add cursor pagination to GET /cards."),
+                          journalEvent(2, "PreToolUse", "src/api/cards.ts", "Read"), journalEvent(3, "PostToolUse", "src/api/cards.ts", "Read"),
+                          journalEvent(4, "PreToolUse", "src/api/cards.ts", "Edit"), journalEvent(5, "PostToolUse", "src/api/cards.ts", "Edit"),
+                          journalEvent(6, "PreToolUse", "pnpm test cards", "Bash"), journalEvent(7, "PostToolUse", "23 passed", "Bash"),
+                          journalEvent(8, "Stop", "Adding cursor pagination to `GET /cards` and scoping lookups by user.\n\n```ts\nconst page = await cards.list({ cursor, limit: 20 });\n```\n\nTests: 23 passed."),
+                          journalEvent(9, "Notification", "Codex wants to run: pnpm prisma migrate dev")});
+    const auto text = view.browser()->toPlainText();
+    QVERIFY(text.contains("Add cursor pagination"));
+    QVERIFY(text.contains("Read  src/api/cards.ts"));
+    QVERIFY(text.contains("Edited  src/api/cards.ts"));
+    QVERIFY(text.contains("Ran  pnpm test cards"));
+    QVERIFY(text.contains("Tests: 23 passed."));
+    if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) view.grab().save(QDir(shots).filePath("activity-whitewh.png"));
 }
 
 void TestActivityView::hiddenSnapshotsDoNotBuildDocuments()

@@ -3,7 +3,10 @@
 #include "TeamController.h"
 #include "TeamConversation.h"
 #include "TeamWidgets.h"
+#include <QComboBox>
 #include <QDir>
+#include <QJsonObject>
+#include <QLineEdit>
 #include <QHBoxLayout>
 #include <QPlainTextEdit>
 #include <QScrollArea>
@@ -15,6 +18,43 @@
 using namespace TeamUi;
 
 namespace {
+const QStringList agents{"claude", "codex", "kimi", "dsh", "opencode"};
+const QMap<QString, QString> agentNames{{"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}};
+
+// Chips that keep their width and wrap onto the next line.
+class FlowLayout : public QLayout {
+public:
+    explicit FlowLayout(int spacing) { setSpacing(spacing); setContentsMargins(0, 0, 0, 0); }
+    ~FlowLayout() override { while (auto *item = takeAt(0)) delete item; }
+    void addItem(QLayoutItem *item) override { m_items.append(item); }
+    int count() const override { return m_items.size(); }
+    QLayoutItem *itemAt(int index) const override { return m_items.value(index); }
+    QLayoutItem *takeAt(int index) override { return index >= 0 && index < m_items.size() ? m_items.takeAt(index) : nullptr; }
+    Qt::Orientations expandingDirections() const override { return {}; }
+    bool hasHeightForWidth() const override { return true; }
+    int heightForWidth(int width) const override { return arrange(QRect(0, 0, width, 0), false); }
+    void setGeometry(const QRect &rect) override { QLayout::setGeometry(rect); arrange(rect, true); }
+    QSize sizeHint() const override { return minimumSize(); }
+    QSize minimumSize() const override
+    {
+        QSize size; for (auto *item : m_items) size = size.expandedTo(item->minimumSize());
+        return size;
+    }
+private:
+    int arrange(const QRect &rect, bool apply) const
+    {
+        int x = rect.x(), y = rect.y(), line = 0;
+        for (auto *item : m_items) {
+            const QSize hint = item->sizeHint();
+            if (x + hint.width() > rect.right() + 1 && line > 0) { x = rect.x(); y += line + spacing(); line = 0; }
+            if (apply) item->setGeometry(QRect(QPoint(x, y), hint));
+            x += hint.width() + spacing(); line = qMax(line, hint.height());
+        }
+        return y + line - rect.y();
+    }
+    QList<QLayoutItem *> m_items;
+};
+
 QLabel *chip(const QString &text, const char *name)
 {
     auto *l = new QLabel(text); l->setObjectName(name);
@@ -101,20 +141,46 @@ QWidget *TeamDesignerPage::emptyState()
     m_goal = new QPlainTextEdit; m_goal->setObjectName("teamDesignerGoal"); m_goal->setFixedHeight(84);
     m_goal->setPlaceholderText(tr("What do you need? e.g. a security reviewer for payment code and a small team for bugfixes"));
     v->addWidget(m_goal);
-    auto *examples = row(6);
+    auto *examplesBox = new QWidget; auto *examples = new FlowLayout(6); examplesBox->setLayout(examples);
     for (const auto &example : {tr("Security reviewer for payments"), tr("Team for small bugfixes"), tr("Cheaper team for docs"), tr("Explain current roles")}) {
         auto *b = button(example, "teamDesignerExample"); b->setProperty("chip", true);
         QObject::connect(b, &QPushButton::clicked, this, [this, example] { m_goal->setPlainText(example); });
         examples->addWidget(b);
     }
-    examples->addStretch();
-    v->addLayout(examples);
+    v->addWidget(examplesBox);
+    // Which agent designs, on which model; it runs on this computer.
+    auto *agentRow = row(6);
+    m_agent = new QComboBox; m_agent->setObjectName("teamDesignerAgent");
+    for (const auto &a : agents) m_agent->addItem(workspaceIcon(a, colorsFor(true).fg), agentNames.value(a), a);
+    m_model = new QComboBox; m_model->setObjectName("teamDesignerModel"); m_model->setEditable(true);
+    m_model->lineEdit()->setPlaceholderText(tr("default model"));
+    m_effort = new QComboBox; m_effort->setObjectName("teamDesignerEffort");
+    m_effort->addItem(QStringLiteral("—"), QString());
+    for (const auto *e : {"low", "medium", "high", "xhigh"}) m_effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
+    const auto models = [this] {
+        // Suggestions only: the field takes any model the agent's command line knows.
+        static const QMap<QString, QStringList> known{{"claude", {"opus", "sonnet", "haiku"}}, {"codex", {"gpt-5.5-codex", "gpt-5.5"}}, {"kimi", {"kimi-k2"}}};
+        const QString agent = m_agent->currentData().toString();
+        const QString keep = m_model->currentText();
+        m_model->clear(); m_model->addItems(known.value(agent));
+        m_model->setCurrentText(known.value(agent).contains(keep) ? keep : QString());
+        // DeepSeek runs its own model; Kimi has no effort.
+        m_model->setEnabled(agent != "dsh"); m_effort->setEnabled(agent != "dsh" && agent != "kimi");
+    };
+    QObject::connect(m_agent, &QComboBox::currentIndexChanged, this, models);
+    models();
+    m_model->setCurrentText(QStringLiteral("opus")); m_effort->setCurrentIndex(m_effort->findData(QStringLiteral("high")));
+    agentRow->addWidget(m_agent, 4); agentRow->addWidget(m_model, 5); agentRow->addWidget(m_effort, 2);
+    v->addLayout(agentRow);
     auto *bottom = row(8);
-    bottom->addWidget(chip(tr("Claude Code · this computer"), "teamDesignerAgent"));
+    auto *where = label(tr("Runs on this computer"), colorsFor(true).dim, 11); where->setObjectName("teamDesignerWhere");
+    bottom->addWidget(where);
     bottom->addStretch();
     m_start = button(tr("Start designer"), "teamDesignerStart", true);
     QObject::connect(m_start, &QPushButton::clicked, this, [this] {
-        if (startDesigner) startDesigner(m_folder, m_goal->toPlainText().trimmed());
+        const QJsonObject launch{{"agent", m_agent->currentData().toString()}, {"model", m_model->isEnabled() ? m_model->currentText().trimmed() : QString()},
+                                 {"effort", m_effort->isEnabled() ? m_effort->currentData().toString() : QString()}};
+        if (startDesigner) startDesigner(m_folder, m_goal->toPlainText().trimmed(), launch);
         m_start->setEnabled(false); m_start->setText(tr("Starting…"));
     });
     bottom->addWidget(m_start);

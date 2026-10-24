@@ -31,6 +31,8 @@
 #include <QHelpEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QTextTable>
+#include <QtMath>
 #include <QHideEvent>
 #include <QShowEvent>
 #include <QImage>
@@ -267,10 +269,120 @@ private:
     QHash<int, QTextFrame *> m_frames;
 };
 
+// WhiteWh fork: with the skin's bubbles the dark canvas is the session panel's
+// surface, so the feed and the composer below it read as one area.
+const char *canvasDark(bool bubbles) { return bubbles ? "#1b1f26" : "#1c2229"; }
+
 JournalDocument *paintDocument(QTextDocument *document)
 {
     auto *journal = static_cast<JournalDocument *>(document);
     return journal->layoutSource ? journal->layoutSource : journal;
+}
+
+// WhiteWh fork: rounded cards. Qt's rich text draws table backgrounds and
+// borders square. With the skin's bubbles, a table with its own background
+// gives them up here and the browser paints them rounded beneath the text: 10
+// px with a border (cards, bubbles), 5 px without (pills). A first column of 4
+// px or less with a background is the card's coloured edge.
+enum : int { CardFill = QTextFormat::UserProperty + 401, CardStroke, CardEdge, CardRadius };
+
+// The cards of a document, found once when it is built; frames of a built
+// journal do not change.
+class CardFrames final : public QObject {
+    Q_OBJECT
+public:
+    explicit CardFrames(QTextDocument *document) : QObject(document) {}
+    static CardFrames *of(QTextDocument *document) { return document->findChild<CardFrames *>(QString(), Qt::FindDirectChildrenOnly); }
+    QList<QTextFrame *> frames;
+};
+
+void roundCards(QTextDocument *document)
+{
+    // Qt builds the frame tree lazily during an edit: find the tables by their blocks.
+    QList<QTextTable *> tables;
+    for (auto block = document->begin(); block.isValid(); block = block.next())
+        for (auto *table = QTextCursor(block).currentTable(); table; table = qobject_cast<QTextTable *>(table->parentFrame()))
+            if (!tables.contains(table)) tables.append(table);
+    auto *cards = CardFrames::of(document);
+    if (!cards) cards = new CardFrames(document);
+    QTextCursor edit(document); edit.beginEditBlock();
+    for (auto *table : tables) {
+        auto format = table->format();
+        if (format.background().style() == Qt::NoBrush) continue;
+        format.setProperty(CardFill, format.background().color());
+        format.clearBackground();
+        const bool bordered = format.border() > 0;
+        // The border keeps its width (the layout stays) and loses its colour.
+        if (bordered) { format.setProperty(CardStroke, format.borderBrush().color()); format.setBorderBrush(Qt::transparent); }
+        format.setProperty(CardRadius, bordered ? 10.0 : 5.0);
+        const auto widths = format.columnWidthConstraints();
+        if (table->columns() >= 2 && !widths.isEmpty() && widths.first().type() == QTextLength::FixedLength && widths.first().rawValue() <= 4) {
+            auto cell = table->cellAt(0, 0);
+            auto cellFormat = cell.format();
+            if (cellFormat.background().style() != Qt::NoBrush) {
+                format.setProperty(CardEdge, cellFormat.background().color());
+                cellFormat.clearBackground(); cell.setFormat(cellFormat);
+            }
+        }
+        table->setFormat(format);
+        cards->frames.append(table);
+    }
+    edit.endEditBlock();
+}
+
+void paintCards(QPainter *painter, QTextDocument *document, const QRectF &exposed)
+{
+    const auto *cards = CardFrames::of(document);
+    if (!cards || cards->frames.isEmpty()) return;
+    auto *layout = document->documentLayout();
+    painter->save(); painter->setRenderHint(QPainter::Antialiasing);
+    for (auto *frame : cards->frames) {
+        const auto format = frame->frameFormat();
+        QRectF rect = layout->frameBoundingRect(frame);
+        // Qt places a table's rectangle at its first cell's content: step back
+        // over that cell's padding and the border.
+        if (auto *table = qobject_cast<QTextTable *>(frame)) {
+            const auto cell = table->cellAt(0, 0).format().toTableCellFormat();
+            const qreal padding = table->format().cellPadding(), border = table->format().border();
+            const qreal left = cell.hasProperty(QTextFormat::TableCellLeftPadding) ? cell.leftPadding() : padding;
+            const qreal top = cell.hasProperty(QTextFormat::TableCellTopPadding) ? cell.topPadding() : padding;
+            rect.translate(-(left + border), -(top + border));
+        }
+        if (!rect.intersects(exposed)) continue;
+        const qreal radius = format.doubleProperty(CardRadius);
+        QPainterPath path; path.addRoundedRect(rect.adjusted(.5, .5, -.5, -.5), radius, radius);
+        painter->fillPath(path, format.colorProperty(CardFill));
+        if (format.hasProperty(CardEdge)) {
+            painter->save(); painter->setClipPath(path);
+            painter->fillRect(QRectF(rect.left(), rect.top(), 3, rect.height()), format.colorProperty(CardEdge));
+            painter->restore();
+        }
+        if (format.hasProperty(CardStroke)) { painter->setPen(QPen(format.colorProperty(CardStroke), 1)); painter->setBrush(Qt::NoBrush); painter->drawPath(path); }
+    }
+    painter->restore();
+}
+
+// WhiteWh fork: the glyph of a tool row (edit, read, run, search), drawn on the
+// render worker, so into an image rather than a pixmap.
+QImage toolGlyph(const QString &kind, const QColor &color, qreal ratio)
+{
+    QImage image(qCeil(14 * ratio), qCeil(14 * ratio), QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(ratio); image.fill(Qt::transparent);
+    QPainter p(&image); p.setRenderHint(QPainter::Antialiasing); p.scale(14 / 24., 14 / 24.);
+    p.setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.setBrush(Qt::NoBrush);
+    if (kind == "edit") {
+        p.drawPolygon(QPolygonF{QPointF(4, 20), QPointF(5, 15), QPointF(15, 5), QPointF(19, 9), QPointF(9, 19)});
+        p.drawLine(QPointF(13, 7), QPointF(17, 11));
+    } else if (kind == "read") {
+        QPainterPath eye; eye.moveTo(2, 12); eye.quadTo(12, 3, 22, 12); eye.quadTo(12, 21, 2, 12); p.drawPath(eye);
+        p.drawEllipse(QPointF(12, 12), 3, 3);
+    } else if (kind == "search") {
+        p.drawEllipse(QPointF(10, 10), 6, 6); p.drawLine(QPointF(14.5, 14.5), QPointF(20, 20));
+    } else {
+        p.drawEllipse(QPointF(12, 12), 9, 9);
+        p.drawPolygon(QPolygonF{QPointF(10, 8), QPointF(16, 12), QPointF(10, 16)});
+    }
+    return image;
 }
 
 // Copies what the reader sees instead of U+FFFC for markers, and draws the
@@ -290,6 +402,13 @@ protected:
     }
     void paintEvent(QPaintEvent *event) override
     {
+        // WhiteWh fork: rounded cards beneath the text.
+        {
+            QPainter cards(viewport());
+            const QPoint offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
+            cards.translate(-offset);
+            paintCards(&cards, paintDocument(document()), QRectF(event->rect().translated(offset)));
+        }
         QTextBrowser::paintEvent(event);
         // The selections as QTextEdit paints them: found text, then the reader's.
         QList<QAbstractTextDocumentLayout::Selection> selections;
@@ -824,7 +943,7 @@ struct ActivityRenderResult {
     // GitHub Markdown on the Zerus card and page colours. Code blocks and zebra
     // rows keep the journal's code surface so that they stay visible on the card.
     auto agentTheme = MarkdownTheme::github(m_dark, QColor(surface), m_scale);
-    auto pageTheme = MarkdownTheme::github(m_dark, QColor(m_dark ? "#1c2229" : "#ffffff"), m_scale);
+    auto pageTheme = MarkdownTheme::github(m_dark, QColor(m_dark ? canvasDark(m_bubbles) : "#ffffff"), m_scale);
     agentTheme.subtle = pageTheme.subtle = QColor(codeSurface);
     // Dark: GitHub's zebra and border steps relative to the grey card instead of near-black
     // code rows, and denser inline code so that it stands out from the card.
@@ -907,10 +1026,41 @@ struct ActivityRenderResult {
             header = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-bottom:8px;'><tr><td valign='top'><p style='font-size:11px;margin:0;'>%1</p></td>"
                 "<td align='right' valign='top'><p style='font-size:11px;color:%3;margin:0;'>%2</p></td></tr></table>").arg(title, headerMetadata, muted);
         }
+        // WhiteWh fork: with bubbles, an agent reply reads as text in the column
+        // under a quiet label line, without a card.
+        if (m_bubbles && !user && !notice && !boundary && !thinking) {
+            const auto quiet = QString("<a name='item-%1'></a><span style='color:%2;'>%3</span>")
+                .arg(escaped(key), muted, escaped(stamp.isEmpty() ? label : stamp));
+            auto line = "<p align='right' style='font-size:10px;margin-top:0;margin-bottom:2px;'>" + quiet + "</p>";
+            if (!markdownSource.trimmed().isEmpty()) {
+                const auto copyKey = QString::fromLatin1(QCryptographicHash::hash((m_sessionKey + '\n' + key).toUtf8(), QCryptographicHash::Sha256).toHex());
+                m_copyTexts.insert(copyKey, markdownSource);
+                line = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-bottom:2px;'><tr><td></td><td align='right' valign='top'><p style='font-size:10px;margin:0;'>%1"
+                    " &nbsp;<img src='%2' width='12' height='12'></p></td></tr></table>").arg(quiet, copyButton("copy", copyKey));
+            }
+            return QString("<p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0'><tr><td style='padding:6px 2px 4px;'>%1%2</td></tr></table>")
+                .arg(line, content);
+        }
         // The spacer goes before each card, so nothing pads the journal below the last one.
-        if (m_bubbles && user && !notice && !boundary && !thinking)
-            return QString("<p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0'><tr><td width='18%'></td><td bgcolor='%1' style='padding:10px 14px;'>%2%3</td></tr></table>")
-                .arg(userSurface, header, content);
+        if (m_bubbles && user && !notice && !boundary && !thinking) {
+            // The bubble says who by its place; its line keeps the time and delivery.
+            const QString bubble = m_dark ? "#1f3a31" : "#e0f0e9", bubbleBorder = m_dark ? "#2f5a4a" : "#9fd3bd";
+            const bool plain = label == tr("You");
+            const auto top = plain ? QString("<a name='item-%1'></a>").arg(escaped(key))
+                : QString("<p style='font-size:10px;color:%1;margin:0 0 4px;'><a name='item-%2'></a>%3</p>").arg(accent, escaped(key), escaped(label));
+            // The time and delivery stay under the bubble, small.
+            const auto under = stamp.isEmpty() ? QString() : QString("<p align='right' style='font-size:10px;color:%1;margin:3px 2px 0;'>%2</p>").arg(muted, escaped(stamp));
+            return QString("<p style='font-size:6px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0'><tr><td width='22%'></td><td>"
+                           "<table width='100%' cellspacing='0' cellpadding='0' bgcolor='%1' style='border:1px solid %2;'><tr><td style='padding:9px 13px;'>%3%4</td></tr></table>%5</td></tr></table>")
+                .arg(bubble, bubbleBorder, top, content, under);
+        }
+        // WhiteWh fork: with bubbles every other card is rounded too, its colour on the edge.
+        if (m_bubbles)
+            return QString("<p style='font-size:6px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0' bgcolor='%2' style='border:1px solid %5;'><tr><td width='3' bgcolor='%1'></td><td style='padding:10px 13px;'>"
+                "%3%4</td></tr></table>")
+                .arg(boundary ? warning : thinking ? thinkingBar : notice ? violet : user ? accent : blue,
+                     boundary ? warningSurface : thinking ? pageTheme.canvas.name() : notice ? noticeSurface : user ? userSurface : surface, header, content,
+                     m_dark ? "#2c343d" : "#e3e8ed");
         return QString("<p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0'><tr><td width='3' bgcolor='%1'></td><td bgcolor='%2' style='padding:11px 13px;'>"
             "%3%4</td></tr></table>")
             .arg(boundary ? warning : thinking ? thinkingBar : notice ? violet : user ? accent : blue,
@@ -1124,6 +1274,12 @@ struct ActivityRenderResult {
                     const auto chip = [&](const QString &content, const QString &color = {}) {
                         return QString("<span style='color:%1;'>&nbsp;%2&nbsp;</span>&nbsp;").arg(color.isEmpty() ? muted : color, content);
                     };
+                    // WhiteWh fork: with bubbles the header's chips are rounded pills.
+                    const QString pillFill = m_dark ? "#262d36" : "#edf1f4";
+                    const auto pill = [&](const QString &content) {
+                        return QString("<td style='padding-right:5px;'><table cellspacing='0' cellpadding='0' bgcolor='%1'><tr><td style='padding:1px 7px;'><p style='font-size:11px;margin:0;white-space:nowrap;'>%2</p></td></tr></table></td>")
+                            .arg(pillFill, content);
+                    };
                     QString chips = QString("<b style='color:%1;'>%2</b>&nbsp;&nbsp;").arg(fg, escaped(team.kind));
                     chips += chip(escaped(team.to.isEmpty() ? team.from : team.from + QStringLiteral(" \u2192 ") + team.to));
                     if (team.task) chips += QString("<a href='hgs-team-task:%1' style='color:%2;'>%3</a>&nbsp;&nbsp;").arg(team.task).arg(accent,
@@ -1141,10 +1297,27 @@ struct ActivityRenderResult {
                     }
                     if (!open && team.body != team.full) clipped = true;
                     QString more = clipped || open ? QString("<a href='hgs-activity:%1' style='color:%2;'>%3</a>").arg(toggle, accent, open ? tr("Show less") : tr("Show more")) : QString();
-                    const auto header = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-bottom:6px;'><tr><td><p style='font-size:11px;margin:0;'>%1</p></td>"
+                    auto header = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-bottom:6px;'><tr><td><p style='font-size:11px;margin:0;'>%1</p></td>"
                         "<td align='right' valign='top'><p style='font-size:11px;color:%2;margin:0;'>%3</p></td></tr></table>").arg(chips, muted, escaped(timeText(event)));
-                    const auto footer = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-top:6px;'><tr><td><p style='font-size:10px;color:%1;margin:0;font-family:monospace;'>%2</p></td>"
-                        "<td align='right'><p style='font-size:11px;margin:0;'>%3</p></td></tr></table>").arg(muted, escaped(team.header), more);
+                    if (m_bubbles) {
+                        QString cells = QString("<td style='padding-right:8px;'><p style='font-size:12px;margin:0;white-space:nowrap;'><b style='color:%1;'>%2</b></p></td>").arg(fg, escaped(team.kind));
+                        cells += pill(QString("<span style='color:%1;'>%2</span>").arg(muted, escaped(team.to.isEmpty() ? team.from : team.from + QStringLiteral(" → ") + team.to)));
+                        if (team.task) cells += pill(QString("<a href='hgs-team-task:%1' style='color:%2;'>%3</a>").arg(team.task).arg(accent,
+                            escaped(team.title.isEmpty() ? tr("Task #%1").arg(team.task) : tr("Task: %1").arg(team.title))));
+                        if (team.attempt) cells += pill(QString("<span style='color:%1;'>%2</span>").arg(muted, escaped(tr("Attempt %1").arg(team.attempt))));
+                        header = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-bottom:6px;'><tr>%1<td width='100%'></td>"
+                            "<td align='right' valign='middle'><p style='font-size:11px;color:%2;margin:0;white-space:nowrap;'>%3</p></td></tr></table>").arg(cells, muted, escaped(timeText(event)));
+                    }
+                    const auto footer = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-top:6px;'><tr><td><p style='font-size:10px;color:%1;margin:0;font-family:%4;'>%2</p></td>"
+                        "<td align='right'><p style='font-size:11px;margin:0;'>%3</p></td></tr></table>").arg(muted, escaped(team.header), more, MarkdownHtml::monospaceFamily());
+                    if (m_bubbles) {
+                        // A rounded card: the background moves to the table, a divider tops the footer.
+                        const QString card = m_dark ? "#20272f" : "#ffffff", line = m_dark ? "#2c343d" : "#e3e8ed";
+                        const auto divided = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-top:8px;'><tr><td bgcolor='%1'><p style='font-size:1px;line-height:1px;margin:0;'>&nbsp;</p></td></tr></table>").arg(line) + footer;
+                        html += QString("<a name='item-%1'></a><p style='font-size:6px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0' bgcolor='%4' style='border:1px solid %2;'><tr><td width='3' bgcolor='%3'></td>"
+                            "<td style='padding:10px 12px;'>%5<p style='white-space:pre-wrap;margin:0;color:%6;'>%7</p>%8</td></tr></table>")
+                            .arg(escaped(eventKey(event)), line, edge, card, header, fg, escaped(body), divided);
+                    } else
                     html += QString("<a name='item-%1'></a><p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0' style='border:1px solid %2;'><tr><td width='3' bgcolor='%3'></td>"
                         "<td bgcolor='%4' style='padding:10px 12px;'>%5<p style='white-space:pre-wrap;margin:0;color:%6;'>%7</p>%8</td></tr></table>")
                         .arg(escaped(eventKey(event)), border, edge, surface, header, fg, escaped(body), footer);
@@ -1236,10 +1409,45 @@ struct ActivityRenderResult {
         const auto last = group.last();
         QString preview = last.value("detail").toString().simplified();
         if (preview.size() > 110) preview = preview.left(109) + QChar(0x2026);
-        html += QString("<p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='9' style='border:1px solid %1;'><tr><td><a name='item-%2'></a>"
-            "<a href='hgs-activity:%3' style='color:%4;'><b>%5 %6</b></a><span style='font-size:10px;color:%7;'> &nbsp; %8</span>")
-            .arg(border, escaped(key), key, color, expanded ? QStringLiteral("▾") : QStringLiteral("▸"), escaped(title), muted, escaped(timeText(last)));
-        if (!expanded && !preview.isEmpty()) html += QString("<p style='color:%1;font-size:11px;margin:4px 0 0;'>%2</p>").arg(muted, escaped(preview));
+        if (m_bubbles) {
+            // WhiteWh fork: each tool call is a quiet row on a thin rule: a glyph,
+            // the verb and what it worked on. The verb opens the group's details.
+            const auto verb = [&](const QString &tool) -> std::pair<QString, QString> {
+                const auto t = tool.toLower();
+                if (t == "read" || t == "view" || t == "read_file") return {tr("Read"), "read"};
+                if (t.contains("edit") || t == "write" || t == "apply_patch" || t == "patch" || t == "create") return {tr("Edited"), "edit"};
+                if (t == "grep" || t == "glob" || t == "find" || t.contains("search")) return {tr("Searched"), "search"};
+                if (t == "bash" || t == "shell" || t == "exec" || t == "command" || t == "run" || t == "powershell") return {tr("Ran"), "run"};
+                return {tool, "run"};
+            };
+            QList<QJsonObject> rows;
+            if (!thinking) for (const auto &e : group) if (e.value("type") == "PreToolUse") rows.append(e);
+            if (rows.isEmpty()) rows.append(event);
+            const QColor glyphColor(attention(event) ? warning : muted);
+            const int shown = qMin(int(rows.size()), 6);
+            html += QString("<a name='item-%1'></a><p style='font-size:4px;margin:0;'>&nbsp;</p>").arg(escaped(key));
+            for (int r = 0; r < shown; ++r) {
+                const auto &e = rows[r];
+                const auto [word, kind] = thinking ? std::pair<QString, QString>{tr("Thinking"), QStringLiteral("read")}
+                                                   : e.value("tool").toString().isEmpty() ? std::pair<QString, QString>{title, QStringLiteral("run")} : verb(e.value("tool").toString());
+                const QString glyph = QStringLiteral("hgs-tool:%1/%2").arg(kind, glyphColor.name().mid(1));
+                if (document->resource(QTextDocument::ImageResource, QUrl(glyph)).value<QImage>().isNull())
+                    document->addResource(QTextDocument::ImageResource, QUrl(glyph), toolGlyph(kind, glyphColor, document->pixelRatio));
+                QString what = thinking ? QString() : e.value("detail").toString().simplified();
+                if (what.size() > 110) what = what.left(109) + QChar(0x2026);
+                const QString more = r == shown - 1 && rows.size() > shown ? tr("  · %1 more").arg(rows.size() - shown) : QString();
+                html += QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-top:2px;'><tr><td width='2' bgcolor='%1'></td>"
+                    "<td style='padding:3px 10px;'><img src='%2' width='14' height='14' style='vertical-align:middle;'>&nbsp;&nbsp;<a href='hgs-activity:%3' style='color:%4;text-decoration:none;'><b>%5</b></a>"
+                    "<span style='color:%6;'>&nbsp;&nbsp;%7%8</span></td></tr></table>")
+                    .arg(border, glyph, key, attention(event) ? warning : fg, escaped(word), muted, escaped(what), escaped(more));
+            }
+            html += "<table width='100%' cellspacing='0' cellpadding='0'><tr><td>";
+        } else {
+            html += QString("<p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='9' style='border:1px solid %1;'><tr><td><a name='item-%2'></a>"
+                "<a href='hgs-activity:%3' style='color:%4;'><b>%5 %6</b></a><span style='font-size:10px;color:%7;'> &nbsp; %8</span>")
+                .arg(border, escaped(key), key, color, expanded ? QStringLiteral("▾") : QStringLiteral("▸"), escaped(title), muted, escaped(timeText(last)));
+            if (!expanded && !preview.isEmpty()) html += QString("<p style='color:%1;font-size:11px;margin:4px 0 0;'>%2</p>").arg(muted, escaped(preview));
+        }
         // WhiteWh fork: the pictures these tools made or read, open or closed.
         if (!thinking) html += mediaTiles(toolMedia(group));
         if(expanded && thinking)html+=markdown(event.value("detail").toString(),pageTheme,m_fileLinks);
@@ -1281,6 +1489,7 @@ struct ActivityRenderResult {
     document->setHtml(m_html);
     MarkdownObjects::convertChips(document.get(), agentTheme);
     edit.endEditBlock();
+    if (m_bubbles) roundCards(document.get());
     for(auto block=document->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
         const auto fragment=it.fragment();const QUrl image(fragment.charFormat().toImageFormat().name());
         if(image.scheme()=="hgs-voice-player")m_voicePositions.insert(image.path(),fragment.position());
@@ -1518,10 +1727,10 @@ void ActivityView::setTheme(bool dark)
 {
     m_dark = dark;
     auto background = this->palette();
-    background.setColor(QPalette::Window, QColor(dark ? "#1c2229" : "#ffffff"));
+    background.setColor(QPalette::Window, QColor(dark ? canvasDark(m_bubbles) : "#ffffff"));
     setPalette(background); setAutoFillBackground(true);
     QPalette palette = m_browser->palette();
-    palette.setColor(QPalette::Base, QColor(dark ? "#1c2229" : "#ffffff"));
+    palette.setColor(QPalette::Base, QColor(dark ? canvasDark(m_bubbles) : "#ffffff"));
     palette.setColor(QPalette::Text, QColor(dark ? "#e8edf4" : "#1a2733"));
     palette.setColor(QPalette::Highlight, QColor(dark ? "#375e54" : "#b6e2d2"));
     palette.setColor(QPalette::HighlightedText, palette.color(QPalette::Text));
@@ -1531,7 +1740,7 @@ void ActivityView::setTheme(bool dark)
     // opaque-canvas chip renderer. Own the same canvas colour here so real
     // workspace scrolls use the fast path, just like a standalone ActivityView.
     const QString browserStyle = QString("QTextBrowser { background:%1; %2 }")
-        .arg(dark ? "#1c2229" : "#ffffff", qFuzzyCompare(m_scale, 1.0) ? QString()
+        .arg(dark ? canvasDark(m_bubbles) : "#ffffff", qFuzzyCompare(m_scale, 1.0) ? QString()
             : QString("font-size:%1px;").arg(ContentScale::px(13, m_scale)));
     if (m_browser->styleSheet() != browserStyle) m_browser->setStyleSheet(browserStyle);
     m_latest->setStyleSheet(QString("QPushButton { color:%1; background:%2; border:1px solid %3; border-radius:12px; padding:5px 13px; font-size:11px; } QPushButton:hover { border-color:%1; }"
@@ -1542,7 +1751,7 @@ void ActivityView::setTheme(bool dark)
     if (m_compactJump) m_latest->setIcon(workspaceIcon("chevrons-down", QColor(dark ? "#8bdfc0" : "#167357")));
     for (auto *edge : m_edges) { static_cast<ColumnEdge *>(edge)->color = QColor(dark ? "#8bdfc0" : "#167357"); edge->update(); }
     m_compaction->setStyleSheet(QString("QWidget#activityCompaction { background:%3; } QLabel { color:%1; background:transparent; font-size:12px; } QProgressBar { background:%2; border:0; border-radius:2px; } QProgressBar::chunk { background:%1; border-radius:2px; }")
-        .arg(dark ? "#8bdfc0" : "#167357", dark ? "#34404a" : "#dbe3e9", dark ? "#1c2229" : "#ffffff"));
+        .arg(dark ? "#8bdfc0" : "#167357", dark ? "#34404a" : "#dbe3e9", dark ? canvasDark(m_bubbles) : "#ffffff"));
     m_queue->setStyleSheet(QString("QWidget#activityInputQueue{background:%1;border:1px solid %2;border-radius:7px;} QLabel#queueCaption{color:%3;font-weight:600;}")
         .arg(dark ? "#2d2c23" : "#fff7e4", dark ? "#655638" : "#d7be84", dark ? "#edbd77" : "#805516")
         + (qFuzzyCompare(m_scale, 1.0) ? QString() : QString(" QLabel#queueText{font-size:%1px;}").arg(ContentScale::px(13, m_scale))));

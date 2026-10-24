@@ -352,7 +352,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_accountsNav = iconButton("accounts", tr("Agent accounts"), "railButton"); m_accountsNav->setCheckable(true);
     connect(m_accountsNav, &QPushButton::clicked, this, [this] { m_pages->setCurrentIndex(4); m_accountsNav->setChecked(true); });
     // WhiteWh fork: agent teams. The Team designer mode: the universal catalog.
-    m_teamDesignerNav = iconButton("team", tr("Team designer"), "railButton"); m_teamDesignerNav->setObjectName("teamDesignerNav"); m_teamDesignerNav->setCheckable(true);
+    m_teamDesignerNav = iconButton("team", tr("Team designer"), "railButton"); m_teamDesignerNav->setProperty("teamDesignerNav", true); m_teamDesignerNav->setCheckable(true);
     connect(m_teamDesignerNav, &QPushButton::clicked, this, [this] { showTeamDesigner(); });
     for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
     m_attentionBadge = new QLabel(m_sessionsNav); m_attentionBadge->setObjectName("railAttentionBadge");
@@ -688,7 +688,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_meta->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_providerBadge = new IdentityBadge(IdentityBadges::Provider); m_providerBadge->setObjectName("sessionProviderBadge");
     m_machineBadge = new IdentityBadge(IdentityBadges::Machine); m_machineBadge->setObjectName("sessionMachineBadge");
-    auto *metadata = new QHBoxLayout; metadata->setSpacing(6); metadata->addWidget(m_providerBadge); metadata->addWidget(m_machineBadge); metadata->addWidget(m_meta, 1); metadata->addWidget(m_model);
+    // WhiteWh fork: the cards view names the session's branch as a chip too.
+    m_branchChip = new QFrame; m_branchChip->setObjectName("sessionBranchChip"); m_branchChip->setFixedHeight(18); m_branchChip->hide();
+    {auto *h=new QHBoxLayout(m_branchChip);h->setContentsMargins(5,0,6,0);h->setSpacing(3);
+     m_branchIcon=new QLabel;m_branchText=new QLabel;m_branchText->setObjectName("sessionBranchText");h->addWidget(m_branchIcon);h->addWidget(m_branchText);}
+    auto *metadata = new QHBoxLayout; metadata->setSpacing(6); metadata->addWidget(m_providerBadge); metadata->addWidget(m_machineBadge); metadata->addWidget(m_branchChip); metadata->addWidget(m_meta, 1); metadata->addWidget(m_model);
     detail->addLayout(metadata);
     m_usageStore=new AccountUsageStore(hgsPath,this);
     m_usageStrip=new QWidget;m_usageStrip->setObjectName("sessionUsageStrip");m_usageStrip->setFixedHeight(22);m_usageStrip->hide();
@@ -2236,6 +2240,7 @@ void SessionsWindow::applyWorkspaceView()
         m_sessions->setProperty(names[at].toLatin1().constData(), cards && !value.isEmpty() ? QVariant(QColor(value)) : QVariant());
     }
     sessionCardTileInset() = cards ? 38 : 0;
+    SessionStatusBadge::outlined() = cards;
     m_sessions->viewport()->update();
     const bool docked = !m_sessionDock || m_sessionDock->mode() == SessionPanelDock::Docked;
     // The list toggle belongs to Sessions; other pages have no session list.
@@ -4039,6 +4044,13 @@ void SessionsWindow::renderDetails()
     QString meta = entry->machine + QStringLiteral("  /  ") + s.cmd + QStringLiteral("  /  ") + projectContext(s);
     m_fullMeta = projectContext(s);
     m_providerBadge->setValue(s.cmd); m_machineBadge->setValue(entry->machine);
+    {const bool cards=WorkspaceSkin::current().view(QStringLiteral("sessions"))==QLatin1String("cards");
+     const QString branch=s.gitDetached?QString():s.gitBranch;
+     m_branchText->setText(m_branchText->fontMetrics().elidedText(branch,Qt::ElideMiddle,220));m_branchChip->setToolTip(branch);
+     m_branchIcon->setPixmap(workspaceIcon("git-branch",QColor(m_dark?"#9aa3ad":"#627082")).pixmap(11,11));
+     m_branchChip->setStyleSheet(QStringLiteral("QFrame#sessionBranchChip{border:1px solid %1;border-radius:5px;} QLabel{color:%2;font-size:11px;background:transparent;border:0;}")
+         .arg(m_dark?"#2c323b":"#dce2e8",m_dark?"#c4cad1":"#40505f"));
+     m_branchChip->setVisible(cards&&!branch.isEmpty());}
     meta += '\n' + (s.cwd.isEmpty() ? s.name : s.cwd);
     if (s.state == "archived" && s.archivedAt > 0) meta += '\n' + tr("Archived %1").arg(QDateTime::fromSecsSinceEpoch(qint64(s.archivedAt)).toLocalTime().toString("d MMM yyyy HH:mm:ss"));
     if (s.state == "archived") {
@@ -4052,6 +4064,12 @@ void SessionsWindow::renderDetails()
         ? QColor(m_dark ? "#edd096" : "#795913")
         : s.muted && (state==tr("Needs approval") || state==tr("Needs input") || state==tr("Sign in")) ? SessionStatusBadge::mutedTone(m_dark)
         : tone(s.state=="running" && s.processState!="exited" && entry->online && s.phase=="error"?QStringLiteral("Error"):state, m_dark);
+    // WhiteWh fork: the cards view outlines the status, as its pills are drawn.
+    if (WorkspaceSkin::current().view(QStringLiteral("sessions")) == QLatin1String("cards")) {
+        QColor edge = color; edge.setAlphaF(.55);
+        setWorkspaceStyle(m_badge, QString("color:%1; background:transparent; border:1px solid %2; border-radius:9px; padding:3px 9px; font-size:11px; font-weight:600;")
+                              .arg(color.name(), edge.name(QColor::HexArgb)));
+    } else
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
     m_badge->setMinimumWidth(state == "Background" ? m_badge->fontMetrics().horizontalAdvance(state) + 16 : 0);
@@ -6212,8 +6230,8 @@ void SessionsWindow::updateTeamPanel()
             }
             m_teamStripText->setText(text);
             QColor fill(m_accent);fill.setAlphaF(m_dark?.10:.07);
-            m_teamStrip->setStyleSheet(QStringLiteral("QFrame#teamStrip{background:%1;border-bottom:1px solid %2;} QPushButton#teamStripOpen{color:%3;border:none;}")
-                .arg(fill.name(QColor::HexArgb),m_border,m_accent));
+            m_teamStrip->setStyleSheet(QStringLiteral("QFrame#teamStrip{background:%1;border:1px solid %2;border-radius:8px;} QPushButton#teamStripOpen{color:%3;border:none;background:transparent;}")
+                .arg(fill.name(QColor::HexArgb),[this]{QColor edge(m_accent);edge.setAlphaF(.45);return edge.name(QColor::HexArgb);}(),m_accent));
         }
     }
     // The Team designer's session shows the catalog draft it proposes.
@@ -6241,7 +6259,7 @@ void SessionsWindow::updateTeamPanel()
         m_teamWorkspace->showTeam(team);
         const int index=m_detailTabs->indexOf(m_teamWorkspace);
         if(team.isEmpty()&&index>=0){if(m_detailTabs->currentWidget()==m_teamWorkspace)m_detailTabs->setCurrentIndex(0);m_detailTabs->removeTab(index);m_teamWorkspace->hide();}
-        else if(!team.isEmpty()&&index<0)m_detailTabs->addTab(m_teamWorkspace,tr("Team"));
+        else if(!team.isEmpty()&&index<0)m_detailTabs->addTab(m_teamWorkspace,workspaceIcon("team",QColor(m_dark?"#c4cad1":"#40505f")),tr("Team"));
     }
     // New team while the selected local session has no team; it leads the team.
     const auto *entry=selected();
@@ -6257,7 +6275,7 @@ void SessionsWindow::setNewTeamTab(bool shown)
     if(!m_teamNewTab)return;
     const int index=m_detailTabs->indexOf(m_teamNewTab);
     if(!shown&&index>=0){if(m_detailTabs->currentWidget()==m_teamNewTab)m_detailTabs->setCurrentIndex(0);m_detailTabs->removeTab(index);m_teamNewTab->hide();}
-    else if(shown&&index<0)m_detailTabs->addTab(m_teamNewTab,tr("+ New team"));
+    else if(shown&&index<0)m_detailTabs->addTab(m_teamNewTab,workspaceIcon("add",QColor(m_dark?"#c4cad1":"#40505f")),tr("New team"));
     else if(shown&&m_detailTabs->currentWidget()==m_teamNewTab)ensureTeamNewForm();
 }
 Teams::Live SessionsWindow::teamLive(const Teams::Member &member) const
@@ -6385,7 +6403,7 @@ void SessionsWindow::showTeamDesigner()
         m_teamDesignerPage=new TeamDesignerPage(m_teams);m_teamDesignerPage->setDark(m_dark);
         m_teamDesignerPage->designerSession=[this]{return teamDesignerSession();};
         m_teamDesignerPage->designerLive=[this]{Teams::Member member;member.session=teamDesignerSession();return teamLive(member);};
-        m_teamDesignerPage->startDesigner=[this](const QString &folder,const QString &goal){startTeamDesigner(folder,goal);};
+        m_teamDesignerPage->startDesigner=[this](const QString &folder,const QString &goal,const QJsonObject &agent){startTeamDesigner(folder,goal,agent);};
         m_teamDesignerPage->openDesigner=[this](const QString &name){showSession({},name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
         m_teamDesignerPage->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
         m_teamDesignerPageIndex=m_pages->addWidget(m_teamDesignerPage);
@@ -6398,11 +6416,12 @@ void SessionsWindow::showTeamDesigner()
     m_pages->setCurrentWidget(m_teamDesignerPage);
     m_teamDesignerPage->refresh();
 }
-void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal)
+void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent)
 {
     if(!m_teams||folder.isEmpty())return;
     showNotice(tr("Starting the Team designer…"));
-    m_teams->call(QStringLiteral("catalog designer"),{{"folder",QDir::toNativeSeparators(folder)},{"goal",goal}},
+    QJsonObject input=agent;input.insert("folder",QDir::toNativeSeparators(folder));input.insert("goal",goal);
+    m_teams->call(QStringLiteral("catalog designer"),input,
         [this](bool ok,const QJsonObject &result,const QString &error){
             if(!ok){showNotice(tr("The Team designer did not start: %1").arg(error),true);if(m_teamDesignerPage)m_teamDesignerPage->refresh();return;}
             const auto name=result.value("name").toString();

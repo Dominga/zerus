@@ -521,7 +521,8 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     TeamDesignerPage page(&controller);
     QString running; QString startedIn, startedGoal; QString opened;
     page.designerSession = [&] { return running; };
-    page.startDesigner = [&](const QString &folder, const QString &goal) { startedIn = folder; startedGoal = goal; };
+    QJsonObject startedAgent;
+    page.startDesigner = [&](const QString &folder, const QString &goal, const QJsonObject &agent) { startedIn = folder; startedGoal = goal; startedAgent = agent; };
     page.openDesigner = [&](const QString &name) { opened = name; };
     page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
     page.setContext("/work/checkout", "checkout");
@@ -536,6 +537,9 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     shot(&page, "d1-not-started");
     start->click();
     QCOMPARE(startedIn, QStringLiteral("/work/checkout")); QCOMPARE(startedGoal, QStringLiteral("A security reviewer"));
+    QCOMPARE(startedAgent["agent"].toString(), QStringLiteral("claude"));
+    QCOMPARE(startedAgent["model"].toString(), QStringLiteral("opus"));
+    QCOMPARE(startedAgent["effort"].toString(), QStringLiteral("high"));
     // Running: its conversation, the proposals and the draft with a diff.
     running = "claude/checkout/team-designer";
     page.refresh();

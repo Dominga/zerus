@@ -22,23 +22,16 @@ Lead, from your own session:
   reassign (with "member"), retry and cancel take the same fields.
   A missing skill: add-member with {"member":{"id","role","agent"}}, then
   reassign a task to it; it starts with that task.
-  A member's question comes to you as a message that begins with
-  [Zerus team · from: ROLE · question]. Answer it once with the command at
-  its end, choosing option ids or writing text:
-    {"team":"ID","member":"MEMBER","question_id":"Q","expected_question_hash":"H",
-     "answers":[{"question_id":"ITEM","selected_option_ids":["0"],"text":""}]} |
-      hgs team answer --json
-  Members' permission requests come the same way ([Zerus team · from: ROLE ·
-  permission]; options allow and deny): allow only what the task needs inside
-  the team's folder, deny the rest, and ask the owner when in doubt.
-  Zerus tells you when a member stops on its task ([Zerus team · from: Zerus ·
-  ... member stopped]): message it to go on, retry or reassign the task, or
-  ask the owner. A member that ran no report command reports with its last reply.
+  Members' questions and permission requests come to you; answer once with
+  the hgs team answer command each carries. Allow only what the task needs
+  in the team's folder; ask the owner when in doubt. Zerus also says when a
+  member stops on its task: message it, retry, reassign or ask the owner.
   The owner's decisions are final; yours cannot undo them.
 
 Member: a task arrives as a message that begins with [Zerus team. Do it,
 then report once with the command at its end (it names the attempt):
   {"request_id":"UUID","team":"ID","task":N,"attempt":"ATTEMPT","text":"..."} |
     hgs @LEAD team report --json
-Summarize what changed, where, and how you checked it. A report for a task
-taken from you is refused; stop that work.
+Summarize what changed, where, and how you checked it. Without the command,
+end with the report as your last message. Take blockers to the lead. A
+report for a task taken from you is refused; stop that work.

@@ -468,9 +468,18 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     QTemporaryDir folder;
     const TeamNewTab::Coordinator coordinator{"claude/checkout/coord", "claude", "Opus", "work", QDir::toNativeSeparators(folder.path()), "msi", "Ready", false};
     TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}, {"msi-old", "msi-old", false}}, coordinator, "Checkout");
-    QString created;
+    QString created, designer; bool designerStarted = false;
     tab.created = [&](const QString &team) { created = team; };
+    tab.designerSession = [&] { return designer; };
+    tab.startDesigner = [&] { designerStarted = true; };
     tab.resize(1038, 900); tab.show();
+    // The designer's chat helps once it runs; until then it offers to start it.
+    QTRY_VERIFY(tab.findChild<QWidget *>("teamNewHelperIdle")->isVisible());
+    QVERIFY(!tab.findChild<QWidget *>("teamNewHelper")->isVisible());
+    tab.findChild<QPushButton *>("teamNewHelperStart")->click(); QVERIFY(designerStarted);
+    designer = "claude/team-designer/team-designer";
+    QTRY_VERIFY(tab.findChild<QWidget *>("teamNewHelper")->isVisible());
+    QVERIFY(!tab.findChild<QWidget *>("teamNewHelperIdle")->isVisible());
     // Nothing picked: the dashed members box, and Create waits for a goal.
     QVERIFY(tab.findChild<QLabel *>("teamNewEmptyMembers"));
     auto *create = tab.findChild<QPushButton *>("teamNewCreate");
@@ -510,6 +519,13 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     const auto lead = input["lead"].toObject();
     QCOMPARE(lead["session"].toObject()["name"].toString(), QStringLiteral("claude/checkout/coord"));
     QCOMPARE(input["lead_protocol"].toString(), QStringLiteral("Plan in waves of two"));
+    // What the designer is asked carries the draft and the two sections.
+    const auto request = tab.helperRequest();
+    QVERIFY(request.contains("Template: Feature delivery") && request.contains("Plan in waves of two") && request.contains("\nGOAL:\n"));
+    QString goal, protocolText;
+    QVERIFY(TeamNewTab::parseHelperReply("Here you go.\n**GOAL:**\nShip checkout.\nDone when tests pass.\n\n## PROTOCOL:\nTwo waves.", &goal, &protocolText));
+    QCOMPARE(goal, QStringLiteral("Ship checkout.\nDone when tests pass.")); QCOMPARE(protocolText, QStringLiteral("Two waves."));
+    QVERIFY(!TeamNewTab::parseHelperReply("No sections here", &goal, &protocolText));
     QCOMPARE(input["members"].toArray().size(), 2);
     QCOMPARE(input["members"].toArray()[0].toObject()["model"].toString(), QStringLiteral("gpt-5.5"));
     QCOMPARE(input["members"].toArray()[1].toObject()["role"].toString(), QStringLiteral("Tester"));

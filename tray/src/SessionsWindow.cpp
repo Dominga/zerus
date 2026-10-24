@@ -6384,6 +6384,9 @@ void SessionsWindow::ensureTeamNewForm()
     m_teamNewForm=new TeamNewTab(m_teams,&m_client,computers,coordinator,project,m_teamNewTab);
     m_teamNewForm->setDark(m_dark);
     m_teamNewForm->askDesigner=[this]{showTeamDesigner();};
+    m_teamNewForm->designerSession=[this]{return teamDesignerSession();};
+    m_teamNewForm->startDesigner=[this,folder=entry->session.cwd]{
+        startTeamDesigner(folder,tr("Help me write the goal and the team protocol for a new team; I will send the details."),{});};
     m_teamNewForm->created=[this](const QString &team){
         m_teamOpenAfterCreate=team;m_teams->refresh();
         // A session whose team ends gets a fresh form.

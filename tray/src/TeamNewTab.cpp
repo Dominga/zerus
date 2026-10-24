@@ -1,6 +1,7 @@
 #include "TeamNewTab.h"
 #include "HgsClient.h"
 #include "TeamController.h"
+#include "TeamConversation.h"
 #include "TeamWidgets.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -98,6 +99,45 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
     m_protocol = new QPlainTextEdit; m_protocol->setObjectName("teamNewProtocol"); m_protocol->setMinimumHeight(72); m_protocol->setMaximumHeight(140);
     m_protocol->setPlaceholderText(tr("How to split the work, check reports and start the next wave… A template fills this in."));
     v->addWidget(m_protocol);
+    // The Team designer helps with both texts in its own conversation; its
+    // answer fills the fields only when you say so.
+    v->addWidget(section(tr("Ask the designer"), tr("the Team designer drafts the goal and the protocol with you"), colorsFor(true)));
+    m_helperIdle = new QWidget; m_helperIdle->setObjectName("teamNewHelperIdle");
+    {
+        auto *h = new QHBoxLayout(m_helperIdle); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(8);
+        h->addWidget(label(tr("The Team designer is not running."), colorsFor(true).muted, 12), 1);
+        auto *start = button(tr("Start designer"), "teamNewHelperStart");
+        connect(start, &QPushButton::clicked, this, [this] { if (startDesigner) startDesigner(); m_helperNote->setText(tr("Starting the Team designer…")); });
+        h->addWidget(start);
+    }
+    v->addWidget(m_helperIdle);
+    m_helper = new TeamConversation(client); m_helper->setObjectName("teamNewHelper"); m_helper->setMinimumHeight(280);
+    m_helper->setPlaceholder(tr("Tell the designer what the team should do…"));
+    v->addWidget(m_helper);
+    {
+        auto *h = row(8);
+        m_helperNote = label(QString(), colorsFor(true).muted, 11); m_helperNote->setWordWrap(true);
+        m_helperDraft = button(tr("Draft goal and protocol"), "teamNewHelperDraft");
+        m_helperDraft->setToolTip(tr("Send the template, members and both fields to the designer and ask for a GOAL and a PROTOCOL"));
+        connect(m_helperDraft, &QPushButton::clicked, this, [this] { m_helper->send(helperRequest()); });
+        m_helperUse = button(tr("Use its answer"), "teamNewHelperUse", true);
+        m_helperUse->setToolTip(tr("Fill Goal and Team protocol from the designer's last reply"));
+        connect(m_helperUse, &QPushButton::clicked, this, [this] {
+            QString goal, protocol;
+            if (!parseHelperReply(m_helper->details().value("last_message").toString(), &goal, &protocol)) {
+                m_helperNote->setText(tr("The last reply has no GOAL: or PROTOCOL: section; ask with Draft goal and protocol."));
+                return;
+            }
+            if (!goal.isEmpty()) m_goal->setPlainText(goal);
+            if (!protocol.isEmpty()) m_protocol->setPlainText(protocol);
+            m_helperNote->setText(tr("Filled from the designer's reply; edit them as you like."));
+        });
+        h->addWidget(m_helperNote, 1); h->addWidget(m_helperDraft); h->addWidget(m_helperUse);
+        v->addLayout(h);
+    }
+    auto *helperTimer = new QTimer(this); helperTimer->setInterval(2000);
+    connect(helperTimer, &QTimer::timeout, this, [this] { if (isVisible()) updateHelper(); });
+    helperTimer->start();
     auto *nameRow = row(10);
     auto *nameLabel = new QLabel(tr("Team name")); nameLabel->setFixedWidth(96); nameLabel->setObjectName("teamNewLabel");
     m_name = new QLineEdit; m_name->setObjectName("teamNewName");
@@ -309,6 +349,57 @@ void TeamNewTab::renderTemplates()
         ++at;
     }
     for (int i = 0; i < m_templateColumns; ++i) m_templates->setColumnStretch(i, 1);
+}
+
+void TeamNewTab::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    updateHelper();
+}
+
+void TeamNewTab::updateHelper()
+{
+    if (!m_helper) return;
+    const QString session = designerSession ? designerSession() : QString();
+    if (session != m_helper->session()) m_helper->setSession({}, session);
+    m_helperIdle->setVisible(session.isEmpty());
+    m_helper->setVisible(!session.isEmpty());
+    m_helperDraft->setEnabled(!session.isEmpty()); m_helperUse->setEnabled(!session.isEmpty());
+    if (!session.isEmpty() && m_helperNote->text() == tr("Starting the Team designer…")) m_helperNote->clear();
+}
+
+QString TeamNewTab::helperRequest() const
+{
+    QStringList roles; for (const auto &m : m_members) roles << m.role + QStringLiteral(" (") + m.agent + QLatin1Char(')');
+    const auto *t = m_teams->catalog().templ(m_template);
+    const auto field = [](const QString &text) { return text.trimmed().isEmpty() ? QStringLiteral("(empty)") : text.trimmed(); };
+    return QStringLiteral(
+        "[New team] Help me write this team's goal and team protocol; change no file and propose nothing to the catalog.\n"
+        "Template: %1\nCoordinator: %2 (%3)\nMembers: %4\nFolder: %5\n\nCurrent goal:\n%6\n\nCurrent team protocol:\n%7\n\n"
+        "Ask me what you need first if anything is unclear. When you answer, reply with exactly these two sections and nothing before them:\n"
+        "GOAL:\n<the result, constraints and what done means; every member reads it with each task>\n"
+        "PROTOCOL:\n<how the coordinator runs the team: waves, checks of reports, when to start the next wave; only the coordinator reads it>")
+        .arg(t ? t->name : QStringLiteral("none"), m_coordinator.name, m_coordinator.agent,
+             roles.isEmpty() ? QStringLiteral("none yet") : roles.join(QStringLiteral(", ")), m_folder->text().trimmed(),
+             field(m_goal->toPlainText()), field(m_protocol->toPlainText()));
+}
+
+bool TeamNewTab::parseHelperReply(const QString &reply, QString *goal, QString *protocol)
+{
+    // "GOAL:" and "PROTOCOL:" on their own lines, bold or as headings too.
+    static const QRegularExpression heading(QStringLiteral("(?im)^[#*_ \\t]*(GOAL|PROTOCOL)[*_ \\t]*:[*_ \\t]*"));
+    QList<std::pair<QString, int>> marks; QList<int> starts;
+    for (auto it = heading.globalMatch(reply); it.hasNext();) {
+        const auto m = it.next();
+        marks.append({m.captured(1).toUpper(), int(m.capturedEnd())}); starts.append(int(m.capturedStart()));
+    }
+    goal->clear(); protocol->clear();
+    for (int i = 0; i < marks.size(); ++i) {
+        const int end = i + 1 < marks.size() ? starts[i + 1] : int(reply.size());
+        const QString text = reply.mid(marks[i].second, end - marks[i].second).trimmed();
+        (marks[i].first == QLatin1String("GOAL") ? *goal : *protocol) = text;
+    }
+    return !goal->isEmpty() || !protocol->isEmpty();
 }
 
 void TeamNewTab::pickTemplate(const QString &id)

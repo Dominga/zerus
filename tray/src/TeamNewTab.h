@@ -6,6 +6,7 @@
 
 class HgsClient;
 class TeamController;
+class TeamConversation;
 class QCheckBox;
 class QGridLayout;
 class QLabel;
@@ -36,9 +37,22 @@ public:
     void setCoordinatorBusy(bool busy);
     std::function<void(const QString &team)> created;
     std::function<void()> askDesigner;
+    // The Team designer's session, if it runs, and how to start it: its chat
+    // here helps write the goal and the team protocol.
+    std::function<QString()> designerSession;
+    std::function<void()> startDesigner;
+    // The message that asks for both texts, and the reply's two sections.
+    QString helperRequest() const;
+    static bool parseHelperReply(const QString &reply, QString *goal, QString *protocol);
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 private:
+    void updateHelper();
+    TeamConversation *m_helper = nullptr;
+    QWidget *m_helperIdle = nullptr;
+    QPushButton *m_helperDraft = nullptr, *m_helperUse = nullptr;
+    QLabel *m_helperNote = nullptr;
     void pickTemplate(const QString &id);
     void addMember(const Teams::Role *role);
     void renderCoordinator();

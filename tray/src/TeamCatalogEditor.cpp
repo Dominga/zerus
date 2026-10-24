@@ -1,5 +1,6 @@
 #include "TeamCatalogEditor.h"
 #include "TeamController.h"
+#include "HgsClient.h"
 #include "TeamWidgets.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -490,17 +491,34 @@ QWidget *TeamCatalogEditor::roleEditor(int index)
     auto *agentRow = row(6);
     QList<std::pair<QString, QString>> agentItems; for (const auto &a : agents) agentItems.append({a, agentNames.value(a)});
     auto *agent = choice(agentItems, r.agent, "teamRoleAgent");
-    auto *account = new QLineEdit(r.account); account->setPlaceholderText(tr("default account")); account->setObjectName("teamRoleAccount");
-    auto *model = new QLineEdit(r.model); model->setPlaceholderText(tr("default model")); model->setObjectName("teamRoleModel");
+    auto *account = new QComboBox; account->setObjectName("teamRoleAccount"); fillAccounts(account, r);
+    m_accountChoice = account; m_accountRole = index;
+    // Suggestions only: any model the agent's command line knows.
+    auto *model = new QComboBox; model->setObjectName("teamRoleModel"); model->setEditable(true); model->setInsertPolicy(QComboBox::NoInsert);
+    model->addItems(Teams::knownModels(r.agent)); model->setCurrentText(r.model); model->lineEdit()->setPlaceholderText(tr("default model"));
+    model->setEnabled(r.agent != "dsh");
     auto *effort = choice({{"", "—"}, {"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"xhigh", "xhigh"}}, r.effort, "teamRoleEffort");
     agentRow->addWidget(agent, 11); agentRow->addWidget(account, 10); agentRow->addWidget(model, 11); agentRow->addWidget(effort, 7);
-    connect(agent, &QComboBox::activated, this, set([this, index, agent] { m_catalog.roles[index].agent = agent->currentData().toString(); rebuildLists(); }));
-    connect(account, &QLineEdit::editingFinished, this, set([this, index, account] { m_catalog.roles[index].account = account->text().trimmed(); }));
-    connect(model, &QLineEdit::editingFinished, this, set([this, index, model] { m_catalog.roles[index].model = model->text().trimmed(); }));
+    // Another agent has other accounts and models.
+    connect(agent, &QComboBox::activated, this, [this, index, agent] {
+        auto &role = m_catalog.roles[index]; const auto value = agent->currentData().toString(); if (value == role.agent) return;
+        role.agent = value; role.account.clear(); if (!Teams::knownModels(value).contains(role.model)) role.model.clear();
+        changed(); rebuildLists(); rebuildEditor();
+    });
+    connect(account, &QComboBox::activated, this, set([this, index, account] { m_catalog.roles[index].account = account->currentData().toString(); }));
+    const auto modelChanged = set([this, index, model] { m_catalog.roles[index].model = model->currentText().trimmed(); });
+    connect(model->lineEdit(), &QLineEdit::editingFinished, this, modelChanged);
+    connect(model, &QComboBox::activated, this, modelChanged);
     connect(effort, &QComboBox::activated, this, set([this, index, effort] { m_catalog.roles[index].effort = effort->currentData().toString(); }));
     add(tr("Default agent"), orig && (r.agent != orig->agent || r.account != orig->account || r.model != orig->model || r.effort != orig->effort), box(agentRow));
-    auto *computer = new QLineEdit(r.computer); computer->setPlaceholderText(tr("Any (this computer)")); computer->setObjectName("teamRoleComputer");
-    connect(computer, &QLineEdit::editingFinished, this, set([this, index, computer] { m_catalog.roles[index].computer = computer->text().trimmed(); }));
+    QList<std::pair<QString, QString>> computerItems{{QString(), tr("Any (this computer)")}};
+    for (const auto &c : m_computers) if (!c.alias.isEmpty()) computerItems.append({c.alias, c.online ? c.label : tr("%1 (offline)").arg(c.label)});
+    auto *computer = choice(computerItems, r.computer, "teamRoleComputer");
+    // Accounts belong to a computer.
+    connect(computer, &QComboBox::activated, this, [this, index, computer] {
+        auto &role = m_catalog.roles[index]; const auto value = computer->currentData().toString(); if (value == role.computer) return;
+        role.computer = value; role.account.clear(); changed(); rebuildEditor();
+    });
     add(tr("Computer"), edited(r.computer, orig ? orig->computer : QString()), computer);
     auto *permissions = choice({{"", tr("Account's mode")}, {"auto", tr("Auto (workspace)")}, {"bypass", tr("Bypass")}}, r.permissions, "teamRolePermissions");
     connect(permissions, &QComboBox::activated, this, set([this, index, permissions] { m_catalog.roles[index].permissions = permissions->currentData().toString(); }));
@@ -814,4 +832,38 @@ void TeamCatalogEditor::showProposal(const QString &proposal)
         if (p.kind != "rule") for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toString() == p.target) list->setCurrentRow(i);
         return;
     }
+}
+
+void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &computers)
+{
+    m_computers = computers;
+    if (client && client != m_client) {
+        m_client = client;
+        connect(m_client, &HgsClient::accountsReady, this, [this](quint64, const QString &host, const QJsonObject &result) {
+            if (host != QString() && std::none_of(m_computers.cbegin(), m_computers.cend(), [&](const Computer &c) { return c.alias == host; })) return;
+            QList<Account> list;
+            for (const auto &value : result.value("profiles").toArray()) {
+                const auto p = value.toObject();
+                list.append({p.value("id").toString(), p.value("provider").toString(), p.value("label").toString(),
+                             p.value("account_status").toObject().value("status").toString() != "signed_out"});
+            }
+            m_accounts.insert(host, list);
+            if (m_accountChoice && m_accountRole >= 0 && m_accountRole < m_catalog.roles.size()) fillAccounts(m_accountChoice, m_catalog.roles[m_accountRole]);
+        });
+    }
+    if (!m_client) return;
+    m_client->requestAccounts({});
+    for (const auto &c : m_computers) if (!c.alias.isEmpty() && c.online) m_client->requestAccounts(c.alias);
+}
+
+void TeamCatalogEditor::fillAccounts(QComboBox *box, const Teams::Role &role) const
+{
+    const QSignalBlocker blocker(box);
+    box->clear(); box->addItem(tr("Default account"), QString());
+    const auto agent = role.agent.isEmpty() ? QStringLiteral("claude") : role.agent;
+    for (const auto &a : m_accounts.value(role.computer)) if (a.provider == agent)
+        box->addItem((a.label.isEmpty() ? a.id : a.label) + (a.signedIn ? QString() : tr(" (signed out)")), a.id);
+    // An account this computer did not report (yet) stays as written.
+    if (!role.account.isEmpty() && box->findData(role.account) < 0) box->addItem(role.account, role.account);
+    box->setCurrentIndex(qMax(0, box->findData(role.account)));
 }

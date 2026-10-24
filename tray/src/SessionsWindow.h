@@ -22,6 +22,7 @@ class SwarmController;
 #include "SessionOrganization.h"
 #include "SessionRowPreferences.h"
 #include "TeamModel.h"   // WhiteWh fork: agent teams
+#include "TeamCatalogEditor.h"
 
 class QAction;
 class QFileSystemWatcher;
@@ -585,6 +586,7 @@ private:
     QLabel *m_detailsIdTitle = nullptr, *m_detailsIdValue = nullptr;
     QPushButton *m_copySessionId = nullptr;
     QPushButton *m_detailsClear = nullptr;
+    QList<TeamCatalogEditor::Computer> teamComputers() const;
     QFrame *m_inspectorPanel = nullptr;
     QSplitter *m_workSplitter = nullptr;
     QPushButton *m_inspectorToggle = nullptr;

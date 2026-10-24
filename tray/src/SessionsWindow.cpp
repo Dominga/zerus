@@ -1652,6 +1652,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_pages,&QStackedWidget::currentChanged,this,[this](int index) {
         m_sessionsNav->setChecked(index==0); m_projectsNav->setChecked(index==1); m_machinesNav->setChecked(index==2); m_brand->setChecked(index==3); m_accountsNav->setChecked(index==4); m_settingsNav->setChecked(index==5);
         if (m_teamDesignerNav) m_teamDesignerNav->setChecked(index==m_teamDesignerPageIndex);
+        // WhiteWh fork: the catalog's Computer and Account dropdowns, fresh on each visit.
+        if (index==5 && m_teamCatalog) m_teamCatalog->setSources(&m_client, teamComputers());
+        if (index==m_teamDesignerPageIndex && m_teamDesignerPage) m_teamDesignerPage->editor()->setSources(&m_client, teamComputers());
         renderAccountUsage();if(index==3)updateDashboardAccounts(true);updateInspectorMinimum();
         if (index == 3 && m_dashboardStale) updateDashboard();
         // Callers that show Sessions rebuild right away; this covers any other switch.
@@ -3944,6 +3947,17 @@ void SessionsWindow::updateWorkingLine(const Entry *entry)
     }
     m_workingLine->setColors(QColor(m_accent), QColor(m_fg), QColor(m_muted));
     m_workingLine->setWorking(working, text, m_details.value("turn_started").toDouble());
+}
+
+QList<TeamCatalogEditor::Computer> SessionsWindow::teamComputers() const
+{
+    QList<TeamCatalogEditor::Computer> computers;
+    const qint64 now=QDateTime::currentMSecsSinceEpoch();
+    for(const auto &alias:m_fleet.peerNames()){
+        const auto *box=m_fleet.peer(alias);
+        computers.append({alias,alias,box&&box->ok&&now-m_fleet.peerPolledAt(alias)<FleetState::kPeerStaleMs});
+    }
+    return computers;
 }
 
 void SessionsWindow::renderDetails()

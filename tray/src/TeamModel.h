@@ -14,6 +14,14 @@
 // Statuses here never change a session's own status; they are a layer on top.
 namespace Teams {
 
+// Model suggestions per agent; a model field still takes any name the
+// agent's command line knows. DeepSeek runs its own model.
+inline QStringList knownModels(const QString &agent)
+{
+    static const QMap<QString, QStringList> known{{"claude", {"opus", "sonnet", "haiku"}}, {"codex", {"gpt-5.5-codex", "gpt-5.5"}}, {"kimi", {"kimi-k2"}}};
+    return known.value(agent);
+}
+
 struct Member {
     QString id, role, agent, model, computer, state, error;
     QString account, effort, permissions, folder, directory, prompt;

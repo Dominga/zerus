@@ -141,6 +141,7 @@ private slots:
     void planningEditsSendTheWholePlan();
     void newTeamStartsTheLeadWithTheTemplate();
     void catalogEditorSavesTheNextVersion();
+    void catalogRoleChoosesAccountModelAndComputer();
     void designerDraftIsKeptThenApplied();
     void workspaceShowsGraphBoardAndFocus();
     void emptyPanelOffersNewTeamAndDesigner();
@@ -165,7 +166,7 @@ void TestTeamsUi::initTestCase()
 import json,sys
 a=sys.argv[1:]
 if a and a[0].startswith('@'):a=a[1:]
-body=json.load(sys.stdin)
+body=json.load(sys.stdin) if a[:1]==['team'] else {}
 open(__file__+'.calls','a').write(json.dumps({'args':a,'input':body})+'\n')
 if a[:2]==['team','list']:
  t=json.load(open(__file__+'.status'))
@@ -350,6 +351,37 @@ void TestTeamsUi::catalogEditorSavesTheNextVersion()
     const auto input = calls(script(), "catalog set").first();
     QCOMPARE(input["version"].toInt(), 3);
     QCOMPARE(input["catalog"].toObject()["roles"].toArray().size(), 4);
+}
+
+void TestTeamsUi::catalogRoleChoosesAccountModelAndComputer()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.setSources(&client, {{"devbox", "devbox", true}, {"laptop", "laptop", false}});
+    editor.resize(900, 700); editor.show();
+    QTRY_COMPARE(editor.findChild<QListWidget *>("teamCatalogRoles")->count(), 3);
+    // The lead runs Claude: its accounts on this computer, its models, the computers.
+    auto *computer = editor.findChild<QComboBox *>("teamRoleComputer"); QVERIFY(computer);
+    QCOMPARE(computer->count(), 3); QCOMPARE(computer->currentData().toString(), QString());
+    QVERIFY(computer->itemText(2).contains("offline"));
+    auto *model = editor.findChild<QComboBox *>("teamRoleModel"); QVERIFY(model && model->isEditable());
+    QVERIFY(model->findText("opus") >= 0); QCOMPARE(model->currentText(), QString());
+    QTRY_COMPARE(editor.findChild<QComboBox *>("teamRoleAccount")->count(), 3);
+    auto *account = editor.findChild<QComboBox *>("teamRoleAccount");
+    QVERIFY(account->itemText(account->findData("work")).contains("signed out"));
+    account->setCurrentIndex(account->findData("native-claude")); emit account->activated(account->currentIndex());
+    model->setCurrentIndex(model->findText("sonnet")); emit model->activated(model->currentIndex());
+    computer->setCurrentIndex(1); emit computer->activated(1);
+    // Accounts belong to a computer: another one clears the choice.
+    auto *rebuilt = editor.findChild<QComboBox *>("teamRoleAccount");
+    QTRY_VERIFY(rebuilt && rebuilt != account); QCOMPARE(rebuilt->currentData().toString(), QString());
+    editor.findChild<QPushButton *>("teamCatalogSave")->click();
+    QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
+    const auto lead = calls(script(), "catalog set").first()["catalog"].toObject()["roles"].toArray()[0].toObject();
+    QCOMPARE(lead["model"].toString(), QStringLiteral("sonnet"));
+    QCOMPARE(lead["computer"].toString(), QStringLiteral("devbox"));
+    QCOMPARE(lead.value("account").toString(), QString());
 }
 
 void TestTeamsUi::designerDraftIsKeptThenApplied()

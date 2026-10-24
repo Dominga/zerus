@@ -1,9 +1,13 @@
 #pragma once
+#include <QHash>
+#include <QPointer>
 #include <QWidget>
 #include <functional>
 #include "TeamModel.h"
 
 class TeamController;
+class HgsClient;
+class QComboBox;
 class QFrame;
 class QListWidget;
 class QPushButton;
@@ -36,7 +40,13 @@ public:
     void setDesignerWorking(bool working) { m_designerWorking = working; updateHeader(); }
     // Selects a proposal's item: Show in catalog.
     void showProposal(const QString &proposal);
+    // The role's Computer and Account dropdowns: computers by alias (empty is
+    // this computer) and the accounts each one reports.
+    struct Computer { QString alias, label; bool online = true; };
+    void setSources(HgsClient *client, const QList<Computer> &computers);
 private:
+    struct Account { QString id, provider, label; bool signedIn = true; };
+    void fillAccounts(QComboBox *box, const Teams::Role &role) const;
     enum class Tab { Roles, Templates, Routing };
     bool draftMode() const;
     void load();
@@ -53,6 +63,11 @@ private:
     int unsavedChanges() const;
     void changed();
     TeamController *m_teams;
+    HgsClient *m_client = nullptr;
+    QList<Computer> m_computers;
+    QHash<QString, QList<Account>> m_accounts;
+    QPointer<QComboBox> m_accountChoice;
+    int m_accountRole = -1;
     Teams::Catalog m_catalog;
     bool m_dirty = false, m_dark = true, m_showDraft = false, m_designerWorking = false;
     Tab m_tab = Tab::Roles;

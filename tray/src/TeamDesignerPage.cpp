@@ -159,11 +159,10 @@ QWidget *TeamDesignerPage::emptyState()
     for (const auto *e : {"low", "medium", "high", "xhigh"}) m_effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
     const auto models = [this] {
         // Suggestions only: the field takes any model the agent's command line knows.
-        static const QMap<QString, QStringList> known{{"claude", {"opus", "sonnet", "haiku"}}, {"codex", {"gpt-5.5-codex", "gpt-5.5"}}, {"kimi", {"kimi-k2"}}};
         const QString agent = m_agent->currentData().toString();
         const QString keep = m_model->currentText();
-        m_model->clear(); m_model->addItems(known.value(agent));
-        m_model->setCurrentText(known.value(agent).contains(keep) ? keep : QString());
+        m_model->clear(); m_model->addItems(Teams::knownModels(agent));
+        m_model->setCurrentText(Teams::knownModels(agent).contains(keep) ? keep : QString());
         // DeepSeek runs its own model; Kimi has no effort.
         m_model->setEnabled(agent != "dsh"); m_effort->setEnabled(agent != "dsh" && agent != "kimi");
     };

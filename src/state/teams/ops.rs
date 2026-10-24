@@ -307,6 +307,7 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     ensure!(!task.status.finished(), "Task #{id} is already decided");
     let revoked = revoke(task, "reassigned");
     task.assignee = target.to_owned();
+    task.pinned = true;
     if task.status != TaskStatus::Draft {
         task.status = TaskStatus::Pending;
     }
@@ -538,6 +539,7 @@ mod tests {
         let first = hand_out(&mut team, 1);
         let mut events = Vec::new();
         reassign(&mut team, &json!({"task":1,"member":"dev"}), &Actor::Human, &mut events).unwrap();
+        assert!(team.task(1).unwrap().pinned);   // your choice: Zerus does not move it to another Backend
         let second = hand_out(&mut team, 1);
         let late = report(&mut team, &json!({"task":1,"attempt":first,"text":"done"}), &Actor::Member("dev".into()), &mut events).unwrap();
         assert_eq!((late["status"].as_str(), events.last().unwrap().kind), (Some("stale"), "stale_report"));

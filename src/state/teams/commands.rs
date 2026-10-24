@@ -147,9 +147,13 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!({"status":"answered"})))
 }
 
+/// The team's files refuse writes here: SQLite opened them read-only, or the
+/// system denies access (in any language: Windows localizes its message).
 fn read_only(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}").to_lowercase();
-    text.contains("readonly") || text.contains("read-only") || text.contains("access is denied") || text.contains("permission denied")
+    ["readonly", "read-only", "access is denied", "permission denied", "os error 5)", "os error 13)", "unable to open database"]
+        .iter()
+        .any(|sign| text.contains(sign))
 }
 
 fn drop_report(input: &Value) -> anyhow::Result<Value> {
@@ -198,27 +202,39 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             ensure!(canonical_uuid(request), "A canonical request_id is required");
             let team_id = text(input, "team");
             let revision = input["revision"].as_u64();
+            // A member in a sandbox may not write the team's files: its report
+            // waits in its own folder for the dispatcher, which checks it.
+            // SQLite may open the store read-only without a word, so the
+            // refusal can come with the write as well as with the open.
             let mut store = match Store::open(true) {
                 Ok(store) => store,
-                // A member in a sandbox may not write the team's files: its
-                // report waits in its own folder for the dispatcher.
-                Err(error) if op == "report" && read_only(&error) => return drop_report(input),
+                Err(_) if op == "report" => return drop_report(input),
                 Err(error) => return Err(error),
             };
             let mut filled = input.clone();
+            if op == "use-last-reply" && text(input, "attempt").is_empty() {
+                // Without an attempt, the task's open one.
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let task = team.task(input["task"].as_u64().unwrap_or_default() as u32).context("Unknown task")?;
+                filled["attempt"] = json!(task.open_attempt().context("The task has no open attempt")?.id);
+            }
             if op == "use-last-reply" && text(input, "text").trim().is_empty() {
                 // The member's last reply becomes the report; reading it is not
                 // part of the request's identity.
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let task = team.task(input["task"].as_u64().unwrap_or_default() as u32).context("Unknown task")?;
-                let attempt = task.attempts.iter().find(|a| a.id == text(input, "attempt")).context("Unknown attempt")?;
+                let attempt = task.attempts.iter().find(|a| a.id == text(&filled, "attempt")).context("Unknown attempt")?;
                 let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("The member has no session")?;
                 filled["text"] = json!(super::dispatcher::last_reply(&session)?);
             }
-            let receipt = store.mutate(Some((request, input)), team_id, revision, |team, events| {
+            let receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = actor(team, op, &filled)?;
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
-            })?;
+            }) {
+                Ok(receipt) => receipt,
+                Err(error) if op == "report" && read_only(&error) => return drop_report(input),
+                Err(error) => return Err(error),
+            };
             if matches!(op, "approve" | "resume") {
                 // The dispatcher runs while any team runs; it exits by itself.
                 if let Err(error) = super::dispatcher::ensure_worker() {
@@ -262,4 +278,22 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     .map_err(|e| e.to_string())?;
     println!("{result}");
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_write_is_recognised_in_any_language() {
+        for message in [
+            "attempt to write a readonly database",
+            "Отказано в доступе. (os error 5)",
+            "Permission denied (os error 13)",
+            "unable to open database file: teams.sqlite3",
+        ] {
+            assert!(read_only(&anyhow::anyhow!(message.to_owned())), "{message}");
+        }
+        assert!(!read_only(&anyhow::anyhow!("This attempt is no longer current")));
+    }
 }

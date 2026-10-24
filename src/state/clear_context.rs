@@ -134,8 +134,14 @@ pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
     // A resume awaiting its deferred SessionStart has no hook-confirmed idle
     // state: its exact process must still own the restored conversation.
     let resumed = resume_input::clearable(record);
+    // The failed-turn path deliberately preserves the missing idle hook. A
+    // matching explicit request may confirm its native reset through the same
+    // full panel/composer checks, without rewriting the session's work state.
+    let requested_failure = record["clear_context_request"].is_object()
+        && record["clear_context_request"]["conversation_id"] == record["conversation_id"]
+        && failed_turn(record);
     if string(record,"agent") != "codex" || awaiting_start(record)
-        || (!resumed && (record["activity"] != "idle" || record["phase"] != "idle"))
+        || (!resumed && !requested_failure && (record["activity"] != "idle" || record["phase"] != "idle"))
         || string(record,"conversation_id").is_empty()
         || (string(record,"prompt").is_empty() && string(record,"last_message").is_empty()
             && !record["clear_context_request"].is_object()) { return Ok(false); }
@@ -143,6 +149,7 @@ pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
     // expensive process and composer checks only for a matching reset panel.
     if !codex_reset_panel(&kimi_tui_choice::capture(record)?,string(record,"cwd")) { return Ok(false); }
     if resumed { resume_input::owned(record)?; }
+    if requested_failure && !failed_turn(record) { return Err("Native work changed before clear confirmation".into()); }
     kimi_tui_choice::identity(record)?;
     input::checked_terminal(record,true)?;
     if !codex_reset_panel(&kimi_tui_choice::capture(record)?,string(record,"cwd")) { return Ok(false); }

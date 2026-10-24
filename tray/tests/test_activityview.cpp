@@ -1867,9 +1867,12 @@ void TestActivityView::kimiDuplicateHooksKeepOneAttachmentCard()
     view.setTimeline(details, events, {});
     QCOMPARE(view.plainText().count("Review this document"), 1);
     QSignalSpy opened(&view, &ActivityView::attachmentActivated);
-    for (const auto &link : links(view.browser())) if (link.startsWith("hgs-attachment:")) activate(view.browser(), link);
+    QSet<QString> attachmentLinks;
+    for (const auto &link : links(view.browser())) if (link.startsWith("hgs-attachment:")) attachmentLinks.insert(link);
+    QCOMPARE(attachmentLinks.size(), 1);
+    activate(view.browser(), *attachmentLinks.cbegin());
     QCOMPARE(opened.size(), 1);
-    QCOMPARE(opened.first().first().toJsonObject().value("request_id").toString(), QString("delivery"));
+    QCOMPARE(opened.first().first().toJsonObject(), files.first().toObject());
     // Without complete native evidence the old ambiguous pair stays distinct.
     details["kimi_turns_complete"] = false;
     view.setSessionKey("fixture/unproven"); view.setTimeline(details, events, {});

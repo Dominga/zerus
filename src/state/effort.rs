@@ -733,6 +733,13 @@ fn catalog(record: &Value) -> Vec<ModelOption> {
     result
 }
 
+pub(super) fn account_models(provider: &str, home: &Path) -> Value {
+    let models = catalog(&json!({"agent":provider,"agent_home":home}));
+    json!({"models":models.iter().take(64).map(|m| json!({"id":m.id,"label":m.label,
+        "effort_options":m.efforts,"default_effort":m.default_effort})).collect::<Vec<_>>(),
+        "truncated":models.len()>64})
+}
+
 fn settings_reason(record: &Value, models: &[ModelOption]) -> &'static str {
     if record.get("archive_id").is_some() || string(record, "state") == "archived" {
         return "Restore the archived session before changing its settings";

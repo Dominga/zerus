@@ -60,6 +60,7 @@ private slots:
     void accountRowsDrawNoNativeFocusFrame();
     void init();
     void nativeDefaultsAndMachineScopedActions();
+    void modelDefaultsUseTheSelectedMachineAndNativeCatalog();
     void openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations();
     void openCodeReasonsAndExplicitStart();
     void openCodeProvidersShowConnectionAndCounts();
@@ -124,6 +125,9 @@ if args[0]=='account':
   while (root/'hold-remote-catalog').exists():time.sleep(.02)
  if args[1]=='ls' and host and (root/'fail-catalog').exists():sys.exit(1)
  if args[1]=='ls' and (root/'empty-catalog').exists():print(json.dumps({'profiles':[]}));sys.exit(0)
+ if args[1]=='model-settings':
+  print(json.dumps({'account_id':args[2],'revision':'model-rev','defaults':{'model':'','effort':''},'provider_defaults':{'model':'fixture-smart','effort':'low'},'effort_supported':True,'models':[{'id':'fixture-smart','label':'Fixture smart','effort_options':['low','xhigh']}]}));sys.exit(0)
+ if args[1]=='model-defaults':publish('model-defaults-action',json.dumps({'host':host,'args':args}))
  if args[1]=='inspect':
   while (root/'hold-inspect').exists() or (host and (root/'hold-remote-inspect').exists()):time.sleep(.02)
   if (root/'fail-inspect').exists():sys.exit(1)
@@ -161,6 +165,7 @@ if args[0]=='account':
  profiles.append({'id':'work-'+(host or 'local'),'provider':'codex','label':'Work','home':'~/.config/hgs/accounts/work','native':False,'installed':True,'portable':True,'credential_file':True})
  if (root/'one-account').exists():profiles=profiles[:1]
  for p in profiles:
+  p['model_defaults_supported']=True;p['model_defaults']={'model':'','effort':''}
   chosen=(root/('default-'+(host or 'local')))
   p['is_default']=p['id']==(chosen.read_text() if chosen.exists() and p['provider']=='codex' else 'native-'+p['provider'])
  if (root/'deepseek').exists():
@@ -195,6 +200,30 @@ elif args[0]=='project': print(json.dumps([{'name':'sample','dir':'/tmp/sample',
 else: print('{}')
 )"); script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
 }
+void TestAccountsPage::modelDefaultsUseTheSelectedMachineAndNativeCatalog()
+{
+    AccountsPage page(FakeCli::program(m_script));page.setFleet(fleet());page.show();
+    page.showAccount("mac","native-codex");
+    auto *button=page.findChild<QPushButton *>("accountModelDefaults");
+    QTRY_VERIFY(button->isVisible() && button->isEnabled());
+    QTimer poll;
+    connect(&poll,&QTimer::timeout,&page,[&]{
+        auto *dialog=page.findChild<QDialog *>("accountModelDefaultsDialog");if(!dialog)return;
+        poll.stop();const auto close=qScopeGuard([&]{if(dialog->isVisible())dialog->reject();});
+        auto *model=dialog->findChild<QComboBox *>("defaultModel"),*effort=dialog->findChild<QComboBox *>("defaultEffort");
+        QVERIFY(model && effort);QCOMPARE(model->count(),2);QVERIFY(!effort->isEnabled());
+        QVERIFY(dialog->findChild<QLabel *>("nativeModelDefaults")->text().contains("low"));
+        model->setCurrentIndex(model->findData("fixture-smart"));QVERIFY(effort->isEnabled());
+        QCOMPARE(effort->count(),3);effort->setCurrentIndex(effort->findData("xhigh"));
+        dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save)->click();
+    });
+    poll.start(10);button->click();
+    QTRY_VERIFY(QFile::exists(m_dir.filePath("model-defaults-action")));
+    QFile action(m_dir.filePath("model-defaults-action"));QVERIFY(action.open(QIODevice::ReadOnly));
+    const auto call=QJsonDocument::fromJson(action.readAll()).object();QCOMPARE(call["host"].toString(),QString("mac"));
+    QCOMPARE(call["args"].toArray(),QJsonArray({"account","model-defaults","native-codex","--model","fixture-smart","--effort","xhigh","--revision","model-rev"}));
+}
+
 void TestAccountsPage::openCodeNativeConfigurationDoesNotOfferUnsupportedAccountMutations()
 {
     QFile original(m_script);QVERIFY(original.open(QIODevice::ReadOnly));

@@ -2325,6 +2325,23 @@ known session inventory; live-work filters still require current work evidence.
 
 ### Accounts
 
+In **Accounts → Model and effort…**, save the model and reasoning effort for new
+conversations with the selected account on that computer. Codex and Claude offer
+only models and effort levels from that account's native catalog. Open the agent
+once and refresh Accounts if its catalog is empty. **Provider settings** removes
+the Zerus override; the dialog also shows readable native account defaults.
+Kimi supports a launch model choice; its effort remains controlled by Kimi's
+native settings. OpenCode and DeepSeek continue to manage their defaults natively.
+Existing conversations, saved resumes and forks keep their own choices. Explicit
+native launch options after `--` take precedence. Nothing rewrites native account
+configuration or changes a running agent.
+
+The CLI is `hgs [@host] account model-settings ID` to inspect the catalog and
+`hgs [@host] account model-defaults ID --model MODEL --effort LEVEL --revision REV`
+to save a choice. Omit effort to inherit the selected model's provider default;
+pass `--model ''` to return to provider settings. Revisions prevent overwriting
+another account edit made while the dialog was open.
+
 Accounts collects provider profiles from connected machines. Verified provider
 account ID, or email with organization, groups the same account across hosts;
 matching display names alone do not. Providers, organizations and conflicting

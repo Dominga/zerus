@@ -87,6 +87,11 @@ mod worktree_cleanup;
 mod worktree_inspection;
 mod worktree_lifecycle;
 
+/// Read the selected account's native catalog without starting an agent.
+pub(crate) fn account_models(provider: &str, home: &std::path::Path) -> serde_json::Value {
+    effort::account_models(provider, home)
+}
+
 /// Current bounded native Git evidence for exact project/worktree placement.
 pub(crate) fn worktree_catalog(path: &std::path::Path) -> serde_json::Value {
     if let Err(detail) = local_sessions() {

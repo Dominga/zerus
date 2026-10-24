@@ -100,6 +100,35 @@ class Accounts(unittest.TestCase):
         self.assertEqual([o['value'] for o in options],['fixture/local','opencode/big-pickle'])
         self.assertEqual([o.get('default') for o in options],[True,None])
         self.assert_opencode_only_asked_its_version()
+    def test_model_defaults_are_account_scoped_catalog_validated_and_revision_checked(self):
+        self.add('code','codex');self.add('second','codex');self.add('moon','kimi')
+        home=self.config/'accounts/code'
+        (home/'models_cache.json').write_text(json.dumps({'models':[{'slug':'fixture-smart','display_name':'Fixture smart',
+            'visibility':'list','supported_reasoning_levels':[{'effort':'low'},{'effort':'xhigh'}],'default_reasoning_level':'low'}]}))
+        (home/'config.toml').write_text('model="fixture-smart"\nmodel_reasoning_effort="low"\nprivate_token="TEMPORARY-PRIVATE-KEY"\n')
+        original=(home/'config.toml').read_bytes()
+        settings=json.loads(self.run_hgs('account','model-settings','code').stdout)
+        self.assertEqual(settings['provider_defaults'],dict(model='fixture-smart',effort='low'))
+        self.assertEqual(settings['models'][0]['effort_options'],['low','xhigh'])
+        self.assertNotIn('TEMPORARY',json.dumps(settings))
+        saved=json.loads(self.run_hgs('account','model-defaults','code','--model','fixture-smart','--effort','xhigh','--revision',settings['revision']).stdout)
+        profiles={p['id']:p for p in saved['profiles']}
+        self.assertEqual(profiles['code']['model_defaults'],dict(model='fixture-smart',effort='xhigh'))
+        self.assertEqual(profiles['second']['model_defaults'],dict(model='',effort=''))
+        self.run_hgs('account','model-defaults','code','--model','','--revision',settings['revision'],ok=False)
+        self.run_hgs('account','model-defaults','code','--model','foreign','--effort','low',ok=False)
+        self.run_hgs('account','model-defaults','code','--model','fixture-smart','--effort','ultra',ok=False)
+        self.run_hgs('account','model-defaults','code','--model','','--dry-run')
+        self.assertEqual((home/'config.toml').read_bytes(),original)
+        self.assertEqual(json.loads(self.run_hgs('account','model-settings','code').stdout)['defaults']['effort'],'xhigh')
+        moon=self.config/'accounts/moon'
+        (moon/'config.toml').write_text('[models.fixture]\nprovider="fixture"\nmodel="fixture"\ncapabilities=["thinking"]\n')
+        self.run_hgs('account','model-defaults','moon','--model','fixture','--effort','on',ok=False)
+        self.run_hgs('account','model-defaults','moon','--model','fixture')
+        self.run_hgs('account','model-defaults','code','--model','')
+        self.assertEqual(json.loads(self.run_hgs('account','model-settings','code').stdout)['defaults'],dict(model='',effort=''))
+        self.assertEqual((home/'config.toml').read_bytes(),original)
+
     def test_native_opencode_login_dry_run_never_invokes_auth(self):
         fake=self.bin
         binary=fake/"opencode";marker=self.root/"opencode-auth-marker"

@@ -30,6 +30,7 @@ mod external_agents;
 mod fork;
 mod goals;
 mod hooks;
+mod command_guard;
 pub(crate) mod hook_health;
 mod input;
 mod input_queue;

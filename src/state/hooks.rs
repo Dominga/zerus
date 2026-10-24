@@ -1169,6 +1169,50 @@ mod windows {
     }
 }
 
+fn command_refusal(event: &Value, home: &str) -> Option<command_guard::Refusal> {
+    if string(event, "hook_event_name") != "PreToolUse" {
+        return None;
+    }
+    let input = &event["tool_input"];
+    for key in ["command", "cmd"] {
+        if let Some(command) = input[key].as_str() {
+            return command_guard::check(command, home);
+        }
+        if let Some(parts) = input[key].as_array() {
+            let command = parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+            return command_guard::check(&command, home);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod command_guard_tests {
+    use super::*;
+
+    #[test]
+    fn checks_both_fields_and_codex_arrays_including_subagents() {
+        for key in ["command", "cmd"] {
+            for command in [json!("rm -rf ~"), json!(["bash", "-lc", "rm -rf ~"])] {
+                for child in ["", "child-fixture"] {
+                    let event = json!({"hook_event_name":"PreToolUse", "agent_id":child,
+                        "tool_input":{key:command}, "permission_mode":"bypass"});
+                    assert_eq!(command_refusal(&event, "/home/example").unwrap().rule, "protected-path");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leaves_other_events_and_safe_commands_unchanged() {
+        for event in [
+            json!({"hook_event_name":"PostToolUse", "tool_input":{"command":"rm -rf ~"}}),
+            json!({"hook_event_name":"PreToolUse", "tool_input":{"cmd":"rm -rf out/tmp"}}),
+            json!({"hook_event_name":"PreToolUse", "tool_input":{"file_path":"/home/example"}}),
+        ] { assert!(command_refusal(&event, "/home/example").is_none()); }
+    }
+}
+
 pub(super) fn hook() -> Result<i32> {
     let (Some(name), Some(token)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID"))
     else {
@@ -1186,6 +1230,10 @@ pub(super) fn hook() -> Result<i32> {
         .filter(|sid| !sid.is_empty() && !sid.chars().any(char::is_whitespace))
         .ok_or("hook did not supply a valid session_id")?;
     let kind = string(&event, "hook_event_name");
+    if let Some(refusal) = command_refusal(&event, &home().to_string_lossy()) {
+        eprintln!("{} [{}]", refusal.message, refusal.rule);
+        return Ok(2);
+    }
     let _guard = lock(None)?;
     let Some(mut record) = read_run(&name, &token)? else {
         return Ok(0);

@@ -6,6 +6,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFormLayout>
 #include <QJsonDocument>
 #include <QLabel>
@@ -15,6 +16,7 @@
 #include <QProcessEnvironment>
 #include <QPushButton>
 #include <QStandardPaths>
+#include <QSysInfo>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <functional>
@@ -66,8 +68,6 @@ public:
         auto *form=new QFormLayout;form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
         mode=new QComboBox;mode->setObjectName("workspaceEnrollmentMode");mode->addItem(tr("Create workspace"),"create");mode->addItem(tr("Join by code"),"join");form->addRow(tr("Connection"),mode);
         url=new QLineEdit(RelaySettings::canonicalRelay());url->setObjectName("workspaceRelayUrl");form->addRow(tr("Relay (HTTPS)"),url);
-        workspaceName=new QLineEdit;workspaceName->setObjectName("mobileWorkspaceName");workspaceName->setPlaceholderText(tr("Workspace"));form->addRow(tr("Workspace name on this computer"),workspaceName);
-        computerName=new QLineEdit;computerName->setObjectName("mobileWorkspaceComputerName");computerName->setPlaceholderText(tr("Computer"));form->addRow(tr("Computer name on this device"),computerName);
         code=new QLineEdit;code->setObjectName("joinComputerWorkspaceCode");code->setMaxLength(4096);code->setEchoMode(QLineEdit::PasswordEchoOnEdit);
         codeLabel=new QLabel(tr("Computer invitation code"));form->addRow(codeLabel,code);enrollLayout->addLayout(form);
         submit=new QPushButton(tr("Create workspace"));submit->setObjectName("submitWorkspaceEnrollment");enrollLayout->addWidget(submit,0,Qt::AlignLeft);layout->addWidget(enrollment);
@@ -79,7 +79,7 @@ public:
         cancelCode=new QPushButton(tr("Cancel code"));cancelCode->setObjectName("cancelComputerWorkspaceCode");invites->addWidget(cancelCode);invites->addStretch();layout->addWidget(invitationRow);
         codeStatus=label({},"computerWorkspaceCodeStatus");notice=label({},"workspaceNotice");
         connect(mode,&QComboBox::currentIndexChanged,this,[this]{updateForm();});
-        connect(change,&QPushButton::clicked,this,[this]{changing=true;enrollment->show();change->hide();updateForm();url->setFocus();});
+        connect(change,&QPushButton::clicked,this,[this]{recoveringEnrollment=false;changing=true;enrollment->show();change->hide();updateForm();url->setFocus();});
         connect(reload,&QPushButton::clicked,this,[this]{refresh();});
         connect(check,&QPushButton::clicked,this,[this]{checkEnrollment();});
         connect(start,&QPushButton::clicked,this,[this]{request("start",{},[this](const QJsonObject &){refresh();});});
@@ -91,6 +91,13 @@ public:
         });});
         connect(copyCode,&QPushButton::clicked,this,[this]{if(!copiedCode.isEmpty()&&QDateTime::currentSecsSinceEpoch()<expires)QApplication::clipboard()->setText(copiedCode);});
         connect(cancelCode,&QPushButton::clicked,this,[this]{request("cancel-invite",{{"invitation_id",invitationId}},[this](const QJsonObject &){clearCode();notice->setText(tr("Code canceled. Computers already joined keep their access."));});});
+        enrollmentPoll=new QTimer(this);enrollmentPoll->setSingleShot(true);
+        connect(enrollmentPoll,&QTimer::timeout,this,[this]{
+            if(!continueEnrollment||!enrollmentWait.isValid()||enrollmentWait.hasExpired(60000)){scheduleEnrollmentCheck();return;}
+            if(process){scheduleEnrollmentCheck();return;}
+            if(!known||snapshot.value("pending").toObject().value("state")!="migration-draining")return;
+            checkEnrollment(true);
+        });
         invitationPoll=new QTimer(this);invitationPoll->setInterval(5000);
         connect(invitationPoll,&QTimer::timeout,this,[this]{
             if(copiedCode.isEmpty())return;
@@ -100,17 +107,19 @@ public:
         updateForm();controls(true);refresh();
     }
     ~Panel() override {
-        invitationPoll->stop();copiedCode.clear();
+        invitationPoll->stop();enrollmentPoll->stop();copiedCode.clear();
         if(process){for(auto *timer:process->findChildren<QTimer*>())timer->stop();process->disconnect();process->kill();process->waitForFinished(1000);}
     }
     void refresh(){request("status");}
 private:
     QString program,path,copiedCode,invitationId;QJsonObject snapshot;QProcess *process=nullptr;
-    bool known=false,changing=false; qint64 expires=0;
+    bool known=false,changing=false,recoveringEnrollment=false,continueEnrollment=false; qint64 expires=0;
+    QString recoveryRevision;
     QLabel *summary,*connection,*notice,*pending,*codeStatus,*codeLabel;
-    QLineEdit *url,*workspaceName,*computerName,*code;QComboBox *mode;
+    QLineEdit *url,*code;QComboBox *mode;
     QPushButton *change,*start,*stop,*reload,*submit,*check,*giveCode,*copyCode,*cancelCode;
-    QWidget *enrollment,*invitationRow;QTimer *invitationPoll;
+    QWidget *enrollment,*invitationRow;QTimer *invitationPoll,*enrollmentPoll;
+    QElapsedTimer enrollmentWait;
     static bool hex(const QJsonValue &value,int size){
         if(!value.isString()||value.toString().size()!=size)return false;
         for(auto c:value.toString())if(!((c>='0'&&c<='9')||(c>='a'&&c<='f')))return false;return true;
@@ -123,7 +132,12 @@ private:
         if(!value.value("encrypted").isBool()||!value.value("config_revision").isString())return false;
         if(!value.value("config_revision").toString().isEmpty()&&!hex(value.value("config_revision"),64))return false;
         const auto state=value.value("state").toString();
-        if(state=="unconfigured"||state=="legacy")return !value.value("encrypted").toBool();
+        if(state=="unconfigured"||state=="legacy"){
+            if(value.value("encrypted").toBool())return false;
+            const auto pendingState=value.value("pending").toObject().value("state").toString();
+            if(pendingState.startsWith("migration-"))return value.value("migration").isObject()&&migrationShape(value.value("migration").toObject(),pendingState);
+            return !value.contains("migration");
+        }
         if(state=="pending-activation")return value.value("encrypted").toBool();
         if((state!="active"&&state!="retired")||!value.value("encrypted").toBool()||!RelaySettings::validUrl(value.value("server_url").toString())||value.value("node_id").toString().isEmpty()||value.value("workspace_id").toString().isEmpty())return false;
         return lifecycle({{"state",value.value("connector_state")},{"running",value.value("running")},{"generation",value.value("generation")}});
@@ -134,8 +148,45 @@ private:
         if(action=="start"||action=="stop")return lifecycle(value)&&(action!="stop"||value.value("state")=="stopped"||value.value("generation")==sent.value("generation"));
         if(action=="invite-computer")return value.value("purpose")=="computer"&&value.value("code").toString().startsWith("ze1.")&&value.value("code").toString().size()<=4096&&value.value("server_url")==snapshot.value("server_url")&&!value.value("invitation_id").toString().isEmpty()&&value.value("expires_at").isDouble();
         if(action=="cancel-invite")return value.value("cancelled")==QJsonValue(true);
+        if(value.value("state")=="migration-draining"||value.value("state")=="migration-blocked")return value.value("config_revision")==sent.value("expected_revision")&&!value.value("node_id").toString().isEmpty()&&value.value("encrypted")==QJsonValue(false)&&migrationShape(value.value("migration").toObject(),value.value("state").toString());
         if(value.value("state")=="pending"||value.value("state")=="legacy-retirement-unconfirmed")return value.value("config_revision")==sent.value("expected_revision")&&!value.value("node_id").toString().isEmpty();
         return value.value("state")=="active"&&value.value("encrypted")==QJsonValue(true)&&hex(value.value("config_revision"),64)&&!value.value("node_id").toString().isEmpty();
+    }
+    static bool migrationShape(const QJsonObject &migration,const QString &state){
+        const auto reason=migration.value("reason").toString();
+        if(!migration.value("retryable").isBool())return false;
+        if(state=="migration-draining")return migration.value("phase")=="draining"&&migration.value("retryable").toBool()&&QStringList{"draining","drain-timeout"}.contains(reason);
+        return state=="migration-blocked"&&migration.value("phase")=="blocked"&&!migration.value("retryable").toBool()&&QStringList{"unsafe-unit","unsupported-runtime","unsupported-platform","identity-changed","service-definition-conflict","service-unconfirmed","journal-unavailable"}.contains(reason);
+    }
+    void finishEnrollmentUi(){
+        changing=false;recoveringEnrollment=false;code->clear();clearCode();
+    }
+    void scheduleEnrollmentCheck(){
+        if(!continueEnrollment)return;
+        if(enrollmentWait.isValid()&&!enrollmentWait.hasExpired(60000))enrollmentPoll->start(1000);
+        else{continueEnrollment=false;notice->setText(tr("The connector is still finishing its current request. Your saved connection is kept; choose Continue connecting to check again."));}
+    }
+    void enrollmentResult(const QJsonObject &value){
+        finishEnrollmentUi();
+        const auto state=value.value("state").toString();
+        continueEnrollment=state=="migration-draining";
+        if(state=="migration-draining"){
+            notice->setText(tr("Finishing the current phone request before switching. Local agents keep running."));
+            scheduleEnrollmentCheck();
+        }else if(state=="migration-blocked"){
+            enrollmentPoll->stop();
+            const auto reason=value.value("migration").toObject().value("reason").toString();
+            if(reason=="unsupported-runtime")notice->setText(tr("The existing connector needs an update before this switch can continue. Your saved connection is kept."));
+            else if(reason=="unsafe-unit"||reason=="service-definition-conflict")notice->setText(tr("The existing connector's service settings do not allow a safe automatic switch. Your saved connection is kept."));
+            else notice->setText(tr("The connector switch could not be confirmed. Your saved connection is kept; refresh its status before continuing."));
+        }else{
+            enrollmentPoll->stop();
+            if(state=="pending")notice->setText(tr("Waiting for the inviting computer. Keep it online, then check this connection."));
+            else if(state=="legacy-retirement-unconfirmed")notice->setText(tr("The old relay has not confirmed retirement. The new connection is saved; your current configuration is unchanged."));
+            else if(value.value("legacy_retirement")=="unconfirmed")notice->setText(tr("The encrypted workspace is connected. Legacy relay retirement remains unconfirmed; its old records or credentials may remain on that relay."));
+            else notice->setText(tr("Workspace connected."));
+        }
+        refresh();
     }
     void clearCode(){copiedCode.clear();invitationId.clear();expires=0;codeStatus->clear();controls(process!=nullptr);}
     void updateForm(){const bool joining=mode->currentData()=="join";code->setVisible(joining);codeLabel->setVisible(joining);submit->setText(changing?(joining?tr("Change and join workspace"):tr("Change and create workspace")):(joining?tr("Join workspace"):tr("Create workspace")));}
@@ -147,14 +198,15 @@ private:
         start->setVisible(active);stop->setVisible(active||(snapshot.value("state")=="retired"&&snapshot.value("running").toBool()));start->setEnabled(writable&&!snapshot.value("running").toBool());stop->setEnabled(known&&!busy&&snapshot.value("running").toBool()&&hex(snapshot.value("generation"),32));
         reload->setEnabled(!busy);check->setVisible(hasPending);check->setEnabled(known&&!busy&&hasPending);
         const bool legacyUnconfirmed=snapshot.value("pending").toObject().value("state")=="legacy-retirement-unconfirmed";
-        check->setText(legacyUnconfirmed?tr("Disconnect legacy locally and switch…"):tr("Check connection"));
+        const auto pendingState=snapshot.value("pending").toObject().value("state").toString();
+        check->setText(legacyUnconfirmed?tr("Disconnect legacy locally and switch…"):pendingState.startsWith("migration-")?tr("Continue connecting"):tr("Check connection"));
         pending->setVisible(hasPending);if(hasPending)pending->setText(legacyUnconfirmed?tr("The new encrypted workspace is ready. The old relay has not confirmed retirement. You can explicitly disconnect its local configuration before switching."):tr("A workspace connection is saved and waiting. Check its result before starting another connection."));
         invitationRow->setVisible(active);giveCode->setEnabled(writable);copyCode->setEnabled(writable&&!copiedCode.isEmpty()&&QDateTime::currentSecsSinceEpoch()<expires);cancelCode->setEnabled(writable&&!copiedCode.isEmpty());
     }
     void render(){
         const auto state=snapshot.value("state").toString();
         if(!changing&&(state=="active"||state=="retired")){
-            url->setText(snapshot.value("server_url").toString());workspaceName->setText(snapshot.value("workspace_name").toString());computerName->setText(snapshot.value("computer_name").toString());
+            url->setText(snapshot.value("server_url").toString());
         }
         if(!changing&&state=="legacy"&&RelaySettings::validUrl(snapshot.value("server_url").toString()))url->setText(snapshot.value("server_url").toString());
         if(state=="active"){
@@ -167,13 +219,14 @@ private:
         if(protectionChanged)protectionChanged(snapshot.value("encrypted").toBool());
         controls(false);
     }
-    void checkEnrollment(){
-        auto run=[this](bool allowLocal){request("check",allowLocal?QJsonObject{{"allow_unconfirmed_legacy_retirement",true}}:QJsonObject{},[this](const QJsonObject &result){
-            if(result.value("state")=="pending")notice->setText(tr("Waiting for the inviting computer. Check again when it is online."));
-            else if(result.value("state")=="legacy-retirement-unconfirmed")notice->setText(tr("The old relay has not confirmed retirement. Your current configuration is unchanged."));
-            else if(result.value("legacy_retirement")=="unconfirmed")notice->setText(tr("The encrypted workspace is connected. Legacy relay retirement remains unconfirmed; its old records or credentials may remain on that relay."));
-            refresh();
-        });};
+    void checkEnrollment(bool automatic=false){
+        if(!automatic)enrollmentWait.restart();
+        auto run=[this](bool allowLocal){
+            QJsonObject payload;
+            if(allowLocal)payload.insert("allow_unconfirmed_legacy_retirement",true);
+            if(snapshot.value("state")=="legacy")payload.insert("allow_legacy_service_handover",true);
+            request("check",payload,[this](const QJsonObject &result){enrollmentResult(result);});
+        };
         if(snapshot.value("pending").toObject().value("state")!="legacy-retirement-unconfirmed"){run(false);return;}
         auto *dialog=new QMessageBox(QMessageBox::Warning,tr("Disconnect legacy locally"),tr("The old relay has not confirmed retirement. Its old records and credentials may remain active on that relay. This only disconnects the saved legacy configuration on this computer and switches to the new encrypted workspace. Local agents, projects and conversations stay on this computer."),QMessageBox::Yes|QMessageBox::Cancel,this);
         dialog->setObjectName("confirmLegacyLocalDisconnect");dialog->setDefaultButton(QMessageBox::Cancel);dialog->button(QMessageBox::Yes)->setText(tr("Disconnect legacy locally and switch"));dialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -184,17 +237,20 @@ private:
         if(!RelaySettings::validUrl(relay)){notice->setText(tr("Enter an HTTPS relay URL without credentials, query or fragment."));return;}
         const bool joining=mode->currentData()=="join";
         if(joining&&(!code->text().startsWith("ze1.")||code->text().size()>4096)){notice->setText(tr("Enter a computer invitation code from an enrolled computer."));return;}
-        QJsonObject payload{{"expected_revision",snapshot.value("config_revision")},{"server_url",relay},{"workspace_name",workspaceName->text().isEmpty()?tr("Workspace"):workspaceName->text()},{"computer_name",computerName->text().isEmpty()?tr("Computer"):computerName->text()}};
+        const auto computer=QSysInfo::machineHostName().trimmed().left(128);
+        QJsonObject payload{{"expected_revision",snapshot.value("config_revision")},{"server_url",relay},{"workspace_name",tr("Workspace")},{"computer_name",computer.isEmpty()?tr("Computer"):computer}};
+        if(changing&&snapshot.value("state")=="legacy")payload.insert("allow_legacy_service_handover",true);
         if(joining)payload.insert("code",code->text());
         const auto action=(changing?QStringLiteral("switch-"):QString())+(joining?QStringLiteral("join"):QStringLiteral("create"));
         auto submitAction=[this,action,payload]{request(action,payload,[this](const QJsonObject &value){
-            code->clear();changing=false;clearCode();notice->setText(value.value("state")=="pending"?tr("Waiting for the inviting computer. Keep its connector running, then check this connection."):value.value("state")=="legacy-retirement-unconfirmed"?tr("The old relay has not confirmed retirement. The new connection is saved; your current configuration is unchanged."):tr("Workspace connected. Start the connector to use it from your phones."));refresh();
+            enrollmentResult(value);
         });};
-        if(!changing){submitAction();return;}
+        if(!changing){enrollmentWait.restart();submitAction();return;}
         auto *dialog=new QMessageBox(QMessageBox::Warning,tr("Change workspace"),tr("This computer will leave its current workspace. Phone access through this computer will end. Local agents, projects and saved conversations stay on this computer."),QMessageBox::Yes|QMessageBox::Cancel,this);
         dialog->setObjectName("confirmWorkspaceChange");dialog->setDefaultButton(QMessageBox::Cancel);dialog->button(QMessageBox::Yes)->setText(tr("Change workspace"));dialog->setAttribute(Qt::WA_DeleteOnClose);
         connect(dialog,&QMessageBox::finished,this,[this,submitAction](int result){
             if(result!=QMessageBox::Yes)return;
+            enrollmentWait.restart();
             if(snapshot.value("running").toBool())request("stop",{{"generation",snapshot.value("generation")}},[this,submitAction](const QJsonObject &value){
                 if(value.value("state")=="stopped")submitAction();else{notice->setText(tr("The current phone request is still draining. Refresh status, then continue the workspace change."));refresh();}
             });else submitAction();
@@ -213,12 +269,22 @@ private:
             if(process!=p)return;deadline->stop();process=nullptr;
             const auto bytes=*output+p->readAllStandardOutput();const auto doc=QJsonDocument::fromJson(bytes);const auto result=doc.object();
             if(!success||!doc.isObject()||bytes.size()>65536||!confirmed(action,result,payload)){
+                enrollmentPoll->stop();
+                continueEnrollment=false;
+                if(QStringList{"create","join","switch-create","switch-join"}.contains(action)){recoveringEnrollment=true;recoveryRevision=payload.value("expected_revision").toString();}
                 known=false;controls(true);reload->setEnabled(true);summary->setText(tr("Workspace status is unconfirmed"));
                 if(protectionChanged)protectionChanged(true);
                 const auto error=result.value("error").toString();notice->setText(error.isEmpty()||error.size()>1024?tr("Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed."):error);
+                // Enrollment may already be durable even when activation failed.
+                // Recover its saved state without repeating the mutation.
+                if(action!="status")QTimer::singleShot(0,this,[this]{refresh();});
             }else{
                 controls(false);
-                if(action=="status"){snapshot=result;known=true;render();}
+                if(action=="status"){
+                    snapshot=result;known=true;
+                    if(recoveringEnrollment&&(snapshot.value("pending").isObject()||(snapshot.value("state")=="active"&&snapshot.value("config_revision").toString()!=recoveryRevision)))finishEnrollmentUi();
+                    render();
+                }
                 else if(done)done(result);
             }
             p->deleteLater();

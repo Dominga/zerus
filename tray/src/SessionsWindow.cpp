@@ -4179,7 +4179,7 @@ void SessionsWindow::renderDetails()
     m_archiveAction->setVisible(s.cmd != "dsh" && (s.state == "paused" || s.state == "stopped"));
     m_archiveAction->setEnabled(!updating && NativeSessionCapabilities::action(s,"archive",m_details));
     const auto endOperation=NativeSessionCapabilities::endOperation(s,m_details);
-    m_forgetAction->setEnabled(!updating && NativeSessionCapabilities::action(s,endOperation,m_details));
+    m_forgetAction->setEnabled(!updating && NativeSessionCapabilities::action(s,NativeSessionCapabilities::capability(s,endOperation),m_details));
     m_forgetAction->setToolTip(NativeSessionCapabilities::forgetsBindingOnly(s,m_details) ? tr("Zerus forgets this session. The conversation stays in OpenCode.") : QString());
     m_forgetAction->setText(archived ? tr("Forget archived session…") : endOperation == "terminate" ? tr("Terminate session…") : tr("Forget saved session…"));
     const auto questionError=m_details.value("pending_questions_error").toString();
@@ -5733,7 +5733,7 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
     m_sessionMenu->addSeparator();
     const auto endOperation=NativeSessionCapabilities::endOperation(target);
     add(archived ? tr("Forget archived session…") : endOperation == "terminate" ? tr("Terminate session…") : tr("Forget saved session…"),
-        "contextTerminateSession", SessionMenuAction::Terminate, available && NativeSessionCapabilities::action(target,endOperation) && (!archived || !target.archiveId.isEmpty()),NativeSessionCapabilities::actionReason(target,endOperation));
+        "contextTerminateSession", SessionMenuAction::Terminate, available && NativeSessionCapabilities::action(target,NativeSessionCapabilities::capability(target,endOperation)) && (!archived || !target.archiveId.isEmpty()),NativeSessionCapabilities::actionReason(target,NativeSessionCapabilities::capability(target,endOperation)));
     m_sessionMenu->popup(position);
 }
 
@@ -6099,7 +6099,7 @@ void SessionsWindow::renameSession()
 void SessionsWindow::terminateSession()
 {
     const auto *e = selected(); if (!e || !e->online || isTerminating(*e) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest
-        || !NativeSessionCapabilities::action(e->session,NativeSessionCapabilities::endOperation(e->session,m_details),m_details)) return;
+        || !NativeSessionCapabilities::action(e->session,NativeSessionCapabilities::capability(e->session,NativeSessionCapabilities::endOperation(e->session,m_details)),m_details)) return;
     const Entry original = *e;
     const QString host = e->host, name = e->session.name, archiveId = e->session.archiveId;
     const bool archived = e->session.state == "archived";

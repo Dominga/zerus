@@ -724,6 +724,13 @@ void TestHgsClient::nativeApiSessionsRetainExactCapabilities()
     legacy.terminalReported=false;QVERIFY(!NativeSessionCapabilities::terminal(legacy));
     QVERIFY(NativeSessionCapabilities::terminal(legacy,{{"terminal_supported",true}}));
     legacy.cmd="dsh";QVERIFY(!NativeSessionCapabilities::terminal(legacy,{{"terminal_supported",true}}));
+    // Native DeepSeek never reports terminate; a running session ends through Forget.
+    legacy.state="running";legacy.actionsReported=true;legacy.allowedActions={"rename","pause","forget","fork"};
+    QCOMPARE(NativeSessionCapabilities::endOperation(legacy),QString("terminate"));
+    QCOMPARE(NativeSessionCapabilities::capability(legacy,"terminate"),QString("forget"));
+    QVERIFY(NativeSessionCapabilities::action(legacy,NativeSessionCapabilities::capability(legacy,"terminate")));
+    legacy.allowedActions={"rename","pause"};QVERIFY(!NativeSessionCapabilities::action(legacy,NativeSessionCapabilities::capability(legacy,"terminate")));
+    QCOMPARE(NativeSessionCapabilities::capability(session,"terminate"),QString("terminate"));
     // An interactive native attach client is not a pane-snapshot capability.
     const auto nativeRows = HgsClient::parseSessions(QJsonArray{QJsonObject{
         {"name", "opencode/project/tui"}, {"cmd", "opencode"}, {"terminal_supported", false},

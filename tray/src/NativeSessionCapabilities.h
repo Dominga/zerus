@@ -26,6 +26,13 @@ inline QString endOperation(const SessionInfo &session, const QJsonObject &detai
 {
     return session.state == "running" && !forgetsBindingOnly(session, details) ? QStringLiteral("terminate") : QStringLiteral("forget");
 }
+// The adapter capability a GUI operation needs. Native DeepSeek has no terminate
+// API: `hgs kill` ends a running session through its Forget lifecycle action,
+// which closes the agent, drops the binding and keeps the native history.
+inline QString capability(const SessionInfo &session, const QString &operation)
+{
+    return operation == "terminate" && session.cmd == "dsh" ? QStringLiteral("forget") : operation;
+}
 inline QString actionReason(const SessionInfo &session, const QString &operation, const QJsonObject &details = {})
 {
     const auto reason=details.value("action_reasons").toObject().value(operation).toString(session.actionReasons.value(operation).toString());

@@ -602,13 +602,11 @@ pub fn parent_and_name(pid: u32) -> io::Result<(Option<u32>, Option<String>)> {
     ))
 }
 
-/// Every other process's current directory and command name.
-#[cfg(target_os = "linux")]
+/// Read-only compatibility fixture; cleanup uses the strict sampler below.
+#[cfg(all(test, target_os = "linux"))]
 pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
     let own = std::process::id();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Ok(Vec::new());
-    };
+    let entries = fs::read_dir("/proc").map_err(|e|format!("Cannot inspect running processes: {e}"))?;
     Ok(entries
         .flatten()
         .filter_map(|entry| {
@@ -624,19 +622,19 @@ pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>,
         })
         .collect())
 }
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
     use std::os::unix::ffi::OsStrExt;
     let own = std::process::id();
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if count <= 0 {
-        return Ok(Vec::new());
+        return Err("Cannot enumerate running processes".into());
     }
     let mut pids = vec![0 as libc::c_int; count as usize + 64];
     let size = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
     let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, size) };
     if found <= 0 {
-        return Ok(Vec::new());
+        return Err("Cannot enumerate running processes".into());
     }
     pids.truncate((found as usize).min(pids.len()));
     Ok(pids
@@ -680,8 +678,128 @@ pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>,
         .collect())
 }
 /// Without a way to read other processes' directories, nothing may count as unused.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+    Err("Running processes cannot be inspected on this computer".into())
+}
+
+/// Automatic cleanup needs a complete bounded sample of this user's live
+/// processes. A failed cwd/executable read is unknown, never evidence of disuse.
+#[cfg(target_os = "linux")]
+pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+    use std::io::Read;
+    let deadline = deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    let uid = unsafe { libc::getuid() };
+    let error = || "Running process coverage is incomplete; review the worktree manually".to_owned();
+    fn read(path: &Path) -> std::io::Result<String> {
+        let mut bytes=Vec::new();
+        fs::File::open(path)?.take(65537).read_to_end(&mut bytes)?;
+        if bytes.len()>65536 { return Err(std::io::Error::other("process metadata exceeds its bound")); }
+        String::from_utf8(bytes).map_err(std::io::Error::other)
+    }
+    fn identity(path: &Path) -> std::io::Result<(String,bool)> {
+        let raw=read(&path.join("stat"))?;
+        let fields:Vec<_>=raw.rsplit_once(") ").ok_or_else(||std::io::Error::other("invalid process identity"))?.1.split_whitespace().collect();
+        let start=fields.get(19).ok_or_else(||std::io::Error::other("invalid process start"))?;
+        Ok(((*start).to_owned(),matches!(fields.first(),Some(&"Z"|&"X"))))
+    }
+    let entries=fs::read_dir("/proc").map_err(|_|error())?;
+    let mut rows=Vec::new();
+    for (count,entry) in entries.enumerate() {
+        if count>=32768 || std::time::Instant::now()>=deadline { return Err(error()); }
+        let entry=entry.map_err(|_|error())?;
+        let Some(pid)=entry.file_name().to_str().and_then(|s|s.parse::<u32>().ok()) else {continue};
+        let path=entry.path();
+        let status=match read(&path.join("status")) {
+            Ok(status)=>status,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        let uids=status.lines().find_map(|line|line.strip_prefix("Uid:")).ok_or_else(error)?
+            .split_whitespace().map(str::parse::<u32>).collect::<std::result::Result<Vec<_>,_>>().map_err(|_|error())?;
+        if uids.len()!=4 {return Err(error());}
+        if !uids.contains(&uid) {continue;}
+        let before=match identity(&path) {
+            Ok(before)=>before,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        if before.1 {continue;}
+        let cwd=fs::read_link(path.join("cwd"));
+        let image=fs::read_link(path.join("exe"));
+        let after=match identity(&path) {
+            Ok(after)=>after,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        if after.1 {continue;}
+        if before!=after {return Err(error());}
+        let (cwd,image)=(cwd.map_err(|_|error())?,image.map_err(|_|error())?);
+        let name=read(&path.join("comm")).map(|s|s.trim().to_owned()).unwrap_or_default();
+        rows.push((pid,cwd,name.clone()));rows.push((pid,image,name));
+    }
+    if std::time::Instant::now()>=deadline {return Err(error());}
+    Ok(rows)
+}
+
+#[cfg(target_os = "macos")]
+pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let deadline=deadline.min(std::time::Instant::now()+std::time::Duration::from_secs(2));
+    let uid=unsafe {libc::getuid()};
+    let error=||"Running process coverage is incomplete; review the worktree manually".to_owned();
+    fn identity(pid:i32)->std::io::Result<libc::proc_bsdinfo> {
+        let mut info:libc::proc_bsdinfo=unsafe {std::mem::zeroed()};
+        let size=std::mem::size_of_val(&info) as libc::c_int;
+        let read=unsafe {libc::proc_pidinfo(pid,libc::PROC_PIDTBSDINFO,0,&mut info as *mut _ as *mut libc::c_void,size)};
+        if read!=size {return Err(std::io::Error::last_os_error());}
+        Ok(info)
+    }
+    let count=unsafe {libc::proc_listallpids(std::ptr::null_mut(),0)};
+    if count<=0 || count>32704 {return Err(error());}
+    let mut pids=vec![0 as libc::c_int;count as usize+64];
+    let found=unsafe {libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void,(pids.len()*std::mem::size_of::<libc::c_int>()) as libc::c_int)};
+    if found<=0 || found as usize>=pids.len() {return Err(error());}
+    pids.truncate(found as usize);
+    let mut rows=Vec::new();
+    for pid in pids.into_iter().filter(|pid|*pid>0) {
+        if std::time::Instant::now()>=deadline {return Err(error());}
+        let before=match identity(pid) {
+            Ok(info)=>info,
+            Err(e) if e.raw_os_error()==Some(libc::ESRCH)=>continue,
+            Err(_)=>return Err(error()),
+        };
+        if before.pbi_pid!=pid as u32 {return Err(error());}
+        if (before.pbi_uid!=uid && before.pbi_ruid!=uid) || before.pbi_status==libc::SZOMB {continue;}
+        let mut info:libc::proc_vnodepathinfo=unsafe {std::mem::zeroed()};
+        let size=std::mem::size_of_val(&info) as libc::c_int;
+        let read=unsafe {libc::proc_pidinfo(pid,libc::PROC_PIDVNODEPATHINFO,0,&mut info as *mut _ as *mut libc::c_void,size)};
+        let mut image=[0u8;4096];
+        let length=unsafe {libc::proc_pidpath(pid,image.as_mut_ptr() as *mut libc::c_void,image.len() as u32)};
+        let after=match identity(pid) {
+            Ok(info)=>info,
+            Err(e) if e.raw_os_error()==Some(libc::ESRCH)=>continue,
+            Err(_)=>return Err(error()),
+        };
+        if after.pbi_status==libc::SZOMB {continue;}
+        if after.pbi_pid!=pid as u32 || (before.pbi_start_tvsec,before.pbi_start_tvusec,before.pbi_uid,before.pbi_ruid)!=(after.pbi_start_tvsec,after.pbi_start_tvusec,after.pbi_uid,after.pbi_ruid)
+            || read!=size || length<=0 {return Err(error());}
+        let path=&info.pvi_cdir.vip_path;
+        let bytes=unsafe {std::slice::from_raw_parts(path.as_ptr() as *const u8,std::mem::size_of_val(path))};
+        let end=bytes.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(error)?;
+        let image_end=image.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(error)?;
+        let cwd=PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
+        let image=PathBuf::from(std::ffi::OsStr::from_bytes(&image[..image_end]));
+        let name=unsafe {std::slice::from_raw_parts(before.pbi_comm.as_ptr() as *const u8,before.pbi_comm.len())};
+        let name=String::from_utf8_lossy(&name[..name.iter().position(|b|*b==0).unwrap_or(name.len())]).into_owned();
+        rows.push((pid as u32,cwd,name.clone()));rows.push((pid as u32,image,name));
+    }
+    if std::time::Instant::now()>=deadline {return Err(error());}
+    Ok(rows)
+}
+
+#[cfg(not(any(target_os = "linux",target_os = "macos")))]
+pub fn worktree_processes(_deadline:std::time::Instant)->std::result::Result<Vec<(u32,PathBuf,String)>,String> {
     Err("Running processes cannot be inspected on this computer".into())
 }
 

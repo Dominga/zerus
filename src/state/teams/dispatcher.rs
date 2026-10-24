@@ -40,6 +40,9 @@ pub(crate) struct Seen {
     pub asking: bool,
     /// Its process or native session runs.
     pub live: bool,
+    /// Its working folder, where a member that may not write the team's
+    /// files leaves its report.
+    pub cwd: String,
 }
 
 /// Every session of this computer and its peers from one listing.
@@ -70,6 +73,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 reply_at: record["reply_at"].as_f64(),
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 live,
+                cwd: field("cwd").to_owned(),
             });
         }
     }
@@ -340,8 +344,9 @@ pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> Strin
     let approval = card["approval"] == true;
     let mut text = if approval {
         format!("[Zerus team \u{b7} from: {role} \u{b7} permission]\n{role} asks you, the lead, for a permission instead of the owner. \
-                 Allow only what its task needs inside the team's folder; deny anything that would change other folders, the \
-                 system or permissions above the project, or delete what it cannot restore. When in doubt, deny and ask the owner.\n")
+                 You decide: allow what its task needs inside the team's folder; deny what would change other folders, the \
+                 system or permissions, or delete what it cannot restore, and ask the owner only for those. Access only to \
+                 send its report is never needed: deny it, Zerus takes the report from its folder or its last reply.\n")
     } else {
         format!("[Zerus team \u{b7} from: {role} \u{b7} question]\n{role} asks you, the lead, instead of the owner:\n")
     };
@@ -445,7 +450,14 @@ pub(crate) fn last_reply(session: &SessionRef) -> anyhow::Result<String> {
     let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
-    let text = record["last_message"].as_str().unwrap_or_default().trim().to_owned();
+    let mut text = record["last_message"].as_str().unwrap_or_default().trim().to_owned();
+    if text.is_empty() {
+        // DeepSeek reports its replies as the main agent's messages.
+        text = record["events"].as_array().into_iter().flatten().rev()
+            .find(|e| e["type"] == "AgentMessage" && e["agent_id"].as_str().unwrap_or_default().is_empty()
+                && !e["detail"].as_str().unwrap_or_default().trim().is_empty())
+            .and_then(|e| e["detail"].as_str()).unwrap_or_default().trim().to_owned();
+    }
     anyhow::ensure!(!text.is_empty(), "The member's session has no reply yet");
     Ok(text)
 }
@@ -957,6 +969,12 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     anyhow::ensure!(output.status.success(), "hgs ls failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     let sessions = seen(&serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?);
     for team in &teams {
+        if let Err(error) = take_dropped_reports(store, team, &sessions) {
+            eprintln!("hgs team worker: {}: dropped report: {error}", team.name);
+        }
+    }
+    let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
+    for team in &teams {
         for step in steps(team, &sessions, now()) {
             if let Err(error) = run_step(store, team, &step, host) {
                 eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
@@ -964,6 +982,35 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// Where `hgs team report` leaves a report it could not record (a member in a
+/// sandbox may not write the team's files): in the member's own folder.
+pub(crate) fn dropped_report(folder: &Path, attempt: &str) -> PathBuf {
+    folder.join(".zerus-team").join(format!("report-{attempt}.json"))
+}
+
+/// Records the reports members left in their folders, as their own reports.
+fn take_dropped_reports(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<()> {
+    if team.status != TeamStatus::Running && team.status != TeamStatus::Paused {
+        return Ok(());
+    }
+    for task in &team.tasks {
+        let Some(attempt) = task.open_attempt() else { continue };
+        let Some(member) = team.member(&attempt.member) else { continue };
+        let Some(found) = session_of(member, seen).filter(|s| !s.cwd.is_empty() && s.host.is_empty()) else { continue };
+        let path = dropped_report(Path::new(&found.cwd), &attempt.id);
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let _ = fs::remove_file(&path);
+        let input: Value = serde_json::from_slice(&bytes).context("invalid dropped report")?;
+        anyhow::ensure!(input["team"] == team.id.as_str() && input["attempt"] == attempt.id.as_str(), "a dropped report for another attempt");
+        let request = json!({"task":task.id,"attempt":attempt.id,"text":input["text"]});
+        let member_id = attempt.member.clone();
+        change(store, &team.id, |team, events| {
+            ops::apply(team, "report", &request, &ops::Actor::Member(member_id), &BTreeSet::new(), events).map(|_| ())
+        })?;
+    }
+    Ok(())
 }
 
 pub(crate) fn worker() -> Result<i32> {
@@ -1182,6 +1229,31 @@ mod tests {
         assert!(launch_args(&team, &claude, "D:/w").windows(4).any(|w| w == ["--model", "opus", "--effort", "high"]));
         let dsh = Member { agent: "dsh".into(), ..codex };
         assert!(!launch_args(&team, &dsh, "D:/w").iter().any(|a| a == "--" || a == "-d"));
+    }
+
+    #[test]
+    fn a_report_left_in_the_members_folder_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let folder = dir.path().join("work");
+        let path = dropped_report(&folder, "A1");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, json!({"team":t.id,"task":id,"attempt":"A1","text":"Done and checked"}).to_string()).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_dropped_reports(&mut store, &current, &[member]).unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        assert_eq!((attempt.state, attempt.report.as_ref().map(|r| r.text.as_str())), (AttemptState::Reported, Some("Done and checked")));
+        assert!(!path.exists());
     }
 
     #[test]

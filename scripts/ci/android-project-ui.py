@@ -23,7 +23,7 @@ APP_CLASSES = {"Lapp/zerus/mobile/SessionProjectController;", "Lapp/zerus/mobile
 IMAGE = "system-images;android-35;google_apis;x86_64"
 SERIAL = "emulator-5554"
 REVISIONS = {"emulator": "37.2.12", IMAGE: "9.0.0"}
-HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1"})
+HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1", "20261023.334.3"})
 
 
 def select_suite(arguments):

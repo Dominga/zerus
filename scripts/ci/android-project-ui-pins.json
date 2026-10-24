@@ -37,6 +37,25 @@
         "platform_tools": "37.0.1"
       },
       "version": "20261018.339.1"
+    },
+    {
+      "image": "ubuntu-24.04",
+      "java_home_variable": "JAVA_HOME_17_X64",
+      "jdk": "17.0.20.1+1",
+      "readme_git_blob": "572b75495a1270994896966fc014316a7cb7a7d0",
+      "readme_sha256": "01917c6c12c3efc53f2b803f5b25268bc4477aedb38705742123b041bba0a409",
+      "readme_url": "https://github.com/actions/runner-images/blob/ubuntu24/20261023.334/images/ubuntu/Ubuntu2404-Readme.md",
+      "release_target_commit": "bf62c713fd9c48247e2a4d3ce99a9f0554cd745e",
+      "release_url": "https://github.com/actions/runner-images/releases/tag/ubuntu24/20261023.334",
+      "runner_summary_jdk": "17.0.20+1",
+      "scope": "Runner release metadata binds the selected base/build; actual bounded JDK release text is retained by admission. Vendor spelling is not inferred from the failed previous job.",
+      "sdk": {
+        "build_tools": "36.0.0",
+        "command_line_tools": "12.0",
+        "platform": "android-36",
+        "platform_tools": "37.0.1"
+      },
+      "version": "20261023.334.3"
     }
   ],
   "jdk_release": {
@@ -89,5 +108,5 @@
   },
   "schema": 1,
   "scope": "Official stable metadata selection; archive bytes are fetched by sdkmanager only on the disposable hosted job, not by source preparation. Installed package revisions and actual tool/image SHA-256 identities are checked separately. No mapping of old development-host platform-tools binaries is claimed.",
-  "selected_date": "2026-10-20"
+  "selected_date": "2026-10-24"
 }

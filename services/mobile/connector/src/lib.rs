@@ -48,6 +48,7 @@ pub mod windows_management;
 pub mod workspace;
 pub mod workspace_cli;
 pub mod workspace_lifecycle;
+pub mod workspace_service;
 
 pub use error::ConnectorError;
 
@@ -292,4 +293,10 @@ async fn signals(stopping: &runtime::Event) {
         runtime::log("INFO", "Connector stopping after the request in progress");
         stopping.set();
     }
+}
+
+/// Uses the production Unix signal handler in the isolated service fixture.
+#[cfg(all(unix, feature = "test-hooks"))]
+pub async fn workspace_service_fixture_signals(stopping: &runtime::Event) {
+    signals(stopping).await
 }

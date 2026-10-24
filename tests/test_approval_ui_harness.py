@@ -1233,7 +1233,7 @@ class ApprovalHarnessTests(unittest.TestCase):
     def test_android_focus_diagnostics_project_to_exact_reviewed_driver_and_unchanged_ui(self):
         source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
         self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(source).encode()).hexdigest(),
-                         "f71a2bfe21b1803897c3aec3297bdb29971d5c5dbb9521486b68a4405bc5f770")
+                         "49c3814a3ef8cdb7be01e3a4792a6f5045559fb7c89db87fd53784feb4e76450")
         for path, digest in {
             "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt": "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7",
             "mobile/android/app/src/main/java/app/zerus/mobile/QuestionUiProbe.kt": "beb6a3caf6ae07ca3a062f4f30286aad3b19b71427eed7c9e8d662f7d5ae85be",

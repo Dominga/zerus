@@ -138,6 +138,17 @@ pub(crate) struct Member {
     /// until you relaunch it.
     #[serde(default)]
     pub error: String,
+    /// DeepSeek takes its model and effort after it starts; once tried, the
+    /// dispatcher does not try again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settings_applied: bool,
+}
+
+impl Member {
+    /// A started DeepSeek member whose model or effort was chosen.
+    pub(crate) fn needs_settings(&self) -> bool {
+        self.agent == "dsh" && !self.settings_applied && (!self.model.is_empty() || !self.effort.is_empty())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

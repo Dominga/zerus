@@ -79,6 +79,8 @@ pub(crate) enum Step {
     TurnEnded { task: u32, at: f64 },
     NoReport { task: u32 },
     NotifyLead { task: u32 },
+    /// A DeepSeek member's model and effort, before its first task.
+    Settings { member: String },
 }
 
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
@@ -177,7 +179,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             continue;
         }
         busy.insert(member.id.as_str());
-        steps.push(Step::HandOut { task: id, member: member.id.clone() });
+        steps.push(if member.needs_settings() { Step::Settings { member: member.id.clone() } } else { Step::HandOut { task: id, member: member.id.clone() } });
     }
     steps
 }
@@ -400,8 +402,10 @@ pub(crate) fn launch_args(team: &Team, member: &Member, folder: &str) -> Vec<Str
     if terminal {
         // A terminal agent reports its status only once a conversation
         // starts; a short first turn makes the member Ready for its task.
+        // Its model and effort go on its own command line.
+        args.push("--".into());
+        args.extend(agent_args(&member.agent, &member.model, &member.effort));
         args.extend([
-            "--".into(),
             format!(
                 "You are {} in the Zerus agent team {}. Tasks arrive as messages that begin with [Zerus team.                  Until one arrives do nothing and reply only: Ready.",
                 member.role, team.name
@@ -409,6 +413,38 @@ pub(crate) fn launch_args(team: &Team, member: &Member, folder: &str) -> Vec<Str
         ]);
     }
     args
+}
+
+/// A terminal agent's own model and effort options, after `--`.
+pub(crate) fn agent_args(agent: &str, model: &str, effort: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    if !model.is_empty() {
+        args.extend(["--model".into(), model.to_owned()]);
+    }
+    if !effort.is_empty() {
+        match agent {
+            "claude" => args.extend(["--effort".into(), effort.to_owned()]),
+            "codex" => args.extend(["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]),
+            _ => {}
+        }
+    }
+    args
+}
+
+/// DeepSeek's model is provider/model; a bare name keeps the session's own.
+fn apply_settings(member: &Member) -> anyhow::Result<()> {
+    let session = member.session.as_ref().context("no session")?;
+    let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id});
+    if member.model.contains('/') {
+        input["model"] = json!(member.model);
+    }
+    if !member.effort.is_empty() {
+        input["effort"] = json!(member.effort);
+    }
+    let output = hgs(&session.host, &["settings", &session.name, "--json"], Some(&input), Duration::from_secs(120))?;
+    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    Ok(())
 }
 
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
@@ -565,6 +601,19 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }),
         Step::NotifyLead { task } => notify_lead(store, &team.id, *task),
+        Step::Settings { member } => {
+            let found = team.member(member).cloned().context("unknown member")?;
+            let result = apply_settings(&found);
+            change(store, &team.id, |team, events| {
+                let role = team.role_of(member);
+                let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
+                found.settings_applied = true;
+                if let Err(error) = &result {
+                    events.push(Event::new("member_settings_failed", json!({"member":role,"error":error.to_string()})));
+                }
+                Ok(())
+            })
+        }
     }
 }
 
@@ -790,8 +839,28 @@ mod tests {
         assert_eq!(args[..8], ["codex", "D:/w", "--new", "-n", "checkout-dev", "--launch-id", "L", "-d"]);
         assert!(args.windows(2).any(|w| w == ["--permissions", "bypass"]));
         assert!(args.last().unwrap().contains("You are Backend in the Zerus agent team Checkout"));
+        // The role's model and effort go on the agent's own command line.
+        let tuned = Member { model: "gpt-5.5".into(), effort: "low".into(), ..codex.clone() };
+        let args = launch_args(&team, &tuned, "D:/w");
+        let after = &args[args.iter().position(|a| a == "--").unwrap() + 1..];
+        assert_eq!(after[..4], ["--model", "gpt-5.5", "-c", "model_reasoning_effort=\"low\""]);
+        let claude = Member { agent: "claude".into(), model: "opus".into(), effort: "high".into(), ..codex.clone() };
+        assert!(launch_args(&team, &claude, "D:/w").windows(4).any(|w| w == ["--model", "opus", "--effort", "high"]));
         let dsh = Member { agent: "dsh".into(), ..codex };
         assert!(!launch_args(&team, &dsh, "D:/w").iter().any(|a| a == "--" || a == "-d"));
+    }
+
+    #[test]
+    fn a_deepseek_member_takes_its_settings_before_its_task() {
+        let mut team = team();
+        let dsh = team.members.iter_mut().find(|m| m.id == "dev").unwrap();
+        dsh.agent = "dsh".into(); dsh.effort = "low".into();
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        let steps_now = steps(&team, &seen, 1.0);
+        assert!(steps_now.contains(&Step::Settings { member: "dev".into() }), "{steps_now:?}");
+        assert!(!steps_now.iter().any(|s| matches!(s, Step::HandOut { member, .. } if member == "dev")));
+        team.members.iter_mut().find(|m| m.id == "dev").unwrap().settings_applied = true;
+        assert!(steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::HandOut { member, .. } if member == "dev")));
     }
 
     #[test]

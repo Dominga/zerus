@@ -3363,7 +3363,28 @@ void SessionsWindow::rebuild()
     QStringList visibleIdentities;
     visibleIdentities.reserve(visible.size());
     for (const auto &entry : visible) visibleIdentities.append(entry.identity);
-    const auto projectMembers = m_organization.orderedMembers(visibleIdentities);
+    auto projectMembers = m_organization.orderedMembers(visibleIdentities);
+    // A team's members stand under its lead, in whichever project they were filed.
+    if (m_teams && !m_teams->teams().isEmpty()) {
+        QHash<int, QString> groupOf;
+        for (auto it = projectMembers.cbegin(); it != projectMembers.cend(); ++it) for (int i : it.value()) groupOf.insert(i, it.key());
+        for (const auto &team : m_teams->teams()) {
+            if (team.status == "archived") continue;
+            int lead = -1; QList<int> follow;
+            for (int i = 0; i < visible.size(); ++i) {
+                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
+                if (!member) continue;
+                if (member->lead) lead = i; else follow.append(i);
+            }
+            if (lead < 0 || !groupOf.contains(lead)) continue;
+            const QString target = groupOf.value(lead);
+            for (int i : follow) {
+                const QString from = groupOf.value(i);
+                if (from.isEmpty() || from == target) continue;
+                projectMembers[from].removeAll(i); projectMembers[target].append(i); groupOf[i] = target;
+            }
+        }
+    }
     const auto leads = SessionLeads::all();   // WhiteWh fork: read once per rebuild
     for (const auto &group : m_organization.groups()) {
         if (!m_projectFilters.isEmpty() && !m_projectFilters.contains(group.id)) continue;

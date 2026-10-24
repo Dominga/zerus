@@ -44,6 +44,13 @@ class HostedMacAdmission(unittest.TestCase):
                 [], 56, '<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)', '')):
             self.assertIsNone(scope.identity('_fixture'))
 
+    def test_changed_scope_identity_never_authorizes_process_signals(self):
+        with patch.object(scope, 'identity', return_value={'GeneratedUID': 'different'}), \
+                patch.object(scope, 'command') as command:
+            with self.assertRaisesRegex(ValueError, 'no signal is authorized'):
+                scope.signal_scope('_fixture', 60000, {'GeneratedUID': 'original'}, 'TERM')
+            command.assert_not_called()
+
 
 class IntegrationScheduling(unittest.TestCase):
     def test_mac_process_scope_keeps_all_three_whole_modules(self):

@@ -87,8 +87,11 @@ creates one locked, unprivileged temporary user for each complete module there.
 The normal CLI, all fixtures, real process blockers and private tmux servers run
 under that UID with a clean environment and private home. A kernel UID inventory
 and real interpreter preflight establish this scope; no process is filtered from
-an individual CLI call. The account is removed only after an empty UID inventory
-and matching directory-service identity. Uncertain cleanup fails and retains the
+an individual CLI call. After the tests, lingering fixture processes receive
+TERM, then bounded KILL if necessary, as that unprivileged user with both real and
+effective UID pinned and its directory-service identity rechecked before each
+signal. The account is removed only after an empty UID inventory and matching
+directory-service identity. Uncertain cleanup fails and retains the
 scope for VM disposal. Owner Macs and other hosts refuse account creation before
 allocation or sudo; local macOS checks continue under the current user. No test is
 excluded and the production guard remains strict.

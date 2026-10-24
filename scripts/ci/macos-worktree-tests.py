@@ -76,6 +76,19 @@ def identity(name):
     return dict(line.split(": ", 1) for line in result.stdout.splitlines() if ": " in line)
 
 
+def signal_scope(name, uid, expected, signal):
+    if identity(name) != expected:
+        raise ValueError("Private fixture identity changed; no signal is authorized")
+    # Only this locked, newly allocated UID can own these fixture descendants.
+    # Signal as that unprivileged user: even a PID race cannot signal another
+    # user's process. Both real and effective UID must match; never run pkill as
+    # root or target the runner's own UID, process group or launch services.
+    result = command("/usr/bin/sudo", "-n", "-u", name, "--", "/usr/bin/pkill",
+                     "-" + signal, "-U", str(uid), "-u", str(uid), check=False)
+    if result.returncode not in (0, 1):
+        raise ValueError("Private fixture processes could not be signalled")
+
+
 def run(module, binary):
     # Admission is before allocation, sudo or any directory-service mutation.
     admit(os.environ, platform.system())
@@ -183,9 +196,19 @@ def run(module, binary):
         try:
             end = min(DEADLINE, time.monotonic() + 20)
             remaining = pids(uid) if created else set()
+            report["processes_after_tests"] = sorted(remaining)
+            if remaining:
+                detail = command("/bin/ps", "-p", ",".join(str(pid) for pid in sorted(remaining)[:128]),
+                                 "-o", "pid=,ruid=,uid=,stat=,comm=", check=False)
+                report["processes_after_tests_details"] = [line[:512] for line in detail.stdout.splitlines()
+                    if len(line.split()) >= 4 and line.split()[1:3] == [str(uid), str(uid)]]
+                signal_scope(name, uid, expected, "TERM")
             while remaining and time.monotonic() < end:
                 time.sleep(.05)
                 remaining = pids(uid)
+                if remaining and time.monotonic() >= end - 10 and not report.get("scope_kill_sent"):
+                    signal_scope(name, uid, expected, "KILL")
+                    report["scope_kill_sent"] = True
             report["remaining_processes"] = sorted(remaining)
             if created and not remaining and identity(name) == expected:
                 dscl("-delete", "/Users/" + name)

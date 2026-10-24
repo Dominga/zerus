@@ -896,7 +896,9 @@ cursor in the message field.
 
 **Send queued messages now** runs the agent's own send-now action for the queue
 shown in Activity, exactly like its **Send now** button; it never sends the text
-being typed. **Send and push now** sends the typed message and, once the agent
+being typed. If the earlier queue is no longer visible, nothing is sent: Activity
+refreshes and a transient error asks you to check Terminal or the current queue
+before retrying. **Send and push now** sends the typed message and, once the agent
 shows it in its queue, sends that queue now. With an empty message field it is
 the same as Send queued messages now. If the message does not appear in the
 queue within 20 seconds, for example because the agent took it directly or a
@@ -1411,6 +1413,15 @@ only while Terminal shows exactly that chooser, using its number key and, for
 Revise, pasting the feedback before Enter; Kimi's recorded decision, including
 the exact feedback, confirms delivery. A clipped or different chooser, or one
 already in Revise feedback mode, stays read-only with **Open Terminal**.
+
+Kimi CreateGoal approval shows the full objective and completion criterion literally,
+with Kimi's own mode choices for Always Ask or Ask When Needed. **Switch to Never
+Ask and start** and a switch between Always Ask and Ask When Needed require a
+separate confirmation because they change permissions beyond this request.
+**Do not start** cancels the tool without creating a goal or changing the mode.
+Zerus answers only the exact native goal panel after the same complete wire and
+process checks as other Kimi approvals; Kimi's recorded decision and mode label
+confirm delivery. A different, clipped or unverifiable panel stays read-only.
 
 Other Kimi tool approvals also appear in Activity, with the complete request from
 Kimi's wire. Kimi's hooks cannot approve, so Zerus answers only in Kimi's own

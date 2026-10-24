@@ -39,16 +39,22 @@ const NARROW: &str =
 
 /// Pending approvals of the main agent, each bound to its active tool call
 /// and removed once Kimi records a resolution. Plan reviews and goal starts
-/// have their own choosers.
+/// have their own choosers and exact request adapters.
 pub(super) fn recover(record: &Value, events: &[Value]) -> Vec<Value> {
     if string(record, "agent") != "kimi" {
         return Vec::new();
     }
-    open(events)
+    let mut cards: Vec<_> = open(events)
         .pending
         .values()
         .filter_map(|event| card(record, event))
-        .collect()
+        .collect();
+    cards.extend(kimi_goal::recover(record, events));
+    cards
+}
+
+pub(super) fn unresolved(events: &[Value]) -> Vec<Value> {
+    open(events).pending.into_values().collect()
 }
 
 /// Unresolved interaction requests by ID, the first record of each, and
@@ -91,7 +97,7 @@ fn active(record: &Value, call: &str, tool: &str) -> bool {
 }
 
 /// Kimi's approval panel title (headerFor).
-fn title(tool: &str) -> String {
+pub(super) fn title(tool: &str) -> String {
     match tool {
         "Bash" => RUN.into(),
         "Write" => "Write this file?".into(),
@@ -484,7 +490,12 @@ fn others(main: &Path) -> Result<()> {
 /// and the only unresolved request of every agent of the conversation, however
 /// old. Nothing proves that Kimi no longer shows an older unresolved request.
 /// The caller checks the screen.
-fn bound(record: &Value, card: &Value) -> Result<Value> {
+fn bound_with(
+    record: &Value,
+    card: &Value,
+    rebuild: fn(&Value, &Value) -> Option<Value>,
+    actionable: fn(&Value) -> bool,
+) -> Result<Value> {
     let paths = questions::wire_paths(record)?;
     let [path] = paths.as_slice() else {
         return Err(UNVERIFIED.into());
@@ -497,10 +508,8 @@ fn bound(record: &Value, card: &Value) -> Result<Value> {
     // The same guard runs after earlier native input, before each next write.
     let gone = "This approval is no longer pending; no further input was sent";
     let event = open.pending.get(id).ok_or(gone)?;
-    let fresh = self::card(record, event).ok_or(gone)?;
-    if fresh["question_hash"] != card["question_hash"]
-        || fresh["questions"][0]["allow_other"] != true
-    {
+    let fresh = rebuild(record, event).ok_or(gone)?;
+    if fresh["question_hash"] != card["question_hash"] || !actionable(&fresh) {
         return Err("This approval changed; no further input was sent".into());
     }
     if open.pending.len() != 1 {
@@ -508,6 +517,20 @@ fn bound(record: &Value, card: &Value) -> Result<Value> {
     }
     others(path)?;
     Ok(event.clone())
+}
+
+fn bound(record: &Value, card: &Value) -> Result<Value> {
+    bound_with(record, card, self::card, |fresh| {
+        fresh["questions"][0]["allow_other"] == true
+    })
+}
+
+pub(super) fn bound_goal(record: &Value, card: &Value) -> Result<Value> {
+    bound_with(record, card, kimi_goal::card, |_| true)
+}
+
+pub(super) fn bound_plan(record: &Value, card: &Value) -> Result<Value> {
+    bound_with(record, card, kimi_plan::card, |_| true)
 }
 
 #[derive(Debug, PartialEq)]
@@ -689,6 +712,9 @@ fn chosen(card: &Value, answers: &Value) -> Result<(usize, String)> {
 
 /// Whether Kimi recorded exactly the submitted decision and nothing else.
 pub(super) fn response_matches(card: &Value, answers: &Value, event: &Value) -> bool {
+    if kimi_goal::is(card) {
+        return kimi_goal::response_matches(card, answers, event);
+    }
     let Ok((index, feedback)) = chosen(card, answers) else {
         return false;
     };
@@ -709,6 +735,9 @@ pub(super) fn response_matches(card: &Value, answers: &Value, event: &Value) -> 
 
 /// The response as the journal's question-answer summary expects it.
 pub(super) fn journal_response(card: &Value, event: &Value) -> Value {
+    if kimi_goal::is(card) {
+        return kimi_goal::journal_response(card, event);
+    }
     let response = &event["response"];
     let feedback = string(response, "feedback");
     let answer = match (string(response, "decision"), string(response, "scope")) {
@@ -722,6 +751,9 @@ pub(super) fn journal_response(card: &Value, event: &Value) -> Value {
 
 /// Let an unviewed pane grow until a clipped panel of this request shows.
 pub(super) fn fit(record: &Value, card: &Value) {
+    if kimi_goal::is(card) {
+        return kimi_goal::fit(record, card);
+    }
     if card["questions"][0]["allow_other"] != true {
         return;
     }
@@ -738,6 +770,9 @@ pub(super) fn fit(record: &Value, card: &Value) {
 }
 
 pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
+    if kimi_goal::is(card) {
+        return kimi_goal::available(record, card);
+    }
     if string(record, "agent") != "kimi" || string(card, "source") != SOURCE {
         return Err("Not a Kimi tool approval".into());
     }
@@ -753,6 +788,9 @@ pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
 }
 
 pub(super) fn answer(record: &Value, card: &Value, answers: &Value) -> Result<()> {
+    if kimi_goal::is(card) {
+        return kimi_goal::answer(record, card, answers);
+    }
     available(record, card)?;
     let guard = Native::new(record, card);
     let request = bound(&guard.identity()?, card)?["request"].clone();
@@ -954,6 +992,73 @@ mod tests {
             only(&record(home.path()), &[lines])["questions"][0]["body"],
             "cwd: /workspace/example\n$ cd /tmp\n·\n· ls"
         );
+    }
+
+    #[test]
+    fn a_goal_approval_shows_the_goal_and_native_mode_choices() {
+        let home = tempfile::tempdir().unwrap();
+        let mut record = record(home.path());
+        record["active_tools"]["tool_bash"]["name"] = json!("CreateGoal");
+        let objective = "Завершить проверку RC12 без production";
+        let criterion = "Все 13 trophy/156 состояний проверены, включая g2★0";
+        for (mode, expected) in [
+            ("yolo", ["auto", "yolo", "cancel"].as_slice()),
+            ("manual", ["auto", "yolo", "manual", "cancel"].as_slice()),
+        ] {
+            let event = json!({"type":"interaction.request","agentId":"main","id":"approval_goal","kind":"approval",
+                "toolCallId":"tool_bash","request":{"id":"approval_goal","sessionId":"session_test","agentId":"main",
+                "turnId":1,"toolCallId":"tool_bash","toolName":"CreateGoal","action":"Creating a goal",
+                "display":{"kind":"goal_start","objective":objective,"completionCriterion":criterion,"mode":mode}},"time":1000500});
+            let card = only(&record, &[event]);
+            let item = &card["questions"][0];
+            assert_eq!(item["id"], "goal");
+            assert_eq!(item["question"], "Approve CreateGoal?");
+            assert_eq!(
+                item["body"],
+                format!("Start goal: {objective}\nDone when: {criterion}")
+            );
+            assert_eq!(item["allow_other"], false);
+            let options = item["options"].as_array().unwrap();
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|option| string(option, "id"))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for option in options {
+                let id = string(option, "id");
+                let broader = id == "auto" || id == "yolo" && id != mode;
+                assert_eq!(option["scope"], if broader { "broader" } else { "once" });
+            }
+        }
+    }
+
+    #[test]
+    fn goal_binding_uses_the_same_complete_history_guard() {
+        let event = json!({"type":"interaction.request","agentId":"main","id":"approval_goal","kind":"approval",
+            "toolCallId":"tool_bash","request":{"id":"approval_goal","sessionId":"session_test","agentId":"main",
+            "turnId":1,"toolCallId":"tool_bash","toolName":"CreateGoal","action":"Creating a goal",
+            "display":{"kind":"goal_start","objective":"Finish the fixture","mode":"yolo"}},"time":1000500});
+        let fixture = home(std::slice::from_ref(&event), &[]);
+        let mut record = record(fixture.path());
+        record["active_tools"]["tool_bash"]["name"] = json!("CreateGoal");
+        let card = only(&record, std::slice::from_ref(&event));
+        assert_eq!(bound_goal(&record, &card).unwrap()["id"], "approval_goal");
+
+        let other = request("approval_bash", "tool_other", COMMAND);
+        let fixture = home(&[event.clone(), other], &[]);
+        record["agent_home"] = json!(fixture.path());
+        record["active_tools"]["tool_other"] = json!({"name":"Bash","started":1000.1});
+        assert!(bound_goal(&record, &card)
+            .unwrap_err()
+            .contains("Another Kimi request"));
+
+        let fixture = home(&[event.clone(), resolved("approval_goal")], &[]);
+        record["agent_home"] = json!(fixture.path());
+        assert!(bound_goal(&record, &card)
+            .unwrap_err()
+            .contains("no longer pending"));
     }
 
     #[test]

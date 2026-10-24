@@ -68,6 +68,17 @@ stable Rust: `rust-version` and the toolchain pinned in CI follow the latest
 stable release, and raising them is routine maintenance. Run
 `cargo +1.99.1 test --locked` for that pinned toolchain.
 
+On Linux, the three worktree modules run through `scripts/ci/worktree-tests.py`
+in a fresh PID/mount namespace, including their live process blockers and private
+tmux servers. Production cleanup retains folders when a host process cannot be
+inspected, so a shared host cannot establish the positive removal controls.
+Local isolation requires `unshare` and `setpriv`; hosted disposable runners use
+passwordless sudo only for namespace creation, then run fixtures as the original
+user with no capabilities or supplementary groups. A real nondumpable child
+checks that inspection restrictions still apply. Failed namespace admission fails
+the tests without an uncontained retry. For a focused local run, use
+`PYTHONPATH=tests python3 scripts/ci/worktree-tests.py test_worktrees test_worktree_lifecycle test_worktree_maintenance`.
+
 `check-source.py` keeps the desktop's Unix children from inheriting its descriptors
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
 `QProcess::startDetached()` and `QProcess::execute()`, and every `QProcess` must go to

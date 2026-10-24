@@ -984,8 +984,12 @@ fn cursor(record: &Value) -> Result<backend::PaneInfo> {
     )
 }
 
-fn wait_until<T>(mut read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+fn wait_until<T>(read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
+    wait_until_for(Duration::from_secs(2), read)
+}
+
+fn wait_until_for<T>(timeout: Duration, mut read: impl FnMut() -> Result<Option<T>>) -> Result<T> {
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(value) = read()? {
             reacted();
@@ -1021,7 +1025,10 @@ fn codex_change(
         }
         let next = if target > index { index + 1 } else { index - 1 };
         send_key(&record, if target > index { "M-." } else { "M-," })?;
-        wait_until(|| {
+        // Released Codex hides its model/effort footer for a 2.5-second Max or
+        // Ultra status-line animation. Wait for the exact footer; never repeat
+        // the step or treat the animation label as confirmation.
+        wait_until_for(Duration::from_secs(5), || {
             let record = checked(name, request, false)?;
             Ok(
                 (footer("codex", &current.model, &capture(&record)?).as_deref()
@@ -1373,7 +1380,7 @@ fn codex_model(name: &str, request: &Request, model: &ModelOption) -> Result<()>
         }
         send_key(&checked(name, request, false)?, "s")?;
     }
-    wait_until(|| {
+    wait_until_for(Duration::from_secs(5), || {
         let r = checked(name, request, false)?;
         Ok(
             (target_footer(&r, model, &capture(&r)?).as_deref() == Some(request.effort.as_str()))

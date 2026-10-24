@@ -8,6 +8,7 @@
 #include "speech/VoicePlayerImage.h"
 
 #include <QApplication>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QSettings>
@@ -248,6 +249,8 @@ private slots:
     void attachmentsStayWithTheirMessageAndOpenExactFile();
     void repeatedJournalWindowKeepsOneAttachmentMessage();
     void delayedAttachmentAcknowledgementKeepsOneMessage();
+    void kimiDuplicateHooksKeepOneAttachmentCard();
+    void kimiNativeTurnIdentityPreservesIndependentSends();
     void voiceMessageRetainsAudioAndExpandableTranscript();
     void voiceTranscriptButtonBesidePlayer_data();
     void voiceTranscriptButtonBesidePlayer();
@@ -1837,6 +1840,69 @@ void TestActivityView::delayedAttachmentAcknowledgementKeepsOneMessage()
     auto other = native; other["seq"] = 4; other["at"] = 1791018104.0;
     view.setTimeline(details, {native, other}, {});
     QCOMPARE(view.browser()->toPlainText().count(text), 3);
+}
+
+void TestActivityView::kimiDuplicateHooksKeepOneAttachmentCard()
+{
+    SettledActivityView view; view.setSessionKey("fixture/kimi-attachment");
+    const QString text = "[File #1] Review this document";
+    const QString submitted = "[File #1] (Read the attached file at \"/synthetic/request/document.pdf\") Review this document";
+    const QJsonArray files{QJsonObject{{"request_id", "delivery"}, {"index", 0}, {"name", "document.pdf"}, {"mime", "application/pdf"}, {"bytes", 120}}};
+    const QJsonObject receipt{{"source", "hgs_delivery"}, {"type", "UserPromptSubmit"}, {"message_id", "delivery"},
+        {"at", 1791018000.0}, {"detail", text}, {"submitted_text", submitted}, {"attachments", files}};
+    const QJsonObject local{{"id", "outgoing"}, {"message_id", "delivery"}, {"status", "sent"}, {"text", text},
+        {"submitted_text", submitted}, {"submitted_at", 1791018000.0}, {"attachments", files}};
+    auto first = journalEvent(3, "TurnStarted", submitted); first["run_id"] = "run"; first["at"] = 1791018000.1;
+    auto second = first; second["seq"] = 4; second["at"] = 1791018000.2;
+    const auto hash = QString::fromLatin1(QCryptographicHash::hash(submitted.toUtf8(), QCryptographicHash::Sha256).toHex());
+    const QJsonObject turn{{"turn_id", 0}, {"prompt_id", "native-prompt"}, {"at", 1791018000.0}, {"origin", "user"}, {"text_sha256", QJsonArray{"synthetic-memory-context-hash", hash}}};
+    QJsonObject details{{"agent", "kimi"}, {"run_id", "run"}, {"conversation_id", "conversation"}, {"prompt", submitted},
+        {"attachment_messages", QJsonArray{receipt}}, {"kimi_turns_complete", true}, {"kimi_turns", QJsonArray{turn}}};
+    const QJsonArray events{journalEvent(1, "UserPromptSubmit", ""), journalEvent(2, "UserPromptSubmit", ""), first, second};
+    // A cold legacy journal plus one outgoing receipt used to render three cards.
+    view.setTimeline(details, events, {local});
+    QCOMPARE(view.plainText().count("Review this document"), 1);
+    QCOMPARE(view.plainText().count("document.pdf"), 1);
+    QVERIFY(!view.plainText().contains("/synthetic/"));
+    view.setTimeline(details, events, {});
+    QCOMPARE(view.plainText().count("Review this document"), 1);
+    QSignalSpy opened(&view, &ActivityView::attachmentActivated);
+    for (const auto &link : links(view.browser())) if (link.startsWith("hgs-attachment:")) activate(view.browser(), link);
+    QCOMPARE(opened.size(), 1);
+    QCOMPARE(opened.first().first().toJsonObject().value("request_id").toString(), QString("delivery"));
+    // Without complete native evidence the old ambiguous pair stays distinct.
+    details["kimi_turns_complete"] = false;
+    view.setSessionKey("fixture/unproven"); view.setTimeline(details, events, {});
+    QCOMPARE(view.plainText().count("Review this document"), 3);
+    // Two genuine native turns with an equal prompt must not be collapsed.
+    details["kimi_turns_complete"] = true;
+    auto other = turn; other["turn_id"] = 1; other["prompt_id"] = "other-prompt";
+    details["kimi_turns"] = QJsonArray{turn, other};
+    view.setSessionKey("fixture/ambiguous-turns"); view.setTimeline(details, events, {});
+    QCOMPARE(view.plainText().count("Review this document"), 3);
+}
+
+void TestActivityView::kimiNativeTurnIdentityPreservesIndependentSends()
+{
+    SettledActivityView view; view.setSessionKey("fixture/kimi-turn-id");
+    auto first = journalEvent(1, "TurnStarted", "Same caption"); first["run_id"] = "run"; first["kimi_turn_id"] = 0;
+    first["kimi_conversation_id"] = "conversation";
+    auto duplicate = first; duplicate["seq"] = 2;
+    view.setTimeline({}, {first, duplicate}, {});
+    QCOMPARE(view.plainText().count("Same caption"), 1);
+    auto next = first; next["seq"] = 3; next["kimi_turn_id"] = 1;
+    view.setTimeline({}, {first, duplicate, next}, {});
+    QCOMPARE(view.plainText().count("Same caption"), 2);
+    next["kimi_turn_id"] = 0; next["run_id"] = "another-run";
+    view.setTimeline({}, {first, next}, {});
+    QCOMPARE(view.plainText().count("Same caption"), 2);
+    next = first; next["seq"] = 3; next["kimi_conversation_id"] = "new-conversation";
+    view.setTimeline({}, {first, next}, {});
+    QCOMPARE(view.plainText().count("Same caption"), 2);
+    next = first; next["seq"] = 3; next["detail"] = "Conflicting caption";
+    view.setTimeline({}, {first, next}, {});
+    QVERIFY(view.plainText().contains("Same caption"));
+    QVERIFY(view.plainText().contains("Conflicting caption"));
 }
 
 void TestActivityView::attachmentThumbnailArrivesWithoutMovingTranscript()

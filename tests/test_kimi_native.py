@@ -25,12 +25,14 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 from unittest import mock
 import urllib.error
@@ -812,8 +814,25 @@ class NativeKimi(lifecycle.Harness):
         return found.count(text)
 
     def test_exact_input_reaches_the_model_once(self):
+        # Existing account-wide tracking entries predate the managed TOML
+        # block. A supervised launch must retain them without adding another
+        # handler that executes the same HGS callback for every native event.
+        tracked = ('SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
+                   'PermissionRequest', 'SubagentStart', 'SubagentStop', 'PreCompact', 'PostCompact', 'Stop',
+                   'PostToolUseFailure', 'StopFailure', 'Notification', 'Interrupt', 'TurnStarted',
+                   'UserPromptQueued', 'PermissionResult', 'TaskStarted', 'SessionHeartbeat')
+        command = shlex.join([str(lifecycle.HGS), '__state', 'hook'])
+        config = self.home / 'config.toml'
+        with config.open('a') as output:
+            for event in tracked:
+                output.write('\n[[hooks]]\nevent = %s\ncommand = %s\ntimeout = 5\n' %
+                             (json.dumps(event), json.dumps(command)))
         name = self.launch()
+        registered = tomllib.loads(config.read_text())['hooks']
+        for event in tracked:
+            self.assertEqual(sum(row['event'] == event and row['command'] == command for row in registered), 1)
         conversation = None
+        native_turns = set()
         for text in ('Continue the fixture\\', 'Literal paths:\nfixture\\\\', 'Проверка ввода'):
             payload = self.payload(name, text)
             receipt = self.send(name, payload)
@@ -825,6 +844,16 @@ class NativeKimi(lifecycle.Harness):
             conversation = conversation or state['conversation_id']
             self.assertEqual(state['conversation_id'], conversation)
             self.assertEqual(self.held(text), 1)
+            hooks = [event for event in state['events'] if event['type'] == 'TurnStarted' and event.get('detail') == text]
+            self.assertEqual(len(hooks), 1)
+            turn = hooks[0].get('kimi_turn_id')
+            self.assertIs(type(turn), int)
+            self.assertEqual(hooks[0]['kimi_conversation_id'], conversation)
+            self.assertNotIn(turn, native_turns)
+            native_turns.add(turn)
+            matching = [row for row in state.get('kimi_turns', []) if row['turn_id'] == turn]
+            self.assertEqual(len(matching), 1)
+            self.assertIn(hashlib.sha256(text.strip().encode()).hexdigest(), matching[0]['text_sha256'])
             # The same request identity returns its receipt and never types again.
             requests = len(self.requests)
             self.assertEqual(self.send(name, payload), receipt)

@@ -257,6 +257,22 @@ and any conditional matchers rather than treating a successful file edit as
 proof that hooks are effective. Existing partial Kimi blocks require manual review
 or a supervised launch: explicit repair refuses to rewrite them lossily.
 
+Complete account-wide Kimi tracking registrations, including legacy Python
+compatibility commands, are reused without adding another managed block. If
+that block was already added and contains only the same HGS callbacks and
+options, launch or compatible explicit repair removes the redundant block while
+retaining the original commands and personal settings/hooks. Different options
+or personal entries prevent removal. This edits registration only; a running
+provider's already-loaded settings are not retrofitted.
+
+Activity recognizes duplicate Kimi callbacks by their native turn ID within the
+same run and conversation. Equal captions in separate native turns or cleared
+conversations remain separate messages.
+For older attachment callbacks that lack that ID, a complete bounded native
+history and a unique exact staged-file input can associate their rich file card
+with the one native turn. Incomplete or ambiguous evidence keeps the separate
+records visible. The original journal is retained.
+
 The additive mobile operation `hooks_status` exposes only the exact-session
 read, and only when the selected CLI advertises `hooks-health-v1`. Both outbound
 connectors preserve the request/run/conversation identity. The relay and gateway

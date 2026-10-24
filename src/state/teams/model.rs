@@ -45,6 +45,9 @@ pub(crate) struct Settings {
     pub folder_policy: FolderPolicy,
     #[serde(default)]
     pub approval: Approval,
+    /// How new phases are approved; absent means the plan's `approval`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_approval: Option<Approval>,
     #[serde(default = "default_max_members")]
     pub max_members: usize,
     /// Idle time after a delivered turn ends before a member shows No report.
@@ -58,6 +61,9 @@ fn default_max_members() -> usize {
 fn default_report_timeout() -> u64 {
     120
 }
+fn default_phase() -> u32 {
+    1
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -65,6 +71,7 @@ impl Default for Settings {
             all_hard: false,
             folder_policy: FolderPolicy::default(),
             approval: Approval::default(),
+            phase_approval: None,
             max_members: default_max_members(),
             report_timeout_seconds: default_report_timeout(),
         }
@@ -290,6 +297,10 @@ pub(crate) struct Attempt {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Task {
     pub id: u32,
+    /// The phase of the plan: the approved initial plan is 1, `extend`
+    /// appends later phases.
+    #[serde(default = "default_phase")]
+    pub phase: u32,
     pub title: String,
     #[serde(default)]
     pub description: String,
@@ -322,6 +333,47 @@ impl Task {
     }
 }
 
+/// What happened to a phase appended by `extend`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PhaseState {
+    /// Waits for the owner's approval.
+    #[default]
+    Draft,
+    /// The owner approved it, or its approval was `auto`.
+    Approved,
+    /// The owner discarded it; its ids stay used.
+    Discarded,
+}
+
+/// One phase appended to the plan after the approved one. Phase 1 is implicit
+/// and has no record.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Phase {
+    pub n: u32,
+    #[serde(default)]
+    pub title: String,
+    /// No task of this phase starts before every lower phase is finished.
+    #[serde(default)]
+    pub barrier: bool,
+    /// The effective phase approval when the phase was added.
+    #[serde(default)]
+    pub approval: Approval,
+    #[serde(default)]
+    pub state: PhaseState,
+    /// The phase's task ids; a discarded phase keeps them, so they are never reused.
+    #[serde(default)]
+    pub tasks: Vec<u32>,
+    #[serde(default)]
+    pub added_by: String,
+    #[serde(default)]
+    pub added_at: f64,
+    #[serde(default)]
+    pub decided_by: String,
+    #[serde(default)]
+    pub decided_at: Option<f64>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Team {
     pub id: String,
@@ -344,6 +396,9 @@ pub(crate) struct Team {
     pub members: Vec<Member>,
     #[serde(default)]
     pub tasks: Vec<Task>,
+    /// Phases added by `extend`; the approved initial plan (phase 1) has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<Phase>,
     #[serde(default)]
     pub revision: u64,
     #[serde(default)]
@@ -378,5 +433,92 @@ impl Team {
             return "Lead".into();
         }
         self.member(member).map(|m| m.role.clone()).unwrap_or_else(|| member.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn old_team() -> Value {
+        json!({
+            "id":"old",
+            "name":"Old team",
+            "lead":"lead",
+            "status":"running",
+            "settings":{"approval":"auto"},
+            "members":[{"id":"lead","role":"Lead","agent":"claude"}],
+            "tasks":[{"id":1,"title":"Model","status":"accepted"},{"id":2,"title":"Tests","deps":[{"task":1}]}]
+        })
+    }
+
+    #[test]
+    fn old_team_json_loads_unchanged() {
+        let team: Team = serde_json::from_value(old_team()).unwrap();
+        assert!(team.phases.is_empty());
+        // Absent phase approval means the plan's approval.
+        assert_eq!(team.settings.phase_approval, None);
+        assert_eq!(team.settings.phase_approval.unwrap_or(team.settings.approval), Approval::Auto);
+        assert!(team.tasks.iter().all(|task| task.phase == 1 && !task.pinned));
+        // Writing it back adds only the phase to each task.
+        let value = serde_json::to_value(&team).unwrap();
+        assert!(value.get("phases").is_none());
+        assert!(value["settings"].get("phase_approval").is_none());
+        assert!(value["tasks"].as_array().unwrap().iter().all(|task| task["phase"] == json!(1) && task.get("pinned").is_none()));
+        assert_eq!(value["settings"]["approval"], "auto");
+        assert_eq!(value["tasks"][1]["deps"][0], json!({"task":1,"kind":"hard"}));
+        let back: Team = serde_json::from_value(value).unwrap();
+        assert_eq!(back, team);
+    }
+
+    fn phased_team() -> Team {
+        Team {
+            id: "phased".into(),
+            name: "Phased".into(),
+            lead: "lead".into(),
+            settings: Settings { approval: Approval::Review, phase_approval: Some(Approval::Auto), ..Default::default() },
+            tasks: vec![Task { id: 3, phase: 2, title: "Fix".into(), pinned: true, ..Default::default() }],
+            phases: vec![Phase {
+                n: 2,
+                title: "QA fixes".into(),
+                barrier: true,
+                approval: Approval::Auto,
+                state: PhaseState::Draft,
+                tasks: vec![3],
+                added_by: "Lead".into(),
+                added_at: 1792868401.5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn new_phase_fields_round_trip() {
+        let team = phased_team();
+        let text = serde_json::to_string(&team).unwrap();
+        let back: Team = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, team);
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["tasks"][0]["phase"], json!(2));
+        assert_eq!(value["tasks"][0]["pinned"], json!(true));
+        assert_eq!(value["phases"][0]["n"], json!(2));
+        assert_eq!(value["phases"][0]["state"], json!("draft"));
+        assert_eq!(value["phases"][0]["approval"], json!("auto"));
+        assert_eq!(value["phases"][0]["barrier"], json!(true));
+        assert_eq!(value["phases"][0]["decided_at"], Value::Null);
+        assert_eq!(value["settings"]["phase_approval"], json!("auto"));
+    }
+
+    #[test]
+    fn phase_approval_falls_back_to_the_plan_approval() {
+        let review = Settings::default();
+        assert_eq!(review.phase_approval, None);
+        assert_eq!(review.phase_approval.unwrap_or(review.approval), Approval::Review);
+        let auto = Settings { approval: Approval::Auto, ..Default::default() };
+        assert_eq!(auto.phase_approval.unwrap_or(auto.approval), Approval::Auto);
+        let review_phases = Settings { approval: Approval::Auto, phase_approval: Some(Approval::Review), ..Default::default() };
+        assert_eq!(review_phases.phase_approval.unwrap_or(review_phases.approval), Approval::Review);
     }
 }

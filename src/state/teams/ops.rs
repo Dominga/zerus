@@ -80,6 +80,9 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     task.deps.retain(|dep| seen.insert(dep.task));
     ensure!(task.deps.iter().all(|dep| dep.task != task.id), "Task #{} depends on itself", task.id);
     task.status = TaskStatus::Draft;
+    // `plan` (and `create`'s planning tasks) always start phase 1; `extend`
+    // sets the computed phase afterwards.
+    task.phase = 1;
     task.attempts.clear();
     task.decided_by = None;
     Ok(task)
@@ -512,6 +515,28 @@ mod tests {
         approve(&mut team, &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         team
     }
+
+    #[test]
+    fn plan_accepts_pinned_and_keeps_phase_one() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"tasks":[
+                {"id":1,"title":"A","assignee":"lead","pinned":true,"phase":7},
+                {"id":2,"title":"B","assignee":"lead"}
+            ]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        let (first, second) = (team.task(1).unwrap(), team.task(2).unwrap());
+        assert!(first.pinned);
+        assert_eq!(first.phase, 1);
+        assert!(!second.pinned);
+        assert_eq!(second.phase, 1);
+    }
+
     /// What the dispatcher records for a delivered hand-off.
     fn hand_out(team: &mut Team, id: u32) -> String {
         let task = team.task_mut(id).unwrap();

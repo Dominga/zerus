@@ -12,6 +12,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export const name = 'hgs-native-dsh';
 export const inject = ['sessionController', 'agents', 'goals', 'llm', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'workspaceRegistry', 'subagents', 'permissionPresets', 'approval', 'commands', 'sessions'];
 
+// A session folder is a full path on this platform: on Windows with a drive
+// or a UNC share, since a rooted `\x` there still depends on the current drive.
+function absoluteFolder(folder) {
+  return path.isAbsolute(folder) && (process.platform !== 'win32' || /^(?:[A-Za-z]:[\\/]|\\\\)/.test(folder));
+}
+
 export function apply(ctx, config) {
   const api = ctx.sessionController;
   // These extension seams are deliberately pinned to the tested release.
@@ -549,8 +555,8 @@ export function apply(ctx, config) {
       case 'catalog': return api.modelCatalog();
       case 'create': {
         checkPermissions(p.permissionMode);
-        // WhiteWh fork: an absolute folder on Windows starts with a drive or UNC prefix, not '/'.
-        if (typeof p.cwd !== 'string' || !path.isAbsolute(p.cwd) || !(await fs.stat(p.cwd)).isDirectory()) throw new Error('Choose an existing absolute folder');
+        // WhiteWh fork: a full folder on this platform (on Windows, a drive or UNC share).
+        if (typeof p.cwd !== 'string' || !absoluteFolder(p.cwd) || !(await fs.stat(p.cwd)).isDirectory()) throw new Error('Choose an existing absolute folder');
         const sessionId = p.sessionId;
         if (typeof sessionId !== 'string' || !/^session-[0-9a-f-]{36}$/.test(sessionId)) throw new Error('Invalid native session ID');
         if (ctx.agents.get(sessionId)) {

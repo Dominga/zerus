@@ -643,7 +643,7 @@ QString messageRole(const QJsonObject &event)
     if (!event.value("agent_id").toString().isEmpty() || (event.value("detail").toString().isEmpty() && event.value("attachments").toArray().isEmpty())) return {};
     // Claude starts a turn for finished background work; nobody wrote it.
     const auto origin = event.value("origin").toString();
-    if (origin == "task_notification" || origin == "subagent_report" || origin == "peer_message") return "notice";
+    if (origin == "task_notification" || origin == "subagent_report" || origin == "peer_message" || origin == "cache_keepalive") return "notice";
     const auto type = event.value("type").toString();
     // Kimi reports an empty UserPromptSubmit followed by the actual prompt in
     // TurnStarted. Keep that prompt in the timeline, ahead of its tool calls.
@@ -1143,6 +1143,22 @@ struct ActivityRenderResult {
             events.removeAt(i);
         } else ++i;
     }
+    // WhiteWh fork: a cache keepalive is one quiet notice without its one-word
+    // reply; keepalives in a row share it. Native histories keep the message text.
+    for (int i = 0; i < events.size();) {
+        const auto role = messageRole(events[i]);
+        const bool keepalive = role == "notice" ? events[i].value("origin") == "cache_keepalive"
+            : role == "user" && events[i].value("detail").toString().startsWith(QLatin1String("<zerus-cache-keepalive>"));
+        if (!keepalive) { ++i; continue; }
+        events[i]["origin"] = "cache_keepalive"; events[i]["detail"] = tr("Cache warmed");
+        int next = i + 1;
+        while (next < events.size() && messageRole(events[next]) == "assistant") events.removeAt(next);
+        const bool joins = i > 0 && events[i - 1].value("origin") == "cache_keepalive";
+        if (joins) {
+            events[i - 1]["keepalive_count"] = events[i - 1].value("keepalive_count").toInt(1) + 1;
+            events[i - 1]["at"] = events[i].value("at"); events.removeAt(i);
+        } else ++i;
+    }
     QString prompt = details.value("prompt").toString(fallbackPrompt);
     if(voiceBoundPrompt)prompt.clear();
     QString answer = details.value("last_message").toString();
@@ -1186,6 +1202,12 @@ struct ActivityRenderResult {
                 auto thinkingTheme = pageTheme; thinkingTheme.fg = QColor(thinkingText);
                 html += card(eventKey(event), tr("Thinking"), timeText(event), markdown(text, thinkingTheme, m_fileLinks), false, false, true);
             }
+            ++i; continue;
+        }
+        if (role == "notice" && event.value("origin") == "cache_keepalive") {
+            const int count = event.value("keepalive_count").toInt(1);
+            const auto text = count > 1 ? tr("Cache warmed %1 times while idle").arg(count) : tr("Cache warmed while idle");
+            html += QString("<p style='font-size:11px;color:%1;margin:6px 0;'>%2 · %3</p>").arg(muted, escaped(text), escaped(timeText(event)));
             ++i; continue;
         }
         if (role == "notice") {

@@ -252,7 +252,7 @@ private:
     QStringList m_selectionErrors;
     int m_selectionTotal = 0, m_selectionDone = 0, m_selectionFailed = 0;
     bool m_selectionRunning = false;
-    enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh, Clear, ToggleMute, CollapseRow, ExpandRow };
+    enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh, Clear, ToggleMute, ToggleKeepWarm, CollapseRow, ExpandRow };
     void copySessionReference(const Entry &entry, const QString &agent = {});
     void showSessionMenu(const QString &key, const QPoint &position);
     void clearContext();
@@ -586,6 +586,11 @@ private:
     QLabel *m_detailsIdTitle = nullptr, *m_detailsIdValue = nullptr;
     QPushButton *m_copySessionId = nullptr;
     QPushButton *m_detailsClear = nullptr;
+    // WhiteWh fork: Keep cache warm and its limit in hours (CacheKeepalive).
+    class QCheckBox *m_keepWarm = nullptr;
+    class QSlider *m_keepWarmHours = nullptr;
+    QLabel *m_keepWarmLimit = nullptr;
+    void setKeepWarm(int hours);
     QList<TeamCatalogEditor::Computer> teamComputers() const;
     QFrame *m_inspectorPanel = nullptr;
     QSplitter *m_workSplitter = nullptr;

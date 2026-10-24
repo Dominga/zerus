@@ -14,6 +14,7 @@
 #include "SessionPresentation.h"
 #include "AccountUsage.h"
 #include "SessionUsage.h"
+#include "CacheKeepalive.h"
 #include "CacheStatus.h"
 #include "ComposerToolbar.h"
 #include "AccountUsageStore.h"
@@ -97,6 +98,7 @@
 #include <QDialogButtonBox>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QSlider>
 #include <QInputDialog>
 #include <QWidgetAction>
 #include <QFontDatabase>
@@ -1434,6 +1436,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_detailsClear->setToolTip(tr("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     connect(m_detailsClear,&QPushButton::clicked,this,&SessionsWindow::clearContext);
     contextRow->addWidget(m_detailsContext,1);contextRow->addWidget(m_detailsClear);detailsLayout->addLayout(contextRow);
+    // WhiteWh fork: keep the prompt cache warm while the person is away.
+    auto *warmRow=new QHBoxLayout;m_keepWarm=new QCheckBox(tr("Keep cache warm"));m_keepWarm->setObjectName("keepCacheWarm");
+    m_keepWarm->setToolTip(tr("Shortly before the provider's prompt cache expires, Zerus sends the idle agent a one-word service message, "
+        "so the next turn reads the context from the cache. Each one uses a little of the account's limit; it is never shown as a reply."));
+    m_keepWarmHours=new QSlider(Qt::Horizontal);m_keepWarmHours->setObjectName("keepCacheWarmHours");
+    m_keepWarmHours->setRange(1,CacheKeepalive::MaxHours);m_keepWarmHours->setPageStep(1);m_keepWarmHours->setValue(CacheKeepalive::DefaultHours);
+    m_keepWarmHours->setToolTip(tr("Stop warming after this long without a turn"));
+    m_keepWarmLimit=new QLabel;m_keepWarmLimit->setObjectName("keepCacheWarmLimit");
+    warmRow->addWidget(m_keepWarm);warmRow->addWidget(m_keepWarmHours,1);warmRow->addWidget(m_keepWarmLimit);detailsLayout->addLayout(warmRow);
+    connect(m_keepWarm,&QCheckBox::toggled,this,[this](bool on){m_keepWarmHours->setEnabled(on);setKeepWarm(on?m_keepWarmHours->value():0);});
+    connect(m_keepWarmHours,&QSlider::valueChanged,this,[this](int hours){
+        m_keepWarmLimit->setText(tr("up to %n h",nullptr,hours));if(m_keepWarm->isChecked())setKeepWarm(hours);});
     // WhiteWh fork: the SocratiCode index of this session's folder.
     m_socratiCode=new SocratiCodePanel(&m_client);detailsLayout->addWidget(m_socratiCode);
     // WhiteWh fork: the iron rules of this session's project.
@@ -3960,6 +3974,12 @@ QList<TeamCatalogEditor::Computer> SessionsWindow::teamComputers() const
     return computers;
 }
 
+void SessionsWindow::setKeepWarm(int hours)
+{
+    const auto *entry=selected(); if(!entry || !m_subagentId.isEmpty() || entry->session.conversationId.isEmpty()) return;
+    CacheKeepalive::setHours(entry->host,entry->session,hours);
+}
+
 void SessionsWindow::renderDetails()
 {
     updateWorktreeCleanupOffer();
@@ -4005,6 +4025,12 @@ void SessionsWindow::renderDetails()
     const auto clearReason=reported && !m_details.value("clear_context_dismiss").toBool()?contextActionReason(m_details,"clear"):QString();
     explainContextAction(m_detailsClear,clearReason);explainContextAction(m_clear,clearReason);
     m_detailsClear->setText(m_clearRequest?tr("Clearing…"):tr("Clear session"));
+    {const bool warmable=mainContext && entry && !entry->session.conversationId.isEmpty() && entry->session.state!="archived";
+     const int hours=warmable?CacheKeepalive::hours(entry->host,entry->session):0;
+     const QSignalBlocker checkbox(m_keepWarm),slider(m_keepWarmHours);
+     m_keepWarm->setChecked(hours>0);m_keepWarmHours->setValue(hours>0?hours:m_keepWarmHours->value());
+     m_keepWarmLimit->setText(tr("up to %n h",nullptr,m_keepWarmHours->value()));
+     m_keepWarm->setEnabled(warmable);m_keepWarmHours->setEnabled(warmable && hours>0);}
     // A live agent clears natively; a stopped one starts fresh instead.
     const bool stopped=entry && (entry->session.state=="paused" || entry->session.state=="stopped");
     m_clear->setVisible(mainContext && !stopped && !(entry && entry->session.state=="archived"));m_clear->setEnabled(canClear);
@@ -5616,6 +5642,10 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
         else if (pending || m_pendingNotifications.size() >= 16) muteReason = tr("A shared notification change is pending. Wait for its result.");
         auto *mute = add(target.muted ? tr("Unmute") : tr("Mute"), "contextToggleMute", SessionMenuAction::ToggleMute, notifications, muteReason);
         mute->setIcon(workspaceIcon(target.muted ? "attention" : "mute", SessionStatusBadge::mutedTone(m_dark)));
+        // WhiteWh fork: the hours stay as set in Details; on from here is one hour.
+        auto *warm = add(tr("Keep cache warm"), "contextKeepCacheWarm", SessionMenuAction::ToggleKeepWarm, !original.session.conversationId.isEmpty(),
+            tr("Send the idle agent a one-word service message before its prompt cache expires"));
+        warm->setCheckable(true); warm->setChecked(CacheKeepalive::hours(original.host, original.session) > 0);
         if (entryNeedsAttention(original))
             add(tr("Mark as read"), "contextMarkRead", SessionMenuAction::MarkRead, true);
         else
@@ -5707,6 +5737,10 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         const auto request = m_client.requestNotifications(current.host, current.session.name, payload);
         m_pendingNotifications.insert(request, {current}); return;
     }
+    case SessionMenuAction::ToggleKeepWarm:
+        CacheKeepalive::setHours(current.host, current.session, CacheKeepalive::hours(current.host, current.session) > 0 ? 0 : CacheKeepalive::DefaultHours);
+        if (current.key == m_selectedKey) renderDetails();
+        return;
     case SessionMenuAction::CollapseRow:
     case SessionMenuAction::ExpandRow:
         setSessionRowCollapsed(current, action == SessionMenuAction::CollapseRow); return;

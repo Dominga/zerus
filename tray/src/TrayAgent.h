@@ -24,6 +24,7 @@
 class SessionsWindow;
 class SwarmWorkerSupervisor;
 class AutomaticApprovals;
+class CacheKeepalive;
 
 // Склейка: таймеры -> HgsClient -> FleetState -> иконка и меню.
 // Ничего не вычисляет сам; вся логика состояния в FleetState, весь ввод-вывод в
@@ -52,6 +53,7 @@ private:
     void observeAttention(const QString &host, const BoxState &box);
     void migrateReadMarks(const QString &host);
     void publishReadMarks();
+    void warmCaches(const QString &host, const BoxState &box);
     void resolveAttentionClick(bool final = false);
     // Одна строка, но своё имя: аргументы у TrayMenu::rebuild() одни и те же во всех
     // шести местах, откуда меню перестраивается, и перечислять их каждый раз -- шум.
@@ -85,6 +87,8 @@ private:
     HgsClient m_client;
     FleetState m_state;
     std::unique_ptr<AutomaticApprovals> m_automaticApprovals;
+    // WhiteWh fork: warms idle conversations' prompt caches, window or not.
+    std::unique_ptr<CacheKeepalive> m_keepalive;
     ReadMarkSync m_readSync;
     IconFactory m_icons;
     // Терминал прячется за интерфейсом целиком: в TrayAgent нет ни строчки D-Bus, и

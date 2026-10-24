@@ -228,6 +228,11 @@ target_link_libraries(test_clonerepository PRIVATE Qt6::Test hgs-tray-ui)
 zerus_add_test(clonerepository test_clonerepository)
 
 add_executable(test_hgsclient test_hgsclient.cpp)
+# WhiteWh fork: the cache keepalive.
+add_executable(test_cachekeepalive test_cachekeepalive.cpp)
+target_include_directories(test_cachekeepalive PRIVATE ../src)
+target_link_libraries(test_cachekeepalive PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+zerus_add_test(cachekeepalive test_cachekeepalive)
 add_executable(test_automaticapprovals test_automaticapprovals.cpp)
 target_link_libraries(test_automaticapprovals PRIVATE Qt6::Test hgs-tray-ui)
 zerus_add_test(automaticapprovals test_automaticapprovals)

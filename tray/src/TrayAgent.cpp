@@ -1,6 +1,7 @@
 #include "TrayAgent.h"
 #include "QuestionNotificationSettings.h"
 #include "AutomaticApprovals.h"
+#include "CacheKeepalive.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -130,6 +131,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_cfg(cfg)
     , m_client(cfg.hgsPath)
     , m_automaticApprovals(std::make_unique<AutomaticApprovals>(cfg.hgsPath))
+    , m_keepalive(std::make_unique<CacheKeepalive>(cfg.hgsPath))
     , m_readSync(&m_client)
     , m_terminal(makeTerminal(cfg))
     // Набор режимов для подменю «Open in» спрашивается У AppConfig, а не строится
@@ -382,7 +384,7 @@ void TrayAgent::onLocalReady(const BoxState &box)
     const auto previousPeers = m_state.peerNames();
     m_state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     m_automaticApprovals->setFleet(m_state);
-    migrateReadMarks({}); publishReadMarks();
+    migrateReadMarks({}); publishReadMarks(); warmCaches({}, m_state.local());
     for (const auto &peer : previousPeers) if (!m_state.peerNames().contains(peer)) {
         BoxState removed; removed.host = peer; removed.ok = true; observeAttention(peer, removed);
     }
@@ -417,7 +419,7 @@ void TrayAgent::onPeerReady(const BoxState &box)
     m_lastError.clear();
     m_state.setPeer(box, QDateTime::currentMSecsSinceEpoch());
     m_automaticApprovals->setFleet(m_state);
-    migrateReadMarks(box.host); publishReadMarks();
+    migrateReadMarks(box.host); publishReadMarks(); warmCaches(box.host, *m_state.peer(box.host));
     observeAttention(box.host, *m_state.peer(box.host));
     if (m_sessionsWindow) m_sessionsWindow->setFleet(m_state);
     refreshIcon();
@@ -486,6 +488,18 @@ void TrayAgent::observeAttention(const QString &host, const BoxState &box)
         const auto target = AttentionTracker::target(m_pendingAttention);
         resolveAttentionClick(box.ok && target.value("host").toString() == host);
     }
+}
+
+// WhiteWh fork: a keepalive's reply that the host still counts is read at once,
+// before attention sees it, so it neither shows unread nor notifies.
+void TrayAgent::warmCaches(const QString &host, const BoxState &box)
+{
+    bool marked = false;
+    for (const auto &reply : m_keepalive->observe(host, box, QDateTime::currentMSecsSinceEpoch() / 1000.))
+        marked |= m_state.markReplyRead(reply.host, reply.name, reply.conversation, reply.reply);
+    if (!marked) return;
+    QSettings().setValue("attention/readReplies", QJsonDocument(m_state.readReplies()).toJson(QJsonDocument::Compact));
+    publishReadMarks();
 }
 
 void TrayAgent::migrateReadMarks(const QString &host)

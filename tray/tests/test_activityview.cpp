@@ -198,6 +198,7 @@ private slots:
     void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
     void teamMessagesReadAsPlaques();
+    void cacheKeepalivesReadAsOneQuietLine();
     void whiteWhTranscriptReadsFlat();
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
@@ -2772,6 +2773,26 @@ void TestActivityView::preview()
         QTest::qWait(40);
         QVERIFY(view.grab().save(directory + (dark ? "/activity-dark.png" : "/activity-light.png")));
     }
+}
+
+// WhiteWh fork: keepalives in a row read as one line, without their replies;
+// native histories carry only the envelope's text.
+void TestActivityView::cacheKeepalivesReadAsOneQuietLine()
+{
+    SettledActivityView view; view.resize(560, 400); view.show();
+    view.setActivity({}, {
+        journalEvent(1, "UserPromptSubmit", "Fix the build"),
+        journalEvent(2, "Stop", "The build passes."),
+        QJsonObject{{"seq", 3}, {"at", 1791018003}, {"type", "UserPromptSubmit"}, {"agent_id", ""}, {"origin", "cache_keepalive"}, {"detail", "Cache warmed"}},
+        journalEvent(4, "Stop", "ok-reply-one"),
+        journalEvent(5, "UserPromptSubmit", "<zerus-cache-keepalive>Reply with exactly: ok</zerus-cache-keepalive>"),
+        journalEvent(6, "AgentMessage", "ok-reply-two"),
+        journalEvent(7, "Stop", "ok-reply-two"),
+        journalEvent(8, "UserPromptSubmit", "Next task")});
+    const auto text = view.browser()->toPlainText();
+    QVERIFY2(text.contains("Cache warmed 2 times while idle"), qPrintable(text));
+    QVERIFY(!text.contains("ok-reply") && !text.contains("zerus-cache-keepalive"));
+    QVERIFY(text.contains("The build passes.") && text.contains("Next task"));
 }
 
 void TestActivityView::caughtUpActivityAcknowledgesEarlierReplyWithoutIntermediatePaint()

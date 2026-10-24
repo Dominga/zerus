@@ -176,7 +176,7 @@ add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/Fle
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
     # WhiteWh fork: agent teams (hgs team).
     src/TeamModel.cpp src/TeamController.cpp
-    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp
+    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp src/CacheKeepalive.cpp
     # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
     src/MainThreadWatchdog.cpp)
 if(NOT WIN32)

@@ -62,11 +62,19 @@ pub(super) fn clipped(value: &Value, limit: usize) -> String {
     result
 }
 
+/// WhiteWh fork: the start of the desktop's cache keepalive message.
+pub(crate) const CACHE_KEEPALIVE: &str = "<zerus-cache-keepalive>";
+
 /// Claude hands finished background work and other sessions' messages to the
 /// agent as a "user" prompt made of XML envelopes the person never wrote: task
 /// notifications, subagent reports and cross-session messages. Several may
 /// arrive together, and a journal excerpt may be clipped.
 pub(super) fn system_prompt(text: &str) -> Option<Value> {
+    // WhiteWh fork: the desktop keeps an idle conversation's prompt cache warm
+    // with this envelope; it is neither the person's message nor a reply.
+    if text.starts_with(CACHE_KEEPALIVE) {
+        return Some(json!({"kind":"cache_keepalive","summary":"Cache warmed","status":"","report":"","agent_id":"","sender":""}));
+    }
     // This complete XML subset is a declared sender label, never authentication.
     // Keep Claude's native envelope parser below unchanged.
     if text.starts_with("<zerus-message") {
@@ -356,7 +364,79 @@ fn latest_reply(record: &Value, recurring_schedules: Option<u64>) -> Result<Valu
         return Ok(json!({}));
     };
     let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-    Ok(reply(seq, event["at"].clone(), false))
+    if !keepalive_turn(&db, record, seq)? {
+        return Ok(reply(seq, event["at"].clone(), false));
+    }
+    Ok(real_reply(&db, record, seq)?.map_or(json!({}), |(seq, at)| reply(seq, at, false)))
+}
+
+// WhiteWh fork: whether the turn of this main Stop opened with the desktop's
+// cache keepalive. Only the latest turn is read; a conversation that has had
+// no keepalive costs one indexed row.
+fn keepalive_turn(db: &Connection, record: &Value, stop: i64) -> Result<bool> {
+    let opening: Option<String> = db
+        .query_row(
+            "SELECT payload FROM events WHERE name = ? AND conversation = ?
+           AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')
+           AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
+           AND seq < ? AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserMessage','Stop')
+         ORDER BY seq DESC LIMIT 1",
+            params![journal_name(record), string(record, "conversation_id"), stop],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(opening.is_some_and(|payload| keepalive_opening(&payload)))
+}
+
+fn keepalive_opening(payload: &str) -> bool {
+    serde_json::from_str::<Value>(payload).is_ok_and(|event| {
+        event["type"] != "Stop"
+            && (event["origin"] == "cache_keepalive" || string(&event, "detail").starts_with(CACHE_KEEPALIVE))
+    })
+}
+
+// The latest main Stop whose turn the person or the agent opened. Keepalive
+// turns follow each other for at most a day, a few rows each.
+fn real_reply(db: &Connection, record: &Value, before: i64) -> Result<Option<(i64, Value)>> {
+    let mut statement = db
+        .prepare(
+            "SELECT seq, json_extract(payload, '$.type'), payload FROM events
+         WHERE name = ? AND conversation = ?
+           AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main')
+           AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')
+           AND seq < ?
+         ORDER BY seq DESC LIMIT 4000",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![journal_name(record), string(record, "conversation_id"), before], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut stop: Option<(i64, Value)> = None;
+    for row in rows {
+        let (seq, kind, payload) = row.map_err(|e| e.to_string())?;
+        match kind.as_deref() {
+            Some("Stop") => {
+                // A turn without a recorded opening is not a keepalive.
+                if let Some(found) = stop.take() {
+                    return Ok(Some(found));
+                }
+                let event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+                stop = Some((seq, event["at"].clone()));
+            }
+            Some("UserPromptSubmit" | "UserMessage") => {
+                if let Some(found) = stop.take() {
+                    if !keepalive_opening(&payload) {
+                        return Ok(Some(found));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(stop)
 }
 
 // A scheduled job opens its turn without a prompt from the person; the latest
@@ -1409,6 +1489,49 @@ mod attention_regressions {
         let (messages, _) = message_events(&db, "example", Some("conversation"), r#"["other"]"#).unwrap();
         assert_eq!(messages.iter().map(|m| m["detail"].as_str().unwrap()).collect::<Vec<_>>(),
             ["Synthetic latest own message", "Other conversation", "Literal answer"]);
+    }
+    #[test]
+    fn cache_keepalive_turns_are_notices_and_never_replies() {
+        let text = format!("{CACHE_KEEPALIVE}Reply with just: ok</zerus-cache-keepalive>");
+        let mut event = json!({"type":"UserPromptSubmit","agent_id":"","detail":text});
+        mark_system_prompt(&json!({}), &mut event, "");
+        assert_eq!((event["origin"].as_str(), event["detail"].as_str()), (Some("cache_keepalive"), Some("Cache warmed")));
+        assert!(user_prompt(&json!({"prompt":text})).is_null());
+
+        let claude = json!({"agent":"claude","name":"example","conversation_id":"conversation"});
+        let db = message_db();
+        let main = |event: Value| insert_message(&db, "example", Some("conversation"), event);
+        let latest = || {
+            let stop: i64 = db.query_row("SELECT max(seq) FROM events WHERE json_extract(payload,'$.type')='Stop'", [], |r| r.get(0)).unwrap();
+            if keepalive_turn(&db, &claude, stop).unwrap() { real_reply(&db, &claude, stop).unwrap().map(|r| r.0) } else { Some(stop) }
+        };
+        main(json!({"type":"UserPromptSubmit","agent_id":"","detail":"Fix the build"}));
+        main(json!({"type":"AgentMessage","agent_id":""}));
+        let real = main(json!({"type":"Stop","agent_id":"","at":1.0}));
+        assert_eq!(latest(), Some(real));
+        // Stored keepalives carry their origin; older rows only their text.
+        for opening in [json!({"type":"UserPromptSubmit","agent_id":"","origin":"cache_keepalive","detail":"Cache warmed"}),
+                        json!({"type":"UserPromptSubmit","agent_id":"","detail":text})] {
+            main(opening);
+            main(json!({"type":"UserPromptSubmit","agent_id":"child","detail":"Child prompt"}));
+            main(json!({"type":"Stop","agent_id":"","at":2.0}));
+            assert_eq!(latest(), Some(real));
+        }
+        // A turn whose opening was not recorded is the agent's own reply.
+        let unopened = main(json!({"type":"Stop","agent_id":"","at":3.0}));
+        assert_eq!(latest(), Some(unopened));
+        main(json!({"type":"UserPromptSubmit","agent_id":"","detail":text}));
+        main(json!({"type":"Stop","agent_id":"","at":4.0}));
+        assert_eq!(latest(), Some(unopened));
+        main(json!({"type":"UserPromptSubmit","agent_id":"","detail":"Next task"}));
+        let next = main(json!({"type":"Stop","agent_id":"","at":5.0}));
+        assert_eq!(latest(), Some(next));
+        // A conversation that only ever warmed its cache has no reply.
+        let only = json!({"agent":"claude","name":"only","conversation_id":"conversation"});
+        insert_message(&db, "only", Some("conversation"), json!({"type":"UserPromptSubmit","agent_id":"","detail":text}));
+        let stop = insert_message(&db, "only", Some("conversation"), json!({"type":"Stop","agent_id":"","at":1.0}));
+        assert!(keepalive_turn(&db, &only, stop).unwrap());
+        assert_eq!(real_reply(&db, &only, stop).unwrap(), None);
     }
     #[test]
     fn kimi_scheduled_ticks_are_not_replies_while_a_recurring_job_remains() {

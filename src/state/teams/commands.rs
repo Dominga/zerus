@@ -147,6 +147,21 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!({"status":"answered"})))
 }
 
+fn read_only(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_lowercase();
+    text.contains("readonly") || text.contains("read-only") || text.contains("access is denied") || text.contains("permission denied")
+}
+
+fn drop_report(input: &Value) -> anyhow::Result<Value> {
+    ensure!(!text(input, "attempt").is_empty() && !text(input, "team").is_empty(), "A report names its team and attempt");
+    ensure!(!text(input, "text").trim().is_empty(), "A report needs text");
+    let path = super::dispatcher::dropped_report(&std::env::current_dir()?, text(input, "attempt"));
+    std::fs::create_dir_all(path.parent().context("no report folder")?)?;
+    std::fs::write(&path, serde_json::to_vec(input)?)?;
+    Ok(json!({"status":"queued","request_id":input["request_id"],"task":input["task"],
+        "note":"The team's files are read-only here; Zerus records this report from your folder."}))
+}
+
 fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
@@ -183,7 +198,13 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             ensure!(canonical_uuid(request), "A canonical request_id is required");
             let team_id = text(input, "team");
             let revision = input["revision"].as_u64();
-            let mut store = Store::open(true)?;
+            let mut store = match Store::open(true) {
+                Ok(store) => store,
+                // A member in a sandbox may not write the team's files: its
+                // report waits in its own folder for the dispatcher.
+                Err(error) if op == "report" && read_only(&error) => return drop_report(input),
+                Err(error) => return Err(error),
+            };
             let mut filled = input.clone();
             if op == "use-last-reply" && text(input, "text").trim().is_empty() {
                 // The member's last reply becomes the report; reading it is not

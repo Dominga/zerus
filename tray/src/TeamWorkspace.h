@@ -42,6 +42,10 @@ protected:
 private:
     void scheduleRender();
     QWidget *teamBar(const Teams::Team &team, const QString &status);
+    // A draft phase waits for you: its header with Approve phase and Discard
+    // phase, and the finished team's own summary once it is Done.
+    QWidget *draftPhase(const Teams::Team &team);
+    QWidget *finishSummary(const Teams::Team &team);
     QWidget *answers(const Teams::Team &team);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);

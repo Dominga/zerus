@@ -337,11 +337,12 @@ void TeamNewDialog::create()
         }
     }
     const bool worktrees = m_worktrees->isChecked();
+    QJsonObject settings{{"folder_policy", worktrees ? "worktree" : "shared"}, {"approval", m_review->isChecked() ? "review" : "auto"},
+                         {"max_members", m_maxMembers->value()}};
+    if (t && !t->phaseApproval.isEmpty()) settings.insert("phase_approval", t->phaseApproval);
     QJsonObject input{{"name", m_name->text().trimmed()}, {"goal", m_goal->toPlainText().trimmed()}, {"folder", m_folder->text().trimmed()},
                       {"project", m_project}, {"template", t ? t->id : QString()}, {"lead", lead}, {"members", members}, {"tasks", tasks},
-                      {"start", true},
-                      {"settings", QJsonObject{{"folder_policy", worktrees ? "worktree" : "shared"}, {"approval", m_review->isChecked() ? "review" : "auto"},
-                                               {"max_members", m_maxMembers->value()}}}};
+                      {"start", true}, {"settings", settings}};
     m_create->setEnabled(false);
     m_summary->setText(tr("Creating the team…"));
     m_teams->call(QStringLiteral("create"), input, [this, guard = QPointer<TeamNewDialog>(this)](bool ok, const QJsonObject &result, const QString &error) {

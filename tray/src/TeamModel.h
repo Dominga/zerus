@@ -43,6 +43,8 @@ struct Dep { int task = 0; bool soft = false; };
 
 struct Task {
     int id = 0;
+    int phase = 1;             // the approved initial plan is phase 1
+    bool pinned = false;       // stays with its assignee
     QString title, description, status, assignee, decidedBy, reason;
     QStringList criteria;
     QList<Dep> deps;
@@ -52,14 +54,40 @@ struct Task {
     QJsonObject json() const;
 };
 
+// A phase appended by `extend`; the approved initial plan (phase 1) has no
+// record. A `draft` phase waits for the owner, `auto` becomes approved at once.
+struct Phase {
+    int n = 0;
+    QString title, approval, state, addedBy, decidedBy;
+    bool barrier = false;      // no task starts before every lower phase is finished
+    double addedAt = 0, decidedAt = 0;
+    QList<int> tasks;          // task ids; a discarded phase keeps them
+    bool draft() const { return state == "draft"; }
+};
+
+// Set by `hgs team finish`: who finished the team and the bounded summary.
+struct Finish {
+    QString by, summary;
+    double at = 0;
+};
+
 struct Team {
     QString id, name, status, project, folder, lead;
     qint64 revision = 0;
     double created = 0, updated = 0;
     bool allHard = false;
     int reportTimeout = 120;
+    QString approval;          // settings.approval; empty when the file has none
+    QString phaseApproval;     // settings.phase_approval; empty = same as approval
+    QString idle;              // the "all tasks decided" notice: pending, sending, sent, unconfirmed
     QList<Member> members;     // removed members are left out
     QList<Task> tasks;
+    QList<Phase> phases;       // phase 1 has no record
+    bool hasFinish = false;
+    Finish finish;
+    // `team status` and `team list` derive these; old files are derived here.
+    bool waitingForLead = false;
+    int pendingPhase = 0;      // the draft phase, 0 when none
     // Only from `team status`: layers by task, tasks in a cycle, ready tasks,
     // plan errors and warnings.
     bool full = false;
@@ -70,8 +98,30 @@ struct Team {
     const Member *member(const QString &id) const;
     const Member *memberOfSession(const QString &host, const QString &session) const;
     const Task *task(int id) const;
+    const Phase *phase(int n) const;
     QString roleOf(const QString &member) const;
+    // Only a team with a phase record groups its plan by phase.
+    bool phased() const { return !phases.isEmpty(); }
+    QString effectivePhaseApproval() const { return phaseApproval.isEmpty() ? approval : phaseApproval; }
 };
+
+// A phase as the plan, board, layers and graph group it. Phase 1 has no
+// record; `done` counts its finished tasks and `total` all its tasks.
+struct PhaseGroup {
+    int n = 0;
+    QString title;
+    bool barrier = false, draft = false;
+    QList<int> tasks;
+    int done = 0;
+    bool finished() const { return !tasks.isEmpty() && done == tasks.size(); }
+};
+// The phases to show, in phase order; empty while the plan is phase 1 only.
+QList<PhaseGroup> phaseGroups(const Team &team);
+// "Phase 2 · QA fixes · 3/5" (the title is left out when empty).
+QString phaseHeading(const PhaseGroup &group);
+// Layers by longest path inside one phase; dependencies outside it are ignored
+// (each phase draws its own layers).
+QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks);
 
 Team parse(const QJsonObject &value);
 // The plan as `hgs team plan` takes it: members besides the lead, and tasks.
@@ -123,6 +173,8 @@ QString nextLine(const Team &team);
 // One tone per task, in task order, for the segmented progress bar.
 QList<Tone> progress(const Team &team);
 int accepted(const Team &team);
+// The team has at least one task and every task is finished (draft is not).
+bool allDecided(const Team &team);
 // Questions and approvals waiting in member sessions.
 int answers(const Team &team, const LiveLookup &live);
 // Ancestors and descendants of a task, itself included.
@@ -143,6 +195,7 @@ struct Seat { QString role; int count = 1; bool optional = false; };
 struct SkeletonTask { QString title, role; QList<int> deps; };
 struct Template {
     QString id, name, description, leadProtocol, planning, approval;
+    QString phaseApproval;     // "" = same as the plan's approval
     QList<Seat> roster;
     QList<SkeletonTask> tasks;
     int maxMembers = 6;

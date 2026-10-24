@@ -62,6 +62,30 @@ QJsonObject feedPage()
  "next_cursor":6})").object();
 }
 
+// A running team with one phase appended: draft phase 2, a pinned task, the
+// idle notice and the derived status fields hgs sends.
+QJsonObject phasedTeam()
+{
+    auto team = checkout();
+    team["settings"] = QJsonObject{{"all_hard", false}, {"report_timeout_seconds", 120},
+                                   {"approval", "review"}, {"phase_approval", "auto"}};
+    team["idle"] = "pending";
+    team["waiting_for_lead"] = false;
+    team["pending_phase"] = 2;
+    team["phases"] = QJsonArray{QJsonObject{
+        {"n", 2}, {"title", "QA fixes"}, {"barrier", true}, {"approval", "auto"}, {"state", "draft"},
+        {"tasks", QJsonArray{11, 12}}, {"added_by", "Lead"}, {"added_at", 1792868401.5},
+        {"decided_by", ""}, {"decided_at", QJsonValue()}}};
+    auto tasks = team["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 11}, {"phase", 2}, {"title", "Fix checkout totals"}, {"assignee", "backend"},
+                             {"status", "draft"}, {"pinned", true},
+                             {"deps", QJsonArray{QJsonObject{{"task", 4}, {"kind", "hard"}}}}});
+    tasks.append(QJsonObject{{"id", 12}, {"phase", 2}, {"title", "Retest checkout"}, {"assignee", "tester"},
+                             {"status", "draft"}, {"deps", QJsonArray{QJsonObject{{"task", 11}, {"kind", "soft"}}}}});
+    team["tasks"] = tasks;
+    return team;
+}
+
 Live live(const Member &member)
 {
     Live state; state.known = true;
@@ -77,9 +101,12 @@ class TestTeams : public QObject {
 private slots:
     void initTestCase();
     void modelReadsTheTeamAndDerivesMemberStates();
+    void modelReadsPhasesPinnedAndTheWaitingState();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
+    void feedLinesSpeakOfPhasesAndTheEndOfThePlan();
     void controllerReadsOnceAndSendsChangesAsYou();
+    void controllerSendsPhaseDecisionsAndFinish();
     void panelShowsProblemsWithTheirActions_data();
     void panelShowsProblemsWithTheirActions();
 private:
@@ -149,6 +176,75 @@ void TestTeams::modelReadsTheTeamAndDerivesMemberStates()
     QCOMPARE(memberStatus(planned, planned.members[2], {}).text, QStringLiteral("Created on approval"));
 }
 
+void TestTeams::modelReadsPhasesPinnedAndTheWaitingState()
+{
+    const auto team = parse(phasedTeam());
+    QVERIFY(team.phased());
+    QCOMPARE(team.phases.size(), 1);
+    const auto *phase = team.phase(2);
+    QVERIFY(phase);
+    QCOMPARE(phase->title, QStringLiteral("QA fixes"));
+    QVERIFY(phase->barrier);
+    QCOMPARE(phase->approval, QStringLiteral("auto"));
+    QVERIFY(phase->draft());
+    QCOMPARE(phase->tasks, (QList<int>{11, 12}));
+    QCOMPARE(phase->addedBy, QStringLiteral("Lead"));
+    QCOMPARE(phase->addedAt, 1792868401.5);
+    QVERIFY(!team.phase(1));
+    QCOMPARE(team.pendingPhase, 2);
+    QVERIFY(!team.waitingForLead);
+    QCOMPARE(team.idle, QStringLiteral("pending"));
+    QCOMPARE(team.task(11)->phase, 2);
+    QVERIFY(team.task(11)->pinned);
+    QVERIFY(!team.task(12)->pinned);
+    QCOMPARE(team.phaseApproval, QStringLiteral("auto"));
+    QCOMPARE(team.effectivePhaseApproval(), QStringLiteral("auto"));
+    // Without phase_approval the plan's approval applies.
+    auto review = phasedTeam();
+    review["settings"] = QJsonObject{{"approval", "review"}};
+    QCOMPARE(parse(review).effectivePhaseApproval(), QStringLiteral("review"));
+    // A draft record implies pending_phase when hgs did not send it.
+    auto older = phasedTeam(); older.remove("pending_phase");
+    QCOMPARE(parse(older).pendingPhase, 2);
+    // All decided without the derived flag: a running team waits for the lead.
+    auto decided = checkout();
+    auto tasks = decided["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) { auto task = tasks[i].toObject(); task["status"] = "accepted"; tasks[i] = task; }
+    decided["tasks"] = tasks;
+    const auto waiting = parse(decided);
+    QVERIFY(waiting.waitingForLead);
+    QVERIFY(!waiting.phased());
+    QCOMPARE(waiting.pendingPhase, 0);
+    decided["status"] = "paused";
+    QVERIFY(!parse(decided).waitingForLead);
+    // A finished team keeps who finished it and its summary.
+    auto done = phasedTeam();
+    done["status"] = "done"; done.remove("pending_phase");
+    done["phases"] = QJsonArray{QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "approved"},
+                                            {"tasks", QJsonArray{11, 12}}, {"decided_by", "You"}}};
+    done["finish"] = QJsonObject{{"by", "Lead"}, {"summary", "All phases are in."}, {"at", 1792868500.5}};
+    const auto finished = parse(done);
+    QVERIFY(finished.hasFinish);
+    QCOMPARE(finished.finish.by, QStringLiteral("Lead"));
+    QCOMPARE(finished.finish.summary, QStringLiteral("All phases are in."));
+    QCOMPARE(finished.finish.at, 1792868500.5);
+    QCOMPARE(finished.pendingPhase, 0);
+    // Old files keep their meaning: phase 1, nothing pinned, no phases or notice.
+    const auto old = parse(checkout());
+    QVERIFY(!old.phased());
+    QCOMPARE(old.task(1)->phase, 1);
+    QVERIFY(!old.task(1)->pinned);
+    QVERIFY(old.phaseApproval.isEmpty());
+    QVERIFY(old.idle.isEmpty());
+    QVERIFY(!old.hasFinish);
+    QVERIFY(!old.waitingForLead);   // open tasks
+    // The catalog template carries the new-phase approval.
+    const auto catalog = parseTemplate(QJsonObject{{"id", "dev"}, {"name", "Dev"}, {"approval", "review"}, {"phase_approval", "auto"}});
+    QCOMPARE(catalog.phaseApproval, QStringLiteral("auto"));
+    QCOMPARE(catalog.json().value("phase_approval").toString(), QStringLiteral("auto"));
+    QVERIFY(parseTemplate(QJsonObject{{"id", "dev"}}).phaseApproval.isEmpty());
+}
+
 void TestTeams::aRunningTeamIsStuckWhenNothingCanMove()
 {
     auto team = parse(checkout());
@@ -173,6 +269,32 @@ void TestTeams::feedLinesAndChains()
     const auto chain = Teams::chain(team, 3);
     QVERIFY(chain.contains(1) && chain.contains(10) && chain.contains(6));
     QVERIFY(!chain.contains(2) && chain.contains(7));   // #7 follows #5, which follows #3
+}
+
+void TestTeams::feedLinesSpeakOfPhasesAndTheEndOfThePlan()
+{
+    const auto team = parse(checkout());
+    const auto line = [&](const char *kind, const QJsonObject &detail) {
+        return feedLine(team, QJsonObject{{"at", 1}, {"seq", 1}, {"kind", kind}, {"detail", detail}});
+    };
+    const auto added = line("phase_added", QJsonObject{{"by", "Lead"}, {"phase", 2}, {"title", "QA fixes"}, {"tasks", 4},
+                                                      {"barrier", true}, {"approval", "review"}});
+    QCOMPARE(added.by, QStringLiteral("Lead"));
+    QCOMPARE(added.text, QStringLiteral("Added phase 2 · QA fixes · 4 tasks"));
+    QCOMPARE(line("phase_added", QJsonObject{{"by", "Lead"}, {"phase", 3}, {"title", ""}, {"tasks", 2}}).text,
+             QStringLiteral("Added phase 3 · 2 tasks"));
+    QCOMPARE(line("phase_approved", QJsonObject{{"by", "You"}, {"phase", 2}, {"tasks", 4}}).text, QStringLiteral("Approved phase 2 · 4 tasks"));
+    QCOMPARE(line("phase_discarded", QJsonObject{{"by", "You"}, {"phase", 2}, {"tasks", 4}}).text, QStringLiteral("Discarded phase 2 · 4 tasks"));
+    QCOMPARE(line("all_decided", QJsonObject{{"accepted", 7}, {"rejected", 1}, {"cancelled", 0}, {"tasks", 8}}).text,
+             QStringLiteral("All tasks decided · waiting for the lead"));
+    const auto finished = line("finished", QJsonObject{{"by", "Lead"}, {"accepted", 8}, {"tasks", 8}, {"summary_chars", 120}});
+    QCOMPARE(finished.by, QStringLiteral("Lead"));
+    QCOMPARE(finished.text, QStringLiteral("Finished · 8 of 8 tasks accepted"));
+    QCOMPARE(finished.tone, Tone::Done);
+    QCOMPARE(line("lead_told", QJsonObject{{"member", "Lead"}, {"kind", "all_decided"}}).text,
+             QStringLiteral("Told the Lead that all tasks are decided"));
+    // Old feeds keep their done line.
+    QCOMPARE(line("done", QJsonObject{{"accepted", 7}, {"tasks", 8}}).text, QStringLiteral("Done · 7 of 8 tasks accepted"));
 }
 
 void TestTeams::controllerReadsOnceAndSendsChangesAsYou()
@@ -209,6 +331,50 @@ void TestTeams::controllerReadsOnceAndSendsChangesAsYou()
     QCOMPARE(pause["by"].toString(), QStringLiteral("human"));
     QCOMPARE(pause["team"].toString(), QStringLiteral("team-1"));
     QVERIFY(!QUuid(pause["request_id"].toString()).isNull());
+}
+
+void TestTeams::controllerSendsPhaseDecisionsAndFinish()
+{
+    QFile::remove(script() + ".calls");
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.watch("team-1");
+    bool done = false, ok = false; QString message;
+    controller.approvePhase(2, [&](bool success, const QString &text) { done = true; ok = success; message = text; });
+    QTRY_VERIFY(done);
+    QVERIFY2(ok, qPrintable(message));
+    done = false;
+    controller.discardPhase(3, [&](bool success, const QString &) { done = true; ok = success; });
+    QTRY_VERIFY(done);
+    QVERIFY(ok);
+    done = false;
+    controller.finishTeam(QStringLiteral("All phases are in."), [&](bool success, const QString &) { done = true; ok = success; });
+    QTRY_VERIFY(done);
+    QVERIFY(ok);
+    QFile calls(script() + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+    QJsonObject approve, discard, finish;
+    for (const auto &line : calls.readAll().split('\n')) {
+        const auto call = QJsonDocument::fromJson(line).object();
+        const auto args = call["args"].toArray();
+        if (args.size() < 2) continue;
+        const auto operation = args.at(1).toString();
+        if (operation == "approve-phase") approve = call["input"].toObject();
+        else if (operation == "discard-phase") discard = call["input"].toObject();
+        else if (operation == "finish") finish = call["input"].toObject();
+    }
+    // The spec's payloads: request_id, team, phase (or summary), by human.
+    QCOMPARE(approve.keys(), (QStringList{"by", "phase", "request_id", "team"}));
+    QCOMPARE(approve["phase"].toInt(), 2);
+    QCOMPARE(approve["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(approve["by"].toString(), QStringLiteral("human"));
+    QVERIFY(!QUuid(approve["request_id"].toString()).isNull());
+    QCOMPARE(discard["phase"].toInt(), 3);
+    QCOMPARE(discard["by"].toString(), QStringLiteral("human"));
+    QVERIFY(!QUuid(discard["request_id"].toString()).isNull());
+    QCOMPARE(finish.keys(), (QStringList{"by", "request_id", "summary", "team"}));
+    QCOMPARE(finish["summary"].toString(), QStringLiteral("All phases are in."));
+    QVERIFY(!QUuid(finish["request_id"].toString()).isNull());
+    QVERIFY(approve["request_id"].toString() != finish["request_id"].toString());
 }
 
 void TestTeams::panelShowsProblemsWithTheirActions_data()

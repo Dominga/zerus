@@ -648,12 +648,13 @@ void TeamNewTab::create()
         }
     }
     const bool worktrees = m_worktrees->isChecked() && m_worktrees->isEnabled();
+    QJsonObject settings{{"folder_policy", worktrees ? "worktree" : "shared"}, {"approval", m_review->isChecked() ? "review" : "auto"},
+                         {"max_members", m_max->value()}};
+    if (t && !t->phaseApproval.isEmpty()) settings.insert("phase_approval", t->phaseApproval);
     const QJsonObject input{{"name", m_name->text().trimmed()}, {"goal", m_goal->toPlainText().trimmed()}, {"folder", m_folder->text().trimmed()},
                             {"project", m_project}, {"template", t ? t->id : QString()}, {"lead_protocol", m_protocol->toPlainText().trimmed()},
                             {"lead", lead}, {"members", members}, {"tasks", tasks},
-                            {"start", true},
-                            {"settings", QJsonObject{{"folder_policy", worktrees ? "worktree" : "shared"}, {"approval", m_review->isChecked() ? "review" : "auto"},
-                                                     {"max_members", m_max->value()}}}};
+                            {"start", true}, {"settings", settings}};
     m_creating = true;
     m_create->setText(tr("Creating…")); m_progress->show();
     m_summary->setText(QStringLiteral("<span style='color:%1;'>%2</span>").arg(colorsFor(m_dark).muted.name(),

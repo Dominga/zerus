@@ -203,7 +203,11 @@ private:
 class TaskView : public QWidget {
 public:
     enum Mode { List, Graph, Wide };
-    struct Node { int id = 0, layer = 0; QString title, role, kind, statusText, deps, agent; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
+    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
+    // A phase group as the plan, board and layers show it: the heading is
+    // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
+    // are in `tasks` but no node is built, and one summary node stands in.
+    struct PhaseBand { int n = 0; QString heading, title; bool barrier = false, draft = false, collapsed = false; int done = 0, total = 0; QList<int> tasks; };
     TaskView(const Colors &colors, Mode mode, QWidget *parent = nullptr) : QWidget(parent), m_c(colors), m_mode(mode)
     {
         setMouseTracking(true);
@@ -217,6 +221,14 @@ public:
     std::function<void(int dependency, int task)> linked, unlinked;
     bool editable = false;
     QList<Node> nodes;
+    // Phase grouping: empty while the plan is phase 1 only. The owner's
+    // toggles call phaseToggled; the caller re-renders with the new collapse.
+    QList<PhaseBand> bands;
+    std::function<void(int phase)> phaseToggled;
+    // The painted place of a phase header or of a collapsed phase's summary
+    // node, in the view's own (unzoomed) coordinates.
+    QRectF bandRect(int phase) const { return m_bandRects.value(phase); }
+    QRectF summaryRect(int phase) const { return m_summaries.value(phase); }
     QMap<int, QList<int>> edges;   // task -> its dependencies
     QSet<QPair<int, int>> soft;    // (dependency, task) edges that need only In progress
     QSet<int> cycle, emphasis;     // emphasis: Show what blocks
@@ -228,6 +240,19 @@ public:
     // Wide: the graph's own size at zoom 1.
     QSizeF natural() const
     {
+        if (banded() && m_mode == Wide) {
+            double width = 16;
+            int tall = 0;
+            for (const auto &band : bands) {
+                QMap<int, int> lines;
+                for (int id : band.tasks) if (const Node *node = nodeOf(id)) ++lines[node->layer];
+                int rows = 0;
+                for (int count : lines) rows = qMax(rows, count);
+                tall = qMax(tall, BandTop + qMax(1, rows) * (WideH + 12));
+                width += bandWidth(band) + BandGap;
+            }
+            return {width, double(tall + 8)};
+        }
         QMap<int, int> column;
         for (const auto &n : nodes) ++column[n.layer];
         int layers = 0, tall = 0;
@@ -236,29 +261,93 @@ public:
     }
     void layout()
     {
-        m_rects.clear();
+        m_rects.clear(); m_bandRects.clear(); m_summaries.clear(); m_bandBackgrounds.clear(); m_listLayers.clear();
         QMap<int, int> column;
         if (m_mode == Graph) {
-            for (const auto &n : nodes) {
-                const int x = Gutter + column[n.layer]++ * (NodeW + 6), y = 8 + n.layer * (NodeH + 26);
-                m_rects.insert(n.id, QRectF(x, y, NodeW, NodeH));
+            if (banded()) {
+                int y = 4, wide = Gutter + NodeW + 4;
+                for (const auto &band : bands) {
+                    QMap<int, int> used;
+                    int layers = 0, bandWide = Gutter + NodeW + 4;
+                    for (int id : band.tasks) {
+                        const Node *node = nodeOf(id);
+                        if (!node) continue;
+                        layers = qMax(layers, node->layer + 1);
+                        const int x = Gutter + used[node->layer]++ * (NodeW + 6);
+                        m_rects.insert(id, QRectF(x, y + BandTop + node->layer * (NodeH + 26), NodeW, NodeH));
+                        bandWide = qMax(bandWide, x + NodeW + 4);
+                    }
+                    m_bandRects.insert(band.n, QRectF(0, y, bandWide, BandHead));
+                    m_bandBackgrounds.append(QRectF(0, y, bandWide, 0));
+                    if (band.collapsed) { m_summaries.insert(band.n, QRectF(Gutter, y + BandTop, NodeW, NodeH)); m_rects.insert(-band.n, m_summaries.value(band.n)); }
+                    wide = qMax(wide, bandWide);
+                    y += BandTop + qMax(1, layers) * (NodeH + 26) + BandGap;
+                }
+                setFixedSize(int((wide + 4) * zoom), int((y + 2) * zoom));
+            } else {
+                for (const auto &n : nodes) {
+                    const int x = Gutter + column[n.layer]++ * (NodeW + 6), y = 8 + n.layer * (NodeH + 26);
+                    m_rects.insert(n.id, QRectF(x, y, NodeW, NodeH));
+                }
+                int layers = 0, wide = 0;
+                for (auto it = column.cbegin(); it != column.cend(); ++it) { layers = qMax(layers, it.key() + 1); wide = qMax(wide, it.value()); }
+                setFixedSize(int((Gutter + wide * (NodeW + 6) + 4) * zoom), int((8 + layers * (NodeH + 26)) * zoom));
             }
-            int layers = 0, wide = 0;
-            for (auto it = column.cbegin(); it != column.cend(); ++it) { layers = qMax(layers, it.key() + 1); wide = qMax(wide, it.value()); }
-            setFixedSize(int((Gutter + wide * (NodeW + 6) + 4) * zoom), int((8 + layers * (NodeH + 26)) * zoom));
         } else if (m_mode == Wide) {
             const QSizeF size = natural();
             const double viewW = area.isValid() ? area.width() / zoom : 0, viewH = area.isValid() ? area.height() / zoom : 0;
             m_ox = qMax(0.0, (viewW - size.width()) / 2);
-            const double oy = qMax(0.0, (viewH - size.height()) / 2);
-            for (const auto &n : nodes) {
-                const double x = m_ox + 12 + n.layer * WideStep, y = oy + 30 + column[n.layer]++ * (WideH + 12);
-                m_rects.insert(n.id, QRectF(x, y, WideW, WideH));
+            m_oy = banded() ? 0.0 : qMax(0.0, (viewH - size.height()) / 2);
+            if (banded()) {
+                double x = m_ox + 8;
+                for (const auto &band : bands) {
+                    const double width = bandWidth(band);
+                    m_bandRects.insert(band.n, QRectF(x, m_oy + 4, width - BandGap, BandHead - 4));
+                    m_bandBackgrounds.append(QRectF(x - 6, 0, width, qMax(size.height(), viewH)));
+                    QMap<int, int> used;
+                    for (int id : band.tasks) {
+                        const Node *node = nodeOf(id);
+                        if (!node) continue;
+                        m_rects.insert(id, QRectF(x + 6 + node->layer * WideStep, m_oy + BandTop + used[node->layer]++ * (WideH + 12), WideW, WideH));
+                    }
+                    if (band.collapsed) { m_summaries.insert(band.n, QRectF(x + 6, m_oy + BandTop, WideW, WideH)); m_rects.insert(-band.n, m_summaries.value(band.n)); }
+                    x += width + BandGap;
+                }
+                m_layers = 0;
+                setFixedSize(int(qMax(size.width(), viewW) * zoom), int(qMax(size.height(), viewH) * zoom));
+            } else {
+                for (const auto &n : nodes) {
+                    const double x = m_ox + 12 + n.layer * WideStep, y = m_oy + 30 + column[n.layer]++ * (WideH + 12);
+                    m_rects.insert(n.id, QRectF(x, y, WideW, WideH));
+                }
+                int layers = 0;
+                for (auto it = column.cbegin(); it != column.cend(); ++it) layers = qMax(layers, it.key() + 1);
+                m_layers = layers;
+                setFixedSize(int(qMax(size.width(), viewW) * zoom), int(qMax(size.height(), viewH) * zoom));
             }
-            int layers = 0;
-            for (auto it = column.cbegin(); it != column.cend(); ++it) layers = qMax(layers, it.key() + 1);
-            m_layers = layers;
-            setFixedSize(int(qMax(size.width(), viewW) * zoom), int(qMax(size.height(), viewH) * zoom));
+        } else if (banded()) {
+            int y = 0;
+            for (const auto &band : bands) {
+                if (y) y += 8;
+                m_bandRects.insert(band.n, QRectF(0, y, 10000, BandHead));
+                y += BandHead + 2;
+                if (band.collapsed) continue;
+                QMap<int, int> counts;
+                for (int id : band.tasks) if (const Node *node = nodeOf(id); node && node->match) ++counts[node->layer];
+                int layer = -1;
+                for (int id : band.tasks) {
+                    const Node *node = nodeOf(id);
+                    if (!node || !node->match) continue;
+                    if (node->layer != layer) {
+                        layer = node->layer;
+                        m_listLayers.append({band.n, layer, counts.value(layer), QRectF(0, y, 10000, 20)});
+                        y += 22;
+                    }
+                    m_rects.insert(id, QRectF(0, y, 10000, 38));
+                    y += 40;
+                }
+            }
+            setMinimumHeight(y + 4); setMaximumHeight(y + 4);
         } else {
             int y = 0, layer = -1;
             for (const auto &n : nodes) {
@@ -273,6 +362,128 @@ public:
     QPair<int, int> selectedEdge() const { return m_edge; }
 protected:
     static constexpr int NodeW = 118, NodeH = 46, Gutter = 20, WideW = 146, WideH = 76, WideStep = 170;
+    static constexpr int BandHead = 26, BandTop = 32, BandGap = 10, BandMin = 240;
+    bool banded() const { return !bands.isEmpty(); }
+    const Node *nodeOf(int id) const
+    {
+        for (const auto &node : nodes) if (node.id == id) return &node;
+        return nullptr;
+    }
+    // Wide: a band is as wide as its own layers, and at least one header.
+    int bandWidth(const PhaseBand &band) const
+    {
+        int layers = 0;
+        for (int id : band.tasks) if (const Node *node = nodeOf(id)) layers = qMax(layers, node->layer + 1);
+        return qMax(BandMin, qMax(1, layers) * WideStep);
+    }
+    // A collapsed phase's tasks hang their edges on the phase summary node.
+    int anchor(int id) const
+    {
+        if (m_rects.contains(id)) return id;
+        for (const auto &band : bands)
+            if (band.collapsed && m_summaries.contains(band.n) && band.tasks.contains(id)) return -band.n;
+        return 0;
+    }
+    // The phase header or summary node under a point, 0 when there is none.
+    int phaseAt(const QPointF &position) const
+    {
+        const QPointF point = graph() ? position / zoom : position;
+        for (auto it = m_bandRects.cbegin(); it != m_bandRects.cend(); ++it) if (it.value().contains(point)) return it.key();
+        for (auto it = m_summaries.cbegin(); it != m_summaries.cend(); ++it) if (it.value().contains(point)) return -it.key();
+        return 0;
+    }
+    // A phase header: chevron, "Phase 2 · QA fixes · 3/5", its barrier and
+    // draft tags.
+    void paintBand(QPainter &p, const PhaseBand &band, const QRectF &r)
+    {
+        p.setOpacity(1);
+        const QPointF middle(r.left() + 7, r.center().y());
+        QPainterPath chevron;
+        if (band.collapsed) { chevron.moveTo(middle + QPointF(-2, -4)); chevron.lineTo(middle + QPointF(3, 0)); chevron.lineTo(middle + QPointF(-2, 4)); }
+        else { chevron.moveTo(middle + QPointF(-4, -2)); chevron.lineTo(middle + QPointF(0, 3)); chevron.lineTo(middle + QPointF(4, -2)); }
+        p.setPen(Qt::NoPen); p.setBrush(m_c.muted); p.drawPath(chevron);
+        QFont caps = font(); caps.setPixelSize(11); caps.setWeight(QFont::DemiBold);
+        p.setFont(caps);
+        const QFontMetrics fm(caps);
+        QFont tagFont = font(); tagFont.setPixelSize(9); tagFont.setWeight(QFont::DemiBold);
+        const auto tagWidth = [&](const QString &text) { return QFontMetrics(tagFont).horizontalAdvance(text) + 10; };
+        const QString barrier = QCoreApplication::translate("TeamPanel", "barrier");
+        const QString draft = QCoreApplication::translate("TeamPanel", "draft");
+        int tags = 0;
+        if (band.barrier) tags += tagWidth(barrier) + 6;
+        if (band.draft) tags += tagWidth(draft) + 6;
+        const double room = qMax(0.0, r.width() - 26 - tags);
+        const QString shown = fm.elidedText(band.heading, Qt::ElideRight, int(room));
+        p.setPen(m_c.text2);
+        p.drawText(QRectF(r.left() + 17, r.top(), room, r.height()), Qt::AlignLeft | Qt::AlignVCenter, shown);
+        double x = r.left() + 21 + qMin(room, double(fm.horizontalAdvance(shown)));
+        const auto tag = [&](const QString &text, const QColor &color) {
+            const int width = tagWidth(text);
+            const QRectF box(x, r.center().y() - 7, width, 14);
+            p.setFont(tagFont);
+            p.setPen(QPen(alpha(color, .45), 1)); p.setBrush(alpha(color, .10)); p.drawRoundedRect(box, 7, 7);
+            p.setPen(color); p.drawText(box, Qt::AlignCenter, text);
+            x += width + 4;
+        };
+        if (band.barrier) tag(barrier, m_c.muted);
+        if (band.draft) tag(draft, m_c.warn);
+    }
+    // A collapsed phase stands in for its tasks in the graph.
+    void paintSummary(QPainter &p, int phase, const QRectF &r)
+    {
+        const PhaseBand *band = nullptr;
+        for (const auto &candidate : bands) if (candidate.n == phase) band = &candidate;
+        p.setOpacity(1);
+        p.setPen(QPen(m_c.border, 1, Qt::DashLine)); p.setBrush(m_c.card);
+        p.drawRoundedRect(r.adjusted(.5, .5, -.5, -.5), 8, 8);
+        p.setPen(Qt::NoPen); p.setBrush(m_c.dim); p.drawRoundedRect(QRectF(r.left() + 1, r.top() + 6, 3, r.height() - 12), 1.5, 1.5);
+        QFont title = font(); title.setPixelSize(11); title.setWeight(QFont::DemiBold); p.setFont(title); p.setPen(m_c.fg);
+        const QString text = !band || band->title.isEmpty() ? QCoreApplication::translate("TeamPanel", "Phase %1").arg(phase)
+                                                            : QCoreApplication::translate("TeamPanel", "Phase %1 · %2").arg(phase).arg(band->title);
+        p.drawText(r.adjusted(9, 6, -6, -18), Qt::AlignLeft | Qt::AlignTop, QFontMetrics(title).elidedText(text, Qt::ElideRight, int(r.width() - 16)));
+        QFont meta = font(); meta.setPixelSize(10); p.setFont(meta); p.setPen(m_c.muted);
+        p.drawText(r.adjusted(9, 0, -6, -7), Qt::AlignLeft | Qt::AlignBottom,
+                   QCoreApplication::translate("TeamPanel", "%1/%2 · open").arg(band ? band->done : 0).arg(band ? band->total : 0));
+    }
+    // The layer list: a "LAYER n · count" rule and one task row.
+    void paintLayerHeader(QPainter &p, int layer, int count, const QRectF &r)
+    {
+        QFont caps = font(); caps.setPixelSize(10); caps.setWeight(QFont::DemiBold); caps.setLetterSpacing(QFont::AbsoluteSpacing, .6);
+        p.setOpacity(1); p.setFont(caps); p.setPen(m_c.dim);
+        const QString text = QCoreApplication::translate("TeamPanel", "LAYER %1 · %2").arg(layer + 1).arg(count);
+        p.drawText(QRectF(2, r.top(), width(), r.height()), Qt::AlignLeft | Qt::AlignVCenter, text);
+        const int lw = QFontMetrics(caps).horizontalAdvance(text) + 10;
+        p.setPen(m_c.border); p.drawLine(QPointF(lw, r.center().y()), QPointF(width() - 2, r.center().y()));
+    }
+    void paintListRow(QPainter &p, const Node &n, bool dim)
+    {
+        const QRectF r = m_rects[n.id];
+        p.setOpacity(dim ? .35 : 1);
+        const QRectF box(1, r.top(), width() - 2, r.height());
+        if (n.problem || n.error) {
+            p.setPen(QPen(n.tone == m_c.warn ? m_c.warn : m_c.danger, 1)); p.setBrush(alpha(n.tone == m_c.warn ? m_c.warn : m_c.danger, .07));
+            p.drawRoundedRect(box.adjusted(.5, .5, -.5, -.5), 7, 7);
+        } else if (m_hover == n.id) { p.setPen(Qt::NoPen); p.setBrush(alpha(m_c.fg, .05)); p.drawRoundedRect(box, 7, 7); }
+        glyph(p, QRectF(8, r.top() + 5, 12, 12), n.tone, n.kind);
+        QFont mono = NewSessionDense::mono(11); p.setFont(mono); p.setPen(m_c.dim);
+        const QString id = QStringLiteral("#%1").arg(n.id);
+        const int idw = QFontMetrics(mono).horizontalAdvance(id) + 6;
+        p.drawText(QRectF(26, r.top() + 2, idw, 18), Qt::AlignLeft | Qt::AlignVCenter, id);
+        QFont small = font(); small.setPixelSize(10); small.setWeight(QFont::Medium);
+        const int roleW = QFontMetrics(small).horizontalAdvance(n.role) + 14;
+        const QRectF pill(width() - roleW - 6, r.top() + 3, roleW, 16);
+        p.setPen(QPen(alpha(n.roleTone, .45), 1)); p.setBrush(alpha(n.roleTone, .12)); p.drawRoundedRect(pill, 8, 8);
+        p.setFont(small); p.setPen(n.roleTone); p.drawText(pill, Qt::AlignCenter, n.role);
+        QFont title = font(); title.setPixelSize(12); p.setFont(title); p.setPen(m_c.fg);
+        const double titleW = pill.left() - 32 - idw;
+        p.drawText(QRectF(26 + idw, r.top() + 2, titleW, 18), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(title).elidedText(n.title, Qt::ElideRight, int(titleW)));
+        QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
+        p.drawText(QRectF(26, r.top() + 19, width() - 120, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
+        if (!n.deps.isEmpty()) {
+            p.setFont(NewSessionDense::mono(10)); p.setPen(m_c.dim);
+            p.drawText(QRectF(width() - 112, r.top() + 19, 104, 16), Qt::AlignRight | Qt::AlignVCenter, n.deps);
+        }
+    }
     bool graph() const { return m_mode != List; }
     QPointF out(const QRectF &r) const { return m_mode == Wide ? QPointF(r.right(), r.center().y()) : QPointF(r.center().x(), r.bottom()); }
     QPointF in(const QRectF &r) const { return m_mode == Wide ? QPointF(r.left(), r.center().y()) : QPointF(r.center().x(), r.top()); }
@@ -307,8 +518,13 @@ protected:
         };
         if (graph()) {
             p.scale(zoom, zoom);
+            if (banded() && m_mode == Wide)
+                for (int i = 0; i < m_bandBackgrounds.size(); ++i)
+                    if (i % 2) p.fillRect(m_bandBackgrounds[i], alpha(m_c.fg, .025));
             QFont small = font(); small.setPixelSize(10); p.setFont(small); p.setPen(m_c.dim);
-            if (m_mode == Wide) {
+            if (banded()) {
+                // The phase headers name the bands; their own layers need no labels.
+            } else if (m_mode == Wide) {
                 QMap<int, int> counts; for (const auto &n : nodes) ++counts[n.layer];
                 for (int l = 0; l < m_layers; ++l) {
                     if (l % 2) p.fillRect(QRectF(m_ox + 4 + l * WideStep, 0, WideStep, height() / zoom), alpha(m_c.fg, .025));
@@ -323,14 +539,15 @@ protected:
                 }
             }
             for (auto it = edges.cbegin(); it != edges.cend(); ++it) for (int dep : it.value()) {
-                if (!m_rects.contains(dep) || !m_rects.contains(it.key())) continue;
+                const int from = anchor(dep), to = anchor(it.key());
+                if (!from || !to || from == to) continue;
                 const bool hot = lit.contains(dep) && lit.contains(it.key());
                 const bool bad = cycle.contains(dep) && cycle.contains(it.key());
                 const bool selected = m_edge == qMakePair(dep, it.key());
                 QColor color = selected || bad ? m_c.danger : hot ? m_c.accent : m_c.border;
                 if (!hot && !selected && (!lit.isEmpty() || !emphasis.isEmpty()) && !(emphasis.contains(dep) && emphasis.contains(it.key()))) color = alpha(color, .35);
                 p.setPen(QPen(color, hot || selected ? 2 : 1.4, selected || soft.contains({dep, it.key()}) ? Qt::DashLine : Qt::SolidLine)); p.setBrush(Qt::NoBrush);
-                const auto path = edgePath(dep, it.key());
+                const auto path = edgePath(from, to);
                 p.drawPath(path);
                 const QPointF e = path.pointAtPercent(1), before = path.pointAtPercent(.96);
                 const QLineF tail(e, before);
@@ -396,6 +613,25 @@ protected:
                     p.setOpacity(1); p.setPen(Qt::NoPen); p.setBrush(m_c.accent); p.drawRoundedRect(handle(r), 3, 3);
                 }
             }
+            // A collapsed phase is one summary node; its header stays above.
+            for (auto it = m_summaries.cbegin(); it != m_summaries.cend(); ++it) paintSummary(p, it.key(), it.value());
+            for (const auto &band : bands) paintBand(p, band, m_bandRects.value(band.n));
+            return;
+        }
+        if (banded()) {
+            for (const auto &band : bands) {
+                paintBand(p, band, m_bandRects.value(band.n));
+                if (band.collapsed) continue;
+                for (const auto &layer : m_listLayers) {
+                    if (layer.phase != band.n) continue;
+                    paintLayerHeader(p, layer.n, layer.count, layer.rect);
+                }
+                for (int id : band.tasks) {
+                    const Node *node = nodeOf(id);
+                    if (!node || !node->match) continue;
+                    paintListRow(p, *node, dimmed(*node));
+                }
+            }
             return;
         }
         int layer = -1, count = 0;
@@ -403,47 +639,15 @@ protected:
         for (const auto &n : nodes) if (n.match) ++perLayer[n.layer];
         for (const auto &n : nodes) {
             if (!n.match) continue;
-            const QRectF r = m_rects[n.id];
-            if (n.layer != layer) {
-                layer = n.layer; count = perLayer[layer];
-                QFont caps = font(); caps.setPixelSize(10); caps.setWeight(QFont::DemiBold); caps.setLetterSpacing(QFont::AbsoluteSpacing, .6);
-                p.setOpacity(1); p.setFont(caps); p.setPen(m_c.dim);
-                const QString label = QCoreApplication::translate("TeamPanel", "LAYER %1 · %2").arg(layer + 1).arg(count);
-                p.drawText(QRectF(2, r.top() - 22, width(), 18), Qt::AlignLeft | Qt::AlignVCenter, label);
-                const int lw = QFontMetrics(caps).horizontalAdvance(label) + 10;
-                p.setPen(m_c.border); p.drawLine(QPointF(lw, r.top() - 13), QPointF(width() - 2, r.top() - 13));
-            }
-            p.setOpacity(dimmed(n) ? .35 : 1);
-            const QRectF box(1, r.top(), width() - 2, r.height());
-            if (n.problem || n.error) {
-                p.setPen(QPen(n.tone == m_c.warn ? m_c.warn : m_c.danger, 1)); p.setBrush(alpha(n.tone == m_c.warn ? m_c.warn : m_c.danger, .07));
-                p.drawRoundedRect(box.adjusted(.5, .5, -.5, -.5), 7, 7);
-            } else if (m_hover == n.id) { p.setPen(Qt::NoPen); p.setBrush(alpha(m_c.fg, .05)); p.drawRoundedRect(box, 7, 7); }
-            glyph(p, QRectF(8, r.top() + 5, 12, 12), n.tone, n.kind);
-            QFont mono = NewSessionDense::mono(11); p.setFont(mono); p.setPen(m_c.dim);
-            const QString id = QStringLiteral("#%1").arg(n.id);
-            const int idw = QFontMetrics(mono).horizontalAdvance(id) + 6;
-            p.drawText(QRectF(26, r.top() + 2, idw, 18), Qt::AlignLeft | Qt::AlignVCenter, id);
-            QFont small = font(); small.setPixelSize(10); small.setWeight(QFont::Medium);
-            const int roleW = QFontMetrics(small).horizontalAdvance(n.role) + 14;
-            const QRectF pill(width() - roleW - 6, r.top() + 3, roleW, 16);
-            p.setPen(QPen(alpha(n.roleTone, .45), 1)); p.setBrush(alpha(n.roleTone, .12)); p.drawRoundedRect(pill, 8, 8);
-            p.setFont(small); p.setPen(n.roleTone); p.drawText(pill, Qt::AlignCenter, n.role);
-            QFont title = font(); title.setPixelSize(12); p.setFont(title); p.setPen(m_c.fg);
-            const double titleW = pill.left() - 32 - idw;
-            p.drawText(QRectF(26 + idw, r.top() + 2, titleW, 18), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(title).elidedText(n.title, Qt::ElideRight, int(titleW)));
-            QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
-            p.drawText(QRectF(26, r.top() + 19, width() - 120, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
-            if (!n.deps.isEmpty()) {
-                p.setFont(NewSessionDense::mono(10)); p.setPen(m_c.dim);
-                p.drawText(QRectF(width() - 112, r.top() + 19, 104, 16), Qt::AlignRight | Qt::AlignVCenter, n.deps);
-            }
+            if (n.layer != layer) { layer = n.layer; count = perLayer[layer]; paintLayerHeader(p, layer, count, QRectF(2, m_rects[n.id].top() - 24, width() - 4, 20)); }
+            paintListRow(p, n, dimmed(n));
         }
     }
     int at(const QPointF &position) const
     {
         const QPointF point = graph() ? position / zoom : position;
         for (auto it = m_rects.cbegin(); it != m_rects.cend(); ++it) {
+            if (it.key() < 0) continue;   // a collapsed phase's summary is no task
             QRectF r = it.value(); if (!graph()) r.setWidth(width());
             if (r.adjusted(0, 0, 0, editable ? 4 : 0).contains(point)) return it.key();
         }
@@ -462,6 +666,7 @@ protected:
     }
     void mousePressEvent(QMouseEvent *e) override
     {
+        if (e->button() == Qt::LeftButton && phaseAt(e->position())) return;   // toggled on release
         if (!editable || !graph() || e->button() != Qt::LeftButton) return QWidget::mousePressEvent(e);
         const QPointF point = e->position() / zoom;
         if (m_edge.first && QLineF(edgePath(m_edge.first, m_edge.second).pointAtPercent(.5), point).length() <= 8) {
@@ -470,13 +675,14 @@ protected:
             return;
         }
         for (auto it = m_rects.cbegin(); it != m_rects.cend(); ++it)
-            if (handle(it.value()).adjusted(-4, -4, 4, 4).contains(point)) { m_dragFrom = it.key(); m_dragAt = e->position(); m_edge = {0, 0}; update(); return; }
+            if (it.key() > 0 && handle(it.value()).adjusted(-4, -4, 4, 4).contains(point)) { m_dragFrom = it.key(); m_dragAt = e->position(); m_edge = {0, 0}; update(); return; }
         if (!at(e->position())) { m_edge = edgeAt(e->position()); update(); }
     }
     void mouseMoveEvent(QMouseEvent *e) override
     {
         const int id = at(e->position());
         if (m_dragFrom) { m_dragAt = e->position(); m_hover = id; update(); return; }
+        if (phaseAt(e->position())) { if (m_hover) { m_hover = 0; update(); } setCursor(Qt::PointingHandCursor); return; }
         if (id != m_hover) { m_hover = id; setCursor(id ? Qt::PointingHandCursor : Qt::ArrowCursor); update(); }
     }
     void leaveEvent(QEvent *) override { if (!m_dragFrom) { m_hover = 0; update(); } }
@@ -487,6 +693,10 @@ protected:
             const int from = m_dragFrom; m_dragFrom = 0; update();
             if (id && id != from && linked) linked(from, id);
             return;
+        }
+        if (e->button() == Qt::LeftButton) {
+            const int phase = phaseAt(e->position());
+            if (phase) { if (phaseToggled) phaseToggled(phase); return; }
         }
         if (id && e->button() == Qt::LeftButton && clicked) clicked(id, e->globalPosition().toPoint());
     }
@@ -503,11 +713,47 @@ private:
     Colors m_c;
     Mode m_mode;
     int m_hover = 0, m_dragFrom = 0, m_layers = 0;
-    double m_ox = 0;
+    double m_ox = 0, m_oy = 0;
     QPointF m_dragAt;
     QPair<int, int> m_edge{0, 0};
     QMap<int, QRectF> m_rects;
+    // Phase grouping: a header per band, one summary rect per collapsed band
+    // (keyed by phase), the alternating wide bands, and the layer rules inside
+    // the list's phase groups.
+    QMap<int, QRectF> m_bandRects, m_summaries;
+    QList<QRectF> m_bandBackgrounds;
+    struct ListLayer { int phase = 0, n = 0, count = 0; QRectF rect; };
+    QList<ListLayer> m_listLayers;
 };
+
+// The phase bands a task view draws, with the owner's collapse choices.
+inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::function<bool(const PhaseGroup &)> &open)
+{
+    QList<TaskView::PhaseBand> bands;
+    for (const auto &group : phaseGroups(team)) {
+        TaskView::PhaseBand band;
+        band.n = group.n; band.title = group.title; band.heading = phaseHeading(group);
+        band.barrier = group.barrier; band.draft = group.draft; band.done = group.done; band.total = group.tasks.size();
+        band.tasks = group.tasks; band.collapsed = !open(group);
+        bands.append(band);
+    }
+    return bands;
+}
+
+// The tasks a grouped view builds nodes for, phase by phase and each phase's
+// own layers in order; a collapsed phase builds none.
+inline QList<int> phaseOrder(const Team &team, const QList<TaskView::PhaseBand> &bands)
+{
+    QList<int> order;
+    for (const auto &band : bands) {
+        if (band.collapsed) continue;
+        const auto layers = phaseLayers(team, band.tasks);
+        QMap<int, QList<int>> byLayer;
+        for (int id : band.tasks) byLayer[layers.value(id)].append(id);
+        for (auto it = byLayer.cbegin(); it != byLayer.cend(); ++it) order += it.value();
+    }
+    return order;
+}
 
 // Replaced content: a click inside it may still be running, so it goes once
 // control returns; meanwhile it is hidden and keeps no names to be found by.

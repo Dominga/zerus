@@ -64,6 +64,10 @@ private:
     QVBoxLayout *m_membersLayout;
     QLabel *m_busy, *m_membersCount, *m_summary, *m_reason, *m_branch;
     QPlainTextEdit *m_goal;
+    // How the coordinator runs the team: the template's lead protocol until
+    // you edit it; only the coordinator reads it.
+    QPlainTextEdit *m_protocol;
+    bool m_protocolEdited = false;
     QLineEdit *m_name, *m_folder;
     QCheckBox *m_worktrees, *m_review;
     QWidget *m_planning;

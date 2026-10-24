@@ -80,7 +80,7 @@ QJsonObject catalog()
   "roles":[{"id":"lead","name":"Lead","agent":"claude","prompt":"You lead."},
            {"id":"backend","name":"Backend","agent":"codex","folder":"worktree","prompt":"Build the API."},
            {"id":"tester","name":"Tester","agent":"kimi","model":"kimi-k2","folder":"worktree","prompt":"Test it."}],
-  "templates":[{"id":"feature","name":"Feature delivery","roster":[{"role":"backend","count":1},{"role":"tester","count":1}],
+  "templates":[{"id":"feature","name":"Feature delivery","lead_protocol":"Plan in waves of three","roster":[{"role":"backend","count":1},{"role":"tester","count":1}],
                 "tasks":[{"title":"Plan","role":"lead","deps":[]},{"title":"Build","role":"backend","deps":[0]},{"title":"Test","role":"tester","deps":[1]}],
                 "planning":"template","approval":"review","max_members":6}],
   "routing":[]},
@@ -482,6 +482,10 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     QVERIFY(feature);
     QTest::mouseClick(feature, Qt::LeftButton);
     QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 2);   // the table from 760 px
+    // The template's lead protocol fills Team protocol, which you may edit.
+    auto *protocol = tab.findChild<QPlainTextEdit *>("teamNewProtocol");
+    QCOMPARE(protocol->toPlainText(), QStringLiteral("Plan in waves of three"));
+    protocol->setPlainText("Plan in waves of two");
     tab.findChild<QPlainTextEdit *>("teamNewGoal")->setPlainText("Redesign the checkout flow: address form and tests");
     QCOMPARE(tab.findChild<QLineEdit *>("teamNewName")->text(), QStringLiteral("Redesign the checkout flow"));
     QTRY_VERIFY(create->isEnabled());
@@ -505,6 +509,7 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     const auto input = calls(script(), "create").first();
     const auto lead = input["lead"].toObject();
     QCOMPARE(lead["session"].toObject()["name"].toString(), QStringLiteral("claude/checkout/coord"));
+    QCOMPARE(input["lead_protocol"].toString(), QStringLiteral("Plan in waves of two"));
     QCOMPARE(input["members"].toArray().size(), 2);
     QCOMPARE(input["members"].toArray()[0].toObject()["model"].toString(), QStringLiteral("gpt-5.5"));
     QCOMPARE(input["members"].toArray()[1].toObject()["role"].toString(), QStringLiteral("Tester"));

@@ -114,16 +114,18 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         tasks.push(task);
     }
     let start = input["start"].as_bool() == Some(true);
-    // The template's lead protocol, as the catalog has it now, unless the
-    // request brings its own; the lead reads it with the planning brief.
+    // The request's lead protocol, even an empty one; without one, the
+    // template's as the catalog has it now. The lead reads it with the
+    // planning brief.
     let template = text(input, "template");
-    let lead_protocol = match text(input, "lead_protocol") {
-        "" if !template.is_empty() => super::catalog::load()
+    let lead_protocol = match input["lead_protocol"].as_str() {
+        Some(given) => given.to_owned(),
+        None if !template.is_empty() => super::catalog::load()
             .ok()
             .and_then(|catalog| catalog.templates.into_iter().find(|t| t.id == template))
             .map(|t| t.lead_protocol)
             .unwrap_or_default(),
-        given => given.to_owned(),
+        None => String::new(),
     };
     // A lead without a session is started first; an existing lead is briefed.
     let team = Team {
@@ -462,7 +464,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(member.session.is_none(), "A new member starts its own session");
             ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
             let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
-            ensure!(active < team.settings.max_members as usize, "The team already has its {} members", team.settings.max_members);
+            ensure!(active < team.settings.max_members, "The team already has its {} members", team.settings.max_members);
             let id = member.id.clone();
             let role = member.role.clone();
             team.members.push(member);

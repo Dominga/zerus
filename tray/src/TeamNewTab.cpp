@@ -94,6 +94,10 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
     m_goal = new QPlainTextEdit; m_goal->setObjectName("teamNewGoal"); m_goal->setMinimumHeight(96); m_goal->setMaximumHeight(140);
     m_goal->setPlaceholderText(tr("Describe the result, constraints and what “done” means…"));
     v->addWidget(m_goal);
+    v->addWidget(section(tr("Team protocol"), tr("how the coordinator runs the team — only the coordinator reads this"), colorsFor(true)));
+    m_protocol = new QPlainTextEdit; m_protocol->setObjectName("teamNewProtocol"); m_protocol->setMinimumHeight(72); m_protocol->setMaximumHeight(140);
+    m_protocol->setPlaceholderText(tr("How to split the work, check reports and start the next wave… A template fills this in."));
+    v->addWidget(m_protocol);
     auto *nameRow = row(10);
     auto *nameLabel = new QLabel(tr("Team name")); nameLabel->setFixedWidth(96); nameLabel->setObjectName("teamNewLabel");
     m_name = new QLineEdit; m_name->setObjectName("teamNewName");
@@ -166,6 +170,8 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
     outer->addWidget(footer);
 
     connect(m_create, &QPushButton::clicked, this, [this] { create(); });
+    // Yours once edited: another template no longer replaces it.
+    connect(m_protocol, &QPlainTextEdit::textChanged, this, [this] { m_protocolEdited = true; });
     connect(m_goal, &QPlainTextEdit::textChanged, this, [this] {
         if (!m_name->isModified()) { const QSignalBlocker block(m_name); m_name->setText(shortName(m_goal->toPlainText())); }
         validate();
@@ -219,7 +225,7 @@ void TeamNewTab::setDark(bool dark)
         "QLabel#teamNewGitNote{color:%9;background:%10;border:1px solid %11;border-radius:8px;padding:6px 10px;}"
         "QLabel#teamNewBranch{color:%12;font-size:11px;}"
         "QLineEdit#teamNewFolder{font-family:Consolas,'Cascadia Mono',monospace;}"
-        "QPlainTextEdit#teamNewGoal{font-size:13px;}")
+        "QPlainTextEdit#teamNewGoal, QPlainTextEdit#teamNewProtocol{font-size:13px;}")
         .arg(cardSel, cardSelBorder, c.surface.name(), c.border.name(), c.accent.name(), alpha(c.danger, .08).name(QColor::HexArgb),
              alpha(c.danger, .7).name(QColor::HexArgb), c.muted.name(), c.warn.name(), alpha(c.warn, .10).name(QColor::HexArgb),
              alpha(c.warn, .45).name(QColor::HexArgb), c.dim.name()));
@@ -316,6 +322,11 @@ void TeamNewTab::pickTemplate(const QString &id)
         for (auto *b : m_planning->findChildren<QPushButton *>()) b->setChecked(b->property("segment") == m_planningValue);
         m_review->setChecked(t->approval != "auto");
         if (t->maxMembers > 0) m_max->setValue(t->maxMembers);
+    }
+    if (!m_protocolEdited) {
+        const QSignalBlocker block(m_protocol);
+        const auto *t = catalog.templ(id);
+        m_protocol->setPlainText(t ? t->leadProtocol : QString());
     }
     renderTemplates(); renderMembers();
 }
@@ -547,7 +558,8 @@ void TeamNewTab::create()
     }
     const bool worktrees = m_worktrees->isChecked() && m_worktrees->isEnabled();
     const QJsonObject input{{"name", m_name->text().trimmed()}, {"goal", m_goal->toPlainText().trimmed()}, {"folder", m_folder->text().trimmed()},
-                            {"project", m_project}, {"template", t ? t->id : QString()}, {"lead", lead}, {"members", members}, {"tasks", tasks},
+                            {"project", m_project}, {"template", t ? t->id : QString()}, {"lead_protocol", m_protocol->toPlainText().trimmed()},
+                            {"lead", lead}, {"members", members}, {"tasks", tasks},
                             {"start", true},
                             {"settings", QJsonObject{{"folder_policy", worktrees ? "worktree" : "shared"}, {"approval", m_review->isChecked() ? "review" : "auto"},
                                                      {"max_members", m_max->value()}}}};

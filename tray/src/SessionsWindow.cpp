@@ -6391,6 +6391,9 @@ void SessionsWindow::ensureTeamNewForm()
         m_teamOpenAfterCreate=team;m_teams->refresh();
         // A session whose team ends gets a fresh form.
         m_teamNewForm->deleteLater();m_teamNewForm=nullptr;
+        // The list may carry the team already; a refresh that finds nothing new
+        // reports nothing, so open its Team tab now if it is there.
+        updateTeamPanel();
     };
     m_teamNewTab->layout()->addWidget(m_teamNewForm);
     m_teamNewForm->show();

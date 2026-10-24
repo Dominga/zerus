@@ -1,5 +1,6 @@
 #pragma once
 #include <QJsonObject>
+#include <QSet>
 #include <QWidget>
 #include <functional>
 #include "TeamModel.h"
@@ -49,6 +50,8 @@ private:
     QSplitter *m_split, *m_chatSplit;
     QStackedWidget *m_chatStack;
     QScrollArea *m_proposals;
+    // Decided proposals closed in the list; Apply still writes the kept ones.
+    QSet<QString> m_closed;
     QLabel *m_title, *m_status, *m_reads, *m_proposes, *m_version;
     QPlainTextEdit *m_goal = nullptr;
     class QComboBox *m_agent = nullptr, *m_model = nullptr, *m_effort = nullptr;

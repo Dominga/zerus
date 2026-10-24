@@ -585,8 +585,15 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     QCOMPARE(roles->count(), 4);   // + the proposed Security role
     shot(&page, "d1-draft-partly-decided");
     page.findChild<QPushButton *>("teamDesignerOpen")->click(); QCOMPARE(opened, running);
-    auto *apply = page.findChild<QPushButton *>("teamDesignerApply");
-    QVERIFY(apply->isVisible() && apply->isEnabled());
+    QVERIFY(page.findChild<QPushButton *>("teamDesignerApply")->isEnabled());
+    // A decided card closes and comes back; Apply stands with the proposals.
+    QCOMPARE(page.findChildren<QPushButton *>("teamProposalClose").size(), 1);   // p2 is kept
+    page.findChild<QPushButton *>("teamProposalClose")->click();
+    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 1);
+    page.findChild<QPushButton *>("teamDesignerShowClosed")->click();
+    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
+    auto *apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
+    QVERIFY(apply && apply->isVisible() && apply->isEnabled()); QCOMPARE(apply->text(), QStringLiteral("Apply 1 change"));
     apply->click();
     QTRY_COMPARE(calls(script(), "catalog apply").size(), 1);
 }

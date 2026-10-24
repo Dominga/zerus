@@ -254,7 +254,29 @@ void TeamDesignerPage::renderProposals()
     const auto decide = [this](const QString &id, const QString &decision) {
         m_teams->call(QStringLiteral("catalog decide"), {{"proposal", id}, {"decision", decision}}, [](bool, const QJsonObject &, const QString &) {});
     };
+    // Apply stands with the proposals it writes.
+    int kept = 0, undecided = 0;
+    for (const auto &p : catalog.proposals) { kept += p.state == "kept"; undecided += p.state == "proposed"; }
+    const bool stale = catalog.draftBase != catalog.version;
+    auto *bar = row(6);
+    QStringList counts;
+    if (kept) counts << tr("%n kept", nullptr, kept);
+    if (undecided) counts << tr("%n undecided", nullptr, undecided);
+    bar->addWidget(label(counts.isEmpty() ? tr("No change kept") : counts.join(QStringLiteral(" · ")), c.muted, 11), 1);
+    if (!m_closed.isEmpty()) {
+        auto *reopen = button(tr("Show closed"), "teamDesignerShowClosed"); reopen->setProperty("ghost", true);
+        QObject::connect(reopen, &QPushButton::clicked, this, [this] { m_closed.clear(); renderProposals(); });
+        bar->addWidget(reopen);
+    }
+    auto *apply = button(kept == 1 ? tr("Apply 1 change") : tr("Apply %1 changes").arg(kept), "teamDesignerApplyKept", true);
+    apply->setEnabled(kept > 0 && !stale);
+    apply->setToolTip(stale ? tr("The catalog changed after this draft; applying would overwrite those edits.")
+                            : tr("Write the kept changes as the next catalog version"));
+    QObject::connect(apply, &QPushButton::clicked, this, [this] { m_editor->applyKept(); });
+    bar->addWidget(apply);
+    v->addLayout(bar);
     for (const auto &p : catalog.proposals) {
+        if (p.state != "proposed" && m_closed.contains(p.id)) continue;
         const bool rejected = p.state == "rejected";
         auto *card = new QFrame; card->setObjectName("teamDesignerProposal");
         auto *cv = new QVBoxLayout(card); cv->setContentsMargins(8, 6, 8, 6); cv->setSpacing(3);
@@ -277,6 +299,11 @@ void TeamDesignerPage::renderProposals()
             auto *undo = button(tr("Undo"), "teamProposalUndo"); undo->setProperty("ghost", true);
             QObject::connect(undo, &QPushButton::clicked, this, [decide, id = p.id] { decide(id, "undo"); });
             head->addWidget(undo);
+            // A decided card can be closed; its decision stays.
+            auto *close = button(QStringLiteral("×"), "teamProposalClose"); close->setProperty("ghost", true);
+            close->setToolTip(tr("Close this card; the decision stays")); close->setAccessibleName(tr("Close"));
+            QObject::connect(close, &QPushButton::clicked, this, [this, id = p.id] { m_closed.insert(id); renderProposals(); });
+            head->addWidget(close);
         }
         cv->addLayout(head);
         auto *foot = row(6);

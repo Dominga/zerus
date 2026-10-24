@@ -40,6 +40,8 @@ public:
     void setDesignerWorking(bool working) { m_designerWorking = working; updateHeader(); }
     // Selects a proposal's item: Show in catalog.
     void showProposal(const QString &proposal);
+    // Apply as from the header, with its confirmation; off while it is.
+    void applyKept();
     // The role's Computer and Account dropdowns: computers by alias (empty is
     // this computer) and the accounts each one reports.
     struct Computer { QString alias, label; bool online = true; };

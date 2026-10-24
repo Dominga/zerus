@@ -834,6 +834,11 @@ void TeamCatalogEditor::showProposal(const QString &proposal)
     }
 }
 
+void TeamCatalogEditor::applyKept()
+{
+    if (m_apply->isEnabled()) m_apply->click();
+}
+
 void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &computers)
 {
     m_computers = computers;

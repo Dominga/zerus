@@ -681,6 +681,13 @@ QWidget *TeamCatalogEditor::templateEditor(int index)
                                   "teamTemplateApproval", [this, index](const QString &value) { m_catalog.templates[index].approval = value; changed(); }));
     approval->addStretch();
     add(tr("Approval"), box(approval));
+    auto *phaseApproval = row(0);
+    phaseApproval->addWidget(segmented({{"", tr("Same as plan")}, {"review", tr("Owner approves")}, {"auto", tr("Lead runs")}}, t.phaseApproval,
+                                       "teamTemplatePhaseApproval", [this, index](const QString &value) {
+                                           m_catalog.templates[index].phaseApproval = value; changed();
+                                       }));
+    phaseApproval->addStretch();
+    add(tr("New phases"), box(phaseApproval));
     auto *max = new QSpinBox; max->setRange(1, 32); max->setValue(t.maxMembers > 0 ? t.maxMembers : 6); max->setFixedWidth(80);
     connect(max, &QSpinBox::valueChanged, this, [this, index](int n) { m_catalog.templates[index].maxMembers = n; changed(); });
     add(tr("Max members"), max);

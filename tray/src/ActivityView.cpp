@@ -518,12 +518,13 @@ TeamMessage teamMessage(QString text)
     if (!match.hasMatch()) return m;
     m.valid = true; m.header = match.captured(0); m.from = match.captured(1).trimmed(); m.full = text;
     const auto parts = match.captured(2).split(QChar(0x00b7), Qt::SkipEmptyParts);
-    bool planning = false;
+    bool planning = false, decided = false;
     for (auto part : parts) {
         part = part.trimmed();
         if (part.startsWith("task: #")) m.task = part.mid(7).toInt();
         else if (part.startsWith("attempt: ")) m.attempt = part.mid(9).toInt();
         else if (part == "planning") planning = true;
+        else if (part == "all tasks decided") decided = true;
     }
     auto rest = text.mid(match.capturedLength()).trimmed();
     static const QRegularExpression role(QStringLiteral("Your role: ([^.\\n]+)\\."));
@@ -538,6 +539,11 @@ TeamMessage teamMessage(QString text)
         m.kind = QObject::tr("Planning brief"); m.to = QObject::tr("Lead");
         const int plan = rest.indexOf(QStringLiteral("\n\nPlan the work"));
         m.body = (plan >= 0 ? rest.left(plan) : rest).trimmed();
+    } else if (decided) {
+        m.kind = QObject::tr("All tasks decided");
+        static const QRegularExpression teamLine(QStringLiteral("^Team: ([^.\\n]+)\\.\\s*"));
+        if (const auto t = teamLine.match(rest); t.hasMatch()) rest = rest.mid(t.capturedLength());
+        m.body = rest.trimmed();
     } else if (m.from == QStringLiteral("You")) {
         m.kind = QObject::tr("Message from you"); m.body = rest;
     } else {

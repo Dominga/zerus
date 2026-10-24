@@ -157,6 +157,13 @@ void TeamTaskCard::rebuild()
         auto *r = row(6);
         auto *caption = label(tr("Assignee"), c.muted, 11); caption->setFixedWidth(84); r->addWidget(caption);
         r->addWidget(new Pill(role, roleColor(role, m_dark)));
+        if (task->pinned) {
+            auto *pin = new QLabel; pin->setObjectName("teamTaskPinned");
+            pin->setPixmap(workspaceIcon("pinned", c.muted).pixmap(14, 14));
+            pin->setToolTip(tr("Pinned: stays with %1").arg(role));
+            pin->setAccessibleName(pin->toolTip());
+            r->addWidget(pin);
+        }
         auto *icon = new QLabel; icon->setPixmap(agentLogo(assignee->agent, c.fg).pixmap(14, 14)); r->addWidget(icon);
         r->addWidget(elided((assignee->model.isEmpty() ? assignee->agent : assignee->model) + QStringLiteral(" · ")
                                 + (assignee->computer.isEmpty() ? tr("this computer") : assignee->computer), c.text2, 12), 1);

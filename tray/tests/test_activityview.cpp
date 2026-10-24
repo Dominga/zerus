@@ -199,6 +199,7 @@ private slots:
     void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
     void teamMessagesReadAsPlaques();
+    void allDecidedMessagesReadAsPlaques();
     void cacheKeepalivesReadAsOneQuietLine();
     void whiteWhTranscriptReadsFlat();
     void preparedWorkerLifetimeFollowsDocuments();
@@ -371,6 +372,22 @@ void TestActivityView::teamMessagesReadAsPlaques()
     QMetaObject::invokeMethod(view.browser(), "anchorClicked", Q_ARG(QUrl, QUrl("hgs-team-task:3")));
     QCOMPARE(task.count(), 1);
     QCOMPARE(task.first().first().toInt(), 3);
+}
+
+// WhiteWh fork: the dispatcher's one "all tasks decided" message is a plaque
+// of its own kind, not a task hand-off.
+void TestActivityView::allDecidedMessagesReadAsPlaques()
+{
+    const QString decided = QString::fromUtf8("[Zerus team \u00b7 from: Zerus \u00b7 all tasks decided]\n"
+        "Team: Checkout. All 5 tasks are decided (3 accepted, 1 rejected, 1 cancelled).\n"
+        "Add the next phase with hgs team extend --json, or finish the team with a summary (hgs guide team-lead):\n"
+        "  {\"request_id\":\"a\",\"team\":\"t\",\"summary\":\"...\"} | hgs team finish --json");
+    SettledActivityView view; view.resize(700, 500);
+    view.setActivity({}, {journalEvent(1, "UserPromptSubmit", decided)});
+    const auto text = view.browser()->toPlainText();
+    QVERIFY(text.contains("All tasks decided"));
+    QVERIFY(text.contains("All 5 tasks are decided"));
+    QVERIFY(!text.contains("Task from team"));
 }
 
 // WhiteWh fork: with the skin's bubbles, agent replies read as text in the

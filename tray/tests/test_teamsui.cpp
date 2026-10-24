@@ -5,10 +5,12 @@
 #include <QPointer>
 #include <QScrollBar>
 #include <QtTest>
+#include <algorithm>
 #include <QStyle>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialog>
 #include <QDialogButtonBox>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -16,6 +18,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
@@ -76,6 +79,38 @@ QJsonObject team(const QString &status = "running")
     return t;
 }
 
+// A running team with two phases appended: phase 1 is finished (it starts
+// collapsed), phase 2 has a barrier, phase 3 waits as a draft.
+QJsonObject phasedTeam()
+{
+    auto t = team();
+    t["settings"] = QJsonObject{{"all_hard", false}, {"approval", "review"}, {"phase_approval", "review"}};
+    t["waiting_for_lead"] = false;
+    t["pending_phase"] = 3;
+    t["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"barrier", true}, {"approval", "review"}, {"state", "approved"},
+                    {"tasks", QJsonArray{3, 4}}, {"added_by", "Lead"}, {"added_at", 1500.0},
+                    {"decided_by", "You"}, {"decided_at", 1600.0}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"barrier", false}, {"approval", "review"}, {"state", "draft"},
+                    {"tasks", QJsonArray{5}}, {"added_by", "Lead"}, {"added_at", 1700.0}}};
+    t["tasks"] = QJsonArray{
+        QJsonObject{{"id", 1}, {"phase", 1}, {"title", "Requirements"}, {"assignee", "lead"}, {"status", "accepted"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "lead"}, {"state", "reported"}}}}},
+        QJsonObject{{"id", 2}, {"phase", 1}, {"title", "Checkout design"}, {"assignee", "backend"}, {"status", "accepted"}},
+        QJsonObject{{"id", 3}, {"phase", 2}, {"title", "Address form UI"}, {"assignee", "backend"}, {"status", "accepted"},
+                    {"deps", QJsonArray{QJsonObject{{"task", 2}}}},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a3"}, {"member", "backend"}, {"state", "reported"}}}}},
+        QJsonObject{{"id", 4}, {"phase", 2}, {"title", "Unit tests"}, {"assignee", "tester"}, {"status", "in_progress"},
+                    {"deps", QJsonArray{QJsonObject{{"task", 3}, {"kind", "soft"}}}},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a4"}, {"member", "tester"}, {"state", "delivered"}, {"sent_at", 1600.0}}}}},
+        QJsonObject{{"id", 5}, {"phase", 3}, {"title", "Code review"}, {"assignee", "backend"}, {"status", "draft"},
+                    {"deps", QJsonArray{QJsonObject{{"task", 4}}}}}};
+    t["layers"] = QJsonObject{{"1", 0}, {"2", 0}, {"3", 0}, {"4", 1}, {"5", 2}};
+    t["ready"] = QJsonArray{4};
+    t["validation"] = QJsonObject{{"errors", QJsonArray()}, {"warnings", QJsonArray()}};
+    return t;
+}
+
 QJsonObject catalog()
 {
     return QJsonDocument::fromJson(R"({"builtin":false,
@@ -85,7 +120,7 @@ QJsonObject catalog()
            {"id":"tester","name":"Tester","agent":"kimi","model":"kimi-k2","folder":"worktree","prompt":"Test it."}],
   "templates":[{"id":"feature","name":"Feature delivery","lead_protocol":"Plan in waves of three","roster":[{"role":"backend","count":1},{"role":"tester","count":1}],
                 "tasks":[{"title":"Plan","role":"lead","deps":[]},{"title":"Build","role":"backend","deps":[0]},{"title":"Test","role":"tester","deps":[1]}],
-                "planning":"template","approval":"review","max_members":6}],
+                "planning":"template","approval":"review","phase_approval":"auto","max_members":6}],
   "routing":[]},
  "draft":{"base":3,"proposals":[
   {"id":"p1","kind":"role","action":"change","target":"tester","title":"Tester: Kimi → Claude Sonnet","reason":"Deliveries to msi-old fail",
@@ -119,7 +154,8 @@ void shot(QWidget *widget, const QString &name)
     const auto dir = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
     if (dir.isEmpty()) return;
     QTest::qWait(50);
-    widget->grab().save(QDir(dir).filePath(name + ".png"));
+    const QString path = QDir(dir).filePath(name + ".png");
+    if (!widget->grab().save(path)) qWarning() << "screenshot not saved:" << path;
 }
 
 void darkPalette()
@@ -147,6 +183,10 @@ private slots:
     void catalogRoleChoosesAccountModelAndComputer();
     void designerDraftIsKeptThenApplied();
     void workspaceShowsGraphBoardAndFocus();
+    void workspaceGroupsTasksByPhase();
+    void phaseApprovalAndFinishAskTheOwner();
+    void pinMarkAndFinishedTeamShowWhoFinished();
+    void catalogEditorCarriesNewPhaseApproval();
     void emptyPanelOffersNewTeamAndDesigner();
     void embeddedNewTeamIsLedByTheSession();
     void workspaceAddsAMember();
@@ -333,6 +373,7 @@ void TestTeamsUi::newTeamStartsTheLeadWithTheTemplate()
     QCOMPARE(input["tasks"].toArray().size(), 3);   // the template plans
     QCOMPARE(input["tasks"].toArray()[0].toObject()["assignee"].toString(), QStringLiteral("lead"));
     QCOMPARE(input["settings"].toObject()["folder_policy"].toString(), QStringLiteral("shared"));
+    QCOMPARE(input["settings"].toObject()["phase_approval"].toString(), QStringLiteral("auto"));
     QCOMPARE(input["lead"].toObject()["prompt"].toString(), QStringLiteral("You lead."));
 }
 
@@ -486,6 +527,258 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     // A card opens the drawer.
     workspace.findChildren<QPushButton *>("teamBoardOpen").first()->click();
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceDrawer")->isVisible());
+}
+
+void TestTeamsUi::workspaceGroupsTasksByPhase()
+{
+    setTeam(phasedTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    const auto graph = [&workspace] { return dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); };
+    QTRY_VERIFY(graph());
+    QTRY_COMPARE(graph()->bands.size(), 3);
+    const auto nodeIds = [](const TeamUi::TaskView *view) {
+        QList<int> ids;
+        for (const auto &node : view->nodes) ids.append(node.id);
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    // Phases left to right; the finished one starts collapsed.
+    QCOMPARE(graph()->bands[0].heading, QStringLiteral("Phase 1 · 2/2"));
+    QVERIFY(graph()->bands[0].collapsed);
+    QCOMPARE(graph()->bands[1].heading, QStringLiteral("Phase 2 · QA fixes · 1/2"));
+    QVERIFY(graph()->bands[1].barrier);
+    QVERIFY(!graph()->bands[1].collapsed);
+    QCOMPARE(graph()->bands[2].heading, QStringLiteral("Phase 3 · Polish · 0/1"));
+    QVERIFY(graph()->bands[2].draft);
+    // A collapsed phase builds no task node; one summary stands in.
+    QCOMPARE(nodeIds(graph()), (QList<int>{3, 4, 5}));
+    QVERIFY(!graph()->summaryRect(1).isNull());
+    shot(&workspace, "d3-phases-graph-collapsed");
+    const auto clickHeader = [&](int phase) {
+        auto *view = graph(); QVERIFY(view);
+        QTest::mouseClick(view, Qt::LeftButton, {}, (view->bandRect(phase).center() * view->zoom).toPoint());
+    };
+    using Guard = QPointer<QWidget>;
+    const Guard before = graph();
+    clickHeader(1);   // the header opens the finished phase, its tasks come back
+    QTRY_VERIFY(graph() && graph() != before);
+    QTRY_VERIFY(!graph()->bands[0].collapsed);
+    QTRY_COMPARE(nodeIds(graph()).size(), 5);
+    QVERIFY(graph()->summaryRect(1).isNull());
+    clickHeader(2);   // the current phase closes; its tasks go, the others stay
+    QTRY_VERIFY(graph()->bands[1].collapsed);
+    QTRY_COMPARE(nodeIds(graph()), (QList<int>{1, 2, 5}));
+    shot(&workspace, "d3-phases-graph-open");
+    const auto showView = [&workspace](const QString &view) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (b->property("segment") == view) { b->click(); break; }
+    };
+    // Layers group by phase too, each phase with its own layer rules.
+    showView("layers");
+    const auto layers = [&workspace] { return dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceLayers")); };
+    QTRY_VERIFY(layers());
+    QTRY_COMPARE(layers()->bands.size(), 3);
+    QVERIFY(layers()->bands[1].collapsed);
+    QCOMPARE(nodeIds(layers()), (QList<int>{1, 2, 5}));
+    shot(&workspace, "d3-phases-layers");
+    // The board stacks the phases; a collapsed one shows only its header.
+    showView("board");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    const auto toggles = [&workspace] { return workspace.findChildren<QPushButton *>("teamBoardPhaseToggle"); };
+    const auto cards = [&workspace] {
+        QList<int> ids;
+        for (auto *card : workspace.findChildren<QFrame *>("teamBoardCard")) ids.append(card->property("task").toInt());
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+    QTRY_COMPARE(toggles().size(), 3);
+    QCOMPARE(toggles()[0]->text(), QStringLiteral("Phase 1 · 2/2"));
+    QCOMPARE(toggles()[1]->text(), QStringLiteral("Phase 2 · QA fixes · 1/2"));
+    QCOMPARE(toggles()[2]->text(), QStringLiteral("Phase 3 · Polish · 0/1"));
+    QCOMPARE(cards(), (QList<int>{1, 2, 5}));
+    shot(&workspace, "d3-phases-board-collapsed");
+    QPointer<QPushButton> closed = toggles()[1];
+    closed->click();
+    QTRY_COMPARE(cards(), (QList<int>{1, 2, 3, 4, 5}));
+    QTRY_VERIFY(toggles().size() == 3 && !toggles()[1]->property("collapsed").toBool());
+    shot(&workspace, "d3-phases-board");
+}
+
+void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
+{
+    setTeam(phasedTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    // The team header says the phase waits, and the draft header carries the
+    // two owner decisions.
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamBarPendingPhase"));
+    QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseHeading")->text(), QStringLiteral("Phase 3 · Polish · 0/1"));
+    QVERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
+    QVERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
+    shot(&workspace, "d3-phases-draft");
+    if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) {
+        const QPalette dark = QApplication::palette();
+        QPalette light;
+        light.setColor(QPalette::Window, QColor("#f5f7f9")); light.setColor(QPalette::WindowText, QColor("#1a2733"));
+        light.setColor(QPalette::Base, QColor("#ffffff")); light.setColor(QPalette::Button, QColor("#edf2f5"));
+        light.setColor(QPalette::ButtonText, QColor("#1a2733")); light.setColor(QPalette::Text, QColor("#1a2733"));
+        QApplication::setPalette(light);
+        workspace.setTheme(false); panel.setTheme(false);
+        QTRY_VERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
+        shot(&workspace, "d3-phases-draft-light");
+        workspace.setTheme(true); panel.setTheme(true);
+        QApplication::setPalette(dark);
+        QTRY_VERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
+    }
+    // Approve sends the owner's decision once, with the phase.
+    workspace.findChild<QPushButton *>("teamApprovePhase")->click();
+    QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
+    QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 3);
+    QCOMPARE(calls(script(), "approve-phase").first()["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(calls(script(), "approve-phase").first()["by"].toString(), QStringLiteral("human"));
+    // Discard asks to confirm first: "Discard phase N and its K tasks?".
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
+    QTimer::singleShot(0, &panel, [&panel] {
+        if (auto *box = panel.findChild<QMessageBox *>("teamDiscardPhaseConfirm"))
+            for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Discard phase")) { b->click(); break; }
+    });
+    workspace.findChild<QPushButton *>("teamDiscardPhase")->click();
+    QTRY_COMPARE(calls(script(), "discard-phase").size(), 1);
+    QCOMPARE(calls(script(), "discard-phase").first()["phase"].toInt(), 3);
+    // All tasks decided: the header waits for the lead and Finish asks for a
+    // bounded summary.
+    auto waiting = phasedTeam();
+    auto tasks = waiting["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) { auto task = tasks[i].toObject(); task["status"] = "accepted"; tasks[i] = task; }
+    waiting["tasks"] = tasks;
+    waiting["phases"] = QJsonArray{QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"barrier", true}, {"approval", "review"},
+                                               {"state", "approved"}, {"tasks", QJsonArray{3, 4}}}};
+    waiting["pending_phase"] = QJsonValue();
+    waiting["waiting_for_lead"] = true;
+    setTeam(waiting);
+    controller.refresh();
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamBarWaitingForLead"));
+    QVERIFY(!workspace.findChild<QWidget *>("teamBarPendingPhase"));
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceFinish"));
+    shot(&workspace, "d3-phases-waiting");
+    workspace.findChild<QPushButton *>("teamWorkspaceFinish")->click();
+    auto *dialog = panel.findChild<QDialog *>("teamFinishDialog");
+    QTRY_VERIFY(dialog);
+    auto *summary = dialog->findChild<QPlainTextEdit *>("teamFinishSummary");
+    auto *finish = dialog->findChild<QPushButton *>("teamFinishConfirm");
+    QVERIFY(summary && finish);
+    QVERIFY(!finish->isEnabled());   // a summary is required
+    summary->setPlainText(QString(4001, QLatin1Char('x')));
+    QTRY_VERIFY(!finish->isEnabled());   // and bounded at 4,000 characters
+    summary->setPlainText(QStringLiteral("Phases 1–2 are delivered; the retest is #11."));
+    QTRY_VERIFY(finish->isEnabled());
+    finish->click();
+    QTRY_COMPARE(calls(script(), "finish").size(), 1);
+    QCOMPARE(calls(script(), "finish").first()["summary"].toString(), QStringLiteral("Phases 1–2 are delivered; the retest is #11."));
+    QCOMPARE(calls(script(), "finish").first()["team"].toString(), QStringLiteral("team-1"));
+}
+
+void TestTeamsUi::pinMarkAndFinishedTeamShowWhoFinished()
+{
+    auto t = phasedTeam();
+    auto tasks = t["tasks"].toArray();
+    auto pinned = tasks[1].toObject(); pinned["pinned"] = true; tasks[1] = pinned;   // #2 Checkout design
+    t["tasks"] = tasks;
+    const auto parsed = parse(t);
+    TeamTaskCard card;
+    card.resize(420, 900); card.show();
+    card.setTask(parsed, 2, live, true);
+    auto *pin = card.findChild<QLabel *>("teamTaskPinned");
+    QVERIFY(pin);
+    QCOMPARE(pin->toolTip(), QStringLiteral("Pinned: stays with Backend"));
+    shot(&card, "task-card-pinned");
+    // A Done team shows who finished it and the summary.
+    t["status"] = "done";
+    t["waiting_for_lead"] = false;
+    t["pending_phase"] = QJsonValue();
+    t["phases"] = QJsonArray{QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "approved"}, {"tasks", QJsonArray{3, 4}}}};
+    t["finish"] = QJsonObject{{"by", "Lead"}, {"summary", "Phases 1–2 are delivered; the retest is #11."}, {"at", 2000.0}};
+    auto doneTasks = t["tasks"].toArray();
+    for (int i = 0; i < doneTasks.size(); ++i) { auto task = doneTasks[i].toObject(); task["status"] = "accepted"; doneTasks[i] = task; }
+    t["tasks"] = doneTasks;
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.setLive(live); panel.resize(420, 1100); panel.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(panel.findChild<QLabel *>("teamFinishBy"));
+    QCOMPARE(panel.findChild<QLabel *>("teamFinishBy")->text(), QStringLiteral("Finished by Lead"));
+    QCOMPARE(panel.findChild<QLabel *>("teamFinishSummaryText")->text(), QStringLiteral("Phases 1–2 are delivered; the retest is #11."));
+    QVERIFY(!panel.findChild<QPushButton *>("teamFinish"));   // Done is final
+    shot(&panel, "team-done-finish");
+    // The inspector repeats both header chips.
+    setTeam(phasedTeam());
+    controller.refresh();
+    QTRY_VERIFY(panel.findChild<QWidget *>("teamPendingPhase"));
+    QVERIFY(!panel.findChild<QWidget *>("teamWaitingForLead"));
+    auto waiting = phasedTeam();
+    auto waitingTasks = waiting["tasks"].toArray();
+    for (int i = 0; i < waitingTasks.size(); ++i) { auto task = waitingTasks[i].toObject(); task["status"] = "accepted"; waitingTasks[i] = task; }
+    waiting["tasks"] = waitingTasks;
+    waiting["pending_phase"] = QJsonValue();
+    waiting["phases"] = QJsonArray{QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "approved"}, {"tasks", QJsonArray{3, 4}}}};
+    waiting["waiting_for_lead"] = true;
+    setTeam(waiting);
+    controller.refresh();
+    QTRY_VERIFY(panel.findChild<QWidget *>("teamWaitingForLead"));
+    QVERIFY(panel.findChild<QPushButton *>("teamFinish"));
+}
+
+void TestTeamsUi::catalogEditorCarriesNewPhaseApproval()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(900, 700); editor.show();
+    QTRY_COMPARE(editor.findChild<QListWidget *>("teamCatalogRoles")->count(), 3);
+    for (auto *b : editor.findChild<QWidget *>("teamCatalogTabs")->findChildren<QPushButton *>())
+        if (b->property("segment") == "templates") { b->click(); break; }
+    auto *templates = editor.findChild<QListWidget *>("teamCatalogTemplates");
+    QTRY_VERIFY(templates && templates->count() >= 1);
+    templates->setCurrentRow(0);
+    auto *choice = editor.findChild<QWidget *>("teamTemplatePhaseApproval");
+    QTRY_VERIFY(choice);
+    QPushButton *owner = nullptr, *lead = nullptr;
+    for (auto *b : choice->findChildren<QPushButton *>()) {
+        if (b->property("segment") == "review") owner = b;
+        if (b->property("segment") == "auto") lead = b;
+    }
+    QVERIFY(owner && lead);
+    QVERIFY(lead->isChecked());   // the template says the lead runs new phases
+    owner->click();
+    editor.findChild<QPushButton *>("teamCatalogSave")->click();
+    QTRY_COMPARE(calls(script(), "catalog set").size(), 1);
+    bool found = false;
+    for (const auto &value : calls(script(), "catalog set").first()["catalog"].toObject()["templates"].toArray()) {
+        if (value.toObject()["id"].toString() != QStringLiteral("feature")) continue;
+        QCOMPARE(value.toObject()["phase_approval"].toString(), QStringLiteral("review"));
+        found = true;
+    }
+    QVERIFY(found);
 }
 
 void TestTeamsUi::boardColumnsKeepTheirScroll()

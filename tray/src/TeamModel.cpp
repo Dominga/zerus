@@ -413,6 +413,63 @@ QMap<int, QList<int>> layered(const Team &team)
     return layers;
 }
 
+QList<PhaseGroup> phaseGroups(const Team &team)
+{
+    QList<PhaseGroup> groups;
+    if (!team.phased()) return groups;
+    QMap<int, PhaseGroup> byPhase;
+    for (const auto &task : team.tasks) {
+        PhaseGroup &group = byPhase[task.phase];
+        group.n = task.phase;
+        group.tasks.append(task.id);
+        group.done += task.finished();
+    }
+    // A team whose remaining tasks are all phase 1 looks as it did before:
+    // grouping starts with the first task appended after the plan.
+    bool appended = false;
+    for (auto it = byPhase.cbegin(); it != byPhase.cend(); ++it) appended = appended || it.key() > 1;
+    if (!appended) return groups;
+    for (auto it = byPhase.cbegin(); it != byPhase.cend(); ++it) {
+        PhaseGroup group = it.value();
+        if (const auto *record = team.phase(it.key())) {
+            group.title = record->title;
+            group.barrier = record->barrier;
+            group.draft = record->draft();
+        }
+        groups.append(group);
+    }
+    return groups;
+}
+
+QString phaseHeading(const PhaseGroup &group)
+{
+    const QString phase = group.title.isEmpty() ? tr("Phase %1").arg(group.n)
+                                                : tr("Phase %1 · %2").arg(group.n).arg(group.title);
+    return tr("%1 · %2/%3").arg(phase).arg(group.done).arg(group.tasks.size());
+}
+
+QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks)
+{
+    QSet<int> ids;
+    for (int id : tasks) ids.insert(id);
+    QMap<int, int> depth;
+    QSet<int> active;
+    std::function<int(int)> visit = [&](int id) -> int {
+        if (depth.contains(id)) return depth[id];
+        if (active.contains(id)) return -1;
+        active.insert(id);
+        int level = 0;
+        if (const auto *task = team.task(id))
+            for (const auto &dep : task->deps)
+                if (ids.contains(dep.task)) { const int d = visit(dep.task); if (d >= 0) level = qMax(level, d + 1); }
+        active.remove(id);
+        depth[id] = level;
+        return level;
+    };
+    for (int id : tasks) visit(id);
+    return depth;
+}
+
 FeedLine feedLine(const Team &team, const QJsonObject &event)
 {
     FeedLine line;

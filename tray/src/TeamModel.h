@@ -105,6 +105,24 @@ struct Team {
     QString effectivePhaseApproval() const { return phaseApproval.isEmpty() ? approval : phaseApproval; }
 };
 
+// A phase as the plan, board, layers and graph group it. Phase 1 has no
+// record; `done` counts its finished tasks and `total` all its tasks.
+struct PhaseGroup {
+    int n = 0;
+    QString title;
+    bool barrier = false, draft = false;
+    QList<int> tasks;
+    int done = 0;
+    bool finished() const { return !tasks.isEmpty() && done == tasks.size(); }
+};
+// The phases to show, in phase order; empty while the plan is phase 1 only.
+QList<PhaseGroup> phaseGroups(const Team &team);
+// "Phase 2 · QA fixes · 3/5" (the title is left out when empty).
+QString phaseHeading(const PhaseGroup &group);
+// Layers by longest path inside one phase; dependencies outside it are ignored
+// (each phase draws its own layers).
+QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks);
+
 Team parse(const QJsonObject &value);
 // The plan as `hgs team plan` takes it: members besides the lead, and tasks.
 QJsonObject planInput(const Team &team);

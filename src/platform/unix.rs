@@ -692,7 +692,7 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
     use std::os::unix::ffi::OsStrExt;
     let deadline=deadline.min(std::time::Instant::now()+std::time::Duration::from_secs(2));
     let uid=unsafe {libc::getuid()};
-    let error=||"Running process coverage is incomplete; review the worktree manually".to_owned();
+    let error=|detail:&str|format!("Running process coverage is incomplete: {detail}; review the worktree manually");
     fn gone(pid:i32)->bool {
         (unsafe {libc::kill(pid,0)})<0 && std::io::Error::last_os_error().raw_os_error()==Some(libc::ESRCH)
     }
@@ -720,20 +720,20 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
         let mut buffer=vec![0 as libc::c_int;32768];
         let bytes=(buffer.len()*std::mem::size_of::<libc::c_int>()) as libc::c_int;
         let found=unsafe {libc::proc_listpids(kind,uid,buffer.as_mut_ptr() as *mut libc::c_void,bytes)};
-        if found<=0 || found>=bytes || !(found as usize).is_multiple_of(std::mem::size_of::<libc::c_int>()) {return Err(error());}
+        if found<=0 || found>=bytes || !(found as usize).is_multiple_of(std::mem::size_of::<libc::c_int>()) {return Err(error("the process list could not be verified"));}
         pids.extend(buffer.into_iter().take(found as usize/std::mem::size_of::<libc::c_int>()).filter(|pid|*pid>0));
-        if pids.len()>=32768 {return Err(error());}
+        if pids.len()>=32768 {return Err(error("the process list exceeded its bound"));}
     }
-    if !pids.contains(&(std::process::id() as libc::c_int)) {return Err(error());}
+    if !pids.contains(&(std::process::id() as libc::c_int)) {return Err(error("the current process is missing from the list"));}
     let mut rows=Vec::new();
     for pid in pids.into_iter().filter(|pid|*pid>0) {
-        if std::time::Instant::now()>=deadline {return Err(error());}
+        if std::time::Instant::now()>=deadline {return Err(error("the process check reached its time limit"));}
         let before=match identity(pid) {
             Ok(info)=>info,
             Err(e) if e.raw_os_error()==Some(libc::ESRCH)=>continue,
-            Err(_)=>return Err(error()),
+            Err(_)=>return Err(error(&format!("process {pid} could not be identified"))),
         };
-        if before.pbi_pid!=pid as u32 {return Err(error());}
+        if before.pbi_pid!=pid as u32 {return Err(error(&format!("process {pid} returned another identity")));}
         if (before.pbi_uid!=uid && before.pbi_ruid!=uid) || before.pbi_status==libc::SZOMB {continue;}
         let mut info:libc::proc_vnodepathinfo=unsafe {std::mem::zeroed()};
         let size=std::mem::size_of_val(&info) as libc::c_int;
@@ -743,25 +743,25 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
         let after=match identity(pid) {
             Ok(info)=>info,
             Err(e) if e.raw_os_error()==Some(libc::ESRCH)=>continue,
-            Err(_)=>return Err(error()),
+            Err(_)=>return Err(error(&format!("process {pid} could not be identified"))),
         };
         if after.pbi_status==libc::SZOMB {continue;}
-        if after.pbi_pid!=pid as u32 || (before.pbi_start_tvsec,before.pbi_start_tvusec,before.pbi_uid,before.pbi_ruid)!=(after.pbi_start_tvsec,after.pbi_start_tvusec,after.pbi_uid,after.pbi_ruid) {return Err(error());}
+        if after.pbi_pid!=pid as u32 || (before.pbi_start_tvsec,before.pbi_start_tvusec,before.pbi_uid,before.pbi_ruid)!=(after.pbi_start_tvsec,after.pbi_start_tvusec,after.pbi_uid,after.pbi_ruid) {return Err(error(&format!("process {pid} changed while being checked")));}
         if read!=size || length<=0 {
             if gone(pid) {continue;}
-            return Err(error());
+            return Err(error(&format!("process {pid}: {} could not be inspected", if read!=size {"its current folder"} else {"its program"})));
         }
         let path=&info.pvi_cdir.vip_path;
         let bytes=unsafe {std::slice::from_raw_parts(path.as_ptr() as *const u8,std::mem::size_of_val(path))};
-        let end=bytes.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(error)?;
-        let image_end=image.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(error)?;
+        let end=bytes.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(||error(&format!("process {pid} returned an unconfirmed path")))?;
+        let image_end=image.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(||error(&format!("process {pid} returned an unconfirmed path")))?;
         let cwd=PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
         let image=PathBuf::from(std::ffi::OsStr::from_bytes(&image[..image_end]));
         let name=unsafe {std::slice::from_raw_parts(before.pbi_comm.as_ptr() as *const u8,before.pbi_comm.len())};
         let name=String::from_utf8_lossy(&name[..name.iter().position(|b|*b==0).unwrap_or(name.len())]).into_owned();
         rows.push((pid as u32,cwd,name.clone()));rows.push((pid as u32,image,name));
     }
-    if std::time::Instant::now()>=deadline {return Err(error());}
+    if std::time::Instant::now()>=deadline {return Err(error("the process check reached its time limit"));}
     Ok(rows)
 }
 

@@ -436,10 +436,36 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     QVERIFY(split && split->handleWidth() >= 5);
     QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceFilter"));
     shot(&workspace, "d3-running");
+    // The coordinator's quick asks stay the same buttons across renders, so
+    // they never flicker.
+    const auto asks = workspace.findChildren<QPushButton *>("teamConversationAsk");
+    QVERIFY(!asks.isEmpty());
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceFilter")->findChildren<QPushButton *>())
+        if (b->property("segment") == "active") { b->click(); break; }
+    QTest::qWait(150);
+    QCOMPARE(workspace.findChildren<QPushButton *>("teamConversationAsk"), asks);
+    // The views are icons with their names as tooltips.
     auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
+    for (auto *b : views->findChildren<QPushButton *>()) QVERIFY(b->text().isEmpty() && !b->icon().isNull() && !b->toolTip().isEmpty());
     for (auto *b : views->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
     QCOMPARE(workspace.findChildren<QFrame *>("teamBoardCard").size(), 5);
+    // Role and state share a line on a wide card and wrap on a narrow one.
+    {
+        // Reads the first card afresh: a resize may render the board again.
+        const auto oneLine = [&workspace] {
+            auto *boardCard = workspace.findChildren<QFrame *>("teamBoardCard").value(0);
+            auto *pill = boardCard ? boardCard->findChild<QWidget *>("teamBoardRole") : nullptr;
+            auto *mark = boardCard ? boardCard->findChild<QWidget *>("teamBoardState") : nullptr;
+            return pill && mark && std::abs(pill->geometry().center().y() - mark->geometry().center().y()) <= 4 ? 1 : pill && mark ? 0 : -1;
+        };
+        const QSize before = workspace.size();
+        workspace.resize(700, before.height());
+        QTRY_COMPARE(oneLine(), 0);
+        workspace.resize(1800, before.height());
+        QTRY_COMPARE(oneLine(), 1);
+        workspace.resize(before);
+    }
     QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceFilter"));   // the board's columns sort by state
     shot(&workspace, "d3-board");
     // Focusing a member keeps only its tasks.

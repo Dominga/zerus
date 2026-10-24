@@ -53,6 +53,17 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "team") {   // A lead above two members
             p.drawEllipse(QPointF(12, 6), 2.5, 2.5); p.drawEllipse(QPointF(6, 18), 2.5, 2.5); p.drawEllipse(QPointF(18, 18), 2.5, 2.5);
             p.drawLine(QPointF(10.8, 8.2), QPointF(7.2, 15.8)); p.drawLine(QPointF(13.2, 8.2), QPointF(16.8, 15.8));
+        } else if (name == "view-graph") {   // tasks as a graph: nodes joined by edges
+            p.drawRoundedRect(QRectF(3, 4, 7, 5), 1.5, 1.5); p.drawRoundedRect(QRectF(14, 4, 7, 5), 1.5, 1.5);
+            p.drawRoundedRect(QRectF(8.5, 15, 7, 5), 1.5, 1.5);
+            p.drawLine(QPointF(6.5, 9), QPointF(11, 15)); p.drawLine(QPointF(17.5, 9), QPointF(13, 15));
+        } else if (name == "view-board") {   // tasks as a board: columns of cards
+            p.drawRoundedRect(QRectF(3, 4, 5, 16), 1.5, 1.5); p.drawRoundedRect(QRectF(9.5, 4, 5, 11), 1.5, 1.5);
+            p.drawRoundedRect(QRectF(16, 4, 5, 7), 1.5, 1.5);
+        } else if (name == "view-layers") {   // tasks in layers: stacked sheets
+            QPainterPath top; top.moveTo(12, 4); top.lineTo(21, 8.5); top.lineTo(12, 13); top.lineTo(3, 8.5); top.closeSubpath(); p.drawPath(top);
+            QPainterPath mid; mid.moveTo(3, 12.5); mid.lineTo(12, 17); mid.lineTo(21, 12.5); p.drawPath(mid);
+            QPainterPath low; low.moveTo(3, 16.5); low.lineTo(12, 21); low.lineTo(21, 16.5); p.drawPath(low);
         } else if (name == "terminal") {
             p.drawRoundedRect(QRectF(3, 4, 18, 16), 2, 2);
             p.drawLine(7, 9, 10, 12); p.drawLine(10, 12, 7, 15); p.drawLine(13, 15, 17, 15);

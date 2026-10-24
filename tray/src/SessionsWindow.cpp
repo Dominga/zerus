@@ -3247,7 +3247,6 @@ void SessionsWindow::rebuild()
         if (hasGroups) rows.append({group.id, -1, false});
         for (int i : members) {
             const bool hidden = hasGroups && group.collapsed && query.isEmpty();
-            if (teamHeads.contains(i)) rows.append({group.id, -1, hidden, {}, {}, teamHeads.value(i)});
             rows.append({group.id, i, hidden || teamHiddenRows.contains(i), {}});
             if (m_expandedSessions.contains(visible[i].key)) {
                 const auto roster = childRoster(visible[i]);
@@ -3356,6 +3355,16 @@ void SessionsWindow::rebuild()
             if (showChild(e, it.key(), it.value().toObject(), s.subagentCountsComplete, includeCompleted)) { hasChildren = true; break; }
         // A team's lead folds its members as a session folds its subagents.
         const QString leadTeam = leadTeams.value(row.entry);
+        QVariantMap teamStrip;
+        if (const auto *team = leadTeam.isEmpty() || !m_teams ? nullptr : m_teams->team(leadTeam)) {
+            const auto live = [this](const Teams::Member &member) { return teamLive(member); };
+            const QString status = Teams::displayStatus(*team, live);
+            QVariantList tones; for (auto tone : Teams::progress(*team)) tones.append(int(tone));
+            teamStrip = {{"id", team->id}, {"name", team->name}, {"status", status}, {"label", Teams::statusLabel(status)},
+                         {"tone", int(Teams::statusTone(status))}, {"meta", QStringLiteral("%1/%2").arg(Teams::accepted(*team)).arg(team->tasks.size())},
+                         {"members", QString::number(team->members.size())}, {"answers", Teams::answers(*team, live)}, {"progress", tones}};
+        }
+        item->setData(SessionRoles::TeamLead, teamStrip.isEmpty() ? QVariant() : QVariant(teamStrip));
         item->setData(SessionRoles::HasChildren, hasChildren || !leadTeam.isEmpty());
         item->setData(SessionRoles::Expanded, leadTeam.isEmpty() ? m_expandedSessions.contains(e.key) : !m_collapsedTeams.contains(leadTeam));
         if (firstSession < 0) firstSession = i;

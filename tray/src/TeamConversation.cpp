@@ -106,6 +106,9 @@ void TeamConversation::setPlaceholder(const QString &text) { m_input->setPlaceho
 
 void TeamConversation::setQuickAsks(const QStringList &asks)
 {
+    // Polls set the same asks again; rebuilding them would make them flicker.
+    if (asks == m_askTexts && !m_asksLayout->isEmpty()) return;
+    m_askTexts = asks;
     while (auto *item = m_asksLayout->takeAt(0)) { if (auto *w = item->widget()) retire(w); delete item; }
     for (const auto &ask : asks) {
         auto *chip = button(ask, "teamConversationAsk");

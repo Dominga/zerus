@@ -208,6 +208,7 @@ void SessionList::syncRowExpandButtons()
 QString SessionList::childrenLabel(const QModelIndex &index)
 {
     const auto count = index.data(SessionRoles::Children).toString();
+    if (count.isEmpty() && !index.data(SessionRoles::TeamLead).toMap().isEmpty()) return tr("Team");
     return count.isEmpty() && index.data(SessionRoles::HasChildren).toBool() ? tr("Agents") : count;
 }
 
@@ -217,7 +218,8 @@ QRect SessionList::childrenControlRect(const QRect &row, const QModelIndex &inde
         || !index.data(SessionRoles::ChildId).toString().isEmpty()) return {};
     font.setPixelSize(11); font.setWeight(QFont::Normal);
     const int width = CachedText::width(font, childrenLabel(index)) + 46;
-    return QRect(row.right() - 13 - width, row.bottom() - 26, width, 20);
+    const int strip = index.data(SessionRoles::TeamLead).toMap().isEmpty() ? 0 : TeamStripHeight;
+    return QRect(row.right() - 13 - width, row.bottom() - 26 - strip, width, 20);
 }
 
 // The collapsed strip, or the list on its way there, shows tiles instead of cards.
@@ -312,6 +314,11 @@ void SessionList::mousePressEvent(QMouseEvent *e)
     if (e->button() == Qt::LeftButton) { m_bulkSelecting = false; emit bulkSelectionChanged(); }
     if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()) { e->accept(); return; }
     m_pressedTeam.clear();
+    if (e->button() == Qt::LeftButton && item && !item->data(SessionRoles::TeamLead).toMap().isEmpty()
+        && teamStripRect(visualItemRect(item)).contains(m_press)) {
+        m_pressedTeam = item->data(SessionRoles::TeamLead).toMap().value("id").toString(); m_pressedTeamToggle = false;
+        setFocus(); e->accept(); return;
+    }
     if (e->button() == Qt::LeftButton && item && !item->data(SessionRoles::TeamId).toString().isEmpty()) {
         // A team header selects its team; its chevron collapses it.
         m_pressedTeam = item->data(SessionRoles::TeamId).toString();
@@ -429,7 +436,8 @@ void SessionList::mouseReleaseEvent(QMouseEvent *e)
     if (!m_pressedTeam.isEmpty()) {
         const QString id = m_pressedTeam; m_pressedTeam.clear();
         const auto *item = itemAt(e->position().toPoint());
-        if (e->button() == Qt::LeftButton && item && item->data(SessionRoles::TeamId).toString() == id
+        if (e->button() == Qt::LeftButton && item
+            && (item->data(SessionRoles::TeamId).toString() == id || item->data(SessionRoles::TeamLead).toMap().value("id").toString() == id)
             && (e->position().toPoint() - m_press).manhattanLength() < QApplication::startDragDistance()) {
             if (m_pressedTeamToggle) emit teamToggled(id); else emit teamActivated(id);
         }

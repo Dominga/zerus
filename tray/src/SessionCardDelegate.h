@@ -70,7 +70,8 @@ public:
         const int width = SessionStrip::expansion(option.widget) < 1 ? 1 : 280;
         if (!index.data(SessionRoles::TeamId).toString().isEmpty()) return {width, 62};   // Team header
         if (rowCollapsed(index) && SessionStrip::expansion(option.widget) >= 1) return {width, 40};
-        return {width, !index.data(SessionRoles::ChildId).toString().isEmpty() ? 64 : index.data(SessionRoles::Header).toBool() ? 40 : option.widget && option.widget->property("compact").toBool() ? 94 : 104};
+        const int strip = index.data(SessionRoles::TeamLead).toMap().isEmpty() ? 0 : SessionList::TeamStripHeight;
+        return {width, (!index.data(SessionRoles::ChildId).toString().isEmpty() ? 64 : index.data(SessionRoles::Header).toBool() ? 40 : option.widget && option.widget->property("compact").toBool() ? 94 : 104) + strip};
     }
     void paint(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
         const qreal expansion = SessionStrip::expansion(option.widget);
@@ -78,7 +79,7 @@ public:
         if (paintIndicatorClip(p, option, index, expansion)) return;
         if (index.data(SessionRoles::Header).toBool()) paintHeader(p, option, index, expansion);
         else if (rowCollapsed(index) && expansion >= 1) paintCompactRow(p, option, index);
-        else if (expansion >= 1) paintCard(p, option, index);
+        else if (expansion >= 1) { paintCard(p, option, index); paintTeamStrip(p, option, index); }
         else paintStripCard(p, option, index, expansion);
         if (index.data(SessionRoles::TeamMember).toBool() && expansion >= 1) paintTeamConnector(p, option, index);
     }
@@ -392,6 +393,69 @@ private:
         default: return QColor(dark ? "#c4cad1" : "#334250");
         }
     }
+    // The lead's team in its own card: icon, name, progress, accepted/total,
+    // state, questions waiting and members, on one line at the bottom.
+    void paintTeamStrip(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const {
+        const auto team = index.data(SessionRoles::TeamLead).toMap();
+        if (team.isEmpty() || rowCollapsed(index)) return;
+        p->save(); p->setRenderHint(QPainter::Antialiasing);
+        const bool dark = option.widget && option.widget->property("hgsDark").toBool();
+        const QColor fg(dark ? "#e8edf4" : "#1a2733"), muted(dark ? "#a1adbb" : "#647386");
+        const QRect r = SessionList::teamStripRect(option.rect);
+        const QString status = team.value("status").toString();
+        const QColor tone = teamTone(team.value("tone").toInt(), dark);
+        QColor fill = tone; fill.setAlphaF(dark ? .10 : .07);
+        QColor edge = status == "stuck" ? tone : QColor(dark ? "#2c323b" : "#dce2e8");
+        p->setPen(QPen(edge, 1)); p->setBrush(fill);
+        p->drawRoundedRect(QRectF(r).adjusted(.5, .5, -.5, -.5), 6, 6);
+        workspaceIcon("team", fg).paint(p, QRect(r.x() + 6, r.y() + 3, 16, 16));
+        // Right to left: members, ?N, state, accepted/total, progress; the name takes what is left.
+        QFont small = option.font; small.setPixelSize(11); small.setWeight(QFont::Medium);
+        const QFontMetrics sm(small);
+        int right = r.right() - 6;
+        const QString members = team.value("members").toString();
+        const int membersW = sm.horizontalAdvance(members) + 14;
+        p->setFont(small); p->setPen(muted);
+        p->drawText(QRect(right - membersW + 13, r.y(), membersW - 13, r.height()), Qt::AlignVCenter | Qt::AlignLeft, members);
+        p->setPen(QPen(muted, 1.2)); p->setBrush(Qt::NoBrush);
+        p->drawEllipse(QPointF(right - membersW + 5, r.y() + 8), 2.5, 2.5);
+        p->drawArc(QRectF(right - membersW + 0.5, r.y() + 12, 9, 8), 0, 180 * 16);
+        right -= membersW + 6;
+        if (const int answers = team.value("answers").toInt(); answers > 0) {
+            const QString text = QStringLiteral("?%1").arg(answers);
+            const int w = sm.horizontalAdvance(text) + 10;
+            p->setPen(Qt::NoPen); p->setBrush(QColor(dark ? "#ffda76" : "#f4ce65")); p->drawRoundedRect(QRectF(right - w, r.y() + 3, w, 16), 8, 8);
+            p->setPen(QColor("#392900")); p->drawText(QRect(right - w, r.y() + 3, w, 16), Qt::AlignCenter, text);
+            right -= w + 6;
+        }
+        const QString label = team.value("label").toString();
+        const int badgeW = sm.horizontalAdvance(label) + 14;
+        p->setPen(QPen(tone, 1)); p->setBrush(Qt::NoBrush);
+        p->drawRoundedRect(QRectF(right - badgeW, r.y() + 3, badgeW, 16), 8, 8);
+        p->setPen(tone); p->drawText(QRect(right - badgeW, r.y() + 3, badgeW, 16), Qt::AlignCenter, label);
+        right -= badgeW + 6;
+        QFont mono = option.font;
+        mono.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), QStringLiteral("Menlo"), mono.family()});
+        mono.setPixelSize(11); p->setFont(mono); p->setPen(muted);
+        const QString counts = team.value("meta").toString();
+        const int countsW = QFontMetrics(mono).horizontalAdvance(counts) + 2;
+        p->drawText(QRect(right - countsW, r.y(), countsW, r.height()), Qt::AlignVCenter | Qt::AlignRight, counts);
+        right -= countsW + 6;
+        const auto tones = team.value("progress").toList();
+        const int barW = 44, gap = 1;
+        const double seg = tones.isEmpty() ? barW : (barW - gap * (tones.size() - 1)) / double(tones.size());
+        p->setPen(Qt::NoPen);
+        if (tones.isEmpty()) { p->setBrush(teamTone(5, dark)); p->drawRoundedRect(QRectF(right - barW, r.y() + 9, barW, 4), 2, 2); }
+        for (int i = 0; i < tones.size(); ++i) {
+            p->setBrush(teamTone(tones[i].toInt(), dark));
+            p->drawRoundedRect(QRectF(right - barW + i * (seg + gap), r.y() + 9, qMax(1.0, seg), 4), 1, 1);
+        }
+        right -= barW + 8;
+        QFont font = option.font; font.setPixelSize(12); font.setWeight(QFont::DemiBold); p->setFont(font); p->setPen(fg);
+        const QRect name(r.x() + 26, r.y(), qMax(0, right - r.x() - 26), r.height());
+        CachedText::draw(p, name, Qt::AlignVCenter | Qt::AlignLeft, CachedText::elided(font, team.value("name").toString(), Qt::ElideRight, name.width()));
+        p->restore();
+    }
     void paintTeamHeader(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index, qreal expansion) const {
         p->save(); p->setRenderHint(QPainter::Antialiasing);
         const bool dark = option.widget && option.widget->property("hgsDark").toBool();
@@ -562,7 +626,7 @@ private:
         const int titleY = r.y() + (childRow ? (compact ? 5 : 6) : (compact ? 3 : 5));
         const int metadataY = titleY + (compact ? 22 : 24);
         const int detailY = metadataY + (compact ? 20 : 22);
-        const int modelY = option.rect.bottom() - 26;
+        const int modelY = option.rect.bottom() - 26 - (index.data(SessionRoles::TeamLead).toMap().isEmpty() ? 0 : SessionList::TeamStripHeight);
 
         // Provider goes with the session title; machine goes with its folder.
         // At narrow widths the provider keeps its icon, leaving room for the

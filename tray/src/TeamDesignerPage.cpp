@@ -21,40 +21,6 @@ namespace {
 const QStringList agents{"claude", "codex", "kimi", "dsh", "opencode"};
 const QMap<QString, QString> agentNames{{"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}};
 
-// Chips that keep their width and wrap onto the next line.
-class FlowLayout : public QLayout {
-public:
-    explicit FlowLayout(int spacing) { setSpacing(spacing); setContentsMargins(0, 0, 0, 0); }
-    ~FlowLayout() override { while (auto *item = takeAt(0)) delete item; }
-    void addItem(QLayoutItem *item) override { m_items.append(item); }
-    int count() const override { return m_items.size(); }
-    QLayoutItem *itemAt(int index) const override { return m_items.value(index); }
-    QLayoutItem *takeAt(int index) override { return index >= 0 && index < m_items.size() ? m_items.takeAt(index) : nullptr; }
-    Qt::Orientations expandingDirections() const override { return {}; }
-    bool hasHeightForWidth() const override { return true; }
-    int heightForWidth(int width) const override { return arrange(QRect(0, 0, width, 0), false); }
-    void setGeometry(const QRect &rect) override { QLayout::setGeometry(rect); arrange(rect, true); }
-    QSize sizeHint() const override { return minimumSize(); }
-    QSize minimumSize() const override
-    {
-        QSize size; for (auto *item : m_items) size = size.expandedTo(item->minimumSize());
-        return size;
-    }
-private:
-    int arrange(const QRect &rect, bool apply) const
-    {
-        int x = rect.x(), y = rect.y(), line = 0;
-        for (auto *item : m_items) {
-            const QSize hint = item->sizeHint();
-            if (x + hint.width() > rect.right() + 1 && line > 0) { x = rect.x(); y += line + spacing(); line = 0; }
-            if (apply) item->setGeometry(QRect(QPoint(x, y), hint));
-            x += hint.width() + spacing(); line = qMax(line, hint.height());
-        }
-        return y + line - rect.y();
-    }
-    QList<QLayoutItem *> m_items;
-};
-
 QLabel *chip(const QString &text, const char *name)
 {
     auto *l = new QLabel(text); l->setObjectName(name);

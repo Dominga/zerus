@@ -528,13 +528,25 @@ struct ActivityRenderResult {
             && !details.value("run_id").toString().isEmpty() && !details.value("conversation_id").toString().isEmpty()
             && event.value("run_id") == details.value("run_id")) {
             const auto body = event.value("detail").toString().trimmed();
-            int receipts = 0;
+            QSet<QString> receipts;
             for (const auto &receipt : details.value("attachment_messages").toArray()) {
                 const auto row = receipt.toObject();
+                const auto id = row.value("message_id").toString();
                 if (row.value("source") == "hgs_delivery" && !row.value("attachments").toArray().isEmpty()
-                    && !body.isEmpty() && row.value("submitted_text").toString().trimmed() == body) ++receipts;
+                    && !id.isEmpty() && !body.isEmpty() && row.value("submitted_text").toString().trimmed() == body) receipts.insert(id);
             }
-            if (receipts == 1) {
+            // A confirmed send can be visible before the next inspection has
+            // its durable file receipt. Both copies share the same delivery ID.
+            for (const auto &message : m_localMessages) {
+                const auto row = message.toObject();
+                const auto id = row.value("message_id").toString();
+                if (row.value("status") == "sent" && row.value("source") != "hgs_voice"
+                    && row.value("run_id") == details.value("run_id")
+                    && row.value("conversation_id") == details.value("conversation_id")
+                    && !row.value("attachments").toArray().isEmpty() && !id.isEmpty()
+                    && !body.isEmpty() && row.value("submitted_text").toString().trimmed() == body) receipts.insert(id);
+            }
+            if (receipts.size() == 1) {
                 const auto hash = QString::fromLatin1(QCryptographicHash::hash(body.toUtf8(), QCryptographicHash::Sha256).toHex());
                 QList<QJsonObject> matching;
                 for (const auto &turn : details.value("kimi_turns").toArray())

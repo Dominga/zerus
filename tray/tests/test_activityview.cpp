@@ -1851,19 +1851,23 @@ void TestActivityView::kimiDuplicateHooksKeepOneAttachmentCard()
     const QJsonObject receipt{{"source", "hgs_delivery"}, {"type", "UserPromptSubmit"}, {"message_id", "delivery"},
         {"at", 1791018000.0}, {"detail", text}, {"submitted_text", submitted}, {"attachments", files}};
     const QJsonObject local{{"id", "outgoing"}, {"message_id", "delivery"}, {"status", "sent"}, {"text", text},
-        {"submitted_text", submitted}, {"submitted_at", 1791018000.0}, {"attachments", files}};
+        {"submitted_text", submitted}, {"submitted_at", 1791018000.0}, {"attachments", files},
+        {"run_id", "run"}, {"conversation_id", "conversation"}};
     auto first = journalEvent(3, "TurnStarted", submitted); first["run_id"] = "run"; first["at"] = 1791018000.1;
     auto second = first; second["seq"] = 4; second["at"] = 1791018000.2;
     const auto hash = QString::fromLatin1(QCryptographicHash::hash(submitted.toUtf8(), QCryptographicHash::Sha256).toHex());
     const QJsonObject turn{{"turn_id", 0}, {"prompt_id", "native-prompt"}, {"at", 1791018000.0}, {"origin", "user"}, {"text_sha256", QJsonArray{"synthetic-memory-context-hash", hash}}};
     QJsonObject details{{"agent", "kimi"}, {"run_id", "run"}, {"conversation_id", "conversation"}, {"prompt", submitted},
-        {"attachment_messages", QJsonArray{receipt}}, {"kimi_turns_complete", true}, {"kimi_turns", QJsonArray{turn}}};
+        {"kimi_turns_complete", true}, {"kimi_turns", QJsonArray{turn}}};
     const QJsonArray events{journalEvent(1, "UserPromptSubmit", ""), journalEvent(2, "UserPromptSubmit", ""), first, second};
-    // A cold legacy journal plus one outgoing receipt used to render three cards.
+    // Confirmed local delivery precedes its durable inspection metadata.
     view.setTimeline(details, events, {local});
     QCOMPARE(view.plainText().count("Review this document"), 1);
     QCOMPARE(view.plainText().count("document.pdf"), 1);
     QVERIFY(!view.plainText().contains("/synthetic/"));
+    details["attachment_messages"] = QJsonArray{receipt};
+    view.setTimeline(details, events, {local});
+    QCOMPARE(view.plainText().count("Review this document"), 1);
     view.setTimeline(details, events, {});
     QCOMPARE(view.plainText().count("Review this document"), 1);
     QSignalSpy opened(&view, &ActivityView::attachmentActivated);
@@ -1874,15 +1878,27 @@ void TestActivityView::kimiDuplicateHooksKeepOneAttachmentCard()
     QCOMPARE(opened.size(), 1);
     QCOMPARE(opened.first().first().toJsonObject(), files.first().toObject());
     // Without complete native evidence the old ambiguous pair stays distinct.
+    details.remove("attachment_messages");
     details["kimi_turns_complete"] = false;
-    view.setSessionKey("fixture/unproven"); view.setTimeline(details, events, {});
+    view.setSessionKey("fixture/unproven"); view.setTimeline(details, events, {local});
     QCOMPARE(view.plainText().count("Review this document"), 3);
     // Two genuine native turns with an equal prompt must not be collapsed.
     details["kimi_turns_complete"] = true;
     auto other = turn; other["turn_id"] = 1; other["prompt_id"] = "other-prompt";
     details["kimi_turns"] = QJsonArray{turn, other};
-    view.setSessionKey("fixture/ambiguous-turns"); view.setTimeline(details, events, {});
+    view.setSessionKey("fixture/ambiguous-turns"); view.setTimeline(details, events, {local});
     QCOMPARE(view.plainText().count("Review this document"), 3);
+    // Unconfirmed or foreign-conversation local rows cannot supply this proof.
+    details["kimi_turns"] = QJsonArray{turn};
+    auto unconfirmed = local; unconfirmed["status"] = "sending";
+    view.setSessionKey("fixture/unconfirmed"); view.setTimeline(details, events, {unconfirmed});
+    QCOMPARE(view.plainText().count("Review this document"), 3);
+    auto foreign = local; foreign["conversation_id"] = "other-conversation";
+    view.setSessionKey("fixture/foreign-receipt"); view.setTimeline(details, events, {foreign});
+    QCOMPARE(view.plainText().count("Review this document"), 3);
+    auto competing = local; competing["id"] = "other-outgoing"; competing["message_id"] = "other-delivery";
+    view.setSessionKey("fixture/competing-receipts"); view.setTimeline(details, events, {local, competing});
+    QCOMPARE(view.plainText().count("Review this document"), 4);
 }
 
 void TestActivityView::kimiNativeTurnIdentityPreservesIndependentSends()

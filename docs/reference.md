@@ -270,8 +270,10 @@ same run and conversation. Equal captions in separate native turns or cleared
 conversations remain separate messages.
 For older attachment callbacks that lack that ID, a complete bounded native
 history and a unique exact staged-file input can associate their rich file card
-with the one native turn. Incomplete or ambiguous evidence keeps the separate
-records visible. The original journal is retained.
+with the one native turn. The confirmed local delivery can supply the receipt
+before its durable inspection metadata arrives; both copies share one delivery
+ID. Incomplete or ambiguous evidence never authorizes this native-turn
+association. The original journal is retained.
 
 The additive mobile operation `hooks_status` exposes only the exact-session
 read, and only when the selected CLI advertises `hooks-health-v1`. Both outbound

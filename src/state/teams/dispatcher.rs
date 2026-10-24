@@ -35,6 +35,9 @@ pub(crate) struct Seen {
     pub free: bool,
     pub idle: bool,
     pub reply_at: Option<f64>,
+    /// Waiting on an answer: a question, or for DeepSeek also a permission
+    /// request, which inspection tells apart.
+    pub asking: bool,
 }
 
 /// Every session of this computer and its peers from one listing.
@@ -63,6 +66,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 free,
                 idle,
                 reply_at: record["reply_at"].as_f64(),
+                asking: live && matches!(field("phase"), "question" | "input"),
             });
         }
     }
@@ -83,6 +87,8 @@ pub(crate) enum Step {
     Brief,
     /// A DeepSeek member's model and effort, before its first message.
     Settings { member: String },
+    /// A member's question for the lead to answer.
+    Question { member: String },
 }
 
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
@@ -167,6 +173,15 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     }
     if team.status != TeamStatus::Running {
         return steps;
+    }
+    // A member asks the lead, not the owner, once the lead is free; one at a
+    // time. Permission requests stay with the owner.
+    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
+        if let Some(member) = team.members.iter().find(|m| {
+            m.id != team.lead && m.state != MemberState::Removed && session_of(m, seen).is_some_and(|s| s.asking)
+        }) {
+            steps.push(Step::Question { member: member.id.clone() });
+        }
     }
     // Members busy with an open attempt, or handed one in this tick.
     let mut busy: BTreeSet<&str> = team
@@ -289,6 +304,40 @@ pub(crate) fn brief_text(team: &Team) -> String {
         team.id,
         serde_json::to_string(&members).unwrap_or_default(),
         serde_json::to_string(&tasks).unwrap_or_default()
+    );
+    text
+}
+
+/// A member's question as the lead reads it, with the answer to send back.
+pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> String {
+    let role = team.role_of(&member.id);
+    let mut text = format!("[Zerus team \u{b7} from: {role} \u{b7} question]\n{role} asks you, the lead, instead of the owner:\n");
+    let mut answers = Vec::new();
+    for item in card["questions"].as_array().into_iter().flatten() {
+        let id = item["id"].as_str().unwrap_or_default();
+        text += "\n";
+        if let Some(header) = item["header"].as_str().filter(|h| !h.is_empty()) {
+            text += &format!("{header}: ");
+        }
+        text += &format!("{}\n", item["question"].as_str().unwrap_or_default());
+        if let Some(body) = item["body"].as_str().filter(|b| !b.is_empty()) {
+            text += &format!("{body}\n");
+        }
+        for option in item["options"].as_array().into_iter().flatten() {
+            let description = option["description"].as_str().unwrap_or_default();
+            text += &format!("  {}) {}{}\n", option["id"].as_str().unwrap_or_default(), option["label"].as_str().unwrap_or_default(),
+                if description.is_empty() { String::new() } else { format!(" \u{2014} {description}") });
+        }
+        if item["allow_other"] != false {
+            text += "  or your own words as text\n";
+        }
+        answers.push(json!({"question_id":id,"selected_option_ids":["<option id>"],"text":""}));
+    }
+    text += &format!(
+        "\nAnswer for them once with hgs team answer --json (hgs guide team):\n  {}\n\
+         If the owner should decide, say so in your reply instead.",
+        json!({"team":team.id,"member":member.id,"question_id":card["question_id"],
+            "expected_question_hash":card["question_hash"],"answers":answers})
     );
     text
 }
@@ -624,6 +673,47 @@ fn notify_lead(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result
     })
 }
 
+/// Gives the lead the member's first question it has not had. A permission
+/// request is the owner's. Inspection runs at most every 20 seconds per member.
+fn forward_question(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    static CHECKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> = std::sync::OnceLock::new();
+    let key = format!("{}\n{member_id}", team.id);
+    {
+        let mut checked = CHECKED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        if checked.get(&key).is_some_and(|at| now() - at < 20.0) {
+            return Ok(());
+        }
+        checked.insert(key, now());
+    }
+    let member = team.member(member_id).context("unknown member")?;
+    let session = member.session.as_ref().context("the member has no session")?;
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
+    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
+    let Some(card) = record["pending_questions"].as_array().into_iter().flatten().find(|card| {
+        card["approval"] != true && card["can_answer"] != false
+            && !member.asked.contains(&format!("{}:{}", card["question_id"].as_str().unwrap_or_default(), card["question_hash"].as_str().unwrap_or_default()))
+    }) else {
+        return Ok(());
+    };
+    let asked = format!("{}:{}", card["question_id"].as_str().unwrap_or_default(), card["question_hash"].as_str().unwrap_or_default());
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &question_text(team, member, card));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
+        found.asked.push(asked);
+        let excess = found.asked.len().saturating_sub(50);
+        found.asked.drain(..excess);
+        let kind = if matches!(outcome, Sent::Uncertain(_)) { "question_unconfirmed" } else { "question_forwarded" };
+        events.push(Event::new(kind, json!({"member":role})));
+        Ok(())
+    })
+}
+
 fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     let brief_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -658,6 +748,7 @@ fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
     match step {
         Step::Brief => send_brief(store, &team.id),
+        Step::Question { member } => forward_question(store, team, member),
         Step::Settings { member } => {
             let found = team.member(member).cloned().context("unknown member")?;
             let result = apply_settings(&found);
@@ -997,6 +1088,32 @@ mod tests {
         assert!(launch_args(&team, &claude, "D:/w").windows(4).any(|w| w == ["--model", "opus", "--effort", "high"]));
         let dsh = Member { agent: "dsh".into(), ..codex };
         assert!(!launch_args(&team, &dsh, "D:/w").iter().any(|a| a == "--" || a == "-d"));
+    }
+
+    #[test]
+    fn a_members_question_goes_to_the_free_lead() {
+        let team = team();
+        let mut asking = session("codex/x/dev", "r1", false);
+        asking.asking = true;
+        let lead = session("claude/x/lead", "r0", true);
+        let steps_now = steps(&team, &[lead.clone(), asking.clone()], 1.0);
+        assert!(steps_now.contains(&Step::Question { member: "dev".into() }), "{steps_now:?}");
+        // A busy lead gets it later.
+        let busy = session("claude/x/lead", "r0", false);
+        assert!(!steps(&team, &[busy, asking], 1.0).iter().any(|s| matches!(s, Step::Question { .. })));
+        // DeepSeek reports questions and permission requests as input.
+        let listing = json!([{"sessions":[{"name":"dsh/x/a","state":"running","activity":"attention","phase":"input"},
+            {"name":"codex/x/b","process_state":"running","activity":"idle","phase":"question"},
+            {"name":"codex/x/c","process_state":"running","activity":"idle","phase":"approval"}]}]);
+        let asked: Vec<bool> = seen(&listing).iter().map(|s| s.asking).collect();
+        assert_eq!(asked, [true, true, false]);
+        let member = team.member("dev").unwrap();
+        let card = json!({"question_id":"q1","question_hash":"h1","questions":[{"id":"0","header":"Access","question":"How should I proceed?",
+            "options":[{"id":"0","label":"Full access","description":"no disk changes"},{"id":"1","label":"Stop"}],"allow_other":true}]});
+        let text = question_text(&team, member, &card);
+        assert!(text.starts_with("[Zerus team \u{b7} from: Backend \u{b7} question]"), "{text}");
+        assert!(text.contains("Access: How should I proceed?") && text.contains("  0) Full access \u{2014} no disk changes") && text.contains("  1) Stop\n"));
+        assert!(text.contains("\"expected_question_hash\":\"h1\"") && text.contains("hgs team answer --json"));
     }
 
     #[test]

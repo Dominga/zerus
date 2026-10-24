@@ -145,6 +145,10 @@ pub(crate) struct Member {
     /// dispatcher does not try again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub settings_applied: bool,
+    /// The member's questions already given to the lead, as question id and
+    /// hash; the most recent ones only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asked: Vec<String>,
 }
 
 impl Member {

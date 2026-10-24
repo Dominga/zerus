@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|approve|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|approve|answer|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
 
 const MUTATIONS: &[&str] = &[
     "plan", "approve", "discard", "pause", "resume", "stop", "archive", "report", "accept", "reject", "reassign",
@@ -124,9 +124,34 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     Ok(receipt)
 }
 
+/// The lead (or you) answers a member's question in the member's session.
+/// A permission request is never answered here: it stays with the owner.
+fn answer(input: &Value) -> anyhow::Result<Value> {
+    let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+    let by = actor(&team, "answer", input)?;
+    ensure!(matches!(&by, Actor::Human) || matches!(&by, Actor::Member(id) if *id == team.lead), "Only the lead answers a member's question");
+    let member = team.member(text(input, "member")).context("Unknown member")?;
+    let session = member.session.as_ref().context("The member has no session")?;
+    let (question, hash) = (text(input, "question_id"), text(input, "expected_question_hash"));
+    ensure!(!question.is_empty() && !hash.is_empty() && input["answers"].is_array(), "question_id, expected_question_hash and answers are required");
+    let inspected = super::dispatcher::hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, std::time::Duration::from_secs(45))?;
+    ensure!(inspected.status.success(), "{}", String::from_utf8_lossy(&inspected.stderr).trim());
+    let record: Value = serde_json::from_slice(&inspected.stdout).context("invalid inspect output")?;
+    let card = record["pending_questions"].as_array().into_iter().flatten()
+        .find(|card| card["question_id"] == question && card["question_hash"] == hash)
+        .context("This question changed or is no longer pending")?;
+    ensure!(card["approval"] != true, "A permission request is the owner's to answer");
+    let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
+    let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;
+    ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    Ok(serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!({"status":"answered"})))
+}
+
 fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
+        "answer" => answer(input),
         "list" => {
             let path = store::path();
             if !path.exists() {

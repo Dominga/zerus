@@ -299,7 +299,7 @@ mod tests {
         env::set_var("CLAUDE_CONFIG_DIR", home.path());
         // A conversation no process on this computer continues.
         let conversation = &uuid::Uuid::new_v4().to_string();
-        write(apps.path(), "local_aaa", json!({"sessionId":"local_aaa","cliSessionId":conversation,"cwd":cwd,"title":"Video view\u{7}","isArchived":false,"lastActivityAt":1000_000.0}));
+        write(apps.path(), "local_aaa", json!({"sessionId":"local_aaa","cliSessionId":conversation,"cwd":cwd,"title":"Video view\u{7}","isArchived":false,"lastActivityAt":1_000_000.0}));
         write(apps.path(), "local_bad", json!({"sessionId":"local_bad","cliSessionId":"not-a-uuid","cwd":cwd}));
         fs::write(apps.path().join("account").join("org").join("notes.json"), "{}").unwrap();
         let listed = list(LIMIT);

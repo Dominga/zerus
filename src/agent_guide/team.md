@@ -22,6 +22,13 @@ Lead, from your own session:
   reassign (with "member"), retry and cancel take the same fields.
   A missing skill: add-member with {"member":{"id","role","agent"}}, then
   reassign a task to it; it starts with that task.
+  A member's question comes to you as a message that begins with
+  [Zerus team · from: ROLE · question]. Answer it once with the command at
+  its end, choosing option ids or writing text:
+    {"team":"ID","member":"MEMBER","question_id":"Q","expected_question_hash":"H",
+     "answers":[{"question_id":"ITEM","selected_option_ids":["0"],"text":""}]} |
+      hgs team answer --json
+  Permission requests stay with the owner; say so if the owner should decide.
   The owner's decisions are final; yours cannot undo them.
 
 Member: a task arrives as a message that begins with [Zerus team. Do it,

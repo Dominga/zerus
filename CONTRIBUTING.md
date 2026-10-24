@@ -68,6 +68,36 @@ stable Rust: `rust-version` and the toolchain pinned in CI follow the latest
 stable release, and raising them is routine maintenance. Run
 `cargo +1.99.1 test --locked` for that pinned toolchain.
 
+On Linux, the three worktree modules run through `scripts/ci/worktree-tests.py`
+in a fresh PID/mount namespace, including their live process blockers and private
+tmux servers. Production cleanup retains folders when a host process cannot be
+inspected, so a shared host cannot establish the positive removal controls.
+Local isolation requires `unshare` and `setpriv`; hosted disposable runners use
+passwordless sudo only for namespace creation, then run fixtures as the original
+user with no capabilities or supplementary groups. A real nondumpable child
+checks that inspection restrictions still apply. Failed namespace admission fails
+the tests without an uncontained retry. For a focused local run, use
+`PYTHONPATH=tests python3 scripts/ci/worktree-tests.py test_worktrees test_worktree_lifecycle test_worktree_maintenance`.
+On macOS these three complete modules run sequentially after the other Python
+integration jobs. Exec/exit fixtures can briefly leave a live owned process
+without readable BSD metadata, and production must retain folders in that case.
+Disposable upstream GitHub macOS runners can also own protected service processes
+whose metadata is permanently unreadable. `scripts/ci/macos-worktree-tests.py`
+creates one locked, unprivileged temporary user for each complete module there.
+The normal CLI, all fixtures, real process blockers and private tmux servers run
+under that UID with a clean environment and private home. A kernel UID inventory
+and real interpreter preflight establish this scope; no process is filtered from
+an individual CLI call. After the tests, lingering fixture processes receive
+TERM, then bounded KILL if necessary, as that unprivileged user with both real and
+effective UID pinned and its directory-service identity rechecked before each
+signal. The harness also closes only that private user's launchd domain, proven
+absent before allocation, so per-user OS services stop respawning. The account is
+removed only after the domain is absent, the UID inventory is empty and the
+directory-service identity matches. Uncertain cleanup fails and retains the
+scope for VM disposal. Owner Macs and other hosts refuse account creation before
+allocation or sudo; local macOS checks continue under the current user. No test is
+excluded and the production guard remains strict.
+
 `check-source.py` keeps the desktop's Unix children from inheriting its descriptors
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
 `QProcess::startDetached()` and `QProcess::execute()`, and every `QProcess` must go to
@@ -281,7 +311,8 @@ the installed Kimi. Each case runs a private copy, disables automatic updates,
 uses its loopback model and platform fixture, proves the child image and private
 environment, and retains uncertain cleanup. The macOS cases compile one exec
 shim per case, so they require both native and compiler resources. A current
-latest-release campaign runs nine native cases. Historical two-version receipts
+latest-release campaign runs twelve native cases, including long Other answers,
+explicit recovery of a retained editor, and preservation of a mismatching draft. Historical two-version receipts
 do not define current selection. The seventeen R2 and seven question-fixture
 controls use stand-ins and loopback
 servers and establish fixture behavior only. `test_kimi_trust` and

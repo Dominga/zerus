@@ -93,13 +93,13 @@ fn codex_reset_panel_below(screen: &str, cwd: &str, home: &Path) -> bool {
     // one `›` row, the composer at the left edge, with only the header block
     // above it; the composer check then needs the cursor there and no draft.
     let lines: Vec<_> = screen.lines().collect();
-    let mut prompts = lines.iter().enumerate().filter(|(_, line)| line.trim_start().starts_with('›'));
+    let mut prompts = lines.iter().enumerate().filter(|(_, line)| input::codex_prompt(line.trim_start()).is_some());
     let (Some((composer, input)), None) = (prompts.next(), prompts.next()) else { return false; };
     // Its text is the dim placeholder, one of the two that both reviewed
     // releases draw, or nothing: a draft fails here before the composer check.
     let placeholder = |text: &str| text.is_empty() || text.strip_prefix(' ')
         .is_some_and(|text| ["Ask Codex to do anything", "Ask a follow-up question"].contains(&text));
-    if !input.strip_prefix('›').map(str::trim_end).is_some_and(placeholder) { return false; }
+    if !input::codex_prompt(input).map(str::trim_end).is_some_and(placeholder) { return false; }
     let mut rows: Vec<_> = lines[..composer].iter().map(|line| line.trim()).filter(|line| !line.is_empty()).collect();
     // The released idle screen can include its settled decorative logo. Match
     // the complete known pose; arbitrary braille, prose and partial frames do
@@ -134,8 +134,14 @@ pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
     // A resume awaiting its deferred SessionStart has no hook-confirmed idle
     // state: its exact process must still own the restored conversation.
     let resumed = resume_input::clearable(record);
+    // The failed-turn path deliberately preserves the missing idle hook. A
+    // matching explicit request may confirm its native reset through the same
+    // full panel/composer checks, without rewriting the session's work state.
+    let requested_failure = record["clear_context_request"].is_object()
+        && record["clear_context_request"]["conversation_id"] == record["conversation_id"]
+        && failed_turn(record);
     if string(record,"agent") != "codex" || awaiting_start(record)
-        || (!resumed && (record["activity"] != "idle" || record["phase"] != "idle"))
+        || (!resumed && !requested_failure && (record["activity"] != "idle" || record["phase"] != "idle"))
         || string(record,"conversation_id").is_empty()
         || (string(record,"prompt").is_empty() && string(record,"last_message").is_empty()
             && !record["clear_context_request"].is_object()) { return Ok(false); }
@@ -143,6 +149,7 @@ pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
     // expensive process and composer checks only for a matching reset panel.
     if !codex_reset_panel(&kimi_tui_choice::capture(record)?,string(record,"cwd")) { return Ok(false); }
     if resumed { resume_input::owned(record)?; }
+    if requested_failure && !failed_turn(record) { return Err("Native work changed before clear confirmation".into()); }
     kimi_tui_choice::identity(record)?;
     input::checked_terminal(record,true)?;
     if !codex_reset_panel(&kimi_tui_choice::capture(record)?,string(record,"cwd")) { return Ok(false); }
@@ -303,6 +310,19 @@ pub(super) fn interrupted(record: &Value, live: bool) -> bool {
 pub(super) fn stopped(record: &Value) -> bool {
     record["agent"] == "claude" && record["phase"] == "interrupted" && !telemetry::work_remains(record)
 }
+
+/// A typed Codex task completion may precede its missing idle hook. Only an
+/// explicit clear uses this path; provider attention and other idle actions
+/// retain their existing state. Confirmed tools, children and native jobs win.
+pub(super) fn failed_turn(record: &Value) -> bool {
+    record["agent"] == "codex" && !string(record,"conversation_id").is_empty()
+        && string(record,"expected_id").is_empty() && !telemetry::work_remains(record)
+        && provider_errors::completed_failure(record)
+        && processes::WorkSample::default().summary(record,true)["count"] == 0
+}
+pub(super) fn failed(record: &Value, live: bool) -> bool {
+    live && unblocked(record) && failed_turn(record) && input::checked_terminal(record,true).is_ok()
+}
 /// Codex reports a clear of a resumed conversation only with the SessionStart
 /// it defers to the next turn, under the new conversation's ID. That clear
 /// confirms the resume when it was requested or observed for the expected
@@ -352,7 +372,7 @@ fn command_row(agent: &str, row: &str, x: usize, command: &str) -> bool {
     let before=row.chars().take(x).collect::<String>();
     let after=row.chars().skip(x).collect::<String>();
     match agent {
-        "codex" => before.trim()==format!("› {command}") && after.trim().is_empty(),
+        "codex" => input::codex_prompt(before.trim()).is_some_and(|text|text.trim()==command) && after.trim().is_empty(),
         "claude" => [format!("❯ {command}"),format!("> {command}")].iter().any(|prompt|prompt==before.replace('\u{a0}'," ").trim()) && after.trim().is_empty(),
         // Kimi 2.1 shows an argument hint such as <instruction> after the command.
         "kimi" => before.trim()==format!("│ > {command}") && after.trim().strip_suffix('│').is_some_and(|hint|{
@@ -388,12 +408,15 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     // A resume before its deferred SessionStart is verified as for its first message.
     let resuming=resume_input::clearable(&current);
     let stopped=!resuming && interrupted(&current,true);
-    let dismiss=request.dismiss_prompt && !resuming && !stopped && !available(&current,true);
+    let failed=!resuming && !stopped && self::failed(&current,true);
+    let dismiss=request.dismiss_prompt && !resuming && !stopped && !failed && !available(&current,true);
     let mut record=if dismiss {checked_chooser(name,&request)?} else {
         let record=if resuming {input::checked_resumed(name,&request.expected_run_id,&request.expected_conversation_id)?}
             else if stopped {input::checked_interrupted(name,&request.expected_run_id,&request.expected_conversation_id)?}
+            else if failed {input::checked_failed(name,&request.expected_run_id,&request.expected_conversation_id)?}
             else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
-        if !(available(&record,true) || resuming && resumed(&record,true) || stopped && interrupted(&record,true)) {
+        if !(available(&record,true) || resuming && resumed(&record,true) || stopped && interrupted(&record,true)
+            || failed && self::failed(&record,true)) {
             return Err("Wait for the agent to become idle before clearing context".into());
         }
         input::checked_terminal(&record,true)?;
@@ -436,6 +459,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         let current=if dismiss {kimi_tui_choice::identity(&record)?}
             else if resuming {resume_input::owned(&record)?;kimi_tui_choice::identity(&record)?}
             else if stopped {input::checked_interrupted(name,&request.expected_run_id,&request.expected_conversation_id)?}
+            else if failed {input::checked_failed(name,&request.expected_run_id,&request.expected_conversation_id)?}
             else {input::checked_ready(name,&request.expected_run_id,&request.expected_conversation_id)?};
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current,false)?;
@@ -885,10 +909,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     #[test] fn exact_command_only() {
         assert!(command_row("codex","› /clear",8,"/clear"));
+        assert!(command_row("codex","» /clear",8,"/clear"));
         assert!(command_row("claude","❯\u{a0}/clear",8,"/clear"));
         assert!(command_row("kimi"," │ > /clear       │",11,"/clear"));
         assert!(command_row("kimi"," │ > /compact  <instruction>          │",13,"/compact"));
         for row in [" │ > /compact extra  │"," │ > /compact  <a> <b> │"," │ > /compact  <instruction"] {assert!(!command_row("kimi",row,13,"/compact"));}
-        for row in ["› /clear extra","› draft /clear","shell$ /clear"] {assert!(!command_row("codex",row,8,"/clear"));}
+        for row in ["› /clear extra","› draft /clear","» /clear extra","» draft /clear","shell$ /clear"] {assert!(!command_row("codex",row,8,"/clear"));}
     }
 }

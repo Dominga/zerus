@@ -733,9 +733,10 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     // actions reuse that result instead of checking the terminal again.
     // So did the summary of an interrupted Claude turn's prompt.
     let interrupted = archive_id.is_none() && clear_context::interrupted(&record,panes.is_some());
+    let failed = archive_id.is_none() && clear_context::failed(&record,panes.is_some());
     output["clear_context_supported"] = json!(archive_id.is_none() && (context_reason.is_none()
         || clear_context::resumed_verified(&record,panes.is_some(),output["resume_message_can_send"] == true)
-        || interrupted && output["interrupted_message_can_send"] == true));
+        || interrupted && output["interrupted_message_can_send"] == true || failed));
     output["clear_context_reason"] = json!(if output["clear_context_supported"] == true { String::new() }
         else if interrupted && !string(&output,"interrupted_message_reason").is_empty() {
             string(&output,"interrupted_message_reason").to_owned()

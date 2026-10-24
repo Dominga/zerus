@@ -1592,6 +1592,9 @@ mod process {
     pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
         Err("Running processes cannot be inspected on this computer".into())
     }
+    pub fn worktree_processes(_deadline: std::time::Instant) -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+        current_directories()
+    }
     /// Windows cannot list another process's open files without a driver; it can
     /// only say who holds a given file (`holds_open`).
     // Retain this explicit unsupported capability and its contract test even

@@ -828,6 +828,7 @@ fn worker() -> Result<i32> {
         return Ok(0);
     };
     recover_interrupted_jobs()?;
+    super::worktree_maintenance::worker();
     loop {
         if replaced() || owner.yields() {
             return Ok(0);

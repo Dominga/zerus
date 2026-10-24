@@ -106,6 +106,43 @@ class ClearContext(unittest.TestCase):
   path=self.root/('rollout-'+sid+'.jsonl')
   path.write_text(json.dumps(dict(type='session_meta',payload=dict(id=sid)))+'\n'+json.dumps(dict(type='event_msg',payload=dict(type='token_count',info=dict(model_context_window=258400,total_token_usage=dict(input_tokens=tokens,cached_input_tokens=cache,output_tokens=0,total_tokens=tokens),last_token_usage=dict(input_tokens=tokens,cached_input_tokens=cache,output_tokens=0,total_tokens=tokens)))))+'\n')
   return str(path)
+
+ def failed_native_turn(self,kind='task_complete',newer=False):
+  from datetime import datetime,timezone
+  now=time.time();at=lambda value:datetime.fromtimestamp(value,timezone.utc).isoformat()
+  path=self.root/('rollout-'+self.conversation_id+'.jsonl')
+  rows=[dict(type='session_meta',payload=dict(id=self.conversation_id)),
+        dict(type='event_msg',timestamp=at(now-1),payload=dict(type=kind,turn_id='fixture-failed-turn',
+          message='Synthetic fixture request rejected',error=dict(message='Synthetic fixture request rejected')))]
+  if newer:rows.append(dict(type='event_msg',timestamp=at(now),payload=dict(type='task_started',turn_id='newer-turn')))
+  path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+  self.record.update(activity='busy',phase='working',main_done=False,active_tools={},
+                     turn_started=now-2,last_main_progress_at=now-2,transcript=str(path))
+  self.write_record()
+
+ def test_explicit_clear_after_native_failed_completion_does_not_need_a_missing_idle_hook(self):
+  self.failed_native_turn()
+  before=self.inspect()
+  self.assertEqual(before['phase'],'error')
+  self.assertTrue(before['clear_context_supported'],before['clear_context_reason'])
+  self.assertFalse(before['compact_context_supported'])
+  self.assertEqual(self.clear()['status'],'confirmed')
+  self.assertEqual(self.received(),b'/clear\r')
+
+ def test_standalone_error_and_newer_native_work_never_authorize_clear(self):
+  for kind,newer in [('error',False),('task_complete',True)]:
+   with self.subTest(kind=kind,newer=newer):
+    self.failed_native_turn(kind,newer)
+    self.assertFalse(self.inspect()['clear_context_supported'])
+    self.clear(success=False)
+    self.assertEqual(self.received(),b'')
+
+ def test_failed_native_turn_with_active_tools_still_keeps_context_actions_blocked(self):
+  self.failed_native_turn()
+  self.record['active_tools']={'still-owned':dict(name='Bash',started=time.time())};self.write_record()
+  self.assertFalse(self.inspect()['clear_context_supported'])
+  self.clear(success=False)
+  self.assertEqual(self.received(),b'')
  def test_deferred_codex_clear_resets_display_without_inventing_identity(self):
   self.record.update(cwd='/fixture',prompt='Previous request',last_message='Previous answer',
                      transcript=self.usage_history(self.conversation_id,109000,100000));self.write_record()

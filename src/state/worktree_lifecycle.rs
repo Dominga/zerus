@@ -28,7 +28,8 @@ pub(super) fn created(common: &Path, path: &Path, branch: &str, head: &str) -> R
     }
     let value = json!({"version":1,"id":uuid::Uuid::new_v4().to_string(),"common_dir":common,"path":path,"branch":branch,"head":head,"metadata":metadata,"created_at":now()});
     atomic(&metadata.join("zerus-owner.json"), &format!("{value}\n"))?;
-    atomic(&receipt_path(common, path), &format!("{value}\n"))
+    atomic(&receipt_path(common, path), &format!("{value}\n"))?;
+    super::worktree_maintenance::register(&value)
 }
 
 pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {
@@ -50,6 +51,13 @@ pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {
         serde_json::from_slice(&fs::read(metadata.join("zerus-owner.json")).ok()?).ok()?;
     if marker != value {
         return None;
+    }
+    if let Err(e) = fs::symlink_metadata(path) {
+        if e.kind() != std::io::ErrorKind::NotFound { return None; }
+        // A missing checkout cannot run rev-parse. Verify Git's retained
+        // backlink as well as both ownership receipts before forgetting it.
+        let backlink = fs::read_to_string(metadata.join("gitdir")).ok()?;
+        return (Path::new(backlink.trim_end_matches('\n')) == path.join(".git")).then_some(value);
     }
     let actual = git(
         path,
@@ -73,40 +81,20 @@ pub(super) fn prepare_removal(common: &Path, row: &Value) -> Result<()> {
     if ownership["branch"] != row["branch"] {
         return Err("The managed worktree branch changed; review it manually".into());
     }
-    let archives = archive::records()?;
-    let directory = root().join("archives");
-    let count = match fs::read_dir(&directory) {
-        Ok(files) => files
-            .map(|file| {
-                file.map(|file| file.path().extension().is_some_and(|e| e == "json"))
-                    .map_err(|e| e.to_string())
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|json| *json)
-            .count(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-        Err(e) => return Err(e.to_string()),
-    };
-    if count != archives.len() {
-        return Err(
-            "Archives could not be fully checked; the worktree was kept for manual review".into(),
-        );
-    }
-    for mut record in archives {
+    archive::visit_bounded(Instant::now()+Duration::from_secs(2), |mut record| {
         let refers = ["cwd", "launch_dir"]
             .iter()
             .any(|key| Path::new(string(&record, key)).starts_with(path));
         if !refers {
-            continue;
+            return Ok(());
         }
         record["worktree_cleanup"] = json!({"owner":ownership,"head":row["head"],"branch":row["branch"],"status":"removal_pending"});
         atomic(
             &archive::path(string(&record, "archive_id"))?,
             &format!("{record}\n"),
         )?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 pub(super) fn restorable(record: &Value) -> bool {
@@ -224,6 +212,9 @@ pub(super) fn restore(record: &Value) -> Result<()> {
 /// Archive success must never become a failed termination because cleanup was
 /// skipped or could not be confirmed. Emit a separate, machine-readable outcome.
 pub(super) fn after_archive(record: &Value) {
+    if !super::worktree_maintenance::policy().is_ok_and(|p| p.enabled && p.after_session) {
+        return;
+    }
     let folder = Path::new(string(record, "launch_dir"));
     if !folder.is_absolute() || !folder.is_dir() {
         return;

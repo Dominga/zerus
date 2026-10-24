@@ -16,7 +16,7 @@ const DROP: &str = "70-zerus-workspace-connector.conf";
 const MARKER: &str =
     "# Written by Zerus workspace migration; only this marked drop-in may be replaced.\n";
 const LIMIT: usize = 65_536;
-const PROPERTIES: &str = "LoadState,ActiveState,SubState,MainPID,InvocationID,KillMode,Restart,RestartForceExitStatus,ExecStart,FragmentPath,DropInPaths,ExecStop,ExecStopPost,ExecStartPre,ExecStartPost,OnSuccess,OnFailure,BoundBy,ConsistsOf,PropagatesStopTo,UpheldBy,TriggeredBy,Job,Type,RemainAfterExit,ExitType,FailureAction,SuccessAction,WatchdogUSec,RuntimeMaxUSec,Result,ExecMainStatus,ExecCondition,Conflicts,Requires,Wants,BindsTo,Upholds,StopWhenUnneeded,MemoryMax,MemoryHigh,CPUQuotaPerSecUSec,TasksMax,RootDirectory,RootImage,RootMStack,BindPaths,BindReadOnlyPaths,TemporaryFileSystem,MountImages,ExtensionImages,ExtensionDirectories,InaccessiblePaths,Environment,EnvironmentFiles,PassEnvironment";
+const PROPERTIES: &str = "LoadState,ActiveState,SubState,MainPID,InvocationID,KillMode,Restart,RestartForceExitStatus,ExecStart,FragmentPath,DropInPaths,ExecStop,ExecStopPost,ExecStartPre,ExecStartPost,OnSuccess,OnFailure,BoundBy,ConsistsOf,PropagatesStopTo,UpheldBy,TriggeredBy,Job,Type,RemainAfterExit,ExitType,FailureAction,SuccessAction,WatchdogUSec,RuntimeMaxUSec,Result,ExecMainStatus,ExecCondition,Conflicts,Requires,Wants,BindsTo,Upholds,Slice,StopWhenUnneeded,MemoryMax,MemoryHigh,CPUQuotaPerSecUSec,TasksMax,RootDirectory,RootImage,RootMStack,BindPaths,BindReadOnlyPaths,TemporaryFileSystem,MountImages,ExtensionImages,ExtensionDirectories,InaccessiblePaths,Environment,EnvironmentFiles,PassEnvironment";
 type Unit = BTreeMap<String, String>;
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -268,8 +268,14 @@ fn policy(unit: &Unit) -> Result<()> {
             .into_iter()
             .any(|k| {
                 unit.get(k).is_none_or(|v| {
-                    v.split_whitespace()
-                        .any(|x| !matches!(x, "basic.target" | "sysinit.target"))
+                    v.split_whitespace().any(|x| {
+                        // systemd places ordinary user services in app.slice
+                        // and implicitly requires that exact parent slice.
+                        !matches!(x, "basic.target" | "sysinit.target")
+                            && !(k == "Requires"
+                                && x == "app.slice"
+                                && unit.get("Slice").is_some_and(|s| s == "app.slice"))
+                    })
                 })
             })
     {
@@ -1276,6 +1282,26 @@ mod tests {
         let u = safe();
         policy(&u).unwrap();
         assert_eq!(arguments(&u).unwrap()[2], "/private/connector.json");
+    }
+    #[test]
+    fn default_user_application_slice_is_only_an_exact_parent_requirement() {
+        let mut u = safe();
+        u.insert("Slice".into(), "app.slice".into());
+        u.insert("Requires".into(), "basic.target app.slice".into());
+        policy(&u).unwrap();
+        for (key, value) in [
+            ("Slice", "custom.slice"),
+            ("Slice", ""),
+            ("Requires", "basic.target custom.slice"),
+            ("Requires", "basic.target app.slice native.service"),
+            ("Wants", "app.slice"),
+            ("BindsTo", "app.slice"),
+            ("Upholds", "app.slice"),
+        ] {
+            let mut bad = u.clone();
+            bad.insert(key.into(), value.into());
+            assert!(policy(&bad).is_err(), "{key}={value}");
+        }
     }
     #[test]
     fn process_kill_mode_cannot_override_dependent_tmux_or_exit_hooks() {

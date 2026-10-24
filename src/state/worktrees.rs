@@ -338,11 +338,14 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
-    if let Some(action @ ("create" | "review" | "inspect" | "remove")) = action {
+    if let Some(action @ ("create" | "review" | "inspect" | "remove" | "policy" | "sweep")) = action {
         let value = match action {
             "create" => create(&args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
             "inspect" => super::worktree_inspection::command(&args[1..])?,
+            "policy" => super::worktree_maintenance::command(&args[1..])?,
+            "sweep" if args[1..].iter().all(|a| a=="--json") => super::worktree_maintenance::Sweep::default().tick()?,
+            "sweep" => return Err("usage: hgs worktrees sweep --json (one bounded automatic cleanup step)".into()),
             _ => super::worktree_cleanup::remove_command(&args[1..])?,
         };
         println!("{value}");

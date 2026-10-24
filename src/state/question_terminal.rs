@@ -1,7 +1,8 @@
 //! Kimi 2.x native question-dialog bridge. This is deliberately a terminal
 //! adapter, not a claim that a TUI exposes KAP's in-process question service.
 //! Each small action checks the live question and screen; only a matching
-//! interaction.resolved event acknowledges delivery. Never retry after input.
+//! interaction.resolved event acknowledges delivery. Never automatically replay
+//! input; explicit draft recovery verifies the full review before submission.
 use super::*;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -244,8 +245,7 @@ pub(super) fn clipped(screen: &str) -> bool {
         return false;
     };
     let rows: Vec<&str> = plain.lines().collect();
-    dialog_bottom(&rows)
-        .is_some_and(|end| !rows[..end].iter().any(|row| row.trim() == "question"))
+    dialog_bottom(&rows).is_some_and(|end| !rows[..end].iter().any(|row| row.trim() == "question"))
 }
 
 /// A Kimi question dialog whose heading and bottom both show.
@@ -254,8 +254,7 @@ pub(super) fn complete(screen: &str) -> bool {
         return false;
     };
     let rows: Vec<&str> = plain.lines().collect();
-    dialog_bottom(&rows)
-        .is_some_and(|end| rows[..end].iter().any(|row| row.trim() == "question"))
+    dialog_bottom(&rows).is_some_and(|end| rows[..end].iter().any(|row| row.trim() == "question"))
 }
 
 /// Grow the pane no client views until this recorded Kimi question's clipped
@@ -638,99 +637,133 @@ fn advance_tab<T: Transport>(transport: &mut T, card: &Value, panel: &Panel) -> 
 fn drive<T: Transport>(transport: &mut T, card: &Value, answers: &Value) -> Result<()> {
     let wanted = desired_answers(card, answers)?;
     let items = questions(card)?;
-    for (index, (item, desired)) in items.iter().zip(&wanted).enumerate() {
-        let panel = goto_question(transport, card, index)?;
-        let Panel::Question { lines, .. } = panel else {
-            unreachable!()
-        };
-        if item["multi_select"].as_bool().unwrap_or(false) {
-            let target = desired.selected.clone();
-            // Other is committed after preset toggles, so first remove any old
-            // selection rather than attributing an old draft to the new answer.
-            let selected = selected_multi(&lines, item)?;
-            if !desired.text.is_empty()
-                && selected.contains(&item["options"].as_array().unwrap().len())
-            {
-                return Err("Other already has a selected draft; finish it in Terminal".into());
+    let expected: Vec<_> = wanted
+        .iter()
+        .map(|answer| normalize(&answer.answer))
+        .collect();
+    // An explicit retry may find the previous attempt in its native review or
+    // the single question's Other editor. Saving an existing editor preserves
+    // its text; only the full review can authorize final submission. Never
+    // paste again or replace a draft whose delivery was uncertain.
+    let resume_review = match parse_panel(&transport.screen()?, card)? {
+        Panel::Review { answers } => answers == expected,
+        Panel::Question {
+            index: 0,
+            editing: true,
+            ..
+        } if items.len() == 1 => {
+            if wanted[0].text.is_empty() || !wanted[0].selected.is_empty() {
+                return Err(
+                    "finish the active Other draft before choosing a different answer".into(),
+                );
             }
-            for choice in selected
-                .symmetric_difference(&target)
-                .copied()
-                .collect::<Vec<_>>()
-            {
-                let panel = parse_panel(&transport.screen()?, card)?;
-                let Panel::Question {
-                    index: current,
-                    editing: false,
-                    lines,
-                } = panel
-                else {
-                    return Err("question changed while selecting options".into());
-                };
-                if current != index {
-                    return Err("active question changed".into());
-                }
-                let before = selected_multi(&lines, item)?;
-                let should_select = target.contains(&choice);
-                if before.contains(&choice) == should_select {
-                    continue;
-                }
-                transport.key(&(choice + 1).to_string())?;
-                wait_panel(transport, card, |panel| match panel {
-                    Panel::Question {
-                        index: current,
-                        editing: false,
-                        lines,
-                    } if *current == index => selected_multi(lines, item)
-                        .is_ok_and(|current| current.contains(&choice) == should_select),
-                    _ => false,
-                })?;
-            }
-        } else if let Some(choice) = desired.selected.iter().next() {
-            transport.key(&(choice + 1).to_string())?;
-            wait_panel(
-                transport,
-                card,
-                |panel| !matches!(panel, Panel::Question { index: current, .. } if *current == index),
-            )?;
-        }
-        if !desired.text.is_empty() {
-            let panel = goto_question(transport, card, index)?;
-            let Panel::Question { lines, .. } = panel else {
-                unreachable!()
-            };
-            if !other_text(&lines, item)?.is_empty() {
-                return Err("Other has an existing draft; finish it in Terminal".into());
-            }
-            transport.key(&(item["options"].as_array().unwrap().len() + 1).to_string())?;
-            let panel = wait_panel(
-                transport,
-                card,
-                |panel| matches!(panel, Panel::Question { index: current, editing: true, .. } if *current == index),
-            )?;
-            let Panel::Question { lines, .. } = panel else {
-                unreachable!()
-            };
-            if !other_text(&lines, item)?.is_empty() {
-                return Err("Other changed before paste".into());
-            }
-            transport.paste(&desired.text)?;
-            wait_panel(transport, card, |panel| match panel {
-                Panel::Question {
-                    index: current,
-                    editing: true,
-                    lines,
-                } if *current == index => {
-                    other_text(lines, item).is_ok_and(|text| text == desired.text)
-                }
-                _ => false,
-            })?;
-            // A single Enter is used only in a verified, exact Other field.
-            // Final submission uses the dialog's explicit numeric action.
             transport.key("Enter")?;
             wait_panel(transport, card, |panel| {
                 !matches!(panel, Panel::Question { editing: true, .. })
             })?;
+            true
+        }
+        _ => false,
+    };
+    if !resume_review {
+        for (index, (item, desired)) in items.iter().zip(&wanted).enumerate() {
+            let panel = goto_question(transport, card, index)?;
+            let Panel::Question { lines, .. } = panel else {
+                unreachable!()
+            };
+            if item["multi_select"].as_bool().unwrap_or(false) {
+                let target = desired.selected.clone();
+                // Other is committed after preset toggles, so first remove any old
+                // selection rather than attributing an old draft to the new answer.
+                let selected = selected_multi(&lines, item)?;
+                if !desired.text.is_empty()
+                    && selected.contains(&item["options"].as_array().unwrap().len())
+                {
+                    return Err("Other already has a selected draft; finish it in Terminal".into());
+                }
+                for choice in selected
+                    .symmetric_difference(&target)
+                    .copied()
+                    .collect::<Vec<_>>()
+                {
+                    let panel = parse_panel(&transport.screen()?, card)?;
+                    let Panel::Question {
+                        index: current,
+                        editing: false,
+                        lines,
+                    } = panel
+                    else {
+                        return Err("question changed while selecting options".into());
+                    };
+                    if current != index {
+                        return Err("active question changed".into());
+                    }
+                    let before = selected_multi(&lines, item)?;
+                    let should_select = target.contains(&choice);
+                    if before.contains(&choice) == should_select {
+                        continue;
+                    }
+                    transport.key(&(choice + 1).to_string())?;
+                    wait_panel(transport, card, |panel| match panel {
+                        Panel::Question {
+                            index: current,
+                            editing: false,
+                            lines,
+                        } if *current == index => selected_multi(lines, item)
+                            .is_ok_and(|current| current.contains(&choice) == should_select),
+                        _ => false,
+                    })?;
+                }
+            } else if let Some(choice) = desired.selected.iter().next() {
+                transport.key(&(choice + 1).to_string())?;
+                wait_panel(
+                    transport,
+                    card,
+                    |panel| !matches!(panel, Panel::Question { index: current, .. } if *current == index),
+                )?;
+            }
+            if !desired.text.is_empty() {
+                let panel = goto_question(transport, card, index)?;
+                let Panel::Question { lines, .. } = panel else {
+                    unreachable!()
+                };
+                if !other_text(&lines, item)?.is_empty() {
+                    return Err("Other has an existing draft; finish it in Terminal".into());
+                }
+                transport.key(&(item["options"].as_array().unwrap().len() + 1).to_string())?;
+                let panel = wait_panel(
+                    transport,
+                    card,
+                    |panel| matches!(panel, Panel::Question { index: current, editing: true, .. } if *current == index),
+                )?;
+                let Panel::Question { lines, .. } = panel else {
+                    unreachable!()
+                };
+                if !other_text(&lines, item)?.is_empty() {
+                    return Err("Other changed before paste".into());
+                }
+                transport.paste(&desired.text)?;
+                wait_panel(transport, card, |panel| match panel {
+                    Panel::Question {
+                        index: current,
+                        editing: true,
+                        lines,
+                    } if *current == index => {
+                        // Kimi scrolls a long one-line editor horizontally. Its
+                        // visible suffix cannot prove the whole draft. Enter here
+                        // saves only this exact editor; the full wrapped review
+                        // below must still match every requested answer.
+                        other_text(lines, item).is_ok_and(|text| !text.is_empty())
+                    }
+                    _ => false,
+                })?;
+                // A single Enter is used only in a verified, exact Other field.
+                // Final submission uses the dialog's explicit numeric action.
+                transport.key("Enter")?;
+                wait_panel(transport, card, |panel| {
+                    !matches!(panel, Panel::Question { editing: true, .. })
+                })?;
+            }
         }
     }
     let mut review = None;
@@ -745,10 +778,6 @@ fn drive<T: Transport>(transport: &mut T, card: &Value, answers: &Value) -> Resu
         }
         advance_tab(transport, card, &panel)?;
     }
-    let expected: Vec<_> = wanted
-        .iter()
-        .map(|answer| normalize(&answer.answer))
-        .collect();
     if review.as_ref() != Some(&expected) {
         return Err("native review differs from your chosen answers; inspect Terminal".into());
     }
@@ -793,9 +822,16 @@ pub(super) struct Native<'a> {
 }
 impl Native<'_> {
     pub(super) fn new<'a>(record: &'a Value, card: &'a Value) -> Native<'a> {
-        Native { original: record, card, touched: false, last_screen: None }
+        Native {
+            original: record,
+            card,
+            touched: false,
+            last_screen: None,
+        }
     }
-    pub(super) fn touched(&self) -> bool { self.touched }
+    pub(super) fn touched(&self) -> bool {
+        self.touched
+    }
     pub(super) fn identity(&self) -> Result<Value> {
         let current = read_run(
             string(self.original, "name"),
@@ -839,14 +875,16 @@ impl Native<'_> {
         let current = self.pending()?;
         let actual = Self::capture(&current)?;
         let unchanged = self.last_screen.as_ref().is_some_and(|previous| {
-            if string(&current,"agent")=="claude" {
+            if string(&current, "agent") == "claude" {
                 // Claude repaints surrounding transcript/status while its
                 // question waits. Verify the complete question and selections,
                 // not unrelated animation or ANSI color changes above it.
-                super::claude_question::same_panel(previous,&actual,self.card)
-            } else if string(self.card,"source")=="codex_async" {
-                super::codex_questions::same_panel(previous,&actual,self.card)
-            } else {previous==&actual}
+                super::claude_question::same_panel(previous, &actual, self.card)
+            } else if string(self.card, "source") == "codex_async" {
+                super::codex_questions::same_panel(previous, &actual, self.card)
+            } else {
+                previous == &actual
+            }
         });
         if !unchanged {
             return Err(
@@ -885,10 +923,7 @@ impl Transport for Native<'_> {
     }
     fn resolved(&mut self) -> Result<Option<Value>> {
         let current = self.identity()?;
-        Ok(
-            super::questions::response(&current, self.card)?
-                .map(|event| event["response"].clone()),
-        )
+        Ok(super::questions::response(&current, self.card)?.map(|event| event["response"].clone()))
     }
 }
 
@@ -904,7 +939,7 @@ pub(super) fn available(record: &Value, card: &Value) -> Result<()> {
     };
     let current = native.identity()?;
     let panel = parse_panel(&Native::capture(&current)?, card)?;
-    if matches!(panel, Panel::Question { editing: true, .. }) {
+    if matches!(panel, Panel::Question { editing: true, .. }) && questions(card)?.len() != 1 {
         return Err("finish the active Other draft in Terminal".into());
     }
     Ok(())
@@ -1001,6 +1036,7 @@ mod tests {
         response: Option<Value>,
         corrupt_review: bool,
         disappear_after_input: bool,
+        clip_other: bool,
     }
     impl Dialog {
         fn new() -> Self {
@@ -1015,6 +1051,7 @@ mod tests {
                 response: None,
                 corrupt_review: false,
                 disappear_after_input: false,
+                clip_other: false,
             }
         }
         fn answer(&self, index: usize) -> String {
@@ -1033,9 +1070,9 @@ mod tests {
             labels.join(", ")
         }
         fn advance(&mut self) {
-            self.tab = ((self.tab + 1)..3)
+            self.tab = ((self.tab + 1)..self.card["questions"].as_array().unwrap().len())
                 .find(|index| self.answer(*index).is_empty())
-                .unwrap_or(3);
+                .unwrap_or(self.card["questions"].as_array().unwrap().len());
         }
         fn rendered(&self) -> String {
             if self.disappear_after_input && !self.keys.is_empty() {
@@ -1048,10 +1085,10 @@ mod tests {
                 " Approach  Checks  Detail  Submit".into(),
                 String::new(),
             ];
-            if self.tab == 3 {
+            if self.tab == self.card["questions"].as_array().unwrap().len() {
                 rows.push(format!(" {REVIEW}"));
                 rows.push(String::new());
-                for index in 0..3 {
+                for index in 0..self.card["questions"].as_array().unwrap().len() {
                     rows.push(format!(
                         "  Q  {}",
                         string(&self.card["questions"][index], "question")
@@ -1093,7 +1130,12 @@ mod tests {
                         option_label(item, choice).to_owned()
                     };
                     if choice == 2 && (self.editing || !self.drafts[self.tab].is_empty()) {
-                        label += &format!(": {}", self.drafts[self.tab]);
+                        let shown = if self.editing && self.clip_other {
+                            self.drafts[self.tab].chars().skip(1).collect::<String>()
+                        } else {
+                            self.drafts[self.tab].clone()
+                        };
+                        label += &format!(": {shown}");
                     }
                     if self.tab == 1 {
                         rows.push(format!(
@@ -1130,16 +1172,16 @@ mod tests {
         fn key(&mut self, key: &str) -> Result<()> {
             self.keys.push(key.into());
             if key == "Tab" {
-                self.tab = (self.tab + 1) % 4;
+                self.tab = (self.tab + 1) % (self.card["questions"].as_array().unwrap().len() + 1);
                 self.editing = false;
                 return Ok(());
             }
-            if self.tab == 3 {
+            if self.tab == self.card["questions"].as_array().unwrap().len() {
                 if key != "1" {
                     return Err("unexpected submit action".into());
                 }
                 let mut answers = serde_json::Map::new();
-                for index in 0..3 {
+                for index in 0..self.card["questions"].as_array().unwrap().len() {
                     answers.insert(
                         string(&self.card["questions"][index], "question").into(),
                         json!(self.answer(index)),
@@ -1284,6 +1326,59 @@ mod tests {
         assert!(dialog.response.is_none());
     }
     #[test]
+    fn horizontally_scrolled_other_is_verified_in_the_full_review() {
+        let mut dialog = Dialog::new();
+        dialog.clip_other = true;
+        drive(&mut dialog, &card(), &answers()).unwrap();
+        assert_eq!(dialog.committed[2], answers()[2]["text"].as_str().unwrap());
+        assert!(dialog.response.is_some());
+    }
+
+    fn single_other(draft: &str, editing: bool) -> (Dialog, Value) {
+        let mut dialog = Dialog::new();
+        let item = dialog.card["questions"][2].clone();
+        dialog.card["questions"] = json!([item]);
+        dialog.drafts[0] = draft.into();
+        dialog.editing = editing;
+        dialog.clip_other = true;
+        (dialog, json!([answers()[2].clone()]))
+    }
+
+    #[test]
+    fn explicit_retry_saves_the_existing_other_without_pasting_again() {
+        let text = answers()[2]["text"].as_str().unwrap().to_owned();
+        let (mut dialog, answers) = single_other(&text, true);
+        let card = dialog.card.clone();
+        drive(&mut dialog, &card, &answers).unwrap();
+        assert_eq!(dialog.keys, vec!["Enter", "1"]);
+        assert_eq!(dialog.committed[0], text);
+    }
+
+    #[test]
+    fn different_existing_other_is_preserved_without_final_submission() {
+        let (mut dialog, answers) = single_other("A foreign native draft", true);
+        let card = dialog.card.clone();
+        assert!(drive(&mut dialog, &card, &answers)
+            .unwrap_err()
+            .contains("review differs"));
+        assert_eq!(dialog.keys, vec!["Enter"]);
+        assert_eq!(dialog.committed[0], "A foreign native draft");
+        assert!(dialog.response.is_none());
+    }
+
+    #[test]
+    fn explicit_retry_of_the_exact_review_uses_only_its_submit_action() {
+        let text = answers()[2]["text"].as_str().unwrap().to_owned();
+        let (mut dialog, answers) = single_other(&text, false);
+        dialog.committed[0] = text;
+        dialog.selected[0].insert(2);
+        dialog.tab = 1;
+        let card = dialog.card.clone();
+        drive(&mut dialog, &card, &answers).unwrap();
+        assert_eq!(dialog.keys, vec!["1"]);
+    }
+
+    #[test]
     fn never_overwrites_existing_other_draft() {
         let mut dialog = Dialog::new();
         dialog.drafts[2] = "user draft".into();
@@ -1334,7 +1429,10 @@ mod tests {
         );
         let mut dialog = Dialog::new();
         for _ in 0..2 {
-            for screen in [dialog.rendered(), format!("transcript\n{}\n status", dialog.rendered())] {
+            for screen in [
+                dialog.rendered(),
+                format!("transcript\n{}\n status", dialog.rendered()),
+            ] {
                 assert!(complete(&screen) && !clipped(&screen), "{screen}");
             }
             dialog.editing = true;

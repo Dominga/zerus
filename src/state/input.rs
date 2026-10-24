@@ -178,6 +178,16 @@ pub(super) fn checked_interrupted(name: &str, run_id: &str, conversation_id: &st
     Ok(record)
 }
 
+/// Explicit reset after a typed native failed-turn completion. This checks the
+/// same live identity again immediately before the sole /clear submission.
+pub(super) fn checked_failed(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
+    let record = checked_input(name, run_id, conversation_id, true)?;
+    if !clear_context::failed_turn(&record) {
+        return Err("The failed native turn is no longer settled; refresh before clearing".into());
+    }
+    Ok(record)
+}
+
 /// Session settings may precede the first user message, when Codex/Kimi have
 /// not created a conversation yet. Other idle-only actions keep checked_ready.
 pub(super) fn checked_settings(name: &str, run_id: &str, conversation_id: &str) -> Result<Value> {
@@ -411,6 +421,13 @@ fn styled_row(row: &str) -> Vec<(char, bool)> {
         .collect()
 }
 
+/// Released Codex uses a double chevron for Ultra's live composer. This is
+/// only its prefix; callers still verify the cursor, styles and full input
+/// boundary, or an exact command/draft under the usual native identity guards.
+pub(super) fn codex_prompt(row: &str) -> Option<&str> {
+    row.strip_prefix('›').or_else(|| row.strip_prefix('»'))
+}
+
 fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: usize) -> bool {
     let styled = styled_row(row);
     let plain: String = styled.iter().map(|(ch, _)| ch).collect();
@@ -418,7 +435,7 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
     match agent {
         "codex" => {
             cursor == 2
-                && (plain == "›" || plain.starts_with("› "))
+                && codex_prompt(&plain).is_some_and(|tail| tail.is_empty() || tail.starts_with(' '))
                 && styled
                     .iter()
                     .skip(2)
@@ -655,7 +672,7 @@ const DRAFT: &str = "terminal has a draft, dialog, or unrecognized prompt; open 
 const RETURNED_FOLLOW_UPS: &str =
     "The queued follow-ups are back in Codex's input as an unsent draft. Submit or clear them in Terminal.";
 
-/// The whole draft in Codex's input: its `›` row and indented continuation rows,
+/// The whole draft in Codex's input: its composer and indented continuation rows,
 /// then a blank row before the model/folder status row of its footer in the last
 /// two screen rows. The cursor must be above that blank row; any other layout is unread.
 pub(super) fn codex_draft(record: &Value, screen: &str, cursor_y: usize) -> Option<String> {
@@ -667,7 +684,7 @@ pub(super) fn codex_draft(record: &Value, screen: &str, cursor_y: usize) -> Opti
         .iter()
         .enumerate()
         .rev()
-        .find_map(|(index, row)| Some((index, row.strip_prefix('›')?)))?;
+        .find_map(|(index, row)| Some((index, codex_prompt(row)?)))?;
     let rows = &lines[start + 1..footer];
     if !(start..footer - 1).contains(&cursor_y)
         || rows.last().is_none_or(|row| !row.is_empty())
@@ -1040,6 +1057,19 @@ mod tests {
             2,
             2
         ));
+    }
+    #[test]
+    fn codex_ultra_composer_keeps_cursor_draft_and_footer_guards() {
+        let screen = "\x1b[1m\x1b[38;2;186;130;255m»\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol ultra · /fixture\n  ? for shortcuts";
+        assert!(composer_empty("codex", screen, 2, 0));
+        assert!(!composer_empty("codex", screen, 3, 0));
+        for replacement in ["draft", "\n  multiline draft", ""] {
+            assert!(!composer_empty("codex", &screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", replacement), 2, 0));
+        }
+        assert!(!composer_empty("codex", &screen.replace("? for shortcuts", "Approve command?"), 2, 0));
+        assert!(!composer_empty("claude", screen, 2, 0));
+        let record = json!({"model":"gpt-6.1-sol"});
+        assert_eq!(codex_draft(&record, "» retained draft\n\n  GPT-6.1-Sol ultra · /fixture\n  ? for shortcuts", 0).as_deref(), Some("retained draft"));
     }
     #[test]
     fn codex_unshaded_single_line_model_footer() {

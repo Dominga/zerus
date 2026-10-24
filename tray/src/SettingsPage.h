@@ -14,6 +14,7 @@
 #include "speech/SpeechSettings.h"
 #include "KeyboardSettings.h"
 #include "AnalyticsSettings.h"
+#include "WorktreeSettings.h"
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -134,6 +135,7 @@ public:
         workspaceConnection->protectionChanged=[legacy,legacyToggle](bool encrypted){legacy->setEnabled(!encrypted);legacyToggle->setEnabled(!encrypted);if(encrypted){legacyToggle->setChecked(false);legacy->hide();}};
         mobileLayout->addWidget(new PhonePairing::Panel(executable));mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         files=new DownloadCacheSettings;addPage(files);
+        worktreeSection=pages->count();nav->insertItem(worktreeSection,tr("Worktrees"));worktrees=new WorktreeSettings(executable);addPage(worktrees);
         approvalSection=pages->count();approvals=new AutomaticApprovalSettings(executable);addPage(approvals);
         speechSection=pages->count();speech=new SpeechSettings(executable);speech->setMaximumWidth(850);addPage(speech);
         keyboardSection=pages->count();keyboard=new KeyboardSettings(ShortcutRegistry::instance());keyboard->setMaximumWidth(850);addPage(keyboard);
@@ -150,9 +152,9 @@ public:
         connect(repository,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ufna/zerus")));});
         about->addWidget(repository,0,Qt::AlignLeft);about->addStretch();
         connect(nav,&QListWidget::currentRowChanged,pages,&QStackedWidget::setCurrentIndex);nav->setCurrentRow(0);
-        connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();if(row==6)files->refresh();if(row==approvalSection)approvals->refresh();if(row==analyticsSection)analytics->refresh();});
+        connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==worktreeSection)worktrees->refresh();if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();if(row==6)files->refresh();if(row==approvalSection)approvals->refresh();if(row==analyticsSection)analytics->refresh();});
     }
-    void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);}
+    void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);worktrees->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
     void setLocalSessions(bool enabled,bool offered=false){sync->setLocalSessions(enabled);sync->setLocalSessionsOffered(offered);}
     // Workspace enrollment is available before a local gateway starts.
@@ -190,6 +192,8 @@ private:
     AutomaticApprovalSettings *approvals;
     KeyboardSettings *keyboard;
     AnalyticsSettings *analytics;
+    WorktreeSettings *worktrees;
+    int worktreeSection=-1;
     int speechSection=-1,keyboardSection=-1,aboutSection=-1,approvalSection=-1,analyticsSection=-1;
     // An icon button restoring a slider's default, shown only after a change.
     // It keeps its space while hidden, so the rows below do not move. Focus

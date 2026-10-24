@@ -281,7 +281,8 @@ the installed Kimi. Each case runs a private copy, disables automatic updates,
 uses its loopback model and platform fixture, proves the child image and private
 environment, and retains uncertain cleanup. The macOS cases compile one exec
 shim per case, so they require both native and compiler resources. A current
-latest-release campaign runs nine native cases. Historical two-version receipts
+latest-release campaign runs twelve native cases, including long Other answers,
+explicit recovery of a retained editor, and preservation of a mismatching draft. Historical two-version receipts
 do not define current selection. The seventeen R2 and seven question-fixture
 controls use stand-ins and loopback
 servers and establish fixture behavior only. `test_kimi_trust` and

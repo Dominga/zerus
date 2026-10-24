@@ -557,6 +557,18 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         saveOrganization(); rebuild();
     });
     connect(m_sessions, &SessionList::childrenToggled, this, [this](const QString &key) {
+        // A team's lead folds and unfolds its members (and its subagents with them).
+        if (m_teams) for (const auto &entry : m_entries) if (entry.key == key) {
+            const auto *team = m_teams->teamOfSession(entry.host, entry.session.name);
+            const auto *member = team ? team->memberOfSession(entry.host, entry.session.name) : nullptr;
+            if (!member || !member->lead || team->status == "archived") break;
+            const bool fold = !m_collapsedTeams.contains(team->id);
+            if (fold) { m_collapsedTeams.insert(team->id); m_expandedSessions.remove(key); }
+            else m_collapsedTeams.remove(team->id);
+            QSettings().setValue("workspace/collapsedTeams", QStringList(m_collapsedTeams.cbegin(), m_collapsedTeams.cend()));
+            QSettings().setValue("workspace/expandedSessions", QStringList(m_expandedSessions.begin(), m_expandedSessions.end()));
+            rebuild(); return;
+        }
         if (m_expandedSessions.contains(key)) {
             m_expandedSessions.remove(key);
             if (m_selectedKey == key && !m_subagentId.isEmpty()) closeSubagent();
@@ -3356,7 +3368,8 @@ void SessionsWindow::rebuild()
     struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch, team; };
     QList<Row> rows;
     QSet<int> subordinateRows;   // WhiteWh fork: visible entries listed under their lead
-    QSet<int> teamMemberRows, teamHiddenRows;   // WhiteWh fork: agent team members under their header
+    QSet<int> teamMemberRows, teamHiddenRows, lastMemberRows;
+    QHash<int, QString> leadTeams;   // WhiteWh fork: agent team members under their header
     const bool hasGroups = m_organization.groups().size() > 1;
     const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
     const bool hideEmptyProjects = QSettings().value("workspace/hideEmptyProjects", true).toBool();
@@ -3427,7 +3440,7 @@ void SessionsWindow::rebuild()
         // WhiteWh fork: agent teams. A team whose lead is listed here gets a
         // header above its lead; its members listed here follow, indented. A
         // collapsed team keeps only members with a problem.
-        QHash<int, QString> teamHeads;
+        QHash<int, QString> teamHeads;   // lead row -> team (leadTeams keeps them for the rows below)
         if (m_teams) for (const auto &team : m_teams->teams()) {
             if (team.status == "archived") continue;
             int lead = -1; QList<int> follow;
@@ -3445,13 +3458,14 @@ void SessionsWindow::rebuild()
                 if (i == lead) ordered += follow;
             }
             members = ordered;
-            teamHeads.insert(lead, team.id);
+            teamHeads.insert(lead, team.id); leadTeams.insert(lead, team.id);
             const bool collapsed = m_collapsedTeams.contains(team.id) && query.isEmpty();
             for (int i : follow) {
-                teamMemberRows.insert(i); subordinateRows.insert(i);
+                teamMemberRows.insert(i);
                 const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
                 if (collapsed && !Teams::memberStatus(team, *member, teamLive(*member)).problem) teamHiddenRows.insert(i);
             }
+            for (auto it = follow.crbegin(); it != follow.crend(); ++it) if (!teamHiddenRows.contains(*it)) { lastMemberRows.insert(*it); break; }
         }
         if (members.isEmpty() && launches.isEmpty() && (filtering || hideEmptyProjects || !group.accessible)) continue;
         if (hasGroups) rows.append({group.id, -1, false});
@@ -3496,7 +3510,8 @@ void SessionsWindow::rebuild()
         item->setData(Qt::AccessibleDescriptionRole, QString());
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
         item->setData(SessionRoles::TeamId, row.team);   // WhiteWh fork: agent teams
-        item->setData(SessionRoles::TeamMember, row.entry >= 0 && row.child.isEmpty() && teamMemberRows.contains(row.entry));
+        item->setData(SessionRoles::TeamMember, row.entry >= 0 && row.child.isEmpty() && teamMemberRows.contains(row.entry)
+                                                    ? (lastMemberRows.contains(row.entry) ? 2 : 1) : 0);
         if (!row.team.isEmpty()) {
             const auto *team = m_teams->team(row.team);
             const auto live = [this](const Teams::Member &member) { return teamLive(member); };
@@ -3564,8 +3579,10 @@ void SessionsWindow::rebuild()
         bool hasChildren = false;
         for (auto it = roster.begin(); it != roster.end(); ++it)
             if (showChild(e, it.key(), it.value().toObject(), s.subagentCountsComplete, includeCompleted)) { hasChildren = true; break; }
-        item->setData(SessionRoles::HasChildren, hasChildren);
-        item->setData(SessionRoles::Expanded, m_expandedSessions.contains(e.key));
+        // A team's lead folds its members as a session folds its subagents.
+        const QString leadTeam = leadTeams.value(row.entry);
+        item->setData(SessionRoles::HasChildren, hasChildren || !leadTeam.isEmpty());
+        item->setData(SessionRoles::Expanded, leadTeam.isEmpty() ? m_expandedSessions.contains(e.key) : !m_collapsedTeams.contains(leadTeam));
         if (firstSession < 0) firstSession = i;
         if (!row.hidden && firstVisible < 0) firstVisible = i;
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled);

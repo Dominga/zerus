@@ -14,6 +14,7 @@
 #include <QScrollBar>
 #include <QSettings>
 #include <QSplitter>
+#include <QStyle>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -35,12 +36,20 @@ QString column(const Task &task, bool problem)
     return QStringLiteral("pending");
 }
 
-// The graph's scroll area tells the graph the space it has.
+// The graph's scroll area tells the graph the space it has: the most it can
+// show less room for both scroll bars, so a scroll bar that comes or goes
+// never changes it (a graph that filled the viewport made bars come and go
+// on every layout, and the canvas shook).
 class GraphArea : public QScrollArea {
 public:
     std::function<void(const QSize &)> resized;
 protected:
-    void resizeEvent(QResizeEvent *event) override { QScrollArea::resizeEvent(event); if (resized) resized(viewport()->size()); }
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QScrollArea::resizeEvent(event);
+        const int bar = style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, this);
+        if (resized) resized(maximumViewportSize() - QSize(bar, bar));
+    }
 };
 
 // A member card that focuses the canvas on its member when clicked.
@@ -62,6 +71,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     outer->addWidget(m_empty, 1);
     m_body = new QWidget; auto *bh = new QHBoxLayout(m_body); bh->setContentsMargins(0, 0, 0, 0);
     m_split = new QSplitter(Qt::Horizontal); m_split->setObjectName("teamWorkspaceSplit"); m_split->setChildrenCollapsible(false);
+    m_split->setHandleWidth(7);
     auto *leftBox = new QWidget; m_leftHost = new QVBoxLayout(leftBox); m_leftHost->setContentsMargins(0, 0, 0, 0); m_leftHost->setSpacing(0);
     // The side column: members above, the coordinator below; the owner moves the divider.
     m_sideSplit = new QSplitter(Qt::Vertical); m_sideSplit->setObjectName("teamWorkspaceSideSplit"); m_sideSplit->setChildrenCollapsible(false);
@@ -111,12 +121,13 @@ void TeamWorkspace::setTheme(bool dark)
     const Colors c = colorsFor(dark);
     setStyleSheet(teamSheet(c) + QStringLiteral(
         "QWidget#teamWorkspace{background:%1;}"
-        "QSplitter#teamWorkspaceSideSplit{border-left:1px solid %2;}"
+        "QSplitter#teamWorkspaceSplit::handle{background:%2;margin:0 3px;}"
+        "QSplitter#teamWorkspaceSplit::handle:hover{background:%4;}"
         "QSplitter#teamWorkspaceSideSplit::handle{background:%2;margin:2px 40px;border-radius:1px;}"
         "QFrame#teamWorkspaceCoordinator{border-top:1px solid %2;}"
         "QWidget#teamWorkspaceCoordinatorHead{border-bottom:1px solid %2;}"
         "QLabel#teamWorkspaceEmpty{color:%3;font-size:13px;}")
-        .arg(c.surface.name(), c.border.name(), c.muted.name()));
+        .arg(c.surface.name(), c.border.name(), c.muted.name(), c.accent.name()));
     m_conversation->setTheme(dark);
     scheduleRender();
 }
@@ -311,8 +322,12 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
         QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, 0); });
         h->addWidget(task);
-    } else h->addWidget(segmented({{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}, m_filter, "teamWorkspaceFilter",
-                                  [this](const QString &value) { m_filter = value; scheduleRender(); }));
+    } else if (m_view != "board") {
+        // The board's columns already sort tasks by state; the graph dims and
+        // the layers hide what the filter leaves out.
+        h->addWidget(segmented({{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}, m_filter, "teamWorkspaceFilter",
+                               [this](const QString &value) { m_filter = value; scheduleRender(); }));
+    }
     if (!m_focus.isEmpty()) {
         auto *chip = button(tr("Member: %1  ×").arg(team.roleOf(m_focus)), "teamWorkspaceFocus"); chip->setProperty("chip", true);
         chip->setToolTip(tr("Show every member again"));

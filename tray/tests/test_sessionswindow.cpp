@@ -748,8 +748,17 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     QCOMPARE(rowOf("\ncodex/hgs/dashboard"), header + 1);
     QCOMPARE(rowOf("\nkimi/hgs/tester"), header + 2);
     auto *member = list->item(header + 2);
-    QVERIFY(member->data(SessionRoles::TeamMember).toBool() && member->data(SessionRoles::Subordinate).toBool());
+    QVERIFY(member->data(SessionRoles::TeamMember).toBool());
     QVERIFY(!list->item(header + 1)->data(SessionRoles::TeamMember).toBool());
+    // The last member ends the connector; the lead folds its members as a
+    // session folds its subagents.
+    QCOMPARE(member->data(SessionRoles::TeamMember).toInt(), 2);
+    QVERIFY(list->item(header + 1)->data(SessionRoles::HasChildren).toBool() && list->item(header + 1)->data(SessionRoles::Expanded).toBool());
+    emit list->childrenToggled(QStringLiteral("\ncodex/hgs/dashboard"));
+    QTRY_VERIFY(list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
+    QVERIFY(!list->item(rowOf("\ncodex/hgs/dashboard"))->data(SessionRoles::Expanded).toBool());
+    emit list->childrenToggled(QStringLiteral("\ncodex/hgs/dashboard"));
+    QTRY_VERIFY(!list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
     QCOMPARE(list->item(header)->data(SessionRoles::Meta).toString(), QStringLiteral("0/2"));
     QCOMPARE(list->item(header)->data(SessionRoles::TeamMembers).toInt(), 2);
     QVERIFY(!(list->item(header)->flags() & Qt::ItemIsSelectable));

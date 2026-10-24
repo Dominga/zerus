@@ -3,6 +3,7 @@
 // editor, the Team designer's draft and the team workspace. Each sends one
 // `hgs team` request per change, recorded by a fake CLI.
 #include <QtTest>
+#include <QStyle>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -425,12 +426,22 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     // The graph fills the canvas: at least its height, centered.
     auto *graph = workspace.findChild<QWidget *>("teamWorkspaceGraph");
     auto *canvas = workspace.findChild<QScrollArea *>("teamWorkspaceCanvas");
-    QTRY_VERIFY(graph->height() >= canvas->viewport()->height() - 2);
+    const int bar = canvas->style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, canvas);
+    QTRY_VERIFY(graph->height() >= canvas->viewport()->height() - bar - 2);
+    // ...and holds still: no scroll bar comes and goes under it.
+    QTest::qWait(150);
+    const QSize settled = graph->size();
+    for (int i = 0; i < 5; ++i) { QTest::qWait(40); QCOMPARE(graph->size(), settled); }
+    // A divider the owner moves stands between the canvas and the side column.
+    auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
+    QVERIFY(split && split->handleWidth() >= 5);
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceFilter"));
     shot(&workspace, "d3-running");
     auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
     for (auto *b : views->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
     QCOMPARE(workspace.findChildren<QFrame *>("teamBoardCard").size(), 5);
+    QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceFilter"));   // the board's columns sort by state
     shot(&workspace, "d3-board");
     // Focusing a member keeps only its tasks.
     for (auto *m : workspace.findChildren<QFrame *>("teamWorkspaceMember")) if (m->property("teamMember") == "tester") { QTest::mouseClick(m, Qt::LeftButton, {}, QPoint(4, 4)); break; }

@@ -20,7 +20,7 @@ inline QRect sessionCardRect(const QRect &row) { return row.adjusted(2, 4, -2, -
 // card's text; every place that lays out or hit-tests that text shifts by it.
 inline int &sessionCardTileInset() { static int inset = 0; return inset; }
 // WhiteWh fork: a subordinate session's card stands indented under its lead.
-inline int sessionCardIndent(const QModelIndex &index) { return index.data(SessionRoles::Subordinate).toBool() ? 22 : 0; }
+inline int sessionCardIndent(const QModelIndex &index) { return index.data(SessionRoles::Subordinate).toBool() || index.data(SessionRoles::TeamMember).toBool() ? 22 : 0; }
 
 // The collapsed session list keeps every row at its height; only the width
 // changes. The list's "expansion" runs from 0 (strip) to 1 (full cards), and
@@ -83,7 +83,7 @@ public:
         else if (rowCollapsed(index) && expansion >= 1) paintCompactRow(p, option, index);
         else if (expansion >= 1) paintCard(p, option, index);
         else paintStripCard(p, option, index, expansion);
-        if (index.data(SessionRoles::TeamMember).toBool() && expansion >= 1) paintTeamConnector(p, option);
+        if (index.data(SessionRoles::TeamMember).toBool() && expansion >= 1) paintTeamConnector(p, option, index);
     }
     struct CardStatus {
         bool attention, unread, working, paused, draft, additionalUnread, muted;
@@ -400,7 +400,7 @@ private:
         p->save(); p->setRenderHint(QPainter::Antialiasing);
         const bool dark = option.widget && option.widget->property("hgsDark").toBool();
         const QColor fg(dark ? "#e8edf4" : "#1a2733"), muted(dark ? "#a1adbb" : "#647386");
-        const QRect card = sessionCardRect(option.rect).adjusted(sessionCardTileInset(), 0, 0, 0);
+        const QRect card = sessionCardRect(option.rect);
         QColor surface = option.widget ? option.widget->property("cardSurface").value<QColor>() : QColor();
         if (!surface.isValid()) surface = QColor(dark ? "#1c2229" : "#ffffff");
         QColor border = option.widget ? option.widget->property("cardBorder").value<QColor>() : QColor();
@@ -471,15 +471,17 @@ private:
         p->restore();
     }
     // A team member's card hangs from its header: a line left of the card.
-    void paintTeamConnector(QPainter *p, const QStyleOptionViewItem &option) const {
+    // The line from the team's lead into each member's card. It runs on past a
+    // member only to the next one shown (TeamMember is 1; the last one is 2).
+    void paintTeamConnector(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const {
         const bool dark = option.widget && option.widget->property("hgsDark").toBool();
-        QColor border = option.widget ? option.widget->property("cardBorder").value<QColor>() : QColor();
-        if (!border.isValid()) border = QColor(dark ? "#2c323b" : "#dce2e8");
-        const QRect card = sessionCardRect(option.rect);
-        const int x = card.left() + sessionCardTileInset() + 9;
-        p->save(); p->setPen(QPen(border, 1));
-        p->drawLine(x, option.rect.top(), x, option.rect.bottom());
-        p->drawLine(x, option.rect.center().y(), x + 10, option.rect.center().y());
+        const bool more = index.data(SessionRoles::TeamMember).toInt() == 1;
+        const int line = option.rect.left() + 12, middle = option.rect.top() + 26;
+        p->save(); p->setRenderHint(QPainter::Antialiasing);
+        p->setPen(QPen(QColor(dark ? "#4a525d" : "#b7c3ce"), 1.5)); p->setBrush(Qt::NoBrush);
+        p->drawLine(line, option.rect.top() - 2, line, more ? option.rect.bottom() + 2 : middle - 6);
+        p->drawArc(QRect(line, middle - 12, 12, 12), 180 * 16, 90 * 16);
+        p->drawLine(line + 6, middle, option.rect.left() + sessionCardIndent(index) + 4, middle);
         p->restore();
     }
     void paintHeader(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index, qreal expansion) const {

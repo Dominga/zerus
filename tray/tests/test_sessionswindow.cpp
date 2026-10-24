@@ -677,7 +677,7 @@ FleetState TestSessionsWindow::fleet() const
 // restores all of it.
 void TestSessionsWindow::compactSkinWorkspaceView()
 {
-    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", "dark");
+    QSettings().setValue("workspace/skin", "compact"); QSettings().setValue("workspace/theme", "dark");
     const auto restore = qScopeGuard([] {
         QSettings().remove("workspace/skin"); QSettings().remove("workspace/theme"); QSettings().remove("workspace/foldedInspector");
         sessionCardTileInset() = 0; SessionStatusBadge::outlined() = false;
@@ -727,7 +727,7 @@ void TestSessionsWindow::compactSkinWorkspaceView()
 // built, before its pages and status bar exist.
 void TestSessionsWindow::compactSkinStartsWithACollapsedList()
 {
-    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/sessionsCollapsed", true);
+    QSettings().setValue("workspace/skin", "compact"); QSettings().setValue("workspace/sessionsCollapsed", true);
     const auto restore = qScopeGuard([] {
         QSettings().remove("workspace/skin"); QSettings().remove("workspace/sessionsCollapsed"); sessionCardTileInset() = 0; SessionStatusBadge::outlined() = false;
     });

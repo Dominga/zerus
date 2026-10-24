@@ -527,7 +527,7 @@ elif a and a[0]=='worktrees':
     // Skins fall back to the Zerus colors and the classic views.
     void skinsKeepSafeValuesAndDuplicate() {
         const auto skins=WorkspaceSkin::available();QVERIFY(skins.size()>=2);
-        QCOMPARE(skins[0].id,QString("zerus"));QCOMPARE(skins[1].id,QString("whitewh"));QCOMPARE(skins[1].name,QString("Compact"));
+        QCOMPARE(skins[0].id,QString("zerus"));QCOMPARE(skins[1].id,QString("compact"));QCOMPARE(skins[1].name,QString("Compact"));
         QCOMPARE(WorkspaceSkin::currentId(),QString("zerus"));QCOMPARE(WorkspaceSkin::current().id,QString("zerus"));
         QCOMPARE(skins[0].view("newSession"),QString("classic"));QVERIFY(!skins[0].framelessDialogs());
         QCOMPARE(skins[1].view("newSession"),QString("dense"));QVERIFY(skins[1].framelessDialogs());
@@ -550,7 +550,7 @@ elif a and a[0]=='worktrees':
     }
     // The Compact skin arranges the same form densely; its logic is unchanged.
     void denseViewStartsLikeTheClassicOne() {
-        QSettings().setValue("workspace/skin","whitewh");
+        QSettings().setValue("workspace/skin","compact");
         const auto restore=qScopeGuard([]{QSettings().remove("workspace/skin");});
         NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.selectPath("/workspace/example",false);dialog.show();
         QVERIFY(dialog.findChild<QFrame *>("newSessionDense"));QVERIFY(dialog.windowFlags()&Qt::FramelessWindowHint);

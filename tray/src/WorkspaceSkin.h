@@ -105,7 +105,7 @@ inline Skin parse(const QJsonObject &data, const QString &id, const QString &pat
     return skin;
 }
 
-// The built-in Compact skin (id "whitewh"): a denser palette, the dense New
+// The built-in Compact skin (id "compact"): a denser palette, the dense New
 // session, session cards, a compact composer, foldable inspector sections and
 // transcript bubbles. Its light theme keeps the Zerus colors.
 inline const char *compactJson()
@@ -128,7 +128,7 @@ inline const char *compactJson()
 inline QList<Skin> builtins()
 {
     Skin base{"zerus", "Zerus", {}, {}, true, zerus(true), zerus(false), {}, QStringLiteral("native")};
-    return {base, parse(QJsonDocument::fromJson(compactJson()).object(), "whitewh", {}, true)};
+    return {base, parse(QJsonDocument::fromJson(compactJson()).object(), "compact", {}, true)};
 }
 
 // The user skins folder, beside the desktop settings file.

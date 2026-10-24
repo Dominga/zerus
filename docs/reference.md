@@ -712,6 +712,16 @@ width** in the same menu restores the default column. Narrower panes use their
 full width, and Terminal, Processes and Native UI are not affected. A reset icon
 appears beside an Appearance slider's value once it differs from the default and
 restores that default.
+**Settings → Appearance → Skin** picks the workspace's colors and views. **Zerus**
+is the default. **Compact** uses a denser palette, a dense New session dialog,
+session cards, a compact message field, foldable side panel sections, Activity
+bubbles and, on Windows, its own title bar. **Duplicate…** copies the selected
+skin as a JSON file in the `skins` folder beside the settings file, and **Open
+skins folder** shows it. Each file names its colors for the dark and light themes
+and may add a Qt stylesheet; the header of `tray/src/WorkspaceSkin.h` describes
+schema 1. A running Zerus reloads the selected skin when its file changes.
+Missing or invalid colors keep the Zerus ones, and unknown views keep the classic
+ones. A skin changes how screens look, never what they do.
 **Settings → Appearance → Usage limit indicator** sets how the account usage in the
 status bar and on Overview account cards shows each limit window. The default, **Usage and elapsed time bars**, draws usage above a gray
 bar for the elapsed part of the window; a longer usage bar means a faster than

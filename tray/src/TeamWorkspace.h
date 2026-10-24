@@ -1,4 +1,6 @@
 #pragma once
+#include <QHash>
+#include <QPoint>
 #include <QPointer>
 #include <QWidget>
 #include <functional>
@@ -50,6 +52,8 @@ private:
     void assignMenu(const Teams::Team &team, const QString &member, const QPoint &global);
     void placeDrawer();
     void placePopover();
+    // A view rebuilt by a render keeps where the owner scrolled it.
+    void keepScroll(QScrollArea *area, const QString &key);
     TeamController *m_teams;
     TeamPanel *m_panel;
     Teams::LiveLookup m_live;
@@ -58,6 +62,7 @@ private:
     bool m_dark = true, m_pending = false, m_feedOpen = false, m_fit = true;
     double m_zoom = 1.0;
     int m_drawerTask = 0;
+    QHash<QString, QPoint> m_scroll;
     // Rebuilt on every render.
     QPointer<QWidget> m_top, m_left, m_membersContent;
     QVBoxLayout *m_topHost, *m_leftHost;

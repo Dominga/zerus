@@ -19,6 +19,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <cmath>
+#include <memory>
 
 using namespace TeamUi;
 
@@ -394,6 +395,9 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     } else view->clicked = [this](int id, const QPoint &) { m_drawerTask = id; scheduleRender(); };
     auto *area = new GraphArea; area->setObjectName("teamWorkspaceCanvas");
     area->setFrameShape(QFrame::NoFrame);
+    // Fit starts the graph afresh; otherwise it stays where it was scrolled.
+    if (m_fit) m_scroll.remove(QStringLiteral("canvas/") + m_view);
+    keepScroll(area, QStringLiteral("canvas/") + m_view);
     area->setWidget(view);
     area->setWidgetResizable(m_view != "graph");
     area->viewport()->setAutoFillBackground(true);
@@ -463,6 +467,8 @@ QWidget *TeamWorkspace::board(const Team &team)
         cv->addWidget(label(QStringLiteral("%1 · %2").arg(name.toUpper()).arg(n), c.dim, 10, true));
         auto *inner = new QWidget; inner->setLayout(list);
         auto *scroll = new QScrollArea; scroll->setWidget(inner); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setObjectName("teamBoardColumn"); scroll->setProperty("column", key);
+        keepScroll(scroll, QStringLiteral("board/") + key + QLatin1Char('/') + m_focus);
         cv->addWidget(scroll, 1);
         h->addWidget(col, 1);
     }
@@ -668,8 +674,31 @@ QWidget *TeamWorkspace::feed(const Team &team)
     rv->addStretch();
     auto *scroll = new QScrollArea; scroll->setWidget(rows); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
     scroll->setFixedHeight(170);
+    keepScroll(scroll, QStringLiteral("feed"));
     v->addWidget(scroll);
     return w;
+}
+
+void TeamWorkspace::keepScroll(QScrollArea *area, const QString &key)
+{
+    const QPoint kept = m_scroll.value(key);
+    for (auto *bar : {area->horizontalScrollBar(), area->verticalScrollBar()}) {
+        const bool vertical = bar->orientation() == Qt::Vertical;
+        const int want = vertical ? kept.y() : kept.x();
+        // Back to the kept place once the content has its size; until then
+        // the new bar's own changes are not the owner's.
+        auto restored = std::make_shared<bool>(want == 0);
+        QObject::connect(bar, &QScrollBar::rangeChanged, bar, [bar, want, restored](int, int max) {
+            if (*restored || max <= 0) return;
+            bar->setValue(qMin(want, max));
+            *restored = true;
+        });
+        QObject::connect(bar, &QScrollBar::valueChanged, area, [this, area, key, vertical, restored](int value) {
+            if (!*restored || !area->isVisible()) return;
+            QPoint &place = m_scroll[key];
+            (vertical ? place.ry() : place.rx()) = value;
+        });
+    }
 }
 
 void TeamWorkspace::addMember(const Team &team)

@@ -606,6 +606,40 @@ inline QString teamSheet(const Colors &c)
              a(c.accent, .35), a(QColor(accentText), .7), c.danger.name(), c.text2.name(), c.tile.name(), segmentOn, c.card.name());
 }
 
+// Items that keep their width and wrap onto the next line.
+class FlowLayout : public QLayout {
+public:
+    explicit FlowLayout(int spacing) { setSpacing(spacing); setContentsMargins(0, 0, 0, 0); }
+    ~FlowLayout() override { while (auto *item = takeAt(0)) delete item; }
+    void addItem(QLayoutItem *item) override { m_items.append(item); }
+    int count() const override { return m_items.size(); }
+    QLayoutItem *itemAt(int index) const override { return m_items.value(index); }
+    QLayoutItem *takeAt(int index) override { return index >= 0 && index < m_items.size() ? m_items.takeAt(index) : nullptr; }
+    Qt::Orientations expandingDirections() const override { return {}; }
+    bool hasHeightForWidth() const override { return true; }
+    int heightForWidth(int width) const override { return arrange(QRect(0, 0, width, 0), false); }
+    void setGeometry(const QRect &rect) override { QLayout::setGeometry(rect); arrange(rect, true); }
+    QSize sizeHint() const override { return minimumSize(); }
+    QSize minimumSize() const override
+    {
+        QSize size; for (auto *item : m_items) size = size.expandedTo(item->minimumSize());
+        return size;
+    }
+private:
+    int arrange(const QRect &rect, bool apply) const
+    {
+        int x = rect.x(), y = rect.y(), line = 0;
+        for (auto *item : m_items) {
+            const QSize hint = item->sizeHint();
+            if (x + hint.width() > rect.right() + 1 && line > 0) { x = rect.x(); y += line + spacing(); line = 0; }
+            if (apply) item->setGeometry(QRect(QPoint(x, y), hint));
+            x += hint.width() + spacing(); line = qMax(line, hint.height());
+        }
+        return y + line - rect.y();
+    }
+    QList<QLayoutItem *> m_items;
+};
+
 // A segmented control: one checked button among `items` (value, text).
 inline QWidget *segmented(const QList<std::pair<QString, QString>> &items, const QString &current, const char *name,
                           const std::function<void(const QString &)> &picked)
@@ -620,6 +654,24 @@ inline QWidget *segmented(const QList<std::pair<QString, QString>> &items, const
         QObject::connect(b, &QPushButton::clicked, box, [picked, value = value] { if (picked) picked(value); });
     }
     box->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    return box;
+}
+
+// The same control with icons: `items` are (value, icon, tooltip); it keeps
+// its width however narrow the window gets.
+inline QWidget *iconSegmented(const QList<std::tuple<QString, QString, QString>> &items, const QString &current, const char *name,
+                              const QColor &color, const std::function<void(const QString &)> &picked)
+{
+    QList<std::pair<QString, QString>> plain;
+    for (const auto &item : items) plain.append({std::get<0>(item), QString()});
+    auto *box = segmented(plain, current, name, picked);
+    const auto buttons = box->findChildren<QPushButton *>();
+    for (int i = 0; i < buttons.size() && i < items.size(); ++i) {
+        const auto &[value, icon, tip] = items[i];
+        buttons[i]->setIcon(workspaceIcon(icon, color)); buttons[i]->setIconSize(QSize(16, 16));
+        buttons[i]->setToolTip(tip); buttons[i]->setAccessibleName(tip);
+        buttons[i]->setStyleSheet(QStringLiteral("padding:4px 8px;"));
+    }
     return box;
 }
 

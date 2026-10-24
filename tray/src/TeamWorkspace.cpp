@@ -316,8 +316,8 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     const Colors c = colorsFor(m_dark);
     auto *bar = new QWidget; bar->setObjectName("teamWorkspaceToolbar");
     auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 8, 12, 6); h->setSpacing(8);
-    h->addWidget(segmented({{"graph", tr("Graph")}, {"board", tr("Board")}, {"layers", tr("Layers")}}, m_view, "teamWorkspaceView",
-                           [this](const QString &value) { m_view = value; m_fit = true; scheduleRender(); }));
+    h->addWidget(iconSegmented({{"graph", "view-graph", tr("Graph")}, {"board", "view-board", tr("Board")}, {"layers", "view-layers", tr("Layers")}},
+                               m_view, "teamWorkspaceView", c.fg, [this](const QString &value) { m_view = value; m_fit = true; scheduleRender(); }));
     if (team.status == "planning") {
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
         QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, 0); });
@@ -438,14 +438,16 @@ QWidget *TeamWorkspace::board(const Team &team)
             cardBox->setObjectName("teamBoardCard"); cardBox->setCursor(Qt::PointingHandCursor);
             auto *b = new QVBoxLayout(cardBox); b->setContentsMargins(8, 6, 8, 6); b->setSpacing(3);
             auto *title = label(QStringLiteral("#%1 %2").arg(task.id).arg(task.title), c.fg, 12, true); title->setWordWrap(true); b->addWidget(title);
-            auto *r = row(4);
+            // Role, agent, state and dependencies share a line while the column
+            // is wide enough and wrap when it is not.
+            auto *r = new FlowLayout(6);
             const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
-            r->addWidget(new Pill(role, roleColor(role, m_dark)));
+            auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r->addWidget(pill);
             if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(workspaceIcon(agentIcon(m->agent), c.text3).pixmap(14, 14)); r->addWidget(i); }
-            r->addStretch(); b->addLayout(r);
-            b->addWidget(new StatusMark(s.text, toneColor(c, s.tone), kindOfTask(task, s)));
+            auto *mark = new StatusMark(s.text, toneColor(c, s.tone), kindOfTask(task, s)); mark->setObjectName("teamBoardState"); r->addWidget(mark);
             QStringList deps; for (const auto &d : task.deps) deps << QStringLiteral("#%1").arg(d.task);
-            if (!deps.isEmpty()) b->addWidget(label(QStringLiteral("← ") + deps.join(' '), c.dim, 10));
+            if (!deps.isEmpty()) r->addWidget(label(QStringLiteral("← ") + deps.join(' '), c.dim, 10));
+            b->addLayout(r);
             auto *open = new QPushButton(cardBox); open->setFlat(true); open->setStyleSheet(QStringLiteral("background:transparent;border:none;"));
             open->setGeometry(0, 0, 4000, 4000); open->setObjectName("teamBoardOpen");
             QObject::connect(open, &QPushButton::clicked, this, [this, id = task.id] { m_drawerTask = id; scheduleRender(); });
@@ -588,7 +590,13 @@ void TeamWorkspace::renderCoordinator(const Team &team, const QString &status)
 {
     const Colors c = colorsFor(m_dark);
     const auto *lead = team.member(team.lead);
-    // The header is rebuilt whole; the conversation below stays.
+    const auto leadStatus = memberStatus(team, lead ? *lead : Member{}, lead && m_live ? m_live(*lead) : Live{});
+    // The header is rebuilt whole, and only when what it shows changes, so
+    // polls never make it flicker; the conversation below stays.
+    const QString shown = lead ? QStringList{lead->agent, lead->host, lead->session, lead->model, leadStatus.text, QString::number(int(leadStatus.tone)),
+                                             QString::number(int(m_dark))}.join(QChar(31)) : QString();
+    if (m_coordinatorHead->property("shown").toString() != shown || m_coordinatorHead->layout()->isEmpty()) {
+    m_coordinatorHead->setProperty("shown", shown);
     auto *outer = static_cast<QHBoxLayout *>(m_coordinatorHead->layout());
     outer->setContentsMargins(0, 0, 0, 0);
     while (auto *item = outer->takeAt(0)) { if (auto *w = item->widget()) retire(w); delete item; }
@@ -598,10 +606,7 @@ void TeamWorkspace::renderCoordinator(const Team &team, const QString &status)
     auto *col = new QVBoxLayout; col->setSpacing(1);
     auto *top = row(6);
     top->addWidget(label(tr("Coordinator"), c.fg, 13, true));
-    if (lead) {
-        const auto s = memberStatus(team, *lead, m_live ? m_live(*lead) : Live{});
-        top->addWidget(new StatusMark(s.text, toneColor(c, s.tone), s.kind));
-    }
+    if (lead) top->addWidget(new StatusMark(leadStatus.text, toneColor(c, leadStatus.tone), leadStatus.kind));
     top->addStretch();
     col->addLayout(top);
     if (lead) col->addWidget(elided(lead->session + (lead->model.isEmpty() ? QString() : QStringLiteral(" · ") + lead->model), c.dim, 11));
@@ -612,6 +617,7 @@ void TeamWorkspace::renderCoordinator(const Team &team, const QString &status)
     if (lead) QObject::connect(open, &QToolButton::clicked, this, [this, host = lead->host, session = lead->session] { if (openSession) openSession(host, session); });
     h->addWidget(open, 0, Qt::AlignTop);
     outer->addWidget(inner); inner->show();
+    }
     m_conversation->setSession(lead ? lead->host : QString(), lead ? lead->session : QString());
     // Quick asks by the team's state.
     QStringList asks;

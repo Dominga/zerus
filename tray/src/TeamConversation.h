@@ -46,6 +46,7 @@ private:
     QJsonObject m_details;
     ActivityView *m_view;
     QWidget *m_asks;
+    QStringList m_askTexts;
     QHBoxLayout *m_asksLayout;
     QPlainTextEdit *m_input;
     QPushButton *m_send;

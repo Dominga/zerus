@@ -14,6 +14,9 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             // WhiteWh fork: agent teams. A team header is a Header row with a
             // TeamId; its lead and members are Subordinate rows with TeamMember.
             TeamId, TeamStatus, TeamProgress, TeamMembers, TeamMember,
+            // The lead's row carries its team (id, name, status, label, tone,
+            // meta, members, answers, progress) for the strip in its card.
+            TeamLead,
             Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
 }
 class QToolButton;
@@ -64,6 +67,9 @@ protected:
 public:
     // WhiteWh fork: the chevron of a team header.
     static QRect teamToggleRect(const QRect &row) { return {row.right() - 30, row.top() + 6, 24, 22}; }
+    // The team strip at the bottom of a lead's card; a click opens the team.
+    static constexpr int TeamStripHeight = 28;
+    static QRect teamStripRect(const QRect &row) { return {row.left() + 12, row.bottom() - 6 - 22, row.width() - 24, 22}; }
 protected:
     void paintEvent(QPaintEvent *) override;
     void showEvent(QShowEvent *) override;

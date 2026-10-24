@@ -743,28 +743,34 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     auto *controller = window.findChild<TeamController *>();
     QVERIFY(controller);
     QTRY_COMPARE(controller->teams().size(), 1);
-    QTRY_VERIFY(rowOf("#team\nteam-1") >= 0);
-    const int header = rowOf("#team\nteam-1");
-    QCOMPARE(rowOf("\ncodex/hgs/dashboard"), header + 1);
-    QCOMPARE(rowOf("\nkimi/hgs/tester"), header + 2);
-    auto *member = list->item(header + 2);
+    // The team lives in its lead's card: no row of its own above it.
+    QTRY_VERIFY(rowOf("\ncodex/hgs/dashboard") >= 0
+                && !list->item(rowOf("\ncodex/hgs/dashboard"))->data(SessionRoles::TeamLead).toMap().isEmpty());
+    QCOMPARE(rowOf("#team\nteam-1"), -1);
+    const int leadRow = rowOf("\ncodex/hgs/dashboard");
+    QCOMPARE(rowOf("\nkimi/hgs/tester"), leadRow + 1);
+    auto *member = list->item(leadRow + 1);
     QVERIFY(member->data(SessionRoles::TeamMember).toBool());
-    QVERIFY(!list->item(header + 1)->data(SessionRoles::TeamMember).toBool());
+    QVERIFY(!list->item(leadRow)->data(SessionRoles::TeamMember).toBool());
     // The last member ends the connector; the lead folds its members as a
     // session folds its subagents.
     QCOMPARE(member->data(SessionRoles::TeamMember).toInt(), 2);
-    QVERIFY(list->item(header + 1)->data(SessionRoles::HasChildren).toBool() && list->item(header + 1)->data(SessionRoles::Expanded).toBool());
+    QVERIFY(list->item(leadRow)->data(SessionRoles::HasChildren).toBool() && list->item(leadRow)->data(SessionRoles::Expanded).toBool());
     emit list->childrenToggled(QStringLiteral("\ncodex/hgs/dashboard"));
     QTRY_VERIFY(list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
     QVERIFY(!list->item(rowOf("\ncodex/hgs/dashboard"))->data(SessionRoles::Expanded).toBool());
     emit list->childrenToggled(QStringLiteral("\ncodex/hgs/dashboard"));
     QTRY_VERIFY(!list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
-    QCOMPARE(list->item(header)->data(SessionRoles::Meta).toString(), QStringLiteral("0/2"));
-    QCOMPARE(list->item(header)->data(SessionRoles::TeamMembers).toInt(), 2);
-    QVERIFY(!(list->item(header)->flags() & Qt::ItemIsSelectable));
-    // The header opens the Team tab; its chevron collapses the group.
-    const QRect rect = list->visualItemRect(list->item(header));
-    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, rect.center() - QPoint(rect.width() / 4, 0));
+    const auto strip = list->item(leadRow)->data(SessionRoles::TeamLead).toMap();
+    QCOMPARE(strip.value("id").toString(), QStringLiteral("team-1"));
+    QCOMPARE(strip.value("name").toString(), QStringLiteral("Checkout"));
+    QCOMPARE(strip.value("meta").toString(), QStringLiteral("0/2"));
+    QCOMPARE(strip.value("members").toString(), QStringLiteral("2"));
+    QCOMPARE(SessionList::childrenLabel(list->model()->index(leadRow, 0)), QStringLiteral("Team"));
+    // The lead's card grows by the strip, and the strip opens the Team tab.
+    const QRect rect = list->visualItemRect(list->item(leadRow));
+    QVERIFY(rect.height() >= SessionList::TeamStripHeight + 64);
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, SessionList::teamStripRect(rect).center());
     auto *inspector = window.findChild<QTabWidget *>("sessionInspector");
     QTRY_COMPARE(inspector->currentWidget()->objectName(), QStringLiteral("teamPanel"));
     QTRY_VERIFY(inspector->findChild<QLabel *>("teamName"));
@@ -773,11 +779,6 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) {
         QTest::qWait(300); window.grab().save(QDir(shots).filePath("team-window.png"));
     }
-    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, SessionList::teamToggleRect(rect).center());
-    QTRY_VERIFY(list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
-    QVERIFY(!list->item(rowOf("\ncodex/hgs/dashboard"))->isHidden());
-    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, SessionList::teamToggleRect(list->visualItemRect(list->item(rowOf("#team\nteam-1")))).center());
-    QTRY_VERIFY(!list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
     // A team's session shows Team next to Activity; a session without one
     // offers New team, which it would lead.
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");

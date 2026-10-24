@@ -40,6 +40,11 @@ public:
     void reassignMenu(const Teams::Team &team, int task, const QPoint &global);
     void act(const QString &operation, const QJsonObject &input);
     bool confirm(const QString &name, const QString &title, const QString &text, const QString &action);
+    // Planning, shared with the team workspace (TeamPanelPlan.cpp): the whole
+    // plan once per edit; a task editor (0 = a new task); a dependency.
+    void savePlan(const Teams::Team &edited);
+    void editTask(const Teams::Team &team, int task);
+    void link(const Teams::Team &team, int dependency, int task, bool add);
     // Opens the team workspace (the Team tab next to Activity).
     std::function<void()> openWorkspace;
     // New team and Team designer, offered while no team is shown.
@@ -50,6 +55,10 @@ protected:
 private:
     void scheduleRender();
     QWidget *header(const Teams::Team &team, const QString &status, bool narrow);
+    // The inspector's short view (design D4) and its no-team state.
+    QWidget *emptyState(bool narrow);
+    QWidget *summary(const Teams::Team &team, const QString &status, bool narrow);
+    QWidget *summaryMembers(const Teams::Team &team, bool narrow);
     QWidget *stuck(const Teams::Team &team, const QList<Teams::Problem> &problems);
     QWidget *answers(const Teams::Team &team);
     QWidget *members(const Teams::Team &team, bool narrow);
@@ -60,11 +69,8 @@ private:
     void taskMenu(const Teams::Team &team, int task, const QPoint &global);
     void remind(const Teams::Team &team, const Teams::Member &member, int task);
     // Planning (TeamPanelPlan.cpp).
-    void savePlan(const Teams::Team &edited);
     QWidget *planMembers(const Teams::Team &team, bool narrow);
     void addMember(const Teams::Team &team, const QPoint &global);
-    void editTask(const Teams::Team &team, int task);
-    void link(const Teams::Team &team, int dependency, int task, bool add);
     QWidget *planFooter(const Teams::Team &team);
     TeamController *m_controller;
     Teams::LiveLookup m_live;

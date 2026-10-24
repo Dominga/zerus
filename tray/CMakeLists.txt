@@ -213,12 +213,14 @@ add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp s
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
     src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp
     # WhiteWh fork: agent teams, the inspector's Team tab.
-    src/TeamPanel.cpp src/TeamPanelPlan.cpp src/TeamTaskCard.cpp src/TeamNewDialog.cpp src/TeamCatalogEditor.cpp src/TeamDesignerPanel.cpp src/TeamDesignerPage.cpp src/TeamWorkspace.cpp
+    src/TeamPanel.cpp src/TeamPanelPlan.cpp src/TeamTaskCard.cpp src/TeamNewDialog.cpp src/TeamNewTab.cpp src/TeamCatalogEditor.cpp src/TeamDesignerPanel.cpp src/TeamDesignerPage.cpp src/TeamConversation.cpp src/TeamWorkspace.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
     # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
     src/QuietTrayIcon.cpp)
 target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-core Qt6::Widgets
     PRIVATE hgs-markdown hgs-external-file hgs-updates hgs-qrcodegen)
+# WhiteWh fork: agent teams show other sessions' conversations (TeamConversation).
+target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-activity)
 
 add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)

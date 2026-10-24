@@ -15,6 +15,8 @@
 #include <QMenu>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QSplitter>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolButton>
@@ -26,6 +28,7 @@
 #include "TeamDesignerPanel.h"
 #include "TeamModel.h"
 #include "TeamNewDialog.h"
+#include "TeamNewTab.h"
 #include "TeamPanel.h"
 #include "TeamTaskCard.h"
 #include "TeamWidgets.h"
@@ -144,6 +147,7 @@ private slots:
     void embeddedNewTeamIsLedByTheSession();
     void workspaceAddsAMember();
     void designerPageStartsOrOpensTheDesigner();
+    void catalogEditorMarksManualEdits();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -256,11 +260,14 @@ void TestTeamsUi::planningEditsSendTheWholePlan()
     controller.refresh();
     panel.showTeam("team-1");
     QTRY_VERIFY(panel.findChild<QWidget *>("teamPlanFooter"));
+    // The list arrives before the full status with its plan errors.
+    QTRY_VERIFY(panel.findChild<QFrame *>("teamPlanErrorsBox"));
     auto *approve = panel.findChild<QPushButton *>("teamApprove");
-    QVERIFY(approve && !approve->isEnabled());   // #6 has no assignee
-    QVERIFY(panel.findChild<QFrame *>("teamPlanErrorsBox"));
+    QTRY_VERIFY((approve = panel.findChild<QPushButton *>("teamApprove")) && !approve->isEnabled());   // #6 has no assignee
     QCOMPARE(panel.findChildren<QComboBox *>("teamMemberAgent").size(), 3);
     shot(&panel, "planning-420");
+    // Nothing is wider than the panel (design D4).
+    QVERIFY(panel.findChild<QWidget *>("teamPanelContent")->minimumSizeHint().width() <= 420);
     // Dragging #1's handle onto #5 makes #5 depend on #1: the whole plan goes once.
     auto *graph = dynamic_cast<TeamUi::TaskView *>(panel.findChild<QWidget *>("teamTaskGraph"));
     QVERIFY(graph && graph->editable && graph->linked);
@@ -372,21 +379,32 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     TeamPanel panel(&controller);
     TeamWorkspace workspace(&controller, &panel);
     workspace.setLive(live);
-    workspace.resize(1100, 720); workspace.show();
+    workspace.resize(1300, 820); workspace.show();
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
-    QVERIFY(workspace.findChild<QFrame *>("teamLeadDock"));
-    shot(&workspace, "workspace-graph");
-    for (auto *b : workspace.findChildren<QPushButton *>("teamWorkspaceView")) if (b->property("view") == "board") { b->click(); break; }
+    // The coordinator shares the side column with the members, split by a divider.
+    auto *side = workspace.findChild<QSplitter *>("teamWorkspaceSideSplit");
+    QVERIFY(side && side->count() == 2);
+    QVERIFY(side->widget(1)->findChild<QWidget *>("teamConversation"));
+    // The answers slot stays when nothing waits.
+    QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceAnswers"));
+    // The graph fills the canvas: at least its height, centered.
+    auto *graph = workspace.findChild<QWidget *>("teamWorkspaceGraph");
+    auto *canvas = workspace.findChild<QScrollArea *>("teamWorkspaceCanvas");
+    QTRY_VERIFY(graph->height() >= canvas->viewport()->height() - 2);
+    shot(&workspace, "d3-running");
+    auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
+    for (auto *b : views->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
     QCOMPARE(workspace.findChildren<QFrame *>("teamBoardCard").size(), 5);
-    shot(&workspace, "workspace-board");
+    shot(&workspace, "d3-board");
     // Focusing a member keeps only its tasks.
-    for (auto *b : workspace.findChildren<QPushButton *>("teamWorkspaceFocusMember")) if (b->parentWidget()->property("teamMember") == "tester") { b->click(); break; }
+    for (auto *m : workspace.findChildren<QFrame *>("teamWorkspaceMember")) if (m->property("teamMember") == "tester") { QTest::mouseClick(m, Qt::LeftButton, {}, QPoint(4, 4)); break; }
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceFocus"));
     QTRY_COMPARE(workspace.findChildren<QFrame *>("teamBoardCard").size(), 1);
+    QVERIFY(workspace.findChild<QLabel *>("teamBoardEmpty"));   // empty columns say so
     // A card opens the drawer.
     workspace.findChildren<QPushButton *>("teamBoardOpen").first()->click();
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceDrawer")->isVisible());
@@ -416,27 +434,49 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     controller.refreshCatalog();
     QTRY_VERIFY(controller.catalogReady());
     QTemporaryDir folder;
-    QWidget tab;
-    auto *layout = new QVBoxLayout(&tab);
-    auto *form = new TeamNewDialog(&controller, &client, {{QString(), "this computer", true}}, {}, QDir::toNativeSeparators(folder.path()), "Checkout", &tab);
-    form->embedFor("claude/checkout/coord");
+    const TeamNewTab::Coordinator coordinator{"claude/checkout/coord", "claude", "Opus", "work", QDir::toNativeSeparators(folder.path()), "msi", "Ready", false};
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}, {"msi-old", "msi-old", false}}, coordinator, "Checkout");
     QString created;
-    form->created = [&](const QString &team) { created = team; };
-    layout->addWidget(form);
-    tab.resize(820, 640); tab.show();
-    QVERIFY(form->isVisible());
-    QVERIFY(!form->isWindow());
-    QVERIFY(!form->findChild<QComboBox *>("teamNewLeadAgent")->isVisible());
-    form->findChild<QLineEdit *>("teamNewName")->setText("Checkout redesign");
-    auto *create = form->findChild<QPushButton *>("teamNewCreate");
+    tab.created = [&](const QString &team) { created = team; };
+    tab.resize(1038, 900); tab.show();
+    // Nothing picked: the dashed members box, and Create waits for a goal.
+    QVERIFY(tab.findChild<QLabel *>("teamNewEmptyMembers"));
+    auto *create = tab.findChild<QPushButton *>("teamNewCreate");
+    QVERIFY(!create->isEnabled());
+    shot(&tab, "d2-empty-wide");
+    // A template card fills the rows from its roster with the roles' defaults.
+    QFrame *feature = nullptr;
+    for (auto *card : tab.findChildren<QFrame *>("teamNewTemplate")) if (card->property("template") == "feature") feature = card;
+    QVERIFY(feature);
+    QTest::mouseClick(feature, Qt::LeftButton);
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 2);   // the table from 760 px
+    tab.findChild<QPlainTextEdit *>("teamNewGoal")->setPlainText("Redesign the checkout flow: address form and tests");
+    QCOMPARE(tab.findChild<QLineEdit *>("teamNewName")->text(), QStringLiteral("Redesign the checkout flow"));
     QTRY_VERIFY(create->isEnabled());
-    shot(&tab, "new-team-tab");
-    create->click();
+    // A member on an offline computer blocks Create with its own row error.
+    auto *computer = tab.findChildren<QComboBox *>("teamNewComputer").at(1);
+    computer->setCurrentIndex(computer->findData("msi-old")); emit computer->activated(computer->currentIndex());
+    QTRY_VERIFY(tab.findChild<QLabel *>("teamNewRowError"));
+    QVERIFY(!tab.findChild<QPushButton *>("teamNewCreate")->isEnabled());
+    shot(&tab, "d2-row-errors-wide");
+    tab.resize(588, 1300);
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberCard").size(), 2);   // cards below 760 px
+    shot(&tab, "d2-row-errors-600");
+    computer = tab.findChildren<QComboBox *>("teamNewComputer").at(1);
+    computer->setCurrentIndex(computer->findData(QString())); emit computer->activated(computer->currentIndex());
+    QTRY_VERIFY(tab.findChild<QPushButton *>("teamNewCreate")->isEnabled());
+    // The rows as entered go to create, with this session as the lead.
+    auto *model = tab.findChildren<QComboBox *>("teamNewModel").first();
+    model->setCurrentText("gpt-5.5");
+    tab.findChild<QPushButton *>("teamNewCreate")->click();
     QTRY_COMPARE(created, QStringLiteral("team-new"));
-    QVERIFY(form->isVisible());   // the tab keeps it until Team replaces the tab
-    const auto lead = calls(script(), "create").first()["lead"].toObject();
+    const auto input = calls(script(), "create").first();
+    const auto lead = input["lead"].toObject();
     QCOMPARE(lead["session"].toObject()["name"].toString(), QStringLiteral("claude/checkout/coord"));
-    QVERIFY(!lead.contains("account"));
+    QCOMPARE(input["members"].toArray().size(), 2);
+    QCOMPARE(input["members"].toArray()[0].toObject()["model"].toString(), QStringLiteral("gpt-5.5"));
+    QCOMPARE(input["members"].toArray()[1].toObject()["role"].toString(), QStringLiteral("Tester"));
+    QCOMPARE(input["tasks"].toArray().size(), 3);   // the template plans
 }
 
 void TestTeamsUi::workspaceAddsAMember()
@@ -453,14 +493,17 @@ void TestTeamsUi::workspaceAddsAMember()
     workspace.showTeam("team-1");
     workspace.resize(1300, 820); workspace.show();
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceAddMember"));
-    workspace.addMemberHook = [](QDialog *dialog) {
-        auto *role = dialog->findChild<QComboBox *>("teamAddMemberRole");
-        role->setCurrentIndex(role->findText("Tester"));
-        QCOMPARE(dialog->findChild<QComboBox *>("teamAddMemberAgent")->currentData().toString(), QStringLiteral("kimi"));
-        QCOMPARE(dialog->findChild<QPlainTextEdit *>("teamAddMemberPrompt")->toPlainText(), QStringLiteral("Test it."));
-        QTimer::singleShot(0, dialog, [dialog] { dialog->findChild<QPushButton *>("teamAddMemberOk")->click(); });
-    };
     workspace.findChild<QPushButton *>("teamWorkspaceAddMember")->click();
+    auto *popover = workspace.findChild<QFrame *>("teamAddMember");
+    QVERIFY(popover && popover->isVisible());
+    QVERIFY(!popover->findChild<QPushButton *>("teamAddMemberOk")->isEnabled());   // a role first
+    for (auto *chip : popover->findChildren<QPushButton *>("teamAddMemberRole")) if (chip->text() == "Tester") chip->click();
+    QCOMPARE(popover->findChild<QComboBox *>("teamAddMemberAgent")->currentData().toString(), QStringLiteral("kimi"));
+    QCOMPARE(popover->findChild<QPlainTextEdit *>("teamAddMemberPrompt")->toPlainText(), QStringLiteral("Test it."));
+    QCOMPARE(popover->findChild<QPushButton *>("teamAddMemberOk")->text(), QStringLiteral("Add Tester"));
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceBar")->isVisible());
+    shot(&workspace, "d3-add-member");
+    popover->findChild<QPushButton *>("teamAddMemberOk")->click();
     QTRY_COMPARE(calls(script(), "add-member").size(), 1);
     const auto input = calls(script(), "add-member").first();
     QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
@@ -468,6 +511,7 @@ void TestTeamsUi::workspaceAddsAMember()
     QCOMPARE(member["id"].toString(), QStringLiteral("tester-2"));
     QCOMPARE(member["role"].toString(), QStringLiteral("Tester"));
     QCOMPARE(member["model"].toString(), QStringLiteral("kimi-k2"));
+    QCOMPARE(member["folder"].toString(), QStringLiteral("shared"));
 }
 
 void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
@@ -475,22 +519,57 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamDesignerPage page(&controller);
-    QString running; int started = 0; QString opened;
+    QString running; QString startedIn, startedGoal; QString opened;
     page.designerSession = [&] { return running; };
-    page.startDesigner = [&] { ++started; };
+    page.startDesigner = [&](const QString &folder, const QString &goal) { startedIn = folder; startedGoal = goal; };
     page.openDesigner = [&](const QString &name) { opened = name; };
-    page.resize(1300, 820); page.show();
+    page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    page.setContext("/work/checkout", "checkout");
+    page.resize(1600, 900); page.show();
     QTRY_VERIFY(controller.catalogReady());   // the page reads the catalog while shown
+    // Not started: the empty state asks what is needed.
     auto *start = page.findChild<QPushButton *>("teamDesignerStart");
-    auto *open = page.findChild<QPushButton *>("teamDesignerOpen");
-    QVERIFY(start->isVisible()); QVERIFY(!open->isVisible());
-    start->click(); QCOMPARE(started, 1);
+    QVERIFY(start->isVisible());
+    QVERIFY(!page.findChild<QPushButton *>("teamDesignerOpen")->isVisible());
+    QVERIFY(page.findChild<QLabel *>("teamDesignerReads")->text().contains("checkout"));
+    page.findChild<QPlainTextEdit *>("teamDesignerGoal")->setPlainText("A security reviewer");
+    shot(&page, "d1-not-started");
+    start->click();
+    QCOMPARE(startedIn, QStringLiteral("/work/checkout")); QCOMPARE(startedGoal, QStringLiteral("A security reviewer"));
+    // Running: its conversation, the proposals and the draft with a diff.
     running = "claude/checkout/team-designer";
     page.refresh();
-    QVERIFY(!start->isVisible()); QVERIFY(open->isVisible());
-    open->click(); QCOMPARE(opened, running);
-    QTRY_VERIFY(page.findChild<QWidget *>("teamDesignerContent"));
-    shot(&page, "designer-page");
+    QVERIFY(page.findChild<QWidget *>("teamConversation")->isVisible());
+    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
+    QCOMPARE(page.findChild<QLabel *>("teamCatalogTitle")->text(), QStringLiteral("Draft catalog"));
+    QVERIFY(page.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 of 2 kept"));
+    page.findChildren<QPushButton *>("teamProposalShow").first()->click();   // p1: the Tester role
+    auto *roles = page.findChild<QListWidget *>("teamCatalogRoles");
+    QCOMPARE(roles->currentItem()->data(Qt::UserRole).toString(), QStringLiteral("tester"));
+    QCOMPARE(roles->count(), 4);   // + the proposed Security role
+    shot(&page, "d1-draft-partly-decided");
+    page.findChild<QPushButton *>("teamDesignerOpen")->click(); QCOMPARE(opened, running);
+    auto *apply = page.findChild<QPushButton *>("teamDesignerApply");
+    QVERIFY(apply->isVisible() && apply->isEnabled());
+    apply->click();
+    QTRY_COMPARE(calls(script(), "catalog apply").size(), 1);
+}
+
+void TestTeamsUi::catalogEditorMarksManualEdits()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamCatalogEditor editor(&controller);
+    editor.resize(1000, 760); editor.show();
+    auto *roles = editor.findChild<QListWidget *>("teamCatalogRoles");
+    QTRY_COMPARE(roles->count(), 3);
+    QCOMPARE(editor.findChild<QLabel *>("teamCatalogTitle")->text(), QStringLiteral("Team catalog"));   // Settings: never the draft
+    roles->setCurrentRow(1);
+    auto *name = editor.findChild<QLineEdit *>("teamRoleName");
+    name->setText("Backend API"); emit name->editingFinished();
+    QTRY_VERIFY(editor.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 unsaved change"));
+    QVERIFY(editor.findChild<QPushButton *>("teamCatalogSave")->isEnabled());
+    shot(&editor, "d1-manual-edits");
 }
 
 #include "test_teamsui.moc"

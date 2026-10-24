@@ -9,8 +9,6 @@ class HgsClient;
 class TeamController;
 class QCheckBox;
 class QComboBox;
-class QFormLayout;
-class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -31,11 +29,6 @@ public:
                   const QString &folder, const QString &project, QWidget *parent = nullptr);
     // The created team's id, once Create team succeeded.
     QString createdTeam() const { return m_created; }
-    // The New team tab next to Activity: the form sits in the window, the
-    // selected session is the lead and `created` follows a created team.
-    void embedFor(const QString &session);
-    QString leadSession() const { return m_lockedLead; }
-    std::function<void(const QString &team)> created;
     struct Row {
         QWidget *box; QComboBox *role, *agent, *account, *model, *effort, *permissions, *computer; QCheckBox *worktree; QLabel *error;
         QString prompt;
@@ -61,10 +54,8 @@ private:
     QSpinBox *m_maxMembers;
     QPlainTextEdit *m_goal;
     QLabel *m_gitNote, *m_summary;
-    QPushButton *m_create, *m_cancel;
+    QPushButton *m_create;
     QVBoxLayout *m_rows;
-    QFormLayout *m_form;
-    QHBoxLayout *m_leadRow;
     QList<Row *> m_rowList;
-    QString m_project, m_created, m_lockedLead;
+    QString m_project, m_created;
 };

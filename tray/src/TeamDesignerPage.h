@@ -1,36 +1,54 @@
 #pragma once
 #include <QWidget>
 #include <functional>
+#include "TeamModel.h"
 
 class QLabel;
+class QPlainTextEdit;
 class QPushButton;
+class QScrollArea;
+class QSplitter;
+class QStackedWidget;
+class QVBoxLayout;
 class TeamCatalogEditor;
 class TeamController;
-class TeamDesignerPanel;
+class TeamConversation;
 
-// WhiteWh fork: agent teams. The Team designer mode on the rail: the universal
-// catalog that New team builds teams from. The catalog editor (roles, templates,
-// routing) on the left; on the right the designer agent — start it, open its
-// chat — and its draft of proposals to keep or reject, then apply.
+// WhiteWh fork: agent teams. The Team designer mode (design D1, HANDOFF §12):
+// the universal catalog that New team builds teams from. Left: the designer
+// agent of the selected session's project — its conversation, its proposals to
+// keep or reject, or Start designer when it does not run. Right: the catalog,
+// edited by hand or shown as the designer's draft with a diff.
 class TeamDesignerPage : public QWidget {
 public:
     explicit TeamDesignerPage(TeamController *teams, QWidget *parent = nullptr);
     void setDark(bool dark);
-    // The running designer session's name, or empty.
+    // The folder and project the designer reads: the selected session's.
+    void setContext(const QString &folder, const QString &project);
+    // The designer session of that project, if it runs; and its live state.
     std::function<QString()> designerSession;
-    std::function<void()> startDesigner;
+    std::function<Teams::Live()> designerLive;
+    std::function<void(const QString &folder, const QString &goal)> startDesigner;
     std::function<void(const QString &session)> openDesigner;
     std::function<bool(const QString &name, const QString &title, const QString &text, const QString &action)> confirm;
-    // The designer agent's line and buttons, after the session list changes.
+    // After the session list or the catalog changes.
     void refresh();
+    TeamCatalogEditor *editor() const { return m_editor; }
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
 private:
+    void renderProposals();
+    QWidget *emptyState();
     TeamController *m_teams;
+    QString m_folder, m_project;
     TeamCatalogEditor *m_editor;
-    TeamDesignerPanel *m_draft;
-    QLabel *m_title, *m_subtitle, *m_agentTitle, *m_agentStatus;
-    QPushButton *m_start, *m_open;
+    TeamConversation *m_chat;
+    QSplitter *m_split, *m_chatSplit;
+    QStackedWidget *m_chatStack;
+    QScrollArea *m_proposals;
+    QLabel *m_title, *m_status, *m_reads, *m_proposes, *m_version;
+    QPlainTextEdit *m_goal = nullptr;
+    QPushButton *m_start = nullptr, *m_open;
     bool m_dark = true;
 };

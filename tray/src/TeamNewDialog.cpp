@@ -54,7 +54,7 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     setWindowTitle(tr("New team"));
     resize(780, 760);
     auto *outer = new QVBoxLayout(this);
-    auto *form = m_form = new QFormLayout; form->setLabelAlignment(Qt::AlignRight);
+    auto *form = new QFormLayout; form->setLabelAlignment(Qt::AlignRight);
     m_name = new QLineEdit; m_name->setObjectName("teamNewName"); m_name->setPlaceholderText(tr("Checkout redesign"));
     form->addRow(tr("Name"), m_name);
     m_template = combo("teamNewTemplate");
@@ -78,7 +78,7 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     form->addRow(QString(), m_worktrees);
     form->addRow(QString(), m_gitNote);
     // The lead: a new session on this computer, or an existing one.
-    auto *leadRow = m_leadRow = new QHBoxLayout;
+    auto *leadRow = new QHBoxLayout;
     m_leadAgent = combo("teamNewLeadAgent", 130); fillAgents(m_leadAgent, "claude");
     m_leadAccount = combo("teamNewLeadAccount", 130);
     m_leadModel = combo("teamNewLeadModel", 120); m_leadModel->setEditable(true); m_leadModel->lineEdit()->setPlaceholderText(tr("default model"));
@@ -119,7 +119,7 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     auto *footer = new QHBoxLayout;
     m_summary = new QLabel; m_summary->setObjectName("teamNewSummary"); m_summary->setWordWrap(true);
     footer->addWidget(m_summary, 1);
-    auto *cancel = m_cancel = new QPushButton(tr("Cancel")); cancel->setAutoDefault(false);
+    auto *cancel = new QPushButton(tr("Cancel")); cancel->setAutoDefault(false);
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
     m_create = new QPushButton(tr("Create team")); m_create->setObjectName("teamNewCreate"); m_create->setDefault(true);
     connect(m_create, &QPushButton::clicked, this, &TeamNewDialog::create);
@@ -160,20 +160,6 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     Q_UNUSED(routing);
     fillAccounts(m_leadAccount, "claude", {});
     applyTemplate();
-}
-
-void TeamNewDialog::embedFor(const QString &session)
-{
-    setWindowFlags(Qt::Widget);
-    m_cancel->hide();
-    m_lockedLead = session;
-    if (m_existingLead->findData(session) < 0) m_existingLead->addItem(session, session);
-    m_existingLead->setCurrentIndex(m_existingLead->findData(session));
-    m_useExisting->setChecked(true);
-    m_useExisting->setText(tr("This session leads the team"));
-    m_useExisting->setEnabled(false); m_existingLead->setEnabled(false);
-    m_form->setRowVisible(m_leadRow, false);
-    validate();
 }
 
 void TeamNewDialog::fillAccounts(QComboBox *box, const QString &agent, const QString &host, const QString &preferred)
@@ -297,9 +283,7 @@ void TeamNewDialog::validate()
     if (folder.isEmpty() || !QDir(folder).exists()) problems << tr("Choose an existing folder");
     if (bad) problems << tr("Fix %n member row(s) to create the team", nullptr, bad);
     if (m_rowList.size() + 1 > m_maxMembers->value()) problems << tr("More members than the limit");
-    const QString ready = m_lockedLead.isEmpty() ? tr("Create starts the lead; it plans, and you approve before members start.")
-                                                 : tr("Create sends this session the planning brief; you approve its plan before members start.");
-    m_summary->setText(problems.isEmpty() ? ready : QStringLiteral("⚠ ") + problems.join(QStringLiteral(" · ")));
+    m_summary->setText(problems.isEmpty() ? tr("Create starts the lead; it plans, and you approve before members start.") : QStringLiteral("⚠ ") + problems.join(QStringLiteral(" · ")));
     m_summary->setStyleSheet(QStringLiteral("color:%1;").arg((problems.isEmpty() ? c.muted : c.warn).name()));
     m_create->setEnabled(problems.isEmpty());
     m_create->setToolTip(problems.join('\n'));
@@ -364,7 +348,6 @@ void TeamNewDialog::create()
         if (!guard) return;
         if (!ok) { m_summary->setText(QStringLiteral("⚠ ") + error); m_create->setEnabled(true); return; }
         m_created = result.value("team").toString();
-        if (created) { m_summary->setText(tr("Team created; its lead plans now.")); created(m_created); }
-        else accept();
+        accept();
     });
 }

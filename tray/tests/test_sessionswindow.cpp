@@ -83,7 +83,7 @@
 #include "ComposerToolbar.h"
 #include "SessionList.h"
 #include "TeamController.h"
-#include "TeamNewDialog.h"   // WhiteWh fork: agent teams
+#include "TeamNewTab.h"   // WhiteWh fork: agent teams
 #include <QToolBar>
 #include "SessionCardDelegate.h"
 #include "SessionLeads.h"
@@ -775,16 +775,16 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     const auto tabNamed = [tabs](const QString &text) { for (int i = 0; i < tabs->count(); ++i) if (tabs->tabText(i) == text) return i; return -1; };
     window.showSession({}, "codex/hgs/dashboard");
     QTRY_VERIFY(tabNamed("Team") >= 0);
-    QCOMPARE(tabNamed("New team"), -1);
+    QCOMPARE(tabNamed("+ New team"), -1);
     QString loner;
     for (const auto &s : state.local().sessions) if (s.name != "codex/hgs/dashboard" && s.name != "kimi/hgs/tester" && s.state != "archived") { loner = s.name; break; }
     QVERIFY(!loner.isEmpty());
     window.showSession({}, loner);
-    QTRY_VERIFY(tabNamed("New team") >= 0);
+    QTRY_VERIFY(tabNamed("+ New team") >= 0);
     QCOMPARE(tabNamed("Team"), -1);
-    tabs->setCurrentIndex(tabNamed("New team"));
+    tabs->setCurrentIndex(tabNamed("+ New team"));
     QTRY_VERIFY(tabs->currentWidget()->findChild<QWidget *>("teamNewDialog"));
-    auto *form = dynamic_cast<TeamNewDialog *>(tabs->currentWidget()->findChild<QWidget *>("teamNewDialog"));
+    auto *form = dynamic_cast<TeamNewTab *>(tabs->currentWidget()->findChild<QWidget *>("teamNewDialog"));
     QVERIFY(form); QCOMPARE(form->leadSession(), loner);
     // The rail's Team designer opens its own mode.
     auto *designerNav = window.findChild<QPushButton *>("teamDesignerNav");

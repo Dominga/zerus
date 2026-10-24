@@ -253,14 +253,14 @@ void TestTeams::panelShowsProblemsWithTheirActions()
     panel.show();
     controller.refresh();
     panel.showTeam("team-1");
-    QTRY_VERIFY(panel.findChild<QWidget *>("teamFeedRow"));
-    QTRY_VERIFY(panel.findChild<QWidget *>(width >= 400 ? "teamTaskGraph" : "teamTaskList"));
+    // A running team reads as a summary (design D4); its work is in the Team tab.
+    QTRY_COMPARE(panel.findChildren<QWidget *>("teamSummaryMember").size(), 6);
     QCOMPARE(answered, 1);
     QCOMPARE(bool(panel.findChild<QWidget *>("teamStuck")), stuck);
     QVERIFY(panel.findChild<QPushButton *>("teamGoToQuestion"));
-    QVERIFY(panel.findChild<QPushButton *>("teamReassign"));   // offline tester
-    QVERIFY(panel.findChild<QPushButton *>("teamPause"));
-    QCOMPARE(panel.findChildren<QFrame *>("teamCard").size() >= 7, true);   // header + six members
+    QVERIFY(panel.findChild<QPushButton *>("teamOpenTeam"));
+    // Nothing is wider than the panel.
+    QVERIFY(panel.findChild<QWidget *>("teamPanelContent")->minimumSizeHint().width() <= width);
     // Optional: ZERUS_TEAM_SHOTS=<dir> keeps a picture for review against the design.
     if (!shots.isEmpty()) {
         auto *content = panel.findChild<QWidget *>("teamPanelContent");

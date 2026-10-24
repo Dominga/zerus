@@ -220,6 +220,18 @@ public:
     QSet<int> cycle, emphasis;     // emphasis: Show what blocks
     std::function<QSet<int>(int)> chain;
     double zoom = 1.0;
+    // Wide: the visible canvas; the graph centers in it and its layer bands
+    // fill its height (design D3, no empty bottom).
+    QSize area;
+    // Wide: the graph's own size at zoom 1.
+    QSizeF natural() const
+    {
+        QMap<int, int> column;
+        for (const auto &n : nodes) ++column[n.layer];
+        int layers = 0, tall = 0;
+        for (auto it = column.cbegin(); it != column.cend(); ++it) { layers = qMax(layers, it.key() + 1); tall = qMax(tall, it.value()); }
+        return {12.0 + layers * WideStep, 30.0 + tall * (WideH + 12) + 8};
+    }
     void layout()
     {
         m_rects.clear();
@@ -233,14 +245,18 @@ public:
             for (auto it = column.cbegin(); it != column.cend(); ++it) { layers = qMax(layers, it.key() + 1); wide = qMax(wide, it.value()); }
             setFixedSize(int((Gutter + wide * (NodeW + 6) + 4) * zoom), int((8 + layers * (NodeH + 26)) * zoom));
         } else if (m_mode == Wide) {
+            const QSizeF size = natural();
+            const double viewW = area.isValid() ? area.width() / zoom : 0, viewH = area.isValid() ? area.height() / zoom : 0;
+            m_ox = qMax(0.0, (viewW - size.width()) / 2);
+            const double oy = qMax(0.0, (viewH - size.height()) / 2);
             for (const auto &n : nodes) {
-                const int x = 12 + n.layer * WideStep, y = 30 + column[n.layer]++ * (WideH + 12);
+                const double x = m_ox + 12 + n.layer * WideStep, y = oy + 30 + column[n.layer]++ * (WideH + 12);
                 m_rects.insert(n.id, QRectF(x, y, WideW, WideH));
             }
-            int layers = 0, tall = 0;
-            for (auto it = column.cbegin(); it != column.cend(); ++it) { layers = qMax(layers, it.key() + 1); tall = qMax(tall, it.value()); }
+            int layers = 0;
+            for (auto it = column.cbegin(); it != column.cend(); ++it) layers = qMax(layers, it.key() + 1);
             m_layers = layers;
-            setFixedSize(int((12 + layers * WideStep) * zoom), int((30 + tall * (WideH + 12) + 8) * zoom));
+            setFixedSize(int(qMax(size.width(), viewW) * zoom), int(qMax(size.height(), viewH) * zoom));
         } else {
             int y = 0, layer = -1;
             for (const auto &n : nodes) {
@@ -293,9 +309,9 @@ protected:
             if (m_mode == Wide) {
                 QMap<int, int> counts; for (const auto &n : nodes) ++counts[n.layer];
                 for (int l = 0; l < m_layers; ++l) {
-                    if (l % 2) p.fillRect(QRectF(4 + l * WideStep, 0, WideStep, height() / zoom), alpha(m_c.fg, .025));
+                    if (l % 2) p.fillRect(QRectF(m_ox + 4 + l * WideStep, 0, WideStep, height() / zoom), alpha(m_c.fg, .025));
                     QFont caps = small; caps.setWeight(QFont::DemiBold); caps.setLetterSpacing(QFont::AbsoluteSpacing, .6); p.setFont(caps);
-                    p.drawText(QRectF(12 + l * WideStep, 6, WideStep, 18), Qt::AlignLeft | Qt::AlignVCenter,
+                    p.drawText(QRectF(m_ox + 12 + l * WideStep, 6, WideStep, 18), Qt::AlignLeft | Qt::AlignVCenter,
                                QCoreApplication::translate("TeamPanel", "LAYER %1 · %2").arg(l + 1).arg(counts.value(l)));
                 }
             } else {
@@ -485,6 +501,7 @@ private:
     Colors m_c;
     Mode m_mode;
     int m_hover = 0, m_dragFrom = 0, m_layers = 0;
+    double m_ox = 0;
     QPointF m_dragAt;
     QPair<int, int> m_edge{0, 0};
     QMap<int, QRectF> m_rects;
@@ -549,10 +566,61 @@ inline QString agentIcon(const QString &agent)
 
 inline QString clock(double at) { return QDateTime::fromSecsSinceEpoch(qint64(at)).toString("HH:mm"); }
 
+// 12m, 3h 12m, 3d 4h, 2w 3d (design HANDOFF §14, fmtDur).
 inline QString duration(double seconds)
 {
     const qint64 s = qMax<qint64>(0, qint64(seconds));
-    return s >= 3600 ? QCoreApplication::translate("TeamPanel", "%1h %2m").arg(s / 3600).arg((s % 3600) / 60) : QCoreApplication::translate("TeamPanel", "%1m").arg(qMax<qint64>(1, s / 60));
+    const qint64 minutes = s / 60, hours = s / 3600, days = s / 86400;
+    if (hours < 1) return QCoreApplication::translate("TeamPanel", "%1m").arg(qMax<qint64>(1, minutes));
+    if (days < 1) return QCoreApplication::translate("TeamPanel", "%1h %2m").arg(hours).arg(minutes % 60);
+    if (days < 7) return QCoreApplication::translate("TeamPanel", "%1d %2h").arg(days).arg(hours % 24);
+    return QCoreApplication::translate("TeamPanel", "%1w %2d").arg(days / 7).arg(days % 7);
+}
+
+// The WhiteWh look of team surfaces: ghost buttons, accent primary ones,
+// segmented controls (a widget with property seg) and fields. Set on the
+// surface's top widget; children inherit it.
+inline QString teamSheet(const Colors &c)
+{
+    const QString accentText = c.dark ? QStringLiteral("#0f1a16") : QStringLiteral("#ffffff");
+    const QString accentHover = c.dark ? QStringLiteral("#a8e6cc") : QStringLiteral("#115d46");
+    const QString segmentOn = c.dark ? QStringLiteral("#26443a") : QStringLiteral("#e0f0e9");
+    const auto a = [](const QColor &color, double value) { return alpha(color, value).name(QColor::HexArgb); };
+    return QStringLiteral(
+        "QPushButton{background:transparent;color:%1;border:1px solid %2;border-radius:7px;padding:4px 10px;}"
+        "QPushButton:hover{background:%3;}"
+        "QPushButton:disabled{color:%4;border-color:%5;}"
+        "QPushButton[primary=\"true\"]{background:%6;color:%7;border:1px solid %6;font-weight:600;}"
+        "QPushButton[primary=\"true\"]:hover{background:%8;border-color:%8;}"
+        "QPushButton[primary=\"true\"]:disabled{background:%9;color:%10;border-color:transparent;}"
+        "QPushButton[danger=\"true\"]{color:%11;border-color:transparent;}"
+        "QPushButton[ghost=\"true\"]{border-color:transparent;}"
+        "QPushButton[chip=\"true\"]{border-radius:11px;padding:2px 9px;color:%12;}"
+        "QWidget[seg=\"true\"]{background:%13;border:1px solid %2;border-radius:8px;}"
+        "QWidget[seg=\"true\"] QPushButton{border:none;border-radius:6px;padding:4px 12px;color:%12;background:transparent;}"
+        "QWidget[seg=\"true\"] QPushButton:checked{background:%14;color:%6;font-weight:600;}"
+        "QLineEdit,QComboBox,QPlainTextEdit,QSpinBox{background:%15;color:%1;border:1px solid %2;border-radius:6px;padding:3px 6px;}"
+        "QLineEdit:focus,QComboBox:focus,QPlainTextEdit:focus,QSpinBox:focus{border-color:%6;}"
+        "QLineEdit:disabled,QComboBox:disabled,QPlainTextEdit:disabled{color:%4;}")
+        .arg(c.fg.name(), c.border.name(), a(c.fg, .06), c.dim.name(), a(c.border, .6), c.accent.name(), accentText, accentHover,
+             a(c.accent, .35), a(QColor(accentText), .7), c.danger.name(), c.text2.name(), c.tile.name(), segmentOn, c.card.name());
+}
+
+// A segmented control: one checked button among `items` (value, text).
+inline QWidget *segmented(const QList<std::pair<QString, QString>> &items, const QString &current, const char *name,
+                          const std::function<void(const QString &)> &picked)
+{
+    auto *box = new QWidget; box->setObjectName(name); box->setProperty("seg", true);
+    box->setAttribute(Qt::WA_StyledBackground);
+    auto *h = new QHBoxLayout(box); h->setContentsMargins(2, 2, 2, 2); h->setSpacing(0);
+    for (const auto &[value, text] : items) {
+        auto *b = new QPushButton(text); b->setCheckable(true); b->setChecked(value == current); b->setAutoDefault(false);
+        b->setAutoExclusive(true); b->setCursor(Qt::PointingHandCursor); b->setProperty("segment", value);
+        h->addWidget(b);
+        QObject::connect(b, &QPushButton::clicked, box, [picked, value = value] { if (picked) picked(value); });
+    }
+    box->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    return box;
 }
 
 }

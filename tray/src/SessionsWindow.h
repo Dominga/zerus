@@ -404,7 +404,8 @@ private:
     void openTeamTask(int task);
     void showNewTeam();
     void showTeamDesigner();
-    void startTeamDesigner();
+    void startTeamDesigner(const QString &folder,const QString &goal);
+    QString m_teamDesignerFolder,m_teamDesignerProject;
     QString teamDesignerSession() const;
     class TeamCatalogEditor *m_teamCatalog=nullptr;
     class TeamWorkspace *m_teamWorkspace=nullptr;
@@ -414,7 +415,7 @@ private:
     class QPushButton *m_teamDesignerNav=nullptr;
     int m_teamDesignerPageIndex=-1;
     QWidget *m_teamNewTab=nullptr;
-    class TeamNewDialog *m_teamNewForm=nullptr;
+    class TeamNewTab *m_teamNewForm=nullptr;
     bool m_teamNewWaiting=false;
     QString m_teamOpenAfterCreate;
     void ensureTeamNewForm();

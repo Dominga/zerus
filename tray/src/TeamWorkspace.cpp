@@ -1,16 +1,19 @@
 #include "TeamWorkspace.h"
+#include "HgsClient.h"
 #include "TeamController.h"
+#include "TeamConversation.h"
 #include "TeamPanel.h"
 #include "TeamTaskCard.h"
 #include "TeamWidgets.h"
 #include <QComboBox>
-#include <QDialog>
-#include <QDialogButtonBox>
-#include <QFormLayout>
+#include <QInputDialog>
 #include <QLineEdit>
+#include <QMenu>
 #include <QPlainTextEdit>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
+#include <QSplitter>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -19,6 +22,9 @@
 using namespace TeamUi;
 
 namespace {
+const QStringList agents{"claude", "codex", "kimi", "dsh", "opencode"};
+const QMap<QString, QString> agentNames{{"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}};
+
 // The board's columns, by what a task needs.
 QString column(const Task &task, bool problem)
 {
@@ -28,14 +34,58 @@ QString column(const Task &task, bool problem)
     if (task.status == "assigned" || task.status == "in_progress") return QStringLiteral("active");
     return QStringLiteral("pending");
 }
+
+// The graph's scroll area tells the graph the space it has.
+class GraphArea : public QScrollArea {
+public:
+    std::function<void(const QSize &)> resized;
+protected:
+    void resizeEvent(QResizeEvent *event) override { QScrollArea::resizeEvent(event); if (resized) resized(viewport()->size()); }
+};
+
+// A member card that focuses the canvas on its member when clicked.
+class MemberCard : public QFrame {
+public:
+    std::function<void()> clicked;
+protected:
+    void mouseReleaseEvent(QMouseEvent *event) override { if (event->button() == Qt::LeftButton && clicked) clicked(); QFrame::mouseReleaseEvent(event); }
+};
 }
 
 TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *parent) : QWidget(parent), m_teams(teams), m_panel(panel)
 {
     setObjectName("teamWorkspace");
-    m_layout = new QVBoxLayout(this);
-    m_layout->setContentsMargins(0, 0, 0, 0);
-    m_layout->setSpacing(0);
+    auto *outer = new QVBoxLayout(this); outer->setContentsMargins(0, 0, 0, 0); outer->setSpacing(0);
+    auto *topBox = new QWidget; m_topHost = new QVBoxLayout(topBox); m_topHost->setContentsMargins(0, 0, 0, 0); m_topHost->setSpacing(0);
+    outer->addWidget(topBox);
+    m_empty = new QLabel(tr("No team selected")); m_empty->setAlignment(Qt::AlignCenter); m_empty->setObjectName("teamWorkspaceEmpty");
+    outer->addWidget(m_empty, 1);
+    m_body = new QWidget; auto *bh = new QHBoxLayout(m_body); bh->setContentsMargins(0, 0, 0, 0);
+    m_split = new QSplitter(Qt::Horizontal); m_split->setObjectName("teamWorkspaceSplit"); m_split->setChildrenCollapsible(false);
+    auto *leftBox = new QWidget; m_leftHost = new QVBoxLayout(leftBox); m_leftHost->setContentsMargins(0, 0, 0, 0); m_leftHost->setSpacing(0);
+    // The side column: members above, the coordinator below; the owner moves the divider.
+    m_sideSplit = new QSplitter(Qt::Vertical); m_sideSplit->setObjectName("teamWorkspaceSideSplit"); m_sideSplit->setChildrenCollapsible(false);
+    m_sideSplit->setMinimumWidth(340); m_sideSplit->setHandleWidth(6);
+    m_members = new QScrollArea; m_members->setObjectName("teamWorkspaceMembers"); m_members->setWidgetResizable(true);
+    m_members->setFrameShape(QFrame::NoFrame); m_members->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); m_members->setMinimumHeight(90);
+    m_coordinator = new QFrame; m_coordinator->setObjectName("teamWorkspaceCoordinator"); m_coordinator->setMinimumHeight(160);
+    auto *cv = new QVBoxLayout(m_coordinator); cv->setContentsMargins(0, 0, 0, 0); cv->setSpacing(0);
+    m_coordinatorHead = new QWidget; m_coordinatorHead->setObjectName("teamWorkspaceCoordinatorHead");
+    new QHBoxLayout(m_coordinatorHead);
+    m_conversation = new TeamConversation(teams->client());
+    m_conversation->setPlaceholder(tr("Message the coordinator…"));
+    cv->addWidget(m_coordinatorHead); cv->addWidget(m_conversation, 1);
+    m_sideSplit->addWidget(m_members); m_sideSplit->addWidget(m_coordinator);
+    m_sideSplit->setStretchFactor(0, 45); m_sideSplit->setStretchFactor(1, 55);
+    m_split->addWidget(leftBox); m_split->addWidget(m_sideSplit);
+    m_split->setStretchFactor(0, 1); m_split->setStretchFactor(1, 0);
+    bh->addWidget(m_split);
+    outer->addWidget(m_body, 1);
+    QSettings settings;
+    if (!m_split->restoreState(settings.value("teams/workspaceSplit").toByteArray())) m_split->setSizes({1000, 380});
+    if (!m_sideSplit->restoreState(settings.value("teams/workspaceSideSplit").toByteArray())) m_sideSplit->setSizes({420, 520});
+    QObject::connect(m_split, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSplit", m_split->saveState()); });
+    QObject::connect(m_sideSplit, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSideSplit", m_sideSplit->saveState()); });
     m_drawer = new TeamTaskCard(this);
     m_drawer->setObjectName("teamWorkspaceDrawer");
     m_drawer->hide();
@@ -52,6 +102,29 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::feedChanged, this, [this] { scheduleRender(); });
+    setTheme(true);
+}
+
+void TeamWorkspace::setTheme(bool dark)
+{
+    m_dark = dark;
+    const Colors c = colorsFor(dark);
+    setStyleSheet(teamSheet(c) + QStringLiteral(
+        "QWidget#teamWorkspace{background:%1;}"
+        "QSplitter#teamWorkspaceSideSplit{border-left:1px solid %2;}"
+        "QSplitter#teamWorkspaceSideSplit::handle{background:%2;margin:2px 40px;border-radius:1px;}"
+        "QFrame#teamWorkspaceCoordinator{border-top:1px solid %2;}"
+        "QWidget#teamWorkspaceCoordinatorHead{border-bottom:1px solid %2;}"
+        "QLabel#teamWorkspaceEmpty{color:%3;font-size:13px;}")
+        .arg(c.surface.name(), c.border.name(), c.muted.name()));
+    m_conversation->setTheme(dark);
+    scheduleRender();
+}
+
+void TeamWorkspace::showTeam(const QString &team)
+{
+    if (m_team != team) { m_team = team; m_focus.clear(); m_drawerTask = 0; m_fit = true; if (m_popover) m_popover->hide(); }
+    scheduleRender();
 }
 
 void TeamWorkspace::scheduleRender()
@@ -70,7 +143,7 @@ void TeamWorkspace::showEvent(QShowEvent *event)
 void TeamWorkspace::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    placeDrawer();
+    placeDrawer(); placePopover();
 }
 
 void TeamWorkspace::placeDrawer()
@@ -80,27 +153,34 @@ void TeamWorkspace::placeDrawer()
     m_drawer->raise();
 }
 
+void TeamWorkspace::placePopover()
+{
+    if (!m_popover) return;
+    const int w = qMin(440, width() - 24);
+    m_popover->setFixedWidth(w);
+    m_popover->adjustSize();
+    const int right = m_split->mapTo(this, QPoint(m_split->sizes().value(0), 0)).x();
+    m_popover->move(qMax(12, right - w - 12), 52);
+    m_popover->raise();
+}
+
 void TeamWorkspace::render()
 {
     if (!isVisible()) return;
     const Colors c = colorsFor(m_dark);
     const Team *team = m_teams->watched();
     if (!team || team->id != m_team) team = m_teams->team(m_team);
-    auto *content = new QWidget;
-    content->setObjectName("teamWorkspaceContent");
-    content->setStyleSheet(QStringLiteral("QWidget#teamWorkspaceContent{background:%1;}").arg(c.surface.name()));
-    auto *v = new QVBoxLayout(content); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(0);
-    if (!team) {
-        auto *empty = label(m_team.isEmpty() ? tr("No team selected") : tr("Loading team…"), c.muted, 13);
-        empty->setAlignment(Qt::AlignCenter);
-        v->addWidget(empty, 1);
-    } else {
+    m_empty->setText(m_team.isEmpty() ? tr("No team selected") : tr("Loading team…"));
+    m_empty->setVisible(!team); m_body->setVisible(team);
+    auto *top = new QWidget; top->setObjectName("teamWorkspaceTop");
+    auto *tv = new QVBoxLayout(top); tv->setContentsMargins(0, 0, 0, 0); tv->setSpacing(0);
+    if (team) {
         const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
         const QString status = displayStatus(*team, live);
-        v->addWidget(teamBar(*team, status));
+        tv->addWidget(teamBar(*team, status));
         // Strips: Stuck, plan errors.
         if (status == "stuck" || !team->errors.isEmpty()) {
-            auto *strip = new QFrame; strip->setObjectName("teamWorkspaceStrip");
+            auto *strip = new QFrame; strip->setObjectName("teamWorkspaceStrip"); strip->setMinimumHeight(34);
             const QColor tone = status == "stuck" ? c.warn : c.danger;
             strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceStrip{background:%1;border-bottom:1px solid %2;}").arg(alpha(tone, .1).name(QColor::HexArgb), alpha(tone, .5).name(QColor::HexArgb)));
             auto *h = new QHBoxLayout(strip); h->setContentsMargins(12, 6, 12, 6);
@@ -108,20 +188,27 @@ void TeamWorkspace::render()
             if (status == "stuck") for (const auto &p : problems(*team, live)) items << p.text;
             items += team->errors;
             h->addWidget(new StatusMark((status == "stuck" ? tr("Team stuck — nothing can start: ") : tr("Plan errors: ")) + items.join(QStringLiteral(" · ")), tone, "stuck"), 1);
-            v->addWidget(strip);
+            tv->addWidget(strip);
         }
-        auto *middle = new QHBoxLayout; middle->setContentsMargins(0, 0, 0, 0); middle->setSpacing(0);
-        auto *left = new QVBoxLayout; left->setSpacing(0);
-        left->addWidget(toolbar(*team));
-        left->addWidget(canvas(*team), 1);
-        left->addWidget(feed(*team));
-        middle->addLayout(left, 1);
-        middle->addWidget(side(*team));
-        v->addLayout(middle, 1);
+        tv->addWidget(answers(*team));
+        // The canvas column.
+        auto *left = new QWidget; left->setObjectName("teamWorkspaceLeft");
+        auto *lv = new QVBoxLayout(left); lv->setContentsMargins(0, 0, 0, 0); lv->setSpacing(0);
+        lv->addWidget(toolbar(*team));
+        lv->addWidget(canvas(*team), 1);
+        lv->addWidget(feed(*team));
+        if (m_left) { m_leftHost->removeWidget(m_left); retire(m_left); }
+        m_leftHost->addWidget(left); left->show(); m_left = left;
+        // Members keep their scroll position.
+        const int scroll = m_members->verticalScrollBar()->value();
+        auto *list = members(*team);
+        retire(m_members->takeWidget());
+        m_members->setWidget(list); m_membersContent = list;
+        m_members->verticalScrollBar()->setValue(scroll);
+        renderCoordinator(*team, status);
     }
-    if (m_content) { m_layout->removeWidget(m_content); retire(m_content); }
-    m_layout->addWidget(content);
-    m_content = content;
+    if (m_top) { m_topHost->removeWidget(m_top); retire(m_top); }
+    m_topHost->addWidget(top); top->show(); m_top = top;
     if (team && m_drawerTask) {
         const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
         m_drawer->setTask(*team, m_drawerTask, live, m_dark);
@@ -130,6 +217,7 @@ void TeamWorkspace::render()
         placeDrawer();
         m_drawer->show();
     } else m_drawer->hide();
+    placePopover();
 }
 
 QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
@@ -155,61 +243,94 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
             if (m_panel->confirm("teamDiscardConfirm", tr("Discard plan?"), tr("Discard the plan of %1? The team stops before any member starts.").arg(name), tr("Discard plan")))
                 m_panel->act("discard", {});
         });
-        discard->setStyleSheet(QStringLiteral("color:%1;").arg(c.danger.name()));
-        add(tr("Edit plan"), "teamWorkspaceEdit", false, [this] { if (openTeamTab) openTeamTab(); });
+        discard->setProperty("danger", true);
+        add(tr("Send back"), "teamWorkspaceSendBack", false, [this] {
+            bool ok = false;
+            const auto comment = QInputDialog::getMultiLineText(this, tr("Send back to the coordinator"), tr("What should change in the plan?"), {}, &ok);
+            if (ok && !comment.trimmed().isEmpty()) m_conversation->send(tr("Your plan needs changes before I approve it: %1").arg(comment.trimmed()));
+        });
         auto *approve = add(tr("Approve && Run"), "teamWorkspaceApprove", true, [this] { m_panel->act("approve", {}); });
         approve->setEnabled(team.errors.isEmpty() && !team.tasks.isEmpty());
+        if (!approve->isEnabled()) approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet") : tr("Fix the plan errors first"));
     } else if (team.status == "running") {
         add(tr("Pause"), "teamWorkspacePause", false, [this] { m_panel->act("pause", {}); });
     } else if (team.status == "paused") {
         add(tr("Resume"), "teamWorkspaceResume", true, [this] { m_panel->act("resume", {}); });
     }
-    if (team.status == "running" || team.status == "paused")
-        add(tr("Stop…"), "teamWorkspaceStop", false, [this, name = team.name] {
+    if (team.status == "running" || team.status == "paused") {
+        auto *stop = add(tr("Stop…"), "teamWorkspaceStop", false, [this, name = team.name] {
             if (m_panel->confirm("teamStopConfirm", tr("Stop team?"), tr("Stop %1? Every open task is cancelled and no task is handed out again. "
                                                                           "Member sessions keep running; their current turns finish.").arg(name), tr("Stop team")))
                 m_panel->act("stop", {});
         });
+        stop->setProperty("danger", true);
+    }
+    if (team.status == "done" || team.status == "stopped")
+        add(tr("Archive"), "teamWorkspaceArchive", false, [this] { m_panel->act("archive", {}); });
     return bar;
+}
+
+QWidget *TeamWorkspace::answers(const Team &team)
+{
+    const Colors c = colorsFor(m_dark);
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    auto *strip = new QFrame; strip->setObjectName("teamWorkspaceAnswers");
+    auto *v = new QVBoxLayout(strip); v->setContentsMargins(12, 4, 12, 4); v->setSpacing(2);
+    int waiting = 0;
+    for (const auto &m : team.members) {
+        const auto state = live(m);
+        if (m.session.isEmpty() || !state.attention) continue;
+        auto *r = row(8);
+        if (!waiting++) r->addWidget(label(tr("Needs your answer"), c.fg, 12, true));
+        else r->addSpacing(QFontMetrics(font()).horizontalAdvance(tr("Needs your answer")) + 4);
+        r->addWidget(new Pill(team.roleOf(m.id), roleColor(team.roleOf(m.id), m_dark)));
+        r->addWidget(elided(state.attentionText.isEmpty() ? tr("Question") : state.attentionText, c.fg, 12), 1);
+        auto *go = button(tr("Go"), "teamWorkspaceGoToQuestion");
+        QObject::connect(go, &QPushButton::clicked, this, [this, host = m.host, session = m.session] { if (openSession) openSession(host, session); });
+        r->addWidget(go);
+        v->addLayout(r);
+    }
+    // The slot stays when nothing waits, so the canvas never jumps.
+    if (!waiting) {
+        strip->setFixedHeight(28);
+        v->addWidget(label(tr("No questions waiting"), c.dim, 11));
+    }
+    strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceAnswers{background:%1;border-bottom:1px solid %2;}")
+                             .arg(waiting ? alpha(c.warn, .10).name(QColor::HexArgb) : QStringLiteral("transparent"), c.border.name()));
+    return strip;
 }
 
 QWidget *TeamWorkspace::toolbar(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
     auto *bar = new QWidget; bar->setObjectName("teamWorkspaceToolbar");
-    auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 8, 12, 6); h->setSpacing(4);
-    for (const auto &[key, text] : QList<std::pair<QString, QString>>{{"graph", tr("Graph")}, {"board", tr("Board")}, {"layers", tr("Layers")}}) {
-        auto *b = button(text, "teamWorkspaceView"); b->setCheckable(true); b->setChecked(m_view == key); b->setProperty("view", key);
-        QObject::connect(b, &QPushButton::clicked, this, [this, key = key] { m_view = key; scheduleRender(); });
-        h->addWidget(b);
-    }
-    h->addSpacing(10);
-    for (const auto &[key, text] : QList<std::pair<QString, QString>>{{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}) {
-        auto *b = button(text, "teamWorkspaceFilter"); b->setCheckable(true); b->setChecked(m_filter == key); b->setProperty("filter", key);
-        QObject::connect(b, &QPushButton::clicked, this, [this, key = key] { m_filter = key; scheduleRender(); });
-        h->addWidget(b);
-    }
+    auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 8, 12, 6); h->setSpacing(8);
+    h->addWidget(segmented({{"graph", tr("Graph")}, {"board", tr("Board")}, {"layers", tr("Layers")}}, m_view, "teamWorkspaceView",
+                           [this](const QString &value) { m_view = value; m_fit = true; scheduleRender(); }));
+    if (team.status == "planning") {
+        auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
+        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, 0); });
+        h->addWidget(task);
+    } else h->addWidget(segmented({{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}, m_filter, "teamWorkspaceFilter",
+                                  [this](const QString &value) { m_filter = value; scheduleRender(); }));
     if (!m_focus.isEmpty()) {
-        auto *chip = button(tr("Member: %1  ×").arg(team.roleOf(m_focus)), "teamWorkspaceFocus");
+        auto *chip = button(tr("Member: %1  ×").arg(team.roleOf(m_focus)), "teamWorkspaceFocus"); chip->setProperty("chip", true);
         chip->setToolTip(tr("Show every member again"));
         QObject::connect(chip, &QPushButton::clicked, this, [this] { m_focus.clear(); scheduleRender(); });
         h->addWidget(chip);
     }
     h->addStretch();
     if (m_view == "graph") {
-        h->addWidget(label(tr("Hover = chain · click = details"), c.muted, 11));
+        h->addWidget(label(team.status == "planning" ? tr("Drag a node's right edge onto a task to add a dependency") : tr("Hover = chain · click = details"), c.dim, 11));
         const auto zoomTo = [this](double zoom) { m_zoom = qBound(0.5, std::round(zoom * 10) / 10, 1.5); scheduleRender(); };
+        auto *zoom = new QWidget; zoom->setProperty("seg", true); zoom->setAttribute(Qt::WA_StyledBackground);
+        auto *zh = new QHBoxLayout(zoom); zh->setContentsMargins(2, 2, 2, 2); zh->setSpacing(0);
         auto *out = button(QStringLiteral("−"), "teamWorkspaceZoomOut"); QObject::connect(out, &QPushButton::clicked, this, [=] { zoomTo(m_zoom - .1); });
-        auto *level = label(QStringLiteral("%1%").arg(int(std::round(m_zoom * 100))), c.text3, 11);
+        auto *fit = button(tr("Fit"), "teamWorkspaceFit"); QObject::connect(fit, &QPushButton::clicked, this, [this] { m_fit = true; scheduleRender(); });
         auto *in = button(QStringLiteral("+"), "teamWorkspaceZoomIn"); QObject::connect(in, &QPushButton::clicked, this, [=] { zoomTo(m_zoom + .1); });
-        auto *fit = button(tr("Fit"), "teamWorkspaceFit");
-        QObject::connect(fit, &QPushButton::clicked, this, [this, zoomTo] {
-            int layers = 1; if (const auto *t = m_teams->watched()) for (int l : t->layers) layers = qMax(layers, l + 1);
-            const double natural = 12 + layers * 170;
-            const int available = width() - 330;
-            zoomTo(qMin(1.5, available / natural));
-        });
-        h->addWidget(out); h->addWidget(level); h->addWidget(in); h->addWidget(fit);
+        fit->setToolTip(tr("Zoom %1%").arg(int(std::round(m_zoom * 100))));
+        zh->addWidget(out); zh->addWidget(fit); zh->addWidget(in);
+        h->addWidget(zoom);
     }
     return bar;
 }
@@ -244,18 +365,38 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         for (const auto &d : task->deps) { deps << QStringLiteral("#%1").arg(d.task); view->edges[id].append(d.task); if (d.soft && !team.allHard) view->soft.insert({d.task, id}); }
         node.deps = deps.isEmpty() ? QString() : QStringLiteral("← ") + deps.join(' ');
         const bool active = QStringList{"assigned", "in_progress", "submitted"}.contains(task->status);
-        node.match = (m_filter == "all" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem))
+        node.match = (m_filter == "all" || team.status == "planning" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem))
                      && (m_focus.isEmpty() || task->assignee == m_focus);
         view->nodes.append(node);
     }
-    view->clicked = [this](int id, const QPoint &) { m_drawerTask = id; scheduleRender(); };
-    view->layout();
-    auto *area = new QScrollArea; area->setObjectName("teamWorkspaceCanvas");
+    // Planning edits the plan here as in the inspector: a click edits the task,
+    // a drag from a node's handle adds a dependency, a selected edge goes.
+    if (team.status == "planning") {
+        view->editable = true;
+        view->clicked = [this](int id, const QPoint &) { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, false); };
+    } else view->clicked = [this](int id, const QPoint &) { m_drawerTask = id; scheduleRender(); };
+    auto *area = new GraphArea; area->setObjectName("teamWorkspaceCanvas");
     area->setFrameShape(QFrame::NoFrame);
     area->setWidget(view);
     area->setWidgetResizable(m_view != "graph");
     area->viewport()->setAutoFillBackground(true);
     QPalette p = area->viewport()->palette(); p.setColor(QPalette::Window, c.surface); area->viewport()->setPalette(p);
+    if (m_view == "graph") {
+        // Opened or Fit: the graph fits the canvas, clamped to 0.8–1.15 (below
+        // that it scrolls), and centers; the layer bands fill its height.
+        area->resized = [this, view](const QSize &size) {
+            view->area = size;
+            if (m_fit && size.width() > 40 && size.height() > 40) {
+                const QSizeF natural = view->natural();
+                const double fitted = qBound(0.8, qMin(size.width() / natural.width(), size.height() / natural.height()), 1.15);
+                m_fit = false;
+                if (std::abs(fitted - m_zoom) > .005) { m_zoom = fitted; view->zoom = fitted; }
+            }
+            view->layout();
+        };
+    } else view->layout();
     return area;
 }
 
@@ -295,6 +436,12 @@ QWidget *TeamWorkspace::board(const Team &team)
             QObject::connect(open, &QPushButton::clicked, this, [this, id = task.id] { m_drawerTask = id; scheduleRender(); });
             list->addWidget(cardBox);
         }
+        // Columns by content; an empty one says so.
+        if (!n) {
+            auto *none = label(tr("Nothing here"), c.dim, 11); none->setAlignment(Qt::AlignCenter); none->setObjectName("teamBoardEmpty");
+            none->setStyleSheet(QStringLiteral("color:%1;border:1px dashed %2;border-radius:8px;padding:10px;").arg(c.dim.name(), c.border.name()));
+            list->addWidget(none);
+        }
         list->addStretch();
         cv->addWidget(label(QStringLiteral("%1 · %2").arg(name.toUpper()).arg(n), c.dim, 10, true));
         auto *inner = new QWidget; inner->setLayout(list);
@@ -305,118 +452,158 @@ QWidget *TeamWorkspace::board(const Team &team)
     return w;
 }
 
-QWidget *TeamWorkspace::side(const Team &team)
+QWidget *TeamWorkspace::members(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
     const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
-    auto *w = new QFrame; w->setObjectName("teamWorkspaceSide"); w->setFixedWidth(320);
-    w->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceSide{border-left:1px solid %1;}").arg(c.border.name()));
-    auto *v = new QVBoxLayout(w); v->setContentsMargins(10, 10, 10, 10); v->setSpacing(8);
-    // Needs your answer.
-    int waiting = 0;
-    for (const auto &m : team.members) {
-        const auto state = live(m);
-        if (m.session.isEmpty() || !state.attention) continue;
-        if (!waiting++) { auto *t = row(6); t->addWidget(label(tr("Needs your answer"), c.fg, 12, true)); t->addStretch(); v->addLayout(t); }
-        auto *r = row(6);
-        r->addWidget(new Pill(team.roleOf(m.id), roleColor(team.roleOf(m.id), m_dark)));
-        r->addWidget(elided(state.attentionText.isEmpty() ? tr("Question") : state.attentionText, c.fg, 12), 1);
-        auto *go = button(tr("Go"), "teamWorkspaceGoToQuestion");
-        QObject::connect(go, &QPushButton::clicked, this, [this, host = m.host, session = m.session] { if (openSession) openSession(host, session); });
-        r->addWidget(go);
-        v->addLayout(r);
-    }
-    // Members: a click focuses the canvas and feed on one.
+    auto *w = new QWidget; w->setObjectName("teamWorkspaceMemberList");
+    auto *v = new QVBoxLayout(w); v->setContentsMargins(10, 10, 10, 10); v->setSpacing(6);
     auto *title = row(6); title->addWidget(label(tr("Members"), c.fg, 12, true)); title->addWidget(label(QString::number(team.members.size()), c.muted, 12)); title->addStretch();
     if (team.status == "planning" || team.status == "running" || team.status == "paused") {
         auto *add = button(tr("+ Member"), "teamWorkspaceAddMember");
-        add->setToolTip(tr("Add a member to the running team; it starts with the first task you give it"));
+        add->setToolTip(tr("Add a member; it starts with the first task it gets"));
         QObject::connect(add, &QPushButton::clicked, this, [this, id = team.id] { if (const auto *t = m_teams->team(id)) addMember(*t); });
         title->addWidget(add);
     }
     v->addLayout(title);
-    auto *membersBox = new QWidget; auto *mv = new QVBoxLayout(membersBox); mv->setContentsMargins(0, 0, 0, 0); mv->setSpacing(4);
     for (const auto &m : team.members) {
-        const auto status = memberStatus(team, m, live(m));
-        auto *b = card(c, m.id == m_focus ? c.accent : status.problem ? toneColor(c, status.tone) : QColor());
-        b->setObjectName("teamWorkspaceMember"); b->setCursor(Qt::PointingHandCursor); b->setProperty("teamMember", m.id);
-        auto *bh = new QHBoxLayout(b); bh->setContentsMargins(6, 4, 6, 4); bh->setSpacing(6);
-        auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(m.agent), c.fg).pixmap(16, 16)); bh->addWidget(tile);
-        auto *col = new QVBoxLayout; col->setSpacing(1);
+        const auto state = live(m);
+        const auto status = memberStatus(team, m, state);
+        auto *b = new MemberCard; b->setObjectName("teamWorkspaceMember"); b->setCursor(Qt::PointingHandCursor); b->setProperty("teamMember", m.id);
+        const QColor edge = m.id == m_focus ? c.accent : status.problem ? toneColor(c, status.tone) : c.border;
+        b->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceMember{background:%1;border:1px solid %2;border-radius:9px;}").arg(c.card.name(), edge.name()));
+        b->setToolTip(m.id == m_focus ? tr("Show every member") : tr("Show only %1's tasks").arg(team.roleOf(m.id)));
+        b->clicked = [this, id = m.id] { m_focus = m_focus == id ? QString() : id; scheduleRender(); };
+        auto *bh = new QHBoxLayout(b); bh->setContentsMargins(8, 6, 6, 6); bh->setSpacing(8);
+        auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(m.agent), c.fg).pixmap(16, 16)); bh->addWidget(tile, 0, Qt::AlignTop);
+        auto *col = new QVBoxLayout; col->setSpacing(2);
         auto *top = row(4);
         const QString role = team.roleOf(m.id);
         top->addWidget(new Pill(role, roleColor(role, m_dark)));
-        top->addWidget(elided(m.model.isEmpty() ? m.agent : m.model, c.text3, 11), 1);
+        if (state.attention) { auto *q = label(QStringLiteral("?1"), c.warn, 10, true); q->setToolTip(tr("A question waits in its session")); top->addWidget(q); }
+        top->addWidget(elided(m.model.isEmpty() ? agentNames.value(m.agent, m.agent) : m.model, c.text3, 11), 1);
         col->addLayout(top);
-        col->addWidget(new StatusMark(status.text, toneColor(c, status.tone), status.kind));
+        int done = 0, total = 0, open = 0;
+        for (const auto &t : team.tasks) if (t.assignee == m.id) { ++total; done += t.status == "accepted"; open += !t.finished(); }
+        // A member added to a running team waits for its first task.
+        const bool waiting = !m.lead && m.session.isEmpty() && !open && m.error.isEmpty() && (team.status == "running" || team.status == "paused");
+        if (waiting) {
+            auto *wait = row(6);
+            wait->addWidget(label(tr("Waiting for a task"), c.muted, 11));
+            auto *assign = button(tr("Assign task…"), "teamWorkspaceAssign"); assign->setProperty("ghost", true);
+            QObject::connect(assign, &QPushButton::clicked, this, [this, id = m.id, assign] { if (const auto *t = m_teams->watched()) assignMenu(*t, id, assign->mapToGlobal(QPoint(0, assign->height()))); });
+            auto *ask = button(tr("Ask lead to plan for it"), "teamWorkspaceAskLead"); ask->setProperty("ghost", true);
+            QObject::connect(ask, &QPushButton::clicked, this, [this, role] {
+                m_conversation->send(tr("I added %1 to the team. Plan a task for it and reassign it with hgs team reassign.").arg(role));
+            });
+            wait->addWidget(assign); wait->addWidget(ask); wait->addStretch();
+            col->addLayout(wait);
+        } else col->addWidget(new StatusMark(team.status == "planning" && m.session.isEmpty() && !m.lead ? tr("On approval") : status.text, toneColor(c, status.tone), status.kind));
         bh->addLayout(col, 1);
-        int done = 0, total = 0; for (const auto &t : team.tasks) if (t.assignee == m.id) { ++total; done += t.status == "accepted"; }
-        auto *ratio = label(QStringLiteral("%1/%2").arg(done).arg(total), c.muted, 11); ratio->setFont(NewSessionDense::mono(11)); bh->addWidget(ratio);
-        auto *focus = new QPushButton(b); focus->setFlat(true); focus->setStyleSheet(QStringLiteral("background:transparent;border:none;"));
-        focus->setGeometry(0, 0, 4000, 4000); focus->setObjectName("teamWorkspaceFocusMember");
-        focus->setToolTip(m.id == m_focus ? tr("Show every member") : tr("Show only %1's tasks").arg(role));
-        QObject::connect(focus, &QPushButton::clicked, this, [this, id = m.id] { m_focus = m_focus == id ? QString() : id; scheduleRender(); });
-        mv->addWidget(b);
+        auto *right = new QVBoxLayout; right->setSpacing(3);
+        auto *ratio = label(QStringLiteral("%1/%2").arg(done).arg(total), c.muted, 11); ratio->setFont(NewSessionDense::mono(11)); ratio->setAlignment(Qt::AlignRight);
+        right->addWidget(ratio);
+        QList<QColor> parts; for (int i = 0; i < qMin(total, 8); ++i) parts << (i < done * qMin(total, 8) / qMax(1, total) ? c.accent : c.border);
+        if (parts.isEmpty()) parts << c.border;
+        auto *bar = new Progress(parts, 4, c.border); bar->setFixedWidth(26); right->addWidget(bar, 0, Qt::AlignRight);
+        bh->addLayout(right);
+        auto *more = new QToolButton; more->setIcon(workspaceIcon("more", c.muted)); more->setAutoRaise(true); more->setObjectName("teamWorkspaceMemberMenu");
+        more->setToolTip(tr("Member actions"));
+        QObject::connect(more, &QToolButton::clicked, this, [this, id = m.id, more] {
+            const auto *t = m_teams->watched();
+            if (const auto *member = t ? t->member(id) : nullptr) memberMenu(*t, *member, more->mapToGlobal(QPoint(0, more->height())));
+        });
+        bh->addWidget(more, 0, Qt::AlignTop);
+        v->addWidget(b);
     }
-    mv->addStretch();
-    auto *scroll = new QScrollArea; scroll->setWidget(membersBox); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
-    v->addWidget(scroll, 1);
-    v->addWidget(leadDock(team));
+    v->addStretch();
     return w;
 }
 
-QWidget *TeamWorkspace::leadDock(const Team &team)
+void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPoint &global)
+{
+    QMenu menu(this);
+    menu.setObjectName("teamWorkspaceMemberActions");
+    const QString role = team.roleOf(member.id);
+    auto *open = menu.addAction(tr("Open session"), this, [this, host = member.host, session = member.session] { if (openSession) openSession(host, session); });
+    open->setEnabled(!member.session.isEmpty());
+    auto *message = menu.addAction(tr("Message…"), this, [this, host = member.host, session = member.session, role] {
+        bool ok = false;
+        const auto text = QInputDialog::getMultiLineText(this, tr("Message %1").arg(role), tr("Message"), {}, &ok);
+        if (ok && !text.trimmed().isEmpty() && sendMessage) sendMessage(host, session, text.trimmed());
+    });
+    message->setEnabled(!member.session.isEmpty());
+    if (!member.lead) {
+        if (member.state == "paused") menu.addAction(tr("Resume member"), this, [this, id = member.id] { m_panel->act("resume-member", {{"member", id}}); });
+        else menu.addAction(tr("Pause member"), this, [this, id = member.id] { m_panel->act("pause-member", {{"member", id}}); });
+        auto *relaunch = menu.addAction(tr("Relaunch"), this, [this, id = member.id] { m_panel->act("relaunch", {{"member", id}}); });
+        const bool failed = member.session.isEmpty() && !member.error.isEmpty();
+        relaunch->setEnabled(failed);
+        if (!failed) relaunch->setToolTip(tr("Starts automatically with its first task"));
+        QStringList open;
+        for (const auto &t : team.tasks) if (t.assignee == member.id && !t.finished()) open << QStringLiteral("#%1").arg(t.id);
+        auto *remove = menu.addAction(tr("Remove from team…"), this, [this, id = member.id, role, name = team.name] {
+            if (m_panel->confirm("teamRemoveMemberConfirm", tr("Remove member?"), tr("Remove %1 from %2? Its session keeps running; it gets no more tasks.").arg(role, name), tr("Remove")))
+                m_panel->act("remove-member", {{"member", id}});
+        });
+        remove->setEnabled(open.isEmpty());
+        if (!open.isEmpty()) remove->setToolTip(tr("Has open tasks %1 — reassign or cancel them first").arg(open.join(QStringLiteral(", "))));
+        auto *replace = menu.addAction(tr("Replace model… (future)"));
+        replace->setEnabled(false); replace->setToolTip(tr("Not supported yet: use Remove + Add member"));
+    }
+    menu.setToolTipsVisible(true);
+    menu.exec(global);
+}
+
+void TeamWorkspace::assignMenu(const Team &team, const QString &member, const QPoint &global)
+{
+    QMenu menu(this);
+    menu.setObjectName("teamWorkspaceAssignMenu");
+    for (const auto &t : team.tasks) {
+        if (t.finished() || t.assignee == member) continue;
+        const bool ready = team.ready.contains(t.id);
+        auto *action = menu.addAction(QStringLiteral("#%1 %2%3").arg(t.id).arg(t.title, ready ? tr("  · ready") : QString()));
+        QObject::connect(action, &QAction::triggered, this, [this, task = t.id, member] { m_panel->act("reassign", {{"task", task}, {"member", member}}); });
+    }
+    if (menu.isEmpty()) menu.addAction(tr("No open task"))->setEnabled(false);
+    menu.exec(global);
+}
+
+void TeamWorkspace::renderCoordinator(const Team &team, const QString &status)
 {
     const Colors c = colorsFor(m_dark);
     const auto *lead = team.member(team.lead);
-    auto *dock = card(c);
-    dock->setObjectName("teamLeadDock");
-    auto *v = new QVBoxLayout(dock); v->setContentsMargins(8, 6, 8, 6); v->setSpacing(4);
-    auto *head = row(6);
-    if (lead) { auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(lead->agent), c.fg).pixmap(14, 14)); head->addWidget(tile); }
-    head->addWidget(label(tr("Lead"), c.fg, 12, true));
+    // The header is rebuilt whole; the conversation below stays.
+    auto *outer = static_cast<QHBoxLayout *>(m_coordinatorHead->layout());
+    outer->setContentsMargins(0, 0, 0, 0);
+    while (auto *item = outer->takeAt(0)) { if (auto *w = item->widget()) retire(w); delete item; }
+    auto *inner = new QWidget;
+    auto *h = new QHBoxLayout(inner); h->setContentsMargins(12, 8, 10, 8); h->setSpacing(8);
+    if (lead) { auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(lead->agent), c.fg).pixmap(20, 20)); h->addWidget(tile, 0, Qt::AlignTop); }
+    auto *col = new QVBoxLayout; col->setSpacing(1);
+    auto *top = row(6);
+    top->addWidget(label(tr("Coordinator"), c.fg, 13, true));
     if (lead) {
-        head->addWidget(label(lead->model.isEmpty() ? lead->agent : lead->model, c.muted, 11));
         const auto s = memberStatus(team, *lead, m_live ? m_live(*lead) : Live{});
-        head->addWidget(new StatusMark(s.text, toneColor(c, s.tone), s.kind), 1);
-    } else head->addStretch();
-    auto *open = new QToolButton; open->setIcon(workspaceIcon("external", c.fg)); open->setAutoRaise(true); open->setToolTip(tr("Open the lead's conversation"));
-    open->setObjectName("teamLeadDockOpen");
+        top->addWidget(new StatusMark(s.text, toneColor(c, s.tone), s.kind));
+    }
+    top->addStretch();
+    col->addLayout(top);
+    if (lead) col->addWidget(elided(lead->session + (lead->model.isEmpty() ? QString() : QStringLiteral(" · ") + lead->model), c.dim, 11));
+    h->addLayout(col, 1);
+    auto *open = new QToolButton; open->setIcon(workspaceIcon("external", c.fg)); open->setAutoRaise(true); open->setToolTip(tr("Open in Activity"));
+    open->setObjectName("teamCoordinatorOpen");
     open->setEnabled(lead && !lead->session.isEmpty());
     if (lead) QObject::connect(open, &QToolButton::clicked, this, [this, host = lead->host, session = lead->session] { if (openSession) openSession(host, session); });
-    auto *minimize = new QToolButton; minimize->setIcon(workspaceIcon(m_leadMinimized ? "chevron-right" : "chevron-down", c.fg)); minimize->setAutoRaise(true);
-    minimize->setToolTip(m_leadMinimized ? tr("Show the lead's recent team events") : tr("Minimize"));
-    minimize->setObjectName("teamLeadDockMinimize");
-    QObject::connect(minimize, &QToolButton::clicked, this, [this] { m_leadMinimized = !m_leadMinimized; scheduleRender(); });
-    head->addWidget(open); head->addWidget(minimize);
-    v->addLayout(head);
-    if (m_leadMinimized) return dock;
-    // The lead's last team events: reports, decisions, plans.
-    static const QStringList kinds{"reported", "accepted", "rejected", "planned", "approved", "briefed", "notice_unconfirmed", "done"};
-    int shown = 0;
-    for (const auto &event : m_teams->feed()) {
-        if (!kinds.contains(event.value("kind").toString())) continue;
-        const auto line = feedLine(team, event);
-        auto *l = label(line.text, line.tone == Tone::Neutral ? c.text2 : toneColor(c, line.tone), 11); l->setWordWrap(true);
-        v->addWidget(l);
-        if (++shown == 4) break;
-    }
-    if (team.status == "planning") v->addWidget(label(team.tasks.isEmpty() ? tr("Waiting for the plan") : tr("Plan ready for review"), c.folder, 11));
-    auto *composer = row(4);
-    auto *text = new QLineEdit; text->setObjectName("teamLeadDockMessage"); text->setPlaceholderText(tr("Message Lead…"));
-    text->setEnabled(lead && !lead->session.isEmpty());
-    auto *send = button(tr("Send"), "teamLeadDockSend", true); send->setEnabled(text->isEnabled());
-    const auto deliver = [this, text, lead = lead ? *lead : Member{}] {
-        const auto message = text->text().trimmed();
-        if (message.isEmpty() || lead.session.isEmpty() || !sendMessage) return;
-        sendMessage(lead.host, lead.session, message);
-        text->clear();
-    };
-    QObject::connect(send, &QPushButton::clicked, this, deliver);
-    QObject::connect(text, &QLineEdit::returnPressed, this, deliver);
-    composer->addWidget(text, 1); composer->addWidget(send);
-    v->addLayout(composer);
-    return dock;
+    h->addWidget(open, 0, Qt::AlignTop);
+    outer->addWidget(inner); inner->show();
+    m_conversation->setSession(lead ? lead->host : QString(), lead ? lead->session : QString());
+    // Quick asks by the team's state.
+    QStringList asks;
+    if (team.status == "planning") asks = {tr("Explain the plan"), tr("Split the biggest task")};
+    else if (status == "stuck") asks = {tr("What blocks the team?"), tr("Re-plan around the problem")};
+    else if (team.status == "running") asks = {tr("Summarize status"), tr("Re-plan remaining work")};
+    m_conversation->setQuickAsks(asks);
 }
 
 QWidget *TeamWorkspace::feed(const Team &team)
@@ -426,15 +613,20 @@ QWidget *TeamWorkspace::feed(const Team &team)
     w->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceFeed{border-top:1px solid %1;}").arg(c.border.name()));
     auto *v = new QVBoxLayout(w); v->setContentsMargins(12, 4, 12, 6); v->setSpacing(2);
     auto *head = row(6);
-    auto *toggle = new QToolButton; toggle->setText(m_feedOpen ? QStringLiteral("⌄") : QStringLiteral("›")); toggle->setAutoRaise(true);
+    auto *toggle = new QToolButton; toggle->setIcon(workspaceIcon(m_feedOpen ? "chevron-down" : "chevron-right", c.fg)); toggle->setAutoRaise(true);
     toggle->setObjectName("teamWorkspaceFeedToggle");
     QObject::connect(toggle, &QToolButton::clicked, this, [this] { m_feedOpen = !m_feedOpen; scheduleRender(); });
     head->addWidget(toggle);
     head->addWidget(label(tr("Feed"), c.fg, 12, true));
-    head->addWidget(label(tr("%n event(s)", nullptr, int(m_teams->feed().size())), c.muted, 11));
-    head->addStretch();
+    const auto items = m_teams->feed();
+    head->addWidget(label(items.size() == 1 ? tr("1 event") : tr("%1 events").arg(items.size()), c.muted, 11));
+    // Collapsed, the header carries the latest event.
+    if (!m_feedOpen && !items.isEmpty()) {
+        const auto line = feedLine(team, items.first());
+        head->addWidget(elided(QStringLiteral("· %1 %2").arg(clock(line.at), line.text), c.text3, 11), 1);
+    } else head->addStretch();
     if (m_teams->feedHasOlder() && m_feedOpen) {
-        auto *older = button(tr("Load older"), "teamWorkspaceFeedOlder");
+        auto *older = button(tr("Load older"), "teamWorkspaceFeedOlder"); older->setProperty("ghost", true);
         QObject::connect(older, &QPushButton::clicked, this, [this] { m_teams->loadOlder(); });
         head->addWidget(older);
     }
@@ -442,7 +634,7 @@ QWidget *TeamWorkspace::feed(const Team &team)
     if (!m_feedOpen) return w;
     auto *rows = new QWidget; auto *rv = new QVBoxLayout(rows); rv->setContentsMargins(0, 0, 0, 0); rv->setSpacing(1);
     const QString focusRole = m_focus.isEmpty() ? QString() : team.roleOf(m_focus);
-    for (const auto &event : m_teams->feed()) {
+    for (const auto &event : items) {
         const auto line = feedLine(team, event);
         if (!focusRole.isEmpty() && line.by != focusRole && !line.text.contains(focusRole)) continue;
         auto *r = row(6);
@@ -454,7 +646,7 @@ QWidget *TeamWorkspace::feed(const Team &team)
     }
     rv->addStretch();
     auto *scroll = new QScrollArea; scroll->setWidget(rows); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setFixedHeight(180);
+    scroll->setFixedHeight(170);
     v->addWidget(scroll);
     return w;
 }
@@ -462,56 +654,120 @@ QWidget *TeamWorkspace::feed(const Team &team)
 void TeamWorkspace::addMember(const Team &team)
 {
     if (!m_teams->catalogReady()) m_teams->refreshCatalog();
-    QDialog dialog(this);
-    dialog.setObjectName("teamAddMemberDialog");
-    dialog.setWindowTitle(tr("Add member to %1").arg(team.name));
-    auto *form = new QFormLayout(&dialog);
-    auto *role = new QComboBox; role->setObjectName("teamAddMemberRole"); role->setEditable(true);
-    for (const auto &r : m_teams->catalog().roles) if (r.id != "lead") role->addItem(r.name, r.id);
+    if (m_popover) { retire(m_popover); m_popover = nullptr; }
+    const Colors c = colorsFor(m_dark);
+    auto *pop = new QFrame(this); pop->setObjectName("teamAddMember");
+    pop->setStyleSheet(QStringLiteral("QFrame#teamAddMember{background:%1;border:1px solid %2;border-radius:12px;}").arg(c.surface.name(), c.border.name()));
+    pop->setAttribute(Qt::WA_StyledBackground);
+    m_popover = pop;
+    auto *v = new QVBoxLayout(pop); v->setContentsMargins(14, 12, 14, 12); v->setSpacing(8);
+    auto *head = row(6);
+    head->addWidget(label(tr("Add member"), c.fg, 13, true));
+    head->addWidget(elided(tr("to %1").arg(team.name), c.dim, 12), 1);
+    auto *close = new QToolButton; close->setIcon(workspaceIcon("close", c.muted)); close->setAutoRaise(true);
+    head->addWidget(close);
+    v->addLayout(head);
+    const auto &catalog = m_teams->catalog();
+    v->addWidget(label(catalog.builtin ? tr("Role from the built-in catalog") : tr("Role from catalog v%1").arg(catalog.version), c.muted, 11));
+    // Role chips: picking one brings its defaults.
+    auto *chips = new QGridLayout; chips->setSpacing(4);
     auto *agent = new QComboBox; agent->setObjectName("teamAddMemberAgent");
-    for (const auto &[id, name] : std::initializer_list<std::pair<const char *, const char *>>{
-             {"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}})
-        agent->addItem(workspaceIcon(QString::fromLatin1(id), palette().color(QPalette::Text)), QString::fromLatin1(name), QString::fromLatin1(id));
+    for (const auto &a : agents) agent->addItem(workspaceIcon(a, c.fg), agentNames.value(a), a);
     auto *model = new QLineEdit; model->setObjectName("teamAddMemberModel"); model->setPlaceholderText(tr("default model"));
     auto *effort = new QComboBox; effort->setObjectName("teamAddMemberEffort"); effort->addItem(QStringLiteral("—"), QString());
     for (const auto *e : {"low", "medium", "high", "xhigh"}) effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
-    auto *permissions = new QComboBox; permissions->setObjectName("teamAddMemberPermissions");
-    permissions->addItem(tr("Account"), QString()); permissions->addItem(tr("Auto"), QStringLiteral("auto")); permissions->addItem(tr("Bypass"), QStringLiteral("bypass"));
-    auto *prompt = new QPlainTextEdit; prompt->setObjectName("teamAddMemberPrompt"); prompt->setFixedHeight(110);
-    prompt->setPlaceholderText(tr("What this member is for; the role's prompt from the catalog fills it"));
-    // A catalog role brings its defaults.
-    const auto fill = [&, this](const QString &text) {
-        const auto *r = m_teams->catalog().roleNamed(text);
-        if (!r) return;
-        agent->setCurrentIndex(qMax(0, agent->findData(r->agent.isEmpty() ? QStringLiteral("claude") : r->agent)));
-        model->setText(r->model);
-        effort->setCurrentIndex(qMax(0, effort->findData(r->effort)));
-        permissions->setCurrentIndex(qMax(0, permissions->findData(r->permissions)));
-        prompt->setPlainText(r->prompt);
-    };
-    QObject::connect(role, &QComboBox::currentTextChanged, &dialog, fill);
-    fill(role->currentText());
-    form->addRow(tr("Role"), role);
-    form->addRow(tr("Agent"), agent);
-    form->addRow(tr("Model"), model);
-    form->addRow(tr("Effort"), effort);
-    form->addRow(tr("Permissions"), permissions);
-    form->addRow(tr("Prompt"), prompt);
-    auto *note = new QLabel(tr("The member starts with the first task assigned to it: reassign one, or ask the lead."));
-    note->setWordWrap(true); form->addRow(note);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    buttons->button(QDialogButtonBox::Ok)->setText(tr("Add member")); buttons->button(QDialogButtonBox::Ok)->setObjectName("teamAddMemberOk");
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] { if (!role->currentText().trimmed().isEmpty()) dialog.accept(); });
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    form->addRow(buttons);
-    if (addMemberHook) addMemberHook(&dialog);
-    if (dialog.exec() != QDialog::Accepted) return;
-    const QString roleName = role->currentText().trimmed();
-    // New members share the team's folder policy: a worktree when others have one.
-    QString folder = QStringLiteral("shared");
-    for (const auto &m : team.members) if (!m.lead && m.folder == "worktree") folder = m.folder;
-    const QJsonObject member{{"id", nextMemberId(team, roleName)}, {"role", roleName}, {"agent", agent->currentData().toString()},
-                             {"model", model->text().trimmed()}, {"effort", effort->currentData().toString()},
-                             {"permissions", permissions->currentData().toString()}, {"folder", folder}, {"prompt", prompt->toPlainText().trimmed()}};
-    m_panel->act(QStringLiteral("add-member"), {{"member", member}});
+    auto *account = new QComboBox; account->setObjectName("teamAddMemberAccount"); account->addItem(tr("Default account"), QString());
+    auto *computer = new QComboBox; computer->setObjectName("teamAddMemberComputer");
+    computer->addItem(tr("this computer"), QString());
+    for (const auto &k : m_computers) if (!k.alias.isEmpty()) computer->addItem(k.label, k.alias);
+    auto *permissions = label(QString(), c.text2, 12); permissions->setObjectName("teamAddMemberPermissions");
+    auto *prompt = new QPlainTextEdit; prompt->setObjectName("teamAddMemberPrompt"); prompt->setFixedHeight(70);
+    prompt->setPlaceholderText(tr("What this member is for"));
+    auto *offline = label(QString(), c.warn, 11); offline->setWordWrap(true); offline->hide();
+    auto *ok = button(tr("Add member"), "teamAddMemberOk", true);
+    auto picked = std::make_shared<QString>();
+    int at = 0;
+    for (const auto &r : catalog.roles) {
+        if (r.id == "lead") continue;
+        auto *chip = button(r.name, "teamAddMemberRole"); chip->setProperty("chip", true); chip->setCheckable(true); chip->setProperty("role", r.id);
+        const QColor tone = r.color.isEmpty() ? roleColor(r.name, m_dark) : QColor(r.color);
+        chip->setStyleSheet(QStringLiteral("QPushButton{color:%1;border-color:%2;} QPushButton:checked{background:%3;border-color:%1;}")
+                                .arg(tone.name(), alpha(tone, .5).name(QColor::HexArgb), alpha(tone, .18).name(QColor::HexArgb)));
+        chips->addWidget(chip, at / 4, at % 4);
+        ++at;
+        QObject::connect(chip, &QPushButton::clicked, this, [this, id = r.id, picked, chip, agent, model, effort, permissions, prompt, ok] {
+            *picked = id;
+            for (auto *b : chip->parentWidget()->findChildren<QPushButton *>("teamAddMemberRole")) b->setChecked(b == chip);
+            const auto *role = m_teams->catalog().role(id);
+            if (!role) return;
+            agent->setCurrentIndex(qMax(0, agent->findData(role->agent.isEmpty() ? QStringLiteral("claude") : role->agent)));
+            model->setText(role->model);
+            effort->setCurrentIndex(qMax(0, effort->findData(role->effort)));
+            const QString mode = role->permissions == "auto" ? tr("Auto") : role->permissions == "bypass" ? tr("Bypass") : tr("Account's mode");
+            const QString folder = role->folder == "read_only" ? tr("Read only") : role->folder == "shared" ? tr("Shared folder") : tr("Own worktree");
+            permissions->setText(QStringLiteral("%1 · %2").arg(mode, folder));
+            prompt->setPlainText(role->prompt);
+            ok->setText(tr("Add %1").arg(role->name));
+            ok->setEnabled(true);
+        });
+    }
+    v->addLayout(chips);
+    auto *form = new QGridLayout; form->setHorizontalSpacing(8); form->setVerticalSpacing(6); form->setColumnStretch(1, 1);
+    const auto field = [&](int r, const QString &text, QWidget *w) { auto *l = label(text, c.muted, 12); l->setAlignment(Qt::AlignRight | Qt::AlignVCenter); form->addWidget(l, r, 0); form->addWidget(w, r, 1); };
+    field(0, tr("Agent"), agent);
+    auto *modelRow = new QWidget; auto *mh = new QHBoxLayout(modelRow); mh->setContentsMargins(0, 0, 0, 0); mh->setSpacing(6); mh->addWidget(model, 1); mh->addWidget(effort);
+    field(1, tr("Model"), modelRow);
+    field(2, tr("Account"), account);
+    field(3, tr("Computer"), computer);
+    field(4, tr("Permissions"), permissions);
+    field(5, tr("Prompt"), prompt);
+    v->addLayout(form);
+    v->addWidget(offline);
+    auto *note = label(tr("Defaults come from the role. The session starts when the member gets its first task."), c.dim, 11); note->setWordWrap(true);
+    v->addWidget(note);
+    auto *buttons = row(8);
+    auto *cancel = button(tr("Cancel"), "teamAddMemberCancel");
+    buttons->addWidget(cancel); buttons->addWidget(ok); buttons->addStretch();
+    v->addLayout(buttons);
+    ok->setEnabled(false);
+    // Accounts of the chosen computer and agent.
+    const auto fillAccounts = [this, account, agent, computer] { m_teams->client()->requestAccounts(computer->currentData().toString()); Q_UNUSED(agent); Q_UNUSED(account); };
+    QObject::connect(m_teams->client(), &HgsClient::accountsReady, pop, [account, agent, computer](quint64, const QString &host, const QJsonObject &result) {
+        if (host != computer->currentData().toString()) return;
+        const QString keep = account->currentData().toString();
+        account->clear(); account->addItem(QCoreApplication::translate("TeamWorkspace", "Default account"), QString());
+        for (const auto &value : result.value("profiles").toArray()) {
+            const auto p = value.toObject();
+            if (p.value("provider").toString() != agent->currentData().toString()) continue;
+            const bool out = p.value("account_status").toObject().value("status").toString() == "signed_out";
+            account->addItem(p.value("label").toString(p.value("id").toString()) + (out ? QCoreApplication::translate("TeamWorkspace", " (signed out)") : QString()), p.value("id").toString());
+        }
+        account->setCurrentIndex(qMax(0, account->findData(keep)));
+    });
+    QObject::connect(agent, &QComboBox::activated, pop, fillAccounts);
+    QObject::connect(computer, &QComboBox::activated, pop, [this, fillAccounts, computer, offline] {
+        fillAccounts();
+        QString warn;
+        for (const auto &k : m_computers) if (k.alias == computer->currentData().toString() && !k.online) warn = tr("Computer %1 is offline; the member starts once it is back.").arg(k.label);
+        offline->setText(warn); offline->setVisible(!warn.isEmpty());
+        placePopover();
+    });
+    fillAccounts();
+    QObject::connect(close, &QToolButton::clicked, pop, [this] { if (m_popover) { retire(m_popover); m_popover = nullptr; } });
+    QObject::connect(cancel, &QPushButton::clicked, pop, [this] { if (m_popover) { retire(m_popover); m_popover = nullptr; } });
+    QObject::connect(ok, &QPushButton::clicked, pop, [this, team, picked, agent, model, effort, account, computer, prompt] {
+        const auto *role = m_teams->catalog().role(*picked);
+        if (!role) return;
+        // New members share the team's folder policy: a worktree when others have one.
+        QString folder = QStringLiteral("shared");
+        for (const auto &m : team.members) if (!m.lead && m.folder == "worktree" && role->folder != "read_only" && role->folder != "shared") folder = m.folder;
+        const QJsonObject member{{"id", nextMemberId(team, role->name)}, {"role", role->name}, {"agent", agent->currentData().toString()},
+                                 {"model", model->text().trimmed()}, {"effort", effort->currentData().toString()}, {"account", account->currentData().toString()},
+                                 {"computer", computer->currentData().toString()}, {"permissions", role->permissions}, {"folder", folder},
+                                 {"prompt", prompt->toPlainText().trimmed()}};
+        m_panel->act(QStringLiteral("add-member"), {{"member", member}});
+        if (m_popover) { retire(m_popover); m_popover = nullptr; }
+    });
+    pop->show();
+    placePopover();
 }

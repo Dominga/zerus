@@ -197,3 +197,36 @@ minutes without a running team. The GUI supervises it later like the swarm worke
   catalog propose` (`hgs guide designer`). Its Team tab shows the draft: NEW / CHANGED / REMOVED proposals by kind
   with field-by-field old and new values, Keep / Reject / Undo, Discard draft, and Apply N changes (confirmed) as the
   next catalog version. Running teams keep their roster.
+
+## Desktop, iteration 2 (M7–M10, design D1–D4)
+
+Design: `design/agent-teams/BRIEF-2.md`, `HANDOFF.md` §12–§17, `IMPLEMENTATION-2.md`. Owner decisions on the open
+questions (2026-10-24): the coordinator shares the Team tab's side column with the members, split by a divider the owner
+moves (both halves scroll); one designer process whose conversation follows the selected session's project; plan editing
+stays in the inspector as well; the session list never collapses by itself.
+
+- **Team designer mode (M7).** Left: the designer of the selected session's project (`<agent>/<project>/team-designer`):
+  its conversation (`TeamConversation`: inspection polled while shown, guarded send) with quick asks, and its proposals as
+  cards (Keep / Reject / Undo, Show in catalog); not running, an empty state asks "What do you need?" and starts it.
+  Right: `TeamCatalogEditor`, one widget for this page and Settings > Teams — header with title and meta, segmented
+  Roles / Templates / Routing, a role or template list (230) beside an editor card, one scroll for the body. By hand:
+  edited items and fields get a warn dot, "N unsaved changes", Revert (confirmed) and Save catalog. With a draft (this
+  page only): counters per tab, NEW / CHANGED / REMOVED marks, old values struck on a danger tint and new ones on an
+  accent tint, Discard draft and Apply K changes (confirmed); a draft made on an older version shows a banner, Apply is
+  off and "Ask designer to redo on vN" asks it in its conversation.
+- **New team tab (M8).** `TeamNewTab`: coordinator card (this session, not started again; a busy warning), template
+  cards (+ No template), the goal and a team name taken from it, folder with Worktree per member or the non-Git warning,
+  members as a table from 760 px and as cards below with an error on each row, + Member from catalog roles, planning,
+  approval, max members, and a fixed footer with the reason Create waits and the creating state. The rows go to `create`
+  as entered.
+- **Team tab (M9).** Team bar (Pause / Stop…; Planning: Discard plan…, Send back — a comment to the coordinator —,
+  Approve & Run), Stuck and plan-error strips, Needs your answer (a calm line when nothing waits, so the canvas stays put),
+  segmented view and filter, the graph fitted to the canvas (0.8–1.15) and centered with its layer bands at full height,
+  the board's empty columns saying so, the feed with its latest event when folded. Planning edits the plan here too. The
+  side column: members (status, `?1`, progress, ⋯ menu: Open session, Message…, Pause / Resume, Relaunch after a failed
+  start, Remove when no task is open, Replace model shown as future) and the coordinator's conversation. + Member opens
+  a popover with the catalog's role chips and their defaults; a member added to a running team waits for a task, with
+  Assign task… and Ask lead to plan for it. Time reads 12m, 3h 12m, 3d 4h, 2w 3d.
+- **Inspector Team (M10).** A running team reads as a summary — status, progress, accepted and problems, Open Team,
+  Needs your answer, one line per member; the planning editor stays. No team: an empty state with New team… and Team
+  designer…. Nothing is wider than the panel.

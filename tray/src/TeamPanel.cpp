@@ -38,6 +38,7 @@ using namespace TeamUi;
 TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(parent), m_controller(controller)
 {
     setObjectName("teamPanel");
+    setStyleSheet(teamSheet(colorsFor(true)));
     auto *layout = new QVBoxLayout(this);
     m_outer = layout;
     layout->setContentsMargins(0, 0, 0, 0);
@@ -73,7 +74,13 @@ TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(pare
     render();
 }
 
-void TeamPanel::setTheme(bool dark) { m_dark = dark; m_designer->setDark(dark); scheduleRender(); }
+void TeamPanel::setTheme(bool dark)
+{
+    m_dark = dark;
+    setStyleSheet(teamSheet(colorsFor(dark)));   // accent primary buttons, segments, fields
+    m_designer->setDark(dark);
+    scheduleRender();
+}
 
 void TeamPanel::showDesigner(bool on)
 {
@@ -174,44 +181,41 @@ void TeamPanel::render()
     layout->setSpacing(12);
     const Team *team = m_controller->watched();
     if (!team && !m_team.isEmpty()) team = m_controller->team(m_team);
-    if (!team) {
-        auto *empty = label(m_team.isEmpty() ? tr("No team for this session") : tr("Loading team…"), c.text2, 13, true, "teamEmptyTitle");
-        layout->addWidget(empty);
-        if (m_team.isEmpty()) {
-            auto *hint = label(tr("Teams appear here when the selected session leads or works in one, or when you select a team "
-                                  "in the session list. A lead session creates one with hgs team create (hgs guide team)."), c.muted, 12);
-            hint->setWordWrap(true); hint->setObjectName("teamEmptyHint");
-            layout->addWidget(hint);
-            auto *actions = new QHBoxLayout; actions->setSpacing(8);
-            if (newTeam) {
-                auto *create = button(tr("New team…"), "teamEmptyNew", true);
-                QObject::connect(create, &QPushButton::clicked, this, [this] { newTeam(); });
-                actions->addWidget(create);
-            }
-            if (openDesigner) {
-                auto *designer = button(tr("Team designer…"), "teamEmptyDesigner");
-                QObject::connect(designer, &QPushButton::clicked, this, [this] { openDesigner(); });
-                actions->addWidget(designer);
-            }
-            actions->addStretch();
-            layout->addLayout(actions);
-        }
+    if (!team && m_team.isEmpty()) {
+        layout->addWidget(emptyState(narrow));
         if (answersChanged) answersChanged(0);
+    } else if (!team) {
+        layout->addWidget(label(tr("Loading team…"), c.text2, 13, true, "teamEmptyTitle"));
+        if (answersChanged) answersChanged(0);
+    } else if (team->status != "planning") {
+        // Running and later: a short summary; the work is in the Team tab (D4).
+        const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+        const QString status = displayStatus(*team, live);
+        layout->addWidget(summary(*team, status, narrow));
+        if (!m_notice.isEmpty()) {
+            auto *notice = label(m_notice, c.danger, 12, false, "teamNotice");
+            notice->setWordWrap(true);
+            layout->addWidget(notice);
+        }
+        const int waiting = Teams::answers(*team, live);
+        if (waiting) layout->addWidget(answers(*team));
+        layout->addWidget(summaryMembers(*team, narrow));
+        auto *foot = label(tr("Plan, graph and member changes live in the Team tab."), c.dim, 11); foot->setWordWrap(true);
+        layout->addWidget(foot);
+        if (answersChanged) answersChanged(waiting);
     } else {
         const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
         const QString status = displayStatus(*team, live);
-        const auto problemList = problems(*team, live);
         layout->addWidget(header(*team, status, narrow));
         if (!m_notice.isEmpty()) {
             auto *notice = label(m_notice, c.danger, 12, false, "teamNotice");
             notice->setWordWrap(true);
             layout->addWidget(notice);
         }
-        if (team->status == "planning") layout->addWidget(planning(*team));
-        if (status == "stuck") layout->addWidget(stuck(*team, problemList));
+        layout->addWidget(planning(*team));
         const int waiting = Teams::answers(*team, live);
         if (waiting) layout->addWidget(answers(*team));
-        layout->addWidget(team->status == "planning" ? planMembers(*team, narrow) : members(*team, narrow));
+        layout->addWidget(planMembers(*team, narrow));
         layout->addWidget(tasks(*team, narrow));
         if (team->full) layout->addWidget(feed(*team));
         if (answersChanged) answersChanged(waiting);
@@ -229,6 +233,96 @@ void TeamPanel::render()
         m_card->setTask(*team, m_openTask, live, m_dark);
         m_stack->setCurrentWidget(m_card);
     } else m_stack->setCurrentWidget(m_scroll);
+}
+
+QWidget *TeamPanel::emptyState(bool narrow)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *box = card(c); box->setObjectName("teamEmpty");
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(narrow ? 12 : 20, 20, narrow ? 12 : 20, 20); v->setSpacing(8);
+    auto *icon = new QLabel; icon->setPixmap(workspaceIcon("team", c.text2).pixmap(36, 36)); icon->setAlignment(Qt::AlignCenter);
+    v->addWidget(icon);
+    auto *title = label(tr("No team in this session"), c.fg, 13, true, "teamEmptyTitle"); title->setAlignment(Qt::AlignCenter);
+    v->addWidget(title);
+    auto *hint = label(tr("Build a team around a goal with this session as the coordinator, or set up roles and templates first."), c.muted, 12);
+    hint->setWordWrap(true); hint->setAlignment(Qt::AlignCenter); hint->setObjectName("teamEmptyHint");
+    v->addWidget(hint);
+    if (newTeam) {
+        auto *create = button(tr("New team…"), "teamEmptyNew", true);
+        QObject::connect(create, &QPushButton::clicked, this, [this] { newTeam(); });
+        v->addWidget(create);
+    }
+    if (openDesigner) {
+        auto *designer = button(tr("Team designer…"), "teamEmptyDesigner");
+        QObject::connect(designer, &QPushButton::clicked, this, [this] { openDesigner(); });
+        v->addWidget(designer);
+    }
+    return box;
+}
+
+QWidget *TeamPanel::summary(const Team &team, const QString &status, bool narrow)
+{
+    const Colors c = colorsFor(m_dark);
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    auto *box = card(c); box->setObjectName("teamCard");
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(10, 10, 10, 10); v->setSpacing(7);
+    auto *top = row(8);
+    auto *icon = new QLabel; icon->setPixmap(workspaceIcon("team", c.fg).pixmap(16, 16)); top->addWidget(icon);
+    auto *name = elided(team.name, c.fg, 14); QFont f = name->font(); f.setWeight(QFont::DemiBold); name->setFont(f);
+    name->setObjectName("teamName");
+    top->addWidget(name, 1);
+    auto *badge = new Pill(statusLabel(status), toneColor(c, statusTone(status)), status, false);
+    badge->setObjectName("teamStatusBadge");
+    top->addWidget(badge);
+    v->addLayout(top);
+    QList<QColor> segments;
+    for (auto tone : progress(team)) segments.append(toneColor(c, tone));
+    v->addWidget(new Progress(segments, 6, c.border));
+    const int problemCount = problems(team, live).size();
+    QString meta = tr("%1/%2 accepted").arg(accepted(team)).arg(team.tasks.size()).toHtmlEscaped();
+    if (problemCount) meta += QStringLiteral(" &nbsp;<span style=\"color:%1;\">%2</span>").arg(c.warn.name(),
+        problemCount == 1 ? tr("1 problem") : tr("%1 problems").arg(problemCount));
+    if (team.created > 0) meta += QStringLiteral(" &nbsp;· %1").arg(duration(QDateTime::currentSecsSinceEpoch() - team.created).toHtmlEscaped());
+    auto *metaLabel = new QLabel(meta); metaLabel->setTextFormat(Qt::RichText); metaLabel->setObjectName("teamLegend");
+    metaLabel->setStyleSheet(QStringLiteral("color:%1;font-size:11px;").arg(c.text3.name()));
+    v->addWidget(metaLabel);
+    if (status == "stuck") {
+        auto *stuckLine = label(tr("Stuck — nothing can start; see the Team tab."), c.warn, 12, false, "teamStuck"); stuckLine->setWordWrap(true);
+        v->addWidget(stuckLine);
+    }
+    auto *open = button(tr("Open Team"), "teamOpenTeam", true);
+    QObject::connect(open, &QPushButton::clicked, this, [this] { if (openWorkspace) openWorkspace(); });
+    v->addWidget(open);
+    Q_UNUSED(narrow);
+    return box;
+}
+
+QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
+{
+    const Colors c = colorsFor(m_dark);
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    auto *box = new QWidget; box->setObjectName("teamSummaryMembers");
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(2);
+    auto *title = row(6);
+    title->addWidget(label(tr("Members"), c.fg, 12, true));
+    title->addWidget(label(QString::number(team.members.size()), c.muted, 12));
+    title->addStretch();
+    v->addLayout(title);
+    for (const auto &m : team.members) {
+        const auto status = memberStatus(team, m, live(m));
+        auto *line = new QWidget; line->setObjectName("teamSummaryMember"); line->setFixedHeight(28);
+        auto *h = new QHBoxLayout(line); h->setContentsMargins(2, 0, 2, 0); h->setSpacing(6);
+        auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(m.agent), c.fg).pixmap(16, 16)); h->addWidget(tile);
+        const QString role = team.roleOf(m.id);
+        h->addWidget(new Pill(role, roleColor(role, m_dark)));
+        if (!narrow) h->addWidget(elided(m.model.isEmpty() ? m.agent : m.model, c.text3, 11), 1);
+        else h->addStretch();
+        auto *mark = new StatusMark(status.text, toneColor(c, status.tone), status.kind);
+        mark->setMaximumWidth(narrow ? 120 : 170);
+        h->addWidget(mark);
+        v->addWidget(line);
+    }
+    return box;
 }
 
 QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
@@ -684,8 +778,12 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
         auto *level = label(QStringLiteral("%1%").arg(int(std::round(m_zoom * 100))), c.text3, 11, false, "teamZoomLevel");
         auto *in = button(QStringLiteral("+"), "teamZoomIn"); QObject::connect(in, &QPushButton::clicked, this, [=] { zoomTo(m_zoom + .1); });
         auto *fit = button(tr("Fit"), "teamZoomFit");
-        tools->addWidget(out); tools->addWidget(level); tools->addWidget(in); tools->addWidget(fit); tools->addStretch();
-        tools->addWidget(label(tr("Hover = chain · click = actions"), c.muted, 11));
+        out->setFixedWidth(28); in->setFixedWidth(28); fit->setFixedWidth(44);
+        tools->addWidget(out); tools->addWidget(level); tools->addWidget(in); tools->addWidget(fit);
+        // The hint gives way first: nothing may be wider than the panel.
+        auto *hint = elided(tr("Hover = chain · click = actions"), c.muted, 11);
+        hint->setAlignment(Qt::AlignRight | Qt::AlignVCenter); hint->setMinimumWidth(0); hint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        tools->addWidget(hint, 1);
         v->addLayout(tools);
         auto *area = new QScrollArea; area->setObjectName("teamGraphArea");
         area->setWidget(view); area->setWidgetResizable(false); area->setFrameShape(QFrame::NoFrame);

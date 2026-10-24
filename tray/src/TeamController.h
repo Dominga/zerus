@@ -46,6 +46,7 @@ public:
     // The Team designer page polls the catalog too, apart from the Team tab.
     void setWatchCatalogPage(bool watch) { m_watchCatalogPage = watch; if (watch) refreshCatalog(); }
     bool available() const { return m_available; }
+    HgsClient *client() const { return m_client; }
     static void setPollInterval(int milliseconds);
 signals:
     void teamsChanged();

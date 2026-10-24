@@ -124,8 +124,8 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     Ok(receipt)
 }
 
-/// The lead (or you) answers a member's question in the member's session.
-/// A permission request is never answered here: it stays with the owner.
+/// The lead (or you) answers a member's question or permission request in the
+/// member's session, by its exact id and hash.
 fn answer(input: &Value) -> anyhow::Result<Value> {
     let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
     let by = actor(&team, "answer", input)?;
@@ -137,10 +137,9 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     let inspected = super::dispatcher::hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, std::time::Duration::from_secs(45))?;
     ensure!(inspected.status.success(), "{}", String::from_utf8_lossy(&inspected.stderr).trim());
     let record: Value = serde_json::from_slice(&inspected.stdout).context("invalid inspect output")?;
-    let card = record["pending_questions"].as_array().into_iter().flatten()
+    record["pending_questions"].as_array().into_iter().flatten()
         .find(|card| card["question_id"] == question && card["question_hash"] == hash)
         .context("This question changed or is no longer pending")?;
-    ensure!(card["approval"] != true, "A permission request is the owner's to answer");
     let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
     let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;

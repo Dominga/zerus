@@ -4,6 +4,7 @@
 //! before it is sent and never sent again once it may have arrived.
 use super::super::*;
 use super::model::*;
+use super::ops;
 use super::plan;
 use super::store::{Event, Store};
 use anyhow::Context;
@@ -35,8 +36,7 @@ pub(crate) struct Seen {
     pub free: bool,
     pub idle: bool,
     pub reply_at: Option<f64>,
-    /// Waiting on an answer: a question, or for DeepSeek also a permission
-    /// request, which inspection tells apart.
+    /// Waiting on an answer: a question or a permission request.
     pub asking: bool,
 }
 
@@ -66,7 +66,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 free,
                 idle,
                 reply_at: record["reply_at"].as_f64(),
-                asking: live && matches!(field("phase"), "question" | "input"),
+                asking: live && matches!(field("phase"), "question" | "input" | "approval"),
             });
         }
     }
@@ -175,7 +175,8 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         return steps;
     }
     // A member asks the lead, not the owner, once the lead is free; one at a
-    // time. Permission requests stay with the owner.
+    // time. Its permission requests go to the lead as well (the owner's
+    // choice); the lead asks the owner when it should not decide.
     if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
         if let Some(member) = team.members.iter().find(|m| {
             m.id != team.lead && m.state != MemberState::Removed && session_of(m, seen).is_some_and(|s| s.asking)
@@ -258,7 +259,8 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     let at = if member_host.is_empty() { String::new() } else { format!("@{report_host} ") };
     text += &format!(
         "\nWhen you finish, report once (hgs guide team) with JSON on stdin:\n  hgs {at}team report --json\n  {}\n\
-         Summarize what changed, where, and how you checked it.",
+         Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
+         the report as your last message: Zerus gives it to the lead. A blocker goes to the lead too: ask it, not the owner.",
         json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
     );
     text
@@ -311,7 +313,14 @@ pub(crate) fn brief_text(team: &Team) -> String {
 /// A member's question as the lead reads it, with the answer to send back.
 pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> String {
     let role = team.role_of(&member.id);
-    let mut text = format!("[Zerus team \u{b7} from: {role} \u{b7} question]\n{role} asks you, the lead, instead of the owner:\n");
+    let approval = card["approval"] == true;
+    let mut text = if approval {
+        format!("[Zerus team \u{b7} from: {role} \u{b7} permission]\n{role} asks you, the lead, for a permission instead of the owner. \
+                 Allow only what its task needs inside the team's folder; deny anything that would change other folders, the \
+                 system or permissions above the project, or delete what it cannot restore. When in doubt, deny and ask the owner.\n")
+    } else {
+        format!("[Zerus team \u{b7} from: {role} \u{b7} question]\n{role} asks you, the lead, instead of the owner:\n")
+    };
     let mut answers = Vec::new();
     for item in card["questions"].as_array().into_iter().flatten() {
         let id = item["id"].as_str().unwrap_or_default();
@@ -673,8 +682,8 @@ fn notify_lead(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result
     })
 }
 
-/// Gives the lead the member's first question it has not had. A permission
-/// request is the owner's. Inspection runs at most every 20 seconds per member.
+/// Gives the lead the member's first question or permission request it has not
+/// had. Inspection runs at most every 20 seconds per member.
 fn forward_question(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
     static CHECKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> = std::sync::OnceLock::new();
     let key = format!("{}\n{member_id}", team.id);
@@ -692,7 +701,7 @@ fn forward_question(store: &mut Store, team: &Team, member_id: &str) -> anyhow::
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
     let Some(card) = record["pending_questions"].as_array().into_iter().flatten().find(|card| {
-        card["approval"] != true && card["can_answer"] != false
+        card["can_answer"] != false
             && !member.asked.contains(&format!("{}:{}", card["question_id"].as_str().unwrap_or_default(), card["question_hash"].as_str().unwrap_or_default()))
     }) else {
         return Ok(());
@@ -806,7 +815,27 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
-        Step::NoReport { task } => change(store, &team.id, |team, events| {
+        Step::NoReport { task } => {
+            // The member's last reply is its report when it ran no command
+            // (a sandbox may keep it from the team's files); only without a
+            // reply does the task show No report.
+            let attempt = team.task(*task).and_then(|t| t.attempts.last()).cloned();
+            let session = attempt.as_ref().and_then(|a| team.member(&a.member)).and_then(|m| m.session.clone());
+            if let (Some(attempt), Some(session)) = (attempt, session) {
+                if let Ok(reply) = last_reply(&session) {
+                    let role = team.role_of(&attempt.member);
+                    let input = json!({"task":task,"attempt":attempt.id,
+                        "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
+                    let member = attempt.member.clone();
+                    let done = change(store, &team.id, |team, events| {
+                        ops::apply(team, "report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events).map(|_| ())
+                    });
+                    if done.is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            change(store, &team.id, |team, events| {
             let role = team.task(*task).and_then(|t| t.attempts.last()).map(|a| team.role_of(&a.member)).unwrap_or_default();
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
                 if attempt.state == AttemptState::Delivered && !attempt.no_report {
@@ -815,7 +844,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 }
             }
             Ok(())
-        }),
+            })
+        }
         Step::NotifyLead { task } => notify_lead(store, &team.id, *task),
     }
 }
@@ -1106,12 +1136,12 @@ mod tests {
         // A busy lead gets it later.
         let busy = session("claude/x/lead", "r0", false);
         assert!(!steps(&team, &[busy, asking], 1.0).iter().any(|s| matches!(s, Step::Question { .. })));
-        // DeepSeek reports questions and permission requests as input.
+        // DeepSeek reports questions and permission requests as input; the others say which.
         let listing = json!([{"sessions":[{"name":"dsh/x/a","state":"running","activity":"attention","phase":"input"},
             {"name":"codex/x/b","process_state":"running","activity":"idle","phase":"question"},
             {"name":"codex/x/c","process_state":"running","activity":"idle","phase":"approval"}]}]);
         let asked: Vec<bool> = seen(&listing).iter().map(|s| s.asking).collect();
-        assert_eq!(asked, [true, true, false]);
+        assert_eq!(asked, [true, true, true]);
         let member = team.member("dev").unwrap();
         let card = json!({"question_id":"q1","question_hash":"h1","questions":[{"id":"0","header":"Access","question":"How should I proceed?",
             "options":[{"id":"0","label":"Full access","description":"no disk changes"},{"id":"1","label":"Stop"}],"allow_other":true}]});

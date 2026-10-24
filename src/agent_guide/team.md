@@ -28,7 +28,9 @@ Lead, from your own session:
     {"team":"ID","member":"MEMBER","question_id":"Q","expected_question_hash":"H",
      "answers":[{"question_id":"ITEM","selected_option_ids":["0"],"text":""}]} |
       hgs team answer --json
-  Permission requests stay with the owner; say so if the owner should decide.
+  Members' permission requests come the same way ([Zerus team · from: ROLE ·
+  permission]; options allow and deny): allow only what the task needs inside
+  the team's folder, deny the rest, and ask the owner when in doubt.
   The owner's decisions are final; yours cannot undo them.
 
 Member: a task arrives as a message that begins with [Zerus team. Do it,

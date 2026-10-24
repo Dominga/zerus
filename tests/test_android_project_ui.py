@@ -252,7 +252,7 @@ class HostedJavaAdmissionTests(unittest.TestCase):
     def test_precheckout_retains_actual_release_and_names_refused_guard(self):
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
         block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
-        for refused, image in ((None, "20261012.334.1"), (None, "20261018.339.1"), ("hosted_image", "unknown"), ("java_base_build", "20261012.334.1")):
+        for refused, image in ((None, "20261012.334.1"), (None, "20261018.339.1"), (None, "20261023.334.3"), ("hosted_image", "unknown"), ("java_base_build", "20261012.334.1")):
             with self.subTest(refused=refused, image=image), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 java = root / "jdk"
@@ -355,8 +355,8 @@ class PhoneServiceReadinessTests(unittest.TestCase):
 
 
 class WorkflowBoundaryTests(unittest.TestCase):
-    def test_only_two_reviewed_images_are_allowed_with_the_same_version_guards(self):
-        self.assertEqual(UI.HOSTED_IMAGES, {"20261012.334.1", "20261018.339.1"})
+    def test_only_reviewed_images_are_allowed_with_the_same_version_guards(self):
+        self.assertEqual(UI.HOSTED_IMAGES, {"20261012.334.1", "20261018.339.1", "20261023.334.3"})
         workflow = (ROOT / ".github/workflows/android-project-ui.yml").read_text()
         block = textwrap.dedent(workflow.split("python3 -I -B - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
         assignment = next(node for node in ast.parse(block).body if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "HOSTED_IMAGES")

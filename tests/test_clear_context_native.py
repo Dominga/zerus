@@ -212,6 +212,33 @@ wire_api="responses"
         elif self.animations == 'false':
             self.assertFalse(visible(), 'The reduced-motion fixture must not draw the native logo')
 
+    def test_ultra_picker_returns_to_a_sendable_composer_and_clears(self):
+        import test_clear_context
+        models=[dict(slug='gpt-6.1-sol',display_name='GPT-6.1-Sol',default_reasoning_level='medium',
+                     supported_reasoning_levels=[dict(effort=e) for e in ['low','medium','high','xhigh','max','ultra']])]
+        (self.native_home/'models_cache.json').write_text(json.dumps(dict(models=models)))
+        self.record.update(model='gpt-6.1-sol',phase='idle',activity='idle',active_tools={})
+        self.write_record()
+        def change(level):
+            request=dict(request_id=str(uuid.uuid4()),expected_run_id=self.run_id,
+                         expected_conversation_id=self.conversation_id,model='gpt-6.1-sol',effort=level)
+            result=subprocess.run([str(test_input.HGS),'settings',self.name,'--json'],
+                                  input=json.dumps(request),env=self.env,text=True,capture_output=True,timeout=20)
+            self.assertEqual(result.returncode,0,result.stderr+'\n'+self.screen())
+            self.assertEqual(json.loads(result.stdout)['status'],'applied')
+            current=json.loads(self.record_path.read_text())
+            self.assertNotIn('settings_unconfirmed_at',current)
+            self.assertEqual(current['resume_settings'],dict(model='gpt-6.1-sol',effort=level))
+        before=(self.native_home/'config.toml').read_bytes()
+        change('ultra')
+        self.assertTrue(any(row.startswith('» ') for row in self.screen().splitlines()),self.screen())
+        change('high')
+        change('ultra')
+        self.assertTrue(test_clear_context.ClearContext.inspect(self)['clear_context_supported'])
+        self.assertEqual(test_clear_context.ClearContext.clear(self)['status'],'confirmed')
+        self.assertEqual(json.loads(self.record_path.read_text())['pid'],self.record['pid'])
+        self.assertEqual((self.native_home/'config.toml').read_bytes(),before,'Session choices never save account defaults')
+
     def test_clear_is_visible_before_the_deferred_native_hook(self):
         import test_clear_context
         before = test_clear_context.ClearContext.inspect(self)

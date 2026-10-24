@@ -1556,6 +1556,10 @@ typed key and returned to its empty prompt leaves nothing unconfirmed, so anothe
 change or a message can follow, including a new session's first message. When the
 agent has not reacted to a typed key, further changes and messages wait for its
 next native event: finish or cancel the change in Terminal and send a message there.
+Codex Ultra's double-chevron composer remains an ordinary input field: a
+confirmed session-only change permits another effort choice, messaging and
+context clearing with the same identity and draft checks. Earlier unconfirmed
+attempts retain their original receipts and are never replayed automatically.
 
 Codex model choices use the selected account's `models_cache.json` and sort by
 ascending signed 32-bit `priority`, preserving source order for ties, as in

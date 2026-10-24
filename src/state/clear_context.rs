@@ -93,13 +93,13 @@ fn codex_reset_panel_below(screen: &str, cwd: &str, home: &Path) -> bool {
     // one `›` row, the composer at the left edge, with only the header block
     // above it; the composer check then needs the cursor there and no draft.
     let lines: Vec<_> = screen.lines().collect();
-    let mut prompts = lines.iter().enumerate().filter(|(_, line)| line.trim_start().starts_with('›'));
+    let mut prompts = lines.iter().enumerate().filter(|(_, line)| input::codex_prompt(line.trim_start()).is_some());
     let (Some((composer, input)), None) = (prompts.next(), prompts.next()) else { return false; };
     // Its text is the dim placeholder, one of the two that both reviewed
     // releases draw, or nothing: a draft fails here before the composer check.
     let placeholder = |text: &str| text.is_empty() || text.strip_prefix(' ')
         .is_some_and(|text| ["Ask Codex to do anything", "Ask a follow-up question"].contains(&text));
-    if !input.strip_prefix('›').map(str::trim_end).is_some_and(placeholder) { return false; }
+    if !input::codex_prompt(input).map(str::trim_end).is_some_and(placeholder) { return false; }
     let mut rows: Vec<_> = lines[..composer].iter().map(|line| line.trim()).filter(|line| !line.is_empty()).collect();
     // The released idle screen can include its settled decorative logo. Match
     // the complete known pose; arbitrary braille, prose and partial frames do
@@ -372,7 +372,7 @@ fn command_row(agent: &str, row: &str, x: usize, command: &str) -> bool {
     let before=row.chars().take(x).collect::<String>();
     let after=row.chars().skip(x).collect::<String>();
     match agent {
-        "codex" => before.trim()==format!("› {command}") && after.trim().is_empty(),
+        "codex" => input::codex_prompt(before.trim()).is_some_and(|text|text.trim()==command) && after.trim().is_empty(),
         "claude" => [format!("❯ {command}"),format!("> {command}")].iter().any(|prompt|prompt==before.replace('\u{a0}'," ").trim()) && after.trim().is_empty(),
         // Kimi 2.1 shows an argument hint such as <instruction> after the command.
         "kimi" => before.trim()==format!("│ > {command}") && after.trim().strip_suffix('│').is_some_and(|hint|{
@@ -909,10 +909,11 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     #[test] fn exact_command_only() {
         assert!(command_row("codex","› /clear",8,"/clear"));
+        assert!(command_row("codex","» /clear",8,"/clear"));
         assert!(command_row("claude","❯\u{a0}/clear",8,"/clear"));
         assert!(command_row("kimi"," │ > /clear       │",11,"/clear"));
         assert!(command_row("kimi"," │ > /compact  <instruction>          │",13,"/compact"));
         for row in [" │ > /compact extra  │"," │ > /compact  <a> <b> │"," │ > /compact  <instruction"] {assert!(!command_row("kimi",row,13,"/compact"));}
-        for row in ["› /clear extra","› draft /clear","shell$ /clear"] {assert!(!command_row("codex",row,8,"/clear"));}
+        for row in ["› /clear extra","› draft /clear","» /clear extra","» draft /clear","shell$ /clear"] {assert!(!command_row("codex",row,8,"/clear"));}
     }
 }

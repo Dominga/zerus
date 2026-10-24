@@ -1181,7 +1181,9 @@ fn command_ready(record: &Value, command: &str) -> Result<bool> {
                     completion.split_whitespace().next() == command.strip_prefix('/')
                 })
         }
-        _ => before.trim() == format!("› {command}") && after.trim().is_empty(),
+        "codex" => input::codex_prompt(before.trim()).is_some_and(|text| text.trim() == command)
+            && after.trim().is_empty(),
+        _ => false,
     })
 }
 

@@ -57,8 +57,13 @@ class HostedMacAdmission(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'could not be verified'):
                 scope.user_domain(60000)
         with patch.object(scope, 'privileged', return_value=subprocess.CompletedProcess(
-                [], 113, '', 'Could not find domain for user 60000')):
+                [], 0, 'system = {\n\tsubdomains = {\n\t\tuser/501\n\t\tpid/12\n\t}\n}\n', '')):
             self.assertFalse(scope.user_domain(60000))
+            self.assertTrue(scope.user_domain(501))
+        with patch.object(scope, 'privileged', return_value=subprocess.CompletedProcess(
+                [], 0, 'system = {\n}\n', '')):
+            with self.assertRaisesRegex(ValueError, 'Unexpected launchd subdomain inventory'):
+                scope.user_domain(60000)
 
     def test_preexisting_or_changed_domain_never_authorizes_bootout(self):
         for absent, actual in [(False, {'UniqueID': '60000'}), (True, {'UniqueID': 'different'})]:

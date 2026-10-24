@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import selectors
 import shutil
 import stat
@@ -77,16 +78,24 @@ def identity(name):
 
 
 def user_domain(uid):
-    result = privileged("/bin/launchctl", "print", "user/" + str(uid), check=False)
-    if result.returncode == 0:
-        if len(result.stdout) > 1024**2 or not result.stdout.startswith("user/" + str(uid) + " = {"):
-            raise ValueError("Unexpected private launchd domain identity")
-        return True
-    message = result.stdout + result.stderr
-    if any(marker in message for marker in ("Could not find domain", "Could not find specified domain",
-                                           "Could not find specified service")):
-        return False
-    raise ValueError("Private launchd domain could not be verified: " + message[:300])
+    # Looking up user/UID itself materializes an otherwise absent domain.
+    # Read the existing parent inventory instead, including after bootout.
+    result = privileged("/bin/launchctl", "print", "system", check=False)
+    if result.returncode or len(result.stdout) > 1024**2:
+        raise ValueError("Private launchd domain could not be verified: " + result.stderr[:300])
+    parts = result.stdout.split("\tsubdomains = {\n")
+    if len(parts) != 2 or "\n\t}" not in parts[1]:
+        raise ValueError("Unexpected launchd subdomain inventory")
+    rows = parts[1].split("\n\t}", 1)[0].splitlines()
+    domains = set()
+    for row in rows:
+        label = row.strip()
+        if label.startswith("user/"):
+            match = re.fullmatch(r"user/([0-9]+)", label)
+            if match is None:
+                raise ValueError("Unknown user domain identity in the launchd inventory")
+            domains.add(int(match[1]))
+    return uid in domains
 
 
 def close_domain(name, uid, expected, absent_before):

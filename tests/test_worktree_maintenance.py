@@ -143,7 +143,9 @@ class Maintenance(Repository, unittest.TestCase):
 
     def test_executable_running_from_checkout_protects_it_with_another_cwd(self):
         if not shutil.which('sleep'):self.skipTest('sleep fixture unavailable')
-        tree=self.managed();image=tree/'fixture-sleep';shutil.copy2(shutil.which('sleep'),image)
+        # System macOS executables carry restricted file flags. The fixture
+        # needs their bytes and executable mode, not those system-only flags.
+        tree=self.managed();image=tree/'fixture-sleep';shutil.copyfile(shutil.which('sleep'),image);image.chmod(0o755)
         child=subprocess.Popen([str(image),'30'],cwd=self.root,env=self.env)
         try:
             r=self.call('review','--path',str(self.repo),'--worktree',str(tree),'--json')['worktrees'][0]

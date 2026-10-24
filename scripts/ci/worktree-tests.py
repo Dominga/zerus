@@ -74,6 +74,9 @@ def main():
         child.wait(timeout=5)
         child.stdout.close()
     print("Worktree process scope: private PID namespace, no capabilities, inaccessible-process control passed", flush=True)
+    # sudo removes PYTHONPATH even with -E. Resolve this checkout's fixtures
+    # after privileges are dropped instead of relying on a loader environment.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
     unittest.main(module=None, argv=[sys.argv[0], "-v", *sys.argv[2:]])
 
 

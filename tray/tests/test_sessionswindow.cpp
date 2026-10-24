@@ -11900,7 +11900,8 @@ elif c=='approval-log':
     QVERIFY(FakeCli::install(path,original.readAll().replace("if False:pass\n","if False:pass\n"+journal)));
     SessionsWindow window(FakeCli::program(path)); window.setFleet(fleet()); window.resize(1280,900); window.show(); window.showUpdates();
     auto *sections=window.findChild<QListWidget *>("settingsSections"); QVERIFY(sections);
-    QCOMPARE(sections->item(7)->text(),QString("Automatic approvals")); sections->setCurrentRow(7);
+    const auto approvalSections=sections->findItems(QString("Automatic approvals"),Qt::MatchExactly);
+    QCOMPARE(approvalSections.size(),1); sections->setCurrentItem(approvalSections.front());
     auto *page=window.findChild<AutomaticApprovalSettings *>("automaticApprovalSettings"); QVERIFY(page); QVERIFY(page->isVisible());
     QVERIFY(!page->findChild<QCheckBox *>("automaticApprovalsEnabled")->isChecked());
     auto *table=page->findChild<QTableWidget *>("approvalJournal"); QTRY_COMPARE(table->rowCount(),5);

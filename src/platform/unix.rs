@@ -755,12 +755,22 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
         if read!=size {return Err(std::io::Error::last_os_error());}
         Ok(info)
     }
-    let count=unsafe {libc::proc_listallpids(std::ptr::null_mut(),0)};
-    if count<=0 || count>32704 {return Err(error());}
-    let mut pids=vec![0 as libc::c_int;count as usize+64];
-    let found=unsafe {libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void,(pids.len()*std::mem::size_of::<libc::c_int>()) as libc::c_int)};
-    if found<=0 || found as usize>=pids.len() {return Err(error());}
-    pids.truncate(found as usize);
+    // Kernel uid-filtered rosters establish ownership before inspection. A
+    // protected foreign process need not disclose BSD info to this user. Both
+    // effective and real uid are required; an unreadable owned process still
+    // makes the sample incomplete. libproc returns bytes, not a PID count.
+    const PROC_UID_ONLY: u32 = 4;
+    const PROC_RUID_ONLY: u32 = 5;
+    let mut pids=std::collections::BTreeSet::new();
+    for kind in [PROC_UID_ONLY, PROC_RUID_ONLY] {
+        let mut buffer=vec![0 as libc::c_int;32768];
+        let bytes=(buffer.len()*std::mem::size_of::<libc::c_int>()) as libc::c_int;
+        let found=unsafe {libc::proc_listpids(kind,uid,buffer.as_mut_ptr() as *mut libc::c_void,bytes)};
+        if found<=0 || found>=bytes || !(found as usize).is_multiple_of(std::mem::size_of::<libc::c_int>()) {return Err(error());}
+        pids.extend(buffer.into_iter().take(found as usize/std::mem::size_of::<libc::c_int>()).filter(|pid|*pid>0));
+        if pids.len()>=32768 {return Err(error());}
+    }
+    if !pids.contains(&(std::process::id() as libc::c_int)) {return Err(error());}
     let mut rows=Vec::new();
     for pid in pids.into_iter().filter(|pid|*pid>0) {
         if std::time::Instant::now()>=deadline {return Err(error());}

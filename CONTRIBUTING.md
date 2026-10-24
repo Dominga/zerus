@@ -81,8 +81,17 @@ the tests without an uncontained retry. For a focused local run, use
 On macOS these three complete modules run sequentially after the other Python
 integration jobs. Exec/exit fixtures can briefly leave a live owned process
 without readable BSD metadata, and production must retain folders in that case.
-This changes only fixture scheduling: no process or test is excluded and the
-production guard remains strict.
+Disposable upstream GitHub macOS runners can also own protected service processes
+whose metadata is permanently unreadable. `scripts/ci/macos-worktree-tests.py`
+creates one locked, unprivileged temporary user for each complete module there.
+The normal CLI, all fixtures, real process blockers and private tmux servers run
+under that UID with a clean environment and private home. A kernel UID inventory
+and real interpreter preflight establish this scope; no process is filtered from
+an individual CLI call. The account is removed only after an empty UID inventory
+and matching directory-service identity. Uncertain cleanup fails and retains the
+scope for VM disposal. Owner Macs and other hosts refuse account creation before
+allocation or sudo; local macOS checks continue under the current user. No test is
+excluded and the production guard remains strict.
 
 `check-source.py` keeps the desktop's Unix children from inheriting its descriptors
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects

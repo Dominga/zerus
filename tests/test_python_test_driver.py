@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import subprocess
 import tempfile
 import importlib.util
 from pathlib import Path
@@ -12,6 +13,36 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('integration_driver', ROOT/'scripts/ci/python-tests.py')
 driver = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(driver)
+scope_spec = importlib.util.spec_from_file_location('mac_worktree_scope', ROOT/'scripts/ci/macos-worktree-tests.py')
+scope = importlib.util.module_from_spec(scope_spec)
+scope_spec.loader.exec_module(scope)
+
+
+class HostedMacAdmission(unittest.TestCase):
+    def test_owner_and_non_upstream_hosts_refuse_before_allocation_or_sudo(self):
+        admitted = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', GITHUB_REPOSITORY='ufna/zerus')
+        for system, changes in [('Darwin', {'GITHUB_ACTIONS': ''}),
+                ('Darwin', {'RUNNER_ENVIRONMENT': 'self-hosted'}),
+                ('Darwin', {'GITHUB_REPOSITORY': 'fixture/fork'}), ('Linux', {})]:
+            with self.subTest(system=system, changes=changes), \
+                    patch.dict(os.environ, dict(admitted, **changes), clear=True), \
+                    patch.object(scope.platform, 'system', return_value=system), \
+                    patch.object(scope, 'command') as command, \
+                    patch.object(scope.tempfile, 'mkdtemp') as allocate:
+                with self.assertRaisesRegex(ValueError, 'disposable hosted runner'):
+                    scope.run('test_worktrees', Path('/nonexistent/normal-hgs'))
+                command.assert_not_called()
+                allocate.assert_not_called()
+
+    def test_unknown_directory_service_failure_never_proves_account_absence(self):
+        for code, output in [(1, 'permission denied'), (56, 'unrelated error')]:
+            with self.subTest(code=code), patch.object(scope, 'dscl',
+                    return_value=subprocess.CompletedProcess([], code, output, '')):
+                with self.assertRaisesRegex(ValueError, 'could not be verified'):
+                    scope.identity('_fixture')
+        with patch.object(scope, 'dscl', return_value=subprocess.CompletedProcess(
+                [], 56, '<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)', '')):
+            self.assertIsNone(scope.identity('_fixture'))
 
 
 class IntegrationScheduling(unittest.TestCase):
@@ -59,7 +90,7 @@ class Scope(unittest.TestCase):
                 with patch.multiple(driver, ROOT=root, TESTS=tests, RESULTS=results,
                         DURATIONS=results/'durations.json', SEED=root/'absent-seed.json', partition_jobs=partition), \
                      patch.object(driver.sys,'platform','darwin'), \
-                     patch.dict(os.environ,{'ZERUS_PYTHON_JOBS':'2'}), contextlib.redirect_stdout(io.StringIO()):
+                     patch.dict(os.environ,{'ZERUS_PYTHON_JOBS':'2','GITHUB_ACTIONS':'','RUNNER_ENVIRONMENT':''}), contextlib.redirect_stdout(io.StringIO()):
                     failed=driver.main()
                 self.assertEqual(failed,unsequenced)
                 for name in driver.WORKTREE_MODULES:

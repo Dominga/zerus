@@ -76,6 +76,9 @@ def run(job):
     # then retain checkouts; positive deletion fixtures need their own inventory.
     if sys.platform == "linux" and job.split(".")[0] in WORKTREE_MODULES:
         command = [sys.executable, str(Path(__file__).with_name("worktree-tests.py")), *names]
+    if sys.platform == "darwin" and os.environ.get("GITHUB_ACTIONS") == "true" and job in WORKTREE_MODULES:
+        command = [sys.executable, str(Path(__file__).with_name("macos-worktree-tests.py")),
+                   "--hgs", os.environ.get("HGS_TEST_BIN", ""), job]
     try:
         result = subprocess.run(command, cwd=ROOT, env=environment(), capture_output=True, text=True, timeout=TIMEOUT)
         output, failed = result.stdout + result.stderr, result.returncode != 0

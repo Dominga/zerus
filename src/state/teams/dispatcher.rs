@@ -56,12 +56,13 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
             let live = !matches!(field("state"), "paused" | "stopped" | "archived")
                 && (field("state") == "running" || field("process_state") == "running" || field("runtime_state") == "live");
             let idle = live && field("activity") == "idle";
+            // An idle agent whose own jobs run in the background (Background:
+            // a watcher, an MCP server, a long check) still takes messages.
             let free = idle
                 && matches!(field("phase"), "" | "idle" | "ready")
                 && record["optional_questions"]["count"].as_u64().unwrap_or(0) == 0
                 && record["auth_required"] != true
-                && record["send_available"] != false
-                && record["process_work"]["count"].as_u64().unwrap_or(0) == 0;
+                && record["send_available"] != false;
             sessions.push(Seen {
                 host: host.clone(),
                 name: field("name").to_owned(),
@@ -1194,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn listed_sessions_are_free_only_when_live_idle_and_unblocked() {
+    fn listed_sessions_are_free_when_live_idle_and_unblocked_even_in_the_background() {
         let listing = json!([
             {"host":"laptop","sessions":[
                 {"name":"codex/x/a","runtime_state":"live","process_state":"running","activity":"idle","phase":"idle",
@@ -1206,7 +1207,8 @@ mod tests {
             {"host":"old","sessions":[{"name":"sh/y/f"}]}]);
         let seen = seen(&listing);
         let free: Vec<_> = seen.iter().filter(|s| s.free).map(|s| s.name.as_str()).collect();
-        assert_eq!(free, ["codex/x/a", "dsh/x/b"]);
+        // Background jobs (codex/x/e) do not keep a message away.
+        assert_eq!(free, ["codex/x/a", "dsh/x/b", "codex/x/e"]);
         assert_eq!((seen[0].host.as_str(), seen[5].host.as_str(), seen[0].reply_at), ("", "old", Some(5.0)));
         assert!(seen[4].idle && !seen[2].idle);
     }

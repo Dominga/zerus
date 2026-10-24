@@ -151,6 +151,20 @@ fn deepseek_exact_call_mapping_and_generation_prevent_duplicates_and_reuse() {
     assert_ne!(jobs.keys().next(), next.keys().next());
 }
 #[test]
+fn deepseek_windows_pwsh_calls_and_jobs_are_shell_jobs() {
+    let mut r = record("dsh");
+    r["backend"] = json!("dsh");
+    let inspected = json!({"generation":"g1","page":{"records":[
+        {"event":{"type":"tool/call","time":1000,"data":{"callId":"call-p","name":"pwsh","arguments":{"command":"Start-Sleep 20","run_in_background":true}}}},
+        {"event":{"type":"tool/call","time":1500,"data":{"callId":"call-r","name":"read","arguments":{"path":"README.md"}}}}
+    ]},"jobs":[{"id":"pwsh-1","callId":"call-p","kind":"pwsh","owner":r["conversation_id"],"label":"Start-Sleep 20","status":"running","startedAt":1000,"controllable":true}]});
+    let jobs = native::dsh(&r, &inspected);
+    assert_eq!(jobs.len(), 1);
+    let j = jobs.values().next().unwrap();
+    assert_eq!(j["command"], "Start-Sleep 20");
+    assert_eq!(j["status"], "running");
+}
+#[test]
 fn bounded_outputs_and_projection_do_not_leak_output() {
     let r = record("claude");
     let mut j = new_job(&r, "child-a", "a", "echo", 1.);

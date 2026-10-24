@@ -526,6 +526,8 @@ pub(super) fn output_path(record: &Value, job: &Value) -> Result<Option<PathBuf>
     }
     Ok(Some(path))
 }
+// Official dsh shell tools: bash, or pwsh where Windows composes PowerShell.
+const DSH_SHELLS: [&str; 2] = ["bash", "pwsh"];
 pub(super) fn dsh(record: &Value, inspected: &Value) -> Jobs {
     let mut jobs = Jobs::new();
     for row in inspected["page"]["records"]
@@ -536,7 +538,7 @@ pub(super) fn dsh(record: &Value, inspected: &Value) -> Jobs {
         let e = &row["event"];
         let data = &e["data"];
         let at = e["time"].as_f64().unwrap_or(0.) / 1000.;
-        if e["type"] == "tool/call" && data["name"] == "bash" {
+        if e["type"] == "tool/call" && DSH_SHELLS.contains(&string(data, "name")) {
             let call = data
                 .get("id")
                 .or_else(|| data.get("callId"))
@@ -600,7 +602,7 @@ pub(super) fn dsh(record: &Value, inspected: &Value) -> Jobs {
         put(&mut jobs, job);
     }
     for native in inspected["jobs"].as_array().into_iter().flatten() {
-        if native["kind"] != "bash" {
+        if !DSH_SHELLS.contains(&string(native, "kind")) {
             continue;
         }
         let owner = native.get("owner").and_then(Value::as_str).unwrap_or("");

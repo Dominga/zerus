@@ -30,24 +30,25 @@ export function apply(ctx, config) {
   const owned = new Map(), opening = new Map(), questions = new Map();
   const generation = randomUUID();
   const shellContext = new AsyncLocalStorage(), shellCalls = new Map(), jobCalls = new Map();
+  // Windows composes the official pwsh tools instead of bash; both run shell jobs.
+  const shellTools = new Set(['bash', 'pwsh']);
   const jobRegistry = ctx.get('jobs');
   if (jobRegistry) ctx.on('dispose',jobRegistry.events.subscribe({owners:'scope'},event => {
     const call = shellContext.getStore();
-    if (event.type === 'registered' && event.job.kind === 'bash' && call?.owner === event.job.owner) {
+    if (event.type === 'registered' && shellTools.has(event.job.kind) && call?.owner === event.job.owner) {
       call.jobId=event.job.id;jobCalls.set(event.job.id,call);
     }
     if (event.type === 'removed') jobCalls.delete(event.job.id);
   }));
   ctx.on('tools/execute',async (exec,next) => {
-    if (['bash', 'pwsh'].includes(exec.name)) {
-      const refused = checkCommand(exec.arguments?.command, os.homedir());
-      if (refused) {
-        const { message } = refused;
-        return {content: [{type: 'text', text: 'Error: ' + message}], isError: true,
-          error: {message, info: {name: 'CommandGuardError', code: 'HGS_COMMAND_GUARD'}}};
-      }
+    if (!shellTools.has(exec.name)) return next();
+    const refused = checkCommand(exec.arguments?.command, os.homedir());
+    if (refused) {
+      const { message } = refused;
+      return {content: [{type: 'text', text: 'Error: ' + message}], isError: true,
+        error: {message, info: {name: 'CommandGuardError', code: 'HGS_COMMAND_GUARD'}}};
     }
-    if (exec.name !== 'bash' || !exec.agent?.session?.id) return next();
+    if (!exec.agent?.session?.id) return next();
     const call={callId:exec.callId,owner:exec.agent.session.id,command:String(exec.arguments?.command ?? '').slice(0,16000),
       cwd:exec.arguments?.workdir?.slice(0,4096),startedAt:Date.now(),status:'running'};
     const key=JSON.stringify([call.owner,call.callId]);shellCalls.set(key,call);
@@ -317,7 +318,7 @@ export function apply(ctx, config) {
     const jobs = ctx.get('jobs');
     return { generation, baseline, page,
       lifecycleActions: agentId ? [] : ["rename", ...(!parentLive ? ["resume", "forget"] : owned.get(sessionId)?.agent === parentLive ? [...(lifecycleIdle ? ["pause"] : []), "forget"] : [])],
-      jobs: jobs && request.includeProcesses !== false ? jobOwners.flatMap(owner => jobs.list(owner).filter(job => job.kind === 'bash' && job.owner === owner)
+      jobs: jobs && request.includeProcesses !== false ? jobOwners.flatMap(owner => jobs.list(owner).filter(job => shellTools.has(job.kind) && job.owner === owner)
         .map(job => ({ ...job, callId:jobCalls.get(job.id)?.callId, controllable: owned.has(sessionId) && Boolean(ctx.agents.get(owner)) }))) : undefined,
       shellCalls:request.includeProcesses !== false ? [...shellCalls.values()].filter(call=>jobOwners.includes(call.owner)) : undefined,
       childMode: child?.mode, childSendSupported: !unstarted && child?.mode === 'continuable' && Boolean(parentLive), goal,

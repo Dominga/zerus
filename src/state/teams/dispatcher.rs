@@ -175,7 +175,9 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                 _ => {}
             }
         }
-        if attempt.state == AttemptState::Reported && attempt.notice == Notice::Pending {
+        // Only a report that still waits for a decision: one the lead (or you)
+        // already decided from the status needs no message.
+        if attempt.state == AttemptState::Reported && attempt.notice == Notice::Pending && task.status == TaskStatus::Submitted {
             let lead = team.member(&team.lead).and_then(|m| session_of(m, seen));
             if lead.is_some_and(|lead| lead.free) {
                 steps.push(Step::NotifyLead { task: task.id });
@@ -1191,6 +1193,10 @@ mod tests {
         assert!(!busy_lead.contains(&Step::NotifyLead { task: 1 }));
         assert!(busy_lead.iter().any(|s| matches!(s, Step::Adopt { member, .. } if member == "qa")));
         assert!(steps(&team, &[session("claude/x/lead", "r0", true)], 1.0).contains(&Step::NotifyLead { task: 1 }));
+        // Decided before the lead heard of it: no message.
+        let mut decided = team.clone();
+        decided.task_mut(1).unwrap().status = TaskStatus::Accepted;
+        assert!(!steps(&decided, &[session("claude/x/lead", "r0", true)], 1.0).contains(&Step::NotifyLead { task: 1 }));
     }
 
     #[test]

@@ -56,6 +56,7 @@ class NativeHarness(unittest.TestCase):
             source = source.replace('applyPermissions(handle.agent, permissionMode);', '')
             source = source.replace('applyPermissions(handle.agent, p.permissionMode);', '')
             bridge.write_text(source)
+            shutil.copyfile(REPO / 'src/dsh/command-guard.mjs', cls.root / 'command-guard.mjs')
         patch = [
             {'id': 'llm-deepseek', 'disabled': True},
             {'id': 'agent-default-model', 'config': {'provider': 'hgs-test', 'model': 'test-a'}},
@@ -206,6 +207,20 @@ class NativeHarness(unittest.TestCase):
         self.assertFalse(job['capabilities']['stop'])
         result=subprocess.run([str(HGS),'processes',b['name'],'--output',job['id'],'--run',b['run_id'],'--conversation',b['conversation_id']],env=self.env,text=True,capture_output=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr);self.assertIn('foreground-output',json.loads(result.stdout)['output'])
+
+    def test_command_guard_returns_a_tool_error_even_in_bypass(self):
+        binding = self.create(permissionMode='bypass')
+        self.cli('send', binding, self.payload(binding, text='SHELL_GUARD_FIXTURE', attachments=[]))
+        data = self.wait(lambda: (d if d['phase'] == 'idle' and any(
+            e['type'] == 'PostToolUse' for e in d['events']) else None)
+            if (d := self.cli('inspect', binding)) else None)
+        results = [e['detail'] for e in data['events'] if e['type'] == 'PostToolUse']
+        self.assertTrue(any('Zerus blocked this command:' in text for text in results), results)
+        self.assertFalse(any('guard-should-not-run' in text for text in results), results)
+        native = self.rpc('inspect', {'sessionId': binding['conversation_id']})
+        self.assertFalse(native['shellCalls'])
+        self.assertFalse(native['jobs'])
+        self.assertEqual(data.get('processes', {}).get('active_count', 0), 0)
 
     def test_native_manual_compaction_is_confirmed_before_continuing(self):
         b=self.create()

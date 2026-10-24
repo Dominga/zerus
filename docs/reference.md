@@ -5,6 +5,43 @@
 This reference covers session lifecycle, desktop workflows and native integration
 limits. Run `hgs -h` for the complete command syntax.
 
+## Command guard
+
+Zerus checks shell command text before execution in tracked Claude, Codex and
+Kimi `PreToolUse` hooks (including subagents), and in the DeepSeek bridge's
+`bash` and `pwsh` tools. A refusal starts with `Zerus blocked this command:` and
+tells the agent how to correct it. Hook refusals exit with code 2; DeepSeek
+receives a tool error with code `HGS_COMMAND_GUARD`.
+
+The first phase has three rules:
+
+- `readonly-variable`: writes to PowerShell read-only automatic variables,
+  including assignments, loop variables, parameters and `Set-Variable`. Use
+  a dedicated name such as `$appHome` instead of `$HOME` or `$PID`.
+- `protected-path`: recognizable deletion, move-source or destructive mirror
+  targets that name a filesystem root, a home directory, system directories,
+  or protected profile directories such as `.ssh`, `.codex` and `AppData`.
+  Ordinary cleanup of an explicit disposable subdirectory remains available.
+- `empty-variable`: deletion targets such as `"$out\\*"` that can become a root
+  wildcard when a variable is empty. Use a preceding nonempty literal path
+  assignment in straight-line code, an explicit path, or shell `${VAR:?}`.
+  Conditional assignments and dynamic reassignments do not establish safety.
+
+This check is independent of permission modes (including `bypass` and
+`danger-full-access`) and automatic tool approvals. There is no override switch.
+It only inspects text: no commands, expansions, filesystem lookups or network
+requests run during inspection. Lexical path normalization and known literal
+assignments catch common accidents, but this is not a shell interpreter or a
+sandbox. Computed paths, symlinks, encoded scripts and other execution languages
+need runtime protection beyond this phase. OpenCode is not covered. Commands
+over 256 KiB or more than eight nested shell command wrappers receive a
+`protected-path` refusal asking the agent to split the command.
+
+A running DeepSeek host retains its loaded bridge. It needs a restart after its
+sessions have been safely closed to load the guard; upgrading Zerus never
+restarts or hot-reloads a host that owns live agents. The shared acceptance
+corpus is `tests/fixtures/command-guard.json`.
+
 ## CLI sessions
 
 `hgs` starts a command in a named project tmux session and attaches locally or

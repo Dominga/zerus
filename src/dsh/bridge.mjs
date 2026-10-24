@@ -4,6 +4,8 @@
 import net from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
+import { checkCommand } from './command-guard.mjs';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
@@ -31,6 +33,14 @@ export function apply(ctx, config) {
     if (event.type === 'removed') jobCalls.delete(event.job.id);
   }));
   ctx.on('tools/execute',async (exec,next) => {
+    if (['bash', 'pwsh'].includes(exec.name)) {
+      const refused = checkCommand(exec.arguments?.command, os.homedir());
+      if (refused) {
+        const { message } = refused;
+        return {content: [{type: 'text', text: 'Error: ' + message}], isError: true,
+          error: {message, info: {name: 'CommandGuardError', code: 'HGS_COMMAND_GUARD'}}};
+      }
+    }
     if (exec.name !== 'bash' || !exec.agent?.session?.id) return next();
     const call={callId:exec.callId,owner:exec.agent.session.id,command:String(exec.arguments?.command ?? '').slice(0,16000),
       cwd:exec.arguments?.workdir?.slice(0,4096),startedAt:Date.now(),status:'running'};

@@ -16,6 +16,7 @@ use std::{
 
 const VERSION: &str = "0.2.1-rc.2";
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
+const COMMAND_GUARD: &str = include_str!("../dsh/command-guard.mjs");
 fn bindings() -> PathBuf {
     root().join("dsh/bindings")
 }
@@ -202,6 +203,7 @@ fn ensure_host(record: &Value) -> Result<()> {
         ));
     }
     let script = dir.join("hgs-bridge.mjs");
+    atomic(&dir.join("command-guard.mjs"), COMMAND_GUARD)?;
     atomic(&script, BRIDGE)?;
     let socket = endpoint(&dir);
     // The startup lock excludes competing HGS starters. Only unlink a stale

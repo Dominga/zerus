@@ -1,4 +1,8 @@
 #include "TeamPanel.h"
+#include "TeamDesignerPanel.h"
+#include "TeamTaskCard.h"
+#include "TeamWidgets.h"
+#include <QStackedWidget>
 #include "NewSessionDense.h"
 #include "TeamController.h"
 #include "WorkspaceIcons.h"
@@ -29,429 +33,67 @@
 
 using namespace Teams;
 
-namespace {
-
-struct Colors {
-    QColor fg, text2, text3, muted, dim, accent, accentMuted, warn, danger, folder, surface, border, card, tile;
-    bool dark = true;
-};
-
-Colors colorsFor(bool dark)
-{
-    const auto skin = WorkspaceSkin::current();
-    const auto t = NewSessionDense::tokens(skin, dark);
-    const auto &p = skin.palette(dark);
-    Colors c;
-    c.dark = dark; c.fg = t.text; c.text2 = t.text2; c.text3 = t.text3; c.muted = t.muted; c.dim = t.dim;
-    c.accent = t.accent; c.warn = t.warn; c.danger = t.danger; c.folder = t.folder;
-    c.accentMuted = QColor(dark ? "#5c9e86" : "#4f8f78");
-    c.surface = QColor(p.surface.isEmpty() ? (dark ? "#1b1f26" : "#ffffff") : p.surface);
-    c.border = t.border; c.card = t.field; c.tile = QColor(dark ? "#0f1318" : "#eef2f5");
-    return c;
-}
-
-QColor toneColor(const Colors &c, Tone tone)
-{
-    switch (tone) {
-    case Tone::Active: return c.accent;
-    case Tone::Assigned: return c.text3;
-    case Tone::Done: return c.accentMuted;
-    case Tone::Muted: return c.muted;
-    case Tone::Dim: return c.dim;
-    case Tone::Warn: return c.warn;
-    case Tone::Danger: return c.danger;
-    case Tone::Planning: return c.folder;
-    case Tone::Neutral: break;
-    }
-    return c.text2;
-}
-
-// The handoff's role palette; other roles get a stable color from it.
-QColor roleColor(const QString &role, bool dark)
-{
-    static const QList<std::tuple<const char *, const char *, const char *>> palette{
-        {"lead", "#b79cff", "#6f4fd8"}, {"architect", "#8e9bff", "#3d4bc4"}, {"backend", "#6fa8ff", "#2f66c9"},
-        {"frontend", "#f08bb4", "#b83a72"}, {"tester", "#56c8e0", "#137f95"}, {"reviewer", "#d9b38c", "#8a5a2b"},
-        {"security", "#e48de0", "#a2349c"}, {"integrator", "#a3b1c6", "#4d5d75"}, {"researcher", "#b9d36b", "#5f7a12"}};
-    const auto key = role.toLower();
-    for (const auto &[name, d, l] : palette) if (key.contains(QLatin1String(name))) return QColor(dark ? d : l);
-    const auto &[name, d, l] = palette[1 + qHash(key) % (palette.size() - 1)];
-    Q_UNUSED(name);
-    return QColor(dark ? d : l);
-}
-
-QColor alpha(QColor color, double a) { color.setAlphaF(a); return color; }
-
-// A 12px status mark: icon and text always come together.
-void glyph(QPainter &p, const QRectF &r, const QColor &color, const QString &kind)
-{
-    p.save();
-    p.setRenderHint(QPainter::Antialiasing);
-    const QRectF c = r.adjusted(1, 1, -1, -1);
-    QPen pen(color, 1.3); pen.setCapStyle(Qt::RoundCap); p.setPen(pen); p.setBrush(Qt::NoBrush);
-    const QPointF m = c.center(); const double s = c.width() / 2;
-    if (kind == "accepted" || kind == "done") {
-        p.setBrush(color); p.drawEllipse(c);
-        p.setPen(QPen(QColor(Qt::white), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.setBrush(Qt::NoBrush);
-        QPainterPath tick; tick.moveTo(m + QPointF(-s * .45, 0)); tick.lineTo(m + QPointF(-s * .1, s * .35)); tick.lineTo(m + QPointF(s * .45, -s * .35)); p.drawPath(tick);
-    } else if (kind == "draft" || kind == "not_created" || kind == "not_started") {
-        pen.setStyle(Qt::DotLine); p.setPen(pen); p.drawEllipse(c);
-    } else if (kind == "cancelled") {
-        p.drawEllipse(c); p.drawLine(m + QPointF(-s * .6, s * .6), m + QPointF(s * .6, -s * .6));
-    } else if (kind == "working" || kind == "in_progress" || kind == "running") {
-        p.drawEllipse(c); p.setBrush(color); p.setPen(Qt::NoPen);
-        QPolygonF play{m + QPointF(-s * .3, -s * .45), m + QPointF(s * .5, 0), m + QPointF(-s * .3, s * .45)}; p.drawPolygon(play);
-    } else if (kind == "assigned") {
-        p.drawEllipse(c); p.drawLine(m + QPointF(-s * .45, 0), m + QPointF(s * .45, 0));
-        p.drawLine(m + QPointF(s * .1, -s * .35), m + QPointF(s * .45, 0)); p.drawLine(m + QPointF(s * .1, s * .35), m + QPointF(s * .45, 0));
-    } else if (kind == "submitted") {
-        p.drawEllipse(c); p.drawLine(m + QPointF(0, s * .45), m + QPointF(0, -s * .45));
-        p.drawLine(m + QPointF(-s * .35, -s * .1), m + QPointF(0, -s * .45)); p.drawLine(m + QPointF(s * .35, -s * .1), m + QPointF(0, -s * .45));
-    } else if (kind == "paused") {
-        p.drawEllipse(c); p.drawLine(m + QPointF(-s * .25, -s * .35), m + QPointF(-s * .25, s * .35)); p.drawLine(m + QPointF(s * .25, -s * .35), m + QPointF(s * .25, s * .35));
-    } else if (kind == "idle" || kind == "pending" || kind == "planning") {
-        p.drawEllipse(c);
-        if (kind == "idle") p.drawLine(m + QPointF(-s * .45, 0), m + QPointF(s * .45, 0));
-    } else if (kind == "answer" || kind == "no_report" || kind == "stuck") {
-        p.drawEllipse(c);
-        QFont f; f.setPixelSize(int(c.height() * .8)); f.setBold(true); p.setFont(f);
-        p.drawText(c, Qt::AlignCenter, kind == "answer" ? QStringLiteral("?") : QStringLiteral("!"));
-    } else if (kind == "offline" || kind == "unconfirmed" || kind == "rejected" || kind == "failed" || kind == "stopped") {
-        p.drawEllipse(c); p.drawLine(m + QPointF(-s * .4, -s * .4), m + QPointF(s * .4, s * .4)); p.drawLine(m + QPointF(-s * .4, s * .4), m + QPointF(s * .4, -s * .4));
-    } else {
-        p.drawEllipse(c);
-    }
-    p.restore();
-}
-
-QString kindOfTask(const Task &task, const Status &status)
-{
-    if (status.tone == Tone::Danger) return QStringLiteral("unconfirmed");
-    if (status.tone == Tone::Warn) return QStringLiteral("no_report");
-    return task.status;
-}
-
-// A pill: role badges and the team badge. Text, border and fill share a color.
-class Pill : public QWidget {
-public:
-    Pill(const QString &text, const QColor &color, const QString &kind = {}, bool filled = true, QWidget *parent = nullptr)
-        : QWidget(parent), m_text(text), m_color(color), m_kind(kind), m_filled(filled)
-    {
-        QFont f = font(); f.setPixelSize(11); f.setWeight(QFont::Medium); setFont(f);
-        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        setToolTip(text);
-    }
-    QSize sizeHint() const override { return {fontMetrics().horizontalAdvance(m_text) + 14 + (m_kind.isEmpty() ? 0 : 14), 18}; }
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
-        const QRectF r = QRectF(rect()).adjusted(.5, .5, -.5, -.5);
-        p.setPen(QPen(alpha(m_color, m_filled ? .45 : 1), 1)); p.setBrush(m_filled ? alpha(m_color, .12) : Qt::transparent);
-        p.drawRoundedRect(r, 9, 9);
-        int x = 7;
-        if (!m_kind.isEmpty()) { glyph(p, QRectF(6, 4, 10, 10), m_color, m_kind); x = 20; }
-        p.setPen(m_color); p.drawText(QRect(x, 0, width() - x - 6, height()), Qt::AlignVCenter | Qt::AlignLeft,
-                                      fontMetrics().elidedText(m_text, Qt::ElideRight, width() - x - 6));
-    }
-private:
-    QString m_text; QColor m_color; QString m_kind; bool m_filled;
-};
-
-// A status: mark and text, elided; a fixed width keeps neighbours in place.
-class StatusMark : public QWidget {
-public:
-    StatusMark(const QString &text, const QColor &color, const QString &kind, int fixedWidth = 0, Qt::Alignment align = Qt::AlignLeft, QWidget *parent = nullptr)
-        : QWidget(parent), m_text(text), m_color(color), m_kind(kind), m_align(align)
-    {
-        QFont f = font(); f.setPixelSize(12); setFont(f);
-        if (fixedWidth) setFixedWidth(fixedWidth); else setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        setFixedHeight(18); setToolTip(text);
-    }
-    QSize sizeHint() const override { return {fontMetrics().horizontalAdvance(m_text) + 18, 18}; }
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        QPainter p(this);
-        const QString text = fontMetrics().elidedText(m_text, Qt::ElideRight, width() - 18);
-        const int w = fontMetrics().horizontalAdvance(text) + 17;
-        const int x = m_align & Qt::AlignRight ? width() - w : 0;
-        glyph(p, QRectF(x, 3, 12, 12), m_color, m_kind);
-        p.setPen(m_color); p.drawText(QRect(x + 17, 0, width() - x - 17, height()), Qt::AlignVCenter | Qt::AlignLeft, text);
-    }
-private:
-    QString m_text; QColor m_color; QString m_kind; Qt::Alignment m_align;
-};
-
-class Progress : public QWidget {
-public:
-    Progress(const QList<QColor> &segments, int height, const QColor &empty, QWidget *parent = nullptr)
-        : QWidget(parent), m_segments(segments), m_empty(empty) { setFixedHeight(height); }
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        QPainter p(this); p.setRenderHint(QPainter::Antialiasing); p.setPen(Qt::NoPen);
-        if (m_segments.isEmpty()) { p.setBrush(m_empty); p.drawRoundedRect(rect(), 2, 2); return; }
-        const double gap = 2, w = (width() - gap * (m_segments.size() - 1)) / m_segments.size();
-        for (int i = 0; i < m_segments.size(); ++i) {
-            p.setBrush(m_segments[i]); p.drawRoundedRect(QRectF(i * (w + gap), 0, qMax(1.0, w), height()), 1.5, 1.5);
-        }
-    }
-private:
-    QList<QColor> m_segments; QColor m_empty;
-};
-
-// Tasks as a graph (layers top to bottom) or as a list by layer. Painted, so
-// hovering a task lights its chain without moving anything.
-class TaskView : public QWidget {
-public:
-    struct Node { int id, layer; QString title, role, kind, statusText, deps; QColor tone, roleTone; bool problem, draft, error, match; int attempt; };
-    TaskView(const Colors &colors, bool graph, QWidget *parent = nullptr) : QWidget(parent), m_c(colors), m_graph(graph)
-    {
-        setMouseTracking(true);
-        QFont f = font(); f.setPixelSize(12); setFont(f);
-    }
-    std::function<void(int task, const QPoint &global)> clicked;
-    QList<Node> nodes;
-    QMap<int, QList<int>> edges;   // task -> its dependencies
-    QSet<QPair<int, int>> soft;    // (dependency, task) edges that need only In progress
-    QSet<int> cycle, emphasis;     // emphasis: Show what blocks
-    std::function<QSet<int>(int)> chain;
-    double zoom = 1.0;
-    void layout()
-    {
-        m_rects.clear();
-        QMap<int, int> column;
-        if (m_graph) {
-            for (const auto &n : nodes) {
-                const int x = Gutter + column[n.layer]++ * (NodeW + 6), y = 8 + n.layer * (NodeH + 26);
-                m_rects.insert(n.id, QRectF(x, y, NodeW, NodeH));
-            }
-            int layers = 0, wide = 0;
-            for (auto it = column.cbegin(); it != column.cend(); ++it) { layers = qMax(layers, it.key() + 1); wide = qMax(wide, it.value()); }
-            setFixedSize(int((Gutter + wide * (NodeW + 6)) * zoom), int((8 + layers * (NodeH + 26)) * zoom));
-        } else {
-            int y = 0, layer = -1;
-            for (const auto &n : nodes) {
-                if (!n.match) continue;
-                if (n.layer != layer) { layer = n.layer; y += 24; }
-                m_rects.insert(n.id, QRectF(0, y, 10000, 38)); y += 40;
-            }
-            setMinimumHeight(y + 4); setMaximumHeight(y + 4);
-        }
-        update();
-    }
-protected:
-    static constexpr int NodeW = 118, NodeH = 46, Gutter = 20;
-    void paintEvent(QPaintEvent *) override
-    {
-        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
-        if (m_graph) p.fillRect(rect(), m_c.surface);
-        const QSet<int> lit = m_hover ? chain(m_hover) : QSet<int>();
-        const auto dimmed = [&](const Node &n) {
-            if (!lit.isEmpty()) return !lit.contains(n.id);
-            if (!emphasis.isEmpty()) return !emphasis.contains(n.id);
-            return m_graph && !n.match;
-        };
-        if (m_graph) {
-            p.scale(zoom, zoom);
-            QFont small = font(); small.setPixelSize(10); p.setFont(small); p.setPen(m_c.dim);
-            QSet<int> labelled;
-            for (const auto &n : nodes) if (!labelled.contains(n.layer)) {
-                labelled.insert(n.layer); p.drawText(QRectF(0, m_rects[n.id].top(), Gutter, NodeH), Qt::AlignCenter, QStringLiteral("L%1").arg(n.layer + 1));
-            }
-            for (auto it = edges.cbegin(); it != edges.cend(); ++it) for (int dep : it.value()) {
-                if (!m_rects.contains(dep) || !m_rects.contains(it.key())) continue;
-                const QRectF a = m_rects[dep], b = m_rects[it.key()];
-                const bool hot = lit.contains(dep) && lit.contains(it.key());
-                const bool bad = cycle.contains(dep) && cycle.contains(it.key());
-                QColor color = bad ? m_c.danger : hot ? m_c.accent : m_c.border;
-                if (!hot && (!lit.isEmpty() || !emphasis.isEmpty()) && !(emphasis.contains(dep) && emphasis.contains(it.key()))) color = alpha(color, .35);
-                p.setPen(QPen(color, hot ? 2 : 1.4, soft.contains({dep, it.key()}) ? Qt::DashLine : Qt::SolidLine)); p.setBrush(Qt::NoBrush);
-                QPainterPath path;
-                if (b.top() > a.bottom()) {
-                    const QPointF s(a.center().x(), a.bottom()), e(b.center().x(), b.top());
-                    path.moveTo(s); path.cubicTo(s + QPointF(0, 14), e - QPointF(0, 14), e);
-                    p.drawPath(path);
-                    p.drawLine(e, e + QPointF(-3.5, -5)); p.drawLine(e, e + QPointF(3.5, -5));
-                } else {   // a back edge of a cycle: a loop on the right
-                    const QPointF s(a.right(), a.center().y()), e(b.right(), b.center().y());
-                    path.moveTo(s); path.cubicTo(s + QPointF(28, 0), e + QPointF(28, 0), e); p.drawPath(path);
-                }
-            }
-            for (const auto &n : nodes) {
-                const QRectF r = m_rects[n.id];
-                p.setOpacity(dimmed(n) ? .35 : 1);
-                p.setPen(n.error || n.problem ? QPen(n.error || n.tone == m_c.danger ? m_c.danger : m_c.warn, 1)
-                                              : QPen(m_c.border, 1, n.draft ? Qt::DashLine : Qt::SolidLine));
-                p.setBrush(n.error ? alpha(m_c.danger, .1) : m_c.card);
-                p.drawRoundedRect(r.adjusted(.5, .5, -.5, -.5), 8, 8);
-                p.setPen(Qt::NoPen); p.setBrush(n.tone); p.drawRoundedRect(QRectF(r.left() + 1, r.top() + 6, 3, r.height() - 12), 1.5, 1.5);
-                QFont mono = NewSessionDense::mono(10); p.setFont(mono); p.setPen(m_c.dim);
-                const QString id = QStringLiteral("#%1").arg(n.id);
-                p.drawText(QRectF(r.left() + 9, r.top() + 5, 30, 16), Qt::AlignLeft | Qt::AlignVCenter, id);
-                const int idw = QFontMetrics(mono).horizontalAdvance(id) + 4;
-                QFont title = font(); title.setPixelSize(12); p.setFont(title); p.setPen(m_c.fg);
-                p.drawText(QRectF(r.left() + 9 + idw, r.top() + 5, r.width() - 14 - idw, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                           QFontMetrics(title).elidedText(n.title, Qt::ElideRight, int(r.width() - 14 - idw)));
-                p.setPen(Qt::NoPen); p.setBrush(n.roleTone); p.drawEllipse(QRectF(r.left() + 10, r.top() + 29, 7, 7));
-                QFont role = font(); role.setPixelSize(11); p.setFont(role); p.setPen(m_c.text3);
-                const QString who = n.role + (n.attempt > 1 ? QStringLiteral(" ·%1").arg(n.attempt) : QString());
-                p.drawText(QRectF(r.left() + 21, r.top() + 24, r.width() - 42, 16), Qt::AlignLeft | Qt::AlignVCenter,
-                           QFontMetrics(role).elidedText(who, Qt::ElideRight, int(r.width() - 42)));
-                glyph(p, QRectF(r.right() - 17, r.top() + 26, 12, 12), n.tone, n.kind);
-                if (n.error) { p.setPen(m_c.danger); p.drawText(QRectF(r.right() - 14, r.top() + 2, 12, 12), Qt::AlignCenter, QStringLiteral("!")); }
-            }
-            return;
-        }
-        int layer = -1, count = 0;
-        QMap<int, int> perLayer;
-        for (const auto &n : nodes) if (n.match) ++perLayer[n.layer];
-        for (const auto &n : nodes) {
-            if (!n.match) continue;
-            const QRectF r = m_rects[n.id];
-            if (n.layer != layer) {
-                layer = n.layer; count = perLayer[layer];
-                QFont caps = font(); caps.setPixelSize(10); caps.setWeight(QFont::DemiBold); caps.setLetterSpacing(QFont::AbsoluteSpacing, .6);
-                p.setOpacity(1); p.setFont(caps); p.setPen(m_c.dim);
-                const QString label = TeamPanel::tr("LAYER %1 · %2").arg(layer + 1).arg(count);
-                p.drawText(QRectF(2, r.top() - 22, width(), 18), Qt::AlignLeft | Qt::AlignVCenter, label);
-                const int lw = QFontMetrics(caps).horizontalAdvance(label) + 10;
-                p.setPen(m_c.border); p.drawLine(QPointF(lw, r.top() - 13), QPointF(width() - 2, r.top() - 13));
-            }
-            p.setOpacity(dimmed(n) ? .35 : 1);
-            const QRectF box(1, r.top(), width() - 2, r.height());
-            if (n.problem || n.error) {
-                p.setPen(QPen(n.tone == m_c.warn ? m_c.warn : m_c.danger, 1)); p.setBrush(alpha(n.tone == m_c.warn ? m_c.warn : m_c.danger, .07));
-                p.drawRoundedRect(box.adjusted(.5, .5, -.5, -.5), 7, 7);
-            } else if (m_hover == n.id) { p.setPen(Qt::NoPen); p.setBrush(alpha(m_c.fg, .05)); p.drawRoundedRect(box, 7, 7); }
-            glyph(p, QRectF(8, r.top() + 5, 12, 12), n.tone, n.kind);
-            QFont mono = NewSessionDense::mono(11); p.setFont(mono); p.setPen(m_c.dim);
-            const QString id = QStringLiteral("#%1").arg(n.id);
-            const int idw = QFontMetrics(mono).horizontalAdvance(id) + 6;
-            p.drawText(QRectF(26, r.top() + 2, idw, 18), Qt::AlignLeft | Qt::AlignVCenter, id);
-            QFont small = font(); small.setPixelSize(10); small.setWeight(QFont::Medium);
-            const int roleW = QFontMetrics(small).horizontalAdvance(n.role) + 14;
-            const QRectF pill(width() - roleW - 6, r.top() + 3, roleW, 16);
-            p.setPen(QPen(alpha(n.roleTone, .45), 1)); p.setBrush(alpha(n.roleTone, .12)); p.drawRoundedRect(pill, 8, 8);
-            p.setFont(small); p.setPen(n.roleTone); p.drawText(pill, Qt::AlignCenter, n.role);
-            QFont title = font(); title.setPixelSize(12); p.setFont(title); p.setPen(m_c.fg);
-            const double titleW = pill.left() - 32 - idw;
-            p.drawText(QRectF(26 + idw, r.top() + 2, titleW, 18), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(title).elidedText(n.title, Qt::ElideRight, int(titleW)));
-            QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
-            p.drawText(QRectF(26, r.top() + 19, width() - 120, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
-            if (!n.deps.isEmpty()) {
-                p.setFont(NewSessionDense::mono(10)); p.setPen(m_c.dim);
-                p.drawText(QRectF(width() - 112, r.top() + 19, 104, 16), Qt::AlignRight | Qt::AlignVCenter, n.deps);
-            }
-        }
-    }
-    int at(const QPointF &position) const
-    {
-        const QPointF point = m_graph ? position / zoom : position;
-        for (auto it = m_rects.cbegin(); it != m_rects.cend(); ++it) {
-            QRectF r = it.value(); if (!m_graph) r.setWidth(width());
-            if (r.contains(point)) return it.key();
-        }
-        return 0;
-    }
-    void mouseMoveEvent(QMouseEvent *e) override
-    {
-        const int id = at(e->position());
-        if (id != m_hover) { m_hover = id; setCursor(id ? Qt::PointingHandCursor : Qt::ArrowCursor); update(); }
-    }
-    void leaveEvent(QEvent *) override { m_hover = 0; update(); }
-    void mouseReleaseEvent(QMouseEvent *e) override
-    {
-        const int id = at(e->position());
-        if (id && e->button() == Qt::LeftButton && clicked) clicked(id, e->globalPosition().toPoint());
-    }
-private:
-    Colors m_c;
-    bool m_graph;
-    int m_hover = 0;
-    QMap<int, QRectF> m_rects;
-};
-
-QLabel *label(const QString &text, const QColor &color, int pixels = 12, bool bold = false, const char *name = nullptr)
-{
-    auto *l = new QLabel(text);
-    QFont f = l->font(); f.setPixelSize(pixels); if (bold) f.setWeight(QFont::DemiBold); l->setFont(f);
-    QPalette pal = l->palette(); pal.setColor(QPalette::WindowText, color); l->setPalette(pal);
-    l->setTextFormat(Qt::PlainText);
-    if (name) l->setObjectName(name);
-    return l;
-}
-
-QLabel *elided(const QString &text, const QColor &color, int pixels = 12)
-{
-    auto *l = label(text, color, pixels);
-    l->setToolTip(text);
-    l->setMinimumWidth(20);
-    l->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    return l;
-}
-
-QPushButton *button(const QString &text, const char *name, bool primary = false)
-{
-    auto *b = new QPushButton(text);
-    b->setObjectName(name); b->setAutoDefault(false); b->setCursor(Qt::PointingHandCursor);
-    b->setProperty("primary", primary);
-    return b;
-}
-
-QFrame *card(const Colors &c, const QColor &border = {})
-{
-    auto *f = new QFrame;
-    f->setObjectName("teamCard");
-    f->setStyleSheet(QStringLiteral("QFrame#teamCard{background:%1;border:1px solid %2;border-radius:9px;}")
-                         .arg(c.surface.name(QColor::HexArgb), (border.isValid() ? border : c.border).name(QColor::HexArgb)));
-    return f;
-}
-
-QHBoxLayout *row(int spacing = 6)
-{
-    auto *l = new QHBoxLayout; l->setContentsMargins(0, 0, 0, 0); l->setSpacing(spacing); return l;
-}
-
-QString agentIcon(const QString &agent)
-{
-    return QStringList{"claude", "codex", "kimi", "opencode", "dsh"}.contains(agent) ? agent : QStringLiteral("terminal");
-}
-
-QString clock(double at) { return QDateTime::fromSecsSinceEpoch(qint64(at)).toString("HH:mm"); }
-
-QString duration(double seconds)
-{
-    const qint64 s = qMax<qint64>(0, qint64(seconds));
-    return s >= 3600 ? TeamPanel::tr("%1h %2m").arg(s / 3600).arg((s % 3600) / 60) : TeamPanel::tr("%1m").arg(qMax<qint64>(1, s / 60));
-}
-
-}  // namespace
+using namespace TeamUi;
 
 TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(parent), m_controller(controller)
 {
     setObjectName("teamPanel");
     auto *layout = new QVBoxLayout(this);
+    m_outer = layout;
     layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
     m_scroll = new QScrollArea;
     m_scroll->setObjectName("teamPanelScroll");
     m_scroll->setWidgetResizable(true);
     m_scroll->setFrameShape(QFrame::NoFrame);
     m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    layout->addWidget(m_scroll);
+    m_stack = new QStackedWidget;
+    m_stack->addWidget(m_scroll);
+    m_card = new TeamTaskCard;
+    m_stack->addWidget(m_card);
+    m_designer = new TeamDesignerPanel(m_controller);
+    m_designer->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return confirm(name, title, text, action); };
+    m_stack->addWidget(m_designer);
+    layout->addWidget(m_stack);
+    m_card->back = [this] { m_openTask = 0; render(); };
+    m_card->act = [this](const QString &operation, const QJsonObject &input) { act(operation, input); };
+    m_card->openTask = [this](int task) { openTask(task); };
+    m_card->openSession = [this](const QString &host, const QString &session) { if (openSession) openSession(host, session); };
+    m_card->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return confirm(name, title, text, action); };
+    m_card->reassign = [this](int task, const QPoint &global) {
+        if (const auto *team = m_controller->watched()) reassignMenu(*team, task, global);
+    };
+    m_card->problemActions = [this](const Member &member, const Status &status) -> QWidget * {
+        const auto *team = m_controller->watched();
+        return team ? problemActions(*team, member, status) : nullptr;
+    };
     QObject::connect(m_controller, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_controller, &TeamController::watchedChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_controller, &TeamController::feedChanged, this, [this] { scheduleRender(); });
     render();
 }
 
-void TeamPanel::setTheme(bool dark) { m_dark = dark; scheduleRender(); }
+void TeamPanel::setTheme(bool dark) { m_dark = dark; m_designer->setDark(dark); scheduleRender(); }
+
+void TeamPanel::showDesigner(bool on)
+{
+    if (m_designerShown == on) return;
+    m_designerShown = on;
+    m_controller->setWatchCatalog(on);
+    if (on) { m_designer->render(); m_stack->setCurrentWidget(m_designer); if (answersChanged) answersChanged(0); }
+    else render();
+}
+
+void TeamPanel::openTask(int task)
+{
+    m_openTask = task;
+    render();
+}
 
 void TeamPanel::showTeam(const QString &team)
 {
     if (m_team == team) return;
-    m_team = team; m_showBlockers = false; m_feedMember.clear(); m_notice.clear();
+    m_team = team; m_showBlockers = false; m_feedMember.clear(); m_notice.clear(); m_openTask = 0;
     m_controller->watch(team);
     render();
 }
@@ -519,6 +161,7 @@ void TeamPanel::render()
 {
     // A hidden tab renders once it is shown; polls keep coming meanwhile.
     if (!isVisible() && m_content) { m_dirty = true; return; }
+    if (m_designerShown) { m_stack->setCurrentWidget(m_designer); return; }
     m_dirty = false;
     const Colors c = colorsFor(m_dark);
     const int scroll = m_scroll->verticalScrollBar()->value();
@@ -555,15 +198,24 @@ void TeamPanel::render()
         if (status == "stuck") layout->addWidget(stuck(*team, problemList));
         const int waiting = Teams::answers(*team, live);
         if (waiting) layout->addWidget(answers(*team));
-        layout->addWidget(members(*team, narrow));
+        layout->addWidget(team->status == "planning" ? planMembers(*team, narrow) : members(*team, narrow));
         layout->addWidget(tasks(*team, narrow));
         if (team->full) layout->addWidget(feed(*team));
         if (answersChanged) answersChanged(waiting);
     }
     layout->addStretch();
+    retire(m_scroll->takeWidget());   // a click inside it may be running
     m_scroll->setWidget(content);
     m_content = content;
     m_scroll->verticalScrollBar()->setValue(scroll);
+    // While planning, the plan's actions stay pinned below the content.
+    if (m_footer) { retire(m_footer); m_footer = nullptr; }
+    if (team && team->status == "planning" && !m_openTask) { m_footer = planFooter(*team); m_outer->addWidget(m_footer); }
+    if (team && m_openTask) {
+        const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+        m_card->setTask(*team, m_openTask, live, m_dark);
+        m_stack->setCurrentWidget(m_card);
+    } else m_stack->setCurrentWidget(m_scroll);
 }
 
 QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
@@ -580,6 +232,10 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
     auto *badge = new Pill(statusLabel(status), toneColor(c, statusTone(status)), status, false);
     badge->setObjectName("teamStatusBadge");
     top->addWidget(badge);
+    auto *expand = new QToolButton; expand->setObjectName("teamOpenWorkspace"); expand->setIcon(workspaceIcon("external", c.fg)); expand->setAutoRaise(true);
+    expand->setToolTip(tr("Open the team workspace"));
+    QObject::connect(expand, &QToolButton::clicked, this, [this] { if (openWorkspace) openWorkspace(); });
+    top->addWidget(expand);
     auto *more = new QToolButton; more->setObjectName("teamMore"); more->setText(QStringLiteral("⋯")); more->setAutoRaise(true);
     more->setPopupMode(QToolButton::InstantPopup); more->setStyleSheet(QStringLiteral("QToolButton::menu-indicator{image:none;width:0;}"));
     auto *menu = new QMenu(more);
@@ -658,30 +314,28 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
 QWidget *TeamPanel::planning(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
-    auto *box = card(c, alpha(team.errors.isEmpty() ? c.accent : c.danger, .6));
-    box->setObjectName("teamPlanning");
-    auto *v = new QVBoxLayout(box); v->setContentsMargins(10, 10, 10, 10); v->setSpacing(6);
-    v->addWidget(label(tr("Plan from Lead — review before running"), c.fg, 12, true));
+    auto *w = new QWidget; w->setObjectName("teamPlanning");
+    auto *v = new QVBoxLayout(w); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(8);
+    auto *banner = card(c, alpha(c.accent, .6));
+    banner->setStyleSheet(banner->styleSheet() + QStringLiteral("QFrame#teamCard{background:%1;}").arg(alpha(c.accent, .08).name(QColor::HexArgb)));
+    auto *b = new QVBoxLayout(banner); b->setContentsMargins(10, 8, 10, 8); b->setSpacing(3);
+    b->addWidget(label(tr("Plan from Lead — review before running"), c.fg, 12, true));
+    auto *hint = label(tr("Edit members and tasks here; drag a node's handle onto another task to add a dependency, click a dependency "
+                          "to remove it. Members are created only after Approve & Run."), c.text2, 12);
+    hint->setWordWrap(true); b->addWidget(hint);
+    v->addWidget(banner);
     if (!team.errors.isEmpty()) {
-        v->addWidget(label(tr("%n plan error(s)", nullptr, int(team.errors.size())), c.danger, 12, true, "teamPlanErrors"));
-        for (const auto &error : team.errors) { auto *l = label(QStringLiteral("• ") + error, c.danger, 12); l->setWordWrap(true); v->addWidget(l); }
+        auto *errors = card(c, c.danger);
+        errors->setObjectName("teamPlanErrorsBox");
+        auto *e = new QVBoxLayout(errors); e->setContentsMargins(10, 8, 10, 8); e->setSpacing(3);
+        e->addWidget(new StatusMark(tr("%n plan error(s)", nullptr, int(team.errors.size())), c.fg, "stuck"));
+        auto *count = label(tr("%n plan error(s)", nullptr, int(team.errors.size())), c.danger, 12, true, "teamPlanErrors");
+        count->hide(); e->addWidget(count);
+        for (const auto &error : team.errors) { auto *l = label(QStringLiteral("• ") + error, c.danger, 12); l->setWordWrap(true); e->addWidget(l); }
+        v->addWidget(errors);
     }
-    for (const auto &warning : team.warnings) { auto *l = label(QStringLiteral("• ") + warning, c.warn, 12); l->setWordWrap(true); v->addWidget(l); }
-    auto *actions = row(6);
-    auto *approve = button(tr("Approve && Run"), "teamApprove", true);
-    approve->setEnabled(team.errors.isEmpty() && !team.tasks.isEmpty());
-    approve->setToolTip(team.errors.isEmpty() ? tr("Start the members and hand out the first tasks")
-                                              : tr("Fix %n plan error(s) to run", nullptr, int(team.errors.size())));
-    QObject::connect(approve, &QPushButton::clicked, this, [this] { act("approve", {}); });
-    auto *discard = button(tr("Discard plan…"), "teamDiscard");
-    QObject::connect(discard, &QPushButton::clicked, this, [this, name = team.name] {
-        if (confirm("teamDiscardConfirm", tr("Discard plan?"), tr("Discard the plan of %1? The team stops before any member starts.").arg(name), tr("Discard plan")))
-            act("discard", {});
-    });
-    actions->addWidget(approve); actions->addWidget(discard); actions->addStretch();
-    v->addLayout(actions);
-    v->addWidget(label(tr("The lead edits the plan; editing it here comes in a later update."), c.muted, 11));
-    return box;
+    for (const auto &warning : team.warnings) { auto *l = label(QStringLiteral("⚠ ") + warning, c.warn, 12); l->setWordWrap(true); v->addWidget(l); }
+    return w;
 }
 
 QWidget *TeamPanel::stuck(const Team &team, const QList<Problem> &problems)
@@ -701,7 +355,7 @@ QWidget *TeamPanel::stuck(const Team &team, const QList<Problem> &problems)
         auto *link = button(QStringLiteral("• ") + problem.text, "teamStuckProblem");
         link->setFlat(true); link->setStyleSheet(QStringLiteral("text-align:left;padding:0;color:%1;").arg(c.accent.name()));
         QObject::connect(link, &QPushButton::clicked, this, [this, task = problem.task, member = problem.member, t = team] {
-            if (task) taskMenu(t, task, QCursor::pos());
+            if (task) openTask(task);
             else if (const auto *m = t.member(member); m && openSession) openSession(m->host, m->session);
         });
         v->addWidget(link);
@@ -802,7 +456,7 @@ QWidget *TeamPanel::memberRow(const Team &team, const Member &member, bool narro
             chip->setStyleSheet(QStringLiteral("QPushButton{font:10px;color:%1;border:1px solid %2;border-radius:4px;padding:0 4px;min-height:16px;}")
                                     .arg(chipColor.name(), alpha(chipColor, task.id == status.task ? 1 : .4).name(QColor::HexArgb)));
             chip->setToolTip(QStringLiteral("#%1 %2 · %3").arg(task.id).arg(task.title, taskStatus(task).text));
-            QObject::connect(chip, &QPushButton::clicked, this, [this, t = team, id = task.id] { taskMenu(t, id, QCursor::pos()); });
+            QObject::connect(chip, &QPushButton::clicked, this, [this, id = task.id] { openTask(id); });
             line2->addWidget(chip);
         }
     }
@@ -950,7 +604,14 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
     title->addWidget(label(tr("Tasks"), c.fg, 12, true));
     title->addWidget(label(QString::number(team.tasks.size()), c.muted, 12));
     title->addStretch();
+    const bool planningNow = team.status == "planning";
+    if (planningNow) {
+        auto *add = button(tr("+ Task"), "teamAddTask");
+        QObject::connect(add, &QPushButton::clicked, this, [this, team] { editTask(team, 0); });
+        title->addWidget(add);
+    }
     for (const auto &[key, text] : QList<std::pair<QString, QString>>{{"all", tr("All")}, {"active", tr("Active")}, {"problems", tr("Problems")}}) {
+        if (planningNow) break;
         auto *b = button(text, "teamTaskFilter");
         b->setCheckable(true); b->setChecked(m_filter == key); b->setProperty("filter", key);
         QObject::connect(b, &QPushButton::clicked, this, [this, key = key] { m_filter = key; scheduleRender(); });
@@ -974,14 +635,15 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
     for (int id : order) {
         const auto *task = team.task(id);
         const auto status = taskStatus(*task);
-        const QString role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
+        const QString role = task->assignee.isEmpty() ? (planningNow ? tr("No assignee") : tr("You")) : team.roleOf(task->assignee);
         TaskView::Node node;
         node.id = id; node.layer = team.layers.value(id); node.title = task->title; node.role = role;
         node.problem = problemTasks.contains(id);
         node.tone = toneColor(c, node.problem ? problemTone.value(id, Tone::Danger) : status.tone);
         node.kind = kindOfTask(*task, status);
         node.statusText = status.text; node.roleTone = roleColor(role, m_dark);
-        node.draft = task->status == "draft"; node.error = team.cycle.contains(id) || (!task->assignee.isEmpty() && !team.member(task->assignee));
+        node.draft = task->status == "draft";
+        node.error = team.cycle.contains(id) || (task->assignee.isEmpty() ? planningNow : !team.member(task->assignee));
         node.attempt = task->last() ? task->last()->n : 0;
         QStringList deps;
         for (const auto &dep : task->deps) {
@@ -994,7 +656,12 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
         view->nodes.append(node);
     }
     if (m_showBlockers) for (int id : problemTasks) view->emphasis += Teams::chain(team, id);
-    view->clicked = [this, team](int id, const QPoint &global) { taskMenu(team, id, global); };
+    if (planningNow) {
+        view->editable = !narrow;
+        view->clicked = [this, team](int id, const QPoint &) { editTask(team, id); };
+        view->linked = [this, team](int dependency, int task) { link(team, dependency, task, true); };
+        view->unlinked = [this, team](int dependency, int task) { link(team, dependency, task, false); };
+    } else view->clicked = [this](int id, const QPoint &) { openTask(id); };
     view->layout();
     if (narrow) v->addWidget(view);
     else {

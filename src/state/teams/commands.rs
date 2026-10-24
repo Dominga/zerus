@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|approve|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|pause-member|resume-member|remove-member --json (JSON stdin) | hgs team worker";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|approve|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
 
 const MUTATIONS: &[&str] = &[
     "plan", "approve", "discard", "pause", "resume", "stop", "archive", "report", "accept", "reject", "reassign",
@@ -113,8 +113,15 @@ fn create(input: &Value) -> anyhow::Result<Value> {
         ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
     }
     let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
+    let start = team.brief == Notice::Pending;
     // The request's identity is what the caller sent, so a replay matches.
-    Store::open(true)?.create(request, input, team, events)
+    let receipt = Store::open(true)?.create(request, input, team, events)?;
+    if start {
+        if let Err(error) = super::dispatcher::ensure_worker() {
+            eprintln!("hgs: the team dispatcher did not start: {error}");
+        }
+    }
+    Ok(receipt)
 }
 
 fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
@@ -179,6 +186,8 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() == 1 && args[0] == "worker" {
         return super::dispatcher::worker();
     }
+    let catalog = args.first().map(String::as_str) == Some("catalog");
+    let args = if catalog { &args[1..] } else { args };
     if args.len() != 2 || args[1] != "--json" {
         return Err(USAGE.into());
     }
@@ -191,7 +200,14 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if !input.is_object() {
         return Err("A JSON object is required".into());
     }
-    let result = run(&args[0], &input).map_err(|e| e.to_string())?;
+    let result = if catalog {
+        // The designer proposes from its session; only you decide and apply.
+        let human = caller_record().is_none() && nonempty_env("HGS_SESSION").is_none() && text(&input, "by") == "human";
+        super::catalog::run(&args[0], &input, human)
+    } else {
+        run(&args[0], &input)
+    }
+    .map_err(|e| e.to_string())?;
     println!("{result}");
     Ok(0)
 }

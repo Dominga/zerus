@@ -149,3 +149,44 @@ minutes without a running team. The GUI supervises it later like the swarm worke
   reply as report / Reassign…; Reassign… / Wait; Go to question; Start again), tasks as a graph from 400 px (soft
   dependencies dashed) or a list by layer, and the paged feed. A task opens a menu of its actions until M3's card.
 - `use-last-reply` without text reads the member's last reply (`hgs [@host] inspect`) on the lead's computer.
+
+## Desktop (M3–M6)
+
+- **Task card (M3).** A task opens over the Team tab (and as a 400 px drawer in the workspace): status, attempt and
+  role; the problem banner with the member's actions; description; criteria; Depends on / Blocks links (soft marked);
+  assignee; attempts newest first with Open in Activity (revoked and rejected faded); the newest report; inline Reject
+  with comment and Mark done manually (`accept` with `"manual":true` and a reason, shown in the feed). The footer
+  shows the status's actions; the rest are under More, disabled with the reason.
+- **Activity plaques (M3).** A message that starts with Zerus's team header (inside a session envelope or not) reads
+  as a plaque: kind (Task from team, Report to lead, Planning brief, Message from you), sender → receiver, a link
+  that opens the task's card, the attempt and the literal header; the body folds to three lines and hides the report
+  command until Show more. A member session shows its team, role and current task in a strip above Activity.
+- **Planning (M4).** While a team plans, the Team tab edits it: members' agent and model, role prompt, own worktree,
+  remove, + Member from the catalog's roles; + Task and a task editor (title, description, criteria, assignee, hard or
+  soft dependencies, delete); dependencies dragged from a node's handle onto another node and removed by selecting the
+  edge (× or Delete). Each edit sends the whole plan once with the revision it was made against. The pinned footer
+  holds Approve & Run (disabled while errors), Send back to lead (your comment goes to the lead's session) and
+  Discard plan….
+- **New team (M4).** Sessions ⋯ → New team…: name, catalog template, goal, folder (a non-Git folder disables
+  worktrees with a warning), the lead (a new session with agent, account, model and effort, or an existing session),
+  members from the template's roster with an error on each row that cannot work (computer offline, account not signed
+  in), planning (lead plans or template tasks), approval and the member limit. Create sends `create` with
+  `"start":true`: the dispatcher starts the lead if needed and sends it a planning brief once (goal, members, template
+  tasks and the plan command); members start after Approve & Run.
+- **Catalog (M4, M6).** `hgs team catalog get|set|propose|decide|apply|discard|route|designer --json`, stored in
+  `root()/teams/catalog.json` (built-in roles and templates until first saved) and `catalog-draft.json`. `set`, `decide`,
+  `apply`, `discard` and `designer` need `"by":"human"` from no session; `set` and `apply` check the version and write
+  the next one; a draft made against an older version cannot be applied. Settings > Teams edits roles (color, prompt
+  with its order preview, default agent, permissions, folder policy, can message, dangerous actions, specialization),
+  templates (roster, task skeleton, planning, approval, max members) and routing rules with Try it; Import / Export as
+  JSON. A member's role prompt travels with every hand-off.
+- **Team workspace (M5).** The Team tab next to Activity (⤢ in the inspector's header opens it): team bar with
+  Pause/Resume/Stop… or Approve & Run while planning, Stuck / plan-error strip, Graph (left to right, layer columns),
+  Board (Pending · Active · Problems · Submitted · Accepted) or Layers, All/Active/Problems, member focus that keeps
+  only that member's tasks and feed, zoom and Fit, the collapsible feed, Needs your answer, members, the Lead dock (its
+  recent team events and a one-line message) and the task card as a drawer.
+- **Team designer (M6).** Sessions ⋯ → Team designer… (or Settings > Teams → Ask Team designer) starts a session
+  `…/team-designer` in the selected folder with a brief: read the project, change no file, propose with `hgs team
+  catalog propose` (`hgs guide designer`). Its Team tab shows the draft: NEW / CHANGED / REMOVED proposals by kind
+  with field-by-field old and new values, Keep / Reject / Undo, Discard draft, and Apply N changes (confirmed) as the
+  next catalog version. Running teams keep their roster.

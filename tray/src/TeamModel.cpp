@@ -2,6 +2,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QJsonValue>
+#include <QRegularExpression>
 #include <functional>
 
 namespace Teams {
@@ -84,6 +85,8 @@ Team parse(const QJsonObject &v)
         Member member;
         member.id = str(m, "id"); member.role = str(m, "role"); member.agent = str(m, "agent"); member.model = str(m, "model");
         member.computer = str(m, "computer"); member.state = str(m, "state"); member.error = str(m, "error");
+        member.account = str(m, "account"); member.effort = str(m, "effort"); member.permissions = str(m, "permissions");
+        member.folder = str(m, "folder"); member.directory = str(m, "directory"); member.prompt = str(m, "prompt");
         const auto session = m.value("session").toObject();
         member.host = str(session, "host"); member.session = str(session, "name");
         member.lead = member.id == team.lead;
@@ -125,6 +128,50 @@ Team parse(const QJsonObject &v)
         for (const auto &task : team.tasks) if (ready(team, task)) team.ready.append(task.id);
     }
     return team;
+}
+
+QJsonObject Member::json() const
+{
+    QJsonObject o{{"id", id}, {"role", role}, {"agent", agent}, {"account", account}, {"model", model}, {"effort", effort},
+                  {"permissions", permissions}, {"computer", computer}, {"directory", directory}, {"prompt", prompt}};
+    if (!folder.isEmpty()) o.insert("folder", folder);
+    if (!session.isEmpty()) o.insert("session", QJsonObject{{"host", host}, {"name", session}});
+    return o;
+}
+
+QJsonObject Task::json() const
+{
+    QJsonArray d, c;
+    for (const auto &dep : deps) d.append(QJsonObject{{"task", dep.task}, {"kind", dep.soft ? "soft" : "hard"}});
+    for (const auto &criterion : criteria) c.append(criterion);
+    return {{"id", id}, {"title", title}, {"description", description}, {"criteria", c}, {"assignee", assignee}, {"deps", d}};
+}
+
+QJsonObject planInput(const Team &team)
+{
+    QJsonArray members, tasks;
+    for (const auto &m : team.members) if (!m.lead) members.append(m.json());
+    for (const auto &t : team.tasks) if (t.status != "cancelled") tasks.append(t.json());
+    return {{"members", members}, {"tasks", tasks}};
+}
+
+int nextTaskId(const Team &team)
+{
+    int next = 1;
+    for (const auto &t : team.tasks) next = qMax(next, t.id + 1);
+    return next;
+}
+
+QString nextMemberId(const Team &team, const QString &role)
+{
+    QString base;
+    for (const auto ch : role.toLower()) base += ch.isLetterOrNumber() && ch.unicode() < 128 ? ch : QChar('-');
+    while (base.contains("--")) base.replace("--", "-");
+    base = base.left(32).remove(QRegularExpression("^-+|-+$"));
+    if (base.isEmpty()) base = QStringLiteral("member");
+    QString id = base;
+    for (int n = 2; team.member(id); ++n) id = QStringLiteral("%1-%2").arg(base).arg(n);
+    return id;
 }
 
 QList<Team> parseList(const QJsonObject &value)
@@ -373,6 +420,125 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "member_removed") t = tr("Removed %1 from the team").arg(d.value("member").toString());
     else t = k;
     return line;
+}
+
+
+Role parseRole(const QJsonObject &v)
+{
+    Role r;
+    r.id = str(v, "id"); r.name = str(v, "name"); r.color = str(v, "color"); r.prompt = str(v, "prompt");
+    r.agent = str(v, "agent"); r.account = str(v, "account"); r.model = str(v, "model"); r.effort = str(v, "effort");
+    r.permissions = str(v, "permissions"); r.computer = str(v, "computer"); r.folder = str(v, "folder");
+    r.canMessage = str(v, "can_message"); r.dangerous = v.value("dangerous").toBool();
+    for (const auto &tag : v.value("tags").toArray()) r.tags.append(tag.toString());
+    return r;
+}
+
+QJsonObject Role::json() const
+{
+    return {{"id", id}, {"name", name}, {"color", color}, {"prompt", prompt}, {"agent", agent}, {"account", account},
+            {"model", model}, {"effort", effort}, {"permissions", permissions}, {"computer", computer}, {"folder", folder},
+            {"can_message", canMessage}, {"dangerous", dangerous}, {"tags", QJsonArray::fromStringList(tags)}};
+}
+
+Template parseTemplate(const QJsonObject &v)
+{
+    Template t;
+    t.id = str(v, "id"); t.name = str(v, "name"); t.description = str(v, "description"); t.leadProtocol = str(v, "lead_protocol");
+    t.planning = str(v, "planning"); t.approval = str(v, "approval"); t.maxMembers = v.value("max_members").toInt(6);
+    for (const auto &seat : v.value("roster").toArray()) {
+        const auto o = seat.toObject();
+        t.roster.append({str(o, "role"), o.value("count").toInt(1), o.value("optional").toBool()});
+    }
+    for (const auto &task : v.value("tasks").toArray()) {
+        const auto o = task.toObject();
+        SkeletonTask k{str(o, "title"), str(o, "role"), {}};
+        for (const auto &d : o.value("deps").toArray()) k.deps.append(d.toInt());
+        t.tasks.append(k);
+    }
+    return t;
+}
+
+QJsonObject Template::json() const
+{
+    QJsonArray seats, skeleton;
+    for (const auto &s : roster) seats.append(QJsonObject{{"role", s.role}, {"count", s.count}, {"optional", s.optional}});
+    for (const auto &k : tasks) {
+        QJsonArray deps; for (int d : k.deps) deps.append(d);
+        skeleton.append(QJsonObject{{"title", k.title}, {"role", k.role}, {"deps", deps}});
+    }
+    return {{"id", id}, {"name", name}, {"description", description}, {"lead_protocol", leadProtocol}, {"roster", seats},
+            {"tasks", skeleton}, {"planning", planning}, {"approval", approval}, {"max_members", maxMembers}};
+}
+
+Rule parseRule(const QJsonObject &v) { return {str(v, "id"), str(v, "when"), str(v, "template"), str(v, "approval")}; }
+
+QJsonObject Rule::json() const { return {{"id", id}, {"when", when}, {"template", templateId}, {"approval", approval}}; }
+
+const Role *Catalog::role(const QString &id) const
+{
+    for (const auto &r : roles) if (r.id == id) return &r;
+    return nullptr;
+}
+
+const Role *Catalog::roleNamed(const QString &name) const
+{
+    for (const auto &r : roles)
+        if (r.id.compare(name, Qt::CaseInsensitive) == 0 || r.name.compare(name, Qt::CaseInsensitive) == 0) return &r;
+    return nullptr;
+}
+
+const Template *Catalog::templ(const QString &id) const
+{
+    for (const auto &t : templates) if (t.id == id) return &t;
+    return nullptr;
+}
+
+QJsonObject Catalog::json() const
+{
+    QJsonArray r, t, u;
+    for (const auto &x : roles) r.append(x.json());
+    for (const auto &x : templates) t.append(x.json());
+    for (const auto &x : routing) u.append(x.json());
+    return {{"version", version}, {"roles", r}, {"templates", t}, {"routing", u}};
+}
+
+Catalog parseCatalog(const QJsonObject &get)
+{
+    Catalog c;
+    const auto catalog = get.value("catalog").toObject();
+    c.version = catalog.value("version").toInteger(); c.builtin = get.value("builtin").toBool();
+    for (const auto &v : catalog.value("roles").toArray()) c.roles.append(parseRole(v.toObject()));
+    for (const auto &v : catalog.value("templates").toArray()) c.templates.append(parseTemplate(v.toObject()));
+    for (const auto &v : catalog.value("routing").toArray()) c.routing.append(parseRule(v.toObject()));
+    const auto draft = get.value("draft").toObject();
+    c.draftBase = draft.value("base").toInteger();
+    for (const auto &v : draft.value("proposals").toArray()) {
+        const auto o = v.toObject();
+        c.proposals.append({str(o, "id"), str(o, "kind"), str(o, "action"), str(o, "target"), str(o, "title"), str(o, "reason"),
+                            o.value("state").toString(QStringLiteral("proposed")), o.value("value").toObject(), o.value("at").toDouble()});
+    }
+    return c;
+}
+
+Catalog withProposals(const Catalog &catalog, bool includeUndecided)
+{
+    Catalog c = catalog;
+    for (const auto &p : catalog.proposals) {
+        if (p.state == "rejected" || (!includeUndecided && p.state != "kept")) continue;
+        const bool remove = p.action == "remove";
+        const auto apply = [&](auto &items, const auto &parsed) {
+            int at = -1;
+            for (int i = 0; i < items.size(); ++i) if (items[i].id == p.target) { at = i; break; }
+            if (remove) { if (at >= 0) items.removeAt(at); }
+            else if (at >= 0) items[at] = parsed;
+            else items.append(parsed);
+        };
+        if (p.kind == "role") apply(c.roles, parseRole(p.value));
+        else if (p.kind == "template") apply(c.templates, parseTemplate(p.value));
+        else if (p.kind == "rule") apply(c.routing, parseRule(p.value));
+    }
+    return c;
 }
 
 }

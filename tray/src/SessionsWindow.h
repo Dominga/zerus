@@ -398,6 +398,15 @@ private:
     class TeamPanel *m_teamPanel=nullptr;
     // The team header the user selected in the list; a selected session shows its own team.
     QString m_selectedTeam;
+    // A member session's team, task and a link to the Team tab, above Activity.
+    class QFrame *m_teamStrip=nullptr;
+    class QLabel *m_teamStripText=nullptr;
+    void openTeamTask(int task);
+    void showNewTeam();
+    void showTeamDesigner();
+    class TeamCatalogEditor *m_teamCatalog=nullptr;
+    class TeamWorkspace *m_teamWorkspace=nullptr;
+    int m_teamSettingsSection=-1;
     void updateTeamPanel();
     void showTeam(const QString &team);
     Teams::Live teamLive(const Teams::Member &member) const;

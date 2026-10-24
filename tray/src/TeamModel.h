@@ -16,10 +16,12 @@ namespace Teams {
 
 struct Member {
     QString id, role, agent, model, computer, state, error;
+    QString account, effort, permissions, folder, directory, prompt;
     // The member's session once it exists: computer alias (empty = the lead's
     // computer) and name.
     QString host, session;
     bool lead = false;
+    QJsonObject json() const;
 };
 
 struct Attempt {
@@ -39,6 +41,7 @@ struct Task {
     QList<Attempt> attempts;   // oldest first
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
+    QJsonObject json() const;
 };
 
 struct Team {
@@ -63,6 +66,11 @@ struct Team {
 };
 
 Team parse(const QJsonObject &value);
+// The plan as `hgs team plan` takes it: members besides the lead, and tasks.
+QJsonObject planInput(const Team &team);
+// The next free task number and member id.
+int nextTaskId(const Team &team);
+QString nextMemberId(const Team &team, const QString &role);
 QList<Team> parseList(const QJsonObject &value);
 
 // A member's session as the fleet shows it.
@@ -114,6 +122,46 @@ QSet<int> chain(const Team &team, int task);
 // Tasks by layer for the list: layer 1 first.
 QMap<int, QList<int>> layered(const Team &team);
 bool ready(const Team &team, const Task &task);
+
+// The team catalog (`hgs team catalog get`): roles, templates, routing rules
+// and the designer's draft of proposed changes.
+struct Role {
+    QString id, name, color, prompt, agent, account, model, effort, permissions, computer, folder, canMessage;
+    QStringList tags;
+    bool dangerous = false;
+    QJsonObject json() const;
+};
+struct Seat { QString role; int count = 1; bool optional = false; };
+struct SkeletonTask { QString title, role; QList<int> deps; };
+struct Template {
+    QString id, name, description, leadProtocol, planning, approval;
+    QList<Seat> roster;
+    QList<SkeletonTask> tasks;
+    int maxMembers = 6;
+    QJsonObject json() const;
+};
+struct Rule { QString id, when, templateId, approval; QJsonObject json() const; };
+struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; };
+struct Catalog {
+    qint64 version = 0;
+    bool builtin = false;
+    QList<Role> roles;
+    QList<Template> templates;
+    QList<Rule> routing;
+    qint64 draftBase = 0;
+    QList<Proposal> proposals;
+    const Role *role(const QString &id) const;
+    // A role by id or by its name, as members name it.
+    const Role *roleNamed(const QString &name) const;
+    const Template *templ(const QString &id) const;
+    QJsonObject json() const;
+};
+Role parseRole(const QJsonObject &value);
+Template parseTemplate(const QJsonObject &value);
+Rule parseRule(const QJsonObject &value);
+Catalog parseCatalog(const QJsonObject &get);
+// The catalog with the kept (or also the undecided) changes of its draft applied.
+Catalog withProposals(const Catalog &catalog, bool includeUndecided);
 
 struct FeedLine { double at = 0; qint64 seq = 0; QString kind, by, text; Tone tone = Tone::Neutral; };
 FeedLine feedLine(const Team &team, const QJsonObject &event);

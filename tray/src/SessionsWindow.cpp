@@ -29,6 +29,9 @@
 #include "SocratiCodePanel.h"
 #include "TeamController.h"   // WhiteWh fork: agent teams
 #include "TeamPanel.h"
+#include "TeamNewDialog.h"
+#include "TeamCatalogEditor.h"
+#include "TeamWorkspace.h"
 #include "Extensions.h"
 #include "WindowTitleBar.h"
 #include "IronRulesPanel.h"
@@ -392,7 +395,13 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     auto *newSession = groupsMenu->addAction(tr("New session…"));
     connect(newSession, &QAction::triggered, this, [this]() { showNewSession({}, {}, selectedHostTarget()); });
     auto *newGroup = groupsMenu->addAction(tr("New project…")); newGroup->setObjectName("createSessionGroup");
-    connect(newGroup, &QAction::triggered, this, [this]() { createGroup(); }); groupsMenu->addSeparator();
+    connect(newGroup, &QAction::triggered, this, [this]() { createGroup(); });
+    // WhiteWh fork: agent teams.
+    auto *newTeam = groupsMenu->addAction(tr("New team…")); newTeam->setObjectName("newTeam");
+    connect(newTeam, &QAction::triggered, this, [this]() { showNewTeam(); });
+    auto *designer = groupsMenu->addAction(tr("Team designer…")); designer->setObjectName("teamDesigner");
+    connect(designer, &QAction::triggered, this, [this]() { showTeamDesigner(); });
+    groupsMenu->addSeparator();
     for (bool collapse : {false, true}) connect(groupsMenu->addAction(collapse ? tr("Collapse all projects") : tr("Expand all projects")), &QAction::triggered, this, [this, collapse]() {
         const auto groups = m_organization.groups(); for (const auto &g : groups) m_organization.setCollapsed(g.id, collapse);
         saveOrganization(); rebuild();
@@ -700,6 +709,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     auto *activityPage = new QWidget; auto *activityLayout = new QVBoxLayout(activityPage);
     activityLayout->setContentsMargins(0, 0, 0, 0); activityLayout->setSpacing(0);
+    // WhiteWh fork: agent teams. A member session names its team and task here.
+    m_teamStrip=new QFrame;m_teamStrip->setObjectName("teamStrip");m_teamStrip->hide();
+    {auto *strip=new QHBoxLayout(m_teamStrip);strip->setContentsMargins(10,4,8,4);strip->setSpacing(8);
+     m_teamStripText=new QLabel;m_teamStripText->setObjectName("teamStripText");m_teamStripText->setTextFormat(Qt::RichText);
+     connect(m_teamStripText,&QLabel::linkActivated,this,[this](const QString &link){if(link.startsWith("task:"))openTeamTask(link.mid(5).toInt());});
+     auto *open=new QPushButton(tr("Open team panel"));open->setObjectName("teamStripOpen");open->setFlat(true);open->setCursor(Qt::PointingHandCursor);
+     connect(open,&QPushButton::clicked,this,[this]{if(const auto *entry=selected())if(const auto *team=m_teams?m_teams->teamOfSession(entry->host,entry->session.name):nullptr)showTeam(team->id);});
+     strip->addWidget(m_teamStripText,1);strip->addWidget(open);}
+    activityLayout->addWidget(m_teamStrip);
     m_activityView = new ActivityView; m_activityView->setObjectName("mainActivity"); m_composer = new MessageComposer; m_question = new QuestionCard;
     auto *voice = new SpeechComposer(hgsPath, m_composer, [this] {
         SpeechComposer::Target target;
@@ -1364,6 +1382,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(2, false);
     m_processes=new ProcessView(&m_client);tabs->addTab(m_processes,tr("Processes"));tabs->setTabVisible(tabs->indexOf(m_processes),ProcessSettings::enabled());
     connect(m_processes,&ProcessView::refreshRequested,this,&SessionsWindow::inspect);
+    connect(m_activityView,&ActivityView::teamTaskActivated,this,&SessionsWindow::openTeamTask);   // WhiteWh fork: agent teams
     for(auto *view:{m_activityView,m_subagentView})connect(view,&ActivityView::processRequested,this,[this](const QString &id){if(!ProcessSettings::enabled())return;m_detailTabs->setCurrentWidget(m_processes);m_processes->selectProcess(id);});
     connect(m_nativeUi, &NativeUiView::responseRequested, this, [this] { closeSubagent(); m_detailTabs->setCurrentWidget(m_activityStack); });
     m_workSplitter = new QSplitter(Qt::Horizontal); m_workSplitter->setObjectName("sessionWorkSplitter");
@@ -1449,6 +1468,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         rebuild();
     });
     m_inspector->addTab(m_teamPanel, tr("Team"));
+    // The team workspace: the Team tab next to Activity, shown while a team is.
+    m_teamWorkspace=new TeamWorkspace(m_teams,m_teamPanel,this);
+    m_teamWorkspace->openSession=m_teamPanel->openSession;
+    m_teamWorkspace->sendMessage=m_teamPanel->sendMessage;
+    m_teamWorkspace->openTeamTab=[this]{setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
+    m_teamWorkspace->setLive([this](const Teams::Member &member){return teamLive(member);});
+    // The tab exists only while a team is shown.
+    m_teamWorkspace->hide();
+    m_teamPanel->openWorkspace=[this]{if(m_detailTabs->indexOf(m_teamWorkspace)<0)m_detailTabs->addTab(m_teamWorkspace,tr("Team"));m_detailTabs->setCurrentWidget(m_teamWorkspace);};
     connect(m_teams,&TeamController::teamsChanged,this,[this]{rebuild();updateTeamPanel();});
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
@@ -1561,6 +1589,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_accountsPage = new AccountsPage(hgsPath,nullptr,m_usageStore); m_pages->addWidget(m_accountsPage);
     m_settingsPage=new SettingsPage(hgsPath);m_pages->addWidget(m_settingsPage);
+    // WhiteWh fork: Settings > Teams, the team catalog.
+    m_teamCatalog=new TeamCatalogEditor(m_teams);m_teamCatalog->askDesigner=[this]{showTeamDesigner();};
+    m_teamSettingsSection=m_settingsPage->addSection(tr("Teams"),m_teamCatalog);
     connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);});
     m_settingsPage->pollingChanged=[this]{
         const bool enabled=ProcessSettings::enabled();
@@ -2120,6 +2151,8 @@ void SessionsWindow::applyTheme()
     m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     if (m_teamPanel) m_teamPanel->setTheme(m_dark);   // WhiteWh fork: agent teams
+    if (m_teamCatalog) m_teamCatalog->setDark(m_dark);
+    if (m_teamWorkspace) m_teamWorkspace->setTheme(m_dark);
     m_processes->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
     applyWorkspaceView();
@@ -6146,6 +6179,32 @@ void SessionsWindow::updateWorktrees()
 void SessionsWindow::updateTeamPanel()
 {
     if(!m_teamPanel||!m_teams)return;
+    if(m_teamStrip){
+        const auto *entry=selected();
+        const auto *found=entry?m_teams->teamOfSession(entry->host,entry->session.name):nullptr;
+        const auto *member=found?found->memberOfSession(entry->host,entry->session.name):nullptr;
+        m_teamStrip->setVisible(member);
+        if(member){
+            QString text=tr("Team <b>%1</b> · %2").arg(found->name.toHtmlEscaped(),found->roleOf(member->id).toHtmlEscaped());
+            for(const auto &task:found->tasks){
+                const auto *attempt=task.last();
+                const bool current=task.assignee==member->id&&!task.finished()&&task.status!="pending"&&task.status!="draft";
+                if(current||(member->lead&&task.status=="submitted")){
+                    text+=tr(" · Task: <a href='task:%1' style='color:%2;'><b>#%1 %3</b></a>").arg(task.id).arg(m_accent,task.title.toHtmlEscaped());
+                    Q_UNUSED(attempt);break;
+                }
+            }
+            m_teamStripText->setText(text);
+            QColor fill(m_accent);fill.setAlphaF(m_dark?.10:.07);
+            m_teamStrip->setStyleSheet(QStringLiteral("QFrame#teamStrip{background:%1;border-bottom:1px solid %2;} QPushButton#teamStripOpen{color:%3;border:none;}")
+                .arg(fill.name(QColor::HexArgb),m_border,m_accent));
+        }
+    }
+    // The Team designer's session shows the catalog draft it proposes.
+    {const auto *entry=selected();
+     const bool designer=m_selectedTeam.isEmpty()&&entry&&entry->host.isEmpty()&&entry->session.name.endsWith("/team-designer");
+     m_teamPanel->showDesigner(designer);
+     if(designer)return;}
     QString team=m_selectedTeam;
     if(team.isEmpty()||!m_teams->team(team)){
         m_selectedTeam.clear();
@@ -6155,6 +6214,12 @@ void SessionsWindow::updateTeamPanel()
     }
     m_teamPanel->showTeam(team);
     m_teamPanel->render();
+    if(m_teamWorkspace){
+        m_teamWorkspace->showTeam(team);
+        const int index=m_detailTabs->indexOf(m_teamWorkspace);
+        if(team.isEmpty()&&index>=0){if(m_detailTabs->currentWidget()==m_teamWorkspace)m_detailTabs->setCurrentIndex(0);m_detailTabs->removeTab(index);m_teamWorkspace->hide();}
+        else if(!team.isEmpty()&&index<0)m_detailTabs->addTab(m_teamWorkspace,tr("Team"));
+    }
 }
 Teams::Live SessionsWindow::teamLive(const Teams::Member &member) const
 {
@@ -6168,6 +6233,40 @@ Teams::Live SessionsWindow::teamLive(const Teams::Member &member) const
         return live;
     }
     return live;
+}
+void SessionsWindow::showNewTeam()
+{
+    if(!m_teams)return;
+    if(!m_teams->catalogReady()){
+        // The form fills its templates and roles from the catalog.
+        auto *once=new QMetaObject::Connection;
+        *once=connect(m_teams,&TeamController::catalogChanged,this,[this,once]{disconnect(*once);delete once;showNewTeam();});
+        m_teams->refreshCatalog();return;
+    }
+    QList<TeamNewDialog::Computer> computers{{QString(),tr("this computer"),true}};
+    const qint64 now=QDateTime::currentMSecsSinceEpoch();
+    for(const auto &alias:m_fleet.peerNames()){
+        const auto *box=m_fleet.peer(alias);
+        computers.append({alias,alias,box&&box->ok&&now-m_fleet.peerPolledAt(alias)<FleetState::kPeerStaleMs});
+    }
+    QList<TeamNewDialog::Session> sessions;
+    for(const auto &e:m_entries)if(e.session.state!="archived"&&e.online)sessions.append({e.host,e.session.name,e.session.cmd});
+    const auto *entry=selected();
+    QString folder,project;
+    if(entry){if(entry->host.isEmpty())folder=entry->session.cwd;project=m_organization.groupFor(entry->identity);
+        if(const auto *group=m_organization.group(project))project=group->name;}
+    TeamNewDialog dialog(m_teams,&m_client,computers,sessions,folder,project,this);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    m_teams->refresh();
+    showTeam(dialog.createdTeam());
+}
+void SessionsWindow::openTeamTask(int task)
+{
+    const auto *entry=selected();
+    const auto *team=entry&&m_teams?m_teams->teamOfSession(entry->host,entry->session.name):nullptr;
+    if(!team)return;
+    showTeam(team->id);
+    m_teamPanel->openTask(task);
 }
 void SessionsWindow::showTeam(const QString &team)
 {
@@ -6188,4 +6287,38 @@ void SessionsWindow::openRelatedSession(const QString &host,const QString &name,
     m_folderFilterPath.clear();m_filter=archive.isEmpty()?"all":"archived";m_hostFilters.clear(); m_projectFilters.clear();m_search->clear();showSessionList();
     const auto key=host+'\n'+name+(archive.isEmpty()?QString():'\n'+archive);revealSession(key);
     for(int i=0;i<m_sessions->count();++i)if(m_sessions->item(i)->data(KeyRole).toString()==key){m_sessions->setCurrentRow(i);m_sessions->scrollToItem(m_sessions->item(i));return;}
+}
+// WhiteWh fork: agent teams. The Team designer is a session of its own that
+// proposes catalog changes; its Team tab shows the draft to keep and apply.
+void SessionsWindow::showTeamDesigner()
+{
+    if(!m_teams)return;
+    for(const auto &e:m_entries)if(e.host.isEmpty()&&e.session.state=="running"&&e.session.name.endsWith("/team-designer")){
+        showSession(e.host,e.session.name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);return;
+    }
+    const auto *entry=selected();
+    QString folder=entry&&entry->host.isEmpty()?entry->session.cwd:QString();
+    if(folder.isEmpty())folder=QDir::homePath();
+    bool ok=false;
+    const auto goal=QInputDialog::getMultiLineText(this,tr("Team designer"),
+        tr("The designer reads %1 (read only) and proposes roles, templates and routing rules for the team catalog. "
+           "What do you need? (optional)").arg(QDir::toNativeSeparators(folder)),{},&ok);
+    if(!ok)return;
+    showNotice(tr("Starting the Team designer…"));
+    m_teams->call(QStringLiteral("catalog designer"),{{"folder",QDir::toNativeSeparators(folder)},{"goal",goal}},
+        [this](bool ok,const QJsonObject &result,const QString &error){
+            if(!ok){showNotice(tr("The Team designer did not start: %1").arg(error),true);return;}
+            const auto name=result.value("name").toString();
+            showNotice(tr("Team designer started%1").arg(name.isEmpty()?QString():QStringLiteral(": ")+name));
+            // Open it once the listing shows it.
+            if(name.isEmpty())return;
+            auto *tries=new int(0);auto *timer=new QTimer(this);timer->setInterval(1000);
+            connect(timer,&QTimer::timeout,this,[this,timer,tries,name]{
+                for(const auto &e:m_entries)if(e.host.isEmpty()&&e.session.name==name){
+                    showSession(e.host,name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);
+                    timer->stop();timer->deleteLater();delete tries;return;}
+                if(++*tries>20){timer->stop();timer->deleteLater();delete tries;}
+            });
+            timer->start();
+        });
 }

@@ -10,10 +10,11 @@ const TOPICS: &[(&str, &str)] = &[
     ("wait", include_str!("agent_guide/wait.md")),
     // WhiteWh fork: agent teams.
     ("team", include_str!("agent_guide/team.md")),
+    ("designer", include_str!("agent_guide/designer.md")),
     ("launch", include_str!("agent_guide/launch.md")),
     ("stop", include_str!("agent_guide/stop.md")),
 ];
-const USAGE: &str = "usage: hgs guide [send|wait|team|launch|stop]";
+const USAGE: &str = "usage: hgs guide [send|wait|team|designer|launch|stop]";
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     let text = match args {

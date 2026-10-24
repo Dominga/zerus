@@ -138,6 +138,9 @@ pub(crate) struct Member {
     /// until you relaunch it.
     #[serde(default)]
     pub error: String,
+    /// The role's instructions from the catalog, given with every task.
+    #[serde(default)]
+    pub prompt: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -315,6 +318,12 @@ pub(crate) struct Team {
     pub created: f64,
     #[serde(default)]
     pub updated: f64,
+    /// A team created from the desktop starts its lead and sends it this
+    /// planning brief once, like a report to the lead.
+    #[serde(default)]
+    pub brief: Notice,
+    #[serde(default)]
+    pub brief_id: String,
 }
 
 impl Team {

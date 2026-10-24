@@ -197,6 +197,7 @@ class TestActivityView : public QObject {
 private slots:
     void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
+    void teamMessagesReadAsPlaques();
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
     void richReplyScrollingKeepsQueuedInputResponsive();
@@ -336,6 +337,35 @@ void TestActivityView::archiveRestoreKeepsVisibleHistoryAndSelection()
     QCOMPARE(view.plainText(), text); QCOMPARE(browser->textCursor().selectedText(), selected);
     QCOMPARE(browser->verticalScrollBar()->value(), scroll);
     view.setSessionKey("another-conversation"); QVERIFY(view.plainText().isEmpty());
+}
+
+// WhiteWh fork: agent teams. A message with Zerus's team header reads as a
+// plaque: kind, sender and receiver, a link to the task, the attempt and the
+// literal header; the report command and long bodies stay folded.
+void TestActivityView::teamMessagesReadAsPlaques()
+{
+    const QString handOff = QString::fromUtf8("[Zerus team \u00b7 from: Lead \u00b7 task: #3 \u00b7 attempt: 2]\n"
+        "Team: Checkout. Your role: Backend.\n\nTask #3: Saved cards API\nImplement REST endpoints for saved cards.\n\n"
+        "When you finish, report once (hgs guide team) with JSON on stdin:\n  hgs team report --json\n  {\"attempt\":\"a3b\"}");
+    const QString report = QString::fromUtf8("[Zerus team \u00b7 from: Backend \u00b7 task: #3 \u00b7 attempt: 2]\n"
+        "Report for task #3 Saved cards API:\n\nEndpoints added; 18 tests pass.\n\nDecide with hgs team accept --json");
+    SettledActivityView view; view.resize(700, 500);
+    QSignalSpy task(&view, &ActivityView::teamTaskActivated);
+    view.setActivity({}, {journalEvent(1, "UserPromptSubmit", handOff), journalEvent(2, "Stop", "Starting with the cards client."),
+                          journalEvent(3, "UserPromptSubmit", report)});
+    const auto text = view.browser()->toPlainText();
+    QVERIFY(text.contains("Task from team"));
+    QVERIFY(text.contains(QString::fromUtf8("Lead \u2192 Backend")));
+    QVERIFY(text.contains("Task: Saved cards API"));
+    QVERIFY(text.contains("Attempt 2"));
+    QVERIFY(text.contains("Report to lead"));
+    QVERIFY(text.contains("Endpoints added; 18 tests pass."));
+    QVERIFY(text.contains(QString::fromUtf8("[Zerus team \u00b7 from: Lead \u00b7 task: #3 \u00b7 attempt: 2]")));
+    QVERIFY(!text.contains("hgs team report --json"));   // folded until Show more
+    QVERIFY(view.browser()->toHtml().contains("hgs-team-task:3"));
+    QMetaObject::invokeMethod(view.browser(), "anchorClicked", Q_ARG(QUrl, QUrl("hgs-team-task:3")));
+    QCOMPARE(task.count(), 1);
+    QCOMPARE(task.first().first().toInt(), 3);
 }
 
 void TestActivityView::hiddenSnapshotsDoNotBuildDocuments()

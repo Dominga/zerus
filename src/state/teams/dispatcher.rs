@@ -79,6 +79,8 @@ pub(crate) enum Step {
     TurnEnded { task: u32, at: f64 },
     NoReport { task: u32 },
     NotifyLead { task: u32 },
+    /// The planning brief of a team created from the desktop.
+    Brief,
 }
 
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
@@ -90,8 +92,9 @@ fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
 /// processes.
 pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     let mut steps = Vec::new();
+    let planning = team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending);
     let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
-    if !active {
+    if !active && !planning {
         return steps;
     }
     for member in &team.members {
@@ -120,6 +123,19 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                 });
             }
         }
+    }
+    if planning {
+        // A desktop team starts only its lead, then briefs it once.
+        if let Some(lead) = team.member(&team.lead) {
+            if lead.session.is_none() {
+                if lead.launch_id.is_empty() && lead.error.is_empty() {
+                    steps.push(Step::Launch { member: lead.id.clone() });
+                }
+            } else if team.brief == Notice::Pending && session_of(lead, seen).is_some_and(|s| s.free && !s.run_id.is_empty()) {
+                steps.push(Step::Brief);
+            }
+        }
+        return steps;
     }
     let ready = plan::ready(team);
     // Turn ends, No report and reports for the lead, for open work.
@@ -194,6 +210,9 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     if !team.goal.is_empty() {
         text += &format!("Team goal: {}\n", team.goal);
     }
+    if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
+        text += &format!("Role: {prompt}\n");
+    }
     text += &format!("\nTask #{}: {}\n", task.id, task.title);
     if !task.description.is_empty() {
         text += &format!("{}\n", task.description);
@@ -228,6 +247,47 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     text
 }
 
+/// The planning brief for the lead of a team created from the desktop: the
+/// goal, the members and tasks proposed so far, and how to plan.
+pub(crate) fn brief_text(team: &Team) -> String {
+    let members: Vec<Value> = team
+        .members
+        .iter()
+        .filter(|m| m.id != team.lead && m.state != MemberState::Removed)
+        .map(|m| {
+            json!({"id":m.id,"role":m.role,"agent":m.agent,"account":m.account,"model":m.model,"effort":m.effort,
+                "permissions":m.permissions,"computer":m.computer,"folder":m.folder,"prompt":m.prompt})
+        })
+        .collect();
+    let tasks: Vec<Value> = team
+        .tasks
+        .iter()
+        .map(|t| json!({"id":t.id,"title":t.title,"description":t.description,"criteria":t.criteria,"assignee":t.assignee,"deps":t.deps}))
+        .collect();
+    let mut text = format!(
+        "[Zerus team \u{b7} from: You \u{b7} planning]\nYou lead the team {}. Goal:\n{}\n\n",
+        team.name,
+        if team.goal.is_empty() { "(none given; ask the owner)" } else { team.goal.as_str() }
+    );
+    if !team.folder.is_empty() {
+        text += &format!("Folder: {}\n", team.folder);
+    }
+    if let Some(prompt) = team.member(&team.lead).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
+        text += &format!("Your role: {prompt}\n");
+    }
+    text += &format!(
+        "\nPlan the work as tasks with acceptance criteria and dependencies (hard: waits for Accepted; soft: may start \
+         once the dependency is In progress), then send the whole plan once with hgs team plan --json (hgs guide team). \
+         Keep these members unless the goal needs others; nothing runs until the owner approves.\n\
+         {{\"request_id\":\"{}\",\"team\":\"{}\",\"members\":{},\"tasks\":{}}}",
+        uuid::Uuid::new_v4(),
+        team.id,
+        serde_json::to_string(&members).unwrap_or_default(),
+        serde_json::to_string(&tasks).unwrap_or_default()
+    );
+    text
+}
+
 /// The message that tells the lead about a report.
 pub(crate) fn notice_text(team: &Team, task: &Task, attempt: &Attempt) -> String {
     let report = attempt.report.as_ref().map(|r| r.text.as_str()).unwrap_or_default();
@@ -245,7 +305,7 @@ pub(crate) fn notice_text(team: &Team, task: &Task, attempt: &Attempt) -> String
 }
 
 /// Runs this hgs with JSON on stdin; the child is no session's own.
-fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Duration) -> anyhow::Result<Output> {
+pub(crate) fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Duration) -> anyhow::Result<Output> {
     let mut command = Command::new(std::env::current_exe()?);
     if !host.is_empty() {
         command.arg(format!("@{host}"));
@@ -410,13 +470,20 @@ pub(crate) fn launch_args(team: &Team, member: &Member, folder: &str) -> Vec<Str
     if terminal {
         // A terminal agent reports its status only once a conversation
         // starts; a short first turn makes the member Ready for its task.
-        args.extend([
-            "--".into(),
+        let intro = if member.id == team.lead {
             format!(
-                "You are {} in the Zerus agent team {}. Tasks arrive as messages that begin with [Zerus team.                  Until one arrives do nothing and reply only: Ready.",
+                "You lead the Zerus agent team {}. A planning brief arrives as a message that begins with [Zerus team. \
+                 Until it arrives do nothing and reply only: Ready.",
+                team.name
+            )
+        } else {
+            format!(
+                "You are {} in the Zerus agent team {}. Tasks arrive as messages that begin with [Zerus team. \
+                 Until one arrives do nothing and reply only: Ready.",
                 member.role, team.name
-            ),
-        ]);
+            )
+        };
+        args.extend(["--".into(), intro]);
     }
     args
 }
@@ -518,8 +585,40 @@ fn notify_lead(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result
     })
 }
 
+fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
+    let brief_id = uuid::Uuid::new_v4().to_string();
+    let mut message = None;
+    change(store, team_id, |team, _| {
+        anyhow::ensure!(team.brief == Notice::Pending, "already briefed");
+        let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+        message = Some((lead, brief_text(team)));
+        team.brief = Notice::Sending;
+        team.brief_id = brief_id.clone();
+        Ok(())
+    })?;
+    let (lead, text) = message.unwrap();
+    let outcome = send(&lead, &brief_id, &text);
+    change(store, team_id, |team, events| {
+        if team.brief != Notice::Sending || team.brief_id != brief_id {
+            return Ok(());
+        }
+        team.brief = match &outcome {
+            Sent::Delivered => Notice::Sent,
+            Sent::Refused(_) => Notice::Pending,
+            Sent::Uncertain(_) => Notice::Unconfirmed,
+        };
+        match &outcome {
+            Sent::Delivered => events.push(Event::new("briefed", json!({"by":"Zerus"}))),
+            Sent::Uncertain(error) => events.push(Event::new("brief_unconfirmed", json!({"error":error}))),
+            Sent::Refused(_) => {}
+        }
+        Ok(())
+    })
+}
+
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
     match step {
+        Step::Brief => send_brief(store, &team.id),
         Step::Adopt { member, session } => change(store, &team.id, |team, events| {
             let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
             let started = found.session.is_none();
@@ -582,11 +681,15 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
 /// being sent may have arrived.
 fn recover(store: &mut Store) -> anyhow::Result<()> {
     for team in store.teams(false, 10_000)? {
-        let stuck = team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.state == AttemptState::Delivering || a.notice == Notice::Sending);
+        let stuck = team.brief == Notice::Sending
+            || team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.state == AttemptState::Delivering || a.notice == Notice::Sending);
         if !stuck {
             continue;
         }
         change(store, &team.id, |team, events| {
+            if team.brief == Notice::Sending {
+                team.brief = Notice::Unconfirmed;
+            }
             for task in &mut team.tasks {
                 for attempt in &mut task.attempts {
                     if attempt.state == AttemptState::Delivering {
@@ -610,7 +713,10 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     let teams: Vec<Team> = store
         .teams(false, 10_000)?
         .into_iter()
-        .filter(|team| matches!(team.status, TeamStatus::Running | TeamStatus::Paused))
+        .filter(|team| {
+            matches!(team.status, TeamStatus::Running | TeamStatus::Paused)
+                || (team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending))
+        })
         .collect();
     if teams.is_empty() {
         return Ok(false);
@@ -719,6 +825,27 @@ mod tests {
         team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Refused, sent_at: 90.0, ..Default::default() });
         assert!(!steps(&team, &[session("codex/x/dev", "r1", true)], 100.0).iter().any(|s| matches!(s, Step::HandOut { .. })));
         assert!(steps(&team, &[session("codex/x/dev", "r1", true)], 130.0).iter().any(|s| matches!(s, Step::HandOut { .. })));
+    }
+
+    #[test]
+    fn a_desktop_team_starts_its_lead_then_briefs_it_once() {
+        let (mut team, _) = ops::create(
+            "t",
+            &json!({"name":"Checkout","goal":"Ship it","start":true,"lead":{"id":"lead","agent":"claude","prompt":"Plan well"},
+                "members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
+        )
+        .unwrap();
+        assert_eq!(steps(&team, &[], 1.0), vec![Step::Launch { member: "lead".into() }]);
+        team.members[0].launch_id = "L".into();
+        let mut started = session("claude/x/lead", "r0", true);
+        started.launch_id = "L".into();
+        assert!(matches!(&steps(&team, &[started.clone()], 1.0)[..], [Step::Adopt { .. }]));
+        team.members[0].session = Some(SessionRef { name: "claude/x/lead".into(), run_id: "r0".into(), conversation_id: "c".into(), ..Default::default() });
+        assert_eq!(steps(&team, &[started], 1.0), vec![Step::Brief]);
+        let brief = brief_text(&team);
+        assert!(brief.contains("Ship it") && brief.contains("Your role: Plan well") && brief.contains("\"assignee\":\"dev\""));
+        team.brief = Notice::Sent;
+        assert!(steps(&team, &[session("claude/x/lead", "r0", true)], 1.0).is_empty());
     }
 
     #[test]

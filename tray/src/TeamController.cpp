@@ -31,6 +31,7 @@ void TeamController::refresh()
 {
     if (!m_listRequest) m_listRequest = m_client->requestTeam({}, QStringLiteral("list"), QJsonObject{});
     readWatched();
+    if (m_watchCatalog && !m_catalogInFlight) refreshCatalog();
 }
 
 void TeamController::readWatched()
@@ -85,8 +86,43 @@ void TeamController::act(const QString &operation, QJsonObject input, const std:
     m_actions.insert(request, done);
 }
 
+void TeamController::call(const QString &operation, QJsonObject input, const Reply &done, bool change)
+{
+    if (change) {
+        input.insert("by", "human");
+        input.insert("request_id", QUuid::createUuid().toString(QUuid::WithoutBraces));
+    }
+    m_calls.insert(m_client->requestTeam({}, operation, input), done);
+}
+
+void TeamController::refreshCatalog()
+{
+    m_catalogInFlight = true;
+    call(QStringLiteral("catalog get"), {}, [this](bool ok, const QJsonObject &result, const QString &) {
+        m_catalogInFlight = false;
+        if (!ok) return;
+        const auto next = Teams::parseCatalog(result);
+        if (m_catalogReady && next.json() == m_catalog.json() && next.proposals.size() == m_catalog.proposals.size()) {
+            bool same = true;
+            for (int i = 0; i < next.proposals.size(); ++i) same = same && next.proposals[i].id == m_catalog.proposals[i].id && next.proposals[i].state == m_catalog.proposals[i].state;
+            if (same) return;
+        }
+        m_catalog = Teams::parseCatalog(result);
+        m_catalogReady = true;
+        emit catalogChanged();
+    }, false);
+}
+
 void TeamController::received(quint64 request, const QString &operation, const QJsonObject &result)
 {
+    if (m_calls.contains(request)) {
+        const auto done = m_calls.take(request);
+        if (done) done(true, result, {});
+        if (operation.startsWith("catalog ")) {
+            if (operation != "catalog get" && operation != "catalog route") refreshCatalog();
+        } else refresh();
+        return;
+    }
     if (m_actions.contains(request)) {
         const auto done = m_actions.take(request);
         if (done) done(true, result.value("status").toString());
@@ -127,6 +163,11 @@ void TeamController::received(quint64 request, const QString &operation, const Q
 
 void TeamController::failed(quint64 request, const QString &operation, const QString &error)
 {
+    if (m_calls.contains(request)) {
+        const auto done = m_calls.take(request);
+        if (done) done(false, {}, error);
+        return;
+    }
     if (m_actions.contains(request)) {
         const auto done = m_actions.take(request);
         if (done) done(false, error);

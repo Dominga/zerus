@@ -59,6 +59,7 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
     member.launch_id.clear();
     member.error.clear();
+    member.prompt = clean(&member.prompt, 8000, "A role prompt")?;
     member.state = match member.session {
         Some(_) => MemberState::Active,
         None => MemberState::NotCreated,
@@ -98,6 +99,22 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?
     };
     ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
+    // From the desktop: the members and template tasks proposed for the
+    // lead's plan; the lead starts and gets a planning brief.
+    let mut members = vec![lead.clone()];
+    for value in input["members"].as_array().into_iter().flatten() {
+        let member = parse_member(value)?;
+        ensure!(members.iter().all(|m| m.id != member.id), "Member id {} is used twice", member.id);
+        members.push(member);
+    }
+    let mut tasks = Vec::new();
+    for value in input["tasks"].as_array().into_iter().flatten() {
+        let task = parse_task(value)?;
+        ensure!(tasks.iter().all(|t: &Task| t.id != task.id), "Task #{} is used twice", task.id);
+        tasks.push(task);
+    }
+    let start = input["start"].as_bool() == Some(true);
+    // A lead without a session is started first; an existing lead is briefed.
     let team = Team {
         id: id.to_owned(),
         name: name.clone(),
@@ -108,8 +125,9 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         status: TeamStatus::Planning,
         settings,
         lead: lead.id.clone(),
-        members: vec![lead],
-        tasks: Vec::new(),
+        members,
+        tasks,
+        brief: if start { Notice::Pending } else { Notice::None },
         ..Default::default()
     };
     let events = vec![Event::new("created", json!({"by":"You","name":name}))];
@@ -253,9 +271,11 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     task.decided_by = Some(if human { Decider::Human } else { Decider::Lead });
     task.decision_reason = reason.clone();
     let title = task.title.clone();
+    // Mark done manually: your acceptance without (or despite) a report.
+    let manual = accept && human && input["manual"].as_bool() == Some(true);
     events.push(Event::new(
         if accept { "accepted" } else { "rejected" },
-        json!({"by":label,"task":id,"title":title,"attempt":n,"reason":reason}),
+        json!({"by":label,"task":id,"title":title,"attempt":n,"reason":reason,"manual":manual}),
     ));
     let status = serde_json::to_value(team.task(id).unwrap().status)?;
     finish_if_done(team, events);

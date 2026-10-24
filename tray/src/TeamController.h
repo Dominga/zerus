@@ -33,12 +33,23 @@ public:
     void loadOlder();
     // A change: `operation` with `input`; team, by and request_id are added.
     void act(const QString &operation, QJsonObject input, const std::function<void(bool ok, const QString &message)> &done = {});
+    // Any `hgs team` operation ("catalog get", "create", ...) with its whole
+    // answer. Changes get by and request_id like act().
+    using Reply = std::function<void(bool ok, const QJsonObject &result, const QString &error)>;
+    void call(const QString &operation, QJsonObject input, const Reply &done, bool change = true);
+    // The catalog, read on request and again after each change through call().
+    const Teams::Catalog &catalog() const { return m_catalog; }
+    bool catalogReady() const { return m_catalogReady; }
+    void refreshCatalog();
+    // The catalog is read with every poll while its draft is on screen.
+    void setWatchCatalog(bool watch) { m_watchCatalog = watch; if (watch) refreshCatalog(); }
     bool available() const { return m_available; }
     static void setPollInterval(int milliseconds);
 signals:
     void teamsChanged();
     void watchedChanged();
     void feedChanged();
+    void catalogChanged();
 private:
     void received(quint64 request, const QString &operation, const QJsonObject &result);
     void failed(quint64 request, const QString &operation, const QString &error);
@@ -55,4 +66,7 @@ private:
     QMap<qint64, QJsonObject> m_feed;   // by seq
     QJsonValue m_feedCursor;
     QMap<quint64, std::function<void(bool, const QString &)>> m_actions;
+    QMap<quint64, Reply> m_calls;
+    Teams::Catalog m_catalog;
+    bool m_catalogReady = false, m_watchCatalog = false, m_catalogInFlight = false;
 };

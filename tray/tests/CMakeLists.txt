@@ -602,6 +602,12 @@ target_include_directories(test_teams PRIVATE ../src)
 target_link_libraries(test_teams PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(teams test_teams)
 set_tests_properties(teams PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# WhiteWh fork: agent teams M3–M6 (task card, planning, New team, catalog, designer, workspace).
+add_executable(test_teamsui test_teamsui.cpp)
+target_include_directories(test_teamsui PRIVATE ../src)
+target_link_libraries(test_teamsui PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(teamsui test_teamsui)
+set_tests_properties(teamsui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # WhiteWh fork: Claude desktop app sessions continued in Zerus.
 add_executable(test_claudeappsessions test_claudeappsessions.cpp)
 target_include_directories(test_claudeappsessions PRIVATE ../src)

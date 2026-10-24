@@ -613,7 +613,9 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
 quint64 HgsClient::requestTeam(const QString &host, const QString &operation, const QJsonObject &input)
 {
     const quint64 request = ++m_teamRequest;
-    QStringList args{QStringLiteral("team"), operation, QStringLiteral("--json")};
+    // A catalog operation is two words: "catalog get".
+    QStringList args{QStringLiteral("team")};
+    args << operation.split(' ', Qt::SkipEmptyParts) << QStringLiteral("--json");
     if (!host.isEmpty()) args.prepend('@' + host);
     runHgs(m_hgs, args, host.isEmpty() ? 15000 : 45000, this,
         [this, request, host, operation](const QByteArray &bytes) {

@@ -41,7 +41,35 @@ pub(crate) fn canonical_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
 }
 
+/// A member in a sandbox runs at Low integrity (DeepSeek's confined shell),
+/// which may not write files of the usual Medium label: its `hgs team
+/// report` could not record the report. The team folder and what it holds
+/// take the Low label once (what is created later inherits it); the folder
+/// keeps its owner and permissions. Failing to set it leaves reports from
+/// sandboxes to the member's last reply.
+#[cfg(windows)]
+fn sandbox_writable(dir: &Path) {
+    use std::os::windows::process::CommandExt;
+    let marker = dir.join(".sandbox-writable");
+    if marker.exists() {
+        return;
+    }
+    let done = std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/setintegritylevel", "(OI)(CI)L", "/T", "/C", "/Q"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .status()
+        .is_ok_and(|status| status.success());
+    if done {
+        let _ = fs::write(&marker, b"");
+    }
+}
+
 impl Store {
+
     pub(crate) fn open(write: bool) -> anyhow::Result<Self> {
         Self::open_at(&path(), write)
     }
@@ -55,6 +83,8 @@ impl Store {
             if !path.exists() {
                 crate::platform::private_open(fs::OpenOptions::new().write(true).create_new(true)).open(path)?;
             }
+            #[cfg(windows)]
+            sandbox_writable(path.parent().context("Missing team store parent")?);
         } else if !path.exists() {
             bail!("No teams yet");
         }

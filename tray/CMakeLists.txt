@@ -147,6 +147,8 @@ add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/Fle
     src/AnalyticsClient.cpp src/AnalyticsData.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
+    # Agent teams (hgs team).
+    src/TeamModel.cpp src/TeamController.cpp
     src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp
     # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
     src/MainThreadWatchdog.cpp)
@@ -183,11 +185,15 @@ add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp s
     src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
     src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp
+    # The inspector's Team tab.
+    src/TeamPanel.cpp src/TeamPanelPlan.cpp src/TeamTaskCard.cpp src/TeamNewDialog.cpp src/TeamNewTab.cpp src/TeamCatalogEditor.cpp src/TeamDesignerPanel.cpp src/TeamDesignerPage.cpp src/TeamConversation.cpp src/TeamWorkspace.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
     # only on macOS; makeTrayIcon() in TrayAgent.cpp explains why not on Linux.
     src/QuietTrayIcon.cpp)
 target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-core Qt6::Widgets
     PRIVATE hgs-markdown hgs-external-file hgs-updates hgs-qrcodegen)
+# Agent teams show other sessions' conversations (TeamConversation).
+target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-activity)
 
 add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)

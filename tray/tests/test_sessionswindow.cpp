@@ -80,6 +80,8 @@
 #include "MessageBoxIcons.h"
 #include "ComposerToolbar.h"
 #include "SessionList.h"
+#include "TeamController.h"
+#include "TeamNewTab.h"
 #include <QToolBar>
 #include "SessionCardDelegate.h"
 #include "SessionOrganization.h"
@@ -232,6 +234,7 @@ private slots:
     void independentWaitRemainsVisibleWithoutExpandingHeader_data();
     void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
+    void agentTeamsGroupTheirSessions();
     void groupsPersistFilterAndRevealAttention();
     void rebuildKeepsProjectOrderAtScale_data();
     void rebuildKeepsProjectOrderAtScale();
@@ -667,6 +670,93 @@ FleetState TestSessionsWindow::fleet() const
     BoxState mac; mac.host = "mac"; mac.ok = true; mac.sessions = {approval};
     FleetState result; result.setLocal(arch, QDateTime::currentMSecsSinceEpoch()); result.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
     return result;
+}
+
+// A team's header stands above its lead, its
+// members follow indented, the header opens the Team tab and its chevron keeps
+// only members with a problem.
+void TestSessionsWindow::agentTeamsGroupTheirSessions()
+{
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/collapsedTeams"); QSettings().remove("workspace/inspectorVisible"); });
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray teams = R"({"items":[{"id":"team-1","name":"Checkout","status":"running","lead":"lead","revision":3,
+        "members":[{"id":"lead","role":"Lead","agent":"codex","state":"active","session":{"host":"","name":"codex/hgs/dashboard"}},
+                   {"id":"qa","role":"Tester","agent":"kimi","state":"active","session":{"host":"","name":"kimi/hgs/tester"}}],
+        "tasks":[{"id":1,"title":"API","status":"in_progress","assignee":"lead","attempt":{"n":1,"state":"delivered"}},
+                 {"id":2,"title":"Tests","status":"pending","assignee":"qa","deps":[{"task":1}]}]}]})";
+    const QByteArray answer = "elif c=='team' and a[1:2]==['list']:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument::fromJson(teams).toJson(QJsonDocument::Compact))) + ")\n"
+                              "elif c=='team':print('{}')\n";
+    const QString fixture = m_dir->filePath("hgs-teams");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    auto state = fleet(); auto box = state.local();
+    SessionInfo tester = box.sessions.value(1); tester.name = "kimi/hgs/tester"; tester.project = "hgs"; tester.tag = "tester";
+    box.sessions.append(tester); state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList");
+    const auto rowOf = [&](const QString &key) { for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key) == key) return i; return -1; };
+    auto *controller = window.findChild<TeamController *>();
+    QVERIFY(controller);
+    QTRY_COMPARE(controller->teams().size(), 1);
+    QTRY_VERIFY(rowOf("#team\nteam-1") >= 0);
+    const int header = rowOf("#team\nteam-1");
+    QCOMPARE(rowOf("\ncodex/hgs/dashboard"), header + 1);
+    QCOMPARE(rowOf("\nkimi/hgs/tester"), header + 2);
+    auto *member = list->item(header + 2);
+    QVERIFY(member->data(SessionRoles::TeamMember).toBool());
+    QVERIFY(!list->item(header + 1)->data(SessionRoles::TeamMember).toBool());
+    // The last member ends the connector; the lead folds its members as a
+    // session folds its subagents.
+    QCOMPARE(member->data(SessionRoles::TeamMember).toInt(), 2);
+    QVERIFY(list->item(header + 1)->data(SessionRoles::HasChildren).toBool() && list->item(header + 1)->data(SessionRoles::Expanded).toBool());
+    emit list->childrenToggled(QStringLiteral("\ncodex/hgs/dashboard"));
+    QTRY_VERIFY(list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
+    QVERIFY(!list->item(rowOf("\ncodex/hgs/dashboard"))->data(SessionRoles::Expanded).toBool());
+    emit list->childrenToggled(QStringLiteral("\ncodex/hgs/dashboard"));
+    QTRY_VERIFY(!list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
+    QCOMPARE(list->item(header)->data(SessionRoles::Meta).toString(), QStringLiteral("0/2"));
+    QCOMPARE(list->item(header)->data(SessionRoles::TeamMembers).toInt(), 2);
+    QVERIFY(!(list->item(header)->flags() & Qt::ItemIsSelectable));
+    // The header opens the Team tab; its chevron collapses the group.
+    const QRect rect = list->visualItemRect(list->item(header));
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, rect.center() - QPoint(rect.width() / 4, 0));
+    auto *inspector = window.findChild<QTabWidget *>("sessionInspector");
+    QTRY_COMPARE(inspector->currentWidget()->objectName(), QStringLiteral("teamPanel"));
+    QTRY_VERIFY(inspector->findChild<QLabel *>("teamName"));
+    QCOMPARE(inspector->findChild<QLabel *>("teamName")->text(), QStringLiteral("Checkout"));
+    // Optional: ZERUS_TEAM_SHOTS=<dir> keeps a picture of the window for review.
+    if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) {
+        QTest::qWait(300); window.grab().save(QDir(shots).filePath("team-window.png"));
+    }
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, SessionList::teamToggleRect(rect).center());
+    QTRY_VERIFY(list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
+    QVERIFY(!list->item(rowOf("\ncodex/hgs/dashboard"))->isHidden());
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, SessionList::teamToggleRect(list->visualItemRect(list->item(rowOf("#team\nteam-1")))).center());
+    QTRY_VERIFY(!list->item(rowOf("\nkimi/hgs/tester"))->isHidden());
+    // A team's session shows Team next to Activity; a session without one
+    // offers New team, which it would lead.
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
+    const auto tabNamed = [tabs](const QString &text) { for (int i = 0; i < tabs->count(); ++i) if (tabs->tabText(i) == text) return i; return -1; };
+    window.showSession({}, "codex/hgs/dashboard");
+    QTRY_VERIFY(tabNamed("Team") >= 0);
+    QCOMPARE(tabNamed("New team"), -1);
+    QString loner;
+    for (const auto &s : state.local().sessions) if (s.name != "codex/hgs/dashboard" && s.name != "kimi/hgs/tester" && s.state != "archived") { loner = s.name; break; }
+    QVERIFY(!loner.isEmpty());
+    window.showSession({}, loner);
+    QTRY_VERIFY(tabNamed("New team") >= 0);
+    QCOMPARE(tabNamed("Team"), -1);
+    tabs->setCurrentIndex(tabNamed("New team"));
+    QTRY_VERIFY(tabs->currentWidget()->findChild<QWidget *>("teamNewDialog"));
+    auto *form = dynamic_cast<TeamNewTab *>(tabs->currentWidget()->findChild<QWidget *>("teamNewDialog"));
+    QVERIFY(form); QCOMPARE(form->leadSession(), loner);
+    // The rail's Team designer opens its own mode.
+    QPushButton *designerNav = nullptr;
+    for (auto *b : window.findChildren<QPushButton *>("railButton")) if (b->property("teamDesignerNav").toBool()) designerNav = b;
+    QVERIFY(designerNav && !designerNav->isChecked());   // only while its page shows
+    QVERIFY(designerNav);
+    designerNav->click();
+    QTRY_VERIFY(window.findChild<QWidget *>("teamDesignerPage") && window.findChild<QWidget *>("teamDesignerPage")->isVisible());
+    QVERIFY(designerNav->isChecked());
 }
 
 void TestSessionsWindow::gitPublicationChecksKeepDraftFocusAndSharedCards()

@@ -590,6 +590,18 @@ target_include_directories(test_worktreepanel PRIVATE ../src)
 target_link_libraries(test_worktreepanel PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
 zerus_add_test(worktreepanel test_worktreepanel)
 set_tests_properties(worktreepanel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Agent teams (TeamModel, TeamController, TeamPanel).
+add_executable(test_teams test_teams.cpp)
+target_include_directories(test_teams PRIVATE ../src)
+target_link_libraries(test_teams PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(teams test_teams)
+set_tests_properties(teams PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Agent teams M3–M6 (task card, planning, New team, catalog, designer, workspace).
+add_executable(test_teamsui test_teamsui.cpp)
+target_include_directories(test_teamsui PRIVATE ../src)
+target_link_libraries(test_teamsui PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(teamsui test_teamsui)
+set_tests_properties(teamsui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_markdownhtml test_markdownhtml.cpp)
 target_link_libraries(test_markdownhtml PRIVATE Qt6::Test hgs-markdown)

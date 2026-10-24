@@ -4,6 +4,7 @@
 //! before it is sent and never sent again once it may have arrived.
 use super::super::*;
 use super::model::*;
+use super::ops;
 use super::plan;
 use super::store::{Event, Store};
 use anyhow::Context;
@@ -35,6 +36,10 @@ pub(crate) struct Seen {
     pub free: bool,
     pub idle: bool,
     pub reply_at: Option<f64>,
+    /// Waiting on an answer: a question or a permission request.
+    pub asking: bool,
+    /// Its process or native session runs.
+    pub live: bool,
 }
 
 /// Every session of this computer and its peers from one listing.
@@ -63,6 +68,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 free,
                 idle,
                 reply_at: record["reply_at"].as_f64(),
+                asking: live && matches!(field("phase"), "question" | "input" | "approval"),
+                live,
             });
         }
     }
@@ -81,6 +88,13 @@ pub(crate) enum Step {
     NotifyLead { task: u32 },
     /// A DeepSeek member's model and effort, before its first task.
     Settings { member: String },
+    /// The planning brief of a team created from the desktop.
+    Brief,
+    /// A member's question for the lead to answer.
+    Question { member: String },
+    /// Tells the lead about a member that stopped on its task (its session
+    /// ended, paused or is gone; or its turn ended with neither report nor reply).
+    Stalled { task: u32, kind: String },
 }
 
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
@@ -92,8 +106,9 @@ fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
 /// processes.
 pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     let mut steps = Vec::new();
+    let planning = team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending);
     let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
-    if !active {
+    if !active && !planning {
         return steps;
     }
     for member in &team.members {
@@ -122,6 +137,19 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                 });
             }
         }
+    }
+    if planning {
+        // A desktop team starts only its lead, then briefs it once.
+        if let Some(lead) = team.member(&team.lead) {
+            if lead.session.is_none() {
+                if lead.launch_id.is_empty() && lead.error.is_empty() {
+                    steps.push(Step::Launch { member: lead.id.clone() });
+                }
+            } else if team.brief == Notice::Pending && session_of(lead, seen).is_some_and(|s| s.free && !s.run_id.is_empty()) {
+                steps.push(if lead.needs_settings() { Step::Settings { member: lead.id.clone() } } else { Step::Brief });
+            }
+        }
+        return steps;
     }
     let ready = plan::ready(team);
     // Turn ends, No report and reports for the lead, for open work.
@@ -152,6 +180,34 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     if team.status != TeamStatus::Running {
         return steps;
     }
+    // A member that stopped on its task: the lead hears once, when free.
+    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
+        for task in &team.tasks {
+            let Some(attempt) = task.open_attempt() else { continue };
+            let Some(member) = team.member(&attempt.member).filter(|m| m.id != team.lead && m.session.is_some()) else { continue };
+            let kind = if attempt.no_report {
+                "no_report"
+            } else if !session_of(member, seen).is_some_and(|s| s.live) {
+                "stopped"
+            } else {
+                continue;
+            };
+            if !attempt.told_lead.iter().any(|k| k == kind) {
+                steps.push(Step::Stalled { task: task.id, kind: kind.to_owned() });
+                break;
+            }
+        }
+    }
+    // A member asks the lead, not the owner, once the lead is free; one at a
+    // time. Its permission requests go to the lead as well (the owner's
+    // choice); the lead asks the owner when it should not decide.
+    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
+        if let Some(member) = team.members.iter().find(|m| {
+            m.id != team.lead && m.state != MemberState::Removed && session_of(m, seen).is_some_and(|s| s.asking)
+        }) {
+            steps.push(Step::Question { member: member.id.clone() });
+        }
+    }
     // Members busy with an open attempt, or handed one in this tick.
     let mut busy: BTreeSet<&str> = team
         .tasks
@@ -163,7 +219,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     for id in ready {
         let Some(task) = team.task(id) else { continue };
         let Some(member) = team.member(&task.assignee) else { continue };
-        if member.state == MemberState::Removed || busy.contains(member.id.as_str()) {
+        if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) {
             continue;
         }
         if member.session.is_none() {
@@ -196,6 +252,9 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     if !team.goal.is_empty() {
         text += &format!("Team goal: {}\n", team.goal);
     }
+    if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
+        text += &format!("Role: {prompt}\n");
+    }
     text += &format!("\nTask #{}: {}\n", task.id, task.title);
     if !task.description.is_empty() {
         text += &format!("{}\n", task.description);
@@ -224,8 +283,94 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     let at = if member_host.is_empty() { String::new() } else { format!("@{report_host} ") };
     text += &format!(
         "\nWhen you finish, report once (hgs guide team) with JSON on stdin:\n  hgs {at}team report --json\n  {}\n\
-         Summarize what changed, where, and how you checked it.",
+         Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
+         the report as your last message: Zerus gives it to the lead. A blocker goes to the lead too: ask it, not the owner.",
         json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
+    );
+    text
+}
+
+/// The planning brief for the lead of a team created from the desktop: the
+/// goal, the members and tasks proposed so far, and how to plan.
+pub(crate) fn brief_text(team: &Team) -> String {
+    let members: Vec<Value> = team
+        .members
+        .iter()
+        .filter(|m| m.id != team.lead && m.state != MemberState::Removed)
+        .map(|m| {
+            json!({"id":m.id,"role":m.role,"agent":m.agent,"account":m.account,"model":m.model,"effort":m.effort,
+                "permissions":m.permissions,"computer":m.computer,"folder":m.folder,"prompt":m.prompt})
+        })
+        .collect();
+    let tasks: Vec<Value> = team
+        .tasks
+        .iter()
+        .map(|t| json!({"id":t.id,"title":t.title,"description":t.description,"criteria":t.criteria,"assignee":t.assignee,"deps":t.deps}))
+        .collect();
+    let mut text = format!(
+        "[Zerus team \u{b7} from: You \u{b7} planning]\nYou lead the team {}. Goal:\n{}\n\n",
+        team.name,
+        if team.goal.is_empty() { "(none given; ask the owner)" } else { team.goal.as_str() }
+    );
+    if !team.folder.is_empty() {
+        text += &format!("Folder: {}\n", team.folder);
+    }
+    if let Some(prompt) = team.member(&team.lead).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
+        text += &format!("Your role: {prompt}\n");
+    }
+    if !team.lead_protocol.trim().is_empty() {
+        text += &format!("\nTeam protocol:\n{}\n", team.lead_protocol.trim());
+    }
+    text += &format!(
+        "\nPlan the work as tasks with acceptance criteria and dependencies (hard: waits for Accepted; soft: may start \
+         once the dependency is In progress), then send the whole plan once with hgs team plan --json (hgs guide team). \
+         Keep these members unless the goal needs others; nothing runs until the owner approves.\n\
+         {{\"request_id\":\"{}\",\"team\":\"{}\",\"members\":{},\"tasks\":{}}}",
+        uuid::Uuid::new_v4(),
+        team.id,
+        serde_json::to_string(&members).unwrap_or_default(),
+        serde_json::to_string(&tasks).unwrap_or_default()
+    );
+    text
+}
+
+/// A member's question as the lead reads it, with the answer to send back.
+pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> String {
+    let role = team.role_of(&member.id);
+    let approval = card["approval"] == true;
+    let mut text = if approval {
+        format!("[Zerus team \u{b7} from: {role} \u{b7} permission]\n{role} asks you, the lead, for a permission instead of the owner. \
+                 Allow only what its task needs inside the team's folder; deny anything that would change other folders, the \
+                 system or permissions above the project, or delete what it cannot restore. When in doubt, deny and ask the owner.\n")
+    } else {
+        format!("[Zerus team \u{b7} from: {role} \u{b7} question]\n{role} asks you, the lead, instead of the owner:\n")
+    };
+    let mut answers = Vec::new();
+    for item in card["questions"].as_array().into_iter().flatten() {
+        let id = item["id"].as_str().unwrap_or_default();
+        text += "\n";
+        if let Some(header) = item["header"].as_str().filter(|h| !h.is_empty()) {
+            text += &format!("{header}: ");
+        }
+        text += &format!("{}\n", item["question"].as_str().unwrap_or_default());
+        if let Some(body) = item["body"].as_str().filter(|b| !b.is_empty()) {
+            text += &format!("{body}\n");
+        }
+        for option in item["options"].as_array().into_iter().flatten() {
+            let description = option["description"].as_str().unwrap_or_default();
+            text += &format!("  {}) {}{}\n", option["id"].as_str().unwrap_or_default(), option["label"].as_str().unwrap_or_default(),
+                if description.is_empty() { String::new() } else { format!(" \u{2014} {description}") });
+        }
+        if item["allow_other"] != false {
+            text += "  or your own words as text\n";
+        }
+        answers.push(json!({"question_id":id,"selected_option_ids":["<option id>"],"text":""}));
+    }
+    text += &format!(
+        "\nAnswer for them once with hgs team answer --json (hgs guide team):\n  {}\n\
+         If the owner should decide, say so in your reply instead.",
+        json!({"team":team.id,"member":member.id,"question_id":card["question_id"],
+            "expected_question_hash":card["question_hash"],"answers":answers})
     );
     text
 }
@@ -247,7 +392,7 @@ pub(crate) fn notice_text(team: &Team, task: &Task, attempt: &Attempt) -> String
 }
 
 /// Runs this hgs with JSON on stdin; the child is no session's own.
-fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Duration) -> anyhow::Result<Output> {
+pub(crate) fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Duration) -> anyhow::Result<Output> {
     let mut command = Command::new(std::env::current_exe()?);
     if !host.is_empty() {
         command.arg(format!("@{host}"));
@@ -293,6 +438,16 @@ fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Duration) -> a
     std::io::Read::read_to_end(&mut stdout, &mut output.stdout)?;
     std::io::Read::read_to_end(&mut stderr, &mut output.stderr)?;
     Ok(output)
+}
+
+/// The last reply of a member's session, for Use last reply as report.
+pub(crate) fn last_reply(session: &SessionRef) -> anyhow::Result<String> {
+    let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
+    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
+    let text = record["last_message"].as_str().unwrap_or_default().trim().to_owned();
+    anyhow::ensure!(!text.is_empty(), "The member's session has no reply yet");
+    Ok(text)
 }
 
 /// The result of one `hgs send`.
@@ -402,15 +557,23 @@ pub(crate) fn launch_args(team: &Team, member: &Member, folder: &str) -> Vec<Str
     if terminal {
         // A terminal agent reports its status only once a conversation
         // starts; a short first turn makes the member Ready for its task.
+        let intro = if member.id == team.lead {
+            format!(
+                "You lead the Zerus agent team {}. A planning brief arrives as a message that begins with [Zerus team. \
+                 Until it arrives do nothing and reply only: Ready.",
+                team.name
+            )
+        } else {
+            format!(
+                "You are {} in the Zerus agent team {}. Tasks arrive as messages that begin with [Zerus team. \
+                 Until one arrives do nothing and reply only: Ready.",
+                member.role, team.name
+            )
+        };
         // Its model and effort go on its own command line.
         args.push("--".into());
         args.extend(agent_args(&member.agent, &member.model, &member.effort));
-        args.extend([
-            format!(
-                "You are {} in the Zerus agent team {}. Tasks arrive as messages that begin with [Zerus team.                  Until one arrives do nothing and reply only: Ready.",
-                member.role, team.name
-            ),
-        ]);
+        args.push(intro);
     }
     args
 }
@@ -544,8 +707,116 @@ fn notify_lead(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result
     })
 }
 
+/// The message that tells the lead a member stopped on its task.
+pub(crate) fn stalled_text(team: &Team, task: &Task, attempt: &Attempt, kind: &str) -> String {
+    let role = team.role_of(&attempt.member);
+    let what = if kind == "no_report" {
+        format!("{role} ended its turn on task #{} {} with neither a report nor a reply.", task.id, task.title)
+    } else {
+        format!("{role}'s session stopped (ended, paused or gone) while on task #{} {}.", task.id, task.title)
+    };
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} member stopped]\n{what}\n\
+         Look at it and decide: send it a message to go on, retry or reassign the task (hgs guide team), \
+         or ask the owner if it needs them (a relaunch, a sign-in).",
+        task.id
+    )
+}
+
+fn tell_lead_stalled(store: &mut Store, team: &Team, task_id: u32, kind: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.open_attempt().context("no open attempt")?.clone();
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &stalled_text(team, task, &attempt, kind));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(&attempt.member);
+        let found = team.task_mut(task_id).and_then(|t| t.attempts.iter_mut().find(|a| a.id == attempt.id)).context("unknown attempt")?;
+        found.told_lead.push(kind.to_owned());
+        events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":kind})));
+        Ok(())
+    })
+}
+
+/// Gives the lead the member's first question or permission request it has not
+/// had. Inspection runs at most every 20 seconds per member.
+fn forward_question(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    static CHECKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> = std::sync::OnceLock::new();
+    let key = format!("{}\n{member_id}", team.id);
+    {
+        let mut checked = CHECKED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        if checked.get(&key).is_some_and(|at| now() - at < 20.0) {
+            return Ok(());
+        }
+        checked.insert(key, now());
+    }
+    let member = team.member(member_id).context("unknown member")?;
+    let session = member.session.as_ref().context("the member has no session")?;
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
+    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
+    let Some(card) = record["pending_questions"].as_array().into_iter().flatten().find(|card| {
+        card["can_answer"] != false
+            && !member.asked.contains(&format!("{}:{}", card["question_id"].as_str().unwrap_or_default(), card["question_hash"].as_str().unwrap_or_default()))
+    }) else {
+        return Ok(());
+    };
+    let asked = format!("{}:{}", card["question_id"].as_str().unwrap_or_default(), card["question_hash"].as_str().unwrap_or_default());
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &question_text(team, member, card));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
+        found.asked.push(asked);
+        let excess = found.asked.len().saturating_sub(50);
+        found.asked.drain(..excess);
+        let kind = if matches!(outcome, Sent::Uncertain(_)) { "question_unconfirmed" } else { "question_forwarded" };
+        events.push(Event::new(kind, json!({"member":role})));
+        Ok(())
+    })
+}
+
+fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
+    let brief_id = uuid::Uuid::new_v4().to_string();
+    let mut message = None;
+    change(store, team_id, |team, _| {
+        anyhow::ensure!(team.brief == Notice::Pending, "already briefed");
+        let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+        message = Some((lead, brief_text(team)));
+        team.brief = Notice::Sending;
+        team.brief_id = brief_id.clone();
+        Ok(())
+    })?;
+    let (lead, text) = message.unwrap();
+    let outcome = send(&lead, &brief_id, &text);
+    change(store, team_id, |team, events| {
+        if team.brief != Notice::Sending || team.brief_id != brief_id {
+            return Ok(());
+        }
+        team.brief = match &outcome {
+            Sent::Delivered => Notice::Sent,
+            Sent::Refused(_) => Notice::Pending,
+            Sent::Uncertain(_) => Notice::Unconfirmed,
+        };
+        match &outcome {
+            Sent::Delivered => events.push(Event::new("briefed", json!({"by":"Zerus"}))),
+            Sent::Uncertain(error) => events.push(Event::new("brief_unconfirmed", json!({"error":error}))),
+            Sent::Refused(_) => {}
+        }
+        Ok(())
+    })
+}
+
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
     match step {
+        Step::Brief => send_brief(store, &team.id),
+        Step::Question { member } => forward_question(store, team, member),
+        Step::Stalled { task, kind } => tell_lead_stalled(store, team, *task, kind),
         Step::Adopt { member, session } => change(store, &team.id, |team, events| {
             let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
             let started = found.session.is_none();
@@ -590,7 +861,27 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
-        Step::NoReport { task } => change(store, &team.id, |team, events| {
+        Step::NoReport { task } => {
+            // The member's last reply is its report when it ran no command
+            // (a sandbox may keep it from the team's files); only without a
+            // reply does the task show No report.
+            let attempt = team.task(*task).and_then(|t| t.attempts.last()).cloned();
+            let session = attempt.as_ref().and_then(|a| team.member(&a.member)).and_then(|m| m.session.clone());
+            if let (Some(attempt), Some(session)) = (attempt, session) {
+                if let Ok(reply) = last_reply(&session) {
+                    let role = team.role_of(&attempt.member);
+                    let input = json!({"task":task,"attempt":attempt.id,
+                        "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
+                    let member = attempt.member.clone();
+                    let done = change(store, &team.id, |team, events| {
+                        ops::apply(team, "report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events).map(|_| ())
+                    });
+                    if done.is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            change(store, &team.id, |team, events| {
             let role = team.task(*task).and_then(|t| t.attempts.last()).map(|a| team.role_of(&a.member)).unwrap_or_default();
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
                 if attempt.state == AttemptState::Delivered && !attempt.no_report {
@@ -599,7 +890,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 }
             }
             Ok(())
-        }),
+            })
+        }
         Step::NotifyLead { task } => notify_lead(store, &team.id, *task),
         Step::Settings { member } => {
             let found = team.member(member).cloned().context("unknown member")?;
@@ -621,11 +913,15 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
 /// being sent may have arrived.
 fn recover(store: &mut Store) -> anyhow::Result<()> {
     for team in store.teams(false, 10_000)? {
-        let stuck = team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.state == AttemptState::Delivering || a.notice == Notice::Sending);
+        let stuck = team.brief == Notice::Sending
+            || team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.state == AttemptState::Delivering || a.notice == Notice::Sending);
         if !stuck {
             continue;
         }
         change(store, &team.id, |team, events| {
+            if team.brief == Notice::Sending {
+                team.brief = Notice::Unconfirmed;
+            }
             for task in &mut team.tasks {
                 for attempt in &mut task.attempts {
                     if attempt.state == AttemptState::Delivering {
@@ -649,7 +945,10 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     let teams: Vec<Team> = store
         .teams(false, 10_000)?
         .into_iter()
-        .filter(|team| matches!(team.status, TeamStatus::Running | TeamStatus::Paused))
+        .filter(|team| {
+            matches!(team.status, TeamStatus::Running | TeamStatus::Paused)
+                || (team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending))
+        })
         .collect();
     if teams.is_empty() {
         return Ok(false);
@@ -743,7 +1042,7 @@ mod tests {
         team
     }
     fn session(name: &str, run: &str, free: bool) -> Seen {
-        Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, ..Default::default() }
+        Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
     }
 
     #[test]
@@ -763,6 +1062,36 @@ mod tests {
         team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Refused, sent_at: 90.0, ..Default::default() });
         assert!(!steps(&team, &[session("codex/x/dev", "r1", true)], 100.0).iter().any(|s| matches!(s, Step::HandOut { .. })));
         assert!(steps(&team, &[session("codex/x/dev", "r1", true)], 130.0).iter().any(|s| matches!(s, Step::HandOut { .. })));
+    }
+
+    #[test]
+    fn a_desktop_team_starts_its_lead_then_briefs_it_once() {
+        let (mut team, _) = ops::create(
+            "t",
+            &json!({"name":"Checkout","goal":"Ship it","start":true,"lead":{"id":"lead","agent":"claude","prompt":"Plan well"},
+                "lead_protocol":"Run the waves in order",
+                "members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
+        )
+        .unwrap();
+        assert_eq!(steps(&team, &[], 1.0), vec![Step::Launch { member: "lead".into() }]);
+        team.members[0].launch_id = "L".into();
+        let mut started = session("claude/x/lead", "r0", true);
+        started.launch_id = "L".into();
+        assert!(matches!(&steps(&team, &[started.clone()], 1.0)[..], [Step::Adopt { .. }]));
+        team.members[0].session = Some(SessionRef { name: "claude/x/lead".into(), run_id: "r0".into(), conversation_id: "c".into(), ..Default::default() });
+        assert_eq!(steps(&team, &[started], 1.0), vec![Step::Brief]);
+        let brief = brief_text(&team);
+        assert!(brief.contains("Ship it") && brief.contains("Your role: Plan well") && brief.contains("\"assignee\":\"dev\""));
+        assert!(brief.contains("Team protocol:\nRun the waves in order"));
+        team.brief = Notice::Sent;
+        assert!(steps(&team, &[session("claude/x/lead", "r0", true)], 1.0).is_empty());
+    }
+
+    #[test]
+    fn a_paused_member_gets_nothing() {
+        let mut team = team();
+        team.members[1].state = MemberState::Paused;
+        assert!(!steps(&team, &[session("codex/x/dev", "r1", true)], 100.0).iter().any(|s| matches!(s, Step::HandOut { .. })));
     }
 
     #[test]
@@ -853,6 +1182,50 @@ mod tests {
         assert!(launch_args(&team, &claude, "D:/w").windows(4).any(|w| w == ["--model", "opus", "--effort", "high"]));
         let dsh = Member { agent: "dsh".into(), ..codex };
         assert!(!launch_args(&team, &dsh, "D:/w").iter().any(|a| a == "--" || a == "-d"));
+    }
+
+    #[test]
+    fn the_lead_hears_once_when_a_member_stops_on_its_task() {
+        let mut team = team();
+        let lead = session("claude/x/lead", "r0", true);
+        let mut gone = session("codex/x/dev", "r1", false);
+        gone.live = false;
+        // A member with an open attempt whose session stopped.
+        let task = team.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        let id = task.id;
+        let steps_now = steps(&team, &[lead.clone(), gone.clone()], 1.0);
+        assert!(steps_now.contains(&Step::Stalled { task: id, kind: "stopped".into() }), "{steps_now:?}");
+        let text = stalled_text(&team, team.task(id).unwrap(), team.task(id).unwrap().attempts.last().unwrap(), "stopped");
+        assert!(text.contains("member stopped") && text.contains("Backend's session stopped"), "{text}");
+        team.task_mut(id).unwrap().attempts.last_mut().unwrap().told_lead.push("stopped".into());
+        assert!(!steps(&team, &[lead, gone], 1.0).iter().any(|s| matches!(s, Step::Stalled { .. })));
+    }
+
+    #[test]
+    fn a_members_question_goes_to_the_free_lead() {
+        let team = team();
+        let mut asking = session("codex/x/dev", "r1", false);
+        asking.asking = true;
+        let lead = session("claude/x/lead", "r0", true);
+        let steps_now = steps(&team, &[lead.clone(), asking.clone()], 1.0);
+        assert!(steps_now.contains(&Step::Question { member: "dev".into() }), "{steps_now:?}");
+        // A busy lead gets it later.
+        let busy = session("claude/x/lead", "r0", false);
+        assert!(!steps(&team, &[busy, asking], 1.0).iter().any(|s| matches!(s, Step::Question { .. })));
+        // DeepSeek reports questions and permission requests as input; the others say which.
+        let listing = json!([{"sessions":[{"name":"dsh/x/a","state":"running","activity":"attention","phase":"input"},
+            {"name":"codex/x/b","process_state":"running","activity":"idle","phase":"question"},
+            {"name":"codex/x/c","process_state":"running","activity":"idle","phase":"approval"}]}]);
+        let asked: Vec<bool> = seen(&listing).iter().map(|s| s.asking).collect();
+        assert_eq!(asked, [true, true, true]);
+        let member = team.member("dev").unwrap();
+        let card = json!({"question_id":"q1","question_hash":"h1","questions":[{"id":"0","header":"Access","question":"How should I proceed?",
+            "options":[{"id":"0","label":"Full access","description":"no disk changes"},{"id":"1","label":"Stop"}],"allow_other":true}]});
+        let text = question_text(&team, member, &card);
+        assert!(text.starts_with("[Zerus team \u{b7} from: Backend \u{b7} question]"), "{text}");
+        assert!(text.contains("Access: How should I proceed?") && text.contains("  0) Full access \u{2014} no disk changes") && text.contains("  1) Stop\n"));
+        assert!(text.contains("\"expected_question_hash\":\"h1\"") && text.contains("hgs team answer --json"));
     }
 
     #[test]

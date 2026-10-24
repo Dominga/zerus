@@ -79,6 +79,8 @@ signals:
     void queueSendNowRequested(const QString &queueId);
     void messageActionRequested(const QString &id, const QString &action);
     void processRequested(const QString &id);
+    // A plaque's task link.
+    void teamTaskActivated(int task);
     // Column edges and the context menu ask the owner, which stores the
     // preference and applies it to every column.
     void columnWidthRequested(int width);

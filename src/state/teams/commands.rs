@@ -10,11 +10,11 @@ use super::store::{self, canonical_uuid, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|approve|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch --json (JSON stdin) | hgs team worker";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|approve|answer|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
 
 const MUTATIONS: &[&str] = &[
     "plan", "approve", "discard", "pause", "resume", "stop", "archive", "report", "accept", "reject", "reassign",
-    "take-over", "cancel", "retry", "check", "use-last-reply", "relaunch",
+    "take-over", "cancel", "retry", "check", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -64,12 +64,32 @@ pub(crate) fn view(team: &Team) -> Value {
     value
 }
 
+/// A team as the session list shows it: members with their sessions and each
+/// task's state, without descriptions, reports or the feed.
 fn summary(team: &Team) -> Value {
     let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
+    let members: Vec<Value> = team
+        .members
+        .iter()
+        .filter(|m| m.state != MemberState::Removed)
+        .map(|m| {
+            json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
+                "session":m.session,"state":m.state,"error":m.error})
+        })
+        .collect();
+    let tasks: Vec<Value> = team
+        .tasks
+        .iter()
+        .map(|t| {
+            let attempt = t.attempts.last();
+            json!({"id":t.id,"title":t.title,"status":t.status,"assignee":t.assignee,
+                "attempt":attempt.map(|a| json!({"n":a.n,"state":a.state,"no_report":a.no_report}))})
+        })
+        .collect();
     json!({
-        "id":team.id,"name":team.name,"status":team.status,"project":team.project,"lead":team.role_of(&team.lead),
-        "members":team.members.iter().filter(|m| m.state != MemberState::Removed).count(),
-        "tasks":team.tasks.len(),"accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
+        "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
+        "lead":team.lead,"members":members,"tasks":tasks,
+        "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "revision":team.revision,"updated":team.updated,
     })
 }
@@ -93,13 +113,44 @@ fn create(input: &Value) -> anyhow::Result<Value> {
         ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
     }
     let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
+    let start = team.brief == Notice::Pending;
     // The request's identity is what the caller sent, so a replay matches.
-    Store::open(true)?.create(request, input, team, events)
+    let receipt = Store::open(true)?.create(request, input, team, events)?;
+    if start {
+        if let Err(error) = super::dispatcher::ensure_worker() {
+            eprintln!("hgs: the team dispatcher did not start: {error}");
+        }
+    }
+    Ok(receipt)
+}
+
+/// The lead (or you) answers a member's question or permission request in the
+/// member's session, by its exact id and hash.
+fn answer(input: &Value) -> anyhow::Result<Value> {
+    let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+    let by = actor(&team, "answer", input)?;
+    ensure!(matches!(&by, Actor::Human) || matches!(&by, Actor::Member(id) if *id == team.lead), "Only the lead answers a member's question");
+    let member = team.member(text(input, "member")).context("Unknown member")?;
+    let session = member.session.as_ref().context("The member has no session")?;
+    let (question, hash) = (text(input, "question_id"), text(input, "expected_question_hash"));
+    ensure!(!question.is_empty() && !hash.is_empty() && input["answers"].is_array(), "question_id, expected_question_hash and answers are required");
+    let inspected = super::dispatcher::hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, std::time::Duration::from_secs(45))?;
+    ensure!(inspected.status.success(), "{}", String::from_utf8_lossy(&inspected.stderr).trim());
+    let record: Value = serde_json::from_slice(&inspected.stdout).context("invalid inspect output")?;
+    record["pending_questions"].as_array().into_iter().flatten()
+        .find(|card| card["question_id"] == question && card["question_hash"] == hash)
+        .context("This question changed or is no longer pending")?;
+    let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
+    let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;
+    ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    Ok(serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!({"status":"answered"})))
 }
 
 fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
+        "answer" => answer(input),
         "list" => {
             let path = store::path();
             if !path.exists() {
@@ -108,8 +159,8 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             let limit = input["limit"].as_i64().unwrap_or(200).clamp(1, 1000);
             let teams = Store::open(false)?.teams(input["include_archived"].as_bool() == Some(true), limit)?;
             // The desktop lists teams while it shows them: a dispatcher that
-            // stopped (an update, a crash) starts again while a team runs.
-            if teams.iter().any(|t| t.status == TeamStatus::Running) {
+            // stopped (an update, a crash) starts again while a team runs or awaits its brief.
+            if teams.iter().any(|t| t.status == TeamStatus::Running || (t.status == TeamStatus::Planning && t.brief == Notice::Pending)) {
                 if let Err(error) = super::dispatcher::ensure_worker() {
                     eprintln!("hgs: the team dispatcher did not start: {error}");
                 }
@@ -133,9 +184,19 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             let team_id = text(input, "team");
             let revision = input["revision"].as_u64();
             let mut store = Store::open(true)?;
+            let mut filled = input.clone();
+            if op == "use-last-reply" && text(input, "text").trim().is_empty() {
+                // The member's last reply becomes the report; reading it is not
+                // part of the request's identity.
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let task = team.task(input["task"].as_u64().unwrap_or_default() as u32).context("Unknown task")?;
+                let attempt = task.attempts.iter().find(|a| a.id == text(input, "attempt")).context("Unknown attempt")?;
+                let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("The member has no session")?;
+                filled["text"] = json!(super::dispatcher::last_reply(&session)?);
+            }
             let receipt = store.mutate(Some((request, input)), team_id, revision, |team, events| {
-                let actor = actor(team, op, input)?;
-                ops::apply(team, op, input, &actor, &BTreeSet::new(), events)
+                let actor = actor(team, op, &filled)?;
+                ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
             })?;
             if matches!(op, "approve" | "resume") {
                 // The dispatcher runs while any team runs; it exits by itself.
@@ -156,6 +217,8 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() == 1 && args[0] == "worker" {
         return super::dispatcher::worker();
     }
+    let catalog = args.first().map(String::as_str) == Some("catalog");
+    let args = if catalog { &args[1..] } else { args };
     if args.len() != 2 || args[1] != "--json" {
         return Err(USAGE.into());
     }
@@ -168,7 +231,14 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if !input.is_object() {
         return Err("A JSON object is required".into());
     }
-    let result = run(&args[0], &input).map_err(|e| e.to_string())?;
+    let result = if catalog {
+        // The designer proposes from its session; only you decide and apply.
+        let human = caller_record().is_none() && nonempty_env("HGS_SESSION").is_none() && text(&input, "by") == "human";
+        super::catalog::run(&args[0], &input, human)
+    } else {
+        run(&args[0], &input)
+    }
+    .map_err(|e| e.to_string())?;
     println!("{result}");
     Ok(0)
 }

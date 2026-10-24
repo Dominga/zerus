@@ -20,11 +20,18 @@ Lead, from your own session:
     {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json
     add "reason" and use reject; the task returns for another attempt.
   reassign (with "member"), retry and cancel take the same fields.
+  A missing skill: add-member with {"member":{"id","role","agent"}}, then
+  reassign a task to it; it starts with that task.
+  Members' questions and permission requests come to you; answer once with
+  the hgs team answer command each carries. Allow only what the task needs
+  in the team's folder; ask the owner when in doubt. Zerus also says when a
+  member stops on its task: message it, retry, reassign or ask the owner.
   The owner's decisions are final; yours cannot undo them.
 
 Member: a task arrives as a message that begins with [Zerus team. Do it,
 then report once with the command at its end (it names the attempt):
   {"request_id":"UUID","team":"ID","task":N,"attempt":"ATTEMPT","text":"..."} |
     hgs @LEAD team report --json
-Summarize what changed, where, and how you checked it. A report for a task
-taken from you is refused; stop that work.
+Summarize what changed, where, and how you checked it. Without the command,
+end with the report as your last message. Take blockers to the lead. A
+report for a task taken from you is refused; stop that work.

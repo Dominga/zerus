@@ -20,6 +20,8 @@ class SwarmController;
 #include "HgsClient.h"
 #include "SessionOrganization.h"
 #include "SessionRowPreferences.h"
+#include "TeamModel.h"
+#include "TeamCatalogEditor.h"
 
 class QAction;
 class QLabel;
@@ -376,6 +378,39 @@ private:
     bool m_folderFilterCheckout=false;
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
+    // Agent teams on this computer and the inspector's Team tab.
+    class TeamController *m_teams=nullptr;
+    class TeamPanel *m_teamPanel=nullptr;
+    // The team header the user selected in the list; a selected session shows its own team.
+    QString m_selectedTeam;
+    // A member session's team, task and a link to the Team tab, above Activity.
+    class QFrame *m_teamStrip=nullptr;
+    class QLabel *m_teamStripText=nullptr;
+    void openTeamTask(int task);
+    void showNewTeam();
+    void showTeamDesigner();
+    void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
+    QString m_teamDesignerFolder,m_teamDesignerProject;
+    QString teamDesignerSession() const;
+    class TeamCatalogEditor *m_teamCatalog=nullptr;
+    class TeamWorkspace *m_teamWorkspace=nullptr;
+    // The Team designer mode on the rail, and New team next to Activity: the
+    // selected session leads the team built there; once created, Team follows.
+    class TeamDesignerPage *m_teamDesignerPage=nullptr;
+    class QPushButton *m_teamDesignerNav=nullptr;
+    int m_teamDesignerPageIndex=-1;
+    QWidget *m_teamNewTab=nullptr;
+    class TeamNewTab *m_teamNewForm=nullptr;
+    bool m_teamNewWaiting=false;
+    QString m_teamOpenAfterCreate;
+    void ensureTeamNewForm();
+    void setNewTeamTab(bool shown);
+    class TeamNewDialog *teamNewForm(QWidget *parent);
+    int m_teamSettingsSection=-1;
+    void updateTeamPanel();
+    void showTeam(const QString &team);
+    Teams::Live teamLive(const Teams::Member &member) const;
+    QSet<QString> m_collapsedTeams;
     QSet<QString> m_hostFilters, m_projectFilters;
     QString selectedHostTarget() const;
     void updateDashboard();
@@ -516,6 +551,7 @@ private:
     QLabel *m_detailsIdTitle = nullptr, *m_detailsIdValue = nullptr;
     QPushButton *m_copySessionId = nullptr;
     QPushButton *m_detailsClear = nullptr;
+    QList<TeamCatalogEditor::Computer> teamComputers() const;
     QFrame *m_inspectorPanel = nullptr;
     QSplitter *m_workSplitter = nullptr;
     QPushButton *m_inspectorToggle = nullptr;

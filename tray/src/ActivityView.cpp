@@ -68,6 +68,8 @@
 #include <cmath>
 #include <functional>
 #include <utility>
+#include <QRegularExpression>   // Agent team plaques
+#include <tuple>
 
 namespace {
 // A slow, smooth cycle independent of the platform's busy-bar speed.
@@ -336,6 +338,76 @@ bool webLink(const QUrl &url)
 }
 
 QString escaped(const QString &text) { return text.toHtmlEscaped(); }
+
+// Zerus prepends a literal header to every team
+// message ("[Zerus team · from: Lead · task: #3 · attempt: 2]"); such a
+// message reads as a plaque: kind, sender and receiver, task and attempt.
+struct TeamMessage {
+    bool valid = false;
+    QString header, from, to, kind, title, body, full;
+    int task = 0, attempt = 0;
+};
+
+TeamMessage teamMessage(QString text)
+{
+    TeamMessage m;
+    text = text.trimmed();
+    // A message from a session arrives in Zerus's envelope.
+    static const QRegularExpression envelope(QStringLiteral("^<zerus-message[^>]*>\\s*([\\s\\S]*?)\\s*</zerus-message>$"));
+    if (const auto found = envelope.match(text); found.hasMatch()) text = found.captured(1).trimmed();
+    static const QRegularExpression header(QStringLiteral("^\\[Zerus team \\x{00b7} from: ([^\\x{00b7}\\]]+?)((?: \\x{00b7} [^\\x{00b7}\\]]+)*)\\]"));
+    const auto match = header.match(text);
+    if (!match.hasMatch()) return m;
+    m.valid = true; m.header = match.captured(0); m.from = match.captured(1).trimmed(); m.full = text;
+    const auto parts = match.captured(2).split(QChar(0x00b7), Qt::SkipEmptyParts);
+    bool planning = false;
+    for (auto part : parts) {
+        part = part.trimmed();
+        if (part.startsWith("task: #")) m.task = part.mid(7).toInt();
+        else if (part.startsWith("attempt: ")) m.attempt = part.mid(9).toInt();
+        else if (part == "planning") planning = true;
+    }
+    auto rest = text.mid(match.capturedLength()).trimmed();
+    static const QRegularExpression role(QStringLiteral("Your role: ([^.\\n]+)\\."));
+    static const QRegularExpression taskLine(QStringLiteral("(?:^|\\n)Task #\\d+: ([^\\n]+)"));
+    static const QRegularExpression reportLine(QStringLiteral("^Report for task #\\d+ ([^\\n]*):\\s*"));
+    if (const auto r = reportLine.match(rest); r.hasMatch()) {
+        m.kind = QObject::tr("Report to lead"); m.to = QObject::tr("Lead"); m.title = r.captured(1);
+        rest = rest.mid(r.capturedLength());
+        const int decide = rest.lastIndexOf(QStringLiteral("\n\nDecide with "));
+        m.body = (decide >= 0 ? rest.left(decide) : rest).trimmed();
+    } else if (planning) {
+        m.kind = QObject::tr("Planning brief"); m.to = QObject::tr("Lead");
+        const int plan = rest.indexOf(QStringLiteral("\n\nPlan the work"));
+        m.body = (plan >= 0 ? rest.left(plan) : rest).trimmed();
+    } else if (m.from == QStringLiteral("You")) {
+        m.kind = QObject::tr("Message from you"); m.body = rest;
+    } else {
+        m.kind = QObject::tr("Task from team");
+        if (const auto r = role.match(rest); r.hasMatch()) m.to = r.captured(1).trimmed();
+        if (const auto t = taskLine.match(rest); t.hasMatch()) {
+            m.title = t.captured(1).trimmed();
+            rest = rest.mid(t.capturedEnd()).trimmed();
+        }
+        const int report = rest.indexOf(QStringLiteral("When you finish, report once"));
+        m.body = (report >= 0 ? rest.left(report) : rest).trimmed();
+    }
+    return m;
+}
+
+QString teamRoleColor(const QString &role, bool dark)
+{
+    static const QList<std::tuple<const char *, const char *, const char *>> palette{
+        {"lead", "#b79cff", "#6f4fd8"}, {"architect", "#8e9bff", "#3d4bc4"}, {"backend", "#6fa8ff", "#2f66c9"},
+        {"frontend", "#f08bb4", "#b83a72"}, {"tester", "#56c8e0", "#137f95"}, {"reviewer", "#d9b38c", "#8a5a2b"},
+        {"security", "#e48de0", "#a2349c"}, {"integrator", "#a3b1c6", "#4d5d75"}, {"researcher", "#b9d36b", "#5f7a12"}};
+    const auto key = role.toLower();
+    if (key == "you") return dark ? "#aab1ba" : "#4d5c6b";
+    for (const auto &[name, d, l] : palette) if (key.contains(QLatin1String(name))) return dark ? d : l;
+    const auto &[name, d, l] = palette[1 + qHash(key) % (palette.size() - 1)];
+    Q_UNUSED(name);
+    return dark ? d : l;
+}
 
 QString userMessage(const QString &text)
 {
@@ -948,6 +1020,40 @@ struct ActivityRenderResult {
                 if(!m_voiceError.isEmpty() && m_voiceError.startsWith(key+"\n"))body+=QString("<p style='color:%1;'>%2</p>").arg(warning,escaped(m_voiceError.mid(key.size()+1)));
                 html+=card(eventKey(event),video.isEmpty()?tr("You (voice)"):tr("You (video)"),{},body,true,false,false,{},false,metadata);
                 ++i;continue;
+            }
+            // A team message reads as a plaque.
+            if (role == "user" && replies.isEmpty() && event.value("type") != "QuestionAnswered") {
+                if (const auto team = teamMessage(text); team.valid) {
+                    const QString edge = teamRoleColor(team.from, m_dark);
+                    const auto chip = [&](const QString &content, const QString &color = {}) {
+                        return QString("<span style='color:%1;'>&nbsp;%2&nbsp;</span>&nbsp;").arg(color.isEmpty() ? muted : color, content);
+                    };
+                    QString chips = QString("<b style='color:%1;'>%2</b>&nbsp;&nbsp;").arg(fg, escaped(team.kind));
+                    chips += chip(escaped(team.to.isEmpty() ? team.from : team.from + QStringLiteral(" \u2192 ") + team.to));
+                    if (team.task) chips += QString("<a href='hgs-team-task:%1' style='color:%2;'>%3</a>&nbsp;&nbsp;").arg(team.task).arg(accent,
+                        escaped(team.title.isEmpty() ? tr("Task #%1").arg(team.task) : tr("Task: %1").arg(team.title)));
+                    if (team.attempt) chips += chip(escaped(tr("Attempt %1").arg(team.attempt)));
+                    const auto toggle = "team-plaque-" + eventKey(event);
+                    m_toggleKeys.insert(toggle);
+                    const bool open = m_expanded.value(toggle);
+                    // Three lines unless opened: long hand-offs keep the journal readable.
+                    QString body = open ? team.full : team.body;
+                    const auto lines = body.split('\n');
+                    bool clipped = false;
+                    if (!open && (lines.size() > 3 || body.size() > 320)) {
+                        body = lines.mid(0, 3).join('\n').left(320).trimmed() + QStringLiteral(" \u2026"); clipped = true;
+                    }
+                    if (!open && team.body != team.full) clipped = true;
+                    QString more = clipped || open ? QString("<a href='hgs-activity:%1' style='color:%2;'>%3</a>").arg(toggle, accent, open ? tr("Show less") : tr("Show more")) : QString();
+                    const auto header = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-bottom:6px;'><tr><td><p style='font-size:11px;margin:0;'>%1</p></td>"
+                        "<td align='right' valign='top'><p style='font-size:11px;color:%2;margin:0;'>%3</p></td></tr></table>").arg(chips, muted, escaped(timeText(event)));
+                    const auto footer = QString("<table width='100%' cellspacing='0' cellpadding='0' style='margin-top:6px;'><tr><td><p style='font-size:10px;color:%1;margin:0;font-family:monospace;'>%2</p></td>"
+                        "<td align='right'><p style='font-size:11px;margin:0;'>%3</p></td></tr></table>").arg(muted, escaped(team.header), more);
+                    html += QString("<a name='item-%1'></a><p style='font-size:5px;margin:0;'>&nbsp;</p><table width='100%' cellspacing='0' cellpadding='0' style='border:1px solid %2;'><tr><td width='3' bgcolor='%3'></td>"
+                        "<td bgcolor='%4' style='padding:10px 12px;'>%5<p style='white-space:pre-wrap;margin:0;color:%6;'>%7</p>%8</td></tr></table>")
+                        .arg(escaped(eventKey(event)), border, edge, surface, header, fg, escaped(body), footer);
+                    ++i; continue;
+                }
             }
             const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
                 event.value("type") == "QuestionAnswered" || !replies.isEmpty() ? tr("You (answer)") : tr("You")) : tr("Agent");
@@ -1650,6 +1756,7 @@ void ActivityView::activateLink(const QUrl &url)
     } else if(url.scheme()=="hgs-message" && m_messageActions.contains(url.path())) {
         const auto action=m_messageActions.value(url.path());emit messageActionRequested(action.first,action.second);
     } else if(url.scheme()=="hgs-process" && m_processLinks.contains(url.path())) emit processRequested(url.path());
+    else if (url.scheme() == "hgs-team-task") emit teamTaskActivated(url.path().toInt());
     else if (webLink(url)) emit externalLinkActivated(url);
 }
 

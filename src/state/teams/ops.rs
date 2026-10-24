@@ -59,6 +59,7 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
     member.launch_id.clear();
     member.error.clear();
+    member.prompt = clean(&member.prompt, 8000, "A role prompt")?;
     member.state = match member.session {
         Some(_) => MemberState::Active,
         None => MemberState::NotCreated,
@@ -98,6 +99,35 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?
     };
     ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
+    // From the desktop: the members and template tasks proposed for the
+    // lead's plan; the lead starts and gets a planning brief.
+    let mut members = vec![lead.clone()];
+    for value in input["members"].as_array().into_iter().flatten() {
+        let member = parse_member(value)?;
+        ensure!(members.iter().all(|m| m.id != member.id), "Member id {} is used twice", member.id);
+        members.push(member);
+    }
+    let mut tasks = Vec::new();
+    for value in input["tasks"].as_array().into_iter().flatten() {
+        let task = parse_task(value)?;
+        ensure!(tasks.iter().all(|t: &Task| t.id != task.id), "Task #{} is used twice", task.id);
+        tasks.push(task);
+    }
+    let start = input["start"].as_bool() == Some(true);
+    // The request's lead protocol, even an empty one; without one, the
+    // template's as the catalog has it now. The lead reads it with the
+    // planning brief.
+    let template = text(input, "template");
+    let lead_protocol = match input["lead_protocol"].as_str() {
+        Some(given) => given.to_owned(),
+        None if !template.is_empty() => super::catalog::load()
+            .ok()
+            .and_then(|catalog| catalog.templates.into_iter().find(|t| t.id == template))
+            .map(|t| t.lead_protocol)
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    // A lead without a session is started first; an existing lead is briefed.
     let team = Team {
         id: id.to_owned(),
         name: name.clone(),
@@ -108,8 +138,10 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         status: TeamStatus::Planning,
         settings,
         lead: lead.id.clone(),
-        members: vec![lead],
-        tasks: Vec::new(),
+        members,
+        tasks,
+        brief: if start { Notice::Pending } else { Notice::None },
+        lead_protocol: clean(&lead_protocol, 8000, "The lead protocol")?,
         ..Default::default()
     };
     let events = vec![Event::new("created", json!({"by":"You","name":name}))];
@@ -253,9 +285,11 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     task.decided_by = Some(if human { Decider::Human } else { Decider::Lead });
     task.decision_reason = reason.clone();
     let title = task.title.clone();
+    // Mark done manually: your acceptance without (or despite) a report.
+    let manual = accept && human && input["manual"].as_bool() == Some(true);
     events.push(Event::new(
         if accept { "accepted" } else { "rejected" },
-        json!({"by":label,"task":id,"title":title,"attempt":n,"reason":reason}),
+        json!({"by":label,"task":id,"title":title,"attempt":n,"reason":reason,"manual":manual}),
     ));
     let status = serde_json::to_value(team.task(id).unwrap().status)?;
     finish_if_done(team, events);
@@ -403,6 +437,53 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             events.push(Event::new("relaunch", json!({"by":"You","member":id})));
             Ok(json!({"status":"relaunch","member":id}))
         }
+        "pause-member" | "resume-member" => {
+            ensure!(human_or_lead, "Only the lead or you pause a member");
+            let pause = op == "pause-member";
+            let id = text(input, "member").to_owned();
+            ensure!(id != team.lead, "Pause the team to pause its lead");
+            let label = actor.label(team);
+            let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
+            ensure!(member.state != MemberState::Removed, "This member was removed");
+            // A paused member gets no new task; its current turn finishes.
+            member.state = match (pause, &member.session) {
+                (true, _) => MemberState::Paused,
+                (false, Some(_)) => MemberState::Active,
+                (false, None) => MemberState::NotCreated,
+            };
+            let role = team.role_of(&id);
+            events.push(Event::new(if pause { "member_paused" } else { "member_resumed" }, json!({"by":label,"member":role})));
+            Ok(json!({"status":if pause {"paused"} else {"resumed"},"member":id}))
+        }
+        "add-member" => {
+            // A running team grows: the new member starts with its first task.
+            ensure!(human_or_lead, "Only the lead or you add a member");
+            ensure!(matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+                "Only a planning, running or paused team takes new members");
+            let member = parse_member(&input["member"])?;
+            ensure!(member.session.is_none(), "A new member starts its own session");
+            ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
+            let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
+            ensure!(active < team.settings.max_members, "The team already has its {} members", team.settings.max_members);
+            let id = member.id.clone();
+            let role = member.role.clone();
+            team.members.push(member);
+            events.push(Event::new("member_added", json!({"by":actor.label(team),"member":role})));
+            Ok(json!({"status":"added","member":id}))
+        }
+        "remove-member" => {
+            ensure!(matches!(actor, Actor::Human), "Only you remove a member");
+            let id = text(input, "member").to_owned();
+            ensure!(id != team.lead, "The lead cannot be removed");
+            let open: Vec<u32> = team.tasks.iter().filter(|t| t.assignee == id && !t.status.finished()).map(|t| t.id).collect();
+            ensure!(open.is_empty(), "Reassign or cancel its open tasks first: {}",
+                open.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", "));
+            let role = team.role_of(&id);
+            let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
+            member.state = MemberState::Removed;
+            events.push(Event::new("member_removed", json!({"by":"You","member":role})));
+            Ok(json!({"status":"removed","member":id}))
+        }
         _ => bail!("Unknown team operation {op}"),
     }?;
     Ok(result)
@@ -518,6 +599,30 @@ mod tests {
         check(&mut team, &json!({"task":1,"outcome":"not_delivered"}), &Actor::Human, &mut events).unwrap();
         let task = team.task(1).unwrap();
         assert_eq!((task.status, task.attempts[0].state), (TaskStatus::Pending, AttemptState::Refused));
+    }
+
+    #[test]
+    fn members_pause_and_leave_only_without_open_tasks() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        assert!(apply(&mut team, "pause-member", &json!({"member":"lead"}), &Actor::Human, &none, &mut events).is_err());
+        apply(&mut team, "pause-member", &json!({"member":"qa"}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.member("qa").unwrap().state, MemberState::Paused);
+        apply(&mut team, "resume-member", &json!({"member":"qa"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.member("qa").unwrap().state, MemberState::NotCreated);
+        let error = apply(&mut team, "remove-member", &json!({"member":"qa"}), &Actor::Human, &none, &mut events).unwrap_err();
+        assert!(error.to_string().contains("#2"), "{error}");
+        cancel(&mut team, &json!({"task":2}), &Actor::Human, &mut events).unwrap();
+        assert!(apply(&mut team, "remove-member", &json!({"member":"qa"}), &Actor::Member("lead".into()), &none, &mut events).is_err());
+        apply(&mut team, "remove-member", &json!({"member":"qa"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.member("qa").unwrap().state, MemberState::Removed);
+        // A removed member frees its place for a new one, which waits for a task.
+        let docs = json!({"member":{"id":"docs","role":"Writer","agent":"codex"}});
+        assert!(apply(&mut team, "add-member", &docs, &Actor::Member("qa".into()), &none, &mut events).is_err());
+        apply(&mut team, "add-member", &docs, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.member("docs").unwrap().state, MemberState::NotCreated);
+        assert!(apply(&mut team, "add-member", &docs, &Actor::Human, &none, &mut events).is_err());
     }
 
     #[test]

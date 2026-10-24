@@ -564,6 +564,25 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
     return request;
 }
 
+// Every operation reads one JSON object on stdin,
+// so even a read sends one: an empty input would leave stdin open.
+quint64 HgsClient::requestTeam(const QString &host, const QString &operation, const QJsonObject &input)
+{
+    const quint64 request = ++m_teamRequest;
+    // A catalog operation is two words: "catalog get".
+    QStringList args{QStringLiteral("team")};
+    args << operation.split(' ', Qt::SkipEmptyParts) << QStringLiteral("--json");
+    if (!host.isEmpty()) args.prepend('@' + host);
+    runHgs(m_hgs, args, host.isEmpty() ? 15000 : 45000, this,
+        [this, request, host, operation](const QByteArray &bytes) {
+            QJsonParseError error; const auto data = QJsonDocument::fromJson(bytes, &error);
+            if (error.error != QJsonParseError::NoError || !data.isObject()) emit teamFailed(request, host, operation, tr("Invalid team response"));
+            else emit teamReady(request, host, operation, data.object());
+        }, [this, request, host, operation](const QString &, const QString &error) { emit teamFailed(request, host, operation, error); },
+        QJsonDocument(input).toJson(QJsonDocument::Compact));
+    return request;
+}
+
 quint64 HgsClient::requestSessionHost(const QString &action)
 {
     const quint64 request = ++m_sessionHostRequest;

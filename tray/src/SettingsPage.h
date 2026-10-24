@@ -161,6 +161,17 @@ public:
         nav->item(5)->setHidden(false);
     }
     void openUpdates(){nav->setCurrentRow(4);}
+    // A section a feature adds (agent teams), placed after Automatic approvals
+    // so the upstream sections keep their order.
+    int addSection(const QString &name,QWidget *page){
+        const int at=speechSection;nav->insertItem(at,name);
+        if(page->objectName().isEmpty())page->setObjectName("settingsContent");
+        auto *scroll=new QScrollArea;scroll->setFrameShape(QFrame::NoFrame);scroll->setWidgetResizable(true);scroll->setWidget(page);scroll->setMinimumWidth(0);
+        pages->insertWidget(at,scroll);
+        for(int *later:{&speechSection,&keyboardSection,&analyticsSection,&aboutSection})if(*later>=at)++*later;
+        return at;
+    }
+    void openSection(int row){nav->setCurrentRow(row);}
     void openAbout(){nav->setCurrentRow(aboutSection);}
     void openKeyboard(){nav->setCurrentRow(keyboardSection);}
     void openRecovery(){nav->setCurrentRow(2);sync->refresh();}

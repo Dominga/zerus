@@ -138,14 +138,21 @@ pub(crate) struct Member {
     /// until you relaunch it.
     #[serde(default)]
     pub error: String,
+    /// The role's instructions from the catalog, given with every task.
+    #[serde(default)]
+    pub prompt: String,
     /// DeepSeek takes its model and effort after it starts; once tried, the
     /// dispatcher does not try again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub settings_applied: bool,
+    /// The member's questions already given to the lead, as question id and
+    /// hash; the most recent ones only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asked: Vec<String>,
 }
 
 impl Member {
-    /// A started DeepSeek member whose model or effort was chosen.
+    /// A started DeepSeek member whose role chose a model or effort.
     pub(crate) fn needs_settings(&self) -> bool {
         self.agent == "dsh" && !self.settings_applied && (!self.model.is_empty() || !self.effort.is_empty())
     }
@@ -265,6 +272,10 @@ pub(crate) struct Attempt {
     pub notice_id: String,
     #[serde(default)]
     pub error: String,
+    /// What the lead was told about this attempt's member on its own
+    /// (stopped, no_report), once each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told_lead: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -326,6 +337,16 @@ pub(crate) struct Team {
     pub created: f64,
     #[serde(default)]
     pub updated: f64,
+    /// A team created from the desktop starts its lead and sends it this
+    /// planning brief once, like a report to the lead.
+    #[serde(default)]
+    pub brief: Notice,
+    #[serde(default)]
+    pub brief_id: String,
+    /// The template's lead protocol when the team was created, given to the
+    /// lead with the planning brief.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lead_protocol: String,
 }
 
 impl Team {

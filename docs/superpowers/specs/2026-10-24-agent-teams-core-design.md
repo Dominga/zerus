@@ -114,7 +114,9 @@ revoked | reported | rejected`), `sent_at`, `delivered_at`, `turn_ended_at`, `no
 
 `create`, `plan` (set members/tasks/deps from JSON while `planning`), `approve`, `discard`, `pause`, `resume`, `stop`,
 `archive`, `status [--json]`, `list`, `events --before N`, `report`, `accept`, `reject`, `reassign`, `take-over`,
-`cancel`, `retry`, `check`, `use-last-reply`, `relaunch` (a member whose session failed to start), `worker`. All
+`cancel`, `retry`, `check`, `use-last-reply`, `relaunch` (a member whose session failed to start),
+`add-member` (`{"member":{...}}`, by the lead or you while planning, running or paused; it starts with its first
+task), `pause-member`, `resume-member`, `remove-member`, `worker`. All
 subcommands except `worker` read one JSON object on stdin (`--json`); mutating ones carry a canonical `request_id`.
 The agent guide topic is `hgs guide team`.
 
@@ -131,3 +133,98 @@ host or DeepSeek host that a launch starts, and it closes stdin. After a
 refused hand-off the member gets none for 30 s. `hgs status` reports it as `team_worker`. M1 starts the worker from
 `hgs team approve`/`resume` when none is running (detached); it exits when its executable is replaced or after five
 minutes without a running team. The GUI supervises it later like the swarm worker.
+
+## Desktop (M2)
+
+- `TeamController` (tray core) polls `hgs team list` every 3 s while the window is shown, and `team status` plus the
+  newest `team events` page for the team on screen; an unchanged answer changes nothing on screen. Changes go out
+  once with their own `request_id` and `"by":"human"`; a refusal is shown in the panel.
+- `TeamModel` derives what the desktop shows: a member's team status (Created on approval, Failed to start, Paused,
+  Offline, Needs your answer, Delivery unconfirmed, No report, Working on #N, Submitted, Idle; problems first),
+  Stuck (a running team where no open task can move without you), progress, the Next line and feed lines.
+- Session list: a team whose lead is listed in a project gets a header row (`SessionRoles::TeamId`) above the lead;
+  its members listed in the same project follow, indented with a connector. The header opens the Team tab; its
+  chevron keeps only members with a problem (`workspace/collapsedTeams`).
+- Inspector tab **Team** (`?N` = questions in member sessions): header with progress, Pause/Resume/Stop…/Archive,
+  plan errors with Approve & Run / Discard plan… while planning, Stuck with Show what blocks, Needs your answer,
+  members with each problem's actions (Check session / It arrived / Send again / Cancel attempt; Remind / Use last
+  reply as report / Reassign…; Reassign… / Wait; Go to question; Start again), tasks as a graph from 400 px (soft
+  dependencies dashed) or a list by layer, and the paged feed. A task opens a menu of its actions until M3's card.
+- `use-last-reply` without text reads the member's last reply (`hgs [@host] inspect`) on the lead's computer.
+
+## Desktop (M3–M6)
+
+- **Task card (M3).** A task opens over the Team tab (and as a 400 px drawer in the workspace): status, attempt and
+  role; the problem banner with the member's actions; description; criteria; Depends on / Blocks links (soft marked);
+  assignee; attempts newest first with Open in Activity (revoked and rejected faded); the newest report; inline Reject
+  with comment and Mark done manually (`accept` with `"manual":true` and a reason, shown in the feed). The footer
+  shows the status's actions; the rest are under More, disabled with the reason.
+- **Activity plaques (M3).** A message that starts with Zerus's team header (inside a session envelope or not) reads
+  as a plaque: kind (Task from team, Report to lead, Planning brief, Message from you), sender → receiver, a link
+  that opens the task's card, the attempt and the literal header; the body folds to three lines and hides the report
+  command until Show more. A member session shows its team, role and current task in a strip above Activity.
+- **Planning (M4).** While a team plans, the Team tab edits it: members' agent and model, role prompt, own worktree,
+  remove, + Member from the catalog's roles; + Task and a task editor (title, description, criteria, assignee, hard or
+  soft dependencies, delete); dependencies dragged from a node's handle onto another node and removed by selecting the
+  edge (× or Delete). Each edit sends the whole plan once with the revision it was made against. The pinned footer
+  holds Approve & Run (disabled while errors), Send back to lead (your comment goes to the lead's session) and
+  Discard plan….
+- **New team (M4).** A New team tab next to Activity while the selected local session has no team; that session
+  leads the team (an existing lead gets the planning brief, no new session starts). Once the team exists, Team replaces
+  the tab. Sessions ⋯ → New team… opens the same tab, or a dialog when no local session is selected. The form: name, catalog template, goal, folder (a non-Git folder disables
+  worktrees with a warning), the lead (a new session with agent, account, model and effort, or an existing session),
+  members from the template's roster with an error on each row that cannot work (computer offline, account not signed
+  in), planning (lead plans or template tasks), approval and the member limit. Create sends `create` with
+  `"start":true`: the dispatcher starts the lead if needed and sends it a planning brief once (goal, members, template
+  tasks and the plan command); members start after Approve & Run.
+- **Catalog (M4, M6).** `hgs team catalog get|set|propose|decide|apply|discard|route|designer --json`, stored in
+  `root()/teams/catalog.json` (built-in roles and templates until first saved) and `catalog-draft.json`. `set`, `decide`,
+  `apply`, `discard` and `designer` need `"by":"human"` from no session; `set` and `apply` check the version and write
+  the next one; a draft made against an older version cannot be applied. Settings > Teams edits roles (color, prompt
+  with its order preview, default agent, permissions, folder policy, can message, dangerous actions, specialization),
+  templates (roster, task skeleton, planning, approval, max members) and routing rules with Try it; Import / Export as
+  JSON. A member's role prompt travels with every hand-off.
+- **Team workspace (M5).** The Team tab next to Activity (⤢ in the inspector's header opens it): team bar with
+  Pause/Resume/Stop… or Approve & Run while planning, Stuck / plan-error strip, Graph (left to right, layer columns),
+  Board (Pending · Active · Problems · Submitted · Accepted) or Layers, All/Active/Problems, member focus that keeps
+  only that member's tasks and feed, zoom and Fit, the collapsible feed, Needs your answer, members, the Lead dock (its
+  recent team events and a one-line message) and the task card as a drawer. + Member (planning, running or paused)
+  adds a member from a catalog role with its agent, model, effort, permissions and prompt (`add-member`, by the lead
+  or you); it starts with the first task assigned to it.
+- **Team designer (M6).** A mode on the rail (beside Agent accounts): the catalog editor and the designer agent with
+  its draft on one page; Settings > Teams keeps the same editor. Start designer… (or Ask Team designer) starts one
+  `…/team-designer` session in its own folder under the hgs state, outside every project, with a brief that names the
+  selected project folder: read it, change no file, propose with `hgs team catalog propose` (`hgs guide designer`). Its Team tab shows the draft: NEW / CHANGED / REMOVED proposals by kind
+  with field-by-field old and new values, Keep / Reject / Undo, Discard draft, and Apply N changes (confirmed) as the
+  next catalog version. Running teams keep their roster.
+
+## Desktop, iteration 2 (M7–M10)
+
+Decisions (2026-10-24): the coordinator shares the Team tab's side column with the members, split by a divider you
+move (both halves scroll); one designer session serves every project; plan editing stays in the inspector as well; the
+session list never collapses by itself.
+
+- **Team designer mode (M7).** Left: the designer (`<agent>/team-designer/team-designer`): its conversation (`TeamConversation`: inspection polled while shown, guarded send) with quick asks, and its proposals as
+  cards (Keep / Reject / Undo, Show in catalog); not running, an empty state asks "What do you need?" and starts it.
+  Right: `TeamCatalogEditor`, one widget for this page and Settings > Teams — header with title and meta, segmented
+  Roles / Templates / Routing, a role or template list (230) beside an editor card, one scroll for the body. By hand:
+  edited items and fields get a warn dot, "N unsaved changes", Revert (confirmed) and Save catalog. With a draft (this
+  page only): counters per tab, NEW / CHANGED / REMOVED marks, old values struck on a danger tint and new ones on an
+  accent tint, Discard draft and Apply K changes (confirmed); a draft made on an older version shows a banner, Apply is
+  off and "Ask designer to redo on vN" asks it in its conversation.
+- **New team tab (M8).** `TeamNewTab`: coordinator card (this session, not started again; a busy warning), template
+  cards (+ No template), the goal and a team name taken from it, folder with Worktree per member or the non-Git warning,
+  members as a table from 760 px and as cards below with an error on each row, + Member from catalog roles, planning,
+  approval, max members, and a fixed footer with the reason Create waits and the creating state. The rows go to `create`
+  as entered.
+- **Team tab (M9).** Team bar (Pause / Stop…; Planning: Discard plan…, Send back — a comment to the coordinator —,
+  Approve & Run), Stuck and plan-error strips, Needs your answer (a calm line when nothing waits, so the canvas stays put),
+  segmented view and filter, the graph fitted to the canvas (0.8–1.15) and centered with its layer bands at full height,
+  the board's empty columns saying so, the feed with its latest event when folded. Planning edits the plan here too. The
+  side column: members (status, `?1`, progress, ⋯ menu: Open session, Message…, Pause / Resume, Relaunch after a failed
+  start, Remove when no task is open, Replace model shown as future) and the coordinator's conversation. + Member opens
+  a popover with the catalog's role chips and their defaults; a member added to a running team waits for a task, with
+  Assign task… and Ask lead to plan for it. Time reads 12m, 3h 12m, 3d 4h, 2w 3d.
+- **Inspector Team (M10).** A running team reads as a summary — status, progress, accepted and problems, Open Team,
+  Needs your answer, one line per member; the planning editor stays. No team: an empty state with New team… and Team
+  designer…. Nothing is wider than the panel.

@@ -15,6 +15,7 @@
 #include "KeyboardSettings.h"
 #include "AnalyticsSettings.h"
 #include <QComboBox>
+#include <QEvent>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QListWidget>
@@ -35,6 +36,28 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
+
+// Keeps a scrolled settings page as tall as its wrapped rows need at its width
+// and lays it out as soon as it is shown or resized. A page longer than its
+// view otherwise starts with squeezed word-wrapped labels, and the deferred
+// relayout then moves every row beneath them.
+class WrappedPageHeight : public QObject {
+public:
+    using QObject::QObject;
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (event->type() == QEvent::Resize || event->type() == QEvent::Show) {
+            auto *page = static_cast<QWidget *>(watched);
+            if (auto *layout = page->layout(); layout && layout->hasHeightForWidth()) {
+                const int height = layout->totalHeightForWidth(page->width());
+                if (page->minimumHeight() != height) page->setMinimumHeight(height);
+                // Lay the rows out now, not after the events that showed the page.
+                layout->activate();
+            }
+        }
+        return false;
+    }
+};
 
 class SettingsPage : public QWidget {
 public:
@@ -102,7 +125,7 @@ public:
         // Switchable skins (WorkspaceSkin.h). A duplicate is a JSON file the person
         // edits; the workspace reloads it when it is saved. The longer page scrolls
         // instead of squeezing its rows, so rows never move as others change.
-        if(auto *page=appearance->parentWidget()){auto policy=page->sizePolicy();policy.setVerticalPolicy(QSizePolicy::Minimum);page->setSizePolicy(policy);}
+        if(auto *page=appearance->parentWidget())page->installEventFilter(new WrappedPageHeight(page));
         auto *skin=new QComboBox;skin->setObjectName("workspaceSkin");
         const auto fillSkins=[skin]{
             const QSignalBlocker blocker(skin);skin->clear();

@@ -1,4 +1,7 @@
 #pragma once
+#include "WorkspaceSkin.h"
+#include "NewSessionDense.h"
+#include <memory>
 #include <QDialog>
 #include <QHash>
 #include <QMap>
@@ -7,6 +10,10 @@
 #include "SessionOrganization.h"
 class QComboBox;
 class QCheckBox;
+class QButtonGroup;
+class QDialogButtonBox;
+class QMenu;
+class QStackedWidget;
 class QToolButton;
 class QLabel;
 class QLineEdit;
@@ -37,6 +44,9 @@ public:
     bool implicitInbox() const;
     void setProjectCatalogSwarm(const QString &swarm) { m_projectCatalogSwarm = swarm; }
     void reject() override;
+protected:
+    // A frameless dense dialog moves by its header.
+    bool eventFilter(QObject *object, QEvent *event) override;
 signals:
     // addFolder: the confirmed folder outside the project that joins it once the
     // session starts, or empty. A worktree generated from it never replaces it.
@@ -46,8 +56,29 @@ signals:
     void projectFoldersRequested(const QString &project);
     // Open Machines with this computer selected (offered without a computer).
     void machinesRequested();
+    // The dense view: sign in to an account here, or set one up in Accounts.
+    void accountLoginRequested(const QString &host, const QString &account);
+    void accountSetupRequested(const QString &host, const QString &provider, const QString &account);
     void organizationChanged();
 private:
+    // Views of the same widgets (skins, WorkspaceSkin.h).
+    void buildClassicLayout(QDialogButtonBox *buttons);
+    void buildDenseLayout(QDialogButtonBox *buttons, bool dark, const WorkspaceSkin::Skin &skin);
+    void refreshDense();
+    void selectDenseAgent(const QString &key);
+    void denseAccountAction();
+    QString denseKey(int row) const;
+    int denseRow(const QString &key) const;
+    std::shared_ptr<NewSessionDense::Tokens> m_denseTokens;
+    NewSessionDense::AgentRail *m_denseRail = nullptr;
+    NewSessionDense::InfoLine *m_denseInfo = nullptr;
+    QWidget *m_denseHeader = nullptr, *m_denseModelCaption = nullptr, *m_denseMetaBox = nullptr;
+    QWidget *m_denseModelField = nullptr;
+    NewSessionDense::AccountChip *m_denseChip = nullptr;
+    NewSessionDense::AccountList *m_denseList = nullptr;
+    QPushButton *m_denseSignIn = nullptr;
+    QString m_denseKey;
+    bool m_denseDark = false, m_denseBlocked = false, m_denseSigningIn = false;
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
     void browseFolder();
@@ -99,7 +130,10 @@ private:
     bool m_cloneLaunchPending=false,m_repositorySource=false,m_customDestination=false,m_customProjectName=false,m_repositoryNewProject=false;
     RepositoryClone *m_repository=nullptr;
     MachinePlatform::Style m_repositoryStyle=MachinePlatform::Style::Posix;
-    QFormLayout *m_form;
+    QFormLayout *m_form=nullptr;
+    QWidget *m_sourceChooser;
+    // The dense view's Clone to row.
+    QWidget *m_denseCloneTo=nullptr,*m_denseCloneDetails=nullptr;
     QStackedWidget *m_sourceInput,*m_sourceDetails,*m_newProjectField,*m_newProjectLabel;
     QLabel *m_sourceLabel,*m_destinationLabel;
     QWidget *m_folderField,*m_repositoryDestinationField,*m_repositoryState;
@@ -134,6 +168,8 @@ private:
     // The hidden m_model keeps the selected model and its variants; this button
     // names it and opens the picker.
     QPushButton *m_modelButton;
+    // The model button and its combo, placed by the view.
+    QWidget *m_modelRow=nullptr;
     QFrame *m_modelPopup;
     OpenCodeModelPicker *m_modelPicker;
     // `account models` answers per computer and folder, at most four: ready

@@ -26,6 +26,9 @@
 #include "AccountsPage.h"
 #include "LaunchWarnings.h"
 #include "LocalSessionHost.h"
+#include "WorkspaceSkin.h"
+#include <QDir>
+#include <QShortcut>
 
 class TestNewSessionDialog : public QObject {
     Q_OBJECT
@@ -520,6 +523,74 @@ elif a and a[0]=='worktrees':
         QCOMPARE(launched[0][0].toString(),host);QCOMPARE(launched[0][1].toString(),QString("codex"));QCOMPARE(launched[0][4].toString(),QString("work"));
         NewSessionDialog next(program(),fleet(),host);QTRY_VERIFY(row(next,"work")>=0);QTRY_COMPARE(choices(next)->count(),5);
         QCOMPARE(choices(next)->currentItem()->data(Qt::UserRole).toString(),QString("work"));
+    }
+    // Skins fall back to the Zerus colors and the classic views.
+    void skinsKeepSafeValuesAndDuplicate() {
+        const auto skins=WorkspaceSkin::available();QVERIFY(skins.size()>=2);
+        QCOMPARE(skins[0].id,QString("zerus"));QCOMPARE(skins[1].id,QString("whitewh"));QCOMPARE(skins[1].name,QString("Compact"));
+        QCOMPARE(WorkspaceSkin::currentId(),QString("zerus"));QCOMPARE(WorkspaceSkin::current().id,QString("zerus"));
+        QCOMPARE(skins[0].view("newSession"),QString("classic"));QVERIFY(!skins[0].framelessDialogs());
+        QCOMPARE(skins[1].view("newSession"),QString("dense"));QVERIFY(skins[1].framelessDialogs());
+        // Compact has its own dark palette and the Zerus light one.
+        QCOMPARE(skins[1].dark.accent,QString("#7dd3b0"));QCOMPARE(skins[1].view("sessions"),QString("cards"));
+        QCOMPARE(skins[1].named(true,"card"),QString("#181c22"));QVERIFY(skins[1].stylesheet.contains("QScrollBar"));
+        QCOMPARE(WorkspaceSkin::toJson(skins[1].light),WorkspaceSkin::toJson(WorkspaceSkin::zerus(false)));
+        const QJsonObject unsafe{{"schema",1},{"name","T"},{"dark",QJsonObject{{"accent","#ff00aa"},{"border","red; background:url(x)"}}},
+                                 {"views",QJsonObject{{"newSession","Dense!"}}}};
+        const auto parsed=WorkspaceSkin::parse(unsafe,"t",{},false);
+        QCOMPARE(parsed.dark.accent,QString("#ff00aa"));QCOMPARE(parsed.dark.border,WorkspaceSkin::zerus(true).border);
+        QCOMPARE(parsed.view("newSession"),QString("classic"));
+        const auto dir=WorkspaceSkin::directory();QDir(dir).removeRecursively();
+        const auto cleanup=qScopeGuard([dir]{QDir(dir).removeRecursively();});
+        QString error;QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin"));QVERIFY(error.isEmpty());
+        QCOMPARE(WorkspaceSkin::duplicate(skins[1],"My Skin",&error),QString("my-skin-2"));
+        const auto again=WorkspaceSkin::available();QCOMPARE(again.size(),4);
+        const QStringList copies{again[2].id,again[3].id};QVERIFY(copies.contains("my-skin"));QVERIFY(copies.contains("my-skin-2"));
+        QVERIFY(!again[2].builtin);QCOMPARE(again[2].view("newSession"),QString("dense"));QVERIFY(again[2].framelessDialogs());
+    }
+    // The Compact skin arranges the same form densely; its logic is unchanged.
+    void denseViewStartsLikeTheClassicOne() {
+        QSettings().setValue("workspace/skin","whitewh");
+        const auto restore=qScopeGuard([]{QSettings().remove("workspace/skin");});
+        NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.selectPath("/workspace/example",false);dialog.show();
+        QVERIFY(dialog.findChild<QFrame *>("newSessionDense"));QVERIFY(dialog.windowFlags()&Qt::FramelessWindowHint);
+        QCOMPARE(dialog.findChildren<QShortcut *>().size(),2);
+        QTRY_VERIFY(row(dialog,"work")>=0);QVERIFY(!choices(dialog)->isVisible());
+        const auto agents=[&]{QStringList ids;for(auto *button:dialog.findChildren<QAbstractButton *>("denseAgent"))ids<<button->property("agent").toString();return ids;};
+        const auto pick=[&](const QString &key){for(auto *button:dialog.findChildren<QAbstractButton *>("denseAgent"))if(button->property("agent").toString()==key)button->click();};
+        QTRY_COMPARE(agents(),QStringList({"codex","claude","dsh","sh"}));
+        const auto preview=qEnvironmentVariable("ZERUS_DENSE_PREVIEW");
+        // Two Codex accounts: the line under the rail is a chip, and its list
+        // chooses the account the session uses.
+        auto *chip=dialog.findChild<QAbstractButton *>("denseAccountChip");auto *info=dialog.findChild<QWidget *>("denseInfo");
+        QTRY_VERIFY(chip->isVisible());QVERIFY(!info->isVisible());QVERIFY(chip->accessibleName().startsWith("Account: "));
+        QCOMPARE(chip->toolTip().split('\n').size(),2);
+        const auto first=choices(dialog)->currentItem()->data(Qt::UserRole).toString();
+        chip->click();auto *list=dialog.findChild<QWidget *>("denseAccountList");QTRY_VERIFY(list->isVisible());
+        if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-accounts.png")&&list->grab().save(preview+"/dense-account-list.png"));
+        QTest::keyClick(list,static_cast<NewSessionDense::AccountChip *>(chip)->chosen()==0?Qt::Key_Down:Qt::Key_Up);QTest::keyClick(list,Qt::Key_Return);QTRY_VERIFY(!list->isVisible());
+        const auto second=choices(dialog)->currentItem()->data(Qt::UserRole).toString();
+        QVERIFY(second!=first);QVERIFY(QStringList({"work","other"}).contains(second));
+        // Esc closes the list without a choice.
+        chip->click();QTRY_VERIFY(list->isVisible());QTest::keyClick(list,Qt::Key_Escape);QTRY_VERIFY(!list->isVisible());
+        QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),second);
+        pick("claude");
+        QTRY_COMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude"));
+        QVERIFY(!chip->isVisible());QVERIFY(info->isVisible());
+        QTRY_VERIFY(info->accessibleName().contains("shared@example.invalid"));
+        QVERIFY2(info->accessibleName().contains("5h 17% used")&&info->accessibleName().contains("week 78% used"),qPrintable(info->accessibleName()));
+        if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-claude.png"));
+        // A signed-out agent offers its own action and does not start.
+        auto *start=dialog.findChild<QPushButton *>("primary");
+        pick("dsh");QTRY_VERIFY(!start->isEnabled());
+        QCOMPARE(start->toolTip(),QString("Connect the account first"));
+        auto *action=dialog.findChild<QPushButton *>("denseSignIn");QVERIFY(action->isVisible());QCOMPARE(action->text(),QString("Add key"));
+        if(!preview.isEmpty())QVERIFY(dialog.grab().save(preview+"/dense-dsh.png"));
+        QVERIFY(!dialog.findChild<QWidget *>("launchModel")->isVisible());
+        pick("claude");QSignalSpy launched(&dialog,&NewSessionDialog::launchRequested);
+        QTRY_VERIFY(start->isEnabled());start->click();QTRY_COMPARE(launched.size(),1);
+        QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][4].toString(),QString("claude"));
+        QVERIFY(launched[0][8].toString().isEmpty());
     }
     void untouchedInboxUsesNativeFolderInferenceAndExplicitInboxWins() {
         for(int explicitChoice=0;explicitChoice<3;++explicitChoice){

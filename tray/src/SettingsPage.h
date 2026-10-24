@@ -28,6 +28,13 @@
 #include "ProcessSettings.h"
 #include "QuestionNotificationSettings.h"
 #include "UiLanguage.h"
+#include "WorkspaceSkin.h"
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QSignalBlocker>
 
 class SettingsPage : public QWidget {
 public:
@@ -92,6 +99,37 @@ public:
         onTopHint=new QLabel;onTopHint->setObjectName("workspaceAlwaysOnTopHint");onTopHint->setWordWrap(true);appearance->addWidget(onTopHint);
         connect(onTop,&QCheckBox::toggled,this,[this](bool on){if(windowLayerChanged)windowLayerChanged(on);});
         auto *local=new QLabel(tr("Appearance and session list preferences apply to this Zerus."));local->setWordWrap(true);appearance->addWidget(local);appearance->addStretch();
+        // Switchable skins (WorkspaceSkin.h). A duplicate is a JSON file the person
+        // edits; the workspace reloads it when it is saved. The longer page scrolls
+        // instead of squeezing its rows, so rows never move as others change.
+        if(auto *page=appearance->parentWidget()){auto policy=page->sizePolicy();policy.setVerticalPolicy(QSizePolicy::Minimum);page->setSizePolicy(policy);}
+        auto *skin=new QComboBox;skin->setObjectName("workspaceSkin");
+        const auto fillSkins=[skin]{
+            const QSignalBlocker blocker(skin);skin->clear();
+            for(const auto &value:WorkspaceSkin::available())skin->addItem(value.builtin?value.name:QObject::tr("%1 (custom)").arg(value.name),value.id);
+            skin->setCurrentIndex(qMax(0,skin->findData(WorkspaceSkin::currentId())));
+        };
+        fillSkins();
+        auto *duplicateSkin=new QPushButton(tr("Duplicate…"));duplicateSkin->setObjectName("duplicateWorkspaceSkin");duplicateSkin->setAutoDefault(false);
+        auto *skinFolder=new QPushButton(tr("Open skins folder"));skinFolder->setObjectName("openWorkspaceSkins");skinFolder->setAutoDefault(false);
+        auto *skinRow=new QHBoxLayout;skinRow->setSpacing(8);skinRow->addWidget(skin,1);skinRow->addWidget(duplicateSkin);skinRow->addWidget(skinFolder);
+        // Right under Theme: the skin changes the whole window, so it leads the page.
+        const int skinAt=appearance->indexOf(theme)+1;
+        appearance->insertWidget(skinAt,new QLabel(tr("Skin")));appearance->insertLayout(skinAt+1,skinRow);
+        // One short line: a wrapping label would move the rows below as the page width changes.
+        auto *skinHint=new QLabel(tr("Colors, window shape and screen layouts. Duplicate a skin to edit it."));
+        skinHint->setObjectName("muted");skinHint->setToolTip(tr("A duplicate is a JSON file in the skins folder; saved changes apply at once."));
+        appearance->insertWidget(skinAt+2,skinHint);
+        connect(skin,&QComboBox::currentIndexChanged,this,[this,skin]{QSettings().setValue("workspace/skin",skin->currentData());if(appearanceChanged)appearanceChanged();});
+        connect(duplicateSkin,&QPushButton::clicked,this,[this,fillSkins]{
+            const auto current=WorkspaceSkin::current();bool ok=false;
+            const auto name=QInputDialog::getText(this,tr("Duplicate skin"),tr("Name of the copy"),QLineEdit::Normal,tr("%1 copy").arg(current.name),&ok);
+            if(!ok)return;
+            QString error;const auto id=WorkspaceSkin::duplicate(current,name,&error);
+            if(id.isEmpty()){QMessageBox::warning(this,tr("Duplicate skin"),error);return;}
+            QSettings().setValue("workspace/skin",id);fillSkins();if(appearanceChanged)appearanceChanged();
+        });
+        connect(skinFolder,&QPushButton::clicked,this,[]{QDir().mkpath(WorkspaceSkin::directory());QDesktopServices::openUrl(QUrl::fromLocalFile(WorkspaceSkin::directory()));});
         connect(theme,&QComboBox::currentIndexChanged,this,[this,theme]{QSettings().setValue("workspace/theme",theme->currentData());if(appearanceChanged)appearanceChanged();});
         auto *sessions=makePage(tr("Sessions"));
         for(const auto &option:QList<QStringList>{{"workspaceCompact","workspace/compact",tr("Compact session rows"),"false"},{"workspaceExpandSessionsOnHover","workspace/expandSessionsOnHover",tr("Expand the collapsed session list on hover"),"true"},{"workspaceHideEmptyProjects","workspace/hideEmptyProjects",tr("Hide projects without active sessions"),"true"},{"workspaceAnimateActivity","workspace/animateActivity",tr("Animate working sessions"),"true"}}){

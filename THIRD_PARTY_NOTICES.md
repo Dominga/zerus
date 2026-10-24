@@ -32,6 +32,13 @@ The About page uses the [GitHub mark from Primer Octicons](
 https://github.com/primer/octicons/blob/97825f832c98f817867f770d084c08e3edc6f78c/icons/mark-github-16.svg). Its complete MIT license and GitHub copyright notice are retained
 in `tray/resources/icons/github-mark.svg`, including the embedded Qt resource.
 
+## Agent logos
+
+The dense New session view shows the Codex, Claude, Kimi and DeepSeek logos from
+[LobeHub lobe-icons](https://github.com/lobehub/lobe-icons), MIT, Copyright (c) 2023
+LobeHub. Its license is retained in `tray/resources/agent-icons/LICENSE`, also in
+the embedded Qt resource.
+
 ## Dependencies obtained during build
 
 Rust dependencies and versions are locked in `Cargo.lock` and, for the mobile

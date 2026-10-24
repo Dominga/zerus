@@ -282,6 +282,35 @@ mod tests {
     }
 
     #[test]
+    fn an_extend_replay_returns_the_first_receipt() {
+        use super::super::model::{Member, TeamStatus};
+        use super::super::ops::{self, Actor};
+        use std::collections::BTreeSet;
+        let (_dir, mut store) = store();
+        let mut team = team("t1");
+        team.status = TeamStatus::Running;
+        team.members = vec![
+            Member { id: "lead".into(), agent: "claude".into(), ..Default::default() },
+            Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() },
+        ];
+        store.create(REQUEST, &json!({}), team, vec![]).unwrap();
+        const EXTEND: &str = "22222222-2222-4222-8222-222222222222";
+        let input = json!({"tasks":[{"id":1,"title":"Fix","assignee":"dev"}]});
+        let extend = |store: &mut Store, input: &Value| {
+            store.mutate(Some((EXTEND, input)), "t1", None, |team, events| {
+                ops::apply(team, "extend", input, &Actor::Member("lead".into()), &BTreeSet::new(), events)
+            })
+        };
+        let first = extend(&mut store, &input).unwrap();
+        assert_eq!(first["status"], "added");
+        let again = extend(&mut store, &input).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(again["revision"], json!(2));
+        assert_eq!(store.load("t1").unwrap().unwrap().phases.len(), 1);
+        assert!(extend(&mut store, &json!({"tasks":[{"id":1,"title":"Other","assignee":"dev"}]})).is_err());
+    }
+
+    #[test]
     fn a_mutation_checks_the_revision_and_appends_its_events() {
         let (_dir, mut store) = store();
         store.create(REQUEST, &json!({}), team("t1"), vec![]).unwrap();

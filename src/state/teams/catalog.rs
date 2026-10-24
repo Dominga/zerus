@@ -86,6 +86,9 @@ pub(crate) struct Template {
     /// review or auto.
     #[serde(default)]
     pub approval: String,
+    /// "" (the plan's approval), review or auto: how new phases are approved.
+    #[serde(default)]
+    pub phase_approval: String,
     #[serde(default)]
     pub max_members: usize,
 }
@@ -276,6 +279,8 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
             ensure!(task.role == "lead" || roles.contains_key(&task.role), "Template {} task {} names unknown role {}", template.name, i + 1, task.role);
             ensure!(task.deps.iter().all(|d| *d < i), "Template {} task {} depends on a later task", template.name, i + 1);
         }
+        ensure!(matches!(template.phase_approval.as_str(), "" | "review" | "auto"),
+            "Template {}: phase approval is \"\", review or auto", template.id);
     }
     for rule in &catalog.routing {
         clean_id(&rule.id)?;
@@ -512,6 +517,17 @@ mod tests {
         // hgs gives the id; the guide's example has none.
         let proposal: Proposal = serde_json::from_value(json!({"kind":"role","action":"remove","target":"tester"})).unwrap();
         assert!(proposal.id.is_empty());
+    }
+
+    #[test]
+    fn a_template_carries_its_phase_approval() {
+        let template: Template = serde_json::from_value(json!({"id":"feature","name":"Feature","phase_approval":"auto"})).unwrap();
+        assert_eq!(template.phase_approval, "auto");
+        let plain: Template = serde_json::from_value(json!({"id":"feature","name":"Feature"})).unwrap();
+        assert_eq!(plain.phase_approval, "");
+        let mut catalog = builtin();
+        catalog.templates[0].phase_approval = "sometimes".into();
+        assert!(validate(&catalog).is_err());
     }
 
     #[test]

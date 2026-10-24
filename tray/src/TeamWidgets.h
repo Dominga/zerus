@@ -8,14 +8,12 @@
 #include "WorkspaceSkin.h"
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QFile>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
-#include <QPixmap>
 #include <QPushButton>
 #include <QKeyEvent>
 #include <cmath>
@@ -573,21 +571,8 @@ inline QString agentIcon(const QString &agent)
 // icon for an agent without one.
 inline QIcon agentLogo(const QString &agent, const QColor &color)
 {
-    static const QHash<QString, QString> files{{"claude", "claude"}, {"codex", "codex"}, {"dsh", "deepseek"}, {"deepseek", "deepseek"},
-                                               {"kimi", "kimi-color"}, {"opencode", "opencode"}, {"ollama", "ollama"}};
-    const QString file = files.value(agent);
-    if (file.isEmpty()) return workspaceIcon(agentIcon(agent), color);
-    // Painted once per agent and color; never destroyed, as for workspaceIcon.
-    static auto *cache = new QHash<std::pair<QString, QRgb>, QIcon>;
-    const std::pair<QString, QRgb> key{file, color.rgba()};
-    if (const auto found = cache->constFind(key); found != cache->cend()) return *found;
-    QFile svg(QStringLiteral(":/hgs/agent-icons/%1.svg").arg(file));
-    QByteArray data = svg.open(QIODevice::ReadOnly) ? svg.readAll() : QByteArray();
-    data.replace("currentColor", color.name().toLatin1()).replace("height=\"1em\"", "height=\"48\"").replace("width=\"1em\"", "width=\"48\"");
-    QPixmap pixmap;
-    const QIcon icon = pixmap.loadFromData(data, "SVG") ? QIcon(pixmap) : workspaceIcon(agentIcon(agent), color);
-    cache->insert(key, icon);
-    return icon;
+    const QIcon logo = agentLogoIcon(agent, color);
+    return logo.isNull() ? workspaceIcon(agentIcon(agent), color) : logo;
 }
 
 inline QString clock(double at) { return QDateTime::fromSecsSinceEpoch(qint64(at)).toString("HH:mm"); }

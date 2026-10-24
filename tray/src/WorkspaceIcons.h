@@ -1,10 +1,34 @@
 #pragma once
+#include <QFile>
 #include <QHash>
 #include <QIcon>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QPushButton>
 #include "WorkspaceFocus.h"
+
+// WhiteWh fork: an agent's own logo (LobeHub lobe-icons, MIT, in
+// tray/resources/agent-icons), in its colors where it has them and its
+// monochrome parts in `color`; a null icon for an agent without one.
+inline QIcon agentLogoIcon(const QString &agent, const QColor &color)
+{
+    static const QHash<QString, QString> files{{"claude", "claude"}, {"codex", "codex"}, {"dsh", "deepseek"}, {"deepseek", "deepseek"},
+                                               {"kimi", "kimi-color"}, {"opencode", "opencode"}, {"ollama", "ollama"}};
+    const QString file = files.value(agent);
+    if (file.isEmpty()) return {};
+    // Painted once per agent and color; never destroyed, as for workspaceIcon.
+    static auto *cache = new QHash<std::pair<QString, QRgb>, QIcon>;
+    const std::pair<QString, QRgb> key{file, color.rgba()};
+    if (const auto found = cache->constFind(key); found != cache->cend()) return *found;
+    QFile svg(QStringLiteral(":/hgs/agent-icons/%1.svg").arg(file));
+    QByteArray data = svg.open(QIODevice::ReadOnly) ? svg.readAll() : QByteArray();
+    data.replace("currentColor", color.name().toLatin1()).replace("height=\"1em\"", "height=\"48\"").replace("width=\"1em\"", "width=\"48\"");
+    QPixmap pixmap;
+    const QIcon icon = pixmap.loadFromData(data, "SVG") ? QIcon(pixmap) : QIcon();
+    cache->insert(key, icon);
+    return icon;
+}
 
 // One small stroke family, drawn at native DPR instead of platform-dependent glyphs.
 inline QIcon workspaceIcon(const QString &name, const QColor &color)

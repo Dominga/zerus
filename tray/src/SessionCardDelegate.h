@@ -446,15 +446,17 @@ private:
         p->drawText(QRect(right - countsW, r.y(), countsW, r.height()), Qt::AlignVCenter | Qt::AlignRight, counts);
         right -= countsW + 6;
         const auto tones = team.value("progress").toList();
-        const int barW = 44, gap = 1;
+        // The name comes first: the bar goes when it would leave the name
+        // less than a short word's room (accepted/total still says it).
+        const int barW = right - r.x() - 26 - 52 >= 96 ? 44 : 0, gap = 1;
         const double seg = tones.isEmpty() ? barW : (barW - gap * (tones.size() - 1)) / double(tones.size());
         p->setPen(Qt::NoPen);
-        if (tones.isEmpty()) { p->setBrush(teamTone(5, dark)); p->drawRoundedRect(QRectF(right - barW, r.y() + 9, barW, 4), 2, 2); }
-        for (int i = 0; i < tones.size(); ++i) {
+        if (barW && tones.isEmpty()) { p->setBrush(teamTone(5, dark)); p->drawRoundedRect(QRectF(right - barW, r.y() + 9, barW, 4), 2, 2); }
+        for (int i = 0; barW && i < tones.size(); ++i) {
             p->setBrush(teamTone(tones[i].toInt(), dark));
             p->drawRoundedRect(QRectF(right - barW + i * (seg + gap), r.y() + 9, qMax(1.0, seg), 4), 1, 1);
         }
-        right -= barW + 8;
+        if (barW) right -= barW + 8;
         QFont font = option.font; font.setPixelSize(12); font.setWeight(QFont::DemiBold); p->setFont(font); p->setPen(fg);
         const QRect name(r.x() + 26, r.y(), qMax(0, right - r.x() - 26), r.height());
         CachedText::draw(p, name, Qt::AlignVCenter | Qt::AlignLeft, CachedText::elided(font, team.value("name").toString(), Qt::ElideRight, name.width()));
@@ -629,11 +631,15 @@ private:
             const QRect tile(sessionCardRect(option.rect).x() + 12 + indent, r.y() + 10, 30, 30);
             QColor fill = color; fill.setAlphaF(dark ? 0.16 : 0.14);
             p->setPen(Qt::NoPen); p->setBrush(fill); p->drawRoundedRect(tile, 8, 8);
-            const QString name = IdentityBadges::providerName(agentKey);
-            const QString initials = agentKey == QLatin1String("codex") ? QStringLiteral(">_") : agentKey == QLatin1String("sh") ? QStringLiteral("$") : name.left(1).toUpper();
-            QFont mark = option.font; mark.setPixelSize(12); mark.setWeight(QFont::Bold); mark.setStyleHint(QFont::Monospace);
-            mark.setFamilies({QStringLiteral("JetBrains Mono"), QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), mark.family()});
-            p->setFont(mark); p->setPen(color); p->drawText(tile, Qt::AlignCenter, initials);
+            if (const QIcon logo = agentLogoIcon(agentKey, foreground); !logo.isNull()) {
+                logo.paint(p, tile.adjusted(6, 6, -6, -6));
+            } else {
+                const QString name = IdentityBadges::providerName(agentKey);
+                const QString initials = agentKey == QLatin1String("codex") ? QStringLiteral(">_") : agentKey == QLatin1String("sh") ? QStringLiteral("$") : name.left(1).toUpper();
+                QFont mark = option.font; mark.setPixelSize(12); mark.setWeight(QFont::Bold); mark.setStyleHint(QFont::Monospace);
+                mark.setFamilies({QStringLiteral("JetBrains Mono"), QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), mark.family()});
+                p->setFont(mark); p->setPen(color); p->drawText(tile, Qt::AlignCenter, initials);
+            }
             const auto state = statusForView(option, index);
             const QColor dot = state.attention ? QColor("#e8a75a") : state.working ? QColor("#7dd3b0") : state.unread ? QColor("#7fb6e0") : QColor();
             if (dot.isValid()) {

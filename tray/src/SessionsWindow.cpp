@@ -3115,6 +3115,16 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
     roles.insert(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
     roles.insert(TitleRole, sessionLabel(s)); roles.insert(AgentRole, s.cmd);
+    // WhiteWh fork: a team member's card names its role (its id where the
+    // role repeats), not the team's long session name.
+    if (m_teams) for (const auto &team : m_teams->teams()) {
+        const auto *member = team.status == "archived" ? nullptr : team.memberOfSession(e.host, s.name);
+        if (!member || member->lead) continue;
+        const QString role = team.roleOf(member->id);
+        const bool repeated = std::count_if(team.members.cbegin(), team.members.cend(), [&](const auto &m) { return team.roleOf(m.id) == role; }) > 1;
+        roles.insert(TitleRole, repeated || role.isEmpty() ? member->id : role);
+        break;
+    }
     QString meta = SessionPresentation::checkoutLine(s);
     roles.insert(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
     if (s.state == "archived" && s.archivedAt > 0) {

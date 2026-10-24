@@ -426,15 +426,21 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     QVERIFY(side->widget(1)->findChild<QWidget *>("teamConversation"));
     // The answers slot stays when nothing waits.
     QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceAnswers"));
-    // The graph fills the canvas: at least its height, centered.
-    auto *graph = workspace.findChild<QWidget *>("teamWorkspaceGraph");
-    auto *canvas = workspace.findChild<QScrollArea *>("teamWorkspaceCanvas");
-    const int bar = canvas->style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, canvas);
-    QTRY_VERIFY(graph->height() >= canvas->viewport()->height() - bar - 2);
+    // The graph fills the canvas: at least its height, centered. A render
+    // (every poll) builds the canvas again, so each check finds it anew.
+    const auto graph = [&workspace] { return workspace.findChild<QWidget *>("teamWorkspaceGraph"); };
+    const auto canvas = [&workspace] { return workspace.findChild<QScrollArea *>("teamWorkspaceCanvas"); };
+    const auto fills = [&] {
+        if (!graph() || !canvas()) return false;
+        const int bar = canvas()->style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, canvas());
+        return graph()->height() >= canvas()->viewport()->height() - bar - 2;
+    };
+    QTRY_VERIFY(fills());
     // ...and holds still: no scroll bar comes and goes under it.
     QTest::qWait(150);
-    const QSize settled = graph->size();
-    for (int i = 0; i < 5; ++i) { QTest::qWait(40); QCOMPARE(graph->size(), settled); }
+    QTRY_VERIFY(graph());
+    const QSize settled = graph()->size();
+    for (int i = 0; i < 5; ++i) { QTest::qWait(40); QTRY_VERIFY(graph()); QCOMPARE(graph()->size(), settled); }
     // A divider the owner moves stands between the canvas and the side column.
     auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
     QVERIFY(split && split->handleWidth() >= 5);

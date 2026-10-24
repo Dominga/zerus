@@ -306,9 +306,15 @@ endpoints are not configured; the fixtures' model and platform are loopback
 only. This is not a kernel network enclosure or Windows Kimi qualification.
 The historical NP50 owner-Mac campaigns are separate and are not replayed.
 The [latest Kimi approval workflow](.github/workflows/kimi-approvals.yml) similarly
-runs one selected release and seven exact approval cases on macOS and Windows,
-including its existing Windows environment preflight. These workflows remain
-path-filtered PR/manual qualifications; they do not add Kimi to every main run.
+runs one selected release on macOS and Windows, including its existing Windows
+environment preflight. Its native inventory is the unchanged seven exact Bash
+approval cases plus exactly these four CreateGoal cases:
+`test_goal_manual_starts_in_manual`,
+`test_goal_yolo_auto_switches_to_never_ask`,
+`test_goal_yolo_cancel_does_not_start`,
+`test_goal_yolo_keeps_ask_when_needed`, and the single ExitPlanMode case
+`test_plan_review_approve`. These workflows remain path-filtered PR/manual
+qualifications; they do not add Kimi to every main run.
 `scripts/fetch-conpty.py` downloads the ConPTY package pinned in
 `packaging/windows/conpty.json` from nuget.org and writes only its checked
 `conpty.dll` and `OpenConsole.exe`; `package-windows.py` puts them next to

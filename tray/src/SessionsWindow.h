@@ -77,7 +77,7 @@ public:
     void setConnectionError(const QString &error);
     void setPollingHosts(const QSet<QString> &hosts);
     static QString status(const SessionInfo &session, bool reachable = true);
-    // Tests only, so suites need not wait out fixed delays: information notices
+    // Tests only, so suites need not wait out fixed delays: timed notices
     // (5 s), compaction polls (2.5 s), the details poll tick (500 ms) with its
     // Activity interval (2.5 s), and the wait of Send and push now (20 s, which
     // also restarts an armed push's wait). The application keeps the defaults.
@@ -180,7 +180,7 @@ private:
     QElapsedTimer m_readDwell;
     QString m_readCandidate, m_readSelectionKey;
     void acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId);
-    void showNotice(const QString &message, bool error = false);
+    void showNotice(const QString &message, bool error = false, bool transient = false);
     void clearNotice();
     // Opens a session file like a browser download; see ExternalFile.h.
     void openExternalFile(const QString &path, bool otherMachine);

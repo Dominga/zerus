@@ -1502,7 +1502,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_accountsPage,&AccountsPage::loginRequested,this,&SessionsWindow::accountLoginRequested);
     connect(m_accountsPage,&AccountsPage::installRequested,this,&SessionsWindow::accountInstallRequested);
     connect(m_accountsPage,&AccountsPage::accountsChanged,this,&SessionsWindow::refreshRequested);
-    connect(m_accountsPage,&AccountsPage::notice,this,&SessionsWindow::showNotice);
+    connect(m_accountsPage,&AccountsPage::notice,this,[this](const QString &message, bool error){showNotice(message,error);});
     connect(m_accountsPage,&AccountsPage::catalogChanged,this,[this]{updateDashboardAccounts(m_pages->currentIndex()==3);});
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){renderAccountUsage();updateDashboardAccounts();});
     connect(m_machinesPage,&MachinesPage::accountsRequested,this,[this](const QString &host) { m_pages->setCurrentIndex(4); m_accountsPage->showMachine(host); });
@@ -1636,7 +1636,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::queueSendFinished, this, [this](quint64 request, bool ok, const QJsonObject &, const QString &error) {
         if (request != m_queueSendRequest) return;
         const bool current = m_queueSendKey == m_selectedKey; m_queueSendRequest = 0; m_queueSendKey.clear();
-        if (current) { m_details.remove("input_queue"); showNotice(ok ? tr("Send now requested. Waiting for the agent to accept the queue.") : error, !ok); renderDetails(); inspect(); }
+        if (current) {
+            m_details.remove("input_queue");
+            const QString detail = error.trimmed();
+            const bool staleQueue = !ok && (detail == "hgs: The native queue is no longer visible; nothing was sent"
+                || detail == "The native queue is no longer visible; nothing was sent");
+            const QString message = ok ? tr("Send now requested. Waiting for the agent to accept the queue.")
+                : staleQueue ? tr("The native queue is no longer visible; nothing was sent. Activity is being refreshed; check Terminal or the current queue before retrying.") : error;
+            showNotice(message, !ok, staleQueue); renderDetails(); inspect();
+        }
         emit refreshRequested();
     });
     connect(&m_client, &HgsClient::inspectionReady, this, &SessionsWindow::acceptInspection);
@@ -4986,7 +4994,7 @@ void SessionsWindow::openExternalFile(const QString &path, bool otherMachine)
     }
 }
 
-void SessionsWindow::showNotice(const QString &message, bool error)
+void SessionsWindow::showNotice(const QString &message, bool error, bool transient)
 {
     m_notice->show();
     m_noticeDismiss->show();
@@ -4997,7 +5005,7 @@ void SessionsWindow::showNotice(const QString &message, bool error)
     const int revision=m_notice->property("noticeRevision").toInt()+1;
     m_notice->setProperty("noticeRevision",revision);
     updateSessionFeedback();
-    if (!error) QTimer::singleShot(m_noticeMs, this, [this,revision] {
+    if (!error || transient) QTimer::singleShot(m_noticeMs, this, [this,revision] {
         if (m_notice->property("noticeRevision").toInt()==revision) clearNotice();
     });
 }

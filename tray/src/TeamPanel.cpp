@@ -182,6 +182,19 @@ void TeamPanel::render()
                                   "in the session list. A lead session creates one with hgs team create (hgs guide team)."), c.muted, 12);
             hint->setWordWrap(true); hint->setObjectName("teamEmptyHint");
             layout->addWidget(hint);
+            auto *actions = new QHBoxLayout; actions->setSpacing(8);
+            if (newTeam) {
+                auto *create = button(tr("New team…"), "teamEmptyNew", true);
+                QObject::connect(create, &QPushButton::clicked, this, [this] { newTeam(); });
+                actions->addWidget(create);
+            }
+            if (openDesigner) {
+                auto *designer = button(tr("Team designer…"), "teamEmptyDesigner");
+                QObject::connect(designer, &QPushButton::clicked, this, [this] { openDesigner(); });
+                actions->addWidget(designer);
+            }
+            actions->addStretch();
+            layout->addLayout(actions);
         }
         if (answersChanged) answersChanged(0);
     } else {

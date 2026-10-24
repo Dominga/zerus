@@ -32,6 +32,8 @@
 #include "TeamNewDialog.h"
 #include "TeamCatalogEditor.h"
 #include "TeamWorkspace.h"
+#include "TeamDesignerPage.h"
+#include <memory>
 #include "Extensions.h"
 #include "WindowTitleBar.h"
 #include "IronRulesPanel.h"
@@ -348,7 +350,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_machinesNav = iconButton("machines", tr("Machines and connection status"), "railButton"); m_machinesNav->setCheckable(true);
     m_accountsNav = iconButton("accounts", tr("Agent accounts"), "railButton"); m_accountsNav->setCheckable(true);
     connect(m_accountsNav, &QPushButton::clicked, this, [this] { m_pages->setCurrentIndex(4); m_accountsNav->setChecked(true); });
-    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
+    // WhiteWh fork: agent teams. The Team designer mode: the universal catalog.
+    m_teamDesignerNav = iconButton("team", tr("Team designer"), "railButton"); m_teamDesignerNav->setObjectName("teamDesignerNav"); m_teamDesignerNav->setCheckable(true);
+    connect(m_teamDesignerNav, &QPushButton::clicked, this, [this] { showTeamDesigner(); });
+    for (auto *button : {m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav}) { button->setFixedSize(42, 44); button->setIconSize(QSize(24, 24)); side->addWidget(button); }
     m_attentionBadge = new QLabel(m_sessionsNav); m_attentionBadge->setObjectName("railAttentionBadge");
     m_attentionBadge->setAlignment(Qt::AlignCenter); m_attentionBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_attentionBadge->setGeometry(24, 3, 17, 16); m_attentionBadge->hide();
@@ -1476,6 +1481,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamWorkspace->setLive([this](const Teams::Member &member){return teamLive(member);});
     // The tab exists only while a team is shown.
     m_teamWorkspace->hide();
+    m_teamNewTab=new QWidget(this);m_teamNewTab->setObjectName("teamNewTab");
+    {auto *v=new QVBoxLayout(m_teamNewTab);v->setContentsMargins(12,8,12,8);}
+    m_teamNewTab->hide();
+    connect(m_detailTabs,&QTabWidget::currentChanged,this,[this]{if(m_detailTabs->currentWidget()==m_teamNewTab)ensureTeamNewForm();});
+    m_teamPanel->newTeam=[this]{showNewTeam();};
+    m_teamPanel->openDesigner=[this]{showTeamDesigner();};
     m_teamPanel->openWorkspace=[this]{if(m_detailTabs->indexOf(m_teamWorkspace)<0)m_detailTabs->addTab(m_teamWorkspace,tr("Team"));m_detailTabs->setCurrentWidget(m_teamWorkspace);};
     connect(m_teams,&TeamController::teamsChanged,this,[this]{rebuild();updateTeamPanel();});
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
@@ -1634,6 +1645,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_machinesPage,&MachinesPage::appearanceChanged,this,[this] { m_machineFilter->refreshColors(); m_accountsPage->refreshAppearance(); rebuild(); updateDashboard(); });
     connect(m_pages,&QStackedWidget::currentChanged,this,[this](int index) {
         m_sessionsNav->setChecked(index==0); m_projectsNav->setChecked(index==1); m_machinesNav->setChecked(index==2); m_brand->setChecked(index==3); m_accountsNav->setChecked(index==4); m_settingsNav->setChecked(index==5);
+        if (m_teamDesignerNav) m_teamDesignerNav->setChecked(index==m_teamDesignerPageIndex);
         renderAccountUsage();if(index==3)updateDashboardAccounts(true);updateInspectorMinimum();
         if (index == 3 && m_dashboardStale) updateDashboard();
         // Callers that show Sessions rebuild right away; this covers any other switch.
@@ -2153,6 +2165,7 @@ void SessionsWindow::applyTheme()
     if (m_teamPanel) m_teamPanel->setTheme(m_dark);   // WhiteWh fork: agent teams
     if (m_teamCatalog) m_teamCatalog->setDark(m_dark);
     if (m_teamWorkspace) m_teamWorkspace->setTheme(m_dark);
+    if (m_teamDesignerPage) m_teamDesignerPage->setDark(m_dark);
     m_processes->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
     applyWorkspaceView();
@@ -6043,7 +6056,7 @@ void SessionsWindow::placeRailControls(bool inTitle)
     // the controls once the window is complete.
     if (inTitle == m_railInTitle || !m_railLayout || !m_statusLayout || !m_titleBar) return;
     m_railInTitle = inTitle;
-    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav};
+    const QList<QPushButton *> leading{m_railSessionsToggle, m_railNewSession, m_sessionsNav, m_projectsNav, m_machinesNav, m_accountsNav, m_teamDesignerNav};
     const QList<QPushButton *> trailing{m_windowPin, m_settingsNav};
     QList<QPushButton *> all{m_brand}; all << leading << trailing;
     // Moving a widget hides it; each keeps whether it was shown.
@@ -6204,7 +6217,7 @@ void SessionsWindow::updateTeamPanel()
     {const auto *entry=selected();
      const bool designer=m_selectedTeam.isEmpty()&&entry&&entry->host.isEmpty()&&entry->session.name.endsWith("/team-designer");
      m_teamPanel->showDesigner(designer);
-     if(designer)return;}
+     if(designer){setNewTeamTab(false);return;}}
     QString team=m_selectedTeam;
     if(team.isEmpty()||!m_teams->team(team)){
         m_selectedTeam.clear();
@@ -6220,6 +6233,19 @@ void SessionsWindow::updateTeamPanel()
         if(team.isEmpty()&&index>=0){if(m_detailTabs->currentWidget()==m_teamWorkspace)m_detailTabs->setCurrentIndex(0);m_detailTabs->removeTab(index);m_teamWorkspace->hide();}
         else if(!team.isEmpty()&&index<0)m_detailTabs->addTab(m_teamWorkspace,tr("Team"));
     }
+    // New team while the selected local session has no team; it leads the team.
+    const auto *entry=selected();
+    setNewTeamTab(m_teams->available()&&team.isEmpty()&&m_selectedTeam.isEmpty()&&entry&&entry->host.isEmpty()&&entry->online&&entry->session.state!="archived");
+    if(!team.isEmpty()&&team==m_teamOpenAfterCreate){m_teamOpenAfterCreate.clear();m_detailTabs->setCurrentWidget(m_teamWorkspace);}
+    if(m_teamDesignerPage&&m_teamDesignerPage->isVisible())m_teamDesignerPage->refresh();
+}
+void SessionsWindow::setNewTeamTab(bool shown)
+{
+    if(!m_teamNewTab)return;
+    const int index=m_detailTabs->indexOf(m_teamNewTab);
+    if(!shown&&index>=0){if(m_detailTabs->currentWidget()==m_teamNewTab)m_detailTabs->setCurrentIndex(0);m_detailTabs->removeTab(index);m_teamNewTab->hide();}
+    else if(shown&&index<0)m_detailTabs->addTab(m_teamNewTab,tr("New team"));
+    else if(shown&&m_detailTabs->currentWidget()==m_teamNewTab)ensureTeamNewForm();
 }
 Teams::Live SessionsWindow::teamLive(const Teams::Member &member) const
 {
@@ -6234,15 +6260,8 @@ Teams::Live SessionsWindow::teamLive(const Teams::Member &member) const
     }
     return live;
 }
-void SessionsWindow::showNewTeam()
+TeamNewDialog *SessionsWindow::teamNewForm(QWidget *parent)
 {
-    if(!m_teams)return;
-    if(!m_teams->catalogReady()){
-        // The form fills its templates and roles from the catalog.
-        auto *once=new QMetaObject::Connection;
-        *once=connect(m_teams,&TeamController::catalogChanged,this,[this,once]{disconnect(*once);delete once;showNewTeam();});
-        m_teams->refreshCatalog();return;
-    }
     QList<TeamNewDialog::Computer> computers{{QString(),tr("this computer"),true}};
     const qint64 now=QDateTime::currentMSecsSinceEpoch();
     for(const auto &alias:m_fleet.peerNames()){
@@ -6255,10 +6274,45 @@ void SessionsWindow::showNewTeam()
     QString folder,project;
     if(entry){if(entry->host.isEmpty())folder=entry->session.cwd;project=m_organization.groupFor(entry->identity);
         if(const auto *group=m_organization.group(project))project=group->name;}
-    TeamNewDialog dialog(m_teams,&m_client,computers,sessions,folder,project,this);
-    if(dialog.exec()!=QDialog::Accepted)return;
+    return new TeamNewDialog(m_teams,&m_client,computers,sessions,folder,project,parent);
+}
+void SessionsWindow::ensureTeamNewForm()
+{
+    const auto *entry=selected();
+    if(!m_teams||!m_teamNewTab||!entry||!entry->host.isEmpty())return;
+    if(m_teamNewForm&&m_teamNewForm->leadSession()==entry->session.name)return;
+    if(!m_teams->catalogReady()){
+        // The form fills its templates and roles from the catalog.
+        if(m_teamNewWaiting)return;
+        m_teamNewWaiting=true;
+        auto *once=new QMetaObject::Connection;
+        *once=connect(m_teams,&TeamController::catalogChanged,this,[this,once]{disconnect(*once);delete once;m_teamNewWaiting=false;ensureTeamNewForm();});
+        m_teams->refreshCatalog();return;
+    }
+    if(m_teamNewForm){m_teamNewForm->hide();m_teamNewForm->deleteLater();}
+    m_teamNewForm=teamNewForm(m_teamNewTab);
+    m_teamNewForm->embedFor(entry->session.name);
+    m_teamNewForm->created=[this](const QString &team){
+        m_teamOpenAfterCreate=team;m_teams->refresh();
+        // A session whose team ends gets a fresh form.
+        m_teamNewForm->deleteLater();m_teamNewForm=nullptr;
+    };
+    m_teamNewTab->layout()->addWidget(m_teamNewForm);
+    m_teamNewForm->show();
+}
+void SessionsWindow::showNewTeam()
+{
+    if(!m_teams)return;
+    if(m_teamNewTab&&m_detailTabs->indexOf(m_teamNewTab)>=0){m_pages->setCurrentIndex(0);m_detailTabs->setCurrentWidget(m_teamNewTab);return;}
+    if(!m_teams->catalogReady()){
+        auto *once=new QMetaObject::Connection;
+        *once=connect(m_teams,&TeamController::catalogChanged,this,[this,once]{disconnect(*once);delete once;showNewTeam();});
+        m_teams->refreshCatalog();return;
+    }
+    std::unique_ptr<TeamNewDialog> dialog(teamNewForm(this));
+    if(dialog->exec()!=QDialog::Accepted)return;
     m_teams->refresh();
-    showTeam(dialog.createdTeam());
+    showTeam(dialog->createdTeam());
 }
 void SessionsWindow::openTeamTask(int task)
 {
@@ -6288,14 +6342,31 @@ void SessionsWindow::openRelatedSession(const QString &host,const QString &name,
     const auto key=host+'\n'+name+(archive.isEmpty()?QString():'\n'+archive);revealSession(key);
     for(int i=0;i<m_sessions->count();++i)if(m_sessions->item(i)->data(KeyRole).toString()==key){m_sessions->setCurrentRow(i);m_sessions->scrollToItem(m_sessions->item(i));return;}
 }
-// WhiteWh fork: agent teams. The Team designer is a session of its own that
-// proposes catalog changes; its Team tab shows the draft to keep and apply.
+// WhiteWh fork: agent teams. The Team designer mode shows the catalog and the
+// designer session, which proposes catalog changes; its draft waits for Apply.
+QString SessionsWindow::teamDesignerSession() const
+{
+    for(const auto &e:m_entries)if(e.host.isEmpty()&&e.session.state=="running"&&e.session.name.endsWith("/team-designer"))return e.session.name;
+    return {};
+}
 void SessionsWindow::showTeamDesigner()
 {
     if(!m_teams)return;
-    for(const auto &e:m_entries)if(e.host.isEmpty()&&e.session.state=="running"&&e.session.name.endsWith("/team-designer")){
-        showSession(e.host,e.session.name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);return;
+    if(!m_teamDesignerPage){
+        // Made on first use: the page reads the catalog while it shows.
+        m_teamDesignerPage=new TeamDesignerPage(m_teams);m_teamDesignerPage->setDark(m_dark);
+        m_teamDesignerPage->designerSession=[this]{return teamDesignerSession();};
+        m_teamDesignerPage->startDesigner=[this]{startTeamDesigner();};
+        m_teamDesignerPage->openDesigner=[this](const QString &name){showSession({},name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
+        m_teamDesignerPage->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
+        m_teamDesignerPageIndex=m_pages->addWidget(m_teamDesignerPage);
     }
+    m_pages->setCurrentWidget(m_teamDesignerPage);
+    m_teamDesignerPage->refresh();
+}
+void SessionsWindow::startTeamDesigner()
+{
+    if(!m_teams)return;
     const auto *entry=selected();
     QString folder=entry&&entry->host.isEmpty()?entry->session.cwd:QString();
     if(folder.isEmpty())folder=QDir::homePath();
@@ -6310,14 +6381,10 @@ void SessionsWindow::showTeamDesigner()
             if(!ok){showNotice(tr("The Team designer did not start: %1").arg(error),true);return;}
             const auto name=result.value("name").toString();
             showNotice(tr("Team designer started%1").arg(name.isEmpty()?QString():QStringLiteral(": ")+name));
-            // Open it once the listing shows it.
-            if(name.isEmpty())return;
+            // The page shows it once the listing does.
             auto *tries=new int(0);auto *timer=new QTimer(this);timer->setInterval(1000);
-            connect(timer,&QTimer::timeout,this,[this,timer,tries,name]{
-                for(const auto &e:m_entries)if(e.host.isEmpty()&&e.session.name==name){
-                    showSession(e.host,name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);
-                    timer->stop();timer->deleteLater();delete tries;return;}
-                if(++*tries>20){timer->stop();timer->deleteLater();delete tries;}
+            connect(timer,&QTimer::timeout,this,[this,timer,tries]{
+                if(!teamDesignerSession().isEmpty()||++*tries>20){if(m_teamDesignerPage)m_teamDesignerPage->refresh();timer->stop();timer->deleteLater();delete tries;}
             });
             timer->start();
         });

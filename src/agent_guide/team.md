@@ -20,6 +20,8 @@ Lead, from your own session:
     {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json
     add "reason" and use reject; the task returns for another attempt.
   reassign (with "member"), retry and cancel take the same fields.
+  A missing skill: add-member with {"member":{"id","role","agent"}}, then
+  reassign a task to it; it starts with that task.
   The owner's decisions are final; yours cannot undo them.
 
 Member: a task arrives as a message that begins with [Zerus team. Do it,

@@ -42,6 +42,8 @@ public:
     bool confirm(const QString &name, const QString &title, const QString &text, const QString &action);
     // Opens the team workspace (the Team tab next to Activity).
     std::function<void()> openWorkspace;
+    // New team and Team designer, offered while no team is shown.
+    std::function<void()> newTeam, openDesigner;
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void showEvent(QShowEvent *event) override;

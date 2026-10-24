@@ -21,6 +21,8 @@ public:
     explicit TeamCatalogEditor(TeamController *teams, QWidget *parent = nullptr);
     std::function<void()> askDesigner;
     void setDark(bool dark) { m_dark = dark; rebuildEditor(); }
+    // The Team designer page has its own title.
+    void hideHeading() { for (auto *w : m_heading) w->hide(); }
 private:
     void load();
     void rebuildLists();
@@ -37,4 +39,5 @@ private:
     QScrollArea *m_editor;
     QPushButton *m_save, *m_revert;
     QLabel *m_status;
+    QList<QWidget *> m_heading;
 };

@@ -43,6 +43,8 @@ public:
     void refreshCatalog();
     // The catalog is read with every poll while its draft is on screen.
     void setWatchCatalog(bool watch) { m_watchCatalog = watch; if (watch) refreshCatalog(); }
+    // The Team designer page polls the catalog too, apart from the Team tab.
+    void setWatchCatalogPage(bool watch) { m_watchCatalogPage = watch; if (watch) refreshCatalog(); }
     bool available() const { return m_available; }
     static void setPollInterval(int milliseconds);
 signals:
@@ -68,5 +70,5 @@ private:
     QMap<quint64, std::function<void(bool, const QString &)>> m_actions;
     QMap<quint64, Reply> m_calls;
     Teams::Catalog m_catalog;
-    bool m_catalogReady = false, m_watchCatalog = false, m_catalogInFlight = false;
+    bool m_catalogReady = false, m_watchCatalog = false, m_watchCatalogPage = false, m_catalogInFlight = false;
 };

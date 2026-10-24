@@ -114,7 +114,9 @@ revoked | reported | rejected`), `sent_at`, `delivered_at`, `turn_ended_at`, `no
 
 `create`, `plan` (set members/tasks/deps from JSON while `planning`), `approve`, `discard`, `pause`, `resume`, `stop`,
 `archive`, `status [--json]`, `list`, `events --before N`, `report`, `accept`, `reject`, `reassign`, `take-over`,
-`cancel`, `retry`, `check`, `use-last-reply`, `relaunch` (a member whose session failed to start), `worker`. All
+`cancel`, `retry`, `check`, `use-last-reply`, `relaunch` (a member whose session failed to start),
+`add-member` (`{"member":{...}}`, by the lead or you while planning, running or paused; it starts with its first
+task), `pause-member`, `resume-member`, `remove-member`, `worker`. All
 subcommands except `worker` read one JSON object on stdin (`--json`); mutating ones carry a canonical `request_id`.
 The agent guide topic is `hgs guide team`.
 
@@ -167,7 +169,9 @@ minutes without a running team. The GUI supervises it later like the swarm worke
   edge (× or Delete). Each edit sends the whole plan once with the revision it was made against. The pinned footer
   holds Approve & Run (disabled while errors), Send back to lead (your comment goes to the lead's session) and
   Discard plan….
-- **New team (M4).** Sessions ⋯ → New team…: name, catalog template, goal, folder (a non-Git folder disables
+- **New team (M4).** A New team tab next to Activity while the selected local session has no team; that session
+  leads the team (an existing lead gets the planning brief, no new session starts). Once the team exists, Team replaces
+  the tab. Sessions ⋯ → New team… opens the same tab, or a dialog when no local session is selected. The form: name, catalog template, goal, folder (a non-Git folder disables
   worktrees with a warning), the lead (a new session with agent, account, model and effort, or an existing session),
   members from the template's roster with an error on each row that cannot work (computer offline, account not signed
   in), planning (lead plans or template tasks), approval and the member limit. Create sends `create` with
@@ -184,8 +188,11 @@ minutes without a running team. The GUI supervises it later like the swarm worke
   Pause/Resume/Stop… or Approve & Run while planning, Stuck / plan-error strip, Graph (left to right, layer columns),
   Board (Pending · Active · Problems · Submitted · Accepted) or Layers, All/Active/Problems, member focus that keeps
   only that member's tasks and feed, zoom and Fit, the collapsible feed, Needs your answer, members, the Lead dock (its
-  recent team events and a one-line message) and the task card as a drawer.
-- **Team designer (M6).** Sessions ⋯ → Team designer… (or Settings > Teams → Ask Team designer) starts a session
+  recent team events and a one-line message) and the task card as a drawer. + Member (planning, running or paused)
+  adds a member from a catalog role with its agent, model, effort, permissions and prompt (`add-member`, by the lead
+  or you); it starts with the first task assigned to it.
+- **Team designer (M6).** A mode on the rail (beside Agent accounts): the catalog editor and the designer agent with
+  its draft on one page; Settings > Teams keeps the same editor. Start designer… (or Ask Team designer) starts a session
   `…/team-designer` in the selected folder with a brief: read the project, change no file, propose with `hgs team
   catalog propose` (`hgs guide designer`). Its Team tab shows the draft: NEW / CHANGED / REMOVED proposals by kind
   with field-by-field old and new values, Keep / Reject / Undo, Discard draft, and Apply N changes (confirmed) as the

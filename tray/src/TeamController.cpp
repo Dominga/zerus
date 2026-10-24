@@ -31,7 +31,7 @@ void TeamController::refresh()
 {
     if (!m_listRequest) m_listRequest = m_client->requestTeam({}, QStringLiteral("list"), QJsonObject{});
     readWatched();
-    if (m_watchCatalog && !m_catalogInFlight) refreshCatalog();
+    if ((m_watchCatalog || m_watchCatalogPage) && !m_catalogInFlight) refreshCatalog();
 }
 
 void TeamController::readWatched()

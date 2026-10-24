@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialogButtonBox>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
@@ -15,10 +16,13 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QToolButton>
+#include <QVBoxLayout>
 #include "HgsClient.h"
 #include "TeamCatalogEditor.h"
 #include "TeamController.h"
+#include "TeamDesignerPage.h"
 #include "TeamDesignerPanel.h"
 #include "TeamModel.h"
 #include "TeamNewDialog.h"
@@ -136,6 +140,10 @@ private slots:
     void catalogEditorSavesTheNextVersion();
     void designerDraftIsKeptThenApplied();
     void workspaceShowsGraphBoardAndFocus();
+    void emptyPanelOffersNewTeamAndDesigner();
+    void embeddedNewTeamIsLedByTheSession();
+    void workspaceAddsAMember();
+    void designerPageStartsOrOpensTheDesigner();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -385,4 +393,104 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
 }
 
 QTEST_MAIN(TestTeamsUi)
+void TestTeamsUi::emptyPanelOffersNewTeamAndDesigner()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    int created = 0, designed = 0;
+    panel.newTeam = [&] { ++created; };
+    panel.openDesigner = [&] { ++designed; };
+    panel.resize(420, 600); panel.show();
+    panel.render();
+    QTRY_VERIFY(panel.findChild<QPushButton *>("teamEmptyNew"));
+    panel.findChild<QPushButton *>("teamEmptyNew")->click();
+    panel.findChild<QPushButton *>("teamEmptyDesigner")->click();
+    QCOMPARE(created, 1); QCOMPARE(designed, 1);
+}
+
+void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    QWidget tab;
+    auto *layout = new QVBoxLayout(&tab);
+    auto *form = new TeamNewDialog(&controller, &client, {{QString(), "this computer", true}}, {}, QDir::toNativeSeparators(folder.path()), "Checkout", &tab);
+    form->embedFor("claude/checkout/coord");
+    QString created;
+    form->created = [&](const QString &team) { created = team; };
+    layout->addWidget(form);
+    tab.resize(820, 640); tab.show();
+    QVERIFY(form->isVisible());
+    QVERIFY(!form->isWindow());
+    QVERIFY(!form->findChild<QComboBox *>("teamNewLeadAgent")->isVisible());
+    form->findChild<QLineEdit *>("teamNewName")->setText("Checkout redesign");
+    auto *create = form->findChild<QPushButton *>("teamNewCreate");
+    QTRY_VERIFY(create->isEnabled());
+    shot(&tab, "new-team-tab");
+    create->click();
+    QTRY_COMPARE(created, QStringLiteral("team-new"));
+    QVERIFY(form->isVisible());   // the tab keeps it until Team replaces the tab
+    const auto lead = calls(script(), "create").first()["lead"].toObject();
+    QCOMPARE(lead["session"].toObject()["name"].toString(), QStringLiteral("claude/checkout/coord"));
+    QVERIFY(!lead.contains("account"));
+}
+
+void TestTeamsUi::workspaceAddsAMember()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    workspace.resize(1300, 820); workspace.show();
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceAddMember"));
+    workspace.addMemberHook = [](QDialog *dialog) {
+        auto *role = dialog->findChild<QComboBox *>("teamAddMemberRole");
+        role->setCurrentIndex(role->findText("Tester"));
+        QCOMPARE(dialog->findChild<QComboBox *>("teamAddMemberAgent")->currentData().toString(), QStringLiteral("kimi"));
+        QCOMPARE(dialog->findChild<QPlainTextEdit *>("teamAddMemberPrompt")->toPlainText(), QStringLiteral("Test it."));
+        QTimer::singleShot(0, dialog, [dialog] { dialog->findChild<QPushButton *>("teamAddMemberOk")->click(); });
+    };
+    workspace.findChild<QPushButton *>("teamWorkspaceAddMember")->click();
+    QTRY_COMPARE(calls(script(), "add-member").size(), 1);
+    const auto input = calls(script(), "add-member").first();
+    QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
+    const auto member = input["member"].toObject();
+    QCOMPARE(member["id"].toString(), QStringLiteral("tester-2"));
+    QCOMPARE(member["role"].toString(), QStringLiteral("Tester"));
+    QCOMPARE(member["model"].toString(), QStringLiteral("kimi-k2"));
+}
+
+void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    QString running; int started = 0; QString opened;
+    page.designerSession = [&] { return running; };
+    page.startDesigner = [&] { ++started; };
+    page.openDesigner = [&](const QString &name) { opened = name; };
+    page.resize(1300, 820); page.show();
+    QTRY_VERIFY(controller.catalogReady());   // the page reads the catalog while shown
+    auto *start = page.findChild<QPushButton *>("teamDesignerStart");
+    auto *open = page.findChild<QPushButton *>("teamDesignerOpen");
+    QVERIFY(start->isVisible()); QVERIFY(!open->isVisible());
+    start->click(); QCOMPARE(started, 1);
+    running = "claude/checkout/team-designer";
+    page.refresh();
+    QVERIFY(!start->isVisible()); QVERIFY(open->isVisible());
+    open->click(); QCOMPARE(opened, running);
+    QTRY_VERIFY(page.findChild<QWidget *>("teamDesignerContent"));
+    shot(&page, "designer-page");
+}
+
 #include "test_teamsui.moc"

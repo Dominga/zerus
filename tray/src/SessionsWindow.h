@@ -404,8 +404,22 @@ private:
     void openTeamTask(int task);
     void showNewTeam();
     void showTeamDesigner();
+    void startTeamDesigner();
+    QString teamDesignerSession() const;
     class TeamCatalogEditor *m_teamCatalog=nullptr;
     class TeamWorkspace *m_teamWorkspace=nullptr;
+    // The Team designer mode on the rail, and New team next to Activity: the
+    // selected session leads the team built there; once created, Team follows.
+    class TeamDesignerPage *m_teamDesignerPage=nullptr;
+    class QPushButton *m_teamDesignerNav=nullptr;
+    int m_teamDesignerPageIndex=-1;
+    QWidget *m_teamNewTab=nullptr;
+    class TeamNewDialog *m_teamNewForm=nullptr;
+    bool m_teamNewWaiting=false;
+    QString m_teamOpenAfterCreate;
+    void ensureTeamNewForm();
+    void setNewTeamTab(bool shown);
+    class TeamNewDialog *teamNewForm(QWidget *parent);
     int m_teamSettingsSection=-1;
     void updateTeamPanel();
     void showTeam(const QString &team);

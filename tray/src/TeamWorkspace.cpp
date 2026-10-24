@@ -3,7 +3,12 @@
 #include "TeamPanel.h"
 #include "TeamTaskCard.h"
 #include "TeamWidgets.h"
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QTimer>
@@ -323,6 +328,12 @@ QWidget *TeamWorkspace::side(const Team &team)
     }
     // Members: a click focuses the canvas and feed on one.
     auto *title = row(6); title->addWidget(label(tr("Members"), c.fg, 12, true)); title->addWidget(label(QString::number(team.members.size()), c.muted, 12)); title->addStretch();
+    if (team.status == "planning" || team.status == "running" || team.status == "paused") {
+        auto *add = button(tr("+ Member"), "teamWorkspaceAddMember");
+        add->setToolTip(tr("Add a member to the running team; it starts with the first task you give it"));
+        QObject::connect(add, &QPushButton::clicked, this, [this, id = team.id] { if (const auto *t = m_teams->team(id)) addMember(*t); });
+        title->addWidget(add);
+    }
     v->addLayout(title);
     auto *membersBox = new QWidget; auto *mv = new QVBoxLayout(membersBox); mv->setContentsMargins(0, 0, 0, 0); mv->setSpacing(4);
     for (const auto &m : team.members) {
@@ -446,4 +457,61 @@ QWidget *TeamWorkspace::feed(const Team &team)
     scroll->setFixedHeight(180);
     v->addWidget(scroll);
     return w;
+}
+
+void TeamWorkspace::addMember(const Team &team)
+{
+    if (!m_teams->catalogReady()) m_teams->refreshCatalog();
+    QDialog dialog(this);
+    dialog.setObjectName("teamAddMemberDialog");
+    dialog.setWindowTitle(tr("Add member to %1").arg(team.name));
+    auto *form = new QFormLayout(&dialog);
+    auto *role = new QComboBox; role->setObjectName("teamAddMemberRole"); role->setEditable(true);
+    for (const auto &r : m_teams->catalog().roles) if (r.id != "lead") role->addItem(r.name, r.id);
+    auto *agent = new QComboBox; agent->setObjectName("teamAddMemberAgent");
+    for (const auto &[id, name] : std::initializer_list<std::pair<const char *, const char *>>{
+             {"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}})
+        agent->addItem(workspaceIcon(QString::fromLatin1(id), palette().color(QPalette::Text)), QString::fromLatin1(name), QString::fromLatin1(id));
+    auto *model = new QLineEdit; model->setObjectName("teamAddMemberModel"); model->setPlaceholderText(tr("default model"));
+    auto *effort = new QComboBox; effort->setObjectName("teamAddMemberEffort"); effort->addItem(QStringLiteral("—"), QString());
+    for (const auto *e : {"low", "medium", "high", "xhigh"}) effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
+    auto *permissions = new QComboBox; permissions->setObjectName("teamAddMemberPermissions");
+    permissions->addItem(tr("Account"), QString()); permissions->addItem(tr("Auto"), QStringLiteral("auto")); permissions->addItem(tr("Bypass"), QStringLiteral("bypass"));
+    auto *prompt = new QPlainTextEdit; prompt->setObjectName("teamAddMemberPrompt"); prompt->setFixedHeight(110);
+    prompt->setPlaceholderText(tr("What this member is for; the role's prompt from the catalog fills it"));
+    // A catalog role brings its defaults.
+    const auto fill = [&, this](const QString &text) {
+        const auto *r = m_teams->catalog().roleNamed(text);
+        if (!r) return;
+        agent->setCurrentIndex(qMax(0, agent->findData(r->agent.isEmpty() ? QStringLiteral("claude") : r->agent)));
+        model->setText(r->model);
+        effort->setCurrentIndex(qMax(0, effort->findData(r->effort)));
+        permissions->setCurrentIndex(qMax(0, permissions->findData(r->permissions)));
+        prompt->setPlainText(r->prompt);
+    };
+    QObject::connect(role, &QComboBox::currentTextChanged, &dialog, fill);
+    fill(role->currentText());
+    form->addRow(tr("Role"), role);
+    form->addRow(tr("Agent"), agent);
+    form->addRow(tr("Model"), model);
+    form->addRow(tr("Effort"), effort);
+    form->addRow(tr("Permissions"), permissions);
+    form->addRow(tr("Prompt"), prompt);
+    auto *note = new QLabel(tr("The member starts with the first task assigned to it: reassign one, or ask the lead."));
+    note->setWordWrap(true); form->addRow(note);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Add member")); buttons->button(QDialogButtonBox::Ok)->setObjectName("teamAddMemberOk");
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] { if (!role->currentText().trimmed().isEmpty()) dialog.accept(); });
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+    if (addMemberHook) addMemberHook(&dialog);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const QString roleName = role->currentText().trimmed();
+    // New members share the team's folder policy: a worktree when others have one.
+    QString folder = QStringLiteral("shared");
+    for (const auto &m : team.members) if (!m.lead && m.folder == "worktree") folder = m.folder;
+    const QJsonObject member{{"id", nextMemberId(team, roleName)}, {"role", roleName}, {"agent", agent->currentData().toString()},
+                             {"model", model->text().trimmed()}, {"effort", effort->currentData().toString()},
+                             {"permissions", permissions->currentData().toString()}, {"folder", folder}, {"prompt", prompt->toPlainText().trimmed()}};
+    m_panel->act(QStringLiteral("add-member"), {{"member", member}});
 }

@@ -441,6 +441,22 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             events.push(Event::new(if pause { "member_paused" } else { "member_resumed" }, json!({"by":label,"member":role})));
             Ok(json!({"status":if pause {"paused"} else {"resumed"},"member":id}))
         }
+        "add-member" => {
+            // A running team grows: the new member starts with its first task.
+            ensure!(human_or_lead, "Only the lead or you add a member");
+            ensure!(matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+                "Only a planning, running or paused team takes new members");
+            let member = parse_member(&input["member"])?;
+            ensure!(member.session.is_none(), "A new member starts its own session");
+            ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
+            let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
+            ensure!(active < team.settings.max_members as usize, "The team already has its {} members", team.settings.max_members);
+            let id = member.id.clone();
+            let role = member.role.clone();
+            team.members.push(member);
+            events.push(Event::new("member_added", json!({"by":actor.label(team),"member":role})));
+            Ok(json!({"status":"added","member":id}))
+        }
         "remove-member" => {
             ensure!(matches!(actor, Actor::Human), "Only you remove a member");
             let id = text(input, "member").to_owned();
@@ -587,6 +603,12 @@ mod tests {
         assert!(apply(&mut team, "remove-member", &json!({"member":"qa"}), &Actor::Member("lead".into()), &none, &mut events).is_err());
         apply(&mut team, "remove-member", &json!({"member":"qa"}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!(team.member("qa").unwrap().state, MemberState::Removed);
+        // A removed member frees its place for a new one, which waits for a task.
+        let docs = json!({"member":{"id":"docs","role":"Writer","agent":"codex"}});
+        assert!(apply(&mut team, "add-member", &docs, &Actor::Member("qa".into()), &none, &mut events).is_err());
+        apply(&mut team, "add-member", &docs, &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.member("docs").unwrap().state, MemberState::NotCreated);
+        assert!(apply(&mut team, "add-member", &docs, &Actor::Human, &none, &mut events).is_err());
     }
 
     #[test]

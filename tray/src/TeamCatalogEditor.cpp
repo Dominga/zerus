@@ -67,7 +67,8 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     auto *outer = new QVBoxLayout(this); outer->setContentsMargins(0, 0, 0, 0); outer->setSpacing(10);
     auto *heading = new QLabel(tr("Teams")); heading->setObjectName("heading"); outer->addWidget(heading);
     auto *intro = new QLabel(tr("Roles, templates and routing rules that New team and the Team designer use. Running teams keep the roster they started with."));
-    intro->setWordWrap(true); outer->addWidget(intro);
+    intro->setObjectName("teamCatalogIntro"); intro->setWordWrap(true); outer->addWidget(intro);
+    m_heading = {heading, intro};
     auto *bar = new QHBoxLayout;
     m_status = new QLabel; m_status->setObjectName("teamCatalogStatus");
     bar->addWidget(m_status, 1);

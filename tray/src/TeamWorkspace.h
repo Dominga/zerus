@@ -4,6 +4,7 @@
 #include <functional>
 #include "TeamModel.h"
 
+class QDialog;
 class QScrollArea;
 class QVBoxLayout;
 class TeamController;
@@ -25,6 +26,9 @@ public:
     std::function<void(const QString &host, const QString &session)> openSession;
     std::function<void(const QString &host, const QString &session, const QString &text)> sendMessage;
     std::function<void()> openTeamTab;
+    // Tests answer the Add member dialog before it runs.
+    std::function<void(QDialog *dialog)> addMemberHook;
+    void addMember(const Teams::Team &team);
     void render();
 protected:
     void showEvent(QShowEvent *event) override;

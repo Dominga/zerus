@@ -10,11 +10,12 @@ use super::store::{self, canonical_uuid, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|approve|answer|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|approve-phase|discard-phase|approve|answer|discard|pause|resume|stop|archive|status|list|events|report|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
 
 const MUTATIONS: &[&str] = &[
-    "plan", "approve", "discard", "pause", "resume", "stop", "archive", "report", "accept", "reject", "reassign",
-    "take-over", "cancel", "retry", "check", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
+    "plan", "extend", "approve-phase", "discard-phase", "approve", "discard", "pause", "resume", "stop", "archive",
+    "report", "accept", "reject", "reassign", "take-over", "cancel", "retry", "check", "use-last-reply", "relaunch",
+    "add-member", "pause-member", "resume-member", "remove-member",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -235,7 +236,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 Err(error) if op == "report" && read_only(&error) => return drop_report(input),
                 Err(error) => return Err(error),
             };
-            if matches!(op, "approve" | "resume") {
+            if matches!(op, "approve" | "resume" | "extend") {
                 // The dispatcher runs while any team runs; it exits by itself.
                 if let Err(error) = super::dispatcher::ensure_worker() {
                     eprintln!("hgs: the team dispatcher did not start: {error}");
@@ -295,5 +296,13 @@ mod tests {
             assert!(read_only(&anyhow::anyhow!(message.to_owned())), "{message}");
         }
         assert!(!read_only(&anyhow::anyhow!("This attempt is no longer current")));
+    }
+
+    #[test]
+    fn the_phase_commands_are_mutations_named_in_the_usage() {
+        for op in ["extend", "approve-phase", "discard-phase"] {
+            assert!(MUTATIONS.contains(&op), "{op} is not a mutation");
+            assert!(USAGE.contains(op), "{op} is not in the usage");
+        }
     }
 }

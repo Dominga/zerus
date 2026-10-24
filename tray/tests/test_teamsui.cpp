@@ -2,6 +2,8 @@
 // S6, S7, S10, S11): the task card, planning edits, New team, the catalog
 // editor, the Team designer's draft and the team workspace. Each sends one
 // `hgs team` request per change, recorded by a fake CLI.
+#include <QPointer>
+#include <QScrollBar>
 #include <QtTest>
 #include <QStyle>
 #include <QApplication>
@@ -150,6 +152,7 @@ private slots:
     void workspaceAddsAMember();
     void designerPageStartsOrOpensTheDesigner();
     void catalogEditorMarksManualEdits();
+    void boardColumnsKeepTheirScroll();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -477,6 +480,46 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     // A card opens the drawer.
     workspace.findChildren<QPushButton *>("teamBoardOpen").first()->click();
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceDrawer")->isVisible());
+}
+
+void TestTeamsUi::boardColumnsKeepTheirScroll()
+{
+    // Thirty pending tasks: more than a column shows.
+    auto t = team();
+    auto tasks = t["tasks"].toArray();
+    for (int id = 6; id < 36; ++id) tasks.append(QJsonObject{{"id", id}, {"title", QStringLiteral("Bin %1").arg(id)}, {"assignee", "tester"}, {"status", "pending"}});
+    t["tasks"] = tasks;
+    QJsonObject layers; for (const auto &k : tasks) layers[QString::number(k.toObject()["id"].toInt())] = 0;
+    t["layers"] = layers;
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
+    const auto showBoard = [&workspace] {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
+    };
+    showBoard();
+    const auto pending = [&workspace]() -> QScrollBar * {
+        for (auto *area : workspace.findChildren<QScrollArea *>("teamBoardColumn")) if (area->property("column") == "pending") return area->verticalScrollBar();
+        return nullptr;
+    };
+    QTRY_VERIFY(pending() && pending()->maximum() > 0);
+    pending()->setValue(pending()->maximum() / 2);
+    const int scrolled = pending()->value();
+    QVERIFY(scrolled > 0);
+    // A poll renders the board again; the column stays where it was.
+    const QPointer<QScrollBar> old = pending();
+    showBoard();
+    QTRY_VERIFY(old.isNull());
+    QTRY_VERIFY(pending());
+    QTRY_COMPARE(pending()->value(), scrolled);
 }
 
 QTEST_MAIN(TestTeamsUi)

@@ -60,7 +60,7 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
         auto *h = row(8);
         auto *tile = new QLabel; tile->setFixedSize(28, 28); tile->setAlignment(Qt::AlignCenter);
         tile->setStyleSheet(QStringLiteral("background:%1;border-radius:7px;").arg(c.tile.name()));
-        tile->setPixmap(workspaceIcon(agentIcon(member.agent), c.fg).pixmap(16, 16));
+        tile->setPixmap(agentLogo(member.agent, c.fg).pixmap(16, 16));
         h->addWidget(tile, 0, Qt::AlignTop);
         auto *body = new QVBoxLayout; body->setSpacing(4);
         auto *line1 = row(6);

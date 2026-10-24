@@ -373,7 +373,7 @@ QWidget *TeamCatalogEditor::listRow(const QString &kind, const QString &id, cons
     else if (proposal) h->addWidget(mark(proposal->action, c));
     if (dirty) h->addWidget(label(QStringLiteral("●"), c.warn, 9));
     if (!agent.isEmpty()) {
-        auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(agent), c.fg).pixmap(14, 14)); tile->setToolTip(agentNames.value(agent, agent));
+        auto *tile = new QLabel; tile->setPixmap(agentLogo(agent, c.fg).pixmap(14, 14)); tile->setToolTip(agentNames.value(agent, agent));
         h->addWidget(tile);
     }
     if (proposal && proposal->state == "rejected") w->setStyleSheet(QStringLiteral("color:%1;").arg(c.dim.name()));

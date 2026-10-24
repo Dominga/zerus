@@ -19,6 +19,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <cmath>
+#include <memory>
 
 using namespace TeamUi;
 
@@ -375,7 +376,7 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
         node.draft = task->status == "draft"; node.error = team.cycle.contains(id);
         node.attempt = task->last() ? task->last()->n : 0;
-        if (const auto *m = team.member(task->assignee)) node.agent = agentIcon(m->agent);
+        if (const auto *m = team.member(task->assignee)) node.agent = m->agent;
         QStringList deps;
         for (const auto &d : task->deps) { deps << QStringLiteral("#%1").arg(d.task); view->edges[id].append(d.task); if (d.soft && !team.allHard) view->soft.insert({d.task, id}); }
         node.deps = deps.isEmpty() ? QString() : QStringLiteral("← ") + deps.join(' ');
@@ -394,6 +395,9 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     } else view->clicked = [this](int id, const QPoint &) { m_drawerTask = id; scheduleRender(); };
     auto *area = new GraphArea; area->setObjectName("teamWorkspaceCanvas");
     area->setFrameShape(QFrame::NoFrame);
+    // Fit starts the graph afresh; otherwise it stays where it was scrolled.
+    if (m_fit) m_scroll.remove(QStringLiteral("canvas/") + m_view);
+    keepScroll(area, QStringLiteral("canvas/") + m_view);
     area->setWidget(view);
     area->setWidgetResizable(m_view != "graph");
     area->viewport()->setAutoFillBackground(true);
@@ -443,7 +447,7 @@ QWidget *TeamWorkspace::board(const Team &team)
             auto *r = new FlowLayout(6);
             const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r->addWidget(pill);
-            if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(workspaceIcon(agentIcon(m->agent), c.text3).pixmap(14, 14)); r->addWidget(i); }
+            if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r->addWidget(i); }
             auto *mark = new StatusMark(s.text, toneColor(c, s.tone), kindOfTask(task, s)); mark->setObjectName("teamBoardState"); r->addWidget(mark);
             QStringList deps; for (const auto &d : task.deps) deps << QStringLiteral("#%1").arg(d.task);
             if (!deps.isEmpty()) r->addWidget(label(QStringLiteral("← ") + deps.join(' '), c.dim, 10));
@@ -463,6 +467,8 @@ QWidget *TeamWorkspace::board(const Team &team)
         cv->addWidget(label(QStringLiteral("%1 · %2").arg(name.toUpper()).arg(n), c.dim, 10, true));
         auto *inner = new QWidget; inner->setLayout(list);
         auto *scroll = new QScrollArea; scroll->setWidget(inner); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setObjectName("teamBoardColumn"); scroll->setProperty("column", key);
+        keepScroll(scroll, QStringLiteral("board/") + key + QLatin1Char('/') + m_focus);
         cv->addWidget(scroll, 1);
         h->addWidget(col, 1);
     }
@@ -492,7 +498,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         b->setToolTip(m.id == m_focus ? tr("Show every member") : tr("Show only %1's tasks").arg(team.roleOf(m.id)));
         b->clicked = [this, id = m.id] { m_focus = m_focus == id ? QString() : id; scheduleRender(); };
         auto *bh = new QHBoxLayout(b); bh->setContentsMargins(8, 6, 6, 6); bh->setSpacing(8);
-        auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(m.agent), c.fg).pixmap(16, 16)); bh->addWidget(tile, 0, Qt::AlignTop);
+        auto *tile = new QLabel; tile->setPixmap(agentLogo(m.agent, c.fg).pixmap(16, 16)); bh->addWidget(tile, 0, Qt::AlignTop);
         auto *col = new QVBoxLayout; col->setSpacing(2);
         auto *top = row(4);
         const QString role = team.roleOf(m.id);
@@ -602,7 +608,7 @@ void TeamWorkspace::renderCoordinator(const Team &team, const QString &status)
     while (auto *item = outer->takeAt(0)) { if (auto *w = item->widget()) retire(w); delete item; }
     auto *inner = new QWidget;
     auto *h = new QHBoxLayout(inner); h->setContentsMargins(12, 8, 10, 8); h->setSpacing(8);
-    if (lead) { auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(lead->agent), c.fg).pixmap(20, 20)); h->addWidget(tile, 0, Qt::AlignTop); }
+    if (lead) { auto *tile = new QLabel; tile->setPixmap(agentLogo(lead->agent, c.fg).pixmap(20, 20)); h->addWidget(tile, 0, Qt::AlignTop); }
     auto *col = new QVBoxLayout; col->setSpacing(1);
     auto *top = row(6);
     top->addWidget(label(tr("Coordinator"), c.fg, 13, true));
@@ -668,8 +674,31 @@ QWidget *TeamWorkspace::feed(const Team &team)
     rv->addStretch();
     auto *scroll = new QScrollArea; scroll->setWidget(rows); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
     scroll->setFixedHeight(170);
+    keepScroll(scroll, QStringLiteral("feed"));
     v->addWidget(scroll);
     return w;
+}
+
+void TeamWorkspace::keepScroll(QScrollArea *area, const QString &key)
+{
+    const QPoint kept = m_scroll.value(key);
+    for (auto *bar : {area->horizontalScrollBar(), area->verticalScrollBar()}) {
+        const bool vertical = bar->orientation() == Qt::Vertical;
+        const int want = vertical ? kept.y() : kept.x();
+        // Back to the kept place once the content has its size; until then
+        // the new bar's own changes are not the owner's.
+        auto restored = std::make_shared<bool>(want == 0);
+        QObject::connect(bar, &QScrollBar::rangeChanged, bar, [bar, want, restored](int, int max) {
+            if (*restored || max <= 0) return;
+            bar->setValue(qMin(want, max));
+            *restored = true;
+        });
+        QObject::connect(bar, &QScrollBar::valueChanged, area, [this, area, key, vertical, restored](int value) {
+            if (!*restored || !area->isVisible()) return;
+            QPoint &place = m_scroll[key];
+            (vertical ? place.ry() : place.rx()) = value;
+        });
+    }
 }
 
 void TeamWorkspace::addMember(const Team &team)

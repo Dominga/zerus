@@ -289,7 +289,7 @@ void TeamNewTab::renderCoordinator()
     delete m_coordinatorCard->layout();
     for (auto *child : m_coordinatorCard->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly)) retire(child);
     auto *h = new QHBoxLayout(m_coordinatorCard); h->setContentsMargins(12, 10, 12, 10); h->setSpacing(10);
-    auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(m_coordinator.agent), c.fg).pixmap(22, 22)); tile->setFixedSize(28, 28); tile->setAlignment(Qt::AlignCenter);
+    auto *tile = new QLabel; tile->setPixmap(agentLogo(m_coordinator.agent, c.fg).pixmap(22, 22)); tile->setFixedSize(28, 28); tile->setAlignment(Qt::AlignCenter);
     h->addWidget(tile, 0, Qt::AlignTop);
     auto *col = new QVBoxLayout; col->setSpacing(2);
     auto *top = row(8);
@@ -489,7 +489,7 @@ void TeamNewTab::renderMembers()
         w.duplicate = new QToolButton; w.duplicate->setIcon(workspaceIcon("copy", c.muted)); w.duplicate->setToolTip(tr("Duplicate")); w.duplicate->setAutoRaise(true);
         w.remove = new QToolButton; w.remove->setIcon(workspaceIcon("trash", c.muted)); w.remove->setToolTip(tr("Remove")); w.remove->setAutoRaise(true); w.remove->setObjectName("teamNewRemove");
         for (auto *b : {w.duplicate, w.remove}) { b->setIconSize(QSize(14, 14)); b->setCursor(Qt::PointingHandCursor); }
-        w.tile = new QLabel; w.tile->setPixmap(workspaceIcon(agentIcon(m.agent), c.fg).pixmap(16, 16));
+        w.tile = new QLabel; w.tile->setPixmap(agentLogo(m.agent, c.fg).pixmap(16, 16));
         const QString danger = QStringLiteral("border-color:%1;").arg(c.danger.name());
         for (const auto &error : errors) {
             if (error.startsWith(tr("Pick a role").left(4))) w.role->setStyleSheet(danger);

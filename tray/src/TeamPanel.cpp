@@ -312,7 +312,7 @@ QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
         const auto status = memberStatus(team, m, live(m));
         auto *line = new QWidget; line->setObjectName("teamSummaryMember"); line->setFixedHeight(28);
         auto *h = new QHBoxLayout(line); h->setContentsMargins(2, 0, 2, 0); h->setSpacing(6);
-        auto *tile = new QLabel; tile->setPixmap(workspaceIcon(agentIcon(m.agent), c.fg).pixmap(16, 16)); h->addWidget(tile);
+        auto *tile = new QLabel; tile->setPixmap(agentLogo(m.agent, c.fg).pixmap(16, 16)); h->addWidget(tile);
         const QString role = team.roleOf(m.id);
         h->addWidget(new Pill(role, roleColor(role, m_dark)));
         if (!narrow) h->addWidget(elided(m.model.isEmpty() ? m.agent : m.model, c.text3, 11), 1);
@@ -532,7 +532,7 @@ QWidget *TeamPanel::memberRow(const Team &team, const Member &member, bool narro
     auto *h = row(8);
     auto *tile = new QLabel; tile->setFixedSize(28, 28); tile->setAlignment(Qt::AlignCenter);
     tile->setStyleSheet(QStringLiteral("background:%1;border-radius:7px;").arg(c.tile.name()));
-    tile->setPixmap(workspaceIcon(agentIcon(member.agent), c.fg).pixmap(16, 16));
+    tile->setPixmap(agentLogo(member.agent, c.fg).pixmap(16, 16));
     tile->setToolTip(member.session.isEmpty() ? member.agent : member.agent + QStringLiteral(" · ") + member.session);
     h->addWidget(tile, 0, Qt::AlignTop);
     auto *body = new QVBoxLayout; body->setSpacing(3);

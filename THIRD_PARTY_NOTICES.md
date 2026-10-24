@@ -34,10 +34,11 @@ in `tray/resources/icons/github-mark.svg`, including the embedded Qt resource.
 
 ## Agent logos (WhiteWh fork)
 
-New session shows the Codex, Claude, Kimi, DeepSeek and Ollama logos from
+New session and the team views show the Codex, Claude, Kimi, DeepSeek, OpenCode and Ollama logos from
 [LobeHub lobe-icons](https://github.com/lobehub/lobe-icons), MIT, Copyright (c) 2023
 LobeHub. Its license is retained in `tray/resources/agent-icons/LICENSE`, also in
-the embedded Qt resource; the Ollama logo is recolored to `#e6e8eb`.
+the embedded Qt resource; the Ollama logo is recolored to `#e6e8eb`, and the team views
+paint the monochrome parts of the Kimi and OpenCode logos in the theme's text color.
 
 ## Dependencies obtained during build
 

@@ -84,6 +84,7 @@
 #include "SessionList.h"
 #include "TeamController.h"
 #include "TeamNewTab.h"   // WhiteWh fork: agent teams
+#include "TeamWidgets.h"
 #include <QToolBar>
 #include "SessionCardDelegate.h"
 #include "SessionLeads.h"
@@ -804,6 +805,16 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     designerNav->click();
     QTRY_VERIFY(window.findChild<QWidget *>("teamDesignerPage") && window.findChild<QWidget *>("teamDesignerPage")->isVisible());
     QVERIFY(designerNav->isChecked());
+    // Team views show the agents' own logos: DeepSeek in its blue, and Kimi's
+    // letter in the text color it is given.
+    const auto painted = [](const QIcon &icon, const std::function<bool(const QColor &)> &match) {
+        const QImage image = icon.pixmap(24, 24).toImage();
+        for (int y = 0; y < image.height(); ++y) for (int x = 0; x < image.width(); ++x) if (const QColor px = image.pixelColor(x, y); px.alpha() > 200 && match(px)) return true;
+        return false;
+    };
+    QVERIFY(painted(TeamUi::agentLogo("dsh", Qt::white), [](const QColor &px) { return px.blue() > 200 && px.red() < 120; }));
+    QVERIFY(painted(TeamUi::agentLogo("kimi", QColor("#ff0000")), [](const QColor &px) { return px.red() > 200 && px.green() < 60 && px.blue() < 60; }));
+    QVERIFY(painted(TeamUi::agentLogo("opencode", QColor("#00ff00")), [](const QColor &px) { return px.green() > 200 && px.red() < 60; }));
 }
 
 void TestSessionsWindow::whiteWhWorkspaceView()

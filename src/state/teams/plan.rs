@@ -351,9 +351,9 @@ mod tests {
     fn validation_reports_assignees_cycles_missing_tasks_and_warnings() {
         let mut t = team(vec![task(1, &[(9, Hard)], Pending), task(2, &[(3, Hard)], Pending), task(3, &[(2, Hard)], Pending)]);
         t.tasks[0].assignee = "nobody".into();
-        t.members[1].computer = "msi-old".into();
+        t.members[1].computer = "devbox".into();
         t.settings.max_members = 1;
-        let found = validate(&t, &BTreeSet::from(["msi-old".to_owned()]));
+        let found = validate(&t, &BTreeSet::from(["devbox".to_owned()]));
         let kinds: Vec<&str> = found.errors.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, vec!["assignee", "dependency", "cycle"]);
         assert_eq!(found.errors[2].tasks, vec![2, 3]);

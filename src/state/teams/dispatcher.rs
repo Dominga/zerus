@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn listed_sessions_are_free_only_when_live_idle_and_unblocked() {
         let listing = json!([
-            {"host":"msi","sessions":[
+            {"host":"laptop","sessions":[
                 {"name":"codex/x/a","runtime_state":"live","process_state":"running","activity":"idle","phase":"idle",
                  "process_work":{"count":0},"run_id":"r","reply_at":5.0},
                 {"name":"dsh/x/b","state":"running","activity":"idle","phase":"idle"},
@@ -884,9 +884,9 @@ mod tests {
         let team = team();
         let task = team.task(1).unwrap();
         let attempt = Attempt { n: 2, id: "A-ID".into(), member: "dev".into(), ..Default::default() };
-        let text = hand_off_text(&team, task, &attempt, "msi", "msi-old");
+        let text = hand_off_text(&team, task, &attempt, "laptop", "devbox");
         assert!(text.starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #1 \u{b7} attempt: 2]"));
-        assert!(text.contains("hgs @msi team report --json") && text.contains("\"attempt\":\"A-ID\""));
-        assert!(hand_off_text(&team, task, &attempt, "msi", "").contains("hgs team report --json"));
+        assert!(text.contains("hgs @laptop team report --json") && text.contains("\"attempt\":\"A-ID\""));
+        assert!(hand_off_text(&team, task, &attempt, "laptop", "").contains("hgs team report --json"));
     }
 }

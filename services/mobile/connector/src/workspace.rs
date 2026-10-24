@@ -23,6 +23,9 @@ const ACTIVE: &str = "active.json";
 const PENDING: &str = "pending.json";
 const INVITATIONS: &str = "invitations.json";
 const MAX_INVITATIONS: usize = 64;
+fn false_flag(value: &bool) -> bool {
+    !*value
+}
 const PAGE: usize = 100;
 
 /// Never Debug: bearer and private keys are intentionally absent from reports.
@@ -94,6 +97,8 @@ struct Pending {
     legacy_retirement_request: Option<String>,
     #[serde(default)]
     legacy_retirement_status: Option<String>,
+    #[serde(default, skip_serializing_if = "false_flag")]
+    legacy_service_handover: bool,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -285,6 +290,96 @@ pub(crate) fn load_record(private_dir: &Path) -> Result<Profile> {
     profile.validate_record()?;
     Ok(profile)
 }
+/// Read the same validated identity through an already-held mutation Store.
+#[cfg(target_os = "linux")]
+pub(crate) fn load_record_from_store(store: &Store) -> Result<Profile> {
+    let bytes =
+        io(store.read(ACTIVE))?.ok_or_else(|| fail("No encrypted workspace is configured"))?;
+    let profile: Profile = decode_record(&bytes)?;
+    profile.validate_record()?;
+    Ok(profile)
+}
+/// Optional switch evidence, never authority for Start. Archive recovery is
+/// limited to the exact saved pending destination after ACTIVE publication.
+#[cfg(target_os = "linux")]
+pub(crate) fn retired_switch_profile_from_store(
+    store: &Store,
+    config: &Value,
+    config_path: &Path,
+    revision: &str,
+    previous_node: &str,
+    next_node: &str,
+    archive_allowed: bool,
+) -> Result<Option<Profile>> {
+    let private = private_directory(config_path)?;
+    let current = load_record_from_store(store)?;
+    if current.identity.device.device_id == previous_node
+        && current.retired()
+        && validate_config_profile_binding(config, &private, &current).is_ok()
+    {
+        return Ok(Some(current));
+    }
+    if !archive_allowed {
+        return Ok(None);
+    }
+    let Some(pending) = stored::<Option<Pending>>(store, PENDING)?.flatten() else {
+        return Ok(None);
+    };
+    if pending.version != 1
+        || !matches!(pending.action.as_str(), "switch-create" | "switch-join")
+        || pending.expected_revision != revision
+        || pending.identity.device.device_id != next_node
+    {
+        return Ok(None);
+    }
+    let Some(destination) = pending.profile.as_ref() else {
+        return Ok(None);
+    };
+    destination.validate()?;
+    current.validate()?;
+    cc(Identity::from_record(&pending.identity))?;
+    if destination.identity.device != pending.identity.device
+        || destination.server_url != pending.server_url
+        || destination.node_token != pending.node_token
+        || destination.state_dir != private.join(format!("receipts-{next_node}"))
+        || current.identity.device != destination.identity.device
+        || current.server_url != destination.server_url
+        || current.workspace_name != destination.workspace_name
+        || current.computer_name != destination.computer_name
+        || current.node_token != destination.node_token
+        || current.state_dir != destination.state_dir
+        || current.membership != destination.membership
+        || current.historical_heads != destination.historical_heads
+    {
+        return Ok(None);
+    }
+    let Some(previous) = pending.previous_profile.as_ref() else {
+        return Ok(None);
+    };
+    validate_config_profile_binding(config, &private, previous)?;
+    if previous.identity.device.device_id != previous_node {
+        return Ok(None);
+    }
+    let Some(archived) = stored::<Profile>(store, &format!("retired-{previous_node}.json"))? else {
+        return Ok(None);
+    };
+    validate_config_profile_binding(config, &private, &archived)?;
+    if !archived.retired()
+        || archived.identity.device != previous.identity.device
+        || archived.node_token != previous.node_token
+        || archived.membership.workspace_id != previous.membership.workspace_id
+        || archived.membership.revision < previous.membership.revision
+        || archived.historical_heads.get(&previous.membership.revision)
+            != Some(&previous.membership.head)
+        || previous
+            .historical_heads
+            .iter()
+            .any(|(revision, head)| archived.historical_heads.get(revision) != Some(head))
+    {
+        return Ok(None);
+    }
+    Ok(Some(archived))
+}
 pub fn public_status(config_path: &Path) -> Result<Value> {
     let (config, revision) = workspace_cli::read_config(config_path)?;
     let private_dir = private_directory(config_path)?;
@@ -323,6 +418,18 @@ pub fn public_status(config_path: &Path) -> Result<Value> {
             let pending: Option<Pending> = decode_record(&bytes)?;
             if let Some(pending) = pending {
                 result["pending"] = json!({"action":pending.action,"node_id":pending.identity.device.device_id,"state":if pending.legacy_retirement_status.as_deref()==Some("unconfirmed"){"legacy-retirement-unconfirmed"}else if pending.profile.is_some(){"ready"}else{"pending"}});
+                if let Some(migration) = crate::workspace_service::status(
+                    &private_dir,
+                    &revision,
+                    &pending.identity.device.device_id,
+                )? {
+                    result["pending"]["state"] = json!(if migration["phase"] == "draining" {
+                        "migration-draining"
+                    } else {
+                        "migration-blocked"
+                    });
+                    result["migration"] = migration;
+                }
             }
         }
     }
@@ -572,6 +679,18 @@ pub async fn manage(
         return Err(fail("Create or join an encrypted workspace first"));
     }
     if action == "start" {
+        let profile = load_record(&private_dir)?;
+        profile.validate()?;
+        if let Some(status) = crate::workspace_service::start(
+            config_path,
+            &private_dir,
+            &profile.identity.device.device_id,
+            &revision,
+        )
+        .await?
+        {
+            return Ok(status);
+        }
         return crate::workspace_lifecycle::manage_start(config_path, &input).await;
     }
     if action == "stop" {
@@ -596,7 +715,16 @@ pub async fn manage(
             ));
         }
     }
-    match action {
+    // Invitation polling also uses Check. Only completing this invocation's
+    // exact saved enrollment may start a connector; active-profile refresh
+    // must never undo an intentional Stop.
+    let start_after_activation =
+        matches!(action, "create" | "join" | "switch-create" | "switch-join")
+            || (action == "check"
+                && stored::<Option<Pending>>(&store, PENDING)?
+                    .flatten()
+                    .is_some());
+    let result = match action {
         "create" | "join" | "switch-create" | "switch-join" => {
             if !action.starts_with("switch-")
                 && (config.get("node_token").is_some()
@@ -644,7 +772,17 @@ pub async fn manage(
                 retirement: None,
                 legacy_retirement_request: None,
                 legacy_retirement_status: None,
+                legacy_service_handover: false,
             };
+            pending.legacy_service_handover = action.starts_with("switch-")
+                && config.get("node_token").is_some()
+                && input
+                    .get("allow_legacy_service_handover")
+                    .map_or(Ok(false), |value| {
+                        value
+                            .as_bool()
+                            .ok_or_else(|| fail("Invalid workspace input"))
+                    })?;
             if action.ends_with("create") {
                 pending.genesis = Some(cc(SignedMembership::sign(
                     MembershipStatement {
@@ -695,7 +833,20 @@ pub async fn manage(
             .await
         }
         "check" => {
-            if let Some(pending) = stored::<Option<Pending>>(&store, PENDING)?.flatten() {
+            if let Some(mut pending) = stored::<Option<Pending>>(&store, PENDING)?.flatten() {
+                if input
+                    .get("allow_legacy_service_handover")
+                    .map_or(Ok(false), |value| {
+                        value
+                            .as_bool()
+                            .ok_or_else(|| fail("Invalid workspace input"))
+                    })?
+                {
+                    if config.get("node_token").is_some() && pending.previous_profile.is_none() {
+                        pending.legacy_service_handover = true;
+                    }
+                    save(&store, PENDING, &Some(&pending))?;
+                }
                 let allow_local_disconnect = input
                     .get("allow_unconfirmed_legacy_retirement")
                     .map_or(Ok(false), |value| {
@@ -853,7 +1004,24 @@ pub async fn manage(
             )
         }
         _ => Err(fail("Unknown workspace action")),
+    };
+    drop(store);
+    let mut result = result?;
+    if start_after_activation && result["state"] == "active" {
+        if let (Some(node), Some(revision)) = (
+            result["node_id"].as_str(),
+            result["config_revision"].as_str(),
+        ) {
+            if let Some(lifecycle) =
+                crate::workspace_service::start(config_path, &private_dir, node, revision).await?
+            {
+                result["connector_state"] = lifecycle["state"].clone();
+                result["running"] = lifecycle["running"].clone();
+                result["generation"] = lifecycle["generation"].clone();
+            }
+        }
     }
+    Ok(result)
 }
 
 async fn resume(
@@ -880,6 +1048,11 @@ async fn resume(
                 ));
             }
             active.validate()?;
+            crate::workspace_service::activated(
+                store,
+                &active.identity.device.device_id,
+                &current_revision,
+            )?;
             save::<Option<Pending>>(store, PENDING, &None)?;
             let mut result = active.report();
             result["config_revision"] = json!(current_revision);
@@ -1039,6 +1212,30 @@ async fn activate(
         .as_ref()
         .map(|p| p.state_dir.as_path())
         .or_else(|| legacy.as_ref().map(|p| p.state_dir.as_path()));
+    if let Some(legacy) = legacy.as_ref().filter(|_| pending.legacy_service_handover) {
+        let binding = crate::workspace_service::Binding {
+            revision: pending.expected_revision.clone(),
+            node_id: pending.identity.device.device_id.clone(),
+            config: config_path.to_path_buf(),
+            state: legacy.state_dir.clone(),
+            relay_binding: legacy.binding.clone(),
+        };
+        if let Some(migration) = crate::workspace_service::drain(store, binding).await? {
+            return Ok(
+                json!({"state":if migration["phase"]=="draining"{"migration-draining"}else{"migration-blocked"},"encrypted":false,"config_revision":pending.expected_revision,"node_id":pending.identity.device.device_id,"migration":migration}),
+            );
+        }
+    }
+    if let Some(previous) = &old {
+        crate::workspace_service::prepare_switch(
+            store,
+            config_path,
+            &pending.expected_revision,
+            &previous.identity.device.device_id,
+            &pending.identity.device.device_id,
+        )
+        .await?;
+    }
     let _journal = if let Some(state_dir) = old_state_dir {
         let stop = || {
             if legacy.is_some() {
@@ -1272,6 +1469,7 @@ async fn activate(
     save(store, ACTIVE, profile)?;
     let revision =
         workspace_cli::replace_config(config_path, &pending.expected_revision, &updated)?;
+    crate::workspace_service::activated(store, &profile.identity.device.device_id, &revision)?;
     save::<Option<Pending>>(store, PENDING, &None)?;
     let mut result = profile.report();
     result["config_revision"] = json!(revision);
@@ -1279,6 +1477,40 @@ async fn activate(
         result["legacy_retirement"] = json!("unconfirmed");
     }
     Ok(result)
+}
+
+/// Private synthetic fixture setup; absent from packaged builds. The actual
+/// Check/resume path consumes this exact persisted Pending without HTTP enroll.
+#[cfg(all(target_os = "linux", feature = "test-hooks"))]
+pub fn test_reserve_legacy_destination(config: &Path, profile: Profile) -> Result<Value> {
+    let (_, revision) = workspace_cli::read_config(config)?;
+    let identity = serde_json::from_value(
+        serde_json::to_value(&profile.identity)
+            .map_err(|_| fail("Invalid synthetic pending fixture"))?,
+    )
+    .map_err(|_| fail("Invalid synthetic pending fixture"))?;
+    let pending = Pending {
+        version: 1,
+        action: "switch-create".into(),
+        expected_revision: revision,
+        server_url: profile.server_url.clone(),
+        workspace_name: profile.workspace_name.clone(),
+        computer_name: profile.computer_name.clone(),
+        node_token: profile.node_token.clone(),
+        identity,
+        genesis: None,
+        candidate: None,
+        invitation: None,
+        profile: Some(profile),
+        previous_profile: None,
+        retirement: None,
+        legacy_retirement_request: None,
+        legacy_retirement_status: None,
+        legacy_service_handover: true,
+    };
+    let store = io(Store::lock(&private_directory(config)?, true))?;
+    save(&store, PENDING, &Some(&pending))?;
+    serde_json::to_value(pending).map_err(|_| fail("Invalid synthetic pending fixture"))
 }
 
 #[cfg(test)]
@@ -1331,6 +1563,7 @@ mod tests {
             retirement: None,
             legacy_retirement_request: None,
             legacy_retirement_status: None,
+            legacy_service_handover: false,
         }
     }
     #[cfg(unix)]

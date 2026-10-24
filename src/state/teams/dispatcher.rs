@@ -1460,6 +1460,89 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_task_from_plan_is_never_rebalanced() {
+        let (mut team, _) = ops::create(
+            "t",
+            &json!({"name":"Checkout","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        ops::apply(
+            &mut team,
+            "plan",
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","session":{"name":"codex/x/dev","run_id":"r1"}}],
+                "tasks":[{"id":1,"title":"API","assignee":"dev"},{"id":2,"title":"More API","assignee":"dev","pinned":true}]}),
+            &Actor::Member("lead".into()),
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert!(team.task(2).unwrap().pinned);
+        let mut dev2 = team.member("dev").unwrap().clone();
+        dev2.id = "dev2".into();
+        dev2.session = Some(SessionRef { name: "codex/x/dev2".into(), run_id: "r3".into(), conversation_id: "c".into(), ..Default::default() });
+        team.members.push(dev2);
+        team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+        let seen = vec![session("claude/x/lead", "r0", false), session("codex/x/dev", "r1", true), session("codex/x/dev2", "r3", true)];
+        let now = steps(&team, &seen, 1.0);
+        // dev is busy with #1, but #2 stays with its member: no peer takes it.
+        assert!(!now.iter().any(|s| matches!(s, Step::Rebalance { .. })), "{now:?}");
+        assert!(!now.iter().any(|s| matches!(s, Step::HandOut { task: 2, .. })), "{now:?}");
+    }
+
+    #[test]
+    fn a_pinned_task_from_extend_is_never_rebalanced() {
+        let (mut team, seen) = team_with_two_backends();
+        let mut events = Vec::new();
+        team.settings.phase_approval = Some(Approval::Auto);
+        team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+        ops::apply(
+            &mut team,
+            "extend",
+            &json!({"tasks":[{"id":4,"title":"Later","assignee":"dev","pinned":true}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((team.task(4).unwrap().pinned, team.task(4).unwrap().status), (true, TaskStatus::Pending));
+        let now = steps(&team, &seen, 1.0);
+        assert!(
+            !now.iter().any(|s| matches!(s, Step::Rebalance { task: 4, .. } | Step::HandOut { task: 4, .. })),
+            "{now:?}"
+        );
+    }
+
+    #[test]
+    fn a_task_pinned_by_reassign_is_never_rebalanced() {
+        let (mut team, seen) = team_with_two_backends();
+        let mut events = Vec::new();
+        team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+        ops::apply(&mut team, "reassign", &json!({"task":2,"member":"dev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert!(team.task(2).unwrap().pinned);
+        let now = steps(&team, &seen, 1.0);
+        assert!(!now.iter().any(|s| matches!(s, Step::Rebalance { .. })), "{now:?}");
+    }
+
+    #[test]
+    fn a_pinned_task_is_retried_by_its_own_member() {
+        let (mut team, seen) = team_with_two_backends();
+        let mut events = Vec::new();
+        ops::apply(&mut team, "reassign", &json!({"task":1,"member":"dev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let task = team.task_mut(1).unwrap();
+        task.attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Rejected, ..Default::default() });
+        task.status = TaskStatus::Pending;
+        let now = steps(&team, &seen, 1.0);
+        // The retry does not go to the free peer that never failed it.
+        assert!(!now.iter().any(|s| matches!(s, Step::Rebalance { task: 1, .. })), "{now:?}");
+        assert!(now.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{now:?}");
+    }
+
+    #[test]
     fn the_lead_hears_of_moved_tasks_in_one_message() {
         let (mut team, mut seen) = team_with_two_backends();
         for id in [1, 2] {

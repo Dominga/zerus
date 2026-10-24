@@ -168,7 +168,15 @@ fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
     }
 }
 
-/// Pending tasks whose dependencies are satisfied, in id order.
+/// A barrier phase's tasks wait until every task of a lower phase is finished:
+/// accepted, rejected or cancelled. A Draft task left in an earlier phase also
+/// holds the barrier.
+fn barrier_holds(team: &Team, task: &Task) -> bool {
+    let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return false };
+    phase.barrier && team.tasks.iter().any(|other| other.phase < task.phase && !other.status.finished())
+}
+
+/// Pending tasks whose dependencies and phase barrier are satisfied, in id order.
 pub(crate) fn ready(team: &Team) -> Vec<u32> {
     let cycles = cycle_tasks(&team.tasks);
     let mut out: Vec<u32> = team
@@ -176,6 +184,7 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .iter()
         .filter(|task| task.status == TaskStatus::Pending && !cycles.contains(&task.id))
         .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
+        .filter(|task| !barrier_holds(team, task))
         .map(|task| task.id)
         .collect();
     out.sort_unstable();
@@ -266,7 +275,7 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
 
 #[cfg(test)]
 mod tests {
-    use super::super::model::{Dependency, Member, MemberState, Settings};
+    use super::super::model::{Dependency, Member, MemberState, Phase, Settings};
     use super::*;
 
     fn task(id: u32, deps: &[(u32, DependencyKind)], status: TaskStatus) -> Task {
@@ -346,6 +355,41 @@ mod tests {
     fn tasks_in_a_cycle_are_never_ready() {
         let t = team(vec![task(1, &[(2, Soft)], Pending), task(2, &[(1, Soft)], Pending)]);
         assert!(ready(&t).is_empty());
+    }
+
+    #[test]
+    fn a_barrier_phase_waits_for_every_lower_phase_task() {
+        let mut t = team(vec![task(1, &[], Accepted), task(2, &[], Pending), task(3, &[], Pending), task(4, &[], Pending)]);
+        t.tasks[2].phase = 2;
+        t.tasks[3].phase = 3;
+        t.phases = vec![Phase { n: 2, barrier: true, ..Default::default() }, Phase { n: 3, ..Default::default() }];
+        // Phase 1 still has an open task, so the barrier holds #3. #4's phase
+        // has no barrier, so it starts once its own dependencies are met.
+        assert_eq!(ready(&t), vec![2, 4]);
+        t.tasks[1].status = Cancelled;
+        // Cancelled counts as decided: the barrier opens.
+        assert_eq!(ready(&t), vec![3, 4]);
+    }
+
+    #[test]
+    fn a_barrier_waits_for_a_draft_lower_phase_and_never_for_its_own_phase() {
+        let mut t = team(vec![task(1, &[], Draft), task(2, &[], Pending), task(3, &[], Pending)]);
+        t.tasks[1].phase = 2;
+        t.tasks[2].phase = 2;
+        t.phases = vec![Phase { n: 2, barrier: true, ..Default::default() }];
+        // A Draft task of phase 1 is not finished, so phase 2 waits.
+        assert!(ready(&t).is_empty());
+        t.tasks[0].status = Rejected;
+        // Tasks of the barrier's own phase never hold each other.
+        assert_eq!(ready(&t), vec![2, 3]);
+    }
+
+    #[test]
+    fn a_phase_without_a_barrier_starts_once_its_dependencies_are_satisfied() {
+        let mut t = team(vec![task(1, &[], Pending), task(2, &[], Pending)]);
+        t.tasks[1].phase = 2;
+        t.phases = vec![Phase { n: 2, ..Default::default() }];
+        assert_eq!(ready(&t), vec![1, 2]);
     }
 
     #[test]

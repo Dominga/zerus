@@ -591,6 +591,7 @@ impl Drop for OwnedChild {
 #[tokio::test(flavor = "current_thread")]
 async fn one_signal_drains_native_and_resumed_check_keeps_the_exact_outcome() {
     let mut f = Fixture::new().await;
+    f.mutate(|v| v["properties"] = json!({"Slice":"app.slice","Requires":"basic.target app.slice"}));
     let cfg = std::fs::read(&f.config).unwrap();
     assert_eq!(f.drain().await.unwrap()["phase"], "draining");
     assert_eq!(f.drain().await.unwrap()["phase"], "draining");

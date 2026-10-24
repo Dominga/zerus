@@ -705,6 +705,9 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     QCOMPARE(rowOf("\nkimi/hgs/tester"), leadRow + 1);
     auto *member = list->item(leadRow + 1);
     QVERIFY(member->data(SessionRoles::TeamMember).toBool());
+    // A member's card names its role, not the team's session name; the lead keeps its own.
+    QTRY_COMPARE(member->data(SessionRoles::Title).toString(), QStringLiteral("Tester"));
+    QVERIFY(list->item(leadRow)->data(SessionRoles::Title).toString() != QStringLiteral("Lead"));
     QVERIFY(!list->item(leadRow)->data(SessionRoles::TeamMember).toBool());
     // The last member ends the connector; the lead folds its members as a
     // session folds its subagents.

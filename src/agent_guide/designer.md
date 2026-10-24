@@ -10,7 +10,8 @@ Read it:  echo '{}' | hgs team catalog get --json
     can_message (lead|team), dangerous
   catalog.templates[]: id, name, description, lead_protocol,
     roster[{role, count, optional}], tasks[{title, role, deps[indexes]}],
-    planning (lead|template), approval (review|auto), max_members
+    planning (lead|template), approval (review|auto), max_members,
+    phase_approval ("" = as approval|review|auto: new phases wait for the owner or run)
   catalog.routing[]: id, when (words all in the goal), template, approval
   draft.proposals[]: your earlier proposals and the owner's decisions
 

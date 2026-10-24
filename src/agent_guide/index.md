@@ -11,6 +11,7 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide send              message another session and read its reply
   hgs guide wait              wait for a result another session owes you
   hgs guide team              lead or work in an agent team
+  hgs guide team-lead         add a phase to a running team, or finish it
   hgs guide designer          propose roles and templates for agent teams
   hgs guide launch            start a session, here or on a peer
   hgs guide stop              interrupt, pause, kill or archive

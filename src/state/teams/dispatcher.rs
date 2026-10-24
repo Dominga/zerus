@@ -403,7 +403,8 @@ pub(crate) fn brief_text(team: &Team) -> String {
     text += &format!(
         "\nPlan the work as tasks with acceptance criteria and dependencies (hard: waits for Accepted; soft: may start \
          once the dependency is In progress), then send the whole plan once with hgs team plan --json (hgs guide team). \
-         Keep these members unless the goal needs others; nothing runs until the owner approves.\n\
+         Keep these members unless the goal needs others; nothing runs until the owner approves. \
+         Once it runs, new work goes in a new phase and you finish the team (hgs guide team-lead).\n\
          {{\"request_id\":\"{}\",\"team\":\"{}\",\"members\":{},\"tasks\":{}}}",
         uuid::Uuid::new_v4(),
         team.id,
@@ -1327,6 +1328,7 @@ mod tests {
         let brief = brief_text(&team);
         assert!(brief.contains("Ship it") && brief.contains("Your role: Plan well") && brief.contains("\"assignee\":\"dev\""));
         assert!(brief.contains("Team protocol:\nRun the waves in order"));
+        assert!(brief.contains("(hgs guide team-lead)"));
         team.brief = Notice::Sent;
         assert!(steps(&team, &[session("claude/x/lead", "r0", true)], 1.0).is_empty());
     }

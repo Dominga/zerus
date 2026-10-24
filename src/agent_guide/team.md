@@ -2,7 +2,7 @@ Work in an agent team (hgs guide team)
 
 A team has a lead session and members on any agent, model or computer. The
 lead plans tasks with dependencies; Zerus hands each ready task to a free
-member and sends the member's report back to the lead. Requests need a
+member and sends its report to the lead. Requests need a
 lowercase canonical UUID: uuidgen | tr A-F a-f. Keep it to retry.
 
 Lead, from your own session:
@@ -15,7 +15,7 @@ Lead, from your own session:
      "assignee":"api","deps":[{"task":2,"kind":"hard"}]}]} | hgs team plan --json
   hard waits for Accepted; soft, for In progress. The owner approves the
   plan in Zerus; nothing runs before.
-  {"team":"ID"} | hgs team status --json   tasks, attempts, ready and findings
+  {"team":"ID"} | hgs team status --json   tasks, attempts, ready, findings
   Reports arrive as messages that begin with [Zerus team. Decide each one:
     {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json
     add "reason" and use reject; the task returns for another attempt.
@@ -27,7 +27,7 @@ Lead, from your own session:
   the hgs team answer command each carries. Allow only what the task needs
   in the team's folder; ask the owner when in doubt. Zerus also says when a
   member stops on its task: message it, retry, reassign or ask the owner.
-  The owner's decisions are final; yours cannot undo them.
+  Owner decisions are final. Phases, extend, finish: hgs guide team-lead
 
 Member: a task arrives as a message that begins with [Zerus team. Do it,
 then report once with the command at its end (it names the attempt):

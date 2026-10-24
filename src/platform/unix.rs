@@ -622,61 +622,6 @@ pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>,
         })
         .collect())
 }
-#[cfg(all(test, target_os = "macos"))]
-pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
-    use std::os::unix::ffi::OsStrExt;
-    let own = std::process::id();
-    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if count <= 0 {
-        return Err("Cannot enumerate running processes".into());
-    }
-    let mut pids = vec![0 as libc::c_int; count as usize + 64];
-    let size = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
-    let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, size) };
-    if found <= 0 {
-        return Err("Cannot enumerate running processes".into());
-    }
-    pids.truncate((found as usize).min(pids.len()));
-    Ok(pids
-        .into_iter()
-        .filter(|pid| *pid > 0 && *pid as u32 != own)
-        .filter_map(|pid| {
-            let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
-            let size = std::mem::size_of_val(&info) as libc::c_int;
-            let read = unsafe {
-                libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDVNODEPATHINFO,
-                    0,
-                    &mut info as *mut _ as *mut libc::c_void,
-                    size,
-                )
-            };
-            if read != size {
-                return None;
-            }
-            let path = &info.pvi_cdir.vip_path;
-            let bytes = unsafe {
-                std::slice::from_raw_parts(path.as_ptr() as *const u8, std::mem::size_of_val(path))
-            };
-            let end = bytes.iter().position(|b| *b == 0)?;
-            if end == 0 {
-                return None;
-            }
-            let cwd = PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
-            let mut name = [0u8; 256];
-            let length = unsafe {
-                libc::proc_name(
-                    pid,
-                    name.as_mut_ptr() as *mut libc::c_void,
-                    name.len() as u32,
-                )
-            };
-            let name = String::from_utf8_lossy(&name[..length.clamp(0, 256) as usize]).into_owned();
-            Some((pid as u32, cwd, name))
-        })
-        .collect())
-}
 /// Without a way to read other processes' directories, nothing may count as unused.
 #[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {

@@ -281,6 +281,10 @@ pub(crate) struct Attempt {
     /// (stopped, no_report), once each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub told_lead: Vec<String>,
+    /// The member the task was assigned to when Zerus gave it to this
+    /// attempt's member instead (a free member with the same role).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rebalanced_from: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -295,6 +299,10 @@ pub(crate) struct Task {
     pub deps: Vec<Dependency>,
     #[serde(default)]
     pub assignee: String,
+    /// The lead or you chose this member: Zerus does not give the task to
+    /// another member with the same role.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     #[serde(default)]
     pub status: TaskStatus,
     #[serde(default)]

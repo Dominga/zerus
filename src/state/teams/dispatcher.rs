@@ -106,6 +106,12 @@ pub(crate) enum Step {
     /// Tells the lead about a member that stopped on its task (its session
     /// ended, paused or is gone; or its turn ended with neither report nor reply).
     Stalled { task: u32, kind: String },
+    /// Gives a ready task to a free member with the assignee's role: the
+    /// assignee is busy, or failed the task's last attempt.
+    Rebalance { task: u32, from: String, to: String },
+    /// Tells the lead, in one message, which open tasks Zerus gave to
+    /// another member with the same role.
+    Rebalanced { tasks: Vec<u32> },
     /// Mutes a member's notifications (unless they already are): its
     /// replies are for the lead.
     Quiet { member: String, session: SessionRef, muted: bool, revision: u64 },
@@ -225,6 +231,19 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             }
         }
     }
+    // Open tasks Zerus gave to another member with the same role, in one
+    // message to the free lead.
+    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
+        let tasks: Vec<u32> = team
+            .tasks
+            .iter()
+            .filter(|t| t.open_attempt().is_some_and(|a| !a.rebalanced_from.is_empty() && !a.told_lead.iter().any(|k| k == "rebalanced")))
+            .map(|t| t.id)
+            .collect();
+        if !tasks.is_empty() {
+            steps.push(Step::Rebalanced { tasks });
+        }
+    }
     // A member asks the lead, not the owner, once the lead is free; one at a
     // time. Its permission requests go to the lead as well (the owner's
     // choice); the lead asks the owner when it should not decide.
@@ -243,9 +262,37 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         .map(|attempt| attempt.member.as_str())
         .collect();
     let mut launching = BTreeSet::new();
+    let refused_recently = |member: &Member| {
+        team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.member == member.id && a.state == AttemptState::Refused && now - a.sent_at < REFUSAL_PAUSE)
+    };
+    let available = |member: &Member, busy: &BTreeSet<&str>| {
+        !matches!(member.state, MemberState::Removed | MemberState::Paused)
+            && !busy.contains(member.id.as_str())
+            && member.session.is_some()
+            && !member.needs_settings()
+            && !refused_recently(member)
+            && session_of(member, seen).is_some_and(|s| s.free && !s.run_id.is_empty())
+    };
     for id in ready {
         let Some(task) = team.task(id) else { continue };
         let Some(member) = team.member(&task.assignee) else { continue };
+        // Members with one role do the same work: a ready task goes to a free
+        // one when its assignee is busy, and a retry to one that did not fail
+        // it (a fresh context). The lead's or your choice stays.
+        if !task.pinned && member.id != team.lead {
+            let failed = |m: &Member| task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
+            let assignee_fits = available(member, &busy) && !failed(member);
+            if !assignee_fits {
+                let role = team.role_of(&member.id);
+                if let Some(peer) = team.members.iter().find(|m| {
+                    m.id != member.id && m.id != team.lead && team.role_of(&m.id) == role && available(m, &busy) && !failed(m)
+                }) {
+                    busy.insert(peer.id.as_str());
+                    steps.push(Step::Rebalance { task: id, from: member.id.clone(), to: peer.id.clone() });
+                    continue;
+                }
+            }
+        }
         if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) {
             continue;
         }
@@ -255,10 +302,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             }
             continue;
         }
-        let refused_recently = team.tasks.iter().flat_map(|t| &t.attempts).any(|a| {
-            a.member == member.id && a.state == AttemptState::Refused && now - a.sent_at < REFUSAL_PAUSE
-        });
-        if refused_recently || !session_of(member, seen).is_some_and(|s| s.free && !s.run_id.is_empty()) {
+        if refused_recently(member) || !session_of(member, seen).is_some_and(|s| s.free && !s.run_id.is_empty()) {
             continue;
         }
         busy.insert(member.id.as_str());
@@ -659,7 +703,7 @@ fn change(store: &mut Store, team: &str, change: impl FnOnce(&mut Team, &mut Vec
     Ok(())
 }
 
-fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, host: &str) -> anyhow::Result<()> {
+fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, from: Option<&str>, host: &str) -> anyhow::Result<()> {
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -667,10 +711,30 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, hos
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
         let member_host = team.member(member_id).map(|m| m.computer.clone()).unwrap_or_default();
+        let roles = from.map(|from| (team.role_of(from), team.role_of(member_id)));
         let task = team.task_mut(task_id).context("unknown task")?;
+        // Given to a free member with the same role, unless the lead or you
+        // chose the assignee in the meantime.
+        let rebalanced = match from {
+            Some(from) if task.assignee == from && !task.pinned => {
+                task.assignee = member_id.to_owned();
+                from.to_owned()
+            }
+            _ => String::new(),
+        };
         anyhow::ensure!(task.assignee == member_id, "reassigned");
         let n = task.attempts.len() as u32 + 1;
-        task.attempts.push(Attempt { n, id: attempt_id.clone(), member: member_id.to_owned(), sent_at: now(), ..Default::default() });
+        task.attempts.push(Attempt {
+            n,
+            id: attempt_id.clone(),
+            member: member_id.to_owned(),
+            sent_at: now(),
+            rebalanced_from: rebalanced.clone(),
+            ..Default::default()
+        });
+        if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+        }
         task.status = TaskStatus::Assigned;
         let task = team.task(task_id).unwrap();
         message = Some((session, hand_off_text(team, task, task.attempts.last().unwrap(), host, &member_host)));
@@ -755,6 +819,41 @@ pub(crate) fn stalled_text(team: &Team, task: &Task, attempt: &Attempt, kind: &s
          or ask the owner if it needs them (a relaunch, a sign-in).",
         task.id
     )
+}
+
+/// One message for the lead: the open tasks Zerus gave to another member
+/// with the same role, and to whom.
+pub(crate) fn rebalanced_text(team: &Team, tasks: &[u32]) -> String {
+    let mut text = String::from("[Zerus team \u{b7} from: Zerus \u{b7} tasks moved]\n");
+    for task in tasks.iter().filter_map(|id| team.task(*id)) {
+        if let Some(attempt) = task.open_attempt() {
+            text += &format!(
+                "#{} {}: given to {} ({}) instead of {}, which was busy or failed its last attempt.\n",
+                task.id,
+                task.title,
+                attempt.member,
+                team.role_of(&attempt.member),
+                attempt.rebalanced_from
+            );
+        }
+    }
+    text + "Members with one role share their work; nothing to do unless you want another member (hgs team reassign keeps your choice)."
+}
+
+fn tell_lead_rebalanced(store: &mut Store, team: &Team, tasks: &[u32]) -> anyhow::Result<()> {
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &rebalanced_text(team, tasks));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, _| {
+        for id in tasks {
+            if let Some(attempt) = team.task_mut(*id).and_then(|t| t.attempts.iter_mut().rev().find(|a| a.state.open())) {
+                attempt.told_lead.push("rebalanced".to_owned());
+            }
+        }
+        Ok(())
+    })
 }
 
 fn tell_lead_stalled(store: &mut Store, team: &Team, task_id: u32, kind: &str) -> anyhow::Result<()> {
@@ -912,7 +1011,9 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }
-        Step::HandOut { task, member } => hand_out(store, &team.id, *task, member, host),
+        Step::HandOut { task, member } => hand_out(store, &team.id, *task, member, None, host),
+        Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
+        Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
                 if attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none() {
@@ -1312,6 +1413,70 @@ mod tests {
         assert!(text.contains("member stopped") && text.contains("Backend's session stopped"), "{text}");
         team.task_mut(id).unwrap().attempts.last_mut().unwrap().told_lead.push("stopped".into());
         assert!(!steps(&team, &[lead, gone], 1.0).iter().any(|s| matches!(s, Step::Stalled { .. })));
+    }
+
+    /// The team with a second Backend member, dev2, free and started.
+    fn team_with_two_backends() -> (Team, Vec<Seen>) {
+        let mut team = team();
+        let mut dev2 = team.member("dev").unwrap().clone();
+        dev2.id = "dev2".into();
+        dev2.session = Some(SessionRef { name: "codex/x/dev2".into(), run_id: "r3".into(), conversation_id: "c".into(), ..Default::default() });
+        team.members.push(dev2);
+        let seen = vec![session("claude/x/lead", "r0", false), session("codex/x/dev", "r1", true), session("codex/x/dev2", "r3", true)];
+        (team, seen)
+    }
+
+    #[test]
+    fn a_ready_task_goes_to_a_free_member_with_the_same_role() {
+        let (mut team, seen) = team_with_two_backends();
+        // dev works on #1; #2, also dev's, goes to the free dev2.
+        team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+        let now = steps(&team, &seen, 1.0);
+        assert!(now.contains(&Step::Rebalance { task: 2, from: "dev".into(), to: "dev2".into() }), "{now:?}");
+        // Your or the lead's choice stays with its member.
+        team.task_mut(2).unwrap().pinned = true;
+        assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::Rebalance { .. })));
+        // Another role is not the same work.
+        team.task_mut(2).unwrap().pinned = false;
+        team.members.iter_mut().find(|m| m.id == "dev2").unwrap().role = "Frontend".into();
+        assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::Rebalance { .. })));
+    }
+
+    #[test]
+    fn a_rejected_task_is_retried_by_a_fresh_member_when_one_is_free() {
+        let (mut team, mut seen) = team_with_two_backends();
+        let task = team.task_mut(1).unwrap();
+        task.attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Rejected, ..Default::default() });
+        task.status = TaskStatus::Pending;
+        // dev failed #1 and is free, yet the free dev2 takes the retry; dev takes #2.
+        let now = steps(&team, &seen, 1.0);
+        assert!(now.contains(&Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() }), "{now:?}");
+        assert!(now.contains(&Step::HandOut { task: 2, member: "dev".into() }), "{now:?}");
+        // Without a free peer, the assignee retries rather than wait.
+        seen[2].free = false;
+        let now = steps(&team, &seen, 1.0);
+        assert!(now.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{now:?}");
+    }
+
+    #[test]
+    fn the_lead_hears_of_moved_tasks_in_one_message() {
+        let (mut team, mut seen) = team_with_two_backends();
+        for id in [1, 2] {
+            let task = team.task_mut(id).unwrap();
+            task.assignee = "dev2".into();
+            task.attempts.push(Attempt { n: 1, member: "dev2".into(), state: AttemptState::Delivered, rebalanced_from: "dev".into(), ..Default::default() });
+            task.status = TaskStatus::InProgress;
+        }
+        assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::Rebalanced { .. })));
+        seen[0].free = true;
+        assert!(steps(&team, &seen, 1.0).contains(&Step::Rebalanced { tasks: vec![1, 2] }));
+        let text = rebalanced_text(&team, &[1, 2]);
+        assert!(text.contains("#1 API: given to dev2 (Backend) instead of dev") && text.contains("#2 More API"), "{text}");
+        for id in [1, 2] {
+            team.task_mut(id).unwrap().attempts[0].told_lead.push("rebalanced".into());
+        }
+        assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::Rebalanced { .. })));
     }
 
     #[test]

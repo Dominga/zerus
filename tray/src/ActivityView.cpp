@@ -512,12 +512,70 @@ struct ActivityRenderResult {
     // A refetched journal window can overlap the previous one. Deduplicate
     // native identities before receipts replace their display keys and text.
     QSet<qint64> journalSequences;
+    QSet<QString> nativeTurns;
     QJsonArray uniqueEvents;
     for (const auto &value : m_events) {
-        const auto seq = value.toObject().value("seq").toInteger();
+        auto event = value.toObject();
+        const auto seq = event.value("seq").toInteger();
         if (seq > 0 && journalSequences.contains(seq)) continue;
         if (seq > 0) journalSequences.insert(seq);
-        uniqueEvents.append(value);
+        // Older journals discarded Kimi's native turn ID. A complete bounded
+        // native file can still prove a unique attachment turn: its immutable
+        // staged-file expansion must match exactly, with no competing send.
+        if (details.value("agent") == "kimi" && details.value("kimi_turns_complete").toBool()
+            && event.value("type") == "TurnStarted" && !event.contains("kimi_turn_id")
+            && event.value("agent_id").toString().isEmpty()
+            && !details.value("run_id").toString().isEmpty() && !details.value("conversation_id").toString().isEmpty()
+            && event.value("run_id") == details.value("run_id")) {
+            const auto body = event.value("detail").toString().trimmed();
+            QSet<QString> receipts;
+            for (const auto &receipt : details.value("attachment_messages").toArray()) {
+                const auto row = receipt.toObject();
+                const auto id = row.value("message_id").toString();
+                if (row.value("source") == "hgs_delivery" && !row.value("attachments").toArray().isEmpty()
+                    && !id.isEmpty() && !body.isEmpty() && row.value("submitted_text").toString().trimmed() == body) receipts.insert(id);
+            }
+            // A confirmed send can be visible before the next inspection has
+            // its durable file receipt. Both copies share the same delivery ID.
+            for (const auto &message : m_localMessages) {
+                const auto row = message.toObject();
+                const auto id = row.value("message_id").toString();
+                if (row.value("status") == "sent" && row.value("source") != "hgs_voice"
+                    && row.value("run_id") == details.value("run_id")
+                    && row.value("conversation_id") == details.value("conversation_id")
+                    && !row.value("attachments").toArray().isEmpty() && !id.isEmpty()
+                    && !body.isEmpty() && row.value("submitted_text").toString().trimmed() == body) receipts.insert(id);
+            }
+            if (receipts.size() == 1) {
+                const auto hash = QString::fromLatin1(QCryptographicHash::hash(body.toUtf8(), QCryptographicHash::Sha256).toHex());
+                QList<QJsonObject> matching;
+                for (const auto &turn : details.value("kimi_turns").toArray())
+                    if (turn.toObject().value("text_sha256").toArray().contains(hash)) matching.append(turn.toObject());
+                if (matching.size() == 1) {
+                    const auto turn = matching.first();
+                    const double delay = event.value("at").toDouble() - turn.value("at").toDouble();
+                    if (turn.value("origin") == "user" && turn.value("turn_id").toInteger(-1) >= 0
+                        && turn.value("at").toDouble() > 0 && delay >= 0 && delay <= 2.)
+                    {
+                        event["kimi_turn_id"] = turn.value("turn_id");
+                        event["kimi_conversation_id"] = details.value("conversation_id");
+                    }
+                }
+            }
+        }
+        const auto turn = event.value("kimi_turn_id").toInteger(-1);
+        if (event.value("type") == "TurnStarted" && turn >= 0 && !event.value("run_id").toString().isEmpty()
+            && !event.value("kimi_conversation_id").toString().isEmpty()) {
+            // A repeated caption with a different native turn is a new send.
+            // Conflicting bodies for one ID also stay visible for inspection.
+            const auto key = QString::fromLatin1(QCryptographicHash::hash(QJsonDocument(QJsonArray{
+                event.value("run_id"), event.value("kimi_conversation_id"), event.value("agent_id"), turn,
+                event.value("detail")}).toJson(QJsonDocument::Compact),
+                QCryptographicHash::Sha256).toHex());
+            if (nativeTurns.contains(key)) continue;
+            nativeTurns.insert(key);
+        }
+        uniqueEvents.append(event);
     }
     m_events = std::move(uniqueEvents);
     const auto clear = details.value("session_clear").toObject();

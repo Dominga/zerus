@@ -305,6 +305,28 @@ fn merge_kimi(
         let document = block
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| format!("cannot merge tracking hooks into {}: {e}", path.display()))?;
+        let without = format!("{}{}", &original[..start], &rest[finish + end..]);
+        // Older installations registered the compatibility shim outside this
+        // block. It executes the same Rust hook: adding a second complete set
+        // records every callback twice. Remove only an entirely redundant HGS
+        // block, retaining the original trusted commands and all personal bytes.
+        if let Ok(existing) = without.parse::<toml_edit::DocumentMut>() {
+            if kimi_complete(&existing)
+                && document.as_table().len() == 1
+                && document.get("hooks").and_then(toml_edit::Item::as_array_of_tables).is_some_and(|tables| {
+                    !tables.is_empty() && tables.iter().all(|table| {
+                        table.get("command").and_then(toml_edit::Item::as_str).is_some_and(owns_hook)
+                            && existing.get("hooks").and_then(toml_edit::Item::as_array_of_tables)
+                                .is_some_and(|registered| registered.iter().any(|other| {
+                                    other.get("command").and_then(toml_edit::Item::as_str).is_some_and(owns_hook)
+                                        && kimi_hook_fields(table) == kimi_hook_fields(other)
+                                }))
+                    })
+                })
+            {
+                return Ok(Some(without));
+            }
+        }
         if let Some(tables) = document
             .get("hooks")
             .and_then(toml_edit::Item::as_array_of_tables)
@@ -334,6 +356,11 @@ fn merge_kimi(
         }
         content_without = format!("{}{}", &original[..start], &rest[finish + end..]);
     }
+    let document = original.parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("cannot merge tracking hooks into {}: {e}", path.display()))?;
+    if kimi_complete(&document) {
+        return Ok(None);
+    }
     let command = match command {
         Some(command) => command,
         None => fresh()?,
@@ -352,6 +379,21 @@ fn merge_kimi(
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| format!("cannot merge tracking hooks into {}: {e}", path.display()))?;
     Ok(Some(content))
+}
+
+fn kimi_hook_fields(table: &toml_edit::Table) -> std::collections::BTreeMap<String, String> {
+    table.iter().filter(|(key, _)| *key != "command")
+        .map(|(key, value)| (key.to_owned(), value.to_string().trim().to_owned())).collect()
+}
+
+fn kimi_complete(document: &toml_edit::DocumentMut) -> bool {
+    document.get("hooks").and_then(toml_edit::Item::as_array_of_tables).is_some_and(|tables| {
+        events("kimi").iter().all(|event| tables.iter().filter(|table| {
+            table.get("event").and_then(toml_edit::Item::as_str) == Some(event)
+                && table.get("command").and_then(toml_edit::Item::as_str).is_some_and(owns_hook)
+                && !table.contains_key("matcher")
+        }).count() == 1)
+    })
 }
 
 /// The JSON hook configuration text `original` of `agent` with an hgs entry
@@ -820,7 +862,10 @@ pub(super) fn repair_document(original: &str, path: &Path, agent: &str, known: (
     let executable = runner_executable()?;
     if agent == "kimi" {
         let health=health_document(original,agent,Some(known))?;
-        if health["state"]=="configured" {return Ok(None);}
+        if health["state"]=="configured" {
+            if health["duplicate_events"].as_array().is_none_or(Vec::is_empty) { return Ok(None); }
+            return merge_kimi(original, path, cfg!(windows), &mut || fresh_command(&executable));
+        }
         // Rewriting an existing Kimi block can discard custom fields/personal
         // entries within it. Explicit repair refuses that lossy transformation.
         if health["state"]=="partial" || original.contains(KIMI_BEGIN) || original.contains(KIMI_END) {
@@ -1635,9 +1680,10 @@ mod tests {
             complete.clone(),
             partial,
             format!("{complete}\n[loop_control]\nmax_attempts_per_step = 1\n"),
-            // Before D12 a CRLF block was not found, and Unix keeps that.
-            crlf,
         ];
+        // Even without Unix marker recognition, a complete CRLF registration
+        // must not receive another set of tracking callbacks.
+        assert_eq!(kimi_merge(&crlf, false, UNIX), None);
         for original in &cases {
             assert_eq!(
                 kimi_merge(original, false, UNIX),
@@ -1653,6 +1699,41 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "incomplete hgs hook block in /config/file");
+    }
+
+    fn legacy_kimi_document() -> String {
+        let mut text = "# Personal settings\ndefault_model = \"synthetic\"\n".to_owned();
+        for event in events("kimi") {
+            text.push_str(&format!("\n[[hooks]]\nevent = {}\ncommand = \"python3 /synthetic/hgs_state.py hook\"\ntimeout = 5\n", json!(event)));
+        }
+        text.push_str("\n# Personal memory hook\n[[hooks]]\nevent = \"UserPromptSubmit\"\ncommand = \"personal-memory-hook\"\ntimeout = 10\n");
+        text
+    }
+
+    #[test]
+    fn complete_legacy_kimi_hooks_do_not_receive_another_managed_block() {
+        let original = legacy_kimi_document();
+        assert_eq!(merge_kimi(&original, &path(), false, &mut || panic!("existing hooks are complete")).unwrap(), None);
+        let conditional = original.replace("event = \"TurnStarted\"", "event = \"TurnStarted\"\nmatcher = \"restricted-origin\"");
+        assert!(kimi_merge(&conditional, false, UNIX).is_some());
+    }
+
+    #[test]
+    fn redundant_kimi_block_is_removed_without_rewriting_legacy_or_personal_hooks() {
+        let original = legacy_kimi_document();
+        let block = reference_kimi("", UNIX).unwrap().unwrap();
+        let duplicate = format!("{original}{block}");
+        let merged = kimi_merge(&duplicate, false, UNIX).unwrap();
+        assert_eq!(merged, format!("{original}\n\n"));
+        let health = health_document(&merged, "kimi", Some((2, 3, 1))).unwrap();
+        assert_eq!(health["duplicate_events"], json!([]));
+        assert!(merged.contains("# Personal memory hook"));
+        assert_eq!(kimi_merge(&merged, false, UNIX), None);
+        // A personal entry or different callback parameters forbid block removal.
+        for protected in [block.replace("timeout = 5", "timeout = 6"),
+            block.replace(KIMI_END, &format!("[[hooks]]\nevent = \"Stop\"\ncommand = \"personal-hook\"\n{KIMI_END}"))] {
+            assert_eq!(kimi_merge(&format!("{original}{protected}"), false, UNIX), None);
+        }
     }
 
     #[test]

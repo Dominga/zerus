@@ -535,8 +535,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         const auto *item = m_sessions->itemAt(position);
         const auto global = m_sessions->viewport()->mapToGlobal(position);
         if (selectionEntries().size() > 1) { showSelectionMenu(global); return; }
-        if (item && !item->data(SessionRoles::TeamId).toString().isEmpty()) showTeam(item->data(SessionRoles::TeamId).toString());   // WhiteWh fork
-        else if (item && item->data(SessionRoles::Header).toBool()) showGroupMenu(item->data(SessionRoles::Group).toString(), global);
+        if (item && item->data(SessionRoles::Header).toBool()) showGroupMenu(item->data(SessionRoles::Group).toString(), global);
         else if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()) {
             const auto id = item->data(SessionRoles::LaunchId).toString();
             auto *menu = new QMenu(this); menu->setObjectName("pendingLaunchMenu");
@@ -1498,11 +1497,6 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamPanel->setLive([this](const Teams::Member &member){return teamLive(member);});
     m_collapsedTeams=[]{const auto list=QSettings().value("workspace/collapsedTeams").toStringList();return QSet<QString>(list.cbegin(),list.cend());}();
     connect(m_sessions,&SessionList::teamActivated,this,&SessionsWindow::showTeam);
-    connect(m_sessions,&SessionList::teamToggled,this,[this](const QString &team){
-        if(m_collapsedTeams.contains(team))m_collapsedTeams.remove(team);else m_collapsedTeams.insert(team);
-        QSettings().setValue("workspace/collapsedTeams",QStringList(m_collapsedTeams.cbegin(),m_collapsedTeams.cend()));
-        rebuild();
-    });
     m_inspector->addTab(m_teamPanel, tr("Team"));
     // The team workspace: the Team tab next to Activity, shown while a team is.
     m_teamWorkspace=new TeamWorkspace(m_teams,m_teamPanel,this);
@@ -3375,11 +3369,11 @@ void SessionsWindow::rebuild()
         m_machineFilter->setSessionCounts(machineCounts, countCaption + (m_projectFilters.isEmpty() ? QString() : tr(" / selected projects"))); }
     { const QSignalBlocker block(m_projectFilter); m_projectFilter->setSelection(m_projectFilters); m_projectFilter->setProjects(m_organization.groups());
         m_projectFilter->setSessionCounts(projectCounts, countCaption + (m_hostFilters.isEmpty() ? QString() : tr(" / selected machines"))); }
-    struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch, team; };
+    struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
     QList<Row> rows;
     QSet<int> subordinateRows;   // WhiteWh fork: visible entries listed under their lead
     QSet<int> teamMemberRows, teamHiddenRows, lastMemberRows;
-    QHash<int, QString> leadTeams;   // WhiteWh fork: agent team members under their header
+    QHash<int, QString> leadTeams;   // WhiteWh fork: lead rows and their teams
     const bool hasGroups = m_organization.groups().size() > 1;
     const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
     const bool hideEmptyProjects = QSettings().value("workspace/hideEmptyProjects", true).toBool();
@@ -3447,10 +3441,9 @@ void SessionsWindow::rebuild()
                 members = ordered;
             }
         }
-        // WhiteWh fork: agent teams. A team whose lead is listed here gets a
-        // header above its lead; its members listed here follow, indented. A
-        // collapsed team keeps only members with a problem.
-        QHash<int, QString> teamHeads;   // lead row -> team (leadTeams keeps them for the rows below)
+        // WhiteWh fork: agent teams. A team's members listed here follow its
+        // lead, indented; the lead's card carries the team. A folded team
+        // keeps only members with a problem.
         if (m_teams) for (const auto &team : m_teams->teams()) {
             if (team.status == "archived") continue;
             int lead = -1; QList<int> follow;
@@ -3459,7 +3452,7 @@ void SessionsWindow::rebuild()
                 if (!member) continue;
                 if (member->lead) lead = i; else follow.append(i);
             }
-            if (lead < 0 || teamHeads.contains(lead)) continue;
+            if (lead < 0 || leadTeams.contains(lead)) continue;
             const QSet<int> following(follow.cbegin(), follow.cend());
             QList<int> ordered;
             for (int i : members) {
@@ -3468,7 +3461,7 @@ void SessionsWindow::rebuild()
                 if (i == lead) ordered += follow;
             }
             members = ordered;
-            teamHeads.insert(lead, team.id); leadTeams.insert(lead, team.id);
+            leadTeams.insert(lead, team.id);
             const bool collapsed = m_collapsedTeams.contains(team.id) && query.isEmpty();
             for (int i : follow) {
                 teamMemberRows.insert(i);
@@ -3492,7 +3485,7 @@ void SessionsWindow::rebuild()
         }
         for (const auto &id : launches) rows.append({group.id, -1, hasGroups && group.collapsed, {}, id});
     }
-    const auto rowKey = [&](const Row &row) { return !row.team.isEmpty() ? "#team\n" + row.team : !row.launch.isEmpty() ? "#launch\n" + row.launch : row.entry < 0 ? "#group\n" + row.group : visible[row.entry].key + (row.child.isEmpty() ? QString() : "\n#child\n" + row.child); };
+    const auto rowKey = [&](const Row &row) { return !row.launch.isEmpty() ? "#launch\n" + row.launch : row.entry < 0 ? "#group\n" + row.group : visible[row.entry].key + (row.child.isEmpty() ? QString() : "\n#child\n" + row.child); };
     bool sameRows = m_sessions->count() == rows.size();
     for (int i = 0; sameRows && i < rows.size(); ++i) sameRows = m_sessions->item(i)->data(KeyRole).toString() == rowKey(rows[i]);
     const int scroll = m_sessions->verticalScrollBar()->value();
@@ -3518,27 +3511,8 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::GitHost, QString()); item->setData(SessionRoles::GitPath, QString());
         item->setData(Qt::AccessibleDescriptionRole, QString());
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
-        item->setData(SessionRoles::TeamId, row.team);   // WhiteWh fork: agent teams
         item->setData(SessionRoles::TeamMember, row.entry >= 0 && row.child.isEmpty() && teamMemberRows.contains(row.entry)
                                                     ? (lastMemberRows.contains(row.entry) ? 2 : 1) : 0);
-        if (!row.team.isEmpty()) {
-            const auto *team = m_teams->team(row.team);
-            const auto live = [this](const Teams::Member &member) { return teamLive(member); };
-            const QString status = Teams::displayStatus(*team, live);
-            QVariantList tones; for (auto tone : Teams::progress(*team)) tones.append(int(tone));
-            const int answers = Teams::answers(*team, live);
-            item->setFlags(Qt::ItemIsEnabled);
-            item->setData(TitleRole, team->name); item->setData(SessionRoles::TeamStatus, status);
-            item->setData(DetailRole, Teams::statusLabel(status)); item->setData(StatusRole, int(Teams::statusTone(status)));
-            item->setData(SessionRoles::TeamProgress, tones);
-            item->setData(MetaRole, QStringLiteral("%1/%2").arg(Teams::accepted(*team)).arg(team->tasks.size()));
-            item->setData(SessionRoles::Attention, answers); item->setData(SessionRoles::TeamMembers, int(team->members.size()));
-            item->setData(SessionRoles::Collapsed, m_collapsedTeams.contains(team->id));
-            const QString description = tr("Team %1: %2, %3 of %4 tasks accepted, %5 members, %6 questions. Click to open the team; the chevron collapses it.")
-                .arg(team->name, Teams::statusLabel(status)).arg(Teams::accepted(*team)).arg(team->tasks.size()).arg(team->members.size()).arg(answers);
-            item->setData(Qt::AccessibleTextRole, description);
-            continue;
-        }
         if (!row.launch.isEmpty()) {
             const auto launch = m_pendingLaunches.value(row.launch).toObject();
             const QString name = launch.value("tag").toString(), host = launch.value("host").toString();

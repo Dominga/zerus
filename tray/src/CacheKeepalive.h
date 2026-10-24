@@ -27,6 +27,8 @@ public:
     // One host's fresh sessions; returns keepalive replies to mark read.
     QList<Reply> observe(const QString &host, const BoxState &box, double now);
     bool pending(const QString &host, const SessionInfo &session) const;
+    // Keepalives sent and not yet answered by hgs.
+    int inFlight() const { return int(m_requests.size()); }
 
 private:
     struct State {

@@ -11,11 +11,11 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             ChildId, ParentKey, HasChildren, Expanded, ProjectColor, ProjectVivid, LaunchId, WorkingSince, ReviewLater, Draft, Failure,
             GitStatus, GitHost, GitPath, MetaIcon, Scheduled, OptionalQuestions, ModifiedAt, CoordinationWait, Waiting,
             Subordinate,
-            // WhiteWh fork: agent teams. A team header is a Header row with a
-            // TeamId; its lead and members are Subordinate rows with TeamMember.
-            TeamId, TeamStatus, TeamProgress, TeamMembers, TeamMember,
-            // The lead's row carries its team (id, name, status, label, tone,
-            // meta, members, answers, progress) for the strip in its card.
+            // WhiteWh fork: agent teams. Members are Subordinate rows with
+            // TeamMember (2 for the last); the lead's row carries its team
+            // (id, name, status, label, tone, meta, members, answers, progress)
+            // for the strip in its card.
+            TeamMember,
             TeamLead,
             Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
 }
@@ -47,9 +47,8 @@ signals:
     void rowCompacted(const QString &key);
     void sessionMoved(const QString &identity, const QString &group, const QString &before);
     void groupMoved(const QString &group, const QString &before);
-    // WhiteWh fork: a team header was clicked, or its chevron.
+    // WhiteWh fork: a lead's team strip was clicked.
     void teamActivated(const QString &team);
-    void teamToggled(const QString &team);
     void dragFinished();
 protected:
     QStringList mimeTypes() const override { return {QStringLiteral("application/x-hgs-session-placement")}; }
@@ -65,8 +64,6 @@ protected:
     void mouseReleaseEvent(QMouseEvent *) override;
     void keyPressEvent(QKeyEvent *) override;
 public:
-    // WhiteWh fork: the chevron of a team header.
-    static QRect teamToggleRect(const QRect &row) { return {row.right() - 30, row.top() + 6, 24, 22}; }
     // The team strip at the bottom of a lead's card; a click opens the team.
     static constexpr int TeamStripHeight = 28;
     static QRect teamStripRect(const QRect &row) { return {row.left() + 12, row.bottom() - 6 - 22, row.width() - 24, 22}; }
@@ -101,7 +98,7 @@ private:
     struct Placement { QString group, before; QRect indicator; bool onGroup = false; };
     Placement placement(const QPoint &point, bool group) const;
     QPoint m_press;
-    QString m_pressedTeam; bool m_pressedTeamToggle = false; QString m_pressedGroup;
+    QString m_pressedTeam, m_pressedGroup;
     QString m_pressedParent;
     bool m_dragging = false;
     QRect m_indicator;

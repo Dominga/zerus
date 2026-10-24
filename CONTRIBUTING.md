@@ -78,6 +78,11 @@ user with no capabilities or supplementary groups. A real nondumpable child
 checks that inspection restrictions still apply. Failed namespace admission fails
 the tests without an uncontained retry. For a focused local run, use
 `PYTHONPATH=tests python3 scripts/ci/worktree-tests.py test_worktrees test_worktree_lifecycle test_worktree_maintenance`.
+On macOS these three complete modules run sequentially after the other Python
+integration jobs. Exec/exit fixtures can briefly leave a live owned process
+without readable BSD metadata, and production must retain folders in that case.
+This changes only fixture scheduling: no process or test is excluded and the
+production guard remains strict.
 
 `check-source.py` keeps the desktop's Unix children from inheriting its descriptors
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects

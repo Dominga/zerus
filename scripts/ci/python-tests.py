@@ -25,6 +25,7 @@ TIMEOUT = 600
 # Larger classes run as several jobs of at most this many tests, unless they
 # share a class fixture.
 CHUNK = 12
+WORKTREE_MODULES = frozenset({"test_worktrees", "test_worktree_lifecycle", "test_worktree_maintenance"})
 
 # The classes unittest discovery would load from the module, by their names in
 # it, with their tests and whether they share a class fixture.
@@ -46,6 +47,10 @@ def environment():
 
 def jobs_for(module):
     """Jobs as (label, unittest names). A module that cannot be listed runs whole and reports why."""
+    # macOS has no private PID namespace. Keep each complete process-inventory
+    # module intact and run these after the unrelated process-mutating fixtures.
+    if sys.platform == "darwin" and module in WORKTREE_MODULES:
+        return [(module, [module])]
     result = subprocess.run([sys.executable, "-c", LIST_CLASSES, module], cwd=ROOT, env=environment(),
                             capture_output=True, text=True, timeout=120)
     try:
@@ -69,9 +74,7 @@ def run(job):
     command = [sys.executable, "-m", "unittest", "-v", *names]
     # A host's other jobs can deliberately hide process metadata. Cleanup must
     # then retain checkouts; positive deletion fixtures need their own inventory.
-    if sys.platform == "linux" and job.split(".")[0] in {
-        "test_worktrees", "test_worktree_lifecycle", "test_worktree_maintenance"
-    }:
+    if sys.platform == "linux" and job.split(".")[0] in WORKTREE_MODULES:
         command = [sys.executable, str(Path(__file__).with_name("worktree-tests.py")), *names]
     try:
         result = subprocess.run(command, cwd=ROOT, env=environment(), capture_output=True, text=True, timeout=TIMEOUT)
@@ -81,6 +84,16 @@ def run(job):
         output += f"\nFAIL: {job} exceeded {TIMEOUT // 60} minutes.\n"
         failed = True
     return job, output, failed, time.monotonic() - started
+
+
+def partition_jobs(jobs, system=None):
+    """macOS global process evidence must not race unrelated exec/exit fixtures."""
+    if (system or sys.platform) != "darwin":
+        return list(jobs), []
+    parallel, deferred = [], []
+    for item in jobs:
+        (deferred if item[0].split(".")[0] in WORKTREE_MODULES else parallel).append(item)
+    return parallel, deferred
 
 
 def main():
@@ -103,14 +116,22 @@ def main():
     print(f"Running {len(jobs)} test jobs from {len(modules)} modules with {workers} parallel jobs", flush=True)
     outputs, failed, durations = {}, set(), {}
     started = time.monotonic()
+    def record(result):
+        name, output, job_failed, seconds = result
+        print(f"\nRunning {name} ({seconds:.1f} s)", flush=True)
+        print(output, end="", flush=True)
+        outputs[name], durations[name] = output, round(seconds, 2)
+        if job_failed:
+            failed.add(name)
+
+    parallel, deferred = partition_jobs(jobs)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        for future in concurrent.futures.as_completed([pool.submit(run, job) for job in jobs]):
-            job, output, job_failed, seconds = future.result()
-            print(f"\nRunning {job} ({seconds:.1f} s)", flush=True)
-            print(output, end="", flush=True)
-            outputs[job], durations[job] = output, round(seconds, 2)
-            if job_failed:
-                failed.add(job)
+        for future in concurrent.futures.as_completed([pool.submit(run, job) for job in parallel]):
+            record(future.result())
+    # The strict kernel sampler still sees every owned process, including each
+    # fixture's real blockers. Only unrelated fixtures have finished first.
+    for job in deferred:
+        record(run(job))
     for module in modules:
         parts = sorted(job for job in outputs if job == module or job.startswith(module + "."))
         (RESULTS / f"{module}.log").write_text("".join(f"== {job}\n{outputs[job]}" for job in parts))

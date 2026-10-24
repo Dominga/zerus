@@ -125,6 +125,8 @@ pub(crate) enum Decision {
 /// replace (by id), or an id to remove.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Proposal {
+    /// Given by hgs when the proposal is made.
+    #[serde(default)]
     pub id: String,
     /// role, template or rule.
     pub kind: String,
@@ -338,15 +340,18 @@ fn locked<T>(f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
 }
 
 /// The Team designer's first prompt: what it may do and how it proposes.
-pub(crate) fn designer_brief(catalog: &Catalog, goal: &str) -> String {
+pub(crate) fn designer_brief(catalog: &Catalog, goal: &str, project: &str) -> String {
     let mut text = format!(
         "You are the Zerus Team designer. You configure the team catalog: roles, templates (which roles a kind of work \
-         needs, with a task skeleton) and routing rules. Read `hgs guide designer` first. You may read this project to \
-         learn how it works, but change no file: your only output is proposals with `hgs team catalog propose --json`. \
+         needs, with a task skeleton) and routing rules. Read `hgs guide designer` first. You may read the owner's \
+         projects to learn how they work, but change no file: your only output is proposals with `hgs team catalog propose --json`. \
          The owner keeps or rejects each proposal and applies them; running teams keep their roster. The catalog is v{}: \
          read it with `echo '{{}}' | hgs team catalog get --json`. Ask the owner what they need, then propose.",
         catalog.version
     );
+    if !project.trim().is_empty() {
+        text += &format!("\n\nThe owner works in the project folder {}.", project.trim());
+    }
     if !goal.trim().is_empty() {
         text += &format!("\n\nThe owner asks: {}", goal.trim());
     }
@@ -354,8 +359,13 @@ pub(crate) fn designer_brief(catalog: &Catalog, goal: &str) -> String {
 }
 
 fn designer(input: &Value) -> anyhow::Result<Value> {
-    let folder = input["folder"].as_str().unwrap_or_default();
-    ensure!(!folder.is_empty(), "Choose the project folder the designer reads");
+    // The catalog belongs to no project: the designer runs in its own folder,
+    // so the desktop lists it outside the projects. The project it may read is
+    // named in its brief.
+    let project = input["folder"].as_str().unwrap_or_default();
+    let home = super::super::root().join("team-designer");
+    std::fs::create_dir_all(&home).context("Could not create the Team designer's folder")?;
+    let folder = home.to_string_lossy().into_owned();
     let agent = input["agent"].as_str().filter(|a| !a.is_empty()).unwrap_or("claude");
     ensure!(["claude", "codex", "kimi", "dsh", "opencode"].contains(&agent), "Unknown agent {agent}");
     // A model or effort is one word, as a provider's command line takes it.
@@ -366,8 +376,8 @@ fn designer(input: &Value) -> anyhow::Result<Value> {
     };
     let (model, effort) = (word("model")?, word("effort")?);
     let launch_id = uuid::Uuid::new_v4().to_string();
-    let brief = designer_brief(&load()?, input["goal"].as_str().unwrap_or_default());
-    let mut args: Vec<String> = [agent, folder, "--new", "-n", "team-designer", "--launch-id", launch_id.as_str()].map(String::from).to_vec();
+    let brief = designer_brief(&load()?, input["goal"].as_str().unwrap_or_default(), project);
+    let mut args: Vec<String> = [agent, folder.as_str(), "--new", "-n", "team-designer", "--launch-id", launch_id.as_str()].map(String::from).to_vec();
     // As a new session from the desktop: a terminal agent runs detached and
     // takes the model on its own command line; OpenCode takes it from hgs.
     let terminal = agent != "dsh" && agent != "opencode";
@@ -381,15 +391,8 @@ fn designer(input: &Value) -> anyhow::Result<Value> {
         }
     }
     args.push("--".into());
-    if terminal && !model.is_empty() {
-        args.extend(["--model".into(), model.clone()]);
-        if !effort.is_empty() {
-            match agent {
-                "claude" => args.extend(["--effort".into(), effort.clone()]),
-                "codex" => args.extend(["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]),
-                _ => {}
-            }
-        }
+    if terminal {
+        args.extend(super::dispatcher::agent_args(agent, &model, &effort));
     }
     args.push(brief);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -502,6 +505,13 @@ mod tests {
         validate(&catalog).unwrap();
         assert_eq!(route(&catalog, "Fix the login bug")["template"]["id"], "bugfix");
         assert_eq!(route(&catalog, "New checkout")["template"]["id"], "feature");
+    }
+
+    #[test]
+    fn a_proposal_needs_no_id_of_its_own() {
+        // hgs gives the id; the guide's example has none.
+        let proposal: Proposal = serde_json::from_value(json!({"kind":"role","action":"remove","target":"tester"})).unwrap();
+        assert!(proposal.id.is_empty());
     }
 
     #[test]

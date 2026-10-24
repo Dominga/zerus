@@ -141,6 +141,17 @@ pub(crate) struct Member {
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,
+    /// DeepSeek takes its model and effort after it starts; once tried, the
+    /// dispatcher does not try again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settings_applied: bool,
+}
+
+impl Member {
+    /// A started DeepSeek member whose role chose a model or effort.
+    pub(crate) fn needs_settings(&self) -> bool {
+        self.agent == "dsh" && !self.settings_applied && (!self.model.is_empty() || !self.effort.is_empty())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -324,6 +335,10 @@ pub(crate) struct Team {
     pub brief: Notice,
     #[serde(default)]
     pub brief_id: String,
+    /// The template's lead protocol when the team was created, given to the
+    /// lead with the planning brief.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lead_protocol: String,
 }
 
 impl Team {

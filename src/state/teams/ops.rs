@@ -114,6 +114,17 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         tasks.push(task);
     }
     let start = input["start"].as_bool() == Some(true);
+    // The template's lead protocol, as the catalog has it now, unless the
+    // request brings its own; the lead reads it with the planning brief.
+    let template = text(input, "template");
+    let lead_protocol = match text(input, "lead_protocol") {
+        "" if !template.is_empty() => super::catalog::load()
+            .ok()
+            .and_then(|catalog| catalog.templates.into_iter().find(|t| t.id == template))
+            .map(|t| t.lead_protocol)
+            .unwrap_or_default(),
+        given => given.to_owned(),
+    };
     // A lead without a session is started first; an existing lead is briefed.
     let team = Team {
         id: id.to_owned(),
@@ -128,6 +139,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         members,
         tasks,
         brief: if start { Notice::Pending } else { Notice::None },
+        lead_protocol: clean(&lead_protocol, 8000, "The lead protocol")?,
         ..Default::default()
     };
     let events = vec![Event::new("created", json!({"by":"You","name":name}))];

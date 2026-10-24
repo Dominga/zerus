@@ -239,7 +239,7 @@ void TeamDesignerPage::refresh()
     m_open->setVisible(!session.isEmpty());
     m_chatStack->setCurrentIndex(session.isEmpty() ? 0 : 1);
     if (!session.isEmpty()) m_chat->setSession({}, session);
-    else if (m_start) { m_start->setEnabled(!m_folder.isEmpty()); m_start->setText(tr("Start designer")); }
+    else if (m_start) { m_start->setEnabled(true); m_start->setText(tr("Start designer")); }
     m_editor->setDesignerWorking(live.working);
     renderProposals();
 }

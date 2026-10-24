@@ -6438,9 +6438,8 @@ void SessionsWindow::openRelatedSession(const QString &host,const QString &name,
 // designer session, which proposes catalog changes; its draft waits for Apply.
 QString SessionsWindow::teamDesignerSession() const
 {
-    // One designer conversation per project: <agent>/<project>/team-designer.
-    for(const auto &e:m_entries)if(e.host.isEmpty()&&e.session.state=="running"&&e.session.name.endsWith("/team-designer")
-        &&(m_teamDesignerProject.isEmpty()||e.session.name.section('/',1,1)==m_teamDesignerProject))return e.session.name;
+    // One designer conversation, outside the projects: hgs starts it in its own folder.
+    for(const auto &e:m_entries)if(e.host.isEmpty()&&e.session.state=="running"&&e.session.name.endsWith("/team-designer"))return e.session.name;
     return {};
 }
 void SessionsWindow::showTeamDesigner()
@@ -6466,7 +6465,7 @@ void SessionsWindow::showTeamDesigner()
 }
 void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent)
 {
-    if(!m_teams||folder.isEmpty())return;
+    if(!m_teams)return;
     showNotice(tr("Starting the Team designer…"));
     QJsonObject input=agent;input.insert("folder",QDir::toNativeSeparators(folder));input.insert("goal",goal);
     m_teams->call(QStringLiteral("catalog designer"),input,

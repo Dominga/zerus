@@ -67,6 +67,12 @@ def run(job):
     job, names = job
     started = time.monotonic()
     command = [sys.executable, "-m", "unittest", "-v", *names]
+    # A host's other jobs can deliberately hide process metadata. Cleanup must
+    # then retain checkouts; positive deletion fixtures need their own inventory.
+    if sys.platform == "linux" and job.split(".")[0] in {
+        "test_worktrees", "test_worktree_lifecycle", "test_worktree_maintenance"
+    }:
+        command = [sys.executable, str(Path(__file__).with_name("worktree-tests.py")), *names]
     try:
         result = subprocess.run(command, cwd=ROOT, env=environment(), capture_output=True, text=True, timeout=TIMEOUT)
         output, failed = result.stdout + result.stderr, result.returncode != 0

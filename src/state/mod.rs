@@ -86,6 +86,7 @@ mod worktrees;
 mod worktree_cleanup;
 mod worktree_inspection;
 mod worktree_lifecycle;
+mod worktree_maintenance;
 
 /// Read the selected account's native catalog without starting an agent.
 pub(crate) fn account_models(provider: &str, home: &std::path::Path) -> serde_json::Value {

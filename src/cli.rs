@@ -118,6 +118,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
        hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
        hgs [@host] worktrees review --path PATH [--worktree WORKTREE] [--json]   cleanup verdicts and fingerprints
+       hgs [@host] worktrees policy get|set --json   worktree-maintenance-v1 (host-local cleanup rules)
+       hgs [@host] worktrees sweep --json   one bounded automatic cleanup step
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes
        hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
@@ -640,8 +642,8 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             if command == "dirs" && has(args, "--create") && dry {
                 return Err(Error::new(1, "folder creation does not support --dry-run"));
             }
-            if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
-                return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
+            if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove" || s == "sweep" || s == "policy" && args.get(1).is_some_and(|s|s=="set")) && dry {
+                return Err(Error::new(1, "worktree creation, removal and policy changes do not support --dry-run"));
             }
             if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));

@@ -2237,6 +2237,48 @@ not ownership evidence. Automatic cleanup has bounded checks and never changes
 a successful archive into a failed termination. A lost removal acknowledgement
 is reported as unconfirmed, with no automatic replay.
 
+**Settings > Worktrees** controls cleanup on the selected computer across all
+its projects. Each computer keeps its own policy. The master switch and the
+three independent rules default to on:
+
+- Clean an integrated managed worktree after its last session is archived or
+  terminated.
+- Periodically clean unused integrated managed worktrees after **24 hours** of
+  Git inactivity by default (configurable from 1 to 8760 hours). This also covers
+  work integrated after archival and worktrees created without a session.
+- Forget a missing managed checkout only after verifying its retained Git
+  registration, ownership nonce and absence of session references.
+
+Periodic maintenance runs with the existing host recovery service, independently
+of whether automatic provider-error recovery is enabled or the GUI is open. It
+imports at most 64 old ownership receipts and checks at most one queued worktree
+per 30-second round. An indexed private queue schedules retained worktrees for a
+later hourly check; it does not rescan project disks or journals. Archive metadata
+checks stream at most 5000 entries and 32 MiB within their deadline; incomplete
+coverage keeps automatic cleanup from removing the folder. Old removed receipts
+do not repopulate the queue once their Git metadata is gone.
+
+All automatic rules use fresh native checks under the repository/session locks.
+They preserve branches, changed/untracked files and **all ignored local data**,
+including build caches. Running executables inside the checkout protect it even
+when their current directory is elsewhere. An incomplete or inaccessible process
+inventory also keeps the checkout. These checks cover the owning user's processes;
+Windows currently retains automatic candidates because process folders cannot be
+verified there. Cleanup reserves its removal intent
+durably before invoking Git. An interrupted or unconfirmed attempt stays for
+manual review across worker restarts; a periodic sweep cannot replay an uncertain
+archive-triggered deletion. External or old worktrees without matching ownership
+receipts require explicit review in Projects. Recent activity or a folder/branch
+name alone never establishes that a worktree is disposable.
+
+Read the host policy with `hgs [@host] worktrees policy get --json`; save the full
+reviewed policy from JSON stdin with `worktrees policy set --json`. The revision
+must still match. Existing policy files and writes require every versioned field;
+incomplete or invalid policies keep folders instead of enabling defaults.
+`hgs [@host] worktrees sweep --json` performs one bounded automatic
+step and respects the same policy and protections. Reads never start a sweep;
+creation, removal, sweep and policy writes reject `--dry-run`.
+
 The desktop reports successful automatic cleanup, or keeps **Folder kept:
 <folder>** after Terminate/Archive (**Cleanup unconfirmed:** when the outcome is
 unconfirmed). This global reminder names the retained checkout; its tooltip and

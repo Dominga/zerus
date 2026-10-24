@@ -501,6 +501,12 @@ target_compile_definitions(test_questioncard PRIVATE ZERUS_OPENCODE_FORM_CONTRAC
 zerus_add_test(questioncard test_questioncard)
 set_tests_properties(questioncard PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_worktreesettings test_worktreesettings.cpp)
+target_include_directories(test_worktreesettings PRIVATE ../src)
+target_link_libraries(test_worktreesettings PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
+zerus_add_test(worktreesettings test_worktreesettings)
+set_tests_properties(worktreesettings PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_workspace test_workspace.cpp)
 target_include_directories(test_workspace PRIVATE ../src)
 target_link_libraries(test_workspace PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)

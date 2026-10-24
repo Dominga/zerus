@@ -75,6 +75,16 @@ only after the user selects Start session. Inspecting or opening a dialog must
 never create a worktree. Keep direct-folder launch and explicit custom/existing
 worktree choices available. Destructive UI actions require explicit confirmation.
 
+Worktree maintenance is configured per owning computer in Settings > Worktrees.
+Its default-enabled lifecycle, periodic integrated-checkout and missing-checkout
+rules require verified Zerus ownership and fresh session/process/file checks.
+Keep branches and all ignored local data; age and naming never authorize removal.
+An unconfirmed automatic removal stays for manual review across every trigger.
+An existing incomplete or malformed policy must fail closed, never re-enable
+default cleanup rules.
+Use bounded indexed queue reads and bounded archive metadata checks; see
+the worktree cleanup section in `docs/reference.md`.
+
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
 remains in Active and accepts new messages. Native work and explicit attention
 take precedence. A native Stop ends a turn; it does not prove those jobs finished.

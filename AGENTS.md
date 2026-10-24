@@ -184,3 +184,19 @@ and export with `bd export -o .beads/issues.jsonl` before staging tracker change
 Inspect `git status` and the staged diff. Commit, push and synchronize only when
 explicitly authorized; the default workflow is conservative.
 Mirror substantive instruction changes in `AGENTS.md` and `CLAUDE.md`.
+
+## Roman Ilyin fork
+
+This fork develops on `main`, starting from WhiteWh's `whitewh/main` commit
+`f31086364f0964c4910a861c385baec904c39b0f`. `origin` is
+`romanilyin/zerus`; `whitewh` and `upstream` are read-only source remotes.
+Preserve upstream attribution, application identifiers and session identities.
+The fork scope is PowerShell 7 Core, explicit canonical path identity and local
+Windows-to-WSL transport for an existing OpenCode 2 service.
+Use synthetic examples and keep deployment settings outside the public tree.
+
+Publication and account-specific permissions described above belong to the
+original maintainers. They do not authorize publishing, signing, external PRs
+or account changes from this fork. Keep automatic update feeds unset until a
+fork-owned distribution channel is explicitly configured and verified.
+Synchronize Beads only with the configured `romanilyin/zerus` remote.

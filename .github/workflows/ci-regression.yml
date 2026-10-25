@@ -15,7 +15,9 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: ci-regression-main
+  # An older build can complete after a newer one. It must not cancel the
+  # newer source's tests; only duplicate tests of the same source may replace it.
+  group: ci-regression-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: true
 
 jobs:

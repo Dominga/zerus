@@ -330,6 +330,11 @@ answered; a denial cannot carry an explanation.
   plan or by `extend` in any active status); `approve-phase N` is refused
   until every earlier phase is approved and decided; discarding one draft
   keeps the later ones. Owner: yes, in phase 1 of the next team.
+- **F10. Editable drafts.** Seen in use: an urgent fix could not be put before
+  the queued drafts (a new phase always goes last), a draft cannot take one more
+  task, and only the owner may discard. Proposal: until a draft is approved the
+  lead may add, change or remove its tasks, insert a phase before other drafts
+  and discard its own drafts; every change shows to the owner as a diff.
 
 ## G. GUI
 

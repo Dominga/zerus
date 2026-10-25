@@ -132,6 +132,33 @@ answered; a denial cannot carry an explanation.
   rejects the task by the exit code, without the lead. Owner: yes, run in the
   member's session. The plan shows each check command to the owner before
   approval.
+- **C7. Plan health feedback (owner, from team 58fd186a).** A lead turned
+  owner rounds into whole-round barriers (a runtime install waited for the
+  acceptance of model installs; one task waited for three blocks' acceptance)
+  and the team ran one task at a time for hours while members idled. Zerus
+  must say so to the planning lead, explicitly and with numbers, at plan,
+  extend and revision time and while the team runs:
+  - critical path length versus total work, expected parallelism per member,
+    the widest ready set; hard dependencies on review/QA/acceptance tasks that
+    gate unrelated work (fan-in barriers); members with no ready work for N
+    minutes while tasks are open ("starved: 3 members idle, 0 ready, chain
+    #401 <- #507 <- ...");
+  - shown as plan warnings in validation, in status (a plan-health block) and
+    as one message to the lead; the owner sees the same numbers in the GUI.
+- **C8. Running-plan revisions.** Beyond drafts (F10): not-started tasks of an
+  approved phase can be changed (deps, text, assignee) by a revision with a
+  preview diff, a cycle check and kept reports; accepted work never changes;
+  the owner confirms revisions that touch approved scope.
+- **C9. Owner constraints in the graph.** An ordering rule of the owner
+  ("publish only after local acceptance") is written as a dependency or gate,
+  never only as text, so the cycle check catches it (the incident's cycle
+  appeared only when the owner's rule was added).
+- **C10. Why a hard dependency.** A hard dependency may name what the consumer
+  needs (an artifact, a contract, a commit); one on a review/QA/acceptance task
+  without it is a plan warning (C7).
+- **C11. Not needed is not cancelled.** A conditional fix or retest can be
+  closed as "not needed" with a reason; that satisfies hard dependencies
+  without a fake Accepted, unlike a plain cancel.
 - **C6. Unblocking order.** When a member has several ready tasks, the
   dispatcher hands out first the one with the most dependants. Owner: yes, in
   Zerus's dispatcher, no model involved.

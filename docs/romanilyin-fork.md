@@ -68,3 +68,7 @@ stay private; an expired quota token is distinct from native sign-in; team
 worker status is additive; DeepSeek reads bounded session rows, with a read-only
 fallback for older adapters. These checks do not authorize native writes or
 service management during inspection.
+
+Build identity, update isolation and matching Windows/WSL delivery are described
+in [fork candidates](fork-candidates.md). Candidate labels do not rename saved
+applications or sessions and do not authorize public releases.

@@ -160,10 +160,7 @@ if(ZERUS_EXTENSIONS_ON_BY_DEFAULT)
     add_compile_definitions(ZERUS_EXTENSIONS_ON_BY_DEFAULT)
 endif()
 if(NOT ZERUS_FORK_FEED_URL STREQUAL "")
-    if(NOT ZERUS_FORK_FEED_URL MATCHES "^https://github[.]com/WhiteWh/zerus/releases/[A-Za-z0-9./_-]+$")
-        message(FATAL_ERROR "ZERUS_FORK_FEED_URL must name a release asset of WhiteWh/zerus")
-    endif()
-    target_compile_definitions(hgs-updates PRIVATE ZERUS_FORK_FEED_URL="${ZERUS_FORK_FEED_URL}")
+    message(FATAL_ERROR "This fork candidate has no authorized update feed; keep ZERUS_FORK_FEED_URL unset")
 endif()
 
 # Tray sources compile once, into static libraries that hgs-tray and the Qt suites

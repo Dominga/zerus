@@ -10,6 +10,7 @@ class QCheckBox;
 // Operator-selected lexical alias. Preview never grants filesystem access;
 // the enclosing directory picker must still read the target native directory.
 class WslPathMappingDialog : public QDialog {
+    Q_OBJECT
 public:
     WslPathMappingDialog(const QString &hgsPath, const QString &host,
                          const QString &machineId, const QJsonObject &profile,

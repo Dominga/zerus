@@ -21,19 +21,47 @@ const PEER_COMMAND: &str = "h=~/.local/bin/hgs; if \"$h\" --help 2>/dev/null | g
 
 pub fn version(config: &Config, target: &str, args: &[String]) -> Result<i32> {
     if target.is_empty() || config.is_self(target) {
-        println!("hgs {VERSION}");
+        if args == ["--json"] {
+            println!("{}", build_identity());
+        } else {
+            println!("hgs {VERSION}");
+        }
         return Ok(0);
     }
-    if !args.is_empty() {
-        return Err(Error::new(1, "usage: hgs [@host] version"));
+    if !args.is_empty() && args != ["--json"] {
+        return Err(Error::new(1, "usage: hgs [@host] version [--json]"));
     }
-    // Every hgs answers --version without side effects.
-    let output = ssh(config, target, &crate::windows_peer::hgs(config, target, &["--version".into()])?)?;
+    // Every hgs answers --version without launching an unknown agent. An older
+    // peer may return text instead of JSON; consumers must then refuse pairing.
+    let mut remote = vec!["--version".into()]; remote.extend_from_slice(args);
+    let output = ssh(config, target, &crate::windows_peer::hgs(config, target, &remote)?)?;
     if !output.status.success() {
         return Err(Error::new(3, format!("{target} unreachable: {}", detail(&output))));
     }
     print!("{}", String::from_utf8_lossy(&output.stdout));
     Ok(0)
+}
+
+fn build_identity() -> Value {
+    json!({"schema_version":1,"product":"hgs","version":VERSION,
+        "distribution":"romanilyin/zerus","fork_version":env!("ZERUS_FORK_VERSION"),
+        "channel":"candidate","source_commit":env!("ZERUS_BUILD_SOURCE_COMMIT"),
+        "source_dirty":env!("ZERUS_BUILD_SOURCE_DIRTY") != "false",
+        "os":std::env::consts::OS,"architecture":std::env::consts::ARCH,
+        "wsl_receiver_abi":"wsl-local-v1","path_ref_schema":1,
+        "opencode_binding_abi":"opencode-bind-existing-v1"})
+}
+
+#[test]
+fn fork_identity_is_explicit_and_independent_of_upstream_version() {
+    let value = build_identity();
+    assert_eq!(value["distribution"],"romanilyin/zerus");
+    assert_eq!(value["channel"],"candidate");
+    assert_eq!(value["fork_version"],include_str!("../FORK_VERSION").trim());
+    assert_eq!(value["version"],VERSION);
+    assert!(value["source_dirty"].is_boolean());
+    let source=value["source_commit"].as_str().unwrap();
+    assert!(source.is_empty() || source.len()==40);
 }
 
 pub fn run(config: &Config, target: &str, args: &[String], dry: bool) -> Result<i32> {

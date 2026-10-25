@@ -9,6 +9,7 @@ class QPushButton;
 // Explicit selection: opening the dialog is read-only and sends no request.
 // A verified preview is required before one local Zerus binding may be written.
 class OpenCodeExistingDialog : public QDialog {
+    Q_OBJECT
 public:
     OpenCodeExistingDialog(const QString &hgsPath, const QString &host,
                            const QString &agentHome, QWidget *parent = nullptr);

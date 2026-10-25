@@ -7,6 +7,7 @@ import zipfile
 import zlib
 
 import conpty_pair
+import fork_identity
 from release_common import require
 
 TOP = "zerus-windows-x86_64"
@@ -97,6 +98,11 @@ def inspect(path, required=REQUIRED):
         require(0 < len(entries) <= ENTRY_LIMIT, "Unexpected Windows portable entry count.")
         names, folded, total = set(), set(), 0
         for entry in entries:
+            # ZipInfo normalizes Windows separators (and truncates NUL) while
+            # reading. Validate the original stored spelling before that change
+            # can make an ambiguous archive look safe on the current OS.
+            require(entry.orig_filename == entry.filename,
+                    f"Windows portable entry changes under ZIP decoding: {entry.orig_filename!r}")
             name = safe_name(entry.filename)
             require(not FORBIDDEN.search(name), f"Windows portable bundle must not contain {name}")
             # conpty.dll would run an OpenConsole.exe from a subfolder when none sat next to it.
@@ -144,6 +150,13 @@ def inspect(path, required=REQUIRED):
                 f"Invalid Windows portable {key}.")
     require(isinstance(manifest.get("source_commit"), str) and re.fullmatch(r"[0-9a-f]{40}", manifest["source_commit"]),
             "Windows portable bundle lacks its exact source commit.")
+    if "distribution" in manifest:
+        require(manifest["distribution"] == fork_identity.DISTRIBUTION and manifest.get("fork_channel") == "candidate",
+                "Windows portable belongs to another fork distribution/channel")
+        fork_identity.cli_identity(manifest.get("cli_build"), manifest["source_commit"], manifest.get("fork_version"), "windows")
+        fork_identity.gui_identity(manifest.get("gui_build"), manifest["source_commit"], manifest["fork_version"])
+        require(manifest["cli_build"]["version"] == manifest["cli_version"] and manifest["gui_build"]["version"] == manifest["version"],
+                "Windows binary versions disagree with their manifest")
     return manifest
 
 

@@ -118,6 +118,12 @@ QJsonObject UpdateController::buildInfo(){
     QJsonObject info{{"version",QCoreApplication::applicationVersion()},
                      {"versionName",QCoreApplication::applicationVersion()},
                      {"devBuildNumber",0},{"sourceCommit",QString()},{"sourceDirty",QJsonValue()}};
+#ifdef ZERUS_FORK_VERSION
+    info["distribution"]="romanilyin/zerus";
+    info["forkVersion"]=QStringLiteral(ZERUS_FORK_VERSION);
+    info["forkChannel"]="candidate";
+    info["forkUpdatesEnabled"]=false;
+#endif
 #ifdef ZERUS_BUILD_SOURCE_COMMIT
     info["sourceCommit"]=QStringLiteral(ZERUS_BUILD_SOURCE_COMMIT);
     info["sourceDirty"]=bool(ZERUS_BUILD_SOURCE_DIRTY);
@@ -129,7 +135,10 @@ QJsonObject UpdateController::buildInfo(){
     return info;
 }
 QString UpdateController::installedVersion(){
-    const auto info=buildInfo();const auto version=info["versionName"].toString();
+    const auto info=buildInfo();auto version=info["versionName"].toString();
+#ifdef ZERUS_FORK_VERSION
+    version=tr("Fork %1 candidate — Zerus %2").arg(info["forkVersion"].toString(),version);
+#endif
     if(info["devBuildNumber"].toInteger()>0||info["sourceCommit"].toString().isEmpty())return version;
     const auto source=info["sourceCommit"].toString().left(7);
     return info["sourceDirty"].toBool()?tr("%1 (local changes %2)").arg(version,source):QString("%1 (%2)").arg(version,source);
@@ -585,6 +594,10 @@ void UpdateController::detectInstallation(const QString &executable){
 // WhiteWh fork: Check now also reads the fork's feed, which otherwise waits an hour.
 void UpdateController::check(){refreshBundleState();startCheck(false);ForkUpdater::instance()->check();}
 void UpdateController::startCheck(bool automatic){
+#ifdef ZERUS_FORK_VERSION
+    if(!m_fetch){m_feed={};m_available=false;m_freshForNotification=false;m_startCheck=false;
+        m_message=tr("This fork candidate has no configured update channel. Install a verified matching candidate explicitly.");emit changed();return;}
+#endif
     if(automatic&&!automaticChecks())return;
     if(m_busy)return;m_busy=true;m_freshForNotification=false;m_automaticInFlight=automatic;m_message="Checking the published release catalog…";m_error.clear();emit changed();emit requestStarted();
     QString selected=channel();auto generation=++m_checkGeneration;QSettings().setValue("updates/lastAttempt/"+selected,QDateTime::currentSecsSinceEpoch());
@@ -626,6 +639,11 @@ void UpdateController::compare(){
 
 void UpdateController::present(const QString &message){m_comparison=message;m_message=m_notice+(m_notice.isEmpty()||message.isEmpty()?QString():QStringLiteral(" "))+message;}
 void UpdateController::restoreCatalog(){
+#ifdef ZERUS_FORK_VERSION
+    // Explicit injected transports serve the inherited contract tests. A real
+    // fork candidate never adopts an upstream cached catalog as its own channel.
+    if(!m_fetch){m_feed={};m_available=false;m_message=tr("This fork candidate has no configured update channel.");return;}
+#endif
     QSettings settings;auto selected=channel();auto raw=settings.value("updates/catalog/"+selected).toByteArray();auto parsed=parseFeed(raw,selected);auto checked=settings.value("updates/lastSuccess/"+selected,0).toLongLong();
     if(!parsed.valid||checked<=0||checked>QDateTime::currentSecsSinceEpoch())return;
     m_feed=parsed;m_lastSuccess=checked;m_cached=true;m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(checked).toString(Qt::ISODate)+" (cached).";

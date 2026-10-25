@@ -893,6 +893,8 @@ async fn startup_adopts_retained_metadata_once_without_raising_a_full_workspaces
         .unwrap();
     t.commit().await.unwrap();
     store.db.close().await;
+    // SQLite file-lock ownership ends when the closed Store/Db is dropped.
+    drop(store);
     for _ in 0..2 {
         let reopened = backend.store().await;
         assert_eq!(retained_bytes(&reopened, &node).await, previous + 3072);
@@ -930,6 +932,7 @@ async fn startup_adopts_retained_metadata_once_without_raising_a_full_workspaces
         );
         assert_eq!(retained_bytes(&reopened, &node).await, previous + 3072);
         reopened.db.close().await;
+        drop(reopened);
     }
 }
 
@@ -1303,4 +1306,178 @@ fn generate_public_load_fixtures() {
         metadata.insert(lane.into(),json!({"workspace_id":workspace,"node_id":computer.public().device_id,"node_token":node_secret,"device_id":phone.public().device_id,"device_token":device_secret,"request_id":request_id}));
     }
     write("metadata.json", &Value::Object(metadata));
+}
+
+// Capacity is exhausted through the existing operator-owned shared lane. The
+// node calls the real HTTP endpoint; no admission hook or claim-state repair
+// is used before the same accepted request is eventually delivered once.
+async fn preclaim_capacity_refusal_keeps_the_same_request_queued(lane: &str) {
+    let backend = Backend::new(config()).await;
+    let store = backend.store().await;
+    let (computer, node_token, mut state, node) = create(&store).await;
+    let (phone, device_token, _device) =
+        enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+    let server = Server::start(&store).await;
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let request_id = id();
+    let envelope = seal(
+        &phone,
+        &computer,
+        &state,
+        &node.id,
+        &request_id,
+        PayloadKind::Request,
+        b"Synthetic capacity control; never executes native work",
+    );
+    let submitted = http(
+        &client,
+        &server,
+        "/v2/requests",
+        &device_token,
+        &json!({"envelope":envelope}),
+    )
+    .await;
+    assert_eq!(submitted.0, StatusCode::ACCEPTED);
+    assert_eq!(submitted.1["request_id"], request_id);
+    let before = store
+        .db
+        .one(
+            "SELECT state,claimed,body_hash,body_bytes FROM encrypted_requests WHERE id=?",
+            args![&request_id],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before["state"], "queued");
+    assert!(before["claimed"].is_null());
+    assert!(
+        support::eventually(|| async {
+            store
+                .db
+                .one("SELECT count(*) AS n FROM service_leases", &[])
+                .await
+                .unwrap()
+                .unwrap()["n"]
+                == 0
+        })
+        .await
+    );
+    let total = store
+        .db
+        .cfg
+        .service_lanes()
+        .into_iter()
+        .find(|(name, _)| *name == lane)
+        .unwrap()
+        .1;
+    let standard = store.db.cfg.standard_capacity(total);
+    let units = if lane == "spool" {
+        standard - 1024 * 1024
+    } else {
+        standard
+    };
+    let held = store
+        .acquire_service(lane, ServiceClass::Standard, units)
+        .await
+        .unwrap();
+    assert!(held.is_some());
+    let refused = client
+        .get(server.at("/v2/node/requests?wait=0"))
+        .bearer_auth(&node_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        refused.json::<Value>().await.unwrap(),
+        json!({"error":"relay capacity is busy"})
+    );
+    let after = store
+        .db
+        .one(
+            "SELECT state,claimed,body_hash,body_bytes FROM encrypted_requests WHERE id=?",
+            args![&request_id],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after["state"], "queued",
+        "{lane} capacity refusal must leave the request queued"
+    );
+    assert!(after["claimed"].is_null());
+    assert_eq!(after["body_hash"], before["body_hash"]);
+    assert_eq!(after["body_bytes"], before["body_bytes"]);
+    drop(held);
+    assert!(
+        support::eventually(|| async {
+            store
+                .db
+                .one("SELECT count(*) AS n FROM service_leases", &[])
+                .await
+                .unwrap()
+                .unwrap()["n"]
+                == 0
+        })
+        .await
+    );
+    let delivered = client
+        .get(server.at("/v2/node/requests?wait=0"))
+        .bearer_auth(&node_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delivered.status(), StatusCode::OK);
+    let body = delivered.json::<Value>().await.unwrap();
+    assert_eq!(body["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(body["requests"][0], json!(envelope));
+    let claimed = store
+        .db
+        .one(
+            "SELECT state,claimed,body_hash,body_bytes FROM encrypted_requests WHERE id=?",
+            args![&request_id],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed["state"], "claimed");
+    assert!(!claimed["claimed"].is_null());
+    assert_eq!(claimed["body_hash"], before["body_hash"]);
+    assert_eq!(claimed["body_bytes"], before["body_bytes"]);
+    assert!(
+        support::eventually(|| async {
+            store
+                .db
+                .one("SELECT count(*) AS n FROM service_leases", &[])
+                .await
+                .unwrap()
+                .unwrap()["n"]
+                == 0
+        })
+        .await
+    );
+    let empty = client
+        .get(server.at("/v2/node/requests?wait=0"))
+        .bearer_auth(&node_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::OK);
+    assert!(empty.json::<Value>().await.unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    server.stop().await;
+    store.db.close().await;
+}
+#[tokio::test]
+async fn encrypted_poll_spool_refusal_leaves_request_queued_until_capacity_returns() {
+    preclaim_capacity_refusal_keeps_the_same_request_queued("spool").await;
+}
+#[tokio::test]
+async fn encrypted_poll_cpu_refusal_leaves_request_queued_until_capacity_returns() {
+    preclaim_capacity_refusal_keeps_the_same_request_queued("cpu").await;
 }

@@ -25,6 +25,27 @@ tokio::task_local! { static ORDINARY_CONTROL:bool; }
 pub async fn ordinary_control<T>(future: impl std::future::Future<Output = T>) -> T {
     ORDINARY_CONTROL.scope(true, future).await
 }
+/// Cleanup owns its existing tracked task and retries only an idempotent SQL
+/// release, including an unknown COMMIT result. No new tasks or connections.
+/// Do not stop on `Db::stop`: close cancels it before its five-second grace.
+pub(crate) async fn retry_cleanup<F, T>(mut operation: F) -> Result<()>
+where
+    F: FnMut() -> T,
+    T: std::future::Future<Output = Result<()>>,
+{
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match operation().await {
+                Err(error) if error.0 == Error::UNAVAILABLE.0 => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
+    })
+    .await
+    .unwrap_or(Err(Error::UNAVAILABLE))
+}
 pub type RowValue = Value;
 #[derive(Clone)]
 pub struct Db {
@@ -341,6 +362,36 @@ impl Db {
             .clone()
             .try_acquire_owned()
             .map_err(|_| Error::BUSY)?;
+        let inner = pool
+            .begin_with(if self.postgres {
+                "BEGIN"
+            } else {
+                "BEGIN IMMEDIATE"
+            })
+            .await?;
+        Ok(Tx {
+            inner,
+            postgres: self.postgres,
+            _permit: permit,
+        })
+    }
+    /// Public lease cleanup waits for its own class's existing control slot.
+    /// Ordinary admission remains fail-fast and cannot borrow another class.
+    pub(crate) async fn cleanup_control(&self, class: crate::store::ServiceClass) -> Result<Tx> {
+        if !self.cfg.public_enrollment {
+            return self.control(class).await;
+        }
+        let pool = if class == crate::store::ServiceClass::Team {
+            self.auth_team.as_ref()
+        } else {
+            self.auth_standard.as_ref()
+        }
+        .unwrap_or(&self.pool);
+        let permit = self.control_slots[usize::from(class == crate::store::ServiceClass::Team)]
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::UNAVAILABLE)?;
         let inner = pool
             .begin_with(if self.postgres {
                 "BEGIN"
@@ -770,4 +821,261 @@ pub fn now() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::store::{Credential, Role, ServiceClass, Store};
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll, Waker},
+    };
+
+    async fn fixture() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            public_enrollment: true,
+            large_payload_slots: 2,
+            max_spool_bytes: 164 * 1024 * 1024,
+            background: false,
+            ..Config::default()
+        };
+        let db = Db::open(
+            &directory.path().join("state/relay.sqlite3"),
+            Arc::new(config),
+        )
+        .await
+        .unwrap();
+        (directory, Store::new(db))
+    }
+
+    fn poll_once<T: Future>(future: Pin<&mut T>) -> Poll<T::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    async fn service_id(store: &Store, class: ServiceClass) -> String {
+        let row = store
+            .db
+            .one(
+                "SELECT id FROM service_leases WHERE lane='request' AND service_class=?",
+                args![class.name()],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        s(&row, "id").to_owned()
+    }
+
+    async fn service_counts(store: &Store) -> Value {
+        let row = store
+            .db
+            .one(
+                "SELECT used_total,used_standard FROM service_resources WHERE lane='request'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        json!([row["used_total"], row["used_standard"]])
+    }
+
+    async fn node(store: &Store, class: ServiceClass) -> Credential {
+        let provisioned = store.provision("Synthetic", "Computer").await.unwrap();
+        let credential = Credential {
+            id: s(&provisioned, "node_id").to_owned(),
+            workspace: s(&provisioned, "workspace_id").to_owned(),
+            role: Role::Node,
+        };
+        if class == ServiceClass::Team {
+            store
+                .set_service_class(&credential.workspace, class)
+                .await
+                .unwrap();
+        }
+        credential
+    }
+
+    async fn poll_counts(store: &Store, credential: &Credential) -> Value {
+        let row = store
+            .db
+            .one(
+                "SELECT u.active_polls,p.active FROM workspace_usage u JOIN poll_credentials p ON p.credential_id=? AND p.role=? WHERE u.workspace_id=?",
+                args![&credential.id, credential.role.table(), &credential.workspace],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        json!([row["active_polls"], row["active"]])
+    }
+
+    #[tokio::test]
+    async fn public_service_cleanup_waits_for_its_class_and_decrements_once() {
+        let (_directory, store) = fixture().await;
+        let standard = store
+            .acquire_service("request", ServiceClass::Standard, 1)
+            .await
+            .unwrap();
+        let team = store
+            .acquire_service("request", ServiceClass::Team, 1)
+            .await
+            .unwrap();
+        let standard_id = service_id(&store, ServiceClass::Standard).await;
+        let team_id = service_id(&store, ServiceClass::Team).await;
+        assert_eq!(service_counts(&store).await, json!([2, 1]));
+        let held = store.db.control_slots[0]
+            .clone()
+            .acquire_many_owned(66)
+            .await
+            .unwrap();
+        let mut release =
+            std::pin::pin!(store.release_service(&standard_id, ServiceClass::Standard));
+        // Keep this exact future: the old fail-fast path returns BUSY here.
+        assert!(
+            poll_once(release.as_mut()).is_pending(),
+            "cleanup must wait for its class instead of abandoning the durable lease"
+        );
+        assert!(matches!(
+            store.db.control(ServiceClass::Standard).await,
+            Err(error) if error.0 == Error::BUSY.0
+        ));
+        assert_eq!(service_counts(&store).await, json!([2, 1]));
+        // Team cleanup never waits for or borrows the standard class.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            store.release_service(&team_id, ServiceClass::Team),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(service_counts(&store).await, json!([1, 1]));
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), release.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .release_service(&standard_id, ServiceClass::Standard)
+            .await
+            .unwrap();
+        assert_eq!(service_counts(&store).await, json!([0, 0]));
+        assert!(store
+            .db
+            .one(
+                "SELECT id FROM service_leases WHERE id=?",
+                args![&standard_id]
+            )
+            .await
+            .unwrap()
+            .is_none());
+        drop((standard, team));
+        store.db.close().await;
+    }
+
+    #[tokio::test]
+    async fn public_poll_cleanup_waits_for_its_class_and_decrements_once() {
+        let (_directory, store) = fixture().await;
+        let standard = node(&store, ServiceClass::Standard).await;
+        let team = node(&store, ServiceClass::Team).await;
+        let standard_id = store.acquire_poll(&standard, 35.0).await.unwrap();
+        let team_id = store.acquire_poll(&team, 35.0).await.unwrap();
+        let held = store.db.control_slots[0]
+            .clone()
+            .acquire_many_owned(66)
+            .await
+            .unwrap();
+        let mut release =
+            std::pin::pin!(store.release_poll_reserved(&standard_id, ServiceClass::Standard));
+        assert!(
+            poll_once(release.as_mut()).is_pending(),
+            "poll cleanup must wait for its class instead of abandoning its durable counters"
+        );
+        assert_eq!(poll_counts(&store, &standard).await, json!([1, 1]));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            store.release_poll_reserved(&team_id, ServiceClass::Team),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(poll_counts(&store, &team).await, json!([0, 0]));
+        assert_eq!(poll_counts(&store, &standard).await, json!([1, 1]));
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), release.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .release_poll_reserved(&standard_id, ServiceClass::Standard)
+            .await
+            .unwrap();
+        assert_eq!(poll_counts(&store, &standard).await, json!([0, 0]));
+        assert!(store
+            .db
+            .one("SELECT id FROM poll_leases WHERE id=?", args![&standard_id])
+            .await
+            .unwrap()
+            .is_none());
+        store.db.close().await;
+    }
+
+    #[tokio::test]
+    async fn public_service_cleanup_retries_a_transient_pool_timeout_with_the_same_id() {
+        let (_directory, store) = fixture().await;
+        let lease = store
+            .acquire_service("request", ServiceClass::Standard, 1)
+            .await
+            .unwrap();
+        let id = service_id(&store, ServiceClass::Standard).await;
+        // This is the existing SQLite pool's only connection; no extra pool.
+        let held = store.db.pool.acquire().await.unwrap();
+        let mut release = std::pin::pin!(store.release_service(&id, ServiceClass::Standard));
+        assert!(poll_once(release.as_mut()).is_pending());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(6), release.as_mut())
+                .await
+                .is_err(),
+            "a transient five-second pool timeout must retain the same cleanup future"
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), release.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .release_service(&id, ServiceClass::Standard)
+            .await
+            .unwrap();
+        assert_eq!(service_counts(&store).await, json!([0, 0]));
+        drop(lease);
+        store.db.close().await;
+    }
+
+    #[tokio::test]
+    async fn pending_public_cleanup_does_not_extend_the_five_second_shutdown_grace() {
+        let (_directory, store) = fixture().await;
+        let lease = store
+            .acquire_service("request", ServiceClass::Standard, 1)
+            .await
+            .unwrap();
+        let held = store.db.control_slots[0]
+            .clone()
+            .acquire_many_owned(66)
+            .await
+            .unwrap();
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(6), store.db.close())
+            .await
+            .expect("cleanup cannot extend the existing shutdown grace");
+        // close timed out waiting for cleanup, leaving the existing pool open.
+        // Releasing only these owned permits lets its tracked task finish.
+        assert!(!store.db.pool.is_closed());
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), store.db.tasks.wait())
+            .await
+            .unwrap();
+        assert_eq!(service_counts(&store).await, json!([0, 0]));
+        store.db.close().await;
+    }
 }

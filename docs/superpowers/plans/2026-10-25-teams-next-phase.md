@@ -25,6 +25,9 @@ review of 2026-10-25.
 - The next team that builds this runs on the currently installed Zerus
   (no phases, no extend). Its plan must be complete up front, as in the phases
   run; fixes and retests are planned tasks that are cancelled when empty.
+- Every phase ends with a local build ready to install (portable zip plus
+  notes: changes, install and rollback, known issues). The owner installs it
+  and brings back the problems found; they feed the next phase.
 
 ## 1. Already closed by the phases work
 

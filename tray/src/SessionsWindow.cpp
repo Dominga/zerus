@@ -507,6 +507,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             }
             closeSubagent();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear(); m_childrenHtml.clear();
+        // A pending Team-tab Stop belongs to the session it named.
+        m_terminateAfterInspect.clear();
         if (!m_restoredInspections.contains(key)) m_restoredInspections.clear();
             m_activityView->setSessionKey(key); m_composer->setSessionKey(key);
             m_terminal->setSession(m_client.executable(), host, name);
@@ -1855,6 +1857,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 m_subagentHint->setText(error);
         });
     connect(&m_client, &HgsClient::inspectionFailed, this, [this](const QString &host, const QString &name, const QString &error, const QString &archiveId) {
+        // N7: a Team-tab Stop that waited for these details cannot decide the
+        // real action; say so instead of doing nothing.
+        if (m_terminateAfterInspect == host + '\n' + name) {
+            m_terminateAfterInspect.clear();
+            showNotice(tr("Could not load %1 to stop it: %2").arg(name, error), true);
+        }
         if (!m_pending && !m_renameKey.isEmpty()) return;
         const auto *entry = selected(); if (!entry || entry->host != host || entry->session.name != name || entry->session.archiveId != archiveId) return;
         // WhiteWh fork: a paused DeepSeek session has no running host until
@@ -3745,6 +3753,8 @@ void SessionsWindow::selectSession()
         pushSelectionChanged(key);
         m_readCandidate.clear(); m_readSelectionKey.clear();
         m_selectedKey = key; m_details = {}; m_events = {}; m_cursor = 0; m_inspectError.clear();
+        // A pending Team-tab Stop belongs to the session it named.
+        m_terminateAfterInspect.clear();
         if (!m_restoredInspections.contains(key)) m_restoredInspections.clear();
         if (m_restoredInspections.contains(key)) m_inspectError = tr("Session restored. Refreshing its current state…");
         rememberRecentSession(key);
@@ -3937,6 +3947,15 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     while (m_events.size() > 500) m_events.removeFirst();
     m_cursor = data.value("cursor").toInteger(); reconcileMessages(); renderDetails(); applyPendingModelSettings();
     pushInspected(entry->key, m_details);
+    // N7: a Team-tab leftover Stop waited for these details; its own terminate
+    // flow can now decide the real action and confirm it.
+    if (m_terminateAfterInspect == entry->key) {
+        m_terminateAfterInspect.clear();
+        QTimer::singleShot(0, this, [this, key = entry->key] {
+            const auto *current = selected();
+            if (current && current->key == key) terminateSession();
+        });
+    }
     if (statusChanged || previousRoster != childRoster(*entry)) rebuild();
 }
 
@@ -6120,18 +6139,32 @@ void SessionsWindow::renameSession()
 
 void SessionsWindow::stopTeamSession(const QString &host, const QString &name)
 {
-    for (const auto &entry : m_entries)
-        if (entry.host == host && entry.session.name == name) { selectSessionEntry(entry); break; }
+    // N7: the Team tab names a session, not the action. Select it, wait for the
+    // inspection its decision needs, and let terminateSession show its own
+    // confirmation (stop and archive, terminate without an archive, or forget
+    // the binding). Reselecting clears m_details, so a decision made now would
+    // be made on nothing.
+    m_terminateAfterInspect.clear();
+    const auto target = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
+        return entry.host == host && entry.session.name == name;
+    });
+    if (target == m_entries.cend()) {
+        showNotice(tr("%1 is not listed here; open it to stop it").arg(name), true);
+        return;
+    }
+    showSession(host, name);
     const auto *entry = selected();
     if (!entry || entry->host != host || entry->session.name != name) {
         showNotice(tr("%1 is not listed here; open it to stop it").arg(name), true);
         return;
     }
-    // The Team tab confirmed with the session's name and the consequence; the
-    // terminate flow below does the rest with the same state checks.
-    m_terminateConfirmed = true;
-    terminateSession();
-    m_terminateConfirmed = false;
+    m_terminateAfterInspect = entry->key;
+    if (!m_details.isEmpty()) {   // this selection's details are already loaded
+        m_terminateAfterInspect.clear();
+        QTimer::singleShot(0, this, [this] { terminateSession(); });
+        return;
+    }
+    inspect();
 }
 
 void SessionsWindow::terminateSession()
@@ -6157,9 +6190,7 @@ void SessionsWindow::terminateSession()
     confirm.button(QMessageBox::Yes)->setText(live ? (keepArchive ? tr("Stop and archive") : tr("Terminate session"))
         : archived ? tr("Forget archived session") : tr("Forget saved session"));
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
-    // A Team-tab leftover row confirmed already and named the same session.
-    if (!m_terminateConfirmed && (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original))) return;
-    if (m_terminateConfirmed && !selectSessionEntry(original)) return;
+    if (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original)) return;
     const auto *current = selected();
     if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest) return;
     const bool currentBindingOnly = !archived && NativeSessionCapabilities::forgetsBindingOnly(current->session,m_details);

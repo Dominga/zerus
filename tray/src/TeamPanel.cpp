@@ -417,6 +417,7 @@ QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
         // A1: the attempt's phase icon and its tooltip beside the member.
         auto *statusMark = new StatusMark(status.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : status.tone),
                                           mark.kind.isEmpty() ? status.kind : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
+        statusMark->setObjectName("teamSummaryMemberState");
         statusMark->setMaximumWidth(narrow ? 120 : 170);
         h->addWidget(statusMark);
         bv->addWidget(line);
@@ -462,11 +463,13 @@ QWidget *TeamPanel::leftoverMembers(const Team &team, bool narrow)
         h->addLayout(body, 1);
         auto *stop = button(tr("Stop…"), "teamLeftoverStop", false);
         stop->setProperty("danger", true);
-        QObject::connect(stop, &QPushButton::clicked, this, [this, host = left.host, name = left.session, role] {
-            if (confirm("teamStopLeftoverConfirm", tr("Stop session?"),
-                        tr("Stop %1 (%2)? Its running processes will stop; the conversation history is kept, and Zerus never stops it by itself.")
-                            .arg(name, role), tr("Stop")))
-                if (stopSession) stopSession(host, name);
+        // N7: this row names a session, not the action. The session's own stop
+        // dialog names what really happens (stop and archive, terminate without
+        // an archive, or forget an OpenCode binding) once its details load, so
+        // the Team tab promises nothing here.
+        stop->setToolTip(tr("Asks the session's own stop confirmation"));
+        QObject::connect(stop, &QPushButton::clicked, this, [this, host = left.host, name = left.session] {
+            if (stopSession) stopSession(host, name);
         });
         h->addWidget(stop);
         auto *take = button(tr("Take into a new team"), "teamLeftoverTake");

@@ -73,8 +73,11 @@ struct Attempt {
     double reportAt = 0;
     bool captured = false;              // the text was taken from the last reply
     QList<ReplacedReport> replaced;     // oldest first, at most 3
-    // The phase hgs derives for the attempt (spec 2), empty on an older hgs.
+    // The phase hgs derives for the attempt (spec 2). `phaseKnown` records that
+    // hgs sent the key at all: it sends null on purpose for a finished task and
+    // for a revoked or refused attempt, and only an older hgs sends no key.
     QString phase;
+    bool phaseKnown = false;
     QList<Question> questions;          // oldest first
     const Question *openQuestion() const
     {

@@ -289,12 +289,13 @@ inline QPushButton *memberQueueRow(const Team &team, const Task &task, const Col
 
 inline QString kindOfTask(const Task &task, const Status &status)
 {
-    // A live task shows the attempt's phase (A1); one hgs did not send is
-    // derived (Teams::lastPhase). A decided task keeps its own mark.
-    if (!task.finished() || task.status == "rejected") {
-        const QString phase = lastPhase(task);
-        if (!phase.isEmpty()) return phase;
-    }
+    // A finished task keeps its own mark (accepted, cancelled or rejected): hgs
+    // sends no attempt phase for one on purpose (N4).
+    if (task.finished()) return task.status;
+    // A live task shows the attempt's phase; one hgs did not send is derived
+    // (Teams::lastPhase).
+    const QString phase = lastPhase(task);
+    if (!phase.isEmpty()) return phase;
     if (status.tone == Tone::Danger) return QStringLiteral("unconfirmed");
     if (status.tone == Tone::Warn) return QStringLiteral("no_report");
     return task.status;

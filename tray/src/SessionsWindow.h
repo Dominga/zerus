@@ -484,8 +484,9 @@ private:
     QSet<QString> m_inspectionBehindSettings;
     QByteArray m_settingsIdentity; // The automatic apply in flight.
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
-    // The Team tab's leftover Stop already confirmed and named the session.
-    bool m_terminateConfirmed = false;
+    // N7: the Team tab's leftover Stop names a session; its entry key waits
+    // here until the inspection that decides the real action has loaded.
+    QString m_terminateAfterInspect;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
     QSet<QString> m_retryReads;

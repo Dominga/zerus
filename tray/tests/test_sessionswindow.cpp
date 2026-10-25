@@ -84,9 +84,13 @@
 #include "ComposerToolbar.h"
 #include "SessionList.h"
 #include "TeamController.h"
+#include "TeamPanel.h"    // N7: the leftover Stop lives in the Team tab
 #include "TeamNewTab.h"   // WhiteWh fork: agent teams
 #include "TeamWidgets.h"
 #include <QToolBar>
+#include <QTimer>
+#include <QFileInfo>
+#include <functional>
 #include "SessionCardDelegate.h"
 #include "SessionLeads.h"
 #include "SessionOrganization.h"
@@ -244,6 +248,7 @@ private slots:
     void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
     void agentTeamsGroupTheirSessions();
+    void teamLeftoverStopAsksTheRealAction();
     void readmeScreenshots();
     void groupsPersistFilterAndRevealAttention();
     void rebuildKeepsProjectOrderAtScale_data();
@@ -1252,6 +1257,101 @@ elif c=='swarm':out({'schema':1,'organization':d['organization'],'node_id':'node
 elif c=='project' and a[1:2]==['ls']:out([])
 else:out({})
 )PY";
+}
+
+// N7: the Team tab's leftover Stop names a session, not the action. The window
+// selects it, loads the details its decision needs, and shows the session's own
+// stop confirmation with the real action; Cancel sends nothing and Yes stops
+// exactly that session.
+void TestSessionsWindow::teamLeftoverStopAsksTheRealAction()
+{
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject team = QJsonDocument::fromJson(R"({
+     "id":"team-done","name":"Checkout","status":"done","lead":"lead","revision":4,
+     "members":[{"id":"lead","role":"Lead","agent":"kimi","state":"active","session":{"host":"","name":"kimi/docs/research"}},
+                {"id":"backend","role":"Backend","agent":"codex","state":"active","session":{"host":"","name":"codex/hgs/dashboard"}}],
+     "tasks":[{"id":1,"title":"API","status":"accepted","assignee":"backend"}],
+     "left_running":[{"member":"backend","role":"Backend",
+                      "session":{"host":"","name":"codex/hgs/dashboard","run_id":"terminated-origin-run","conversation_id":"conversation-one"}}],
+     "finish":{"by":"Lead","summary":"All done.","at":1800}})").object();
+    const QByteArray listed = QJsonDocument(QJsonObject{{"items", QJsonArray{team}}}).toJson(QJsonDocument::Compact);
+    const QByteArray status = QJsonDocument(team).toJson(QJsonDocument::Compact);
+    const QByteArray answer =
+        "elif c=='team' and a[1:2]==['list']:print(" + FakeCli::pythonString(QString::fromUtf8(listed)) + ")\n"
+        "elif c=='team' and a[1:2]==['status']:print(" + FakeCli::pythonString(QString::fromUtf8(status)) + ")\n"
+        "elif c=='team' and a[1:2]==['events']:print('{\"items\":[],\"next_cursor\":null}')\n"
+        "elif c in ('kill','terminate'):open(__file__+'.ended','a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+        "elif c=='team':print('{}')\n";
+    const QString fixture = m_dir->filePath("hgs-team-stop");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    QFile::remove(fixture + ".ended");
+    auto state = fleet(); auto box = state.local();
+    for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") {
+        session.state = "running"; session.runId = "terminated-origin-run"; session.conversationId = "conversation-one";
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.resize(1280, 820);
+    window.setFleet(state); window.show();
+    auto *inspector = window.findChild<QTabWidget *>("sessionInspector");
+    QVERIFY(inspector);
+    auto *panel = dynamic_cast<TeamPanel *>(window.findChild<QWidget *>("teamPanel"));
+    QVERIFY(panel);
+    // The window keeps its selected team only once the team list has arrived.
+    auto *teams = window.findChild<TeamController *>();
+    QVERIFY(teams);
+    QTRY_VERIFY(teams->team("team-done"));
+    auto *list = window.findChild<SessionList *>("sessionList");
+    QVERIFY(list);
+    emit list->teamActivated("team-done");   // as the list's team header does
+    inspector->setCurrentWidget(panel);
+    QTRY_VERIFY(panel->findChild<QPushButton *>("teamLeftoverStop"));
+    auto *client = window.findChild<HgsClient *>();
+    QVERIFY(client);
+    QSignalSpy writes(client, &HgsClient::writeDone);
+    // The Stop handler loads the session's details first, so its confirmation
+    // appears a little later: answer it from the event loop that dialog runs in.
+    const auto answerDialog = [&](const std::function<void(QMessageBox *)> &action) {
+        auto *timer = new QTimer(&window);
+        timer->setInterval(20);
+        QObject::connect(timer, &QTimer::timeout, &window, [&, timer, action] {
+            auto *confirm = window.findChild<QMessageBox *>("terminateSessionConfirm");
+            if (!confirm) return;   // the details are still loading
+            timer->stop();
+            action(confirm);
+        });
+        timer->start();
+    };
+    bool asked = false;
+    answerDialog([&](QMessageBox *confirm) {
+        asked = true;
+        // The real action for this tracked codex member: stop and archive. The
+        // old Team text promised the history stays; this names what happens.
+        QVERIFY(confirm->text().contains(QStringLiteral("move its recorded conversation to Archive")));
+        QString action;
+        for (auto *button : confirm->buttons()) if (button->text().startsWith(QStringLiteral("Stop and archive"))) action = button->text();
+        QCOMPARE(action, QStringLiteral("Stop and archive"));
+        if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty())
+            confirm->grab().save(QDir(shots).filePath("leftover-stop-confirm-dark.png"));
+        confirm->done(QMessageBox::Cancel);
+    });
+    panel->findChild<QPushButton *>("teamLeftoverStop")->click();
+    QTRY_VERIFY(asked);
+    QTest::qWait(100);
+    // Cancel sends nothing.
+    QVERIFY(writes.isEmpty());
+    QVERIFY(!QFileInfo::exists(fixture + ".ended"));
+    // Yes stops exactly that session.
+    bool confirmed = false;
+    answerDialog([&](QMessageBox *confirm) {
+        confirmed = true;
+        confirm->done(QMessageBox::Yes);
+    });
+    panel->findChild<QPushButton *>("teamLeftoverStop")->click();
+    QTRY_VERIFY(confirmed);
+    QTRY_COMPARE(writes.size(), 1);
+    QFile ended(fixture + ".ended");
+    QVERIFY(ended.open(QIODevice::ReadOnly));
+    QVERIFY(ended.readAll().contains("codex/hgs/dashboard"));
 }
 
 // WhiteWh fork: the desktop pictures of README.md. Opt-in: with

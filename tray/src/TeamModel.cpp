@@ -109,18 +109,27 @@ QList<int> memberQueue(const Team &team, const QString &member)
 
 QString attemptPhase(const Task &task, const Attempt &attempt)
 {
-    if (!attempt.phase.isEmpty()) return attempt.phase;   // hgs derived it
+    // hgs derives the phase and sends null on purpose when the task or the
+    // attempt has none: a finished task, a revoked attempt that another attempt
+    // replaced, or a refused attempt nothing reached. Only an older hgs sends no
+    // key at all; then the same answer is derived here, mirroring
+    // ops::attempt_phase (which also knows the live session's state, so an
+    // older hgs never yields "stopped").
+    if (attempt.phaseKnown) return attempt.phase;
+    if (task.finished()) return {};
     if (task.held) return QStringLiteral("held");
-    if (attempt.state == "delivering") return QStringLiteral("sent");
     if (attempt.state == "unconfirmed") return QStringLiteral("unconfirmed");
+    if (attempt.state == "delivering") return QStringLiteral("sent");
     if (attempt.state == "rejected") return QStringLiteral("rejected");
+    if (attempt.state == "refused" || attempt.state == "revoked") return {};
+    if (attempt.state != "delivered" && attempt.state != "reported") return {};
+    // A question is not a report, and the attempt stays open (A3).
+    if (attempt.openQuestion()) return QStringLiteral("asking");
     if (attempt.state == "reported") return QStringLiteral("reported");
     if (attempt.noReport) return QStringLiteral("no_report");
-    if (attempt.openQuestion()) return QStringLiteral("asking");
     if (attempt.startedAt > 0) return QStringLiteral("working");
     if (attempt.startWarned) return QStringLiteral("late");
-    if (attempt.state == "delivered") return QStringLiteral("delivered");
-    return attempt.state;
+    return QStringLiteral("delivered");
 }
 
 QString lastPhase(const Task &task)
@@ -202,7 +211,11 @@ Team parse(const QJsonObject &v)
             attempt.deliveredAt = a.value("delivered_at").toDouble(); attempt.startedAt = a.value("started_at").toDouble();
             attempt.startWarned = a.value("start_warned").toBool();
             attempt.replyAt = a.value("reply_at").toDouble(); attempt.turnEndedAt = a.value("turn_ended_at").toDouble();
-            attempt.turnReply = str(a, "turn_reply"); attempt.phase = str(a, "phase");
+            attempt.turnReply = str(a, "turn_reply");
+            // The key's presence is the contract: hgs sends null when the task
+            // or the attempt has no phase, and an older hgs sends no key.
+            attempt.phaseKnown = a.contains("phase");
+            attempt.phase = str(a, "phase");
             const auto report = a.value("report").toObject();
             attempt.report = report.value("text").toString();
             attempt.reportAt = report.value("at").toDouble(); attempt.captured = report.value("captured").toBool();
@@ -380,6 +393,10 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
     // A3: a question to the lead leaves the attempt open and pauses the work.
     if (attempt && attempt->openQuestion())
         return make("asking", tr("Waiting for your answer"), tr("Answer"), Tone::Warn, current->id, true);
+    // QA: an attempt that only left for the member reads as sending, not as
+    // work (its icon says the same).
+    if (attempt && attempt->state == "delivering")
+        return make("sent", tr("Sending #%1 %2").arg(current->id).arg(current->title), QStringLiteral("Sending"), Tone::Assigned, current->id);
     if (attempt)
         return make("working", tr("Working on #%1 %2").arg(current->id).arg(current->title), QStringLiteral("#%1").arg(current->id), Tone::Active, current->id);
     for (const auto &task : team.tasks)

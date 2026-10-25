@@ -148,11 +148,17 @@ QJsonObject deliveryTeam()
   {"id":19,"title":"Stopped","assignee":"lead","status":"in_progress",
    "attempts":[{"n":1,"id":"s9","member":"lead","state":"delivered","delivered_at":1700,"started_at":1701,"phase":"stopped"}]},
   {"id":20,"title":"Rejected","assignee":"backend","status":"rejected",
-   "attempts":[{"n":1,"id":"s10","member":"backend","state":"rejected"}]},
+   "attempts":[{"n":1,"id":"s10","member":"backend","state":"rejected","phase":null}]},
+  {"id":21,"title":"Accepted work","assignee":"backend","status":"accepted",
+   "attempts":[{"n":1,"id":"s12","member":"backend","state":"reported","phase":null,
+                "report":{"text":"Done long ago","at":1750}}]},
   {"id":22,"title":"Captured","assignee":"backend","status":"submitted",
    "attempts":[{"n":1,"id":"s11","member":"backend","state":"reported","report":{"text":"Captured reply","at":1760,"captured":true}}]},
-  {"id":23,"title":"Park me","assignee":"backend","status":"pending"}],
- "layers":{"11":0,"12":1,"13":2,"14":2,"15":2,"16":2,"17":2,"18":2,"19":2,"20":2,"22":2,"23":2},
+  {"id":23,"title":"Park me","assignee":"backend","status":"pending"},
+  {"id":24,"title":"Retried once","assignee":"backend","status":"pending",
+   "attempts":[{"n":1,"id":"s13","member":"backend","state":"revoked","phase":null},
+               {"n":2,"id":"s14","member":"backend","state":"refused","phase":null}]}],
+ "layers":{"11":0,"12":1,"13":2,"14":2,"15":2,"16":2,"17":2,"18":2,"19":2,"20":2,"21":2,"22":2,"23":2,"24":2},
  "cycle":[],"ready":[],"validation":{"errors":[],"warnings":[]}})").object();
 }
 
@@ -409,7 +415,7 @@ void TestTeamsUi::attemptStatesShowPhaseIcons()
     const double now = 1900;   // well after the fixture's own times
     const QList<std::pair<int, QString>> expected{
         {11, "sent"}, {12, "delivered"}, {13, "late"}, {14, "working"}, {15, "asking"},
-        {16, "held"}, {17, "reported"}, {18, "no_report"}, {19, "stopped"}, {20, "rejected"}};
+        {16, "held"}, {17, "reported"}, {18, "no_report"}, {19, "stopped"}};
     for (const auto &[id, phase] : expected) {
         const auto *task = team.task(id);
         QVERIFY2(task, qPrintable(QStringLiteral("task %1").arg(id)));
@@ -421,6 +427,20 @@ void TestTeamsUi::attemptStatesShowPhaseIcons()
         QVERIFY2(mark.tooltip != phase, qPrintable(mark.tooltip));
         QCOMPARE(TeamUi::kindOfTask(*task, taskStatus(*task)), phase);
     }
+    // N4: hgs sends "phase": null for a finished task and for revoked or
+    // refused attempts. Those keep their own mark and invent no phase icon.
+    for (const auto &[id, mark] : QList<std::pair<int, QString>>{{20, "rejected"}, {21, "accepted"}}) {
+        const auto *task = team.task(id);
+        QVERIFY(task && task->last() && task->last()->phaseKnown);
+        QVERIFY2(TeamUi::phaseMark(team, *task).phase.isEmpty(), qPrintable(QStringLiteral("task %1").arg(id)));
+        QCOMPARE(TeamUi::kindOfTask(*task, taskStatus(*task)), mark);
+        QCOMPARE(taskStatus(*task).kind, task->status);
+    }
+    const auto *retried = team.task(24);
+    QVERIFY(retried && retried->last()->phaseKnown);
+    QVERIFY2(TeamUi::phaseMark(team, *retried).phase.isEmpty(), "a revoked or refused attempt has no phase");
+    QCOMPARE(TeamUi::kindOfTask(*retried, taskStatus(*retried)), QStringLiteral("pending"));
+    QVERIFY(taskStatus(*retried).text.startsWith(QStringLiteral("Pending")));
     // The tooltips name the time and the next step where the spec asks for it.
     QVERIFY(TeamUi::phaseMark(team, *team.task(13), now).tooltip.contains("not started"));
     QVERIFY(TeamUi::phaseMark(team, *team.task(13), now).tooltip.contains("terminal"));
@@ -454,6 +474,24 @@ void TestTeamsUi::attemptStatesShowPhaseIcons()
         QCOMPARE(found->kind, phase);
         QVERIFY(!found->tooltip.isEmpty());
     }
+    // N4 on the canvas: the accepted and rejected tasks carry their own mark.
+    QVERIFY(node(20) && node(20)->kind == QStringLiteral("rejected"));
+    QVERIFY(node(21) && node(21)->kind == QStringLiteral("accepted"));
+    QVERIFY(node(24) && node(24)->kind == QStringLiteral("pending"));
+    // QA: an attempt that only left for the member reads as sending, not as
+    // work; the icon and the tooltip say the same.
+    const auto quiet = [](const Member &) { Live state; state.known = true; return state; };
+    const auto sending = memberStatus(team, *team.member("backend"), quiet(*team.member("backend")));
+    QCOMPARE(sending.kind, QStringLiteral("sent"));
+    QVERIFY2(sending.text.startsWith(QStringLiteral("Sending")), qPrintable(sending.text));
+    QVERIFY(sending.text.contains(QStringLiteral("#11")));
+    QVERIFY(sending.text != QStringLiteral("Working on #11 Pending hand-off"));
+    // The inspector's member row says the same (its mark carries the text).
+    const auto marks = panel.findChildren<QWidget *>("teamSummaryMemberState");
+    QVERIFY(!marks.isEmpty());
+    bool sawSending = false;
+    for (auto *mark : marks) if (mark->toolTip().contains(QStringLiteral("Sending #11"))) sawSending = true;
+    QVERIFY(sawSending);
     // The card header carries the same icon and tooltip (A1).
     TeamTaskCard card;
     card.resize(440, 900); card.show();
@@ -463,6 +501,11 @@ void TestTeamsUi::attemptStatesShowPhaseIcons()
     QVERIFY(state->toolTip().contains("Report from Tester"));
     card.setTask(team, 15, live, true);
     QVERIFY(card.findChild<QWidget *>("teamTaskState")->toolTip().contains("Answer"));
+    // N4: an accepted card invents no report tooltip.
+    card.setTask(team, 21, live, true);
+    auto *accepted = card.findChild<QWidget *>("teamTaskState");
+    QVERIFY(accepted);
+    QVERIFY(!accepted->toolTip().contains(QStringLiteral("Report from")));
     // A3: the open question is in the lead's inbox, and Answer opens its task.
     QTRY_VERIFY(panel.findChild<QPushButton *>("teamGoToTaskAnswer"));
     panel.findChild<QPushButton *>("teamGoToTaskAnswer")->click();
@@ -1090,22 +1133,18 @@ void TestTeamsUi::leftoverMembersAreShownApart()
     QCOMPARE(rows[0]->property("session").toString(), QStringLiteral("codex/checkout/backend"));
     QVERIFY(panel.findChild<QLabel *>("teamLeftoverTitle")->text().contains(QStringLiteral("Checkout redesign")));
     shot(&panel, "leftover-members-dark");
-    // Stop asks first: Cancel sends nothing.
-    QTimer::singleShot(0, &panel, [&panel] {
-        if (auto *box = panel.findChild<QMessageBox *>("teamStopLeftoverConfirm"))
-            for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Cancel")) { b->click(); break; }
-    });
-    panel.findChild<QPushButton *>("teamLeftoverStop")->click();
+    // N7: the Team tab promises no action of its own. Stop only asks the window,
+    // which shows the session's own stop dialog with the real action (stop and
+    // archive, terminate, or forget the binding) once its details are loaded.
+    auto *stopButton = panel.findChild<QPushButton *>("teamLeftoverStop");
+    QVERIFY(stopButton);
+    QCOMPARE(stopButton->text(), QStringLiteral("Stop…"));
+    QVERIFY(stopButton->toolTip().contains(QStringLiteral("session's own stop confirmation")));
+    stopButton->click();
     QTest::qWait(100);
-    QVERIFY(stopped.isEmpty());
-    // Confirming stops exactly that session.
-    QTimer::singleShot(0, &panel, [&panel] {
-        if (auto *box = panel.findChild<QMessageBox *>("teamStopLeftoverConfirm"))
-            for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Stop")) { b->click(); break; }
-    });
-    panel.findChild<QPushButton *>("teamLeftoverStop")->click();
-    QCOMPARE(stopped.size(), 1);
+    QCOMPARE(stopped.size(), 1);   // the window gets the identity and decides
     QCOMPARE(stopped.first(), QStringLiteral("\ncodex/checkout/backend"));   // this computer
+    QVERIFY(!panel.findChild<QWidget *>("teamStopLeftoverConfirm"));         // no invented dialog
     // Take into a new team names the same session.
     panel.findChild<QPushButton *>("teamLeftoverTake")->click();
     QCOMPARE(taken.size(), 1);

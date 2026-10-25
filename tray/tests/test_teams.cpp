@@ -140,6 +140,7 @@ private slots:
     void draftPhasesApproveInOrder();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void attemptPhasesAreDerivedForAnOlderHgs();
+    void finishedRevokedAndRefusedAttemptsHaveNoPhase();
     void oldStatusJsonStillParses();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
     void aRunningTeamIsStuckWhenNothingCanMove();
@@ -509,11 +510,80 @@ void TestTeams::attemptPhasesAreDerivedForAnOlderHgs()
     task.held = false;
     attempt.state = "reported";
     QCOMPARE(attemptPhase(task, attempt), QStringLiteral("reported"));
-    // hgs decides when it sends the phase itself.
+    // hgs decides when it sends the phase itself, null included (N4).
+    attempt.phaseKnown = true;
     attempt.phase = QStringLiteral("stopped");
     QCOMPARE(attemptPhase(task, attempt), QStringLiteral("stopped"));
+    attempt.phase.clear();
+    QCOMPARE(attemptPhase(task, attempt), QString());   // hgs said: no phase
+    // An open question outranks a reported attempt, as in hgs (L7).
+    attempt.phaseKnown = false;
+    attempt.state = "reported";
+    Question asked; asked.id = "q7"; asked.text = "Still true?";
+    attempt.questions.append(asked);
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("asking"));
+    attempt.questions.clear();
     // No attempts, no phase.
     QCOMPARE(lastPhase(task), QString());
+}
+
+void TestTeams::finishedRevokedAndRefusedAttemptsHaveNoPhase()
+{
+    // hgs sends "phase": null on purpose for a finished task and for a revoked
+    // or refused attempt; the desktop then shows the task's own mark and never
+    // invents an attempt phase (N4). Only an older hgs with no key at all gets
+    // the derived answer.
+    auto done = phasedTeam();
+    auto tasks = done["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        task["status"] = "accepted";
+        task["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "backend"}, {"state", "reported"},
+                                                 {"phase", QJsonValue()}, {"report", QJsonObject{{"text", "Done"}, {"at", 1800}}}}};
+        tasks[i] = task;
+    }
+    done["tasks"] = tasks;
+    const auto accepted = parse(done);
+    const auto *first = accepted.task(1);
+    QVERIFY(first);
+    QVERIFY(first->last()->phaseKnown);          // the key was there, as null
+    QCOMPARE(lastPhase(*first), QString());
+    QCOMPARE(taskStatus(*first).kind, QStringLiteral("accepted"));   // its own mark, not "reported"
+    QCOMPARE(taskStatus(*first).text, QStringLiteral("Accepted"));
+    // A final rejection keeps the task's own rejected mark.
+    auto rejected = parse(done);
+    for (auto &task : rejected.tasks) { task.status = "rejected"; task.reason = QStringLiteral("No"); }
+    const auto *final = rejected.task(2);
+    QVERIFY(final);
+    QCOMPARE(lastPhase(*final), QString());
+    QCOMPARE(taskStatus(*final).kind, QStringLiteral("rejected"));
+    QCOMPARE(taskStatus(*final).text, QStringLiteral("Rejected"));
+    // A cancelled task too.
+    auto cancelled = parse(done);
+    for (auto &task : cancelled.tasks) task.status = "cancelled";
+    QCOMPARE(taskStatus(*cancelled.task(1)).kind, QStringLiteral("cancelled"));
+    // Revoked and refused attempts of a live task have no phase either, whether
+    // hgs sent null or an older hgs sent no key at all.
+    for (const char *state : {"revoked", "refused"}) {
+        auto live = phasedTeam();
+        auto liveTasks = live["tasks"].toArray();
+        auto one = liveTasks[0].toObject();
+        one["status"] = "pending";
+        one["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "backend"}, {"state", state}, {"phase", QJsonValue()}}};
+        liveTasks[0] = one;
+        live["tasks"] = liveTasks;
+        const auto task = parse(live);
+        QCOMPARE(lastPhase(*task.task(1)), QString());
+        QCOMPARE(taskStatus(*task.task(1)).kind, QStringLiteral("pending"));
+        auto older = live;
+        auto olderTasks = older["tasks"].toArray();
+        auto oldOne = olderTasks[0].toObject();
+        auto oldAttempts = oldOne["attempts"].toArray();
+        auto oldAttempt = oldAttempts[0].toObject(); oldAttempt.remove("phase"); oldAttempts[0] = oldAttempt;
+        oldOne["attempts"] = oldAttempts; olderTasks[0] = oldOne; older["tasks"] = olderTasks;
+        const auto derived = parse(older);
+        QCOMPARE(lastPhase(*derived.task(1)), QString());
+    }
 }
 
 void TestTeams::oldStatusJsonStillParses()

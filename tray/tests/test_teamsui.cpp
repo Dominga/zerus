@@ -293,6 +293,7 @@ private slots:
     void leftoverMembersAreShownApart();
     void memberEditorPicksAnExistingSession();
     void severalDraftPhasesRenderAndApproveInOrder();
+    void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
     void catalogEditorCarriesNewPhaseApproval();
     void phaseRetriesReuseTheRequestId();
@@ -608,6 +609,101 @@ void TestTeamsUi::taskCardAnswersQuestionsAndHolds()
     card.setTask(team, 16, live, false); shot(&card, "delivery-card-release-light");
     darkPalette();
     card.setTask(team, 17, live, true);
+}
+
+// G5/F10: the drafts wait as compact lines at the top of the members column,
+// and their arrows move one among the others with move-phase. Seven drafts show
+// the live numbers, the disabled ends and the renumbering in the feed.
+void TestTeamsUi::draftReorderSendsMovePhase()
+{
+    auto seven = phasedTeam();
+    seven["pending_phase"] = 2;
+    seven["pending_phases"] = QJsonArray{2, 3, 4, 5, 6, 7, 8};
+    seven["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "draft"}, {"tasks", QJsonArray{3}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{5}}},
+        QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{6}}},
+        QJsonObject{{"n", 5}, {"title", "Release notes"}, {"state", "draft"}, {"tasks", QJsonArray{7}}},
+        QJsonObject{{"n", 6}, {"title", "Screenshots"}, {"state", "draft"}, {"tasks", QJsonArray{8}}},
+        QJsonObject{{"n", 7}, {"title", "Cleanup"}, {"state", "draft"}, {"tasks", QJsonArray{9}}},
+        QJsonObject{{"n", 8}, {"title", "Archive"}, {"state", "draft"}, {"tasks", QJsonArray{10}}}};
+    auto tasks = seven["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        task["status"] = task["phase"].toInt(1) > 1 ? "draft" : "accepted";
+        task.remove("attempts");
+        tasks[i] = task;
+    }
+    for (int id = 6; id <= 10; ++id)
+        tasks.append(QJsonObject{{"id", id}, {"phase", id - 2}, {"title", QStringLiteral("Draft %1").arg(id)}, {"assignee", "backend"}, {"status", "draft"}});
+    seven["tasks"] = tasks;
+    setTeam(seven);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 900); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamWorkspaceDraftPhase").size(), 7);
+    auto *membersList = workspace.findChild<QWidget *>("teamWorkspaceMemberList");
+    QVERIFY(membersList && membersList->isAncestorOf(workspace.findChildren<QFrame *>("teamWorkspaceDraftPhase").first()));
+    // The live numbers, in the store's order.
+    QStringList headings;
+    for (auto *label : workspace.findChildren<QLabel *>("teamDraftPhaseHeading")) headings << label->text();
+    QCOMPARE(headings, (QStringList{"Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6", "Phase 7", "Phase 8"}));
+    // The first draft cannot go up, the last cannot go down.
+    auto ups = workspace.findChildren<QPushButton *>("teamMovePhaseUp");
+    QCOMPARE(ups.size(), 7);
+    QVERIFY(!ups.first()->isEnabled());
+    QVERIFY(ups.last()->isEnabled());
+    ups[1]->click();
+    QTRY_COMPARE(calls(script(), "move-phase").size(), 1);
+    auto moved = calls(script(), "move-phase").first();
+    QCOMPARE(moved["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(moved["phase"].toInt(), 3);
+    QCOMPARE(moved["to"].toInt(), 2);
+    QCOMPARE(moved["position"].toString(), QStringLiteral("before"));
+    QTRY_VERIFY(workspace.findChildren<QPushButton *>("teamMovePhaseDown").size() == 7);
+    auto downs = workspace.findChildren<QPushButton *>("teamMovePhaseDown");
+    QVERIFY(!downs.last()->isEnabled());
+    downs.first()->click();
+    QTRY_COMPARE(calls(script(), "move-phase").size(), 2);
+    moved = calls(script(), "move-phase")[1];
+    QCOMPARE(moved["phase"].toInt(), 2);
+    QCOMPARE(moved["to"].toInt(), 3);
+    QCOMPARE(moved["position"].toString(), QStringLiteral("after"));
+    // The store renumbers the drafts after a move: the rows follow the live
+    // numbers and titles it sends, not positions cached when the canvas was built.
+    auto renumbered = seven;
+    renumbered["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{5}}},
+        QJsonObject{{"n", 3}, {"title", "QA fixes"}, {"state", "draft"}, {"tasks", QJsonArray{3}}},
+        QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{6}}},
+        QJsonObject{{"n", 5}, {"title", "Release notes"}, {"state", "draft"}, {"tasks", QJsonArray{7}}},
+        QJsonObject{{"n", 6}, {"title", "Screenshots"}, {"state", "draft"}, {"tasks", QJsonArray{8}}},
+        QJsonObject{{"n", 7}, {"title", "Cleanup"}, {"state", "draft"}, {"tasks", QJsonArray{9}}},
+        QJsonObject{{"n", 8}, {"title", "Archive"}, {"state", "draft"}, {"tasks", QJsonArray{10}}}};
+    setTeam(renumbered);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        const auto headings = workspace.findChildren<QLabel *>("teamDraftPhaseHeading");
+        const auto titles = workspace.findChildren<QLabel *>("teamDraftPhaseTitle");
+        return headings.size() == 7 && titles.size() == 7 && headings[0]->text() == QStringLiteral("Phase 2")
+               && headings[6]->text() == QStringLiteral("Phase 8") && titles[0]->text() == QStringLiteral("Polish");
+    })());
+    // QA fixes now waits for the draft that moved before it, at phase 2.
+    QCOMPARE(workspace.findChildren<QLabel *>("teamDraftPhaseReason")[0]->text(), QStringLiteral("after phase 2"));
+    shot(&workspace, "phases-7-drafts-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTRY_VERIFY(workspace.findChildren<QFrame *>("teamWorkspaceDraftPhase").size() == 7);
+    shot(&workspace, "phases-7-drafts-light");
+    darkPalette();
+    workspace.setTheme(true);
 }
 
 void TestTeamsUi::memberQueueListsCurrentAndReturned()
@@ -1055,14 +1151,58 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
-    // The team header says the phase waits, and the draft header carries the
-    // two owner decisions.
+    // The team header says the phase waits; the draft waits in the members
+    // column, as one compact line with the two owner decisions (G5).
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamBarPendingPhase"));
-    QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseHeading")->text(), QStringLiteral("Phase 3 · Polish · 0/1"));
+    QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseHeading")->text(), QStringLiteral("Phase 3"));
+    auto *membersList = workspace.findChild<QWidget *>("teamWorkspaceMemberList");
+    QVERIFY(membersList);
+    auto *draft = workspace.findChild<QFrame *>("teamWorkspaceDraftPhase");
+    QVERIFY(draft);
+    // It sits in the members column, not in the rows above the canvas, and the
+    // canvas gets that height back.
+    QVERIFY(membersList->isAncestorOf(draft));
+    QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceTop")->isAncestorOf(draft));
+    QVERIFY(draft->height() <= 40);
+    QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseTitle")->text(), QStringLiteral("Polish"));
     QVERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
     QVERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
     QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceFinish"));   // tasks are still open
     shot(&workspace, "d3-phases-draft");
+    // G5: the Phases block folds and the members fold as well; each header stays.
+    auto *phasesToggle = workspace.findChild<QToolButton *>("teamPhasesToggle");
+    auto *membersToggle = workspace.findChild<QToolButton *>("teamMembersToggle");
+    QVERIFY(phasesToggle && membersToggle);
+    phasesToggle->click();
+    QTRY_VERIFY(!workspace.findChild<QFrame *>("teamWorkspaceDraftPhase"));
+    QVERIFY(workspace.findChild<QToolButton *>("teamPhasesToggle"));
+    shot(&workspace, "d3-phases-folded");
+    workspace.findChild<QToolButton *>("teamPhasesToggle")->click();
+    QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceDraftPhase"));
+    membersToggle = workspace.findChild<QToolButton *>("teamMembersToggle");
+    membersToggle->click();
+    QTRY_VERIFY(!workspace.findChild<QFrame *>("teamWorkspaceMember"));
+    QVERIFY(workspace.findChild<QFrame *>("teamWorkspaceDraftPhase"));   // the phases stay
+    shot(&workspace, "d3-members-folded");
+    workspace.findChild<QToolButton *>("teamMembersToggle")->click();
+    QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceMember"));
+    // Opened, the draft shows its tasks and, when the store reports them, the
+    // lead's changes as a diff.
+    workspace.findChild<QToolButton *>("teamDraftOpen")->click();
+    QTRY_VERIFY(workspace.findChild<QFrame *>("teamDraftDetail"));
+    auto *detail = workspace.findChild<QFrame *>("teamDraftDetail");
+    QVERIFY(detail->findChildren<QLabel *>().size() >= 2);   // the task and its state
+    shot(&workspace, "d3-phases-draft-open");
+    // The same one-draft column in the light theme.
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTRY_VERIFY(workspace.findChild<QFrame *>("teamDraftDetail"));
+    shot(&workspace, "d3-phases-draft-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
     // Approve sends the owner's decision once, with the phase. The buttons are
     // disabled at once, so a second click cannot send it again.
     auto *approve = workspace.findChild<QPushButton *>("teamApprovePhase");

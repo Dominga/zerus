@@ -252,6 +252,20 @@ Team parse(const QJsonObject &v)
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
         phase.addedAt = p.value("added_at").toDouble(); phase.decidedAt = p.value("decided_at").toDouble();
         for (const auto &id : p.value("tasks").toArray()) phase.tasks.append(id.toInt());
+        // F10: the lead's diff for this draft, when the store reports one.
+        for (const auto &value : p.value("changes").toArray()) {
+            const auto entry = value.toObject();
+            const auto text = [](const QJsonValue &value) {
+                return value.isDouble() ? QString::number(value.toInt()) : value.toString();
+            };
+            PhaseChange change;
+            change.kind = str(entry, "kind");
+            change.task = entry.value("task").toInt();
+            change.title = str(entry, "title");
+            change.from = text(entry.value("from"));
+            change.to = text(entry.value("to"));
+            if (!change.kind.isEmpty()) phase.changes.append(change);
+        }
         if (phase.n < 1) continue;   // phase 0 and negative numbers collide with task ids
         team.phases.append(phase);
     }
@@ -616,26 +630,50 @@ bool leftMember(const Team &team, const QString &member)
     return team.leftOf(member) != nullptr;
 }
 
-QString approveBlocked(const Team &team, int phase)
+namespace {
+// Why phase N may not be approved yet: the nearest lower phase that is still a
+// draft or unapproved, or the nearest one with open tasks.
+struct PhaseBlocker { int phase = 0; bool approved = false; int open = 0; };
+PhaseBlocker nearestBlocker(const Team &team, int phase)
 {
-    const auto *record = team.phase(phase);
-    if (!record || !record->draft()) return tr("Phase %1 is not a draft").arg(phase);
-    // QA: name the nearest phase that still has to open or end, not the first
-    // one above the plan: for drafts 2, 3 and 4, phase 4 waits for phase 3.
     for (int lower = phase - 1; lower >= 1; --lower) {
         const auto *previous = team.phase(lower);
         // A discarded phase is out of the plan, and phase 1 has no record: the
         // approved initial plan is approved by definition.
         if (previous && previous->state == "discarded") continue;
         if (previous && (previous->draft() || previous->state != "approved"))
-            return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(lower);
+            return {lower, false, 0};
         int open = 0;
         for (const auto &task : team.tasks) if (task.phase == lower && !task.finished()) ++open;
-        if (open)
-            return QCoreApplication::translate("Teams", "Phase %1 opens after phase %2 ends: %n task(s) still open", nullptr, open)
-                .arg(phase).arg(lower);
+        if (open) return {lower, true, open};
     }
     return {};
+}
+}
+
+QString approveBlocked(const Team &team, int phase)
+{
+    const auto *record = team.phase(phase);
+    if (!record || !record->draft()) return tr("Phase %1 is not a draft").arg(phase);
+    // QA: name the nearest phase that still has to open or end, not the first
+    // one above the plan: for drafts 2, 3 and 4, phase 4 waits for phase 3.
+    const auto blocker = nearestBlocker(team, phase);
+    if (!blocker.phase) return {};
+    if (!blocker.approved) return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(blocker.phase);
+    return QCoreApplication::translate("Teams", "Phase %1 opens after phase %2 ends: %n task(s) still open", nullptr, blocker.open)
+        .arg(phase).arg(blocker.phase);
+}
+
+// The same reason, short enough for the compact draft row; the full sentence
+// stays in the row's tooltip.
+QString approveBlockedShort(const Team &team, int phase)
+{
+    const auto *record = team.phase(phase);
+    if (!record || !record->draft()) return {};
+    const auto blocker = nearestBlocker(team, phase);
+    if (!blocker.phase) return {};
+    if (!blocker.approved) return tr("after phase %1").arg(blocker.phase);
+    return QCoreApplication::translate("Teams", "after phase %1 ends · %n open", nullptr, blocker.open).arg(blocker.phase);
 }
 
 QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks)
@@ -689,6 +727,12 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
                             : tr("Added phase %1 · %2 · %3 tasks").arg(n).arg(title).arg(d.value("tasks").toInt());
     }
     else if (k == "phase_approved") t = tr("Approved phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt());
+    else if (k == "phase_moved") {
+        // F10: the drafts are numbered live; a move renumbers them, and the
+        // feed says where the phase went.
+        t = d.value("renumbered").toBool() ? tr("Moved phase %1 to position %2 · drafts renumbered").arg(d.value("from").toInt()).arg(d.value("to").toInt())
+                                           : tr("Moved phase %1 to position %2").arg(d.value("from").toInt()).arg(d.value("to").toInt());
+    }
     else if (k == "phase_discarded") { t = tr("Discarded phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Muted; }
     else if (k == "all_decided") { t = tr("All tasks decided · waiting for the lead"); line.tone = Tone::Active; }
     else if (k == "finished") { t = tr("Finished · %1 of %2 tasks accepted").arg(d.value("accepted").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Done; }

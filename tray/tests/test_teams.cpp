@@ -367,6 +367,36 @@ void TestTeams::draftPhasesApproveInOrder()
     QVERIFY(approveBlocked(team, 3).contains(QStringLiteral("Phase 3 opens after phase 2 is approved")));
     // QA: the nearest open phase is named, not the first draft of the plan.
     QVERIFY(approveBlocked(team, 4).contains(QStringLiteral("Phase 4 opens after phase 3 is approved")));
+    // F10: the lead's diff travels with the draft, and a move renumbers the
+    // drafts; the feed says where the phase went.
+    auto withDiff = roadmap;
+    withDiff["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "draft"}, {"tasks", QJsonArray{11, 12}},
+                    {"changes", QJsonArray{QJsonObject{{"kind", "added"}, {"task", 15}, {"title", "New check"}},
+                                           QJsonObject{{"kind", "removed"}, {"task", 9}, {"title", "Old check"}},
+                                           QJsonObject{{"kind", "changed"}, {"task", 11}, {"title", "Draft 11"}, {"from", "Fix it"}, {"to", "Fix it now"}},
+                                           QJsonObject{{"kind", "moved"}, {"from", 3}, {"to", 2}}}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}}},
+        QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{14}}}};
+    const auto diffed = parse(withDiff);
+    const auto *secondPhase = diffed.phase(2);
+    QVERIFY(secondPhase);
+    QCOMPARE(secondPhase->changes.size(), 4);
+    QVERIFY(secondPhase->changes[0].added());
+    QCOMPARE(secondPhase->changes[0].task, 15);
+    QCOMPARE(secondPhase->changes[0].title, QStringLiteral("New check"));
+    QVERIFY(secondPhase->changes[1].removed());
+    QCOMPARE(secondPhase->changes[2].kind, QStringLiteral("changed"));
+    QCOMPARE(secondPhase->changes[2].from, QStringLiteral("Fix it"));
+    QCOMPARE(secondPhase->changes[2].to, QStringLiteral("Fix it now"));
+    QCOMPARE(secondPhase->changes[3].kind, QStringLiteral("moved"));
+    QCOMPARE(secondPhase->changes[3].from, QStringLiteral("3"));
+    QCOMPARE(secondPhase->changes[3].to, QStringLiteral("2"));
+    QJsonObject moved{{"kind", "phase_moved"}, {"seq", 9}, {"at", 1700.0},
+                      {"detail", QJsonObject{{"from", 3}, {"to", 2}, {"renumbered", true}}}};
+    const auto line = feedLine(diffed, moved);
+    QVERIFY2(line.text.contains(QStringLiteral("Moved phase 3 to position 2")), qPrintable(line.text));
+    QVERIFY(line.text.contains(QStringLiteral("renumbered")));
     // Approved but not finished yet: its tasks still hold the next phase back.
     auto running = roadmap;
     running["phases"] = QJsonArray{

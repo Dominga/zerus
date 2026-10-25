@@ -112,12 +112,24 @@ struct Task {
 
 // A phase appended by `extend`; the approved initial plan (phase 1) has no
 // record. A `draft` phase waits for the owner, `auto` becomes approved at once.
+// F10: one line of what the lead changed in a draft, as the store reports it,
+// so the owner can read the diff before approving. `task` is the number the
+// change names; `from`/`to` say what moved or changed.
+struct PhaseChange {
+    QString kind;     // added, removed, changed, moved
+    int task = 0;
+    QString title, from, to;
+    bool added() const { return kind == "added"; }
+    bool removed() const { return kind == "removed"; }
+};
+
 struct Phase {
     int n = 0;
     QString title, approval, state, addedBy, decidedBy;
     bool barrier = false;      // no task starts before every lower phase is finished
     double addedAt = 0, decidedAt = 0;
     QList<int> tasks;          // task ids; a discarded phase keeps them
+    QList<PhaseChange> changes; // F10: the lead's changes since the owner last saw it
     bool draft() const { return state == "draft"; }
 };
 
@@ -192,6 +204,9 @@ QList<PhaseGroup> phaseGroups(const Team &team);
 // lower phase must be approved and its tasks decided. "Phase 2 opens after
 // phase 1 ends."
 QString approveBlocked(const Team &team, int phase);
+// The same reason for the compact draft row ("after phase 3"); the full
+// sentence stays its tooltip.
+QString approveBlockedShort(const Team &team, int phase);
 // True when this member's session still runs after the team ended (F7).
 bool leftMember(const Team &team, const QString &member);
 // "Phase 2 · QA fixes · 3/5" (the title is left out when empty).

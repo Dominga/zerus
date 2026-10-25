@@ -132,6 +132,48 @@ answered; a denial cannot carry an explanation.
   rejects the task by the exit code, without the lead. Owner: yes, run in the
   member's session. The plan shows each check command to the owner before
   approval.
+- **C7. Plan health feedback (owner, from team 58fd186a).** A lead turned
+  owner rounds into whole-round barriers (a runtime install waited for the
+  acceptance of model installs; one task waited for three blocks' acceptance)
+  and the team ran one task at a time for hours while members idled. Zerus
+  must say so to the planning lead, explicitly and with numbers, at plan,
+  extend and revision time and while the team runs:
+  - critical path length versus total work, expected parallelism per member,
+    the widest ready set; hard dependencies on review/QA/acceptance tasks that
+    gate unrelated work (fan-in barriers); members with no ready work for N
+    minutes while tasks are open ("starved: 3 members idle, 0 ready, chain
+    #401 <- #507 <- ...");
+  - shown as plan warnings in validation, in status (a plan-health block) and
+    as one message to the lead; the owner sees the same numbers in the GUI.
+  Owner: yes, first, into the nearest phase (Permissions, with F10 once the
+  fix-phase build is installed).
+- **C8. Running-plan revisions, a last resort.** A good plan never needs it:
+  C7 must catch the problem while planning. If a running plan is stuck anyway,
+  the lead may propose a revision of not-started tasks of an approved phase
+  (deps, text, assignee) with a preview diff, a cycle check and kept reports;
+  it applies only after the owner explicitly approves it, every time; accepted
+  work never changes. Zerus shows it to the owner as an exceptional step.
+- **C9. Owner constraints in the graph.** An ordering rule of the owner
+  ("publish only after local acceptance") is written as a dependency or gate,
+  never only as text, so the cycle check catches it (the incident's cycle
+  appeared only when the owner's rule was added).
+- **C10. Why a hard dependency.** A hard dependency may name what the consumer
+  needs (an artifact, a contract, a commit); one on a review/QA/acceptance task
+  without it is a plan warning (C7).
+- **C11. Not needed is not cancelled.** A conditional fix or retest can be
+  closed as "not needed" with a reason; that satisfies hard dependencies
+  without a fake Accepted, unlike a plain cancel.
+- **C12. Time budgets for background work (owner).** A member (or its
+  subagents) that starts a long background job - an install, a build, a full
+  test run - declares how long it should take: `hgs team expect --json
+  {request_id, team, label, minutes, red_minutes?}` (red defaults to twice the
+  estimate). Zerus ties the budget to the member's live Background job and
+  shows it on the member card and the task: normal until the estimate, amber
+  after it, red after the red time ("install: 25 min, expected 15 - check it").
+  At red the lead is told once, with the command and its last output lines,
+  so it checks whether the job hangs or died. A Background job without a
+  declared budget gets a default red time (the blocked timeout of #272, 30
+  min). Budgets end when the job ends; they never stop anything themselves.
 - **C6. Unblocking order.** When a member has several ready tasks, the
   dispatcher hands out first the one with the most dependants. Owner: yes, in
   Zerus's dispatcher, no model involved.
@@ -360,6 +402,20 @@ answered; a denial cannot carry an explanation.
   (m_mode == Wide) { layer stripes }`). Fix: inside each band, keep the
   alternating stripes per layer (and a small layer label). Owner: report,
   goes into the fix phase after phase 1.
+
+- **G7. Session services are not background work (owner).** MCP servers and
+  similar services (socraticode, server-pdf) start with a session and live as
+  long as it, sometimes longer; today they show as Background, as if a long
+  job ran. Show them as a small services icon on the session (tooltip: names,
+  since when, still running after the session ended), not in Background tasks
+  and not as the Background status. They must not count as Background work
+  for the team capture gate (A2), the blocked reminder (#272) or the time
+  budgets (C12): otherwise a member with MCP servers is never captured and
+  always looks busy. Classify by the process tree and command line (an MCP
+  server is started by the agent's MCP config), with a fixture per agent.
+  CLAUDE.md fixes the Background status contract across desktop, Android,
+  shared fixtures and docs: this is the owner's explicit direction to change
+  it; keep all of them aligned. Owner: yes, first, with C7 in the nearest phase.
 
 ## H. Operations
 

@@ -135,14 +135,15 @@ bool TeamPanel::confirm(const QString &name, const QString &title, const QString
     return dialog.clickedButton() == ok;
 }
 
-void TeamPanel::act(const QString &operation, const QJsonObject &input)
+void TeamPanel::act(const QString &operation, const QJsonObject &input, const std::function<void(bool, const QString &)> &done)
 {
     QJsonObject body = input;
     if (!body.contains("team")) body.insert("team", m_team);
     m_notice.clear();
-    m_controller->act(operation, body, [this, guard = QPointer<TeamPanel>(this)](bool ok, const QString &message) {
+    m_controller->act(operation, body, [this, guard = QPointer<TeamPanel>(this), done](bool ok, const QString &message) {
         if (!guard) return;
         m_notice = ok ? QString() : message;
+        if (done) done(ok, message);
         scheduleRender();
     });
 }
@@ -172,15 +173,16 @@ void TeamPanel::finishTeam(const Team &team)
     v->addWidget(buttons);
     const auto update = [summary, finish, count] {
         const QString text = summary->toPlainText().trimmed();
-        count->setText(tr("%1 / 4000").arg(text.size()));
-        finish->setEnabled(!text.isEmpty() && text.size() <= 4000);
+        const int characters = int(text.toUcs4().size());
+        count->setText(tr("%1 / 4000").arg(characters));
+        finish->setEnabled(!text.isEmpty() && characters <= 4000);
     };
     QObject::connect(summary, &QPlainTextEdit::textChanged, dialog, update);
     QObject::connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
     QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
     QObject::connect(dialog, &QDialog::accepted, this, [this, summary] {
         const QString text = summary->toPlainText().trimmed();
-        if (text.isEmpty() || text.size() > 4000) return;
+        if (text.isEmpty() || int(text.toUcs4().size()) > 4000) return;
         m_controller->finishTeam(text, [this, guard = QPointer<TeamPanel>(this)](bool ok, const QString &message) {
             if (!guard) return;
             m_notice = ok ? QString() : message;
@@ -188,6 +190,8 @@ void TeamPanel::finishTeam(const Team &team)
         });
     });
     m_finishDialog = dialog;
+    // A hidden dialog is not kept: each Finish click would parent another one.
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->open();
 }
 
@@ -361,7 +365,11 @@ QWidget *TeamPanel::summary(const Team &team, const QString &status, bool narrow
     auto *actions = row(6);
     if (allDecided(team) && (team.status == "running" || team.status == "paused")) {
         auto *finish = button(tr("Finish…"), "teamFinish", true);
-        QObject::connect(finish, &QPushButton::clicked, this, [this, team] { finishTeam(team); });
+        QObject::connect(finish, &QPushButton::clicked, this, [this, id = team.id] {
+            const auto *current = m_controller->watched();
+            if (!current || current->id != id) current = m_controller->team(id);
+            if (current) finishTeam(*current);
+        });
         actions->addWidget(finish);
     }
     auto *open = button(tr("Open Team"), "teamOpenTeam", true);
@@ -794,8 +802,13 @@ void TeamPanel::togglePhase(const Team &team, int phase)
     for (const auto &group : phaseGroups(team)) if (group.n == phase) { found = group; known = true; }
     if (!known) return;
     const bool open = phaseOpen(team, found);
-    // Bounded: only the teams met in this session, the oldest dropped.
-    if (!m_phaseOpen.contains(team.id) && m_phaseOpen.size() >= 16) m_phaseOpen.erase(m_phaseOpen.begin());
+    // Bounded: only the teams met in this session, the least recently met
+    // dropped, in the order they were first opened here.
+    if (!m_phaseOpen.contains(team.id)) {
+        m_phaseOrder.removeAll(team.id);
+        m_phaseOrder.append(team.id);
+        while (m_phaseOrder.size() > 16) m_phaseOpen.remove(m_phaseOrder.takeFirst());
+    }
     m_phaseOpen[team.id][phase] = !open;
 }
 
@@ -835,7 +848,13 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
     view->cycle = team.cycle;
     view->bands = phaseBands(team, [this, &team](const PhaseGroup &group) { return phaseOpen(team, group); });
     const bool grouped = !view->bands.isEmpty();
-    view->phaseToggled = [this, team](int phase) { togglePhase(team, phase); scheduleRender(); };
+    view->phaseToggled = [this, id = team.id](int phase) {
+        // The team is re-read by id: a poll may have replaced the one rendered.
+        const auto *current = m_controller->watched();
+        if (!current || current->id != id) current = m_controller->team(id);
+        if (current) togglePhase(*current, phase);
+        scheduleRender();
+    };
     // Edges exist for every task: a collapsed phase's edges attach to its
     // summary node.
     for (const auto &task : team.tasks) {

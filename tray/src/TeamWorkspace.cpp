@@ -190,8 +190,10 @@ void TeamWorkspace::render()
         const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
         const QString status = displayStatus(*team, live);
         tv->addWidget(teamBar(*team, status));
-        if (const auto *draft = team->phase(team->pendingPhase); draft && draft->draft()) tv->addWidget(draftPhase(*team));
+        if (const auto *draft = team->phase(team->pendingPhase); draft && draft->draft())
+            if (auto *strip = draftPhase(*team)) tv->addWidget(strip);
         if (team->hasFinish) tv->addWidget(finishSummary(*team));
+        if (!m_error.isEmpty()) tv->addWidget(errorStrip());
         // Strips: Stuck, plan errors.
         if (status == "stuck" || !team->errors.isEmpty()) {
             auto *strip = new QFrame; strip->setObjectName("teamWorkspaceStrip"); strip->setMinimumHeight(34);
@@ -263,7 +265,9 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
         auto *b = button(text, objectName, primary); QObject::connect(b, &QPushButton::clicked, this, run); h->addWidget(b); return b;
     };
     if (allDecided(team) && (team.status == "running" || team.status == "paused"))
-        add(tr("Finish…"), "teamWorkspaceFinish", true, [this, team] { m_panel->finishTeam(team); });
+        add(tr("Finish…"), "teamWorkspaceFinish", true, [this, id = team.id] {
+            if (const auto *current = currentTeam(id)) m_panel->finishTeam(*current);
+        });
     if (team.status == "planning") {
         auto *discard = add(tr("Discard plan…"), "teamWorkspaceDiscard", false, [this, name = team.name] {
             if (m_panel->confirm("teamDiscardConfirm", tr("Discard plan?"), tr("Discard the plan of %1? The team stops before any member starts.").arg(name), tr("Discard plan")))
@@ -313,15 +317,21 @@ QWidget *TeamWorkspace::draftPhase(const Team &team)
     h->addWidget(label(tr("waits for your approval"), c.text2, 11));
     h->addStretch();
     auto *approve = button(tr("Approve phase"), "teamApprovePhase", true);
-    QObject::connect(approve, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
-        m_panel->act("approve-phase", {{"team", id}, {"phase", phase}});
-    });
     auto *discard = button(tr("Discard phase"), "teamDiscardPhase");
     discard->setProperty("danger", true);
-    QObject::connect(discard, &QPushButton::clicked, this, [this, id = team.id, phase = group.n, count = group.tasks.size()] {
+    // Both decisions go out once: the buttons stay disabled until the answer.
+    const auto decide = [this, id = team.id, phase = group.n, approve, discard](const QString &operation) {
+        approve->setEnabled(false); discard->setEnabled(false); m_error.clear();
+        m_panel->act(operation, {{"team", id}, {"phase", phase}}, [this](bool ok, const QString &message) {
+            if (!ok) m_error = message;
+            scheduleRender();
+        });
+    };
+    QObject::connect(approve, &QPushButton::clicked, this, [decide] { decide(QStringLiteral("approve-phase")); });
+    QObject::connect(discard, &QPushButton::clicked, this, [this, decide, phase = group.n, count = group.tasks.size()] {
         if (m_panel->confirm("teamDiscardPhaseConfirm", tr("Discard phase?"),
                              tr("Discard phase %1 and its %2 tasks?").arg(phase).arg(count), tr("Discard phase")))
-            m_panel->act("discard-phase", {{"team", id}, {"phase", phase}});
+            decide(QStringLiteral("discard-phase"));
     });
     h->addWidget(approve); h->addWidget(discard);
     return strip;
@@ -338,6 +348,27 @@ QWidget *TeamWorkspace::finishSummary(const Team &team)
     text->setObjectName("teamWorkspaceFinishText");
     h->addWidget(text, 1);
     return strip;
+}
+
+QWidget *TeamWorkspace::errorStrip()
+{
+    const Colors c = colorsFor(m_dark);
+    auto *strip = new QFrame; strip->setObjectName("teamWorkspaceError");
+    strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceError{background:%1;border-bottom:1px solid %2;}")
+                             .arg(alpha(c.danger, .10).name(QColor::HexArgb), alpha(c.danger, .5).name(QColor::HexArgb)));
+    auto *h = new QHBoxLayout(strip); h->setContentsMargins(12, 5, 12, 5); h->setSpacing(8);
+    auto *text = label(m_error, c.danger, 12); text->setWordWrap(true); text->setObjectName("teamWorkspaceErrorText");
+    h->addWidget(text, 1);
+    auto *close = button(QStringLiteral("×"), "teamWorkspaceErrorClose");
+    QObject::connect(close, &QPushButton::clicked, this, [this] { m_error.clear(); scheduleRender(); });
+    h->addWidget(close);
+    return strip;
+}
+
+const Teams::Team *TeamWorkspace::currentTeam(const QString &id) const
+{
+    if (const auto *watched = m_teams->watched(); watched && watched->id == id) return watched;
+    return m_teams->team(id);
 }
 
 QWidget *TeamWorkspace::answers(const Team &team)
@@ -424,7 +455,10 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     view->cycle = team.cycle;
     view->bands = phaseBands(team, [this, &team](const PhaseGroup &group) { return m_panel->phaseOpen(team, group); });
     const bool grouped = !view->bands.isEmpty();
-    view->phaseToggled = [this, team](int phase) { m_panel->togglePhase(team, phase); scheduleRender(); };
+    view->phaseToggled = [this, id = team.id](int phase) {
+        if (const auto *current = currentTeam(id)) m_panel->togglePhase(*current, phase);
+        scheduleRender();
+    };
     // Edges exist for every task: a collapsed phase's edges attach to its
     // summary node.
     for (const auto &task : team.tasks)
@@ -591,8 +625,8 @@ QWidget *TeamWorkspace::board(const Team &team)
         toggle->setFlat(true); toggle->setAutoDefault(false);
         toggle->setStyleSheet(QStringLiteral("QPushButton{text-align:left;font-size:12px;font-weight:600;color:%1;padding:2px 4px;}"
                                              "QPushButton:hover{color:%2;}").arg(c.fg.name(), c.accent.name()));
-        QObject::connect(toggle, &QPushButton::clicked, this, [this, team, phase = group.n] {
-            m_panel->togglePhase(team, phase);
+        QObject::connect(toggle, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
+            if (const auto *current = currentTeam(id)) m_panel->togglePhase(*current, phase);
             scheduleRender();
         });
         h->addWidget(toggle, 1);

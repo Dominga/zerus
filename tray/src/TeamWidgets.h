@@ -125,6 +125,14 @@ inline QString kindOfTask(const Task &task, const Status &status)
     return task.status;
 }
 
+// The summary node of a collapsed phase: a finished phase says so, and both
+// kinds stay clickable.
+inline QString phaseSummaryText(int done, int total)
+{
+    if (total > 0 && done == total) return QCoreApplication::translate("TeamPanel", "%1/%2 done · click to open").arg(done).arg(total);
+    return QCoreApplication::translate("TeamPanel", "%1/%2 · click to open").arg(done).arg(total);
+}
+
 // A pill: role badges and the team badge. Text, border and fill share a color.
 class Pill : public QWidget {
 public:
@@ -389,7 +397,7 @@ protected:
     {
         const QPointF point = graph() ? position / zoom : position;
         for (auto it = m_bandRects.cbegin(); it != m_bandRects.cend(); ++it) if (it.value().contains(point)) return it.key();
-        for (auto it = m_summaries.cbegin(); it != m_summaries.cend(); ++it) if (it.value().contains(point)) return -it.key();
+        for (auto it = m_summaries.cbegin(); it != m_summaries.cend(); ++it) if (it.value().contains(point)) return it.key();
         return 0;
     }
     // A phase header: chevron, "Phase 2 · QA fixes · 3/5", its barrier and
@@ -443,7 +451,7 @@ protected:
         p.drawText(r.adjusted(9, 6, -6, -18), Qt::AlignLeft | Qt::AlignTop, QFontMetrics(title).elidedText(text, Qt::ElideRight, int(r.width() - 16)));
         QFont meta = font(); meta.setPixelSize(10); p.setFont(meta); p.setPen(m_c.muted);
         p.drawText(r.adjusted(9, 0, -6, -7), Qt::AlignLeft | Qt::AlignBottom,
-                   QCoreApplication::translate("TeamPanel", "%1/%2 · open").arg(band ? band->done : 0).arg(band ? band->total : 0));
+                   phaseSummaryText(band ? band->done : 0, band ? band->total : 0));
     }
     // The layer list: a "LAYER n · count" rule and one task row.
     void paintLayerHeader(QPainter &p, int layer, int count, const QRectF &r)

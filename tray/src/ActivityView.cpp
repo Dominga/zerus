@@ -541,7 +541,10 @@ TeamMessage teamMessage(QString text)
         m.body = (plan >= 0 ? rest.left(plan) : rest).trimmed();
     } else if (decided) {
         m.kind = QObject::tr("All tasks decided");
-        static const QRegularExpression teamLine(QStringLiteral("^Team: ([^.\\n]+)\\.\\s*"));
+        m.to = QObject::tr("Lead");
+        // A team name may contain a period ("v1.2 release"); the sentence after
+        // the name starts with ". All ".
+        static const QRegularExpression teamLine(QStringLiteral("^Team: (.+?)\\.\\s+"));
         if (const auto t = teamLine.match(rest); t.hasMatch()) rest = rest.mid(t.capturedLength());
         m.body = rest.trimmed();
     } else if (m.from == QStringLiteral("You")) {

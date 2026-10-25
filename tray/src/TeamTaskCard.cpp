@@ -159,7 +159,7 @@ void TeamTaskCard::rebuild()
         r->addWidget(new Pill(role, roleColor(role, m_dark)));
         if (task->pinned) {
             auto *pin = new QLabel; pin->setObjectName("teamTaskPinned");
-            pin->setPixmap(workspaceIcon("pinned", c.muted).pixmap(14, 14));
+            pin->setPixmap(workspaceIcon("pinned", c.text2).pixmap(15, 15));
             pin->setToolTip(tr("Pinned: stays with %1").arg(role));
             pin->setAccessibleName(pin->toolTip());
             r->addWidget(pin);

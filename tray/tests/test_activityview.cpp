@@ -379,7 +379,7 @@ void TestActivityView::teamMessagesReadAsPlaques()
 void TestActivityView::allDecidedMessagesReadAsPlaques()
 {
     const QString decided = QString::fromUtf8("[Zerus team \u00b7 from: Zerus \u00b7 all tasks decided]\n"
-        "Team: Checkout. All 5 tasks are decided (3 accepted, 1 rejected, 1 cancelled).\n"
+        "Team: Checkout v1.2 release. All 5 tasks are decided (3 accepted, 1 rejected, 1 cancelled).\n"
         "Add the next phase with hgs team extend --json, or finish the team with a summary (hgs guide team-lead):\n"
         "  {\"request_id\":\"a\",\"team\":\"t\",\"summary\":\"...\"} | hgs team finish --json");
     SettledActivityView view; view.resize(700, 500);
@@ -387,6 +387,7 @@ void TestActivityView::allDecidedMessagesReadAsPlaques()
     const auto text = view.browser()->toPlainText();
     QVERIFY(text.contains("All tasks decided"));
     QVERIFY(text.contains("All 5 tasks are decided"));
+    QVERIFY(text.contains(QString::fromUtf8("Zerus \u2192 Lead")));
     QVERIFY(!text.contains("Task from team"));
 }
 

@@ -104,7 +104,7 @@ Team parse(const QJsonObject &v)
     for (const auto &value : v.value("tasks").toArray()) {
         const auto t = value.toObject();
         Task task;
-        task.id = t.value("id").toInt(); task.phase = t.value("phase").toInt(1); task.pinned = t.value("pinned").toBool();
+        task.id = t.value("id").toInt(); task.phase = qMax(1, t.value("phase").toInt(1)); task.pinned = t.value("pinned").toBool();
         task.title = str(t, "title"); task.description = str(t, "description");
         task.status = str(t, "status"); task.assignee = str(t, "assignee");
         task.decidedBy = str(t, "decided_by"); task.reason = str(t, "decision_reason");
@@ -131,6 +131,7 @@ Team parse(const QJsonObject &v)
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
         phase.addedAt = p.value("added_at").toDouble(); phase.decidedAt = p.value("decided_at").toDouble();
         for (const auto &id : p.value("tasks").toArray()) phase.tasks.append(id.toInt());
+        if (phase.n < 1) continue;   // phase 0 and negative numbers collide with task ids
         team.phases.append(phase);
     }
     team.idle = str(v, "idle");

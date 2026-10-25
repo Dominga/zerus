@@ -41,6 +41,7 @@ signals:
     void groupToggled(const QString &group);
     void childrenToggled(const QString &parentKey);
     void rowExpanded(const QString &key);
+    void rowCompacted(const QString &key);
     void sessionMoved(const QString &identity, const QString &group, const QString &before);
     void groupMoved(const QString &group, const QString &before);
     void dragFinished();
@@ -56,6 +57,7 @@ protected:
     void dragLeaveEvent(QDragLeaveEvent *) override;
     void dropEvent(QDropEvent *) override;
     void mousePressEvent(QMouseEvent *) override;
+    void mouseDoubleClickEvent(QMouseEvent *) override;
     void mouseMoveEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
     void keyPressEvent(QKeyEvent *) override;
@@ -66,10 +68,17 @@ protected:
     bool viewportEvent(QEvent *) override;
     bool event(QEvent *) override;
 private:
+    bool rangeSelectable(const QListWidgetItem *item) const;
+    int rangeRow(const QString &key) const;
+    void selectRange(int targetRow, bool additive);
+    QString m_rangeAnchor, m_rangeCursor;
     void scheduleRowExpandButtons();
     QHash<QPersistentModelIndex, QToolButton *> m_rowExpandButtons;
     bool m_rowExpandButtonsPending = false;
     bool m_rowFullLayout = true;
+    QElapsedTimer m_expandClickClock;
+    QString m_expandClickKey;
+    QRect m_expandClickRect;
     QRect childrenControlRect(const QListWidgetItem *item) const;
     QStyleOptionViewItem animationOption(const QModelIndex &index) const;
     QList<QPersistentModelIndex> m_visibleWorkingRows;

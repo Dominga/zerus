@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real Kimi TUI against a localhost-only API fixture, never a user's account.
 Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi and its sha256 in
-HGS_KIMI_TEST_SHA256 (otherwise skipped). Kimi installs updates over the
+HGS_KIMI_TEST_SHA256 plus its sealed HGS_KIMI_TEST_RECORD. Kimi installs updates over the
 executable it runs from, so the fixture runs a private copy with automatic
 updates off and never the user's installed Kimi. HGS_KIMI_GUARD lists
 executables, such as that installed Kimi, that must not change during a run;
@@ -192,6 +192,7 @@ display_name = "Fixture"
   switches off, and prove afterwards that nothing outside changed."""
   self.assertRegex(KIMI_SHA256,'^[0-9a-f]{64}$','HGS_KIMI_TEST_SHA256 must pin the executable')
   self.assertEqual(sha256(KIMI),KIMI_SHA256)
+  self.version=guard.admitted_version(KIMI,KIMI_SHA256)
   self.guarded={str(path):sha256(path) for path in GUARDED}
   kimi=self.images/'kimi';shutil.copyfile(KIMI,kimi);kimi.chmod(0o755)
   self.assertEqual(sha256(kimi),KIMI_SHA256)
@@ -354,6 +355,9 @@ display_name = "Fixture"
   return cards[0]
 
 class NativeKimiQuestions(NativeKimi):
+ LONG_OTHER=('Добавить отдельный тестовый маршрут на выбранном компьютере. '
+             'Сохранить существующие настройки и проверить полный текст ответа, '
+             'который прокручивается по горизонтали в узком редакторе Other.')
  def startup_snapshot(self,stage):
   if not EVIDENCE:return
   snapshot=dict(stage=stage,monotonic=time.monotonic(),screen=self.screen(),
@@ -444,6 +448,44 @@ class NativeKimiQuestions(NativeKimi):
   receipt=self.answer(self.payload(card,'opt_0_0'),timeout=60)
   self.assertEqual(receipt['status'],'answered')
   self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':'Stable'})
+
+ def other_payload(self,card,text):
+  payload=self.payload(card,'opt_0_0')
+  payload['answers']=[dict(question_id='q_0',selected_option_ids=[],text=text)]
+  return payload
+
+ def prime_other(self,text):
+  self.tmux('send-keys','-t',self.pane,'3')
+  self.wait_for(lambda:'Type your answer, then press Enter to save.' in self.screen())
+  loaded=subprocess.run([str(self.bin/'tmux'),'load-buffer','-b','native-other','-'],env=self.env,
+                        input=text,text=True,capture_output=True,timeout=5)
+  self.assertEqual(loaded.returncode,0,loaded.stderr)
+  self.tmux('paste-buffer','-p','-r','-d','-b','native-other','-t',self.pane)
+  self.wait_for(lambda:text[-25:] in self.screen())
+
+ def test_short_question_long_other_is_confirmed_from_the_complete_review(self):
+  card=self.card()
+  receipt=self.answer(self.other_payload(card,self.LONG_OTHER),timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':self.LONG_OTHER})
+
+ def test_short_question_explicit_retry_resumes_the_existing_other_editor(self):
+  self.prime_other(self.LONG_OTHER)
+  card=self.card()
+  self.assertTrue(card['can_answer'],card['answer_unavailable_reason'])
+  receipt=self.answer(self.other_payload(card,self.LONG_OTHER),timeout=60)
+  self.assertEqual(receipt['status'],'answered')
+  self.assertEqual(self.resolved()['answers'],{'Which release should we prepare?':self.LONG_OTHER})
+
+ def test_short_question_foreign_other_is_preserved_without_submission(self):
+  self.prime_other(self.LONG_OTHER)
+  card=self.card();payload=self.other_payload(card,'A different requested answer')
+  error=self.answer(payload,success=False,timeout=60)
+  self.assertIn('review differs',error)
+  self.assertIsNone(self.resolved())
+  self.assertIn('Review your answer before submit',self.screen())
+  self.assertNotIn('A different requested answer',self.screen())
+  self.assertIn('do not resend automatically',self.answer(payload,success=False,timeout=60))
 
 class NativeKimiTrust(NativeKimi):
  """The startup folder trust prompt: shown whole, answered only as chosen."""
@@ -553,23 +595,42 @@ class QuestionFixtureControls(unittest.TestCase):
  def test_kimis_platform_gets_a_written_404_and_never_reaches_the_model(self):
   fixture=mock.Mock(native_requests=[],items=SHORT)
   server=serve(fixture);self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+  post_written,release_post,get_completed=threading.Event(),threading.Event(),threading.Event()
+  completion_errors=[]
+  class HeldPostCompletion(list):
+   def append(self,row):
+    # The POST response is already written/flushed. Its handler may be
+    # descheduled here while the next request finishes on another thread.
+    if row['method']=='POST':
+     post_written.set()
+     if not release_post.wait(5):completion_errors.append('POST completion was not released')
+    super().append(row)
+    if row['method']=='GET':get_completed.set()
+  server.platform_completed=HeldPostCompletion()
+  self.addCleanup(release_post.set)
   opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
   def call(method,path,body=None):
    request=urllib.request.Request('http://127.0.0.1:%d%s'%(server.server_port,path),method=method,
                                   data=None if body is None else json.dumps(body).encode())
    try:
     with opener.open(request,timeout=10) as response:return response.status,response.read()
-   except urllib.error.HTTPError as error:return error.code,b''
+   except urllib.error.HTTPError as error:
+    with error:return error.code,error.read()
   self.assertEqual(call('POST',guard.PLATFORM+'/resource_configs',dict(name='client_banner'))[0],404)
+  self.assertTrue(post_written.wait(3),'The POST response was not written')
   self.assertEqual(call('GET',guard.PLATFORM+'/client_config')[0],404)
+  self.assertTrue(get_completed.wait(3),'The GET response was not completed')
+  self.assertEqual(server.platform_completed,[dict(method='GET',path='/client_config',name=None)])
+  release_post.set()
   self.assertEqual(call('GET','/v1/models')[0],501)
   status,stream=call('POST','/v1/chat/completions',dict(tools=[dict(function=dict(name='AskUserQuestion'))],messages=[]))
   self.assertEqual(status,200);self.assertIn(b'"AskUserQuestion"',stream);self.assertTrue(stream.endswith(b'data: [DONE]\n\n'))
   platform=[dict(method='POST',path='/resource_configs',name='client_banner'),dict(method='GET',path='/client_config',name=None)]
   self.assertEqual(server.platform,platform)
   deadline=time.monotonic()+5
-  while server.platform_completed!=platform and time.monotonic()<deadline:time.sleep(.02)
-  self.assertEqual(server.platform_completed,platform)
+  while len(server.platform_completed)<len(platform) and time.monotonic()<deadline:time.sleep(.02)
+  self.assertEqual(completion_errors,[])
+  self.assertCountEqual(server.platform_completed,platform)
   self.assertEqual(len(fixture.native_requests),1)
  def test_the_child_gets_only_the_private_environment(self):
   root=Path(tempfile.mkdtemp(prefix='hgs-kimi-control-')).resolve();self.addCleanup(shutil.rmtree,root)
@@ -593,7 +654,7 @@ class QuestionFixtureControls(unittest.TestCase):
   digest=hashlib.sha256(b'pinned bytes').hexdigest()
   for pin,refused in (('0'*64,True),('not-a-pin',True),(digest,False)):
    case=self.case();case.images=root/('images-'+pin[:4]);case.images.mkdir()
-   with mock.patch.multiple(sys.modules[__name__],KIMI=str(pinned),KIMI_SHA256=pin,GUARDED=[]):
+   with mock.patch.multiple(sys.modules[__name__],KIMI=str(pinned),KIMI_SHA256=pin,GUARDED=[]),mock.patch.object(guard,'admitted_version',return_value='2.3.1'):
     if refused:
      with self.assertRaises(AssertionError):case.stage()
      self.assertFalse((case.images/'kimi').exists(),pin)

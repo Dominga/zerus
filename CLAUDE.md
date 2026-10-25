@@ -77,6 +77,16 @@ only after the user selects Start session. Inspecting or opening a dialog must
 never create a worktree. Keep direct-folder launch and explicit custom/existing
 worktree choices available. Destructive UI actions require explicit confirmation.
 
+Worktree maintenance is configured per owning computer in Settings > Worktrees.
+Its default-enabled lifecycle, periodic integrated-checkout and missing-checkout
+rules require verified Zerus ownership and fresh session/process/file checks.
+Keep branches and all ignored local data; age and naming never authorize removal.
+An unconfirmed automatic removal stays for manual review across every trigger.
+An existing incomplete or malformed policy must fail closed, never re-enable
+default cleanup rules.
+Use bounded indexed queue reads and bounded archive metadata checks; see
+the worktree cleanup section in `docs/reference.md`.
+
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
 remains in Active and accepts new messages. Native work and explicit attention
 take precedence. A native Stop ends a turn; it does not prove those jobs finished.
@@ -118,16 +128,20 @@ audit record durably before delivery, and retain exact run/conversation/question
 identity. Unknown delivery never authorizes replay. Ordinary questions, startup
 trust and broader persistent permission changes remain manual.
 
-Hosted CI runs the complete Linux/Arch/macOS/Windows matrix automatically on
-pushes to main and pull requests targeting main. Manual checks remain available. Public
+Hosted Dev CI checks shared Rust/protocol contracts, Linux CLI, Arch, macOS and
+Android on main. PRs add Windows/iOS for affected desktop, native or shared paths;
+unknown change inventories retain both. Nightly and Stable run the full matrix.
+iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
+source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise
 the 10 GiB cache limit without owner authorization. Authenticated model tests stay
 opt-in. Validate workflow edits locally before pushing. See `docs/ci-and-aur.md`.
 Native terminal/lifecycle changes need isolated real-agent contract coverage for
-reviewed versions, including retained resident versions. Full CI runs the
-keyless pinned Codex (Linux and Windows) and Claude Code (Linux, macOS and
-Windows) matrices; the separate upstream canary reports new releases and
-protocol changes without advancing pins or updating live agents. Review
+the latest available release of each supported agent. Ordinary CI resolves one
+official version and package integrity per agent before native execution; it
+never adds historical versions or falls back to them on discovery failure.
+Keep terminal sizes, animation modes and native method coverage. The separate
+upstream report captures current releases and capabilities without updating live agents. Review
 capabilities before adopting them; a skipped native suite is not compatibility
 evidence. See the native compatibility section in `docs/ci-and-aur.md`.
 External fork workflows require maintainer approval for every external contributor.
@@ -157,6 +171,16 @@ assets. Pure VCS version bumps do not create AUR commits. Stable releases after
 unchanged; it stays GitHub-only (not mirrored or in the v1 feed). Dev builds have
 no Windows asset. `publish.yml` proposes each stable zip to winget as `ufna.Zerus`;
 its manifest relies on the zip's `zerus-windows-x86_64/hgs-tray.exe` layout.
+The owner has already personally agreed to the Microsoft CLA for every
+`ufna.Zerus` proposal opened by `ufna` in `microsoft/winget-pkgs`. When its bot
+requests consent, post `@microsoft-github-policy-service agree` once after
+checking the author's existing replies; do not ask the owner again. This is
+personal consent, with no company or employer representation. The winget
+publisher handles this automatically; `winget-cla.yml` reconciles delayed
+prompts from trusted main. Ordinary author confirmations on external PRs opened
+from the owner's account are already authorized; substantive package questions
+still go to the owner. Moderator review and actual winget availability are
+separate from CLA consent.
 The Homebrew casks `zerus` (stable), `zerus@nightly` and `zerus@dev` (tap
 `ufna/homebrew-zerus`) ship signed, notarized Apple Silicon `Zerus.app` once
 `MACOS_CASKS_ENABLED` is set. Dev also requires `DEV_UPDATES_ENABLED`, follows

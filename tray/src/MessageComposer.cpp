@@ -42,10 +42,12 @@
 #include <QMimeData>
 #include <QMimeDatabase>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QScreen>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QStylePainter>
@@ -63,6 +65,61 @@ constexpr qsizetype MaxTextBytes = HgsClient::MaximumMessageBytes;
 constexpr qsizetype MaxAttachmentBytes = HgsClient::MaximumAttachmentBytes;
 constexpr qsizetype MaxTotalBytes = HgsClient::MaximumAttachmentsBytes;
 constexpr qsizetype MaxAttachments = HgsClient::MaximumAttachments;
+constexpr int DefaultEditorHeight = 76, MaximumEditorHeight = 720;
+const auto EditorHeightSetting = "workspace/messageEditorHeight";
+
+class ComposerResizeHandle final : public QWidget {
+public:
+    std::function<void()> pressed, finished, reset;
+    std::function<void(int)> dragged;
+    QColor color, accent;
+    explicit ComposerResizeHandle(QWidget *parent) : QWidget(parent) {
+        setObjectName("messageResizeHandle"); setFixedHeight(10); setCursor(Qt::SizeVerCursor);
+        setFocusPolicy(Qt::TabFocus);
+        setAccessibleName(tr("Message field height"));
+        setToolTip(tr("Drag to resize the message field. Double-click to restore the default height."));
+        setAccessibleDescription(toolTip() + tr(" Up and Down resize; Home restores the default."));
+    }
+protected:
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::UngrabMouse && m_dragging) { m_dragging = false; finished(); update(); }
+        if (event->type() == QEvent::Enter || event->type() == QEvent::Leave ||
+            event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut) update();
+        return QWidget::event(event);
+    }
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() != Qt::LeftButton) { event->ignore(); return; }
+        m_origin = event->globalPosition().y(); m_dragging = true; update();
+        pressed();
+    }
+    void mouseMoveEvent(QMouseEvent *event) override {
+        if (m_dragging) dragged(qRound(m_origin - event->globalPosition().y()));
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton && m_dragging) { m_dragging = false; finished(); update(); }
+    }
+    void mouseDoubleClickEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton) { m_dragging = false; reset(); update(); }
+    }
+    void hideEvent(QHideEvent *) override {
+        if (m_dragging) { m_dragging = false; finished(); }
+    }
+    void keyPressEvent(QKeyEvent *event) override {
+        if (event->key() == Qt::Key_Home) reset();
+        else if (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down) {
+            pressed(); dragged(event->key() == Qt::Key_Up ? 20 : -20); finished();
+        } else { QWidget::keyPressEvent(event); return; }
+        event->accept();
+    }
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen); painter.setBrush(m_dragging || underMouse() || hasFocus() ? accent : color);
+        painter.drawRoundedRect(QRectF(width()/2.0 - 18, height()/2.0 - 1.5, 36, 3), 1.5, 1.5);
+    }
+private:
+    bool m_dragging = false;
+    qreal m_origin = 0;
+};
 
 // Decodes at most bounds; oversized or unreadable images give a null image.
 QImage attachmentImage(const QByteArray &data, const QSize &bounds)
@@ -114,6 +171,10 @@ protected:
 class ComposeEdit : public QPlainTextEdit {
 public:
     explicit ComposeEdit(QWidget *parent) : QPlainTextEdit(parent) {}
+    int preferredHeight = DefaultEditorHeight;
+    QSize sizeHint() const override {
+        auto size = QPlainTextEdit::sizeHint(); size.setHeight(preferredHeight); return size;
+    }
     std::function<void()> submit;
     std::function<bool()> escape;
     std::function<QString()> suggestion;
@@ -201,6 +262,8 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
 {
     setObjectName("messageComposer");
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 4, 0, 0); layout->setSpacing(0);
+    m_editorHeight = qBound(DefaultEditorHeight, QSettings().value(EditorHeightSetting, DefaultEditorHeight).toInt(), MaximumEditorHeight);
+    auto *handle = new ComposerResizeHandle(this); m_resizeHandle = handle; layout->addWidget(handle);
     m_toolbar = new ComposerToolbar(this); layout->addWidget(m_toolbar);
     m_attachmentsChip = new ToolbarChip; m_attachmentsChip->setObjectName("attachmentsChip");
     m_attachmentsChip->setTone(ChipTone::Neutral); m_attachmentsChip->setIconName("attachment");
@@ -216,7 +279,15 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     layout->addWidget(m_input);
     auto *edit = new ComposeEdit(this); m_editor = edit; m_toolbar->setFocusFallback(edit); edit->setObjectName("messageInput");
     edit->setAccessibleName(tr("Message to selected agent")); edit->setPlaceholderText(tr("Message this agent…"));
-    edit->setFixedHeight(76); edit->setTabChangesFocus(true);
+    edit->setMinimumHeight(DefaultEditorHeight); edit->setMaximumHeight(DefaultEditorHeight); edit->setTabChangesFocus(true);
+    handle->pressed = [this] { m_dragEditorHeight = m_editor->height(); };
+    handle->dragged = [this](int distance) {
+        m_editorHeight = boundedEditorHeight(m_dragEditorHeight + distance) / m_scale; updateEditorHeight();
+    };
+    handle->finished = [this] { QSettings().setValue(EditorHeightSetting, m_editorHeight); };
+    handle->reset = [this] {
+        m_editorHeight = DefaultEditorHeight; QSettings().remove(EditorHeightSetting); updateEditorHeight();
+    };
     inputLayout->addWidget(edit);
     auto *actions = new QHBoxLayout; m_actions = actions; actions->setContentsMargins(0, 0, 0, 0); actions->setSpacing(8);
     m_attach = new QPushButton; m_attach->setObjectName("attachMessageFile");
@@ -356,14 +427,50 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
             notifyDraft(it.key());
         }
     });
-    setTheme(true); updateControls();
+    updateEditorHeight(); setTheme(true); updateControls();
 }
 
 MessageComposer::~MessageComposer() = default;
 
+bool MessageComposer::event(QEvent *event)
+{
+    const bool handled = QWidget::event(event);
+    if (m_editor && (event->type() == QEvent::ParentChange || event->type() == QEvent::Show)) {
+        if (m_heightParent != parentWidget()) {
+            if (m_heightParent) m_heightParent->removeEventFilter(this);
+            m_heightParent = parentWidget();
+            if (m_heightParent) m_heightParent->installEventFilter(this);
+        }
+        updateEditorHeight();
+    }
+    return handled;
+}
+
+int MessageComposer::boundedEditorHeight(int height) const
+{
+    const int minimum = ContentScale::px(DefaultEditorHeight, m_scale);
+    int maximum = ContentScale::px(MaximumEditorHeight, m_scale);
+    if (parentWidget()) {
+        // Reserve at least a third of the Activity pane for the conversation.
+        const int chrome = layout()->minimumSize().height() - m_editor->minimumHeight();
+        maximum = qMin(maximum, parentWidget()->contentsRect().height() * 2/3 - chrome);
+    }
+    return qBound(minimum, height, qMax(minimum, maximum));
+}
+
+void MessageComposer::updateEditorHeight()
+{
+    auto *edit = static_cast<ComposeEdit *>(m_editor);
+    edit->setMinimumHeight(ContentScale::px(DefaultEditorHeight, m_scale));
+    const int height = boundedEditorHeight(qRound(m_editorHeight * m_scale));
+    if (edit->preferredHeight == height && edit->maximumHeight() == height) return;
+    edit->preferredHeight = height; edit->setMaximumHeight(height); edit->updateGeometry();
+}
+
 void MessageComposer::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    updateEditorHeight();
     const bool narrow = width() < 400;
     if (m_narrow == narrow) return;
     m_narrow = narrow;
@@ -380,6 +487,14 @@ void MessageComposer::setSessionKey(const QString &key)
     // Another session or none: the OpenCode picker's context ends here, also when the same one returns.
     m_openCodeContext.clear(); resetOpenCodeModels();
     m_toolbar->closePopovers(); m_preview->hide();
+    ensureDraftLoaded(key);
+    m_key = key; m_loading = true;
+    restoreDraft();
+    m_loading = false; rebuildAttachments(); updateControls(); updatePlaceholder();
+}
+
+void MessageComposer::ensureDraftLoaded(const QString &key)
+{
     if (!key.isEmpty() && !m_drafts.contains(key)) {
         m_drafts.insert(key, {}); m_loadingKeys.insert(key);
         const auto revision = m_saveRevision.value(key);
@@ -390,11 +505,9 @@ void MessageComposer::setSessionKey(const QString &key)
                 m_loading = true; restoreDraft(); m_loading = false;
                 rebuildAttachments(); updateControls(); updatePlaceholder();
             }
+            emit draftLoaded(key);
         });
     }
-    m_key = key; m_loading = true;
-    restoreDraft();
-    m_loading = false; rebuildAttachments(); updateControls(); updatePlaceholder();
 }
 
 bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved)
@@ -627,7 +740,7 @@ void MessageComposer::deliveryFinished(const QString &key, bool ok, const QStrin
 
 void MessageComposer::renameDraft(const QString &oldKey, const QString &newKey)
 {
-    if (oldKey == newKey || !m_drafts.contains(oldKey) || isSending(oldKey) || isWaitingToSend(oldKey)
+    if (oldKey == newKey || !m_drafts.contains(oldKey) || !m_drafts.value(oldKey).storageError.isEmpty() || isSending(oldKey) || isWaitingToSend(oldKey)
         || isDraftLoading(oldKey) || isSending(newKey) || isWaitingToSend(newKey) || m_renamingKeys.contains(newKey)) return;
     const auto destination = m_drafts.value(newKey);
     if (m_drafts.contains(newKey) && (!destination.text.isEmpty() || !destination.attachments.isEmpty() || !destination.storageError.isEmpty())) {
@@ -950,6 +1063,7 @@ void MessageComposer::showAttachmentPreview(QWidget *row, int index)
 
 bool MessageComposer::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == m_heightParent && event->type() == QEvent::Resize) updateEditorHeight();
     if (watched == m_attachmentsChip->popover() && event->type() == QEvent::Hide) m_preview->hide();
     auto *row = qobject_cast<QWidget *>(watched);
     if (row && row->objectName() == "attachmentRow") {
@@ -975,6 +1089,7 @@ bool MessageComposer::eventFilter(QObject *watched, QEvent *event)
 void MessageComposer::setInputVisible(bool visible)
 {
     if (!visible) m_settingsPopup->hide();
+    m_resizeHandle->setVisible(visible);
     m_input->setVisible(visible);
 }
 
@@ -999,6 +1114,9 @@ void MessageComposer::updateControls()
     // Keep its focus while locking the outgoing payload against edits.
     m_editor->setEnabled(!m_key.isEmpty());
     m_editor->setReadOnly(locked);
+    // Return focus before disabling Send; Qt would otherwise choose the first
+    // available control (now the height handle) before the durable save returns.
+    if (locked && m_send->hasFocus()) m_editor->setFocus(Qt::OtherFocusReason);
     if (m_editor->property("sessionBlocked").toBool() != m_sessionStatusBlocksInput) {
         m_editor->setProperty("sessionBlocked", m_sessionStatusBlocksInput);
         m_editor->style()->unpolish(m_editor); m_editor->style()->polish(m_editor); m_editor->update();
@@ -1519,6 +1637,9 @@ void MessageComposer::setTheme(bool dark)
     // Match the stylesheet's enabled and disabled Send text colors below.
     m_send->setIcon(composerIcon("send", QColor(dark ? "#10231b" : "#ffffff"), QColor(dark ? "#85909e" : "#6d7784")));
     const QColor chevron(dark ? "#a2adbc" : "#627082");
+    auto *handle = static_cast<ComposerResizeHandle *>(m_resizeHandle);
+    handle->color = QColor(dark ? "#53606c" : "#b1bdc8");
+    handle->accent = QColor(dark ? "#8bdfc0" : "#167357"); handle->update();
     m_settings->setProperty("chevron", QVariant::fromValue(composerIcon("chevron-down", chevron, chevron))); m_settings->update();
     setStyleSheet(QString(R"(
         QPlainTextEdit#messageInput { background:%1; color:%2; border:1px solid %3; border-radius:9px; padding:%8px; font-size:%9px; selection-background-color:%4; }
@@ -1565,6 +1686,6 @@ void MessageComposer::setContentScale(double scale)
     if (qFuzzyCompare(scale, m_scale)) return;
     m_scale = scale;
     // Keep the same number of visible lines as at the native size.
-    m_editor->setFixedHeight(ContentScale::px(76, scale));
+    updateEditorHeight();
     setTheme(m_dark);
 }

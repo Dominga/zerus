@@ -160,9 +160,14 @@ The project directory remains on the agent computer.
   256 MiB.
 - **Voice** transcripts use the same guarded send path; a refused voice message
   shows as failed, and the original audio stays in Zerus history.
+- **Terminal** on desktop opens the native OpenCode TUI on the existing service
+  and conversation. The CLI equivalent is `hgs a NAME --existing --run-id RUN`.
+  Closing the client keeps that service and conversation running; opening it
+  never starts or replaces a service and disables the client's automatic updates.
+  Mobile pane snapshots remain unavailable.
 
 Not available in this version: pause/resume (OpenCode sessions have no separate
-process to pause), Terminal, attachments, compaction, fork and child sessions
+process to pause), attachments, compaction, fork and child sessions
 (a later update).
 
 ### Delivery
@@ -195,8 +200,8 @@ The ordinary CLI suite covers parsing and projections. The native adapter suite
 runs against the actual OpenCode 2 binary with private HOME and XDG folders, its
 own service on a private port and a keyless local model; it never touches the
 service, settings or sessions of the person running it and does not contact paid
-model APIs. Full Linux and macOS CI run it with the reviewed minimum, and a daily
-canary runs it with the newest release
+model APIs. Full Linux and macOS CI and the daily upstream report each test one
+latest release, while product admission retains the supported minimum
 ([native agent compatibility](ci-and-aur.md#native-agent-compatibility-and-upstream-review)).
 Run it explicitly with OpenCode installed:
 

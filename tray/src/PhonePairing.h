@@ -9,7 +9,7 @@
 #include <functional>
 #include <vector>
 
-class HgsClient; class QComboBox; class QLabel; class QPushButton; class QTimer; class QTreeWidget;
+class HgsClient; class QComboBox; class QLabel; class QPlainTextEdit; class QPushButton; class QScrollArea; class QStackedWidget; class QTimer; class QTreeWidget;
 
 // Phones paired with the workspaces this computer reaches: through its own
 // mobile connection, or through one enabled peer that has one (hgs @peer
@@ -33,7 +33,7 @@ public:
     void setFaded(bool faded);
     QString text() const { return m_text; }
     int modules() const { return m_size; }
-    QSize sizeHint() const override { return {264, 264}; }
+    QSize sizeHint() const override;
 protected:
     void paintEvent(QPaintEvent *) override;
 private:
@@ -49,15 +49,22 @@ public:
     Dialog(const QString &executable, const QList<Target> &targets, int selected, QWidget *parent = nullptr,
            std::function<double()> now = {});
     void request();
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+    bool eventFilter(QObject *object, QEvent *event) override;
 private:
     void showInvitation(const QJsonObject &invitation);
+    void sizeQrCode();
     void tick();
     HgsClient *m_client;
     QList<Target> m_targets;
     std::function<double()> m_now;
     QComboBox *m_workspace = nullptr;
     QrCodeView *m_code;
-    QLabel *m_server, *m_pairCode, *m_expiry, *m_status;
+    QScrollArea *m_scroll;
+    QStackedWidget *m_qr;
+    QLabel *m_qrStatus, *m_server, *m_expiry, *m_status;
+    QPlainTextEdit *m_pairCode;
     QPushButton *m_copyCode, *m_copyLink, *m_again;
     QTimer *m_timer;
     QString m_link, m_codeText;
@@ -80,6 +87,7 @@ private:
     void render();
     void revoke();
     void pair();
+    void openPairing();
     QString m_executable;
     HgsClient *m_client;
     std::function<bool(const QString &, const QString &)> m_confirm;
@@ -94,7 +102,8 @@ private:
     QString m_notice, m_revokingName;
     QSet<quint64> m_pending;
     quint64 m_machines = 0, m_revoking = 0;
-    bool m_loaded = false;
+    Target m_pairTarget;
+    bool m_refreshQueued = false, m_pairRequested = false;
 };
 
 } // namespace PhonePairing

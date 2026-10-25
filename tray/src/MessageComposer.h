@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QMap>
 #include <QPixmap>
+#include <QPointer>
 #include <QSet>
 #include <QWidget>
 #include <QVariant>
@@ -32,6 +33,8 @@ public:
     explicit MessageComposer(QWidget *parent = nullptr);
     ~MessageComposer() override;
     void setSessionKey(const QString &key);
+    // Read a retained draft in the background without navigating to its session.
+    void ensureDraftLoaded(const QString &key);
     void setAvailability(bool available, const QString &reason = {});
     // Session feedback uses the existing action row and never replaces a draft.
     // html: the same status with emphasis, shown while nothing else takes its place.
@@ -142,11 +145,14 @@ signals:
     void sendNowRequested(const QString &sessionKey);
     // hasDraft(sessionKey) changed.
     void draftChanged(const QString &sessionKey);
+    // A revision-bound background load completed, even if presence was already known.
+    void draftLoaded(const QString &sessionKey);
     // Go to session in Saved drafts, after the dialog has closed.
     void draftSessionRequested(const QString &draftKey);
     void controlsChanged();
 
 protected:
+    bool event(QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -166,6 +172,8 @@ private:
     void referenceFile();
     void attachFile(const QString &path);
     void updateControls();
+    int boundedEditorHeight(int height) const;
+    void updateEditorHeight();
     void rebuildAttachments();
     void removeAttachment(int index);
     void openAttachment(int index);
@@ -198,7 +206,11 @@ private:
     QString m_referenceKey, m_referenceHost, m_referenceMachine, m_referenceContext;
     quint64 m_referenceRevision = 0;
     double m_scale = 1.0;
-    QPlainTextEdit *m_editor;
+    double m_editorHeight = 76.0; // At 100%; temporary viewport limits do not overwrite it.
+    int m_dragEditorHeight = 0;
+    QPlainTextEdit *m_editor = nullptr;
+    QWidget *m_resizeHandle;
+    QPointer<QWidget> m_heightParent;
     QLabel *m_status;
     QFrame *m_settingsPopup;
     QComboBox *m_models, *m_efforts;

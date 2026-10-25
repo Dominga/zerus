@@ -191,10 +191,15 @@ private slots:
     void taskModeAddsTextOnlyWithTheStageButton();
     void initTestCase();
     void voiceInsertionRequiresUnchangedDraftAndNavigation();
-    void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); QSettings().remove("workspace/messageEditorHeight"); }
+    void dragResizesMessageFieldAndDoubleClickRestoresDefault();
+    void resizedMessageFieldFitsSmallerWindowWithoutLosingPreference();
     void crashRestoresLastEditAndAttachmentBytes();
     void restartKeepsIsolationRenamesAndAttachmentRemoval();
     void restoredDraftPresenceNeedsNoConversationOrAttachmentRead();
+    void backgroundDraftLoadAndRenamePreserveVisibleSession();
+    void backgroundDraftLoadRefusesIncompleteRetainedAttachments_data();
+    void backgroundDraftLoadRefusesIncompleteRetainedAttachments();
     void deliveryPersistence_data();
     void deliveryPersistence();
     void storageFailureKeepsDraftAndBlocksDispatch();
@@ -664,6 +669,93 @@ void TestMessageComposer::restartKeepsIsolationRenamesAndAttachmentRemoval()
     setSessionReady(restored, "arch\nsame"); QCOMPARE(restored.editor()->toPlainText(), "Local without marker");
 }
 
+void TestMessageComposer::backgroundDraftLoadAndRenamePreserveVisibleSession()
+{
+    const QString oldKey = "arch\nnever-opened\narchive-one", newKey = "arch\nnever-opened", currentKey = "mac\nvisible";
+    ComposerDraftStore store;
+    ComposerDraft archived; archived.text = "Never opened archived draft"; archived.anchor = 2; archived.position = 13;
+    archived.attachments = {{"notes.txt", "text/plain", QByteArray("retained\0attachment", 19), {}}}; archived.nextAttachmentNumber = 4;
+    QVERIFY(store.save(oldKey, archived));
+    const auto original = store.load(oldKey);
+    ComposerDraft current; current.text = "Keep this editor and selection"; current.anchor = 3; current.position = 11;
+    current.attachments = {{"current.txt", "text/plain", "current attachment", {}}}; current.nextAttachmentNumber = 2;
+    QVERIFY(store.save(currentKey, current));
+    MessageComposer composer; setSessionReady(composer, currentKey); composer.setAvailability(true);
+    QSignalSpy submitted(&composer, &MessageComposer::sendRequested);
+    QTRY_VERIFY(composer.hasDraft(oldKey)); // Presence may be indexed before bytes are loaded.
+    QSignalSpy loaded(&composer, &MessageComposer::draftLoaded);
+    const auto checkVisible = [&] {
+        QCOMPARE(composer.sessionKey(), currentKey);
+        QCOMPARE(composer.editor()->toPlainText(), current.text);
+        QCOMPARE(composer.editor()->textCursor().anchor(), current.anchor);
+        QCOMPARE(composer.editor()->textCursor().position(), current.position);
+        QVERIFY(composer.draftMatches(currentKey, current.text, current.attachments));
+        QCOMPARE(submitted.size(), 0);
+    };
+    composer.ensureDraftLoaded(oldKey);
+    QVERIFY(composer.isDraftLoading(oldKey));
+    composer.ensureDraftLoaded(oldKey); // A duplicate request keeps the same pending load.
+    checkVisible();
+    QTRY_VERIFY(!composer.isDraftLoading(oldKey));
+    QCOMPARE(loaded.size(), 1); QCOMPARE(loaded.first().first().toString(), oldKey);
+    composer.ensureDraftLoaded(oldKey); QCOMPARE(loaded.size(), 1);
+    QVERIFY(composer.draftMatches(oldKey, original.text, original.attachments));
+    checkVisible();
+    composer.renameDraft(oldKey, newKey);
+    QTRY_VERIFY(!composer.isDraftLoading(oldKey) && !composer.isDraftLoading(newKey));
+    checkVisible();
+    const auto moved = store.load(newKey);
+    QCOMPARE(moved.text, original.text); QCOMPARE(moved.anchor, original.anchor); QCOMPARE(moved.position, original.position);
+    QCOMPARE(moved.nextAttachmentNumber, original.nextAttachmentNumber); QCOMPARE(moved.attachmentHashes, original.attachmentHashes);
+    QCOMPARE(moved.attachments.size(), 1); QCOMPARE(moved.attachments.first().name, original.attachments.first().name);
+    QCOMPARE(moved.attachments.first().mime, original.attachments.first().mime); QCOMPARE(moved.attachments.first().data, original.attachments.first().data);
+    QVERIFY(store.load(oldKey).text.isEmpty()); QVERIFY(store.load(oldKey).attachments.isEmpty());
+    QVERIFY(!composer.hasDraft(oldKey)); QVERIFY(composer.hasDraft(newKey));
+}
+
+void TestMessageComposer::backgroundDraftLoadRefusesIncompleteRetainedAttachments_data()
+{
+    QTest::addColumn<bool>("missing");
+    QTest::newRow("missing-attachment") << true;
+    QTest::newRow("corrupt-attachment") << false;
+}
+
+void TestMessageComposer::backgroundDraftLoadRefusesIncompleteRetainedAttachments()
+{
+    QFETCH(bool, missing);
+    const QString oldKey = "arch\nincomplete\narchive", newKey = "arch\nincomplete", currentKey = "mac\nunchanged";
+    ComposerDraftStore store; ComposerDraft archived;
+    archived.text = "Keep the incomplete source recoverable"; archived.anchor = 2; archived.position = 8;
+    archived.attachments = {{"good.txt", "text/plain", "retained good bytes", {}}, {"damaged.txt", "text/plain", "original damaged bytes", {}}};
+    QVERIFY(store.save(oldKey, archived));
+    const auto root = ComposerDraftStore::directory();
+    const auto sourcePath = root + '/' + QString::fromLatin1(QCryptographicHash::hash(oldKey.toUtf8(), QCryptographicHash::Sha256).toHex());
+    const auto destinationPath = root + '/' + QString::fromLatin1(QCryptographicHash::hash(newKey.toUtf8(), QCryptographicHash::Sha256).toHex());
+    const auto damagedPath = sourcePath + '/' + QString::fromLatin1(QCryptographicHash::hash(archived.attachments.last().data, QCryptographicHash::Sha256).toHex()) + ".bin";
+    if (missing) QVERIFY(QFile::remove(damagedPath));
+    else { QFile damaged(damagedPath); QVERIFY(damaged.open(QIODevice::WriteOnly | QIODevice::Truncate)); QCOMPARE(damaged.write("corrupt retained bytes"), qint64(22)); damaged.close(); }
+    QMap<QString, QByteArray> before;
+    const auto sourceNames = QDir(sourcePath).entryList(QDir::Files);
+    for (const auto &name : sourceNames) { QFile file(sourcePath + '/' + name); QVERIFY(file.open(QIODevice::ReadOnly)); before.insert(name, file.readAll()); }
+    const auto incomplete = store.load(oldKey);
+    QVERIFY(!incomplete.storageError.isEmpty()); QCOMPARE(incomplete.attachments.size(), 1);
+    MessageComposer composer; setSessionReady(composer, currentKey); composer.setAvailability(true);
+    composer.editor()->setPlainText("Current editor survives");
+    auto cursor = composer.editor()->textCursor(); cursor.setPosition(2); cursor.setPosition(9, QTextCursor::KeepAnchor); composer.editor()->setTextCursor(cursor);
+    composer.ensureDraftLoaded(oldKey); QTRY_VERIFY(!composer.isDraftLoading(oldKey));
+    composer.renameDraft(oldKey, newKey);
+    ComposerDraftStore::flushWrites();
+    QCOMPARE(composer.sessionKey(), currentKey); QCOMPARE(composer.editor()->toPlainText(), QString("Current editor survives"));
+    QCOMPARE(composer.editor()->textCursor().anchor(), 2); QCOMPARE(composer.editor()->textCursor().position(), 9);
+    QVERIFY(composer.hasDraft(oldKey)); QVERIFY(!composer.hasDraft(newKey)); QVERIFY(!composer.isDraftLoading(newKey));
+    QVERIFY(!QFileInfo::exists(destinationPath));
+    QCOMPARE(QDir(sourcePath).entryList(QDir::Files), sourceNames);
+    for (auto it = before.cbegin(); it != before.cend(); ++it) { QFile file(sourcePath + '/' + it.key()); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), it.value()); }
+    const auto retained = store.load(oldKey);
+    QCOMPARE(retained.text, archived.text); QCOMPARE(retained.attachments.first().data, archived.attachments.first().data);
+    QVERIFY(!retained.storageError.isEmpty());
+}
+
 void TestMessageComposer::restoredDraftPresenceNeedsNoConversationOrAttachmentRead()
 {
     ComposerDraftStore store; ComposerDraft text; text.text = "Restored text";
@@ -1110,6 +1202,73 @@ void TestMessageComposer::contentScaleEnlargesOnlyTheMessageField()
     composer->setContentScale(1.0); QTest::qWait(10);
     QCOMPARE(QFontInfo(composer->editor()->font()).pixelSize(), 13);
     QCOMPARE(composer->editor()->height(), height);
+}
+
+void TestMessageComposer::dragResizesMessageFieldAndDoubleClickRestoresDefault()
+{
+    QWidget workspace; auto *layout = new QVBoxLayout(&workspace); layout->addStretch(1);
+    auto *composer = new MessageComposer; layout->addWidget(composer);
+    setSessionReady(*composer, "local/resize"); composer->setAvailability(true);
+    QVERIFY(composer->addAttachment("notes.txt", "text/plain", "Keep attachment"));
+    const QString text = QString("A long draft, with line breaks.\n").repeated(30);
+    composer->editor()->setPlainText(text);
+    auto cursor = composer->editor()->textCursor(); cursor.setPosition(10); cursor.setPosition(40, QTextCursor::KeepAnchor);
+    composer->editor()->setTextCursor(cursor);
+    QSignalSpy sent(composer, &MessageComposer::sendRequested);
+    workspace.resize(700, 900); workspace.show(); QVERIFY(QTest::qWaitForWindowExposed(&workspace));
+    auto *handle = composer->findChild<QWidget *>("messageResizeHandle"); QVERIFY(handle);
+    QCOMPARE(handle->cursor().shape(), Qt::SizeVerCursor);
+    const int initial = composer->editor()->height(); QCOMPARE(initial, 76);
+    const auto sendPosition = sendButton(*composer)->mapTo(&workspace, QPoint());
+    const auto origin = handle->rect().center();
+    QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, origin);
+    QTest::mouseMove(handle, origin - QPoint(0, 160));
+    QTest::mouseRelease(handle, Qt::LeftButton);
+    QTRY_COMPARE(composer->editor()->height(), initial + 160);
+    QCOMPARE(sendButton(*composer)->mapTo(&workspace, QPoint()), sendPosition);
+    QCOMPARE(composer->editor()->toPlainText(), text);
+    QCOMPARE(composer->editor()->textCursor().position(), 40); QCOMPARE(composer->editor()->textCursor().anchor(), 10);
+    QCOMPARE(QSettings().value("workspace/messageEditorHeight").toInt(), initial + 160);
+    const auto preview = qEnvironmentVariable("HGS_COMPOSER_PREVIEW");
+    if (!preview.isEmpty()) {
+        QVERIFY(QDir().mkpath(preview));
+        QVERIFY(composer->grab().save(preview + "/resized-message-field.png"));
+    }
+    setSessionReady(*composer, "local/other"); setSessionReady(*composer, "local/resize");
+    QCOMPARE(composer->editor()->height(), initial + 160); QCOMPARE(composer->editor()->toPlainText(), text);
+    QVERIFY(composer->findChild<ToolbarChip *>("attachmentsChip")->isActive());
+    { MessageComposer reopened; reopened.show(); QTRY_COMPARE(reopened.editor()->height(), initial + 160); }
+    composer->setContentScale(1.25);
+    QTRY_COMPARE(composer->editor()->height(), qRound((initial + 160) * 1.25));
+    QTest::mouseDClick(handle, Qt::LeftButton);
+    QTRY_COMPARE(composer->editor()->height(), 95); // Scaled default, rather than a hard-coded 76 px.
+    QVERIFY(!QSettings().contains("workspace/messageEditorHeight"));
+    QCOMPARE(composer->editor()->toPlainText(), text); QCOMPARE(sent.count(), 0);
+    composer->setInputVisible(false); QVERIFY(!handle->isVisible());
+    composer->setInputVisible(true); QVERIFY(handle->isVisible());
+    handle->setFocus(); QTest::keyClick(handle, Qt::Key_Up);
+    QTRY_COMPARE(composer->editor()->height(), 115);
+    QTest::keyClick(handle, Qt::Key_Home); QTRY_COMPARE(composer->editor()->height(), 95);
+}
+
+void TestMessageComposer::resizedMessageFieldFitsSmallerWindowWithoutLosingPreference()
+{
+    QSettings().setValue("workspace/messageEditorHeight", 420);
+    QWidget workspace; auto *layout = new QVBoxLayout(&workspace); layout->addStretch(1);
+    auto *composer = new MessageComposer; layout->addWidget(composer);
+    workspace.resize(700, 1000); workspace.show(); QVERIFY(QTest::qWaitForWindowExposed(&workspace));
+    QTRY_COMPARE(composer->editor()->height(), 420);
+    workspace.resize(700, 400);
+    QTRY_COMPARE(workspace.height(), 400); // A large saved preference must not raise the window's minimum height.
+    QTRY_VERIFY(composer->height() <= workspace.height() * 2/3);
+    QVERIFY(composer->editor()->height() >= 76); QVERIFY(sendButton(*composer)->isVisible());
+    QCOMPARE(QSettings().value("workspace/messageEditorHeight").toInt(), 420);
+    workspace.resize(700, 1000); QTRY_COMPARE(composer->editor()->height(), 420);
+    auto *handle = composer->findChild<QWidget *>("messageResizeHandle"); QVERIFY(handle);
+    const auto origin = handle->rect().center();
+    QTest::mousePress(handle, Qt::LeftButton, Qt::NoModifier, origin);
+    QTest::mouseMove(handle, origin + QPoint(0, 1000)); QTest::mouseRelease(handle, Qt::LeftButton);
+    QTRY_COMPARE(composer->editor()->height(), 76);
 }
 
 void TestMessageComposer::attachmentDropReleasesVisualCaret_data()

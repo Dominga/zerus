@@ -26,6 +26,7 @@ public:
     void selectProject(const QString &id);
     void refresh();
     void setSwarmStatus(const QString &text, bool error);
+    void setSwarmSnapshot(const QJsonObject &snapshot);
     void deleteProject(const QString &id);
     static bool nameProblem(const QString &name, QString *why);
     static QString nameWarning(const QString &) { return {}; }
@@ -37,6 +38,7 @@ signals:
     void projectsChanged(const QString &host);
     void organizationChanged();
     void swarmRequested();
+    void connectSwarmRequested(const QString &computer);
     void catalogDraftEditing(bool active);
     void folderSessionsRequested(const QString &host, const QString &path, bool checkout);
     void relatedSessionRequested(const QString &host, const QString &name, const QString &archive);
@@ -44,12 +46,14 @@ signals:
     void newSessionRequested(const QString &project, const QString &host, const QString &folder);
 private:
     void showProject();
+    void updateSwarmConnections();
     void moveProject(int offset);
     void chooseColor();
     void changed();
     void addProject();
     void removeProject();
     void addFolder();
+    void cloneRepository();
     void editFolder(const QString &id, const QString &projectId = {});
     void removeFolder(const QString &projectId, const QString &id);
     void transferFolder(const QString &projectId, const SessionOrganization::Folder &folder,
@@ -86,6 +90,11 @@ private:
     QCheckBox *m_default;
     QCheckBox *m_allProjects;
     QLabel *m_swarmStatus;
+    QWidget *m_swarmConnectionPanel;
+    QLabel *m_swarmConnectionHint;
+    QPushButton *m_connectSwarm;
+    QJsonObject m_swarmSnapshot;
+    QStringList m_unconnectedComputers;
     bool m_dark = false;
     ProjectPreview *m_preview;
     QPushButton *m_color, *m_remove, *m_removeFolder, *m_editFolder, *m_openFolder, *m_newSession;

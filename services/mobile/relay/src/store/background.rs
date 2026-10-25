@@ -72,6 +72,23 @@ impl Store {
         }
         Ok(())
     }
+    pub async fn release_poll_reserved(&self, lease: &str, class: ServiceClass) -> Result<()> {
+        if !self.db.cfg.public_enrollment {
+            return self.release_poll(lease).await;
+        }
+        crate::db::retry_cleanup(|| self.release_poll_reserved_once(lease, class)).await
+    }
+    async fn release_poll_reserved_once(&self, lease: &str, class: ServiceClass) -> Result<()> {
+        let mut t = self.db.cleanup_control(class).await?;
+        if let Some(row) = t
+            .one("SELECT * FROM poll_leases WHERE id=?", args![lease])
+            .await?
+        {
+            self.db.usage(&mut t, s(&row, "workspace_id")).await?;
+            Self::release_poll_tx(&mut t, &row).await?;
+        }
+        t.commit().await
+    }
     pub async fn release_poll(&self, lease: &str) -> Result<()> {
         let mut t = self.db.cleanup().await?;
         if let Some(row) = t
@@ -115,15 +132,36 @@ impl Store {
         self.db.one("SELECT p.provider,p.target FROM pushes p JOIN devices d ON d.id=p.device_id WHERE p.device_id=? AND d.revoked=0",args![id]).await
     }
     pub async fn claim_push_jobs(&self) -> Result<Vec<Value>> {
+        Ok(self
+            .claim_push_jobs_budgeted()
+            .await?
+            .into_iter()
+            .map(|(job, _budget)| job)
+            .collect())
+    }
+    pub async fn claim_push_jobs_budgeted(&self) -> Result<Vec<(Value, Option<ServiceLease>)>> {
         let mut t = self.db.begin().await?;
-        let mut jobs=t.all("SELECT j.id,j.device_id,j.event_id,j.payload,j.attempts FROM push_jobs j JOIN devices d ON d.id=j.device_id JOIN pushes p ON p.device_id=j.device_id WHERE j.attempts<5 AND j.next_at<=? AND (j.lease_until IS NULL OR j.lease_until<=?) AND d.revoked=0 ORDER BY j.next_at,j.id LIMIT 4 FOR UPDATE SKIP LOCKED",args![now(),now()]).await?;
-        for j in &mut jobs {
-            j["lease_token"] = json!(token());
+        let ordering = if self.db.cfg.public_enrollment {
+            "CASE WHEN w.service_class='team' THEN 0 ELSE 1 END,"
+        } else {
+            ""
+        };
+        let rows=t.all(&format!("SELECT j.id,j.device_id,j.event_id,j.payload,j.attempts,w.service_class FROM push_jobs j JOIN devices d ON d.id=j.device_id JOIN pushes p ON p.device_id=j.device_id JOIN workspaces w ON w.id=d.workspace_id WHERE j.attempts<5 AND j.next_at<=? AND (j.lease_until IS NULL OR j.lease_until<=?) AND d.revoked=0 ORDER BY {ordering}j.next_at,j.id LIMIT 4 FOR UPDATE SKIP LOCKED"),args![now(),now()]).await?;
+        let mut jobs = Vec::new();
+        for mut job in rows {
+            let class = ServiceClass::parse(s(&job, "service_class"))?;
+            let budget = match self.acquire_service("push", class, 1).await {
+                Ok(budget) => budget,
+                Err(error) if error.0 == Error::BUSY.0 => continue,
+                Err(error) => return Err(error),
+            };
+            job["lease_token"] = json!(token());
             t.exec(
                 "UPDATE push_jobs SET lease_token=?,lease_until=? WHERE id=?",
-                args![&j["lease_token"], now() + 60.0, &j["id"]],
+                args![&job["lease_token"], now() + 60.0, &job["id"]],
             )
             .await?;
+            jobs.push((job, budget));
         }
         t.commit().await?;
         Ok(jobs)
@@ -313,6 +351,12 @@ impl Store {
                 "requests INDEXED BY git_status_history_v1"
             };
             rows.extend(t.all(&format!("SELECT id,workspace_id FROM {git_reads} WHERE operation='git_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?"),args![at-self.db.cfg.retention.min(3600) as f64,batch]).await?);
+            let repository_reads = if self.db.postgres {
+                "requests"
+            } else {
+                "requests INDEXED BY repository_reads_v1"
+            };
+            rows.extend(t.all(&format!("SELECT id,workspace_id FROM {repository_reads} WHERE operation IN {} AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT ?", crate::repositories::READ_SQL),args![at-self.db.cfg.retention.min(3600) as f64,batch]).await?);
             let projection_reads = if self.db.postgres {
                 "requests"
             } else {

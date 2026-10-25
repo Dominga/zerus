@@ -105,6 +105,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account ls | add ID --provider AGENT --label NAME | rm ID | restore ID | login ID
        hgs [@host] account rename ID --label NAME | inspect ID [--refresh]
        hgs [@host] account default [ID]   show or select the default account for new sessions
+       hgs [@host] account model-settings ID   inspect this account's native model catalog and launch defaults
+       hgs [@host] account model-defaults ID --model MODEL [--effort LEVEL] [--revision REV]   defaults for new sessions
        hgs [@host] account set-key native-dsh --json   save API key from private JSON stdin
        hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it
        hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID   star an OpenCode model on that computer
@@ -116,9 +118,15 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
        hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
        hgs [@host] worktrees review --path PATH [--worktree WORKTREE] [--json]   cleanup verdicts and fingerprints
+       hgs [@host] worktrees policy get|set --json   worktree-maintenance-v1 (host-local cleanup rules)
+       hgs [@host] worktrees sweep --json   one bounded automatic cleanup step
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes
        hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
+       hgs [@host] repository check|clone --url URL --parent PATH --name NAME --json
+       hgs [@host] repository status --request-id UUID --json
+       Repository acquisition ABI: repository-clone-v1
+       Mobile repository acquisition ABI: repository-acquisition-v1
        Mobile Git status ABI: git-status-v1
        Mobile project assignment ABI: session-project-v1
        Mobile clear-context ABI: dismiss-prompt-v1
@@ -176,6 +184,12 @@ fn local_sessions() -> Result<()> {
     } else {
         Err(Error::new(2, platform::LOCAL_SESSIONS_UNSUPPORTED))
     }
+}
+
+// Repository preparation owns only its checkout and receipt. Like the existing
+// configuration/control commands, it does not require or enable a session host.
+fn needs_local_sessions(command: &str) -> bool {
+    !matches!(command, "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -380,7 +394,7 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
         .into()
 }
 
-pub fn dispatch(args: Vec<String>) -> Result<i32> {
+pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     // Private: the screen model behind the differential tmux capture test.
     if args.first().is_some_and(|a| a == "__screen-capture") {
         return crate::screen::cli(&args[1..]).map_err(|e| Error::new(2, e));
@@ -400,6 +414,26 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
         return state::dispatch(&args[1..]).map_err(|e| Error::new(1, e));
     }
     let config = Config::load()?;
+    // An encrypted gateway binds every local native call to the physical
+    // machine it advertised. This check also works on Windows, without a
+    // shell, stdin rewriting or a second native process.
+    if args.first().is_some_and(|a| a == "--expect-machine") {
+        let expected = args.get(1).ok_or_else(|| Error::new(2, "Missing expected machine identity"))?;
+        if uuid::Uuid::parse_str(expected).ok().is_none_or(|id| id.to_string() != *expected)
+            || crate::swarm::local_node_id(&config).map_err(|_| Error::new(1,"Native machine identity is unavailable"))? != *expected
+        {
+            return Err(Error::new(1,"Mobile target identity changed; refresh computers"));
+        }
+        args.drain(..2);
+        if args.first().is_none_or(|a| a.starts_with('@')
+            || (a.starts_with('-') && !(args.len()==1 && matches!(a.as_str(),"--help"|"-h"|"--version")))) {
+            return Err(Error::new(2,"A guarded mobile call requires a local command"));
+        }
+        if args.first().is_some_and(|a| a == "__state") {
+            session_process()?;
+            return state::dispatch(&args[1..]).map_err(|e| Error::new(1,e));
+        }
+    }
     // The existing swarm namespace fails closed on unknown operations in older
     // installations, so transport helpers cannot fall through to agent launch.
     if args.first().is_some_and(|a| a == "swarm")
@@ -462,6 +496,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
                 return remote(&config, &target, "--help", args, dry);
             }
             print!("{}", usage_text(cfg!(unix)));
+            println!("Encrypted workspace ABI: guarded-local-v1");
             #[cfg(windows)]
             print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);
@@ -560,7 +595,7 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
-    if !matches!(command.as_str(), "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks") {
+    if needs_local_sessions(command) {
         local_sessions()?;
     }
     // Only Unix has arms for these below; elsewhere they would reach the launch arm.
@@ -602,15 +637,16 @@ pub fn dispatch(args: Vec<String>) -> Result<i32> {
             }
             state_command(command, &args)
         }
-        "inspect" | "processes" | "worktrees" | "git-status" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
+        "inspect" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
         | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" => {
+            if command == "repository" && dry { return Err(Error::new(1,"Repository operations do not support --dry-run")); }
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
             if command == "graph" && dry { return Err(Error::new(1,"Graph reads do not support --dry-run")); }
             if command == "dirs" && has(args, "--create") && dry {
                 return Err(Error::new(1, "folder creation does not support --dry-run"));
             }
-            if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove") && dry {
-                return Err(Error::new(1, "worktree creation and removal do not support --dry-run"));
+            if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove" || s == "sweep" || s == "policy" && args.get(1).is_some_and(|s|s=="set")) && dry {
+                return Err(Error::new(1, "worktree creation, removal and policy changes do not support --dry-run"));
             }
             if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
@@ -926,7 +962,7 @@ fn remote(
             all.extend(args.clone());
             all
         }
-        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "dirs" | "project" | "archive" | "rename"
+        "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
         | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
                 "-o".into(),
@@ -963,19 +999,22 @@ fn remote(
         }
     };
     flags.extend(crate::machines::ssh_options(config, target));
-    let remote = if command == "wait" {
+    let remote = if command == "repository" {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "wait" {
         // Old peers otherwise interpret an unknown command as an agent launch.
         // Probe the same installed executable without consuming JSON stdin.
-        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args))
+        // These probes are POSIX scripts; a fish login shell runs them under sh.
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "notifications" {
-        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-notifications-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change notification preferences' >&2; exit 1; fi",platform::join(&remote_args))
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-notifications-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change notification preferences' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "hooks" {
-        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hooks-health-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to inspect hook health' >&2; exit 1; fi",platform::join(&remote_args))
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hooks-health-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to inspect hook health' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "analytics" {
-        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] analytics --json'; then exec ~/.local/bin/hgs {} --read-only; else echo 'hgs: update the selected computer to read analytics' >&2; exit 1; fi",platform::join(&remote_args))
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] analytics --json'; then exec ~/.local/bin/hgs {} --read-only; else echo 'hgs: update the selected computer to read analytics' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "guide" {
-        format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args))
-    } else { format!("~/.local/bin/hgs {}", platform::join(&remote_args)) };
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else { format!("~/.local/bin/hgs {}", platform::remote_join(&remote_args)) };
     if global_dry || has(&args, "--dry-run") {
         if let Some(title) = tab {
             if config.tab {
@@ -1148,7 +1187,6 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
 fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool) -> Result<i32> {
     const HELP: &str = "usage: hgs a <session> [--existing [--run-id ID]]";
     let session = require(args, 0, HELP)?;
-    if state::opencode::exists(session) {return Err(Error::new(1,state::backend::OPENCODE_ATTACH.text()));}
     if state::dsh::exists(session) {
         return crate::native_ui::open(config, "", session, dry || has(args, "--dry-run"));
     }
@@ -1169,6 +1207,9 @@ fn attach_command(config: &Config, args: &[String], client: &str, mut dry: bool)
     }
     if run_id.is_some() && !existing {
         return Err(Error::new(1, "--run-id requires --existing"));
+    }
+    if state::opencode::exists(session) {
+        return state::opencode::attach(session, run_id, dry).map_err(|error| Error::new(1, error));
     }
     if !existing {
         return attach(config, session, client, dry);
@@ -2071,6 +2112,13 @@ fn launch(
             resume.extend(options.extra.clone());
         }
     }
+    // Capture the account defaults in the new conversation's launch recipe.
+    // Saved resumes/forks and explicit native choices retain their own settings.
+    if !existing && !auto && options.resume_id.is_none()
+        && (options.fresh || !binding_exists(config, &session)?)
+        && ["codex", "claude", "kimi"].contains(&command_name.as_str()) {
+        crate::accounts::apply_model_defaults(config, options.account.as_deref().unwrap_or(""), &command_name, &mut base)?;
+    }
     if options.remote_control {
         if command_name == "claude" {
             base.extend(["--remote-control".into(), session.clone()]);
@@ -2080,6 +2128,10 @@ fn launch(
         }
     }
     let executable = executable_path()?.to_string_lossy().into_owned();
+    let hint_environment = crate::config::agent_hint_environment(&command_name);
+    #[cfg(unix)]
+    let supervisor_environment = account_environment
+        .iter().chain(&hint_environment).cloned().collect::<Vec<_>>();
     // The Unix login shell is the pane's root process. On Windows PowerShell
     // runs under `--run` as well: the host starts every root process as a new
     // process group, which ignores Ctrl+C together with everything it starts,
@@ -2091,14 +2143,7 @@ fn launch(
         let mut words = vec![
             shell,
             "-lic".into(),
-            if account_environment.is_empty() {
-                "exec \"$0\" --run \"$@\"".into()
-            } else {
-                format!(
-                    "exec env {} \"$0\" --run \"$@\"",
-                    platform::join(&account_environment)
-                )
-            },
+            crate::accounts::supervisor_script(&supervisor_environment),
             executable.clone(),
         ];
         // The supervisor starts directly, with the session's variables, which
@@ -2149,6 +2194,7 @@ fn launch(
         environment.push(format!("HGS_LAUNCH_ID={id}"));
     }
     environment.extend(account_environment);
+    environment.extend(hint_environment);
     environment.extend(platform::gui_env());
     if !options.fresh
         && (requested_saved || (options.resume_id.is_none() && binding_exists(config, &session)?))
@@ -2249,6 +2295,23 @@ fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_preparation_does_not_admit_session_commands_on_control_consoles() {
+        for command in ["ls", "machine", "presence", "swarm", "project", "account",
+            "speech", "analytics", "graph", "wait", "mobile", "hooks", "repository"] {
+            assert!(!needs_local_sessions(command), "{command}");
+        }
+        for command in ["a", "kill", "send", "send-now", "inspect", "history",
+            "history-projection", "processes", "terminal", "session-action", "interrupt",
+            "clear-context", "compact-context", "answer", "effort", "settings", "recovery",
+            "read", "notifications", "voice", "schedules", "attachment", "file-read",
+            "claude", "codex", "kimi", "sh", "resume", "pause", "fork", "reference",
+            "archive", "terminate", "dirs", "worktrees", "git-status", "__state", "__host",
+            "repository-git-worker", "Repository", "repository-extra", ""] {
+            assert!(needs_local_sessions(command), "{command}");
+        }
+    }
 
     #[test]
     fn shared_notifications_advertises_its_exact_standalone_marker_on_every_platform() {

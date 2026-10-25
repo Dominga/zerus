@@ -71,6 +71,36 @@ The replica crate has its own lockfile: run
 `cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml`; its
 golden vectors must keep decoding, and `ZERUS_BLESS=1` only adds new ones.
 
+On Linux, the three worktree modules run through `scripts/ci/worktree-tests.py`
+in a fresh PID/mount namespace, including their live process blockers and private
+tmux servers. Production cleanup retains folders when a host process cannot be
+inspected, so a shared host cannot establish the positive removal controls.
+Local isolation requires `unshare` and `setpriv`; hosted disposable runners use
+passwordless sudo only for namespace creation, then run fixtures as the original
+user with no capabilities or supplementary groups. A real nondumpable child
+checks that inspection restrictions still apply. Failed namespace admission fails
+the tests without an uncontained retry. For a focused local run, use
+`PYTHONPATH=tests python3 scripts/ci/worktree-tests.py test_worktrees test_worktree_lifecycle test_worktree_maintenance`.
+On macOS these three complete modules run sequentially after the other Python
+integration jobs. Exec/exit fixtures can briefly leave a live owned process
+without readable BSD metadata, and production must retain folders in that case.
+Disposable upstream GitHub macOS runners can also own protected service processes
+whose metadata is permanently unreadable. `scripts/ci/macos-worktree-tests.py`
+creates one locked, unprivileged temporary user for each complete module there.
+The normal CLI, all fixtures, real process blockers and private tmux servers run
+under that UID with a clean environment and private home. A kernel UID inventory
+and real interpreter preflight establish this scope; no process is filtered from
+an individual CLI call. After the tests, lingering fixture processes receive
+TERM, then bounded KILL if necessary, as that unprivileged user with both real and
+effective UID pinned and its directory-service identity rechecked before each
+signal. The harness also closes only that private user's launchd domain, proven
+absent before allocation, so per-user OS services stop respawning. The account is
+removed only after the domain is absent, the UID inventory is empty and the
+directory-service identity matches. Uncertain cleanup fails and retains the
+scope for VM disposal. Owner Macs and other hosts refuse account creation before
+allocation or sudo; local macOS checks continue under the current user. No test is
+excluded and the production guard remains strict.
+
 `check-source.py` keeps the desktop's Unix children from inheriting its descriptors
 ([ChildProcess.h](tray/src/ChildProcess.h)): in `tray/src` it rejects
 `QProcess::startDetached()` and `QProcess::execute()`, and every `QProcess` must go to
@@ -116,9 +146,10 @@ backend classes when a behaviour must hold for both.
 On Arch, `bash scripts/ci/arch.sh` also builds and validates the pacman package
 as an unprivileged user. It substitutes a local Git source only in its disposable
 build directory; it never installs the package or enables services.
-Hosted CI runs full Linux CLI, Arch desktop/package, macOS and Windows checks
-automatically on pushes to main and PRs targeting main. Manual runs default to full
-coverage; explicit suite inputs can narrow a manual/reusable run. Validate workflow
+Hosted Dev CI runs shared Rust/protocol checks, Linux CLI, Arch desktop/package,
+macOS and Android on main. PRs retain Windows/iOS for affected or unknown paths;
+Nightly and Stable require the full matrix. Manual runs default to all platforms,
+with independent macOS-desktop and iOS flags. Validate workflow
 edits locally before pushing. Daily nightlies publish a verified binary to GitHub and
 AUR, and the Windows portable zip to GitHub, only after every check passes; stable
 releases, which carry the zip their own candidate run tested, remain manually published.
@@ -131,7 +162,7 @@ Some platform tests only exist on macOS, Linux or Windows. Record any unavailabl
 checks.
 
 The OpenCode 2 native suite needs an installed OpenCode 2.0.32 or newer 2.x. Run it
-locally on request; full Linux and macOS CI run it with the pinned minimum. See
+locally on request; full Linux and macOS CI run it with the latest release. See
 [OpenCode qualification](docs/opencode.md#qualification).
 
 Color-popup dismissal also needs Cocoa qualification on macOS. These cases post
@@ -239,7 +270,7 @@ HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_FAKE_AGENT="$(cygpath -w "$PWD/target/debug/examples/fake_agent.exe")" \
 HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -m unittest discover -s tests -p 'test_windows_host*.py' -v </dev/null
-# Downloads the pinned win32-x64 Claude Code and Codex for their real-agent suites:
+# Resolves the latest win32-x64 Claude Code and Codex for their real-agent suites:
 HGS_TEST_BIN="$(cygpath -w "$PWD/target/release/hgs.exe")" \
 HGS_TEST_CONPTY_DIR="$(cygpath -w "$PWD/target/conpty")" \
   python -X utf8 scripts/ci/agent-compatibility.py </dev/null
@@ -269,31 +300,35 @@ native session host of Windows Phase 2 has its own isolated recipe and tests,
 `tests/test_windows_host_conpty.py`, the survival tests in
 `tests/test_windows_host_survival.py` and the real-agent suites in
 `tests/test_windows_native_agents.py`, which `scripts/ci/agent-compatibility.py`
-runs with the reviewed Claude Code and Codex packages, each against a local fake
+runs with one latest Claude Code and Codex package per agent, each against a local fake
 API: [testing the Windows session host](docs/windows-host-testing.md).
 
-Kimi's optional native input, question and startup-trust fixtures are
-`test_kimi_native.NativeKimi` (two cases),
+Kimi's optional native input, recovery, question and startup-trust fixtures are
+`test_kimi_native.NativeKimi` (three cases),
 `test_kimi_questions_native.NativeKimiQuestions` (three) and
 `test_kimi_questions_native.NativeKimiTrust` (three). Run them only with an
-explicitly reviewed `HGS_KIMI_TEST_BIN` and exact `HGS_KIMI_TEST_SHA256`, a sealed
+privately selected `HGS_KIMI_TEST_BIN`, exact `HGS_KIMI_TEST_SHA256` and the runner's
+sealed `HGS_KIMI_TEST_RECORD` plus official manifest, a sealed
 `HGS_TEST_BIN`, private helper PATH and evidence directory; never point them at
 the installed Kimi. Each case runs a private copy, disables automatic updates,
 uses its loopback model and platform fixture, proves the child image and private
 environment, and retains uncertain cleanup. The macOS cases compile one exec
-shim per case, so they require both native and compiler resources. A campaign
-over two reviewed Kimi versions is sixteen native cases, not the seventeen R2
-and seven question-fixture controls. The latter use stand-ins and loopback
+shim per case, so they require both native and compiler resources. A current
+latest-release campaign runs twelve native cases, including long Other answers,
+explicit recovery of a retained editor, and preservation of a mismatching draft. Historical two-version receipts
+do not define current selection. The seventeen R2 and seven question-fixture
+controls use stand-ins and loopback
 servers and establish fixture behavior only. `test_kimi_trust` and
 `test_kimi_cache_hint` additionally execute hgs and private tmux fixtures; they
 are synthetic integration tests, not pure controls. Historical native results
 do not qualify a newly composed candidate.
 
-The separate [pinned Kimi native workflow](.github/workflows/kimi-native.yml)
-runs these sixteen cases on disposable standard Linux and macOS runners for
+The separate [latest Kimi native workflow](.github/workflows/kimi-native.yml)
+runs these eight cases on disposable standard Linux and macOS runners for
 relevant PR changes or a manual run. It builds hgs once with Rust 1.99.1 and
-two jobs, runs the existing pinned tmux in a private prefix, and checks both
-official version manifests and all image sizes/SHA-256 pins before native
+two jobs, runs the existing pinned tmux in a private prefix, resolves the official
+latest release once and verifies its versioned manifest, exact target, bounded
+size and SHA-256 before native
 execution. It receives no provider or publication credentials, uses no cache,
 and never installs Kimi globally. Linux x64 and Darwin arm64 are the only
 reviewed images; an unexpected runner architecture fails before the build.
@@ -304,6 +339,16 @@ its detached agents. Ephemeral VM disposal is the final boundary. Public model
 endpoints are not configured; the fixtures' model and platform are loopback
 only. This is not a kernel network enclosure or Windows Kimi qualification.
 The historical NP50 owner-Mac campaigns are separate and are not replayed.
+The [latest Kimi approval workflow](.github/workflows/kimi-approvals.yml) similarly
+runs one selected release on macOS and Windows, including its existing Windows
+environment preflight. Its native inventory is the unchanged seven exact Bash
+approval cases plus exactly these four CreateGoal cases:
+`test_goal_manual_starts_in_manual`,
+`test_goal_yolo_auto_switches_to_never_ask`,
+`test_goal_yolo_cancel_does_not_start`,
+`test_goal_yolo_keeps_ask_when_needed`, and the single ExitPlanMode case
+`test_plan_review_approve`. These workflows remain path-filtered PR/manual
+qualifications; they do not add Kimi to every main run.
 `scripts/fetch-conpty.py` downloads the ConPTY package pinned in
 `packaging/windows/conpty.json` from nuget.org and writes only its checked
 `conpty.dll` and `OpenConsole.exe`; `package-windows.py` puts them next to

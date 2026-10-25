@@ -14,7 +14,7 @@ let package = Package(
     targets: [
         .binaryTarget(name: "ZerusReplicaFFI", path: "Replica/ZerusReplicaFFI.xcframework"),
         .target(name: "ZerusReplica", dependencies: ["ZerusReplicaFFI"], path: "Replica/Swift"),
-        .target(name: "ZerusKit", dependencies: ["ZerusReplica"]),
+        .target(name: "ZerusKit", dependencies: ["ZerusReplica"], linkerSettings: [.linkedLibrary("sqlite3")]),
         .testTarget(name: "ZerusKitTests", dependencies: ["ZerusKit", "ZerusReplica"]),
     ]
 )

@@ -24,6 +24,48 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+/// A completed process roster may still contain protected Linux processes whose
+/// paths the OS refuses to disclose. Keep these separate from readable paths:
+/// they require personal confirmation, never automatic cleanup authority.
+#[derive(Default)]
+pub struct WorktreeProcesses {
+    pub paths: Vec<(u32, PathBuf, String)>,
+    pub unreadable: Vec<UnreadableWorktreeProcess>,
+}
+
+#[derive(serde::Serialize)]
+pub struct UnreadableWorktreeProcess {
+    pub pid: u32,
+    pub identity: String,
+    pub command: String,
+    pub cwd: bool,
+    pub executable: bool,
+    /// Kernel-verified ancestor of this CLI invocation. Remote commands create
+    /// fresh launch ancestors; their role, rather than PID, binds manual consent.
+    pub invocation_ancestor: bool,
+}
+
+impl UnreadableWorktreeProcess {
+    pub fn confirmation_identity(&self) -> serde_json::Value {
+        if self.invocation_ancestor {
+            serde_json::json!({"invocation_ancestor":true,
+                "boot":self.identity.split_once(':').map(|(boot,_)|boot),
+                "command":self.command,"cwd":self.cwd,"executable":self.executable})
+        } else {
+            serde_json::json!(self)
+        }
+    }
+}
+
+impl From<Vec<(u32, PathBuf, String)>> for WorktreeProcesses {
+    fn from(paths: Vec<(u32, PathBuf, String)>) -> Self {
+        Self {
+            paths,
+            unreadable: Vec::new(),
+        }
+    }
+}
+
 /// What a local session command reports where `local_sessions()` is false: a
 /// Windows computer whose local sessions are not enabled (spec D2). It exits with
 /// code 2.
@@ -310,6 +352,9 @@ pub enum RunError {
     Failed,
     /// This computer cannot answer the question.
     #[cfg_attr(unix, allow(dead_code))]
+    // Windows retains the unsupported enumeration API for explicit capability
+    // queries; fork readiness now uses known-path holder discovery instead.
+    #[cfg_attr(windows, allow(dead_code))]
     Unsupported,
 }
 
@@ -329,6 +374,35 @@ pub fn join<S: AsRef<str>>(args: &[S]) -> String {
         .map(|s| quote(s.as_ref()))
         .collect::<Vec<_>>()
         .join(" ")
+}
+/// Quotes a word for an SSH peer's login shell, which may be fish. fish also
+/// reads `\\` and `\'` inside single quotes, so every backslash stays outside
+/// them; a word without one keeps the `quote` form.
+pub fn remote_quote(word: &str) -> String {
+    if !word.contains('\\') {
+        return quote(word);
+    }
+    let mut quoted = String::from("'");
+    for c in word.chars() {
+        match c {
+            '\'' => quoted.push_str(r"'\''"),
+            '\\' => quoted.push_str(r"'\\'"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+pub fn remote_join<S: AsRef<str>>(args: &[S]) -> String {
+    args.iter()
+        .map(|s| remote_quote(s.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+/// Runs a POSIX script under `sh` on an SSH peer. The peer's login shell,
+/// which may be fish, then parses only one quoted word.
+pub fn remote_sh(script: &str) -> String {
+    format!("sh -c {}", remote_quote(script))
 }
 
 fn konsole_args(method: &str, args: &[&str]) -> Option<Vec<String>> {
@@ -471,6 +545,26 @@ pub fn restore_terminal() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn protected_process_confirmation_retains_boot_and_nonancestor_identity() {
+        let mut row = super::UnreadableWorktreeProcess {
+            pid:10, identity:"boot-a:100".into(), command:"fixture-launcher".into(),
+            cwd:true, executable:true, invocation_ancestor:true,
+        };
+        let first=row.confirmation_identity();
+        row.pid=11;row.identity="boot-a:200".into();
+        assert_eq!(first,row.confirmation_identity(),"Separate launch PIDs in the same boot share their verified role");
+        row.identity="boot-b:200".into();
+        assert_ne!(first,row.confirmation_identity(),"Reboot invalidates consent even if every unreadable process is an ancestor");
+        row.identity="boot-a:200".into();row.executable=false;
+        assert_ne!(first,row.confirmation_identity(),"Changed hidden-path shape needs a new review");
+        row.executable=true;row.invocation_ancestor=false;
+        let unrelated=row.confirmation_identity();
+        row.pid=12;
+        assert_ne!(unrelated,row.confirmation_identity(),"Unrelated protected processes retain exact PID identity");
+        row.pid=11;row.identity="boot-a:201".into();
+        assert_ne!(unrelated,row.confirmation_identity(),"Unrelated PID reuse retains exact start identity");
+    }
     use super::*;
 
     #[test]
@@ -491,6 +585,16 @@ mod tests {
             join(&["inspect", "zerus://session?a=1&b=2", "--local"]),
             "inspect 'zerus://session?a=1&b=2' --local"
         );
+    }
+
+    #[test]
+    fn remote_words_keep_backslashes_outside_quotes_for_fish() {
+        assert_eq!(remote_quote("~/.local/bin/hgs"), "~/.local/bin/hgs");
+        assert_eq!(remote_quote("it's"), quote("it's"));
+        assert_eq!(remote_quote(r"a\b"), r"'a'\\'b'");
+        assert_eq!(remote_quote(r"a\'b\"), r"'a'\\''\''b'\\''");
+        assert_eq!(remote_join(&["search", r"C:\x y"]), r"search 'C:'\\'x y'");
+        assert_eq!(remote_sh("if true; then :; fi"), "sh -c 'if true; then :; fi'");
     }
 
     #[test]

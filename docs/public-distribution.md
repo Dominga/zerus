@@ -17,10 +17,11 @@ The manual `android-release.yml` workflow creates a candidate only, using the
 existing release-environment Android signer and private Firebase configuration.
 It neither publishes a release nor updates a catalog. Select upstream `main` and
 provide the exact selected SHA, committed stable version and `VERSION_CODE`, a
-completed successful full main-push `ci.yml` run for that SHA, and the previously
-reviewed existing signing-certificate SHA-256. PR/manual CI cannot authorize the
-signing step. Both exact main CI gates must have succeeded in the selected
-attempt; an absent earlier-attempt gate is refused rather than guessed.
+completed successful full Nightly/Release candidate (or historical full main CI)
+run for that SHA, and the reviewed existing signing-certificate SHA-256. Ordinary
+PR/manual CI cannot authorize signing. Every named platform suite and its
+aggregate gate must succeed in the selected attempt; a reduced Dev main gate or
+an absent earlier-attempt gate cannot qualify Stable.
 
 Before dispatch, pause and drain Dev publication and check every public channel
 and distributed private preview code. The workflow checks committed identity;
@@ -31,7 +32,9 @@ The candidate builds an exclusive clean source extraction with JDK 17, SDK 36
 and at most two Gradle workers, without Dev/version overrides or shared caches.
 Its original thirty-minute end includes admission, tooling, build, APK/R8
 validation and cleanup, reserving one minute for cleanup. Kernel stalls and
-unproven detached descendants do not establish successful cleanup. Unknown
+unproven detached descendants do not establish successful cleanup. A same-user
+process whose identity the job cannot read, such as a capability-holding user
+manager, is accepted only when it started before admission. Unknown
 process custody or cleanup refuses the artifact and retains the private root.
 
 The exact-build Crashlytics mapping upload must execute successfully, rather
@@ -82,21 +85,19 @@ remain explicit; desktop continues to provide notifications and instructions.
 
 For dev, the provenance origin is successful upstream-main **CI artifacts** plus
 the lightweight `dev` Git tag, rather than a new GitHub Release for every push.
-Only an upstream main push builds Dev candidates. `ci.yml` builds and signs
-the Android APK (`dev-android.yml`) in parallel with the checks; Crashlytics receives
-the R8 mapping during that build, and the mapping stays private. That job only
-assembles the APK. Android unit tests and release lint run without credentials in
-every CI run, including PR checks before merge, and the gate of the main run
-requires them again. The job then removes its signing inputs and uploads the
-sealed APK only after the complete Linux/Arch/macOS/Windows/Android CI gate of
-the same run succeeds. If the gate fails, the
-job fails without uploading anything, and **Re-run failed jobs** rebuilds the
-candidate. Trusted main CI also calls `macos-cask.yml` with `channel: dev` after
-the gate when `MACOS_CASKS_ENABLED` is enabled, building, signing, notarizing and
-installing the exact Mac candidate on disposable hosted runners. `ci.yml` invokes
-`dev.yml` only after the gate, Android and enabled Mac jobs succeed.
-Dev assembly reuses the checked Arch package and includes exact
-`git archive` source bytes. No Dev artifact of a run exists before its gate succeeds.
+Only an upstream main push builds Dev candidates. `ci.yml` requires shared
+Rust/protocol/connector, Linux CLI, Arch, macOS and Android checks. Windows and
+iOS are qualified by Nightly and affected PRs. After this run's gate succeeds,
+the protected Android job assembles/seals one APK with the existing signer and
+removes private inputs; it never waits on a polling runner. Android unit/lint
+checks remain credential-free before the gate.
+
+The credential-free pinned-Qt Mac bundle starts with the checks and packages its
+actual tested Release app. After the same run's gate and unsigned bundle pass,
+`macos-cask.yml` signs/notarizes/installs it and seals the ZIP/DMG. Dev assembly
+still waits for the Arch, Android and enabled Mac candidates. No signing input
+or publication credential reaches PR code or the parallel unsigned build.
+
 The final main-only release-environment job advances `refs/tags/dev` to that
 commit using a fast-forward update. A late older build cannot move the tag back;
 diverged history requires explicit review. Stable `v*` and immutable nightly tags
@@ -391,6 +392,21 @@ GitHub. Without the `release` environment secret `WINGET_TOKEN` (a classic token
 with the `public_repo` scope of the account that owns the fork) the job only
 warns. Run `scripts/publish-winget.py --version VERSION --output DIR` to write the
 manifests of a published release locally without submitting them.
+
+The owner has standing personal Microsoft CLA consent for all `ufna.Zerus`
+proposals from `ufna`. The publisher checks the exact PR author, fork, version
+branch and three manifest paths, then posts
+`@microsoft-github-policy-service agree` once if `Needs-CLA` is present and the
+author has not already replied. New proposals wait up to one minute for the
+bot's label. Existing proposals are checked again on publication retries.
+The trusted-main **Confirm authorized winget CLA** workflow runs hourly and
+supports manual dispatch to reconcile later prompts with the same helper; it
+never opens or changes a proposal or its package files. Both paths serialize
+through `winget-cla-consent`, use only the existing `release/WINGET_TOKEN`, and
+never execute external PR code. Other accounts and corporate consent are not
+covered. A comment whose result is unknown requires inspection before a retry;
+an existing author agreement is not posted again. Moderator review and listing
+in winget remain independent of this confirmation.
 
 AUR versions are read from the published recipe archive, including epoch and
 package release. In particular `zerus-git` is a VCS recipe, not an invented copy

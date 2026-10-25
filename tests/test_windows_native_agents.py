@@ -1053,3 +1053,13 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
 
     def test_input_keys_reach_codex_through_the_host(self):
         self.check_keys(self.launch("keys", self.NO_HOOK_REVIEW))
+
+    def test_ultra_composer_accepts_exact_input_and_clear_without_a_restart(self):
+        self.COMPOSER = "»"
+        name = self.launch("ultra", self.NO_HOOK_REVIEW, "-c", 'model_reasoning_effort="ultra"')
+        self.deliver(name, MESSAGES[0])
+        self.settled(name)
+        self.assertTrue(any(row.startswith("»") for row in self.capture(name).splitlines()), self.describe())
+        outside = not below(self.project, os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+        row, record, _ = self.check_clear(name, "confirmed" if outside else None)
+        self.check_after_clear(name, row, record)

@@ -315,6 +315,7 @@ class MainActivity : ComponentActivity() {
                 if (!model.demo && (model.busy || model.catalogProgress))
                     LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
             }
+            if (selected == null) CatalogRefreshStatus(model)
             if (selected != null) SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
             if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -343,13 +344,13 @@ class MainActivity : ComponentActivity() {
             ScanPairingButton(enabled = !model.busy) { invite -> server = invite.server;code = invite.code }
             OutlinedTextField(server, { server = it }, label = { Text("Gateway URL") }, placeholder = { Text("https://zerus.example") }, singleLine = true)
             OutlinedTextField(code, { code = it }, label = { Text("Invitation code") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
-            Text("The gateway can read relayed messages. Credentials and drafts stay encrypted on this phone.", style = MaterialTheme.typography.bodySmall, color = Muted)
+            Text(if(WorkspaceProtocol.encryptedInvitationCode(code)) "Messages are encrypted between enrolled devices. The computer that executes a request can read its content." else "Legacy invitations trust the relay with relayed content. Use a new phone invitation from an enrolled computer for encrypted transport.", style = MaterialTheme.typography.bodySmall, color = Muted)
         } }, confirmButton = { TextButton(enabled = !model.busy && model.storageReady && code.isNotBlank() && server.isNotBlank(),
             onClick = { model.pair(server, code) { pairing = false; code = ""; onNotifications() } }) { Text("Pair") } },
         dismissButton = { TextButton(onClick = { pairing = false;code = "" }, enabled = !model.busy) { Text("Cancel") } })
-    disconnect?.let { connection -> ZerusAlertDialog(onDismissRequest = { disconnect = null }, title = { Text("Disconnect ${connection.displayName}?") },
-        text = { Text("This removes the gateway credential from this phone. Saved drafts remain available.") },
-        confirmButton = { TextButton(onClick = { model.disconnect(connection); disconnect = null }) { Text("Disconnect") } },
+    disconnect?.let { connection -> ZerusAlertDialog(onDismissRequest = { disconnect = null }, title = { Text("${if(connection.protocolVersion==2) "Forget" else "Disconnect"} ${connection.displayName}?") },
+        text = { Text(if(connection.protocolVersion==2) "This erases this phone's connection keys. Saved drafts remain available. To revoke this phone across the workspace, remove it from an enrolled computer." else "This removes the gateway credential from this phone. Saved drafts remain available.") },
+        confirmButton = { TextButton(onClick = { model.disconnect(connection); disconnect = null }) { Text(if(connection.protocolVersion==2) "Forget connection" else "Disconnect") } },
         dismissButton = { TextButton(onClick = { disconnect = null }) { Text("Cancel") } }) }
     review?.let { draft -> ZerusAlertDialog(onDismissRequest = { review = null }, title = { Text("Review unconfirmed delivery") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -685,7 +686,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                             Text(SessionFilters.label(session), Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if(SessionNotificationPreferences.muted(session)) Icon(Icons.Default.NotificationsOff,"Notifications muted on all devices",tint=Muted,modifier=Modifier.size(18.dp))
                             // A reply read on another device needs no badge here.
-                            (if (SharedReadPolicies.replyRead(session) || SessionFilters.replyInProgress(session, online)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
+                            (if (!SharedReadPolicies.canShowReplyBadge(session) || SessionFilters.replyInProgress(session, online)) null else UnreadPresentation.badge(model.unreadCount(session.target), model.loadedUnreadCount(session.target),
                                 SessionFilters.visibleUnreadReply(session, online)))?.let { unread ->
                                 val muted = SessionNotificationPreferences.muted(session)
                                 Surface(color = if(muted) Color(0xFF2B343E) else Mint, shape = CircleShape, modifier = Modifier.semantics { contentDescription = unread.description }) {
@@ -780,6 +781,12 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val ownSendId = model.ownSendId(target)
     // Exact inspection evidence supersedes the older computer catalog while reading.
     val online = model.activityVerified || model.demo
+    // BEGIN QUESTION_AVAILABILITY_PROBE committed
+    if (QuestionUiProbe.enabled) {
+        val observedAvailability = model.questionAvailabilityProbe(target, online)
+        if (observedAvailability != null) SideEffect { QuestionUiProbe.availability(target, observedAvailability) }
+    }
+    // END QUESTION_AVAILABILITY_PROBE committed
     val warning = if (model.demo) "" else raw?.string("pending_questions_error", "provider_messages_error").orEmpty()
     val queueVisible = target.agentId.isBlank() && !archived && raw?.optJSONObject("input_queue")?.string("id").orEmpty().isNotBlank()
     val unreadBoundary = model.firstUnreadEventId.takeIf { id -> events.any { it.id == id } }.orEmpty()
@@ -820,8 +827,13 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val scrollMutex = remember { Mutex() }
     var viewportHeight by remember { mutableIntStateOf(0) }
     var viewportBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
-    // A pending question is what the reader acts on; leave a quarter for the history above it.
-    val cardMaxHeight = with(LocalDensity.current) { (viewportHeight.toDp() * .75f).coerceAtLeast(160.dp) }
+    // Keep history above the card unless the IME has already reduced its measured viewport.
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val cardMaxHeight = with(density) {
+        if (imeVisible) viewportHeight.toDp().coerceAtLeast(0.dp)
+        else (viewportHeight.toDp() * .75f).coerceAtLeast(160.dp)
+    }
     val scope = rememberCoroutineScope()
     val currentHistoryTarget by rememberUpdatedState(target.key)
     val window = LocalWindowInfo.current

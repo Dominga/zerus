@@ -64,23 +64,45 @@ def stable_identity(text, code_text, request):
 
 
 def validate_ci(run, workflow, jobs, request):
-    require(type(run.get('id')) is int and run['id'] == request['ci_run_id'], 'Wrong main CI run.')
-    require(run.get('path') == '.github/workflows/ci.yml' and run.get('event') == 'push' and
-            run.get('head_branch') == 'main' and run.get('head_sha') == request['source_commit'] and
+    require(type(run.get('id')) is int and run['id'] == request['ci_run_id'], 'Wrong qualification run.')
+    callers = {'.github/workflows/ci.yml': ('push', 'Trusted main checks'),
+               '.github/workflows/nightly.yml': (('schedule', 'workflow_dispatch'), 'verify'),
+               '.github/workflows/release.yml': ('workflow_dispatch', 'verify')}
+    policy = callers.get(run.get('path'))
+    require(policy is not None, 'Wrong full-matrix workflow.')
+    events, prefix = policy
+    if run.get('path') == '.github/workflows/nightly.yml' and run.get('event') == 'workflow_dispatch':
+        present = [p for p in ('verify', 'review') if any(j.get('name') == p + ' / Suite results' and j.get('conclusion') == 'success' for j in jobs)]
+        require(len(present) == 1, 'Ambiguous full Nightly matrix.')
+        prefix = present[0]
+    events = (events,) if isinstance(events, str) else events
+    require(run.get('event') in events and run.get('head_branch') == 'main' and
+            run.get('head_sha') == request['source_commit'] and
             run.get('head_repository', {}).get('full_name') == REPOSITORY and
             run.get('repository', {}).get('full_name') == REPOSITORY,
-            'Successful PR/manual/fork/other-source CI cannot admit signing.')
-    require(run.get('status') == 'completed' and run.get('conclusion') == 'success', 'Full main CI must finish successfully.')
-    require(workflow.get('path') == '.github/workflows/ci.yml' and
-            type(workflow.get('id')) is int and workflow['id'] == run.get('workflow_id'), 'Wrong CI workflow identity.')
+            'PR/fork/other-source runs cannot admit signing.')
+    require(run.get('status') == 'completed' and run.get('conclusion') == 'success', 'Full qualification must finish successfully.')
+    require(workflow.get('path') == run['path'] and type(workflow.get('id')) is int and
+            workflow['id'] == run.get('workflow_id'), 'Wrong qualification workflow identity.')
     attempt = run.get('run_attempt')
-    require(type(attempt) is int and attempt > 0, 'Unknown main CI attempt.')
-    # latest is deliberate: no guessing/reusing an absent earlier-attempt gate.
-    for name in ('CI gate', 'Trusted main checks / Suite results'):
+    require(type(attempt) is int and attempt > 0, 'Unknown qualification attempt.')
+    names = ['Resolve commit', 'Quick checks (source and Rust 1.99)',
+             'Rust relay (v1, PostgreSQL and connector contracts)',
+             'Rust mobile connector (Rust 1.99 and black-box suites)',
+             'Rust mobile connector on macOS (smoke)', 'iOS core tests and simulator build',
+             'Android unit tests and lint', 'CLI (ubuntu-24.04)', 'CLI (macos-15)',
+             'Arch desktop', 'Arch package', 'macOS desktop',
+             'Windows client, desktop and portable zip', 'Windows real agents through the session host',
+             'Suite results']
+    required = [prefix + ' / ' + name for name in names]
+    if run['path'] == '.github/workflows/ci.yml':
+        required.append('CI gate')
+    # A reduced Dev gate must never masquerade as full stable qualification.
+    for name in required:
         found = [j for j in jobs if j.get('name') == name]
         require(len(found) == 1 and found[0].get('status') == 'completed' and
                 found[0].get('conclusion') == 'success' and found[0].get('run_attempt') == attempt,
-                'Both exact full-matrix main CI gates must succeed in the selected attempt.')
+                'Every exact full-matrix suite must succeed in the selected attempt: ' + name)
     return dict(run_id=run['id'], run_attempt=attempt, workflow_id=workflow['id'])
 
 
@@ -102,7 +124,9 @@ def json_api(endpoint, end):
 
 def main_ci(request, end):
     run = json_api('actions/runs/' + str(request['ci_run_id']), end)
-    workflow = json_api('actions/workflows/ci.yml', end)
+    require(run.get('path') in ('.github/workflows/ci.yml', '.github/workflows/nightly.yml',
+                                '.github/workflows/release.yml'), 'Wrong full qualification workflow.')
+    workflow = json_api('actions/workflows/' + run['path'].rsplit('/', 1)[1], end)
     jobs = []
     for page in range(1, 11):
         data = json_api(f"actions/runs/{request['ci_run_id']}/jobs?filter=latest&per_page=100&page={page}", end)
@@ -156,7 +180,9 @@ def admit(env):
     root = run_root(env, request)
     root.mkdir(mode=0o700)  # exclusive, after trust/full CI; no old admission reuse
     info = root.stat()
-    json_new(root / 'admission.json', dict(schema=1, request=request, ci=ci, end=end,
+    # Every generation process starts after this boot-clock instant.
+    admitted = time.clock_gettime(time.CLOCK_BOOTTIME)
+    json_new(root / 'admission.json', dict(schema=1, request=request, ci=ci, end=end, admitted=admitted,
                                          root_dev=info.st_dev, root_ino=info.st_ino, uid=os.getuid()))
     print('Exact main CI and stable source admitted; no signing input created.')
 
@@ -177,6 +203,8 @@ def admission(env):
             'Admission or generation root changed.')
     require(type(data.get('end')) in (int, float) and math.isfinite(data['end']) and data['end'] > 0,
             'Original end missing.')
+    require(type(data.get('admitted')) in (int, float) and math.isfinite(data['admitted']) and data['admitted'] > 0,
+            'Generation admission time missing.')
     return root, data
 
 
@@ -369,8 +397,23 @@ def sha256(path, end):
     return digest.hexdigest()
 
 
-def generation_survivors(private, end, proc=Path('/proc')):
-    """Observe escaped same-UID generation processes; never signal by discovery."""
+def process_started(directory):
+    """Boot-clock start seconds from the always readable stat record."""
+    with (directory / 'stat').open('rb') as source:
+        record = source.read(4097)
+    require(len(record) <= 4096, 'Unknown over-bound process identity during cleanup.')
+    fields = record.rsplit(b')', 1)[1].split()
+    require(len(fields) > 19 and fields[19].isdigit(), 'Unknown process start during cleanup.')
+    return int(fields[19]) / os.sysconf('SC_CLK_TCK')
+
+
+def generation_survivors(private, end, proc=Path('/proc'), admitted=None):
+    """Observe escaped same-UID generation processes; never signal by discovery.
+
+    A same-UID process may refuse identity reads (a capability-holding user
+    manager, for example). It cannot carry this generation's paths if it started
+    before admission; one started later stays unknown and refuses cleanup.
+    """
     needle = os.fsencode(private)
     survivors, count = [], 0
     with os.scandir(proc) as entries:
@@ -385,12 +428,17 @@ def generation_survivors(private, end, proc=Path('/proc')):
                 if directory.stat().st_uid != os.getuid():
                     continue
                 values = []
-                for name in ('cmdline', 'environ'):
-                    with (directory / name).open('rb') as source:
-                        value = source.read(65537)
-                    require(len(value) <= 65536, 'Unknown over-bound process identity during cleanup.')
-                    values.append(value)
-                values.append(os.fsencode(os.readlink(directory / 'cwd')))
+                try:
+                    for name in ('cmdline', 'environ'):
+                        with (directory / name).open('rb') as source:
+                            value = source.read(65537)
+                        require(len(value) <= 65536, 'Unknown over-bound process identity during cleanup.')
+                        values.append(value)
+                    values.append(os.fsencode(os.readlink(directory / 'cwd')))
+                except PermissionError:
+                    require(admitted is not None and process_started(directory) < admitted,
+                            'Uninspectable same-user process started during this generation; retain private root.')
+                    continue
                 if any(needle in value for value in values):
                     survivors.append(int(item.name))
             except (FileNotFoundError, ProcessLookupError):
@@ -412,7 +460,8 @@ def cleanup_private(root, data):
         require(private.is_dir() and private.stat().st_uid == os.getuid(), 'Unknown private cleanup root.')
         require(not (private / 'PROCESS_CUSTODY_UNKNOWN').exists(), 'Unknown command cleanup; private root retained.')
         require(completed_commands(private), 'Unfinished command custody; private root retained.')
-        require(not generation_survivors(private, data['end']), 'Generation process survives outside reaped commands; retain private root.')
+        require(not generation_survivors(private, data['end'], admitted=data['admitted']),
+                'Generation process survives outside reaped commands; retain private root.')
         require(shutil.rmtree.avoids_symlink_attacks, 'Descriptor-based private cleanup required.')
         shutil.rmtree(private)  # fd-based no-follow rmtree on the fixed Ubuntu runner
     require(not private.exists() and not private.is_symlink(), 'Private cleanup incomplete; no artifact admitted.')

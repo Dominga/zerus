@@ -1,5 +1,6 @@
 #include <QtTest>
 #include "ProjectsDialog.h"
+#include "CloneRepositoryDialog.h"
 #include "PopupMouse.h"
 #include "FakeCli.h"
 #include <QInputDialog>
@@ -26,6 +27,8 @@
 class TestProjectsDialog : public QObject {
     Q_OBJECT
 private slots:
+    void projectConnectionsGuideExplainsMissingCatalogsWithoutJoining();
+    void cloneAddsFolderWithoutLaunchingSession();
     void worktreeOverviewIsVisibleWithoutSelectingAProjectFolder();
     void projectColorChangesRequireApply_data();
     void projectColorChangesRequireApply();
@@ -49,6 +52,59 @@ private slots:
     void warnsOnDotOrColon();
     void nameDefaultsToBasename();
 };
+
+void TestProjectsDialog::projectConnectionsGuideExplainsMissingCatalogsWithoutJoining()
+{
+    HgsClient client("/nonexistent/hgs"); SessionOrganization projects;
+    projects.markImported("desktop"); projects.markImported("laptop"); projects.markImported("office");
+    ProjectsDialog dialog(&client,nullptr,false,&projects);
+    FleetState fleet; BoxState local; local.host="desktop"; local.ok=true; fleet.setLocal(local,1);
+    for(const auto &alias:{"laptop","office"}){BoxState peer;peer.host=alias;peer.ok=true;fleet.setPeer(peer,1);}
+    dialog.setFleet(fleet);dialog.show();
+    auto *guide=dialog.findChild<QWidget *>("projectConnectionGuide");
+    auto *hint=dialog.findChild<QLabel *>("projectConnectionHint");
+    auto *connect=dialog.findChild<QPushButton *>("connectProjectCatalogs");
+    QVERIFY(guide);QVERIFY(connect);QVERIFY(guide->isHidden()); // unknown is not unjoined proof
+    QSignalSpy requested(&dialog,&ProjectsDialog::connectSwarmRequested);
+    QSignalSpy changed(&dialog,&ProjectsDialog::organizationChanged);
+    dialog.setSwarmSnapshot({{"node_id","desktop-id"},{"peers",QJsonObject{{"office",QJsonObject{{"node","office-id"},{"error","offline"}}}}}});
+    QVERIFY(!guide->isHidden());QVERIFY(hint->text().contains("laptop"));QVERIFY(!hint->text().contains("office"));
+    QVERIFY(hint->text().contains("Preview"));QVERIFY(hint->text().contains("explicitly join"));
+    connect->click();QCOMPARE(requested.size(),1);QCOMPARE(requested[0][0].toString(),QString("laptop"));
+    QCOMPARE(changed.size(),0); // navigation is not enrollment or membership mutation
+    dialog.setSwarmSnapshot({{"node_id","desktop-id"},{"peers",QJsonObject{{"laptop",QJsonObject{}},{"office",QJsonObject{}}}}});
+    QVERIFY(guide->isHidden());QCOMPARE(changed.size(),0);
+}
+
+void TestProjectsDialog::cloneAddsFolderWithoutLaunchingSession()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-clone-test");QCoreApplication::setApplicationName("projects");
+    const auto script=directory.filePath("hgs");
+    QVERIFY(FakeCli::install(script,R"PY(#!/usr/bin/env python3
+import json,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a.pop(0)
+def arg(k):return a[a.index(k)+1]
+if a==['--help']:print('repository-clone-v1')
+elif a[:2]==['repository','check']:print(json.dumps({'status':'ready','parent':'/workspace','path':'/workspace/'+arg('--name'),'name':arg('--name')}))
+elif a[:2]==['repository','clone']:print(json.dumps({'status':'cloned','parent':arg('--parent'),'path':arg('--parent')+'/'+arg('--name'),'name':arg('--name'),'request_id':arg('--request-id')}))
+elif a[:1]==['worktrees']:print(json.dumps({'state':'not_repo','worktrees':[]}))
+elif a[:2]==['project','ls']:print('[]')
+)PY"));
+    HgsClient client(FakeCli::program(script));SessionOrganization projects;const auto id=projects.createGroup("Work");projects.markImported("pc");projects.markImported("mac");
+    ProjectsDialog view(&client,nullptr,false,&projects);FleetState fleet;BoxState pc;pc.host="pc";pc.ok=true;pc.metrics=QJsonObject{{"platform","linux"}};fleet.setLocal(pc,QDateTime::currentMSecsSinceEpoch());BoxState mac;mac.host="mac";mac.ok=true;fleet.setPeer(mac,QDateTime::currentMSecsSinceEpoch());view.setFleet(fleet);view.selectProject(id);view.show();
+    QSignalSpy launched(&view,&ProjectsDialog::newSessionRequested);QSignalSpy paths(&view,&ProjectsDialog::newPathSessionRequested);
+    QTimer::singleShot(0,&view,[&]{
+        auto *choice=view.findChild<QDialog *>("cloneRepositoryComputerDialog");QVERIFY(choice);auto *computer=choice->findChild<QComboBox *>("cloneTargetComputer");computer->setCurrentIndex(computer->findData("mac"));
+        QTimer::singleShot(0,&view,[&]{auto *form=view.findChild<CloneRepositoryDialog *>();QVERIFY(form);form->findChild<QLineEdit *>("cloneRepositoryUrl")->setText("https://example.invalid/team/project.git");form->findChild<QLineEdit *>("cloneParentFolder")->setText("/workspace");form->findChild<QPushButton *>("cloneRepositoryConfirm")->click();});
+        choice->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+    });
+    QTimer::singleShot(10000,&view,[&]{for(auto *dialog:view.findChildren<QDialog *>())dialog->reject();});
+    view.findChild<QPushButton *>("cloneProjectRepository")->click();
+    QCOMPARE(projects.group(id)->folders.size(),1);QCOMPARE(projects.group(id)->folders.first().machine,"mac");QCOMPARE(projects.group(id)->folders.first().path,"/workspace/project");QCOMPARE(launched.size(),0);QCOMPARE(paths.size(),0);
+}
 
 void TestProjectsDialog::projectColorChangesRequireApply_data()
 {

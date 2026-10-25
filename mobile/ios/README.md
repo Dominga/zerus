@@ -8,6 +8,34 @@ is only checked through its original receipt, and cached history never
 authorizes an action. iOS 18 or later is supported; the bundle ID is
 `app.zerus.mobile`, shared by local Dev, TestFlight and App Store builds.
 
+Encrypted API v2 workspaces use a separate `ze1.` phone invitation from an
+enrolled computer. It pins the inviter's keys and membership head; its secret is
+never sent to the relay. The phone durably saves its identity, service bearer
+and exact signed candidate before enrollment. **Resume pairing** reuses that
+saved candidate, including CryptoKit's randomized Ed25519 signature. Refresh
+only checks receipts and signed membership history.
+
+CryptoKit provides RFC 9180 HPKE and Ed25519. A native SQLite journal stores the
+protected identity under a per-connection ThisDeviceOnly Keychain wrapping key,
+commits membership state/history/head indexes together, and reserves exact
+ciphertext before HTTP. A separate versioned connection item prevents an older
+app from treating protected credentials as plaintext API v1 connections. Missing
+or invalid protected state refuses transport. Legacy API v1 connections retain
+their existing behavior.
+
+**Forget encrypted connection** deletes the phone's wrapping key and retains
+saved drafts. Remove the phone from **Phones** on an enrolled computer to revoke
+it throughout the workspace. Previously received plaintext cannot be erased;
+recorded ciphertext is exposed by later compromise of its recipient's key.
+There is no forward-secrecy claim. See the
+[wire contract](../../services/mobile/crypto/README.md).
+
+Shared protocol fixtures, HTTP tests and real SQLite package tests cover key
+substitution, membership history, exact ciphertext retry and receipt-only
+recovery. Mac package tests exercise CryptoKit, and unsigned simulator builds
+check the app integration. Physical iPhone Keychain lifecycle and protected-data
+behavior require separate device qualification.
+
 Design and roadmap: [iOS architecture and foundation](../../docs/superpowers/specs/2026-10-16-ios-foundation-design.md)
 (epic `zerus-gfph` in Beads).
 
@@ -19,11 +47,30 @@ bounded provider details, retained catalog state and truncation notices. Opening
 these views never starts the service, fetches a full catalog, edits a favorite or
 manages provider credentials.
 
+New session uses one full-screen form: Computer is selected inline, followed by
+Working folder / Git repository, project, account/agent and session name. Repository
+URLs suggest an editable Clone to path; Browse chooses the parent. Source toggles
+retain drafts, machine changes discard machine-bound paths/accounts, and explicit
+project/Inbox choices survive only in the same workspace/swarm. Worktree keeps
+Auto / None, options and the resulting path without routine explanatory paragraphs.
+Cloning requires the Rust connector's additive mobile acquisition operations.
+The original mutation and native clone UUID remain bound through reconnects;
+uncertain recovery only checks status and offers Use checkout, never replaying
+clone or launching automatically. See the [Android contract](../android/README.md#project-and-account-selection).
+
+Repository recovery selects the attempt for the current Clone to destination and
+pages other unresolved attempts in bounded groups. Each Check original result
+reads that attempt's original native clone UUID; choosing another destination
+keeps it recoverable. A read-only check may resolve a parent alias (for example,
+`/var/tmp` to `/private/var/tmp` on macOS). The form shows that canonical path and
+requires a fresh explicit Clone and start before creating it; mutation and status
+receipts must keep the confirmed exact destination.
+
 ## Layout
 
 - `ZerusKit/` is a Swift package with the platform-neutral core: JSON values,
   protocol models, policies ported from the Kotlin client, the relay client and
-  sealed persistence. It uses Foundation, CryptoKit, Security and
+  sealed persistence. It uses Foundation, CryptoKit, Security, SQLite3 and
   UniformTypeIdentifiers, plus the project task replica from
   `crates/replica-ffi` (module `ZerusReplica`, built by
   `scripts/build-replica.sh`), so its tests run on a Mac with `swift test`.

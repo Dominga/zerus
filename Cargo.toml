@@ -1,6 +1,6 @@
 [package]
 name = "hgs"
-version = "1.54.0"
+version = "1.56.0"
 edition = "2021"
 rust-version = "1.99"
 description = "Persistent local and remote agent sessions for Zerus"
@@ -38,6 +38,8 @@ zerus-replica = { path = "crates/replica" }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Wdk_System_Threading",
+    "Wdk_Storage_FileSystem",
+    "Wdk_Foundation",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",

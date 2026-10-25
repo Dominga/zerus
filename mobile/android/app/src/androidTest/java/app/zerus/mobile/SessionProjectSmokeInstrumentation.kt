@@ -187,6 +187,7 @@ class SessionProjectSmokeInstrumentation : Instrumentation() {
             main { visible = true; host.barrier = CompletableDeferred(); network.lost = true }
             node(literalName)
             tap(literalName)
+            await("selected Move before durable assignment") { action("Move").isEnabled }
             tap("Move")
             await("durable intent barrier") { main { host.persistEntered } }
             check(main { network.writes == 0 && host.records.isEmpty() })

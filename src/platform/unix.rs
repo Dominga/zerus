@@ -95,7 +95,10 @@ pub fn spawn_ssh(
     stderr: bool,
 ) -> io::Result<super::SshChild> {
     for (piped, set) in [
-        (stdin, Command::stdin as fn(&mut Command, Stdio) -> &mut Command),
+        (
+            stdin,
+            Command::stdin as fn(&mut Command, Stdio) -> &mut Command,
+        ),
         (stdout, Command::stdout),
         (stderr, Command::stderr),
     ] {
@@ -599,13 +602,11 @@ pub fn parent_and_name(pid: u32) -> io::Result<(Option<u32>, Option<String>)> {
     ))
 }
 
-/// Every other process's current directory and command name.
-#[cfg(target_os = "linux")]
+/// Read-only compatibility fixture; cleanup uses the strict sampler below.
+#[cfg(all(test, target_os = "linux"))]
 pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
     let own = std::process::id();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Ok(Vec::new());
-    };
+    let entries = fs::read_dir("/proc").map_err(|e|format!("Cannot inspect running processes: {e}"))?;
     Ok(entries
         .flatten()
         .filter_map(|entry| {
@@ -621,64 +622,182 @@ pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>,
         })
         .collect())
 }
-#[cfg(target_os = "macos")]
-pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
-    use std::os::unix::ffi::OsStrExt;
-    let own = std::process::id();
-    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if count <= 0 {
-        return Ok(Vec::new());
-    }
-    let mut pids = vec![0 as libc::c_int; count as usize + 64];
-    let size = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
-    let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, size) };
-    if found <= 0 {
-        return Ok(Vec::new());
-    }
-    pids.truncate((found as usize).min(pids.len()));
-    Ok(pids
-        .into_iter()
-        .filter(|pid| *pid > 0 && *pid as u32 != own)
-        .filter_map(|pid| {
-            let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
-            let size = std::mem::size_of_val(&info) as libc::c_int;
-            let read = unsafe {
-                libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDVNODEPATHINFO,
-                    0,
-                    &mut info as *mut _ as *mut libc::c_void,
-                    size,
-                )
-            };
-            if read != size {
-                return None;
-            }
-            let path = &info.pvi_cdir.vip_path;
-            let bytes = unsafe {
-                std::slice::from_raw_parts(path.as_ptr() as *const u8, std::mem::size_of_val(path))
-            };
-            let end = bytes.iter().position(|b| *b == 0)?;
-            if end == 0 {
-                return None;
-            }
-            let cwd = PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
-            let mut name = [0u8; 256];
-            let length = unsafe {
-                libc::proc_name(
-                    pid,
-                    name.as_mut_ptr() as *mut libc::c_void,
-                    name.len() as u32,
-                )
-            };
-            let name = String::from_utf8_lossy(&name[..length.clamp(0, 256) as usize]).into_owned();
-            Some((pid as u32, cwd, name))
-        })
-        .collect())
-}
 /// Without a way to read other processes' directories, nothing may count as unused.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
 pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+    Err("Running processes cannot be inspected on this computer".into())
+}
+
+/// Automatic cleanup needs a complete bounded sample of this user's live
+/// processes. A failed cwd/executable read is unknown, never evidence of disuse.
+#[cfg(target_os = "linux")]
+pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<super::WorktreeProcesses, String> {
+    use std::io::Read;
+    let deadline = deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    let uid = unsafe { libc::getuid() };
+    let error = || "Running process coverage is incomplete; review the worktree manually".to_owned();
+    fn read(path: &Path) -> std::io::Result<String> {
+        let mut bytes=Vec::new();
+        fs::File::open(path)?.take(65537).read_to_end(&mut bytes)?;
+        if bytes.len()>65536 { return Err(std::io::Error::other("process metadata exceeds its bound")); }
+        String::from_utf8(bytes).map_err(std::io::Error::other)
+    }
+    fn identity(path: &Path) -> std::io::Result<(String,bool,u32)> {
+        let raw=read(&path.join("stat"))?;
+        let fields:Vec<_>=raw.rsplit_once(") ").ok_or_else(||std::io::Error::other("invalid process identity"))?.1.split_whitespace().collect();
+        let start=fields.get(19).ok_or_else(||std::io::Error::other("invalid process start"))?;
+        let parent=fields.get(1).ok_or_else(||std::io::Error::other("invalid process parent"))?
+            .parse().map_err(std::io::Error::other)?;
+        Ok(((*start).to_owned(),matches!(fields.first(),Some(&"Z"|&"X")),parent))
+    }
+    fn ancestors(deadline: std::time::Instant) -> std::io::Result<std::collections::BTreeMap<u32,String>> {
+        let mut rows=std::collections::BTreeMap::new();
+        let mut pid=std::process::id();
+        while pid!=0 {
+            if rows.len()>=128 || std::time::Instant::now()>=deadline || rows.contains_key(&pid) {
+                return Err(std::io::Error::other("incomplete invocation ancestry"));
+            }
+            let (start,exited,parent)=identity(&PathBuf::from(format!("/proc/{pid}")))?;
+            if exited {return Err(std::io::Error::other("exited invocation ancestor"));}
+            rows.insert(pid,start);pid=parent;
+        }
+        Ok(rows)
+    }
+    let invocation=ancestors(deadline).map_err(|_|error())?;
+    let entries=fs::read_dir("/proc").map_err(|_|error())?;
+    let boot=read(Path::new("/proc/sys/kernel/random/boot_id")).map_err(|_|error())?;
+    let mut rows=super::WorktreeProcesses::default();
+    for (count,entry) in entries.enumerate() {
+        if count>=32768 || std::time::Instant::now()>=deadline { return Err(error()); }
+        let entry=entry.map_err(|_|error())?;
+        let Some(pid)=entry.file_name().to_str().and_then(|s|s.parse::<u32>().ok()) else {continue};
+        let path=entry.path();
+        let status=match read(&path.join("status")) {
+            Ok(status)=>status,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        let uids=status.lines().find_map(|line|line.strip_prefix("Uid:")).ok_or_else(error)?
+            .split_whitespace().map(str::parse::<u32>).collect::<std::result::Result<Vec<_>,_>>().map_err(|_|error())?;
+        if uids.len()!=4 {return Err(error());}
+        if !uids.contains(&uid) {continue;}
+        let before=match identity(&path) {
+            Ok(before)=>before,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        if before.1 {continue;}
+        let cwd=fs::read_link(path.join("cwd"));
+        let image=fs::read_link(path.join("exe"));
+        let after=match identity(&path) {
+            Ok(after)=>after,
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,
+            Err(_)=>return Err(error()),
+        };
+        if after.1 {continue;}
+        if before!=after {return Err(error());}
+        let name=read(&path.join("comm")).map(|s|s.trim().to_owned()).unwrap_or_default();
+        // Only access denials on stable, live, fully identified processes are
+        // reviewable. Timeouts, roster/identity errors and other IO errors stay
+        // hard failures. A readable half still protects its actual worktree.
+        let denied = |value: &std::io::Result<PathBuf>| value.as_ref().is_err_and(|e| e.kind()==std::io::ErrorKind::PermissionDenied);
+        let (cwd_denied,image_denied)=(denied(&cwd),denied(&image));
+        if (cwd.is_err() && !cwd_denied) || (image.is_err() && !image_denied) { return Err(error()); }
+        if cwd_denied || image_denied {
+            rows.unreadable.push(super::UnreadableWorktreeProcess {
+                pid, identity:format!("{}:{}",boot.trim(),before.0), command:name.clone(),
+                cwd:cwd_denied, executable:image_denied,
+                invocation_ancestor:invocation.get(&pid)==Some(&before.0),
+            });
+        }
+        if let Ok(cwd)=cwd { rows.paths.push((pid,cwd,name.clone())); }
+        if let Ok(image)=image { rows.paths.push((pid,image,name)); }
+    }
+    if std::time::Instant::now()>=deadline || ancestors(deadline).map_err(|_|error())?!=invocation {return Err(error());}
+    rows.unreadable.sort_by_key(|row|row.pid);
+    Ok(rows)
+}
+
+#[cfg(target_os = "macos")]
+pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<super::WorktreeProcesses, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let deadline=deadline.min(std::time::Instant::now()+std::time::Duration::from_secs(2));
+    let uid=unsafe {libc::getuid()};
+    let error=|detail:&str|format!("Running process coverage is incomplete: {detail}; review the worktree manually");
+    fn gone(pid:i32)->bool {
+        (unsafe {libc::kill(pid,0)})<0 && std::io::Error::last_os_error().raw_os_error()==Some(libc::ESRCH)
+    }
+    fn identity(pid:i32)->std::io::Result<libc::proc_bsdinfo> {
+        let mut info:libc::proc_bsdinfo=unsafe {std::mem::zeroed()};
+        let size=std::mem::size_of_val(&info) as libc::c_int;
+        let read=unsafe {libc::proc_pidinfo(pid,libc::PROC_PIDTBSDINFO,0,&mut info as *mut _ as *mut libc::c_void,size)};
+        if read!=size {
+            // libproc can return zero for an exited PID without setting errno.
+            // Only an independent ESRCH probe proves absence; stale errno must
+            // never hide an inaccessible live process from the owned roster.
+            return Err(if gone(pid) {std::io::Error::from_raw_os_error(libc::ESRCH)}
+                else {std::io::Error::other("Owned process metadata is unavailable")});
+        }
+        Ok(info)
+    }
+    // Kernel uid-filtered rosters establish ownership before inspection. A
+    // protected foreign process need not disclose BSD info to this user. Both
+    // effective and real uid are required; an unreadable owned process still
+    // makes the sample incomplete. libproc returns bytes, not a PID count.
+    const PROC_UID_ONLY: u32 = 4;
+    const PROC_RUID_ONLY: u32 = 5;
+    let mut pids=std::collections::BTreeSet::new();
+    for kind in [PROC_UID_ONLY, PROC_RUID_ONLY] {
+        let mut buffer=vec![0 as libc::c_int;32768];
+        let bytes=(buffer.len()*std::mem::size_of::<libc::c_int>()) as libc::c_int;
+        let found=unsafe {libc::proc_listpids(kind,uid,buffer.as_mut_ptr() as *mut libc::c_void,bytes)};
+        if found<=0 || found>=bytes || !(found as usize).is_multiple_of(std::mem::size_of::<libc::c_int>()) {return Err(error("the process list could not be verified"));}
+        pids.extend(buffer.into_iter().take(found as usize/std::mem::size_of::<libc::c_int>()).filter(|pid|*pid>0));
+        if pids.len()>=32768 {return Err(error("the process list exceeded its bound"));}
+    }
+    if !pids.contains(&(std::process::id() as libc::c_int)) {return Err(error("the current process is missing from the list"));}
+    let mut rows=Vec::new();
+    for pid in pids.into_iter().filter(|pid|*pid>0) {
+        if std::time::Instant::now()>=deadline {return Err(error("the process check reached its time limit"));}
+        let before=match identity(pid) {
+            Ok(info)=>info,
+            Err(e) if e.raw_os_error()==Some(libc::ESRCH)=>continue,
+            Err(_)=>return Err(error(&format!("process {pid} could not be identified"))),
+        };
+        if before.pbi_pid!=pid as u32 {return Err(error(&format!("process {pid} returned another identity")));}
+        if (before.pbi_uid!=uid && before.pbi_ruid!=uid) || before.pbi_status==libc::SZOMB {continue;}
+        let mut info:libc::proc_vnodepathinfo=unsafe {std::mem::zeroed()};
+        let size=std::mem::size_of_val(&info) as libc::c_int;
+        let read=unsafe {libc::proc_pidinfo(pid,libc::PROC_PIDVNODEPATHINFO,0,&mut info as *mut _ as *mut libc::c_void,size)};
+        let mut image=[0u8;4096];
+        let length=unsafe {libc::proc_pidpath(pid,image.as_mut_ptr() as *mut libc::c_void,image.len() as u32)};
+        let after=match identity(pid) {
+            Ok(info)=>info,
+            Err(e) if e.raw_os_error()==Some(libc::ESRCH)=>continue,
+            Err(_)=>return Err(error(&format!("process {pid} could not be identified"))),
+        };
+        if after.pbi_status==libc::SZOMB {continue;}
+        if after.pbi_pid!=pid as u32 || (before.pbi_start_tvsec,before.pbi_start_tvusec,before.pbi_uid,before.pbi_ruid)!=(after.pbi_start_tvsec,after.pbi_start_tvusec,after.pbi_uid,after.pbi_ruid) {return Err(error(&format!("process {pid} changed while being checked")));}
+        if read!=size || length<=0 {
+            if gone(pid) {continue;}
+            return Err(error(&format!("process {pid}: {} could not be inspected", if read!=size {"its current folder"} else {"its program"})));
+        }
+        let path=&info.pvi_cdir.vip_path;
+        let bytes=unsafe {std::slice::from_raw_parts(path.as_ptr() as *const u8,std::mem::size_of_val(path))};
+        let end=bytes.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(||error(&format!("process {pid} returned an unconfirmed path")))?;
+        let image_end=image.iter().position(|b|*b==0).filter(|end|*end>0).ok_or_else(||error(&format!("process {pid} returned an unconfirmed path")))?;
+        let cwd=PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end]));
+        let image=PathBuf::from(std::ffi::OsStr::from_bytes(&image[..image_end]));
+        let name=unsafe {std::slice::from_raw_parts(before.pbi_comm.as_ptr() as *const u8,before.pbi_comm.len())};
+        let name=String::from_utf8_lossy(&name[..name.iter().position(|b|*b==0).unwrap_or(name.len())]).into_owned();
+        rows.push((pid as u32,cwd,name.clone()));rows.push((pid as u32,image,name));
+    }
+    if std::time::Instant::now()>=deadline {return Err(error("the process check reached its time limit"));}
+    Ok(rows.into())
+}
+
+#[cfg(not(any(target_os = "linux",target_os = "macos")))]
+pub fn worktree_processes(_deadline:std::time::Instant)->std::result::Result<super::WorktreeProcesses,String> {
     Err("Running processes cannot be inspected on this computer".into())
 }
 
@@ -795,11 +914,224 @@ pub fn request_exit(pid: u32) -> io::Result<()> {
         .ok()
         .filter(|pid| *pid > 0)
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    let observation = std::panic::catch_unwind(|| pause_signal_observer::before(pid as u32))
+        .ok()
+        .flatten();
+    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+    // Capture errno before any diagnostic output. A successful kill has no errno.
+    let error = if result != 0 {
+        Some(io::Error::last_os_error())
+    } else {
+        None
+    };
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    {
+        let errno = error.as_ref().and_then(io::Error::raw_os_error);
+        let _ =
+            std::panic::catch_unwind(|| pause_signal_observer::after(observation, result, errno));
     }
-    Ok(())
+    match error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
+
+// BEGIN private Mac fixture observer. No observer IO precedes the original kill.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+mod pause_signal_observer {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+    use std::os::fd::FromRawFd;
+
+    const FLAG: &str = "HGS_TEST_MAC_PAUSE_OBSERVER";
+    const ROOT: &str = "HGS_TEST_MAC_PAUSE_ROOT";
+    const MAX_ROW: usize = 768;
+
+    #[derive(Clone, Copy)]
+    pub(super) struct Before {
+        pid: u32,
+        sender: u32,
+        at: Option<u64>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Context {
+        version: u8,
+        nonce: String,
+        target_pid: u32,
+        root_dev: u64,
+        root_ino: u64,
+        run: String,
+        conversation: String,
+        pane: String,
+        saved_start: String,
+    }
+
+    fn clock() -> Option<u64> {
+        let mut value: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } != 0
+            || value.tv_sec < 0
+            || !(0..1_000_000_000).contains(&value.tv_nsec)
+        {
+            return None;
+        }
+        (value.tv_sec as u64)
+            .checked_mul(1_000_000_000)?
+            .checked_add(value.tv_nsec as u64)
+    }
+
+    pub(super) fn before(pid: u32) -> Option<Before> {
+        // Environment lookup and a clock/PID scalar only: no file/proc read,
+        // output, callback, new thread or admission decision before the kill.
+        (env::var_os(FLAG).as_deref() == Some(std::ffi::OsStr::new("1"))).then(|| Before {
+            pid,
+            sender: std::process::id(),
+            at: clock(),
+        })
+    }
+
+    fn private(metadata: &fs::Metadata, mode: u32, file: bool) -> bool {
+        metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == mode
+            && if file {
+                metadata.is_file() && metadata.nlink() == 1
+            } else {
+                metadata.is_dir()
+            }
+    }
+
+    fn open_at(root: &fs::File, name: &'static [u8], flags: i32) -> io::Result<fs::File> {
+        let fd = unsafe {
+            libc::openat(
+                root.as_raw_fd(),
+                name.as_ptr().cast(),
+                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { fs::File::from_raw_fd(fd) })
+    }
+
+    fn hex(value: &str, length: usize) -> bool {
+        value.len() == length
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    fn observe(
+        before: Before,
+        result: i32,
+        errno: Option<i32>,
+        returned_at: Option<u64>,
+    ) -> io::Result<()> {
+        let path = env::var_os(ROOT)
+            .map(PathBuf::from)
+            .ok_or(io::ErrorKind::NotFound)?;
+        if path.as_os_str().len() > 4096 || !path.is_absolute() || fs::canonicalize(&path)? != path
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY)
+            .open(path)?;
+        let root = directory.metadata()?;
+        if !private(&root, 0o700, false) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let mut input = open_at(&directory, b"manifest.json\0", libc::O_RDONLY)?;
+        let initial = input.metadata()?;
+        if !private(&initial, 0o600, true) || initial.len() > 1024 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut input)
+            .take(1025)
+            .read_to_end(&mut bytes)?;
+        let final_metadata = input.metadata()?;
+        if bytes.len() > 1024
+            || initial.len() != bytes.len() as u64
+            || initial.dev() != final_metadata.dev()
+            || initial.ino() != final_metadata.ino()
+            || initial.len() != final_metadata.len()
+            || !private(&final_metadata, 0o600, true)
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let context: Context =
+            serde_json::from_slice(&bytes).map_err(|_| io::ErrorKind::InvalidData)?;
+        if context.version != 1
+            || context.target_pid != before.pid
+            || before.pid == 0
+            || context.root_dev != root.dev()
+            || context.root_ino != root.ino()
+            || !hex(&context.nonce, 32)
+            || [
+                &context.run,
+                &context.conversation,
+                &context.pane,
+                &context.saved_start,
+            ]
+            .iter()
+            .any(|value| !hex(value, 64))
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // These are post-kill observations, never an atomic delivery receipt.
+        let sender_birth = process_identity(before.sender).map(|p| p.birth);
+        let target_birth = process_identity(before.pid).map(|p| p.birth);
+        let mut output = Vec::new();
+        for (sequence, phase, at, rc, code) in [
+            (1, "kill_before", before.at, None, None),
+            (2, "kill_return_or_errno", returned_at, Some(result), errno),
+        ] {
+            let row = json!({"v":1,"role":"sender","seq":sequence,"phase":phase,
+                "nonce":context.nonce,"pid":before.sender,"target":before.pid,
+                "clock":"CLOCK_MONOTONIC","at":at,"run":context.run,"conversation":context.conversation,
+                "pane":context.pane,"saved_start":context.saved_start,"birth_before":"unknown",
+                "sender_birth_after":sender_birth,"target_birth_after":target_birth,"rc":rc,"errno":code});
+            let mut row = serde_json::to_vec(&row).map_err(|_| io::ErrorKind::InvalidData)?;
+            row.push(b'\n');
+            if row.len() > MAX_ROW {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            output.extend(row);
+        }
+        let mut file = open_at(
+            &directory,
+            b"sender.jsonl\0",
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )?;
+        if !private(&file.metadata()?, 0o600, true) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        // A short write remains visibly partial; never retry even telemetry IO.
+        if file.write(&output)? != output.len() {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn after(before: Option<Before>, result: i32, errno: Option<i32>) {
+        if let Some(before) = before {
+            let returned_at = clock();
+            let _ = observe(
+                before,
+                result,
+                if result == 0 { None } else { errno },
+                returned_at,
+            );
+        }
+    }
+}
+// END private Mac fixture observer.
 
 static SHUTDOWN_CHILD: AtomicI32 = AtomicI32::new(0);
 static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
@@ -1055,11 +1387,23 @@ pub fn process_start_time(pid: u32) -> Option<String> {
 fn process_started_at(pid: u32) -> Option<Option<u64>> {
     // The kinfo_proc that ps reads, which also covers other users' processes.
     // Its extern_proc begins with p_starttime, a timeval whose seconds come first.
-    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid as libc::c_int];
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as libc::c_int,
+    ];
     let mut info = [0u64; 128]; // kinfo_proc is 648 bytes
     let mut size = std::mem::size_of_val(&info);
     let rc = unsafe {
-        libc::sysctl(mib.as_mut_ptr(), 4, info.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0)
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            info.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
     };
     match (rc, size) {
         (0, 0) => Some(None), // no such process
@@ -1079,14 +1423,22 @@ fn process_started_at(pid: u32) -> Option<Option<u64>> {
         Err(_) => return None,
     };
     // The command name may contain spaces and parentheses; fields follow its last ')'.
-    let ticks: u64 = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()?;
+    let ticks: u64 = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
     let boot = (*BOOT.get_or_init(|| {
         fs::read_to_string("/proc/stat")
             .ok()?
             .lines()
             .find_map(|line| line.strip_prefix("btime ")?.trim().parse().ok())
     }))?;
-    let hertz = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).ok().filter(|&hz| hz > 0)?;
+    let hertz = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) })
+        .ok()
+        .filter(|&hz| hz > 0)?;
     Some(Some(boot + ticks / hertz))
 }
 
@@ -1098,17 +1450,24 @@ fn process_started_at(_pid: u32) -> Option<Option<u64>> {
 /// `%a %b %e %H:%M:%S %Y` in the C locale and UTC, the form ps and ctime print.
 fn lstart_text(seconds: u64) -> String {
     const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let (days, time) = (seconds / 86_400, seconds % 86_400);
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let shifted = days as i64 + 719_468;
     let era = shifted.div_euclid(146_097);
     let day_of_era = shifted - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_index = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     format!(
         "{} {} {:>2} {:02}:{:02}:{:02} {}",
@@ -1454,7 +1813,10 @@ mod tests {
         let folders: Vec<&str> = path.split(':').collect();
         assert_eq!(folders.last(), Some(&"/home/user/.opencode/bin"));
         assert_eq!(
-            folders.iter().filter(|f| f.ends_with("/.opencode/bin")).count(),
+            folders
+                .iter()
+                .filter(|f| f.ends_with("/.opencode/bin"))
+                .count(),
             1
         );
         assert!(
@@ -1486,7 +1848,9 @@ mod tests {
     fn process_start_time_matches_ps() {
         let parent = unsafe { libc::getppid() } as u32;
         for pid in [std::process::id(), parent, 1] {
-            let Some(expected) = ps_start(pid) else { return };
+            let Some(expected) = ps_start(pid) else {
+                return;
+            };
             let actual = process_start_time(pid).expect("readable start time");
             // A process that cannot be read must stay unknown rather than look absent.
             if expected.is_empty() {
@@ -1515,7 +1879,9 @@ mod tests {
         let (mut checked, mut differ) = (0, Vec::new());
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let line = line.trim_start();
-            let Some((pid, expected)) = line.split_once(' ') else { continue };
+            let Some((pid, expected)) = line.split_once(' ') else {
+                continue;
+            };
             let pid: u32 = pid.parse().unwrap();
             match process_start_time(pid) {
                 Some(actual) if actual == expected.trim() => checked += 1,
@@ -1696,7 +2062,10 @@ mod tests {
         assert_eq!(error.raw_os_error(), Some(libc::ESRCH));
         // 0 would signal this process group and u32::MAX (-1) every process.
         for pid in [0, u32::MAX, 1 << 31] {
-            assert_eq!(request_exit(pid).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(
+                request_exit(pid).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
         }
     }
 

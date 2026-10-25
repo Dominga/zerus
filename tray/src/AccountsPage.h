@@ -43,10 +43,13 @@ private:
     QJsonArray savedForAccount(const QString &host) const;
     void rename();
     void permissions();
+    void modelDefaults();
+    void editModelDefaults(const QJsonObject &profile, const QJsonObject &data);
     void inspectSelected(bool refresh = false);
     void inspectProfiles(bool refresh = false);
     void renameNext();
     void request(const QString &host, const QStringList &args);
+    QJsonObject m_modelProfile;
     QJsonObject selected() const;
     QJsonObject selectedAccount() const;
     bool online(const QString &host) const;
@@ -60,8 +63,8 @@ private:
     QJsonArray m_displayProfiles;
     bool m_hasSnapshot = false;
     IdentityBadge *m_providerBadge;
-    QLabel *m_summary, *m_title, *m_detail, *m_identity, *m_permissionState;
-    QPushButton *m_add, *m_login, *m_copy, *m_remove, *m_rename, *m_install, *m_permissions, *m_default, *m_startOpenCode;
+    QLabel *m_summary, *m_title, *m_detail, *m_identity, *m_permissionState, *m_modelState;
+    QPushButton *m_add, *m_login, *m_copy, *m_remove, *m_rename, *m_install, *m_permissions, *m_default, *m_startOpenCode, *m_modelDefaults;
     // OpenCode's connected providers and their notes, read-only text from that machine's catalog.
     QTreeWidget *m_openCodeProviders;
     QLabel *m_openCodeProvidersNote;

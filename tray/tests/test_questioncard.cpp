@@ -11,6 +11,7 @@
 #include <QFile>
 #include <QFontInfo>
 #include <QJsonDocument>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -163,6 +164,10 @@ private slots:
     void customAndMultipleAnswers();
     void enterSubmitsFreeformAnswers_data();
     void enterSubmitsFreeformAnswers();
+    void enterSubmitsSelectedChoices_data();
+    void enterSubmitsSelectedChoices();
+    void enterFromChoicesRespectsGuardsAndFocus();
+    void enterFromChoicesKeepsNavigationAndApproval();
     void enterRespectsSubmissionGuards();
     void enterCannotBypassQuestionNavigationOrApproval();
     void draftsSurviveRefreshAndSessionSwitch();
@@ -189,6 +194,7 @@ private slots:
     void openCodePermissionListsNativeChoicesAndConfirmsAlwaysAllow();
     void openCodeFormTextMayStartWithSlashOrBang();
     void claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes();
+    void kimiNativeChoicesReviewFeedbackAndReplacementGuards();
     void unreadableApprovalPointsToTerminal();
     void kimiPlanReviewShowsPlanAndNamedRevise();
     void optionalQuestionsHaveExplicitSkipAndKeepDrafts();
@@ -482,6 +488,62 @@ void TestQuestionCard::claudeApprovalListsNativeOptionsAndConfirmsBroaderOnes()
     option(card,"4")->click();QTRY_VERIFY(submit(card)->isEnabled());submit(card)->click();QCOMPARE(sent.size(),2);
     QCOMPARE(sent.last()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(),QJsonArray{"4"});
     const auto preview=qEnvironmentVariable("HGS_APPROVAL_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QVERIFY(card.grab().save(preview+"/claude-approval.png"));}
+}
+
+void TestQuestionCard::kimiNativeChoicesReviewFeedbackAndReplacementGuards()
+{
+    QuestionCard card; card.resize(700, 500); card.show(); card.activateWindow(); QApplication::setActiveWindow(&card);
+    auto approval = request("kimi-approval:fixture", "first");
+    approval["approval"] = true; approval["approval_choices"] = true; approval["source"] = "kimi_tool_approval";
+    approval["questions"] = QJsonArray{QJsonObject{{"id", "approval"}, {"question", "Run this synthetic command?"},
+        {"body", "printf fixture # *literal*"}, {"allow_other", true}, {"other_label", "Reject with feedback"},
+        {"options", QJsonArray{QJsonObject{{"id", "1"}, {"label", "Approve once"}, {"scope", "once"}},
+            QJsonObject{{"id", "2"}, {"label", "Approve for this session"}, {"description", "Exact command for this session only"}, {"scope", "broader"}},
+            QJsonObject{{"id", "3"}, {"label", "Reject"}, {"scope", "once"}}}}}};
+    setQuestionReady(card, "session", approval);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    QVERIFY(option(card, "2")); QTest::mouseClick(option(card, "2"), Qt::LeftButton);
+    QVERIFY(!submit(card)->isEnabled());
+    // Exercise the unchanged production delay, rather than setReviewDelayForTests.
+    QTest::qWait(1000); QVERIFY(!submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    card.hide(); QTest::qWait(150); card.show(); card.activateWindow(); QApplication::setActiveWindow(&card);
+    QTest::qWait(1000); QVERIFY(!submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(), 4000);
+    QTest::mouseClick(submit(card), Qt::LeftButton);
+    QCOMPARE(sent.size(), 0); QCOMPARE(submit(card)->text(), QString("Confirm"));
+    QVERIFY(card.findChild<QLabel *>("questionStatus")->text().contains("beyond this request"));
+    // Selecting another native choice cancels the broader second step, without sending it.
+    QTest::mouseClick(option(card, "3"), Qt::LeftButton);
+    QCOMPARE(submit(card)->text(), QString("Submit answer")); QCOMPARE(sent.size(), 0);
+    QTest::mouseClick(option(card, "2"), Qt::LeftButton); QTest::mouseClick(submit(card), Qt::LeftButton);
+    QCOMPARE(sent.size(), 0); QCOMPARE(submit(card)->text(), QString("Confirm"));
+    // A replacement card cannot consume the old confirmation or its elapsed review.
+    approval["question_hash"] = "replacement"; setQuestionReady(card, "session", approval);
+    QVERIFY(!submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    QTest::mouseClick(option(card, "2"), Qt::LeftButton);
+    QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(), 4000);
+    QTest::mouseClick(submit(card), Qt::LeftButton); QCOMPARE(sent.size(), 0);
+    QCOMPARE(submit(card)->text(), QString("Confirm"));
+    QTest::mouseClick(submit(card), Qt::LeftButton); QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("selected_option_ids").toArray(), QJsonArray{"2"});
+    QCOMPARE(sent.first()[2].toJsonArray().first().toObject().value("text").toString(), QString());
+
+    approval["question_hash"] = "feedback"; setQuestionReady(card, "session", approval);
+    QVERIFY(other(card, "approval")); QTest::mouseClick(other(card, "approval"), Qt::LeftButton);
+    auto *editor = text(card, "approval"); QVERIFY(editor); editor->setFocus();
+    QTest::keyClicks(editor, "Use a safer command"); QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(sent.size(), 1); QVERIFY(!submit(card)->isEnabled());
+    QTRY_VERIFY_WITH_TIMEOUT(submit(card)->isEnabled(), 4000);
+    QTest::keyClick(editor, Qt::Key_Return); QCOMPARE(sent.size(), 2);
+    const auto feedback = sent.last()[2].toJsonArray().first().toObject();
+    QCOMPARE(feedback.value("selected_option_ids").toArray(), QJsonArray());
+    QCOMPARE(feedback.value("text").toString(), QString("Use a safer command"));
+    // Read-only replacement retains literal choices but cannot emit a callback, including Enter.
+    approval["question_hash"] = "readonly"; approval["can_answer"] = false;
+    approval["answer_unavailable_reason"] = "Synthetic request is no longer current";
+    setQuestionReady(card, "session", approval);
+    QVERIFY(!submit(card)->isEnabled()); QVERIFY(!option(card, "1")->isEnabled());
+    QTest::keyClick(&card, Qt::Key_Return); QCOMPARE(sent.size(), 2);
 }
 
 void TestQuestionCard::nativeCountdownPreservesScrollChoiceAndReview()
@@ -934,6 +996,127 @@ void TestQuestionCard::enterSubmitsFreeformAnswers()
     QTest::keyClick(editor, Qt::Key(key)); QCOMPARE(sent.size(), 1);
     card.setSubmitted("fixture/session", "tool-question");
     QTest::keyClick(editor, Qt::Key(key)); QCOMPARE(sent.size(), 1);
+}
+
+void TestQuestionCard::enterSubmitsSelectedChoices_data()
+{
+    QTest::addColumn<int>("key"); QTest::addColumn<QJsonObject>("data"); QTest::addColumn<QStringList>("selected");
+    for (const auto key : {Qt::Key_Return, Qt::Key_Enter}) {
+        for (const auto &source : {QString("codex_folder_trust"), QString("kimi_folder_trust"),
+                                  QString("codex_hooks_trust"), QString("hook"), QString("multiple")}) {
+            auto data = request(); auto question = data["questions"].toArray().first().toObject();
+            data["source"] = source == "multiple" ? "hook" : source;
+            question["allow_other"] = false;
+            QStringList selected{"opt_0_1"};
+            if (source.endsWith("folder_trust")) {
+                question["id"] = "trust";
+                question["options"] = QJsonArray{QJsonObject{{"id", "trust_0"}, {"label", "Trust and continue"}},
+                    QJsonObject{{"id", "trust_1"}, {"label", "Quit"}}};
+                selected = {"trust_0"};
+            } else if (source == "codex_hooks_trust") {
+                data["trust_request"] = true; question["id"] = "hooks_trust";
+                question["options"] = QJsonArray{QJsonObject{{"id", "review"}, {"label", "Review hooks"}},
+                    QJsonObject{{"id", "trust"}, {"label", "Trust all and continue"}}};
+                selected = {"trust"};
+            } else if (source == "multiple") {
+                question["multi_select"] = true; selected = {"opt_0_0", "opt_0_1"};
+            }
+            data["questions"] = QJsonArray{question};
+            QTest::newRow(qPrintable(QString("%1-%2").arg(source).arg(key))) << int(key) << data << selected;
+        }
+    }
+}
+
+void TestQuestionCard::enterSubmitsSelectedChoices()
+{
+    QFETCH(int, key); QFETCH(QJsonObject, data); QFETCH(QStringList, selected);
+    QuestionCard card; setQuestionReady(card, "fixture/session", data); card.resize(700, 450); card.show();
+    card.activateWindow(); QApplication::setActiveWindow(&card);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    connect(&card, &QuestionCard::answerRequested, &card, [&card](const QString &session, const QString &id) {
+        setSendingReady(card, session, id);
+    });
+    QJsonArray expected;
+    for (const auto &id : selected) {
+        auto *choice = option(card, id); QVERIFY(choice);
+        // A click on the row leaves keyboard focus on its radio/checkbox.
+        QTest::mouseClick(choice->parentWidget(), Qt::LeftButton);
+        QVERIFY(choice->isChecked()); QTRY_VERIFY(choice->hasFocus()); expected.append(id);
+    }
+    QVERIFY(submit(card)->isVisible()); QVERIFY(submit(card)->isEnabled()); QCOMPARE(sent.size(), 0);
+    auto *focused = option(card, selected.last());
+    QTest::keyClick(focused, Qt::Key(key)); QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[0].toString(), QString("fixture/session"));
+    QCOMPARE(sent.first()[1].toString(), data["question_id"].toString());
+    QCOMPARE(sent.first()[2].toJsonArray(), QJsonArray{QJsonObject({
+        {"question_id", data["questions"].toArray().first().toObject()["id"]},
+        {"selected_option_ids", expected}, {"text", ""}})});
+    QTest::keyClick(focused, Qt::Key(key)); QCOMPARE(sent.size(), 1);
+    card.setSubmitted("fixture/session", data["question_id"].toString());
+    QTest::keyClick(focused, Qt::Key(key)); QCOMPARE(sent.size(), 1);
+}
+
+void TestQuestionCard::enterFromChoicesRespectsGuardsAndFocus()
+{
+    QWidget window; auto *layout = new QVBoxLayout(&window);
+    auto *outside = new QLineEdit; auto *card = new QuestionCard;
+    layout->addWidget(outside); layout->addWidget(card);
+    auto data = request(); data["questions"] = QJsonArray{data["questions"].toArray().first()};
+    setQuestionReady(*card, "fixture/session", data); window.resize(700, 500); window.show();
+    window.activateWindow(); QApplication::setActiveWindow(&window);
+    QSignalSpy sent(card, &QuestionCard::answerRequested);
+    auto press = [&] { auto *choice = option(*card, "opt_0_1"); choice->setFocus(); QTest::keyClick(choice, Qt::Key_Return); };
+    press(); QCOMPARE(sent.size(), 0); // Nothing selected.
+    option(*card, "opt_0_1")->click();
+    outside->setFocus(); QTest::keyClick(outside, Qt::Key_Return); QCOMPARE(sent.size(), 0);
+    data["can_answer"] = false; setQuestionReady(*card, "fixture/session", data);
+    press(); QCOMPARE(sent.size(), 0);
+    data["can_answer"] = true; setQuestionReady(*card, "fixture/session", data);
+    card->setAvailability(false, "Offline"); press(); QCOMPARE(sent.size(), 0);
+    card->setAvailability(true); card->setError("fixture/session", "tool-question", "Check delivery", true);
+    press(); QCOMPARE(sent.size(), 0);
+    card->findChild<QPushButton *>("questionAllowRetry")->click();
+    auto *choice = option(*card, "opt_0_1");
+    QKeyEvent repeat(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier, {}, true);
+    QApplication::sendEvent(choice, &repeat); QCOMPARE(sent.size(), 0);
+    QTest::keyClick(choice, Qt::Key_Return, Qt::ShiftModifier); QCOMPARE(sent.size(), 0);
+    // Selecting Other keeps focus there; its already typed text is also an answer.
+    auto *custom = other(*card, "q_0"); custom->click(); custom->setFocus();
+    QTest::keyClick(custom, Qt::Key_Return); QCOMPARE(sent.size(), 0);
+    text(*card, "q_0")->setText("Keyboard answer");
+    QTest::keyClick(custom, Qt::Key_Return); QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent.first()[2].toJsonArray(), QJsonArray{QJsonObject({{"question_id", "q_0"},
+        {"selected_option_ids", QJsonArray{}}, {"text", "Keyboard answer"}})});
+}
+
+void TestQuestionCard::enterFromChoicesKeepsNavigationAndApproval()
+{
+    QuestionCard card; setQuestionReady(card, "fixture/session", request()); card.resize(700, 500); card.show();
+    card.activateWindow(); QApplication::setActiveWindow(&card); complete(card);
+    QSignalSpy sent(&card, &QuestionCard::answerRequested);
+    QVERIFY(submit(card)->isEnabled()); QVERIFY(submit(card)->isHidden());
+    QTest::keyClick(option(card, "opt_0_0"), Qt::Key_Return); QCOMPARE(sent.size(), 0);
+    card.findChild<QTabBar *>("questionTabs")->setCurrentIndex(1);
+    QTest::keyClick(option(card, "opt_1_0"), Qt::Key_Enter); QCOMPARE(sent.size(), 1);
+
+    auto data = request("approval", "keyboard-review"); data["approval"] = true;
+    data["approval_choices"] = true; data["source"] = "claude_tool_approval";
+    data["questions"] = QJsonArray{QJsonObject{{"id", "approval"}, {"question", "Allow this request?"},
+        {"options", QJsonArray{QJsonObject{{"id", "allow"}, {"label", "Allow for this session"}, {"scope", "broader"}}}}}};
+    setQuestionReady(card, "fixture/session", data); auto *choice = option(card, "allow");
+    choice->click(); choice->setFocus(); QVERIFY(!submit(card)->isEnabled());
+    QTest::keyClick(choice, Qt::Key_Return); QCOMPARE(sent.size(), 1);
+    card.setReviewDelayForTests(150); QTRY_VERIFY(submit(card)->isEnabled());
+    QTest::keyClick(choice, Qt::Key_Return); QCOMPARE(sent.size(), 1); QCOMPARE(submit(card)->text(), QString("Confirm"));
+    QKeyEvent repeat(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier, {}, true);
+    QApplication::sendEvent(choice, &repeat); QCOMPARE(sent.size(), 1);
+    QTest::keyClick(choice, Qt::Key_Return); QCOMPARE(sent.size(), 2);
+    QCOMPARE(sent.last()[2].toJsonArray(), QJsonArray{QJsonObject({{"question_id", "approval"},
+        {"selected_option_ids", QJsonArray{"allow"}}, {"text", ""}})});
+    data["question_hash"] = "read-only"; data["can_answer"] = false;
+    setQuestionReady(card, "fixture/session", data);
+    QVERIFY(!option(card, "allow")->isEnabled());
+    QTest::keyClick(option(card, "allow"), Qt::Key_Return); QCOMPARE(sent.size(), 2);
 }
 
 void TestQuestionCard::enterRespectsSubmissionGuards()

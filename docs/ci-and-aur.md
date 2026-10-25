@@ -10,19 +10,19 @@ the control console.
 ## Continuous integration
 
 Hosted checks run automatically on pushes to `main` and pull requests targeting
-`main`, including Dependabot proposals. External fork workflows wait for a
-maintainer's **Approve and run** decision. Every automatic run selects source/MSRV,
-full Linux CLI, Arch desktop/package, both macOS suites and both Windows suites
-(client and desktop, and real agents through the session host). The owner enabled
-this policy on 2026-10-09 after making the repository public: standard Ubuntu,
-macOS and Windows GitHub-hosted runners are free for public repositories.
+`main`, including Dependabot proposals. External forks still require maintainer
+approval. Dev main checks shared Rust/protocol contracts, Linux CLI, Arch,
+macOS and Android. Windows and iOS run in the full nightly/stable matrix and on
+PRs affecting their code: desktop changes select Windows, iOS changes select
+iOS, and native/shared/build/workflow or unknown paths select both. An unknown
+PR inventory also selects both; a partial or unavailable diff never removes
+coverage. Android-only and documentation-only changes need no Windows/iOS jobs.
 
-Manual CI remains available and defaults to all suites. `ci.yml` chooses the cache
-trust boundary and calls the shared jobs in `checks.yml`. Reusable CI keeps explicit
-suite selection so another workflow cannot accidentally request unrelated jobs.
-A short first job resolves the exact commit and the selected suites; every other
-job checks out that commit. PR checks use the GitHub merge commit; a manual `ref`
-can select a PR head or another exact revision.
+Manual CI defaults to all platforms, with independent `run_ios` and `run_macos`
+flags. `ci.yml` selects the cache trust boundary and `checks.yml` respects the
+explicit coverage. The resolver records the exact test commit and selected
+suites. PR checks test the merge commit and use the base/head merge ancestry for
+conservative change selection, including both sides of renames.
 
 | Job | Automatic CI | Checks |
 | --- | --- | --- |
@@ -31,19 +31,22 @@ can select a PR head or another exact revision.
 | Rust relay | Always | Rust 1.99 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
 | Rust mobile connector | Always | Rust 1.99 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
 | Rust mobile connector on macOS | Always | Cold Rust 1.99 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
-| iOS core tests and simulator build | Always | The project task replica built with Rust 1.99.1 for the iPhone, the simulator and macOS (`mobile/ios/scripts/build-replica.sh`, without the release profile's LTO in this check), then `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
+| iOS core tests and simulator build | Affected PR; full nightly/stable | The project task replica built with Rust 1.99.1 for the iPhone, the simulator and macOS (`mobile/ios/scripts/build-replica.sh`, without the release profile's LTO in this check), then `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
 | macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
-| Windows client and desktop | Always | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
-| Windows real agents | Always | The pinned `win32-x64` Claude Code and Codex in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
+| Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
+| Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
 Quick checks and the full suites start together once the commit is resolved, so
-a quick-check failure no longer holds back the other suites. New CI runs cancel
-obsolete runs for the same branch/PR and workflow. PR jobs have read-only
+a quick-check failure no longer holds back the other suites. New PR/manual runs cancel
+obsolete runs for the same branch/PR and workflow. Trusted public Dev main pushes
+use separate bounded qualification and signing/sealing queues; each keeps its active
+phase and coalesces pending revisions to the newest one. PR/manual checks and main
+before Dev rollout keep their existing whole-run concurrency. PR jobs have read-only
 permissions and no publication credentials; fork PRs use `pull_request`, never
 `pull_request_target`. Publishing is confined to trusted upstream `main` and the
 branch-restricted `release` environment. Authenticated model-turn tests remain
@@ -56,22 +59,68 @@ number zero, package `app.zerus.mobile`). The google-services and Crashlytics
 plugins only turn that file into resources; tests and lint never contact
 Firebase, and the mapping upload follows R8, which these tasks do not run.
 
+The macOS CLI unit/debug job finishes before two independent consumers start.
+One continues the original smoke, Python integration and release build; the other
+runs the unchanged latest-agent contracts from that exact debug CLI. A three-file
+handoff contains only `hgs`, `fake_agent` and a manifest bound to the selected
+source, run, producer attempt, actual OS/architecture, producing Rust toolchain
+and source-helper/binary hashes. Consumers use the completed producer's exact
+artifact ID and manifest digest, including its original attempt on a partial
+rerun; there is no live-producer polling or name/latest fallback. The CLI consumer
+selects the producer's exact Rust release and verifies the compiler identity.
+The public `CLI (macos-15)` result and `Suite results` require every selected
+component. The producer saves tested unit/debug dependencies under a `debug`
+content key; the integration/release consumer uses a distinct `complete` key.
+Both keep the legacy registry, Git and target paths and inherit the caller's
+cache authority: only requested trusted-main saves run after successful work and
+an exact-key miss. A cold core first restores the completed debug cache; a cold
+producer first tries the complete cache, then both accept legacy lock/family
+entries. The profile suffix stays inside the final key segment, so housekeeping
+still retains only two total entries in that existing compiler/month family.
+The native consumer has no cache access. Linux retains the default complete CLI path.
+Separate runner setup, dependency restoration and artifact transfer add overhead;
+this split does not establish an observed speedup without hosted evidence.
+
 On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
-enabled, `dev-android.yml` starts with the checks instead of after them. In the
-`release` environment and without cache access, it only assembles the signed
-release APK (`assembleRelease`), seals it and deletes the signing inputs. It
-then polls this run's jobs with a read-only Actions token and uploads
-`zerus-dev-android-a<attempt>` only after the `CI gate` job succeeds. While this
-attempt has no gate record, an earlier successful gate counts (a failed-job retry
-does not rerun it); an earlier failed or cancelled gate means waiting. Any
-other gate result, repeated API failures or a 135-minute wait fail the job without
-an upload; **Re-run failed jobs** then rebuilds the candidate. `dev.yml` assembles
-the desktop candidate and moves the `dev` tag only after the gate, this job
-and the enabled Mac candidate succeed. Main CI invokes `macos-cask.yml` after
-the gate with `channel: dev`; its full bundle/sign/notarize/install checks produce
-the same signed ZIP and DMG later sealed into the desktop candidate. Release builds skip the `lintVital` tasks: the gate requires the
-Android job, whose `lintRelease` covers those fatal checks for the same commit
-and variant.
+enabled, `ci-dev-qualification.yml` holds one qualification slot through both
+credential-free checks and the parallel unsigned Mac bundle. The bundle uses pinned
+official Qt, tests the Release GUI, then packages that same tested app; there is no
+second GUI compilation with tests disabled. Its gate requires successful checks and
+the exact run's selected bundle; a disabled Mac bundle must be skipped.
+The qualification caller reuses the former whole-CI concurrency key, so the first
+new run waits for any active old CI run to finish before starting qualification.
+
+After the public **CI gate** admits exactly one successful check workflow,
+`ci-dev-tail.yml` holds one separate noncancelling CI slot through Android/Mac
+signing, installation checks, candidate sealing and the monotonic Dev tag. The next
+revision can qualify while this tail runs. Signing remains in the existing protected
+workflows; source/version checks, Developer ID, notarization and disposable cask
+installation remain required. Qualification and delivery retain the same CI run ID,
+number, SHA and artifact namespace. Only trusted checks write caches; PR checks read
+them and signing/publication have no cache access.
+
+The existing **Publish Dev** workflow is the third, independently serialized lane.
+It still starts only after the entire source CI run succeeds and validates that
+run's immutable candidate. Active signing and publication are never cancelled by a
+new main push. All queues retain GitHub's default single pending entry, so newer
+pending work can replace older pending work; every revision is not promised a
+published build. Existing monotonic candidate/catalog checks reject stale delivery.
+
+The short signed `dev-android.yml` build starts after the CI gate alongside Mac
+signing/installation. It builds `assembleRelease`, seals the APK/source and removes
+private inputs on every outcome, then uploads `zerus-dev-android-a<attempt>`.
+No runner polls the gate and no Actions token reaches this signing job. Its
+credential-free Android unit/lint check is required before signing; the signed
+build uses the same Firebase variant. Publication and the `dev` tag still wait
+for all selected candidates. With Mac enabled, the Android build overlaps its
+post-gate delivery work; with Mac disabled it adds its own short build duration.
+
+Nightly retains all Windows/iOS checks and uploads iOS Dev to TestFlight only
+after full verification. The upload retains the exact source's successful main
+CI number, not Nightly's smaller sequence. A bounded read-only App Store Connect
+preflight skips a known valid/processing existing build and refuses failed,
+expired or unknown records/API results before archiving. Stable iOS uploads run
+full verification too. These uploads remain separate from the desktop catalog.
 
 ### Incoming PRs and publication trust
 
@@ -91,6 +140,9 @@ configuration and authenticated model sessions do not belong in CI caches/artifa
 PR checks and every manual CI run receive **read-only cache tokens**, including a
 manual run of `refs/pull/NUMBER/head` from the upstream workflow. Only upstream
 `main` pushes and scheduled checks of that exact `main` commit can populate caches.
+Scheduled upstream-main Nightly checks also refresh these families, including
+Windows now absent from Dev. Manual Nightly uses a separate read-only call; its
+verification gate requires exactly one full matrix to pass.
 This restriction is enforced by GitHub's fixed `cache-mode` on the reusable call,
 so checked-out build code cannot bypass it by invoking the cache API itself.
 Publishers use `cache-mode: none` and execute trusted upstream publication scripts.
@@ -178,7 +230,7 @@ gh workflow run ci.yml --ref main
 # Full coverage of a PR head with the current upstream workflow:
 gh workflow run ci.yml --ref main -f ref=refs/pull/123/head
 # Source/MSRV checks plus the aggregate gate only:
-gh workflow run ci.yml --ref main -f run_linux=false -f run_arch=false -f run_macos=false -f run_windows=false
+gh workflow run ci.yml --ref main -f run_linux=false -f run_arch=false -f run_macos=false -f run_windows=false -f run_ios=false
 ```
 
 An explicit test `ref` changes the checked-out commit, not GitHub's workflow run
@@ -228,7 +280,7 @@ The Arch base image is digest-pinned, but `pacman -Syu` intentionally uses curre
 Arch packages. This tests rolling-distribution compatibility; it does not promise
 bit-for-bit reproducibility months later. Rust dependencies are locked, fetched
 in `prepare()` and built/tested with `--frozen` inside source packages. The CI
-image, tmux, official DeepSeek fixture and Windows Qt pins need periodic
+image, tmux and Windows Qt pins need periodic
 maintainer review.
 
 ### Dependency updates and cost
@@ -250,6 +302,9 @@ Dependabot vulnerability alerts and security updates are enabled separately in
 repository settings. Security proposals have their own per-ecosystem groups;
 they are not delayed by the monthly version schedule or counted against its PR
 limit. A fix requiring a manifest migration still needs maintainer attention.
+The historical DeepSeek fixture lockfile has no version-update entry. Ordinary
+CI resolves a fresh exact source lock for the official latest release and retains
+it with that run's evidence; it never silently falls back to the historical lock.
 Do not disable security alerts to reduce routine version-update noise.
 
 Dependabot jobs on standard GitHub-hosted runners do not consume included Actions
@@ -278,9 +333,18 @@ its own `HGS_TEST_BIN`. Python integration modules run in separate processes so
 module patches do not leak between suites. Terminal fixtures use private socket
 paths and synthetic homes. No check runs against existing agent sessions.
 Authenticated native-client tests remain explicit opt-ins; baseline CI needs no
-model API keys. Linux installs the pinned official `@deepseek-ai/dsh@0.2.0-rc.2`
-for its keyless local-model contract fixture. Native agent CLIs are not included
-in the product package.
+model API keys. Linux resolves one official latest `@deepseek-ai/dsh` release for
+its keyless local-model contract fixture. `scripts/ci/dsh_fixture.py` verifies the
+official package identity and SHA-512 integrity, then records the complete exact
+registry-only dependency lock before `npm ci`. Private npm configuration disables
+Git, file, directory and remote dependency sources during both resolution and
+installation. Metadata, source lock, installation identity and logs remain in the
+test evidence. The original ten-minute end covers selection through publication
+of the install receipt, reserving fifteen seconds for owned npm-group cleanup.
+Missing or changed receipts and a version mismatch fail mandatory native admission.
+The fixture is not a package-script sandbox. A new release can expose an adapter
+incompatibility and fail CI; selecting it does not itself change product support.
+Native agent CLIs are not included in the product package.
 
 The CI CLI jobs set `ZERUS_PYTHON_JOBS` to twice the runner vCPUs (8 on Ubuntu,
 6 on macOS): the Python test classes mostly wait on terminals and subprocesses.
@@ -295,19 +359,19 @@ usage lists the commands. A test the file does not list still runs exactly once.
 `tests/test_claude_input_native.py` checks exact message acceptance by the real
 Claude TUI with a private home/socket and a localhost fake API; it never reads a
 user's account. Full Linux and macOS CI run it with the other Claude native
-suites against the pinned Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
-selects another executable for a manual run. Claude 2.1.296 coverage verifies
+suites against one latest Claude Code package (see below); `HGS_CLAUDE_TEST_BIN`
+selects another executable for a manual run. The coverage verifies
 literal trailing backslashes, multiline messages and durable request replay.
 Terminal submission alone is insufficient: the test waits for the unchanged user
 message in native history. `tests/test_claude_settings_native.py` drives the
-real `/model` picker with a synthetic model catalog and history. Claude 2.1.296
-coverage changes model and effort in a fresh session, accepts Claude's own cache
+real `/model` picker with a synthetic model catalog and history. It changes
+model and effort in a fresh session, accepts Claude's own cache
 notice in a resumed conversation, and requires the session-only transcript
 receipt while `settings.json` stays unchanged. A session-only change made in
 Terminal must reach hgs through `PostModelSwitch` with the exact model ID.
 `tests/test_claude_statusline_native.py` starts the real TUI through a tracked
 `hgs claude` launch, with the private home, state folder and socket and the
-loopback API of `tests/model_api_fixture.py`. Claude 2.1.296 coverage requires the
+loopback API of `tests/model_api_fixture.py`. Claude 2.1.296 and 2.1.308 coverage requires the
 user's own status line on screen and its `settings.json` unchanged, and the window
 from Claude's status line input in `hgs inspect` for the exact run, conversation and
 model: before the first reply, after a reply, after a session-only model change, a
@@ -318,6 +382,11 @@ for a start that a fake agent's tracked launch recorded, returns them from the r
 agent's SessionStart hook, and requires the task instructions in the request the
 real Claude Code (`claude -p`) or Codex (`codex exec`) sends to its loopback model;
 it runs with the Claude and the Codex suites.
+`tests/test_claude_permission_native.py` leaves Claude's one-time auto-mode offer
+enabled for a fixture account whose default mode is manual. Claude 2.1.296 and
+2.1.308 coverage requires an answerable Activity card under the launch prompt's reply
+that holds messages back, then answers it once: keeping the mode records Claude's own
+`hasSeenAutoDefaultNudge` with `defaultMode` unchanged, and accepting sets it to `auto`.
 
 ### Unix tmux census
 
@@ -636,7 +705,7 @@ On a Windows development PC the same steps run from Git Bash;
 
 ### Windows real agents through the session host
 
-The `windows-host` job runs the reviewed `win32-x64` Claude Code and Codex in
+The `windows-host` job runs one latest `win32-x64` Claude Code and Codex release in
 isolated session hosts of the release `hgs.exe` on a standard `windows-2025` runner
 (M7 of [Windows Phase 2](superpowers/specs/2026-10-13-windows-native-host-design.md)).
 It is selected with the Windows desktop job and the gate requires both, but it is a
@@ -648,7 +717,7 @@ the same way.
 
 It then runs `scripts/ci/agent-compatibility.py` with `HGS_TEST_BIN` and
 `HGS_TEST_CONPTY_DIR` ([native agent compatibility](#native-agent-compatibility-and-upstream-review)):
-the runner verifies each package against its pin, extracts only `claude.exe` or
+the runner verifies each package against its selected SHA-512 integrity, extracts only `claude.exe` or
 `codex.exe` and runs that agent's class of `tests/test_windows_native_agents.py`,
 whose agents reach only a local fake API (Anthropic's for Claude Code, OpenAI's
 for Codex) and keep their homes private. The suites confirm what spike S6 ran by
@@ -752,14 +821,23 @@ accounts in private configuration.
 
 Full Linux and macOS CLI CI also run `python3
 scripts/ci/agent-compatibility.py`, and the Windows real-agent job runs it on
-Windows ([above](#windows-real-agents-through-the-session-host)). Each reviewed
-version in `scripts/ci/agent-compatibility.json` names the official npm package
-for one target, `linux-x64`, `linux-x64-baseline`, `darwin-arm64` or `win32-x64`,
-with an exact version and SHA-512 integrity pin. The runner selects the pins for its
-host and refuses an agent that has none. The Codex matrix pins 0.162.0 for Linux and
-Windows and retains 0.160.1 (a resident-session regression boundary) on Linux only.
-The Claude Code matrix pins 2.1.296 for all three targets. The OpenCode matrix pins
-its reviewed minimum, 2.0.32, for Linux and macOS; on x86_64 Linux it uses the
+Windows ([above](#windows-real-agents-through-the-session-host)). Each ordinary
+compatibility invocation resolves the official npm `latest` tag once for each
+selected agent, then resolves its exact platform package and SHA-512 integrity.
+All selected packages must resolve before any native execution. The report saves
+their exact versions, URLs and digests before the first test; a missing release,
+platform package or valid digest fails without falling back to historical pins.
+Every terminal case uses that same selected image. Historical package records in
+`scripts/ci/agent-compatibility.json` remain evidence for separately selected old
+fixtures; ordinary CI and the daily upstream report do not execute those versions.
+Targets are `linux-x64`, `linux-x64-baseline`, `darwin-arm64` and `win32-x64`.
+From 2.1.304 Claude also
+records each API request as an `api-request-blob` transcript row and can defer
+WebFetch behind ToolSearch (its approval fixture sets `ENABLE_TOOL_SEARCH=false`).
+Claude offers a one-time default permission mode change; fixtures set
+`hasSeenAutoDefaultNudge` except the suite that answers that offer. OpenCode has
+a supported minimum of 2.0.32; CI tests its latest release on Linux and macOS.
+On x86_64 Linux it uses the
 `@opencode/cli-linux-x64-baseline` package, which runs without AVX2 on every x86_64
 host. macOS therefore runs Claude Code and OpenCode, and Windows, where Zerus has no
 OpenCode adapter, runs Codex and Claude Code. Only the native executable is
@@ -873,29 +951,30 @@ The separate **Agent upstream compatibility** workflow runs daily at 04:41 UTC
 and is also available manually on upstream main. It discovers published Codex,
 Claude Code, OpenCode, Kimi Code and DeepSeek Harness versions from their official
 package indexes, links their official release notes and tests the latest Codex,
-Claude Code and OpenCode as additional canaries. OpenCode follows a minimum version
+Claude Code and OpenCode, once per agent, using the same latest-only selection as
+ordinary CI. OpenCode follows a minimum version
 policy: Zerus accepts any 2.x at or above the reviewed minimum whose service offers
-every operation it uses, so its pin is that minimum, and the canary qualifies the
-newest `@opencode/cli` release each day and reports an incompatibility without
-changing the pin. The report labels the newest OpenCode as newer than, the same as
+every operation it uses. CI qualifies the newest `@opencode/cli` release and reports
+an incompatibility without changing the product's minimum. The report labels the newest OpenCode as newer than, the same as
 or older than the reviewed minimum, and flags another major version or a prerelease
-for review. It does not advance reviewed pins or install
+for review. Kimi discovery uses the current `@moonshot-ai/kimi-code` package,
+not the archived Python `kimi-cli` project. The workflow does not install
 anything on development machines. Its hosted job has read-only repository
 access, no cache access and no publication credentials. Reports, native logs
 and public protocol schemas expire after three days. A discovery or
 native-contract failure fails the run; successful unittest skips do not hide
 missing coverage.
 
-Codex protocol schemas are generated separately with and without experimental
-APIs. The report compares the latest canary with the newest reviewed pin and
-lists added/removed methods and added/removed/changed schemas. Changes to Codex,
-Claude Code and OpenCode CLI help appear with a generated diff per agent. A detected
-addition is a review candidate, not evidence that Zerus supports it or that a
+Codex protocol schemas are captured separately with and without experimental
+APIs, together with the selected release's CLI help and schema hashes. Reports
+can be compared as data; the workflow does not execute an older agent to generate
+a comparison. A detected addition is a review candidate, not evidence that Zerus supports it or that a
 signed-in account can use it. For Kimi this workflow currently discovers
-versions only. DeepSeek's existing pinned keyless contract fixture runs in full
-Linux CLI CI.
+versions only. Its separate native and approval workflows qualify one latest
+Kimi release for affected PRs or manual runs. DeepSeek's latest-release keyless
+contract fixture runs in full Linux CLI CI.
 
-To run the reviewed matrix or inspect current upstream changes locally:
+To test the latest releases or inspect current upstream changes locally:
 
 ```sh
 cargo build --locked
@@ -905,20 +984,260 @@ python3 scripts/ci/agent-compatibility.py --agent opencode
 python3 scripts/ci/agent-compatibility.py --latest
 ```
 
-On Windows it takes the release build and the ConPTY pair as
+The unshipped static coordination hint has a separately selected source candidate:
+`--contract agent-hint`. This historical, separately granted fixture consumes its
+frozen Claude and Codex pins and targets from `agent-compatibility.json`; it is
+not part of ordinary CI's latest-only matrix. Native acceptance requires retained successful
+results on the exact reviewed source. It selects
+exactly four methods per pin: actual hgs lifecycle (launch, compact, clear, two
+resumes, rename, fork), lost-mark output, real pre-feature first resume, and
+global/account exclusions with instruction and personal-hook preservation. The
+Unix launcher sentinel covers supported project shell launchers; Windows starts
+the real executable directly and makes no shell-launcher claim. Existing default
+UI method and geometry/animation coverage remain unchanged.
+
+The source inputs are the candidate hgs, a real CLI built from pre-feature main
+`ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce`, the `session_start_observer` Rust example,
+and cached public official package tarballs whose exact filenames and SHA-512
+pins are already in `agent-compatibility.json`. The hint selection never downloads
+or retries missing packages. Build receipts must bind each declared Git source to
+its binary hash; a version string cannot establish that association. A future
+separately authorized run has this shape (all paths are examples, not inputs):
+
+```sh
+python3 scripts/ci/agent-compatibility.py --contract agent-hint --agent claude \
+  --hgs /fixture/candidate/hgs --hgs-source <reviewed-40-digit-source> \
+  --pre-feature-hgs /fixture/pre-feature/hgs \
+  --hook-observer /fixture/observer/session_start_observer \
+  --observer-source <reviewed-40-digit-observer-source> \
+  --native-package-cache /fixture/public-package-cache --results /fixture/fresh-results
+```
+
+Each selected pin has one original 1200-second row end including preparation and
+a 60-second cleanup reserve, with four fixed methods and first failure stopping
+the selected campaign. Startup and deferred-resume gates keep their original
+120-second ends, including late native consent answered only through `hgs answer`.
+The native five-second hook timeout is unchanged. No prompt or count precedes the
+actual public gate and native-process proof. Pre-feature migration launches and
+pauses through the old CLI, then resumes through the candidate; Windows records a
+resident old host separately from the newly installed candidate stable CLI.
+Admission requires typed `tracked: true`, an explicit question list, and the
+selected first/resume gate exactly `true` with its reason exactly empty. A known
+already-bound steady conversation uses its exact run/conversation and idle
+activity; its normal false first-message field has no first-message reason.
+The exact observed read-only `Hooks need review` frame with 13 new or changed
+hooks may wait within that same original gate for an answerable
+`codex_hooks_trust` card. Its current run, hash, title, disclosure and all three
+choices must match. This read-only card authorizes no answer or prompt; an altered
+card is refused, and a card that never upgrades expires at the original end.
+The product hook-review parser is unchanged.
+
+Hint cases own cleanup before partial setup or launch can return. Their process
+queries, private socket/endpoint stops, pinned-handle reaping, model shutdown and
+post-stop image/observer checks share the same original row end. The ordinary
+fixtures' cleanup defaults are not used or changed. Hint Windows profiles and the
+outer hint scratch root have no automatic TemporaryDirectory deletion. Unknown
+identity, a failed/expired cleanup or a parent timeout retains the namespaces and
+fails qualification. Forced native stops use only a verified private socket or
+pinned owned handles; no numeric-PID fallback is added. A parent timeout is not
+proof of descendant exit. Files are removed only after every cleanup check has
+verified within the original end. This bounds the fixture's waits, not arbitrary
+host filesystem or logging stalls.
+Windows cleanup queries the image through the already-pinned process handle.
+If that image is unavailable, one zero-time wait on the same handle must prove
+exit; otherwise cleanup remains UNKNOWN without a forced stop. Private cleanup
+evidence retains at most 16 exception records, each with at most eight bounded
+arguments and eight source frames, with explicit truncation/overflow metadata.
+It records no frame locals. Private-stop failures still fail cleanup.
+
+The fixture intentionally seeds an observed retained owned hook entry at a
+separate private executable named `hgs` or `hgs.exe`. It leaves the real stable
+CLI, staged images, supervisor/native argv and real answer channel intact. The
+normal installer must retain that entry; this does not qualify fresh registration
+as having generated the observer path. Each observed call starts one standalone
+phase-sealed real hgs. Bounded capture never truncates forwarded streams; stdin,
+stdout and stderr preserve their own byte order, without a cross-stream ordering
+claim. Missing identity, incomplete capture/forwarding, overflow or unknown output
+fails the case. Pipes add interposition and can change fault-path behavior.
+Recorded output and completed forwarding do not prove customer receipt or
+crash-atomic exactly-once delivery. The lost-mark control requires a second
+distinct actual SessionStart output, then empty output on the next marked resume;
+marks, model counts and transcripts alone cannot prove that, particularly with
+Claude's identical-context deduplication. This is no OS/network-isolation claim,
+native execution grant, shipped feature or release-dependency waiver.
+On macOS, the observer child and fixture native process use `proc_pidpath` for
+their absolute image paths and retain the existing `ps` birth identity. A `ps`
+basename cannot establish executable identity.
+
+Each call may add five fixed, exclusive stage files: before spawn, child identity,
+first stdin write progress, child exit and drained streams. A stdin prefix is
+bounded captured data and may be incomplete; these diagnostics never substitute
+for complete `begin.json`/`result.json`, forwarding or cleanup proof. Their file
+writes and syncs add observer timing overhead under the same five-second hook
+limit. A missing result or recording failure remains UNKNOWN and fails the case.
+Private Codex profiles set `sandbox_mode="danger-full-access"` and
+`approval_policy="never"` for the keyless fixture, as the ordinary Windows native
+suite does. Hook and folder trust still require their exact public hgs cards and
+answers; the fixture never answers a Terminal-only sandbox setup card.
+
+The finite allocation is seven pin/OS rows: retained Claude 2.1.296 and Claude
+2.1.308 on Linux x86_64, Claude 2.1.308 on macOS arm64 and Windows x86_64;
+retained Codex 0.160.1 on Linux x86_64, and
+Codex 0.162.0 on Linux x86_64 and Windows x86_64. A disposable Linux job needs
+Python, tmux and private short TMPDIR; macOS needs Python, tmux and its native
+arm64 build; Windows needs Python and the reviewed ConPTY pair supplied through
+`HGS_TEST_CONPTY_DIR`. Candidate and pre-feature hgs and the observer must be built
+for that job's OS/architecture, with separate source/command/toolchain/hash
+receipts. Linux Codex and Linux Claude selections run their two manifest pins
+sequentially; all other provider/OS selections run one row. Each selection uses the command above
+with `--agent claude` or `--agent codex` and fresh results, its OS-native binary
+paths and official public cache. Existing version/help/schema probes remain part
+of the runner. These focused disposable hosted or local jobs can be allocated
+after review; ordinary CI defaults, suites and pins are unchanged.
+
+#### Opt-in hosted hint gate
+
+`agent-hint.yml` provides five disposable standard public-runner jobs. It runs
+only in the public upstream repository, through `workflow_dispatch` or a PR to
+main carrying the `native-agent-hint` label and changing one of its scoped source
+paths. A PR run checks out the exact head commit. External-contributor workflow
+approval still applies. Manual dispatch becomes available once the workflow is
+registered on the default branch; select the reviewed source ref explicitly:
+
+```sh
+gh workflow run agent-hint.yml --ref <reviewed-source-branch-or-tag>
+```
+
+| Job | Manifest pins, in order | Required methods |
+| --- | --- | --- |
+| Linux Claude | 2.1.296 then 2.1.308 linux-x64 | 8 |
+| Linux Codex | 0.160.1 then 0.162.0 linux-x64 | 8 |
+| macOS arm64 Claude | 2.1.308 darwin-arm64 | 4 |
+| Windows Claude | 2.1.308 win32-x64 | 4 |
+| Windows Codex | 0.162.0 win32-x64 | 4 |
+
+Every row must report its exact four raw IDs, four passes, zero skips/errors and
+verified owned cleanup (eight for the two-pin Linux Codex and Claude rows). Each
+stops before its second pin if the first fails. Jobs collect evidence
+independently; all five must succeed for the 28-occurrence campaign to qualify. The gate does not publish or release, and
+the full standard CI matrix remains required before merging the product change.
+
+Before any Python interpreter starts, the workflow creates a short private Unix
+`TMPDIR` (at most 24 bytes), with separate fresh private Cargo/rustup caches and
+home. It uses no shared Actions cache, provider credential or signing environment.
+Linux reuses the pinned tmux installer, macOS the existing Homebrew setup, and
+Windows the reviewed ConPTY fetcher and MSVC environment helper. Rust 1.99.1 is
+installed explicitly; preparation uses direct cargo/rustc paths with at most two
+compiler jobs. Public dependency downloads belong to this hosted preparation
+scope and never target an owner's installation.
+
+`scripts/ci/prepare-agent-hint.py` has one original 2400-second preparation end:
+public Cargo/npm fetches share at most 600 seconds, then candidate and pre-feature
+builds each get at most 900 seconds, clamped to that original end. Builds are
+locked and offline after fetching; dependencies must have crates.io checksums.
+Only the selected official npm URLs, filenames and SHA-512 values already in
+`agent-compatibility.json` are fetched (512 MiB maximum per package), without
+latest discovery, redirects, retries or missing-cache fallback. Candidate hgs
+and `session_start_observer` are built together from the candidate; real
+pre-feature hgs is built from exact main
+`ad3285c19013cf2ff78ec8eaf6ab2fbdd5253dce` on each OS. Preparation stops on its first
+failure and starts no provider or hgs process.
+
+The retained `build-receipt.json` binds clean pre/post Git commit/tree and lockfile
+hashes, build argv, OS/architecture, direct tool hashes, raw-log hashes, exit codes
+and all three binary hashes. Windows also records selected MSVC/SDK executable
+hashes, versions and include/library search inputs; verbose build logs retain
+compiler/linker invocation details. This associates source with build output;
+it makes no reproducible-build or kernel-isolation claim. The row runner
+independently hashes the binary inputs again.
+
+Preparation and native rows have separate finite bounds. Dependency setup steps
+have 5–10-minute caps, preparation has 45 minutes, each Unix selection 45 minutes,
+and each Windows host step 28 minutes. Every job has a 120-minute whole-job cap,
+including upload. Each native row keeps its original 1200 seconds, including the
+60-second fixture cleanup reserve, original 120-second startup gates and unchanged
+five-second hook timeout.
+
+The Unix hint fixture records the exact private tmux server's socket, PID, birth
+and kernel image before each launch when live, then registers each new run's
+native and supervisor identities before consenting to a startup card. It retains
+observed descendants while their recorded parents are live. The ledger permits
+64 launch intents, 2,048 owned identities and 16 private panes; process snapshots
+permit 16,384 rows and query output is checked against 2 MiB after capture. A
+printable delimiter frames server, socket and pane fields: tmux may render TAB
+control bytes as underscores. Owned socket paths containing that delimiter or
+non-printable characters refuse before the query; malformed rows never qualify.
+A stale or missing socket is insufficient: a zero-byte connection to only that
+reserved Unix stream path must return ENOENT or ECONNREFUSED, all launch custody
+must be complete, and all recorded birth identities must have exited. Unknown
+connectivity, images, partial registration or exhausted bounds retain the runtime
+and fail cleanup. No discovered numeric PID is signalled. Windows first waits
+at most five seconds for the selected host's sessions to drain after pane kills,
+clamped before the original row end's last five seconds, then keeps the same
+pinned-handle exit and executable-release requirements. The 60 seconds is a row
+cleanup reserve. If image lookup becomes unavailable, one passive wait of at
+most five seconds on the same pinned handle may prove exit; the original end is
+checked again afterward. Timeout, unknown status or late completion still fails,
+without a forced stop, image-query retry or process-ID reopen. Cleanup uses
+the existing absolute row end even after an early
+body failure, and these checks do not create a renewed cleanup allowance.
+
+An identity-bound, bounded read-only `startup_terminal_choice` may be observed
+until a supported typed card appears within the same original 120-second gate.
+It grants no answer, prompt or readiness proof. Unknown answerable cards still
+refuse, and a forever read-only panel times out. This does not prove that a native
+provider will expose a typed card; fresh native qualification is required.
+
+Both qualification builds pass the per-command Cargo override
+`--config profile.dev.package.sha2.opt-level=3`. The candidate hgs and observer
+share that dependency profile; the real pre-feature hgs uses it as well. Normal
+Cargo profiles, manifests and dependency pins remain unchanged. Both full
+subject hashes and all stream joins remain required under the same five-second
+hook limit. Incomplete diagnostics cannot distinguish an unfinished stream join
+from an unfinished post-exit subject hash.
+
+Focused helper qualification uses the same override in each command:
+
+```sh
+cargo test --locked --offline --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3 -- --nocapture
+cargo clippy --locked --offline --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3 -- -D warnings
+cargo build --locked --offline --bin hgs --example session_start_observer \
+  --config profile.dev.package.sha2.opt-level=3
+```
+
+Windows reuses `outside-job.py` unchanged: WMI creation has a 120-second cap,
+followed by a 1320-second monitor cap allowing the 1200-second row and up to 120
+seconds of ordinary host cleanup. A monitor timeout may trigger the launcher's
+separate shared 120-second cleanup allowance (30 seconds per action). Thus the
+launcher permits up to 1560 seconds of bounded waits, apart from filesystem or
+logging stalls, under the 1680-second host-step cap. This outer allowance is
+separate from the row's 60-second reserve. Executable-pattern cleanup is confined
+to these disposable Windows jobs; it cannot establish verified fixture cleanup
+or turn UNKNOWN into PASS.
+
+Three-day artifacts retain raw row logs/IDs and the full hook-output tree
+(stdout and forwarded-stream hashes, exact phase/pre-send gates, known-consent
+receipts and actual cleanup records), source/build receipts and the ConPTY fetch
+log. Failed or unknown runtime roots remain on the disposable host until it is
+discarded. The workflow neither deletes nor uploads those complete roots, build
+targets or dependency caches. A canceled host may prevent artifact upload and
+provides no successful qualification evidence.
+
+The ordinary Windows compatibility matrix takes the release build and ConPTY pair as
 [testing the session host](windows-host-testing.md#real-agents) shows. The
 generated `artifacts/test-results/agent-compatibility/summary.md` and
 `report.json` contain the coverage result and review candidates. Before changing
-a pin, read the provider's release notes and compare CLI flags, hook events,
+a supported integration, read the provider's release notes and compare CLI flags, hook events,
 native history and protocol schemas. Classify each relevant feature as already
 supported, requiring an adapter change, or requiring a separately reviewed
 integration; track implementation work in Beads. Add an isolated native contract
-for every adopted lifecycle/input change and retain versions still used by
-resident sessions until their compatibility boundary is deliberately reviewed.
-Pin a reviewed version for every target its agent supports. Only an older version
-kept as a regression boundary may cover fewer targets: each of its pins gives the
-reason in `retained`, and the newest version is never retained. The runner refuses
-a manifest that breaks this rule, and its unit tests cover it.
+for every adopted lifecycle/input change. CI tests one latest release per supported
+agent and does not add retained resident versions. Historical frozen fixture
+records retain their original target and integrity checks; they are not a CI
+version-selection policy. Qualification does not update an installed agent or
+restart a resident session.
 
 Zerus receives activity from structured hooks, conversation messages and usage
 from native history, and DeepSeek controls from its native API. Terminal checks
@@ -926,6 +1245,20 @@ verify input ownership, empty composers and native dialogs, including Codex's
 reset before its deferred SessionStart. Prefer a structured provider protocol
 when it can address the same exact live process/run/conversation. A separate
 app-server process must not be assumed to own an existing terminal session.
+Windows cannot enumerate a process's open files. Deferred Codex fork verification
+instead completes a bounded scan of only the selected account's `sessions`
+directory and uses the existing Restart Manager query for each eligible child
+file. It retains the exact supervised PID/birth, distinct child ID, parent,
+interactive source, launch directory and empty-composer requirements. Links and
+reparse points, missing or unreadable entries, uncertain ownership and multiple
+eligible held histories refuse input. The scan allows at most 16,384 entries,
+eight nested directory levels, 256 KiB per first-line header and 16 MiB of total
+returned header data, within a two-second verification window. Exhaustion is
+unknown; it never selects the newest file or accepts a partial inventory. This
+window does not interrupt an arbitrary filesystem or Restart Manager stall and
+does not extend the original startup, hook or cleanup budgets. Pure adapter
+controls cannot prove that a pinned native Windows fork creates and holds its
+child history before its first turn; that still requires native qualification.
 See [Codex App Server](https://developers.openai.com/codex/app-server) for its
 JSON-RPC protocol and version-specific schema generation. Migration of live
 terminal-backed sessions requires separate ownership/resume verification.

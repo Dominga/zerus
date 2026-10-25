@@ -8,6 +8,7 @@
 #include "speech/VoicePlayerImage.h"
 
 #include <QApplication>
+#include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QSettings>
@@ -195,6 +196,7 @@ QAction *menuAction(QMenu *menu, const QString &text)
 class TestActivityView : public QObject {
     Q_OBJECT
 private slots:
+    void archiveRestoreKeepsVisibleHistoryAndSelection();
     void hiddenSnapshotsDoNotBuildDocuments();
     void preparedWorkerLifetimeFollowsDocuments();
     void longUpdatesKeepQueuedEditorInputResponsive();
@@ -247,7 +249,15 @@ private slots:
     void attachmentsStayWithTheirMessageAndOpenExactFile();
     void repeatedJournalWindowKeepsOneAttachmentMessage();
     void delayedAttachmentAcknowledgementKeepsOneMessage();
+    void kimiDuplicateHooksKeepOneAttachmentCard();
+    void kimiNativeTurnIdentityPreservesIndependentSends();
     void voiceMessageRetainsAudioAndExpandableTranscript();
+    void voiceTranscriptButtonBesidePlayer_data();
+    void voiceTranscriptButtonBesidePlayer();
+    void voiceTranscriptExpansionFollowsBottom_data();
+    void voiceTranscriptExpansionFollowsBottom();
+    void voiceTranscriptExpansionKeepsReadingPosition_data();
+    void voiceTranscriptExpansionKeepsReadingPosition();
     void videoMessageIsOneCircleAndLoadsOnlyAfterTap();
     void voiceWaveformSeeksWithoutRelayout_data();
     void voiceWaveformSeeksWithoutRelayout();
@@ -306,6 +316,27 @@ QJsonArray longHistory()
     }
     return events;
 }
+}
+
+void TestActivityView::archiveRestoreKeepsVisibleHistoryAndSelection()
+{
+    SettledActivityView view; view.resize(600, 400); view.setSessionKey("archived-key");
+    view.setActivity({{"conversation_id", "same-conversation"}}, history(24));
+    auto *browser = view.browser();
+    auto cursor = browser->textCursor(); cursor.setPosition(4); cursor.setPosition(18, QTextCursor::KeepAnchor);
+    browser->setTextCursor(cursor);
+    browser->verticalScrollBar()->setValue(browser->verticalScrollBar()->maximum() / 2);
+    const auto text = view.plainText(), selected = browser->textCursor().selectedText();
+    const int scroll = browser->verticalScrollBar()->value();
+    view.continueSession("unrelated-key", "wrong-destination");
+    QCOMPARE(view.plainText(), text); QCOMPARE(browser->textCursor().selectedText(), selected);
+    view.continueSession("archived-key", "live-key");
+    // Unlike a switch to another conversation, rekeying never clears the document.
+    QCOMPARE(view.plainText(), text); QCOMPARE(browser->textCursor().selectedText(), selected);
+    settle(view);
+    QCOMPARE(view.plainText(), text); QCOMPARE(browser->textCursor().selectedText(), selected);
+    QCOMPARE(browser->verticalScrollBar()->value(), scroll);
+    view.setSessionKey("another-conversation"); QVERIFY(view.plainText().isEmpty());
 }
 
 void TestActivityView::hiddenSnapshotsDoNotBuildDocuments()
@@ -1481,6 +1512,109 @@ QPair<QUrl,QRect> waveformImage(QTextBrowser *browser) {
     }
     return {};
 }
+
+QTextCursor transcriptButton(QTextBrowser *browser) {
+    for(auto block=browser->document()->begin();block.isValid();block=block.next())for(auto it=block.begin();!it.atEnd();++it){
+        const auto fragment=it.fragment();
+        if(QUrl(fragment.charFormat().toImageFormat().name()).scheme()!="hgs-voice-transcript")continue;
+        QTextCursor cursor(browser->document());cursor.setPosition(fragment.position());return cursor;
+    }
+    return {};
+}
+
+QPoint transcriptButtonPoint(QTextBrowser *browser) {
+    const auto cursor=transcriptButton(browser);if(cursor.isNull())return {-1,-1};
+    const auto rect=browser->cursorRect(cursor);
+    auto selected=cursor;selected.movePosition(QTextCursor::NextCharacter,QTextCursor::KeepAnchor);
+    const auto href=selected.charFormat().anchorHref();if(href.isEmpty())return {-1,-1};
+    const auto image=selected.charFormat().toImageFormat();
+    const QPoint point(rect.left()+qRound(image.width()/2),rect.center().y());
+    if(browser->anchorAt(point)==href)return point;
+    return {-1,-1};
+}
+}
+
+void TestActivityView::voiceTranscriptButtonBesidePlayer_data()
+{
+    QTest::addColumn<int>("width");QTest::addColumn<double>("scale");QTest::addColumn<bool>("dark");
+    QTest::newRow("dark-normal")<<620<<1.<<true;
+    QTest::newRow("light-normal")<<620<<1.<<false;
+    QTest::newRow("dark-narrow")<<280<<1.<<true;
+    QTest::newRow("light-narrow-large")<<280<<1.5<<false;
+}
+
+void TestActivityView::voiceTranscriptButtonBesidePlayer()
+{
+    QFETCH(int,width);QFETCH(double,scale);QFETCH(bool,dark);
+    SettledActivityView view;view.resize(width,480);view.setContentScale(scale);view.setTheme(dark);view.setSessionKey("fixture/transcript-button");
+    view.setActivity({{"voice_messages",QJsonArray{waveformMessage()}}},{});
+    auto *browser=view.browser();QSignalSpy played(&view,&ActivityView::voicePlaybackRequested);
+    for(bool expanded:{false,true}){
+        const auto player=waveformImage(browser);const auto toggle=transcriptButton(browser);QVERIFY(!toggle.isNull());
+        const auto bounds=browser->cursorRect(toggle);
+        QCOMPARE(bounds.top(),player.second.top());
+        QVERIFY(bounds.left()>player.second.right());
+        QVERIFY(bounds.left()+qRound(32*scale)<=browser->viewport()->width());
+        QCOMPARE(browser->horizontalScrollBar()->maximum(),0);
+        const auto screenshots=qEnvironmentVariable("ZERUS_VOICE_PLAYER_SCREENSHOTS");
+        if(!screenshots.isEmpty()){
+            QDir().mkpath(screenshots);QVERIFY(view.grab().save(screenshots+"/transcript-"+QString::fromLatin1(QTest::currentDataTag())+(expanded?"-expanded.png":"-collapsed.png")));
+        }
+        const auto point=transcriptButtonPoint(browser);QVERIFY(browser->viewport()->rect().contains(point));
+        QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,point);settle(view);
+        QCOMPARE(played.count(),0);
+        QVERIFY(!browser->textCursor().hasSelection());
+        QCOMPARE(view.plainText().contains("Synthetic voice recording for player verification."),!expanded);
+    }
+}
+
+void TestActivityView::voiceTranscriptExpansionFollowsBottom_data()
+{
+    QTest::addColumn<bool>("overflow");QTest::addColumn<double>("scale");
+    QTest::newRow("new-scrollbar")<<false<<1.;QTest::newRow("existing-scrollbar")<<true<<1.;
+    QTest::newRow("new-scrollbar-large")<<false<<1.5;QTest::newRow("existing-scrollbar-large")<<true<<1.5;
+}
+
+void TestActivityView::voiceTranscriptExpansionFollowsBottom()
+{
+    QFETCH(bool,overflow);QFETCH(double,scale);
+    SettledActivityView view;view.resize(520,420);view.setContentScale(scale);view.setSessionKey("fixture/transcript-bottom");
+    auto row=waveformMessage();row["at"]=1792018002.;auto voice=row["voice"].toObject();
+    voice["transcript"]=QString("Recognized speech that wraps across several lines.\n").repeated(45)+"Transcript final line.";row["voice"]=voice;
+    view.setActivity({{"voice_messages",QJsonArray{row}}},overflow?history(10):QJsonArray{});
+    auto *browser=view.browser();auto *bar=browser->verticalScrollBar();view.jumpToLatest();
+    QTRY_COMPARE(bar->value(),bar->maximum());QCOMPARE(bar->maximum()>0,overflow);
+    const auto point=transcriptButtonPoint(browser);QVERIFY(browser->viewport()->rect().contains(point));
+    QSignalSpy played(&view,&ActivityView::voicePlaybackRequested);
+    QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,point);settle(view);
+    QTRY_VERIFY(bar->maximum()>0);QTRY_COMPARE(bar->value(),bar->maximum());
+    const auto end=browser->document()->find("Transcript final line.");QVERIFY(!end.isNull());
+    QVERIFY(browser->cursorRect(end).bottom()<=browser->viewport()->height());
+    QCOMPARE(played.count(),0);
+}
+
+void TestActivityView::voiceTranscriptExpansionKeepsReadingPosition_data()
+{
+    QTest::addColumn<bool>("overflow");
+    QTest::newRow("reading-above-bottom")<<true;
+    QTest::newRow("earlier-message-at-bottom")<<false;
+}
+
+void TestActivityView::voiceTranscriptExpansionKeepsReadingPosition()
+{
+    QFETCH(bool,overflow);
+    SettledActivityView view;view.resize(520,400);view.setSessionKey("fixture/transcript-reading");
+    auto row=waveformMessage();auto voice=row["voice"].toObject();
+    voice["transcript"]=QString("Expanded older recording.\n").repeated(60);row["voice"]=voice;
+    const auto later=journalEvent(3,"Stop",overflow?QString("Later reply.\n").repeated(80):QString("Later reply."));
+    view.setActivity({{"voice_messages",QJsonArray{row}}},{later});
+    auto *browser=view.browser();auto *bar=browser->verticalScrollBar();
+    QCOMPARE(bar->maximum()>0,overflow);bar->setValue(0);
+    const auto top=browser->cursorForPosition({4,4});const auto text=top.block().text();const int y=browser->cursorRect(top).top();
+    const auto point=transcriptButtonPoint(browser);QVERIFY(browser->viewport()->rect().contains(point));
+    QTest::mouseClick(browser->viewport(),Qt::LeftButton,Qt::NoModifier,point);settle(view);
+    QTRY_VERIFY(bar->maximum()>0);QCOMPARE(bar->value(),0);
+    const auto updated=browser->cursorForPosition({4,4});QCOMPARE(updated.block().text(),text);QCOMPARE(browser->cursorRect(updated).top(),y);
 }
 
 void TestActivityView::voiceWaveformSeeksWithoutRelayout_data()
@@ -1601,6 +1735,13 @@ void TestActivityView::recordingMetadataAppearance()
         if(resource.scheme()=="hgs-voice-status"){
             status=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),state=="submitted"?"Accepted by native app":state=="transcribing"?"Recognizing…":"Delivery not confirmed");
             QVERIFY(!view.browser()->document()->resource(QTextDocument::ImageResource,resource).value<QImage>().isNull());
+            QTextCursor cursor(view.browser()->document());cursor.setPosition(it.fragment().position());
+            const auto bounds=view.browser()->cursorRect(cursor);
+            const auto title=view.browser()->document()->find(videoMode?"You (video)":"You (voice)");QVERIFY(!title.isNull());
+            const auto titleBounds=view.browser()->cursorRect(title);
+            QVERIFY(bounds.left()>titleBounds.right());
+            QCOMPARE(bounds.top(),titleBounds.top());
+            QVERIFY(bounds.bottom()<waveformImage(view.browser()).second.top());
         }
         if(resource.scheme()=="hgs-voice-transcript"){transcript=true;QCOMPARE(format.property(QTextFormat::ImageAltText).toString(),"Show transcript");}
     }
@@ -1699,6 +1840,88 @@ void TestActivityView::delayedAttachmentAcknowledgementKeepsOneMessage()
     auto other = native; other["seq"] = 4; other["at"] = 1791018104.0;
     view.setTimeline(details, {native, other}, {});
     QCOMPARE(view.browser()->toPlainText().count(text), 3);
+}
+
+void TestActivityView::kimiDuplicateHooksKeepOneAttachmentCard()
+{
+    SettledActivityView view; view.setSessionKey("fixture/kimi-attachment");
+    const QString text = "[File #1] Review this document";
+    const QString submitted = "[File #1] (Read the attached file at \"/synthetic/request/document.pdf\") Review this document";
+    const QJsonArray files{QJsonObject{{"request_id", "delivery"}, {"index", 0}, {"name", "document.pdf"}, {"mime", "application/pdf"}, {"bytes", 120}}};
+    const QJsonObject receipt{{"source", "hgs_delivery"}, {"type", "UserPromptSubmit"}, {"message_id", "delivery"},
+        {"at", 1791018000.0}, {"detail", text}, {"submitted_text", submitted}, {"attachments", files}};
+    const QJsonObject local{{"id", "outgoing"}, {"message_id", "delivery"}, {"status", "sent"}, {"text", text},
+        {"submitted_text", submitted}, {"submitted_at", 1791018000.0}, {"attachments", files},
+        {"run_id", "run"}, {"conversation_id", "conversation"}};
+    auto first = journalEvent(3, "TurnStarted", submitted); first["run_id"] = "run"; first["at"] = 1791018000.1;
+    auto second = first; second["seq"] = 4; second["at"] = 1791018000.2;
+    const auto hash = QString::fromLatin1(QCryptographicHash::hash(submitted.toUtf8(), QCryptographicHash::Sha256).toHex());
+    const QJsonObject turn{{"turn_id", 0}, {"prompt_id", "native-prompt"}, {"at", 1791018000.0}, {"origin", "user"}, {"text_sha256", QJsonArray{"synthetic-memory-context-hash", hash}}};
+    QJsonObject details{{"agent", "kimi"}, {"run_id", "run"}, {"conversation_id", "conversation"}, {"prompt", submitted},
+        {"kimi_turns_complete", true}, {"kimi_turns", QJsonArray{turn}}};
+    const QJsonArray events{journalEvent(1, "UserPromptSubmit", ""), journalEvent(2, "UserPromptSubmit", ""), first, second};
+    // Confirmed local delivery precedes its durable inspection metadata.
+    view.setTimeline(details, events, {local});
+    QCOMPARE(view.plainText().count("Review this document"), 1);
+    QCOMPARE(view.plainText().count("document.pdf"), 1);
+    QVERIFY(!view.plainText().contains("/synthetic/"));
+    details["attachment_messages"] = QJsonArray{receipt};
+    view.setTimeline(details, events, {local});
+    QCOMPARE(view.plainText().count("Review this document"), 1);
+    view.setTimeline(details, events, {});
+    QCOMPARE(view.plainText().count("Review this document"), 1);
+    QSignalSpy opened(&view, &ActivityView::attachmentActivated);
+    QSet<QString> attachmentLinks;
+    for (const auto &link : links(view.browser())) if (link.startsWith("hgs-attachment:")) attachmentLinks.insert(link);
+    QCOMPARE(attachmentLinks.size(), 1);
+    activate(view.browser(), *attachmentLinks.cbegin());
+    QCOMPARE(opened.size(), 1);
+    QCOMPARE(opened.first().first().toJsonObject(), files.first().toObject());
+    // Without complete native evidence the old ambiguous pair stays distinct.
+    details.remove("attachment_messages");
+    details["kimi_turns_complete"] = false;
+    view.setSessionKey("fixture/unproven"); view.setTimeline(details, events, {local});
+    QCOMPARE(view.plainText().count("Review this document"), 3);
+    // Two genuine native turns with an equal prompt must not be collapsed.
+    details["kimi_turns_complete"] = true;
+    auto other = turn; other["turn_id"] = 1; other["prompt_id"] = "other-prompt";
+    details["kimi_turns"] = QJsonArray{turn, other};
+    view.setSessionKey("fixture/ambiguous-turns"); view.setTimeline(details, events, {local});
+    QCOMPARE(view.plainText().count("Review this document"), 3);
+    // Unconfirmed or foreign-conversation local rows cannot supply this proof.
+    details["kimi_turns"] = QJsonArray{turn};
+    auto unconfirmed = local; unconfirmed["status"] = "sending";
+    view.setSessionKey("fixture/unconfirmed"); view.setTimeline(details, events, {unconfirmed});
+    QCOMPARE(view.plainText().count("Review this document"), 3);
+    auto foreign = local; foreign["conversation_id"] = "other-conversation";
+    view.setSessionKey("fixture/foreign-receipt"); view.setTimeline(details, events, {foreign});
+    QCOMPARE(view.plainText().count("Review this document"), 3);
+    auto competing = local; competing["id"] = "other-outgoing"; competing["message_id"] = "other-delivery";
+    view.setSessionKey("fixture/competing-receipts"); view.setTimeline(details, events, {local, competing});
+    QCOMPARE(view.plainText().count("Review this document"), 4);
+}
+
+void TestActivityView::kimiNativeTurnIdentityPreservesIndependentSends()
+{
+    SettledActivityView view; view.setSessionKey("fixture/kimi-turn-id");
+    auto first = journalEvent(1, "TurnStarted", "Same caption"); first["run_id"] = "run"; first["kimi_turn_id"] = 0;
+    first["kimi_conversation_id"] = "conversation";
+    auto duplicate = first; duplicate["seq"] = 2;
+    view.setTimeline({}, {first, duplicate}, {});
+    QCOMPARE(view.plainText().count("Same caption"), 1);
+    auto next = first; next["seq"] = 3; next["kimi_turn_id"] = 1;
+    view.setTimeline({}, {first, duplicate, next}, {});
+    QCOMPARE(view.plainText().count("Same caption"), 2);
+    next["kimi_turn_id"] = 0; next["run_id"] = "another-run";
+    view.setTimeline({}, {first, next}, {});
+    QCOMPARE(view.plainText().count("Same caption"), 2);
+    next = first; next["seq"] = 3; next["kimi_conversation_id"] = "new-conversation";
+    view.setTimeline({}, {first, next}, {});
+    QCOMPARE(view.plainText().count("Same caption"), 2);
+    next = first; next["seq"] = 3; next["detail"] = "Conflicting caption";
+    view.setTimeline({}, {first, next}, {});
+    QVERIFY(view.plainText().contains("Same caption"));
+    QVERIFY(view.plainText().contains("Conflicting caption"));
 }
 
 void TestActivityView::attachmentThumbnailArrivesWithoutMovingTranscript()

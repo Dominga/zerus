@@ -62,6 +62,37 @@ pub(super) fn records() -> Result<Vec<Value>> {
     Ok(result)
 }
 
+/// Worktree guards need metadata only. Stream a bounded inventory rather than
+/// sorting/materializing all archives or opening any conversation journal.
+/// Incomplete coverage is an error, never proof that no archive refers to a tree.
+pub(super) fn visit_bounded(deadline: std::time::Instant, mut visit: impl FnMut(Value) -> Result<()>) -> Result<()> {
+    use std::io::Read;
+    let entries=match fs::read_dir(root().join("archives")) {
+        Ok(entries)=>entries,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
+        Err(e)=>return Err(e.to_string()),
+    };
+    let mut bytes=0;
+    for (count,entry) in entries.enumerate() {
+        if count>=5000 || std::time::Instant::now()>=deadline {return Err("Archive metadata inventory exceeded its check budget; review manually".into());}
+        let path=entry.map_err(|e|e.to_string())?.path();
+        if path.extension().is_none_or(|e|e!="json"){continue;}
+        let file=crate::platform::refuse_link(fs::OpenOptions::new().read(true)).open(&path).map_err(|e|e.to_string())?;
+        if !file.metadata().is_ok_and(|m|m.is_file()) {return Err("Archive metadata is not a regular file".into());}
+        let mut data=Vec::new();file.take(1024*1024+1).read_to_end(&mut data).map_err(|e|e.to_string())?;
+        bytes+=data.len();
+        if data.len()>1024*1024 || bytes>32*1024*1024 {return Err("Archive metadata inventory exceeded its byte budget; review manually".into());}
+        let mut value:Value=serde_json::from_slice(&data).map_err(|e|e.to_string())?;
+        rename::normalize_archive(&mut value)?;
+        let id=path.file_stem().and_then(|s|s.to_str()).unwrap_or_default();
+        if value["version"]!=1 || string(&value,"archive_id")!=id
+            || uuid::Uuid::parse_str(id).is_err() || string(&value,"name").is_empty()
+            || !AGENTS.contains(&string(&value,"agent")) {return Err("Invalid archive metadata; review manually".into());}
+        visit(value)?;
+    }
+    Ok(())
+}
+
 pub(super) fn remove_synced(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid record path")?)
@@ -116,6 +147,55 @@ pub(super) fn reconcile() -> Result<()> {
     }
     let _guard = lock(None)?;
     reconcile_locked(&live()?).map(drop)
+}
+
+/// Indexed membership for one current binding. The archive JSON stays
+/// authoritative: catalog() refreshes a changed archive directory before the
+/// lookup. This can rebuild that index, but never enumerates saved bindings.
+pub(super) fn contains_selected(record: &Value) -> Result<bool> {
+    if !root().join("archives").exists() {
+        return Ok(false);
+    }
+    archive_catalog::contains(&archive_catalog::catalog()?, record)
+}
+
+fn reconcile_candidate(record: &Value, snapshot: &Snapshot) -> bool {
+    !snapshot.contains_key(string(record, "name"))
+        && !process_alive(record)
+        && record.get("pausing").is_none()
+        && !record["paused"].as_bool().unwrap_or(false)
+        && string(record, "expected_id").is_empty()
+}
+
+fn clean_completion(record: &Value) -> bool {
+    record["termination_signal"].is_null()
+        && known_exit(record)
+        && ((string(record, "agent") == "claude"
+            && record.get("supervisor").is_none()
+            && string(record, "error").is_empty())
+            || (string(record, "completion_source") == "supervisor"
+                && string(record, "completion_reason") == "clean_exit"
+                && record["exit_code"] == 0))
+}
+
+/// Read-mark admission reconciles just its requested binding. Global lifecycle
+/// reconciliation remains in listings; an acknowledgement must not sweep every
+/// unrelated saved session while holding the shared-read writer.
+pub(super) fn reconcile_selected(name: &str) -> Result<()> {
+    if !root().exists() {
+        return Ok(());
+    }
+    let _guard = lock(None)?;
+    if !record_path(name).exists() {
+        return Ok(());
+    }
+    let record = read(name)?;
+    if reconcile_candidate(&record, &live()?)
+        && (contains_selected(&record)? || clean_completion(&record))
+    {
+        save(&record)?;
+    }
+    Ok(())
 }
 
 /// `reconcile` for a caller that holds the state lock and read `snapshot`

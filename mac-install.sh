@@ -50,11 +50,12 @@ ssh -o BatchMode=yes "$host" 'mkdir -p ~/.local/bin ~/.local/src/hgs/.rust-build
 # Replace these entries rather than unpacking over them: a file deleted or moved
 # here (src/platform.rs became src/platform/mod.rs) would otherwise stay on the Mac
 # and break its build. target/ is kept for incremental builds.
-# The mobile connector, the relay library it links and the replica crate are
+# The mobile connector, the relay and crypto libraries it links and the replica crate are
 # named file by file, so no Linux target/ of theirs travels either.
 sources=(Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_state.py tests README.md LICENSE THIRD_PARTY_NOTICES.md docs mac-install.sh tmux.conf .gitignore
   services/mobile/connector/Cargo.toml services/mobile/connector/Cargo.lock services/mobile/connector/.cargo
   services/mobile/connector/src services/mobile/relay/Cargo.toml services/mobile/relay/src
+  services/mobile/crypto/Cargo.toml services/mobile/crypto/src
   crates/replica/Cargo.toml crates/replica/Cargo.lock crates/replica/.cargo crates/replica/src)
 tar czf - -C "$here" "${sources[@]}" \
   | ssh -o BatchMode=yes "$host" "cd ~/.local/src/hgs/.rust-build && rm -rf ${sources[*]} && tar xzf -"

@@ -156,6 +156,9 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.archivedAt = obj.value(QStringLiteral("archived_at")).toDouble();
     s.resumable = obj.value(QStringLiteral("resumable")).toBool();
     s.terminalReported = obj.value("terminal_supported").isBool();
+    s.terminalAttachReported = obj.value("terminal_attach_supported").isBool();
+    s.terminalAttachSupported = obj.value("terminal_attach_supported").toBool();
+    s.terminalAttachReason = obj.value("terminal_attach_reason").toString();
     s.terminalSupported = obj.value("terminal_supported").toBool(s.cmd != "dsh" && s.cmd != "opencode");
     s.bulkLifecycleSupported = obj.value("bulk_lifecycle_supported").toBool(s.cmd != "opencode");
     s.terminalReason = obj.value("terminal_reason").toString();
@@ -1468,13 +1471,14 @@ quint64 HgsClient::inspectWorktree(const QString &host,const QString &path,const
     return request;
 }
 
-quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint,const QString &discardFingerprint)
+quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint,const QString &discardFingerprint,const QString &processFingerprint)
 {
     const auto request=++m_worktreeRequest;const auto token=QUuid::createUuid().toString(QUuid::WithoutBraces);
     QStringList args{"worktrees","remove","--path",path,"--common-dir",commonDir,"--fingerprint",fingerprint,"--request-id",token,"--json"};
     if(deleteBranch)args<<"--delete-branch";if(!host.isEmpty())args.prepend('@'+host);
     if(!ignoredFingerprint.isEmpty())args<<"--ignored-fingerprint"<<ignoredFingerprint;
     if(!discardFingerprint.isEmpty())args<<"--discard-fingerprint"<<discardFingerprint;
+    if(!processFingerprint.isEmpty())args<<"--process-fingerprint"<<processFingerprint;
     const auto forget=[this,host,commonDir]{invalidateWorktreeCache(host,commonDir);};
     runHgs(m_hgs,args,330000,this,[this,request,token,path,forget](const QByteArray &out){
         forget();const auto data=QJsonDocument::fromJson(out).object();
@@ -1733,9 +1737,22 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
         if (*reported) return;
         *reported = true;
         m_messagesInFlight.remove(key);
-        emit messageFailed(request, host, name, detail, uncertain);
+        // A failed start can be reported inside start(), before the caller has
+        // registered this request. Keep the claim synchronous, the result queued.
+        QTimer::singleShot(0, this, [this, request, host, name, detail, uncertain] {
+            emit messageFailed(request, host, name, detail, uncertain);
+        });
     };
-    connect(process, &QProcess::started, process, [process, payload, fail]() {
+    const auto timeout = [process, fail]() {
+        fail(tr("Delivery timed out. The message may have reached the agent; inspect Terminal before retrying."), true);
+        process->kill();
+    };
+    connect(process, &QProcess::started, process, [process, timer, reported, payload, fail, timeout]() {
+        if (*reported || timer->remainingTime() <= 0) {
+            if (!*reported) timeout(); else process->kill();
+            process->closeWriteChannel();
+            return;
+        }
         // The request and file bytes never appear in argv, a shell command, or a
         // clipboard. closeWriteChannel drains QProcess's pending bytes before EOF.
         if (process->write(payload) != payload.size()) {
@@ -1744,10 +1761,7 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
         }
         process->closeWriteChannel();
     });
-    connect(timer, &QTimer::timeout, process, [process, fail]() {
-        fail(tr("Delivery timed out. The message may have reached the agent; inspect Terminal before retrying."), true);
-        process->kill();
-    });
+    connect(timer, &QTimer::timeout, process, timeout);
     connect(process, &QProcess::errorOccurred, process,
         [process, timer, fail](QProcess::ProcessError error) {
             if (error == QProcess::FailedToStart) {
@@ -1791,7 +1805,12 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
         });
     m_messagesInFlight.insert(key);
     timer->start(host.isEmpty() ? 15000 : 45000);
-    process->start();
+    // Return the request ID before native startup can reenter the event loop.
+    QTimer::singleShot(0, process, [process, timer, reported, timeout] {
+        if (*reported) { process->deleteLater(); return; }
+        if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }
+        process->start();
+    });
     return request;
 }
 
@@ -1931,15 +1950,22 @@ quint64 HgsClient::requestQueueSendNow(const QString &host, const QString &name,
     auto *timer = new QTimer(process); timer->setSingleShot(true);
     auto reported = std::make_shared<bool>(false);
     const auto fail = [this, request, reported](const QString &error) {
-        if (*reported) return; *reported = true; emit queueSendFinished(request, false, {}, error);
+        if (*reported) return; *reported = true;
+        QTimer::singleShot(0, this, [this, request, error] { emit queueSendFinished(request, false, {}, error); });
     };
-    connect(process, &QProcess::started, process, [process, payload, fail] {
+    const auto timeout = [process, fail] {
+        fail(tr("Queue action timed out. Check Terminal before retrying.")); process->kill();
+    };
+    connect(process, &QProcess::started, process, [process, timer, reported, payload, fail, timeout] {
+        if (*reported || timer->remainingTime() <= 0) {
+            if (!*reported) timeout(); else process->kill();
+            process->closeWriteChannel();
+            return;
+        }
         if (process->write(payload) != payload.size()) { fail(tr("Queue action failed. Check Terminal before retrying.")); process->kill(); }
         process->closeWriteChannel();
     });
-    connect(timer, &QTimer::timeout, process, [process, fail] {
-        fail(tr("Queue action timed out. Check Terminal before retrying.")); process->kill();
-    });
+    connect(timer, &QTimer::timeout, process, timeout);
     connect(process, &QProcess::errorOccurred, process, [process, timer, fail](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) { timer->stop(); fail(process->errorString()); process->deleteLater(); }
     });
@@ -1959,7 +1985,14 @@ quint64 HgsClient::requestQueueSendNow(const QString &host, const QString &name,
         }
         process->deleteLater();
     });
-    timer->start(host.isEmpty() ? 20000 : 35000); process->start(); return request;
+    timer->start(host.isEmpty() ? 20000 : 35000);
+    // Return the request ID before native startup can reenter the event loop.
+    QTimer::singleShot(0, process, [process, timer, reported, timeout] {
+        if (*reported) { process->deleteLater(); return; }
+        if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }
+        process->start();
+    });
+    return request;
 }
 
 quint64 HgsClient::requestEffort(const QString &host, const QString &name, const QString &effort, const QString &run, const QString &conversation)
@@ -2023,15 +2056,22 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
     auto *timer = new QTimer(process); timer->setSingleShot(true);
     auto reported = std::make_shared<bool>(false);
     const auto fail = [this, request, reported](const QString &error) {
-        if (*reported) return; *reported = true; emit settingsFinished(request, false, {}, error);
+        if (*reported) return; *reported = true;
+        QTimer::singleShot(0, this, [this, request, error] { emit settingsFinished(request, false, {}, error); });
     };
-    connect(process, &QProcess::started, process, [process, payload, fail, transferFailed] {
+    const auto timeout = [process, fail, timedOut] {
+        fail(timedOut); process->kill();
+    };
+    connect(process, &QProcess::started, process, [process, timer, reported, payload, fail, transferFailed, timeout] {
+        if (*reported || timer->remainingTime() <= 0) {
+            if (!*reported) timeout(); else process->kill();
+            process->closeWriteChannel();
+            return;
+        }
         if (process->write(payload) != payload.size()) { fail(transferFailed); process->kill(); }
         process->closeWriteChannel();
     });
-    connect(timer, &QTimer::timeout, process, [process, fail, timedOut] {
-        fail(timedOut); process->kill();
-    });
+    connect(timer, &QTimer::timeout, process, timeout);
     connect(process, &QProcess::errorOccurred, process, [process, timer, fail](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) { timer->stop(); fail(process->errorString()); process->deleteLater(); }
     });
@@ -2052,7 +2092,14 @@ quint64 HgsClient::requestSettings(const QString &host, const QString &name, con
         }
         process->deleteLater();
     });
-    timer->start(host.isEmpty() ? 20000 : 35000); process->start(); return request;
+    timer->start(host.isEmpty() ? 20000 : 35000);
+    // Return the request ID before native startup can reenter the event loop.
+    QTimer::singleShot(0, process, [process, timer, reported, timeout] {
+        if (*reported) { process->deleteLater(); return; }
+        if (timer->remainingTime() <= 0) { timeout(); process->deleteLater(); return; }
+        process->start();
+    });
+    return request;
 }
 
 quint64 HgsClient::requestNotifications(const QString &host, const QString &name, const QJsonObject &payload)
@@ -2154,4 +2201,42 @@ quint64 HgsClient::requestRead(const QString &host, const QString &name, const Q
         process->deleteLater();
     });
     timer->start(host.isEmpty() ? 15000 : 35000); process->start(); return request;
+}
+
+quint64 HgsClient::repositoryOperation(const QString &host,const QString &action,const QString &url,
+    const QString &parent,const QString &name,const QString &token)
+{
+    const auto request=++m_directoryRequest;
+    QStringList help{"--help"};if(!host.isEmpty())help.prepend('@'+host);
+    runHgs(m_hgs,help,15000,this,[this,request,host,action,url,parent,name,token](const QByteArray &help){
+        if(!help.contains("repository-clone-v1")){
+            emit repositoryFinished(request,false,{},tr("Update hgs on %1 to clone repositories.").arg(host.isEmpty()?tr("this computer"):host));return;
+        }
+        QStringList args{"repository",action,"--json"};
+        if(action!="status")args<<"--url"<<url<<"--parent"<<parent<<"--name"<<name;
+        if(action!="check")args<<"--request-id"<<token;
+        if(!host.isEmpty())args.prepend('@'+host);
+        auto process=processRequest(m_hgs,args);process.input=QByteArray();process.maximumOutputBytes=65536;
+        process.timeoutMs=action=="clone"?650000:30000;
+        ProcessRunner::run(std::move(process),this,[this,request,action,name,token,host](const ProcessRunner::Result &result){
+            if(result.outcome!=ProcessRunner::Result::Finished||result.exitStatus!=QProcess::NormalExit||result.exitCode!=0){
+                auto error=QString::fromUtf8(result.standardError).trimmed().left(4000);
+                if(error.isEmpty())error=tr("The computer did not confirm the repository operation. Check its result before trying again.");
+                emit repositoryFinished(request,false,{},error);return;
+            }
+            const auto data=QJsonDocument::fromJson(result.standardOutput).object();
+            const auto style=host.isEmpty()&&MachinePlatform::windowsShaped(data["parent"].toString())?MachinePlatform::Style::Windows:MachinePlatform::Style::Posix;
+            const auto status=data["status"].toString();
+            const auto expected=MachinePlatform::clean(data["parent"].toString()+'/'+name,style);
+            const bool receipt=action=="check"?status=="ready"&&data["name"]==name
+                &&MachinePlatform::same(data["path"].toString(),expected,style):
+                data["request_id"]==token&&(status=="cloned"||status=="failed"||status=="unconfirmed");
+            if(!receipt||!MachinePlatform::absolute(data["parent"].toString(),style)
+                ||!MachinePlatform::absolute(data["path"].toString(),style)){
+                emit repositoryFinished(request,false,{},tr("Invalid repository response. Check the destination before trying again."));return;
+            }
+            emit repositoryFinished(request,true,data,{});
+        });
+    },[this,request](const QString &,const QString &error){emit repositoryFinished(request,false,{},error);});
+    return request;
 }

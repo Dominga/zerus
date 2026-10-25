@@ -22,6 +22,9 @@ use std::path::Path;
 use std::time::Duration;
 use zerus_relay::protocol::{OPERATIONS, READS};
 
+#[path = "encrypted_journal.rs"]
+mod encrypted;
+
 pub const JOURNAL: &str = "journal.sqlite3";
 pub const LOCK: &str = "connector.lock";
 pub const SIDECARS: [&str; 3] = ["-journal", "-wal", "-shm"];
@@ -67,10 +70,10 @@ pub const VOICE_READ_SQL: &str = "('voice_profiles','voice_status')";
 pub const TASK_READ_PRUNE: &str = "DELETE FROM requests INDEXED BY journal_operation WHERE operation IN ('task_exchange','task_done') AND delivered=1 AND state!='running' AND delivered_at<?";
 
 /// Additive Rust-only reads stay outside the frozen Python class predicate:
-/// Git status, and the phone's task exchange and Done list.
+/// Git status, repository checks, and the phone's task exchange and Done list.
 pub const GIT_STATUS_COUNT_SQL: &str =
-    "SELECT count(*) FROM requests WHERE operation IN ('git_status','task_exchange','task_done')";
-pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='git_status' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
+    "SELECT count(*) FROM requests WHERE operation IN ('git_status','repository_check','repository_status','task_exchange','task_done')";
+pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation IN ('git_status','repository_check','repository_status') AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
 
 /// Delivered short-lived reads go after two minutes, other reads after an
 /// hour; a delivered mutation becomes a tombstone after seven days.

@@ -98,6 +98,9 @@ jobs:
     # Its own job: "Re-run failed jobs" retries only the submission, which never
     # proposes a version twice, and never touches the published release.
     needs: publish
+    concurrency:
+      group: winget-cla-consent
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release

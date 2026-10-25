@@ -6,7 +6,10 @@ use crate::{
     json,
     protocol::{self, MIB, REQUEST_MAX},
     push::Push,
-    store::{Credential, Role, Store},
+    store::{
+        Credential, EncryptedSubmission, Role, ServiceClass, ServiceLease, Store,
+        ENCRYPTED_REQUEST_MAX, ENCRYPTED_SMALL_MAX,
+    },
 };
 use axum::{
     body::{Body, BodyDataStream},
@@ -34,14 +37,15 @@ pub struct App {
     pub push: Arc<Push>,
     pub cfg: Arc<Config>,
     anonymous: Arc<Semaphore>,
-    lookups: Arc<Semaphore>,
-    authenticated: Arc<Semaphore>,
-    body_bytes: Arc<Semaphore>,
-    large: Arc<Semaphore>,
-    polls: Arc<Semaphore>,
-    responses: Arc<Semaphore>,
-    spools: Arc<Semaphore>,
-    cpu: Arc<Semaphore>,
+    lookups: Lane,
+    authenticated: Lane,
+    body_bytes: Lane,
+    large: Lane,
+    polls: Lane,
+    responses: Lane,
+    spools: Lane,
+    cpu: Lane,
+    database: Lane,
     ready: Arc<Mutex<Ready>>,
     pub stop: CancellationToken,
 }
@@ -52,10 +56,50 @@ struct Ready {
 }
 #[derive(Default)]
 struct Budget {
-    permits: Mutex<Vec<OwnedSemaphorePermit>>,
+    permits: Mutex<Vec<ResourcePermit>>,
+    class: Mutex<ServiceClass>,
 }
 fn take(s: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit> {
     s.clone().try_acquire_owned().map_err(|_| Error::BUSY)
+}
+#[derive(Clone)]
+struct Lane {
+    name: &'static str,
+    total: Arc<Semaphore>,
+    standard: Arc<Semaphore>,
+}
+struct ResourcePermit {
+    _local: Vec<OwnedSemaphorePermit>,
+    _shared: Option<ServiceLease>,
+    class: ServiceClass,
+}
+impl Lane {
+    fn new(name: &'static str, total: usize, cfg: &Config) -> Self {
+        Self {
+            name,
+            total: Arc::new(Semaphore::new(total)),
+            standard: Arc::new(Semaphore::new(cfg.standard_capacity(total))),
+        }
+    }
+    fn take(&self, units: usize, class: ServiceClass) -> Result<Vec<OwnedSemaphorePermit>> {
+        let units = u32::try_from(units).map_err(|_| Error::BAD)?;
+        let mut permits = Vec::with_capacity(2);
+        if class == ServiceClass::Standard {
+            permits.push(
+                self.standard
+                    .clone()
+                    .try_acquire_many_owned(units)
+                    .map_err(|_| Error::BUSY)?,
+            );
+        }
+        permits.push(
+            self.total
+                .clone()
+                .try_acquire_many_owned(units)
+                .map_err(|_| Error::BUSY)?,
+        );
+        Ok(permits)
+    }
 }
 /// Refusals made before `App::body` reads (forwarding, Content-Encoding or
 /// Content-Type, authentication, rate limits, request lanes, routing, the
@@ -86,26 +130,79 @@ async fn drain(mut stream: BodyDataStream, maximum: usize) {
     .await;
 }
 impl Budget {
-    fn keep(&self, p: OwnedSemaphorePermit) {
+    fn class(&self) -> ServiceClass {
+        *self.class.lock().expect("budget class")
+    }
+    fn keep(&self, p: ResourcePermit) {
         self.permits.lock().expect("budget mutex").push(p);
     }
 }
 struct Poll {
     store: Store,
     id: String,
-    _permit: Option<OwnedSemaphorePermit>,
+    _permit: Option<ResourcePermit>,
 }
 impl Drop for Poll {
     fn drop(&mut self) {
         let store = self.store.clone();
         let id = self.id.clone();
         let permit = self._permit.take();
+        let class = permit.as_ref().map_or(ServiceClass::Standard, |p| p.class);
         let tasks = store.db.tasks.clone();
         tasks.spawn(async move {
             let _permit = permit;
-            let _ = store.release_poll(&id).await;
+            let _ = store.release_poll_reserved(&id, class).await;
         });
     }
+}
+fn encode_response(value: Value, maximum: usize) -> Result<(std::fs::File, usize)> {
+    use std::io::{Seek, Write};
+    let file = tempfile::tempfile()?;
+    let mut w = json::LimitWriter {
+        inner: std::io::BufWriter::new(file),
+        remaining: maximum,
+    };
+    json::encode(&value, &mut w).map_err(|_| Error::LARGE)?;
+    w.flush()?;
+    let size = maximum - w.remaining;
+    let mut file = w.inner.into_inner().map_err(|_| Error::UNAVAILABLE)?;
+    file.rewind()?;
+    Ok((file, size))
+}
+fn spooled_response(
+    file: std::fs::File,
+    size: usize,
+    status: StatusCode,
+    budget: Arc<Budget>,
+) -> Response {
+    let file = tokio::fs::File::from_std(file);
+    let stream = stream::unfold(
+        (file, budget, Instant::now() + Duration::from_secs(30)),
+        |(mut file, guard, deadline)| async move {
+            let mut b = vec![0u8; 65536];
+            let read = tokio::time::timeout_at(deadline.into(), file.read(&mut b)).await;
+            match read {
+                Ok(Ok(0)) => None,
+                Ok(Ok(n)) => {
+                    b.truncate(n);
+                    Some((
+                        Ok::<_, std::io::Error>(bytes::Bytes::from(b)),
+                        (file, guard, deadline),
+                    ))
+                }
+                _ => Some((
+                    Err(std::io::Error::other("response interrupted")),
+                    (file, guard, Instant::now()),
+                )),
+            }
+        },
+    );
+    let mut r = Response::new(Body::from_stream(stream));
+    *r.status_mut() = status;
+    r.headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    r.headers_mut().insert(header::CONTENT_LENGTH, size.into());
+    r
 }
 impl App {
     pub async fn new(store: Store) -> Result<Self> {
@@ -117,14 +214,15 @@ impl App {
             store,
             push,
             anonymous: sem(cfg.max_anonymous_requests),
-            lookups: sem(cfg.max_authenticated_requests),
-            authenticated: sem(cfg.max_authenticated_requests),
-            body_bytes: sem(cfg.max_body_bytes),
-            large: sem(cfg.large_payload_slots),
-            polls: sem(cfg.max_polls_global),
-            responses: sem(cfg.max_small_responses),
-            spools: sem(64 * MIB),
-            cpu: sem(4),
+            lookups: Lane::new("lookup", cfg.max_authenticated_requests, &cfg),
+            authenticated: Lane::new("request", cfg.max_authenticated_requests, &cfg),
+            body_bytes: Lane::new("body", cfg.max_body_bytes, &cfg),
+            large: Lane::new("large", cfg.large_payload_slots, &cfg),
+            polls: Lane::new("poll", cfg.max_polls_global, &cfg),
+            responses: Lane::new("response", cfg.max_small_responses, &cfg),
+            spools: Lane::new("spool", cfg.max_spool_bytes, &cfg),
+            cpu: Lane::new("cpu", 4, &cfg),
+            database: Lane::new("database", cfg.payload_pool_max() as usize, &cfg),
             cfg,
             ready: Arc::new(Mutex::new(Ready {
                 ok: false,
@@ -137,12 +235,51 @@ impl App {
     pub fn router(self) -> Router {
         Router::new().fallback(dispatch).with_state(self)
     }
+    async fn prepare_encrypted(
+        &self,
+        c: &Credential,
+        body: Value,
+        budget: Arc<Budget>,
+    ) -> Result<EncryptedSubmission> {
+        let sender = self.store.encrypted_sender(c).await?;
+        self.work(budget, move || EncryptedSubmission::new(body, sender))
+            .await
+    }
+    async fn admit(
+        &self,
+        lane: &Lane,
+        units: usize,
+        class: ServiceClass,
+    ) -> Result<ResourcePermit> {
+        let local = lane.take(units, class)?;
+        if !self.cfg.public_enrollment {
+            return Ok(ResourcePermit {
+                _local: local,
+                _shared: None,
+                class,
+            });
+        }
+        let store = self.store.clone();
+        let name = lane.name;
+        let tracker = store.db.tasks.clone();
+        // Ownership transfers before COMMIT. If HTTP disappears, the task
+        // retains local capacity and its eventual shared lease still drops.
+        let task = tracker.spawn(async move {
+            let shared = store.acquire_service(name, class, units).await?;
+            Ok::<_, Error>(ResourcePermit {
+                _local: local,
+                _shared: shared,
+                class,
+            })
+        });
+        task.await.map_err(|_| Error::UNAVAILABLE)?
+    }
     async fn work<T: Send + 'static>(
         &self,
         budget: Arc<Budget>,
         f: impl FnOnce() -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let permit = take(&self.cpu)?;
+        let permit = self.admit(&self.cpu, 1, budget.class()).await?;
         tokio::task::spawn_blocking(move || {
             let _keep = (permit, budget);
             f()
@@ -185,12 +322,10 @@ impl App {
             return Err(Error::LARGE);
         }
         let admission = if length.is_none_or(|n| n > MIB) {
-            take(&self.large)
+            self.admit(&self.large, 1, budget.class()).await
         } else {
-            self.body_bytes
-                .clone()
-                .try_acquire_many_owned(length.unwrap_or(0) as u32)
-                .map_err(|_| Error::BUSY)
+            self.admit(&self.body_bytes, length.unwrap_or(0), budget.class())
+                .await
         };
         let admission = match admission {
             Ok(permit) => permit,
@@ -236,77 +371,47 @@ impl App {
     ) -> Result<Response> {
         // Reserve disk before encoding. Files are unlinked immediately and dropped
         // on success/disconnect; only the open descriptor owns the spool.
-        let reserve = self
-            .spools
-            .clone()
-            .try_acquire_many_owned(maximum as u32)
-            .map_err(|_| Error::BUSY)?;
+        let reserve = self.admit(&self.spools, maximum, budget.class()).await?;
         budget.keep(reserve);
         let (file, size) = self
-            .work(budget.clone(), move || {
-                use std::io::{Seek, Write};
-                let file = tempfile::tempfile()?;
-                let mut w = json::LimitWriter {
-                    inner: std::io::BufWriter::new(file),
-                    remaining: maximum,
-                };
-                json::encode(&value, &mut w).map_err(|_| Error::LARGE)?;
-                w.flush()?;
-                let size = maximum - w.remaining;
-                let mut file = w.inner.into_inner().map_err(|_| Error::UNAVAILABLE)?;
-                file.rewind()?;
-                Ok((file, size))
-            })
+            .work(budget.clone(), move || encode_response(value, maximum))
             .await?;
-        let file = tokio::fs::File::from_std(file);
-        let stream = stream::unfold(
-            (file, budget, Instant::now() + Duration::from_secs(30)),
-            |(mut file, guard, deadline)| async move {
-                let mut b = vec![0u8; 65536];
-                let read = tokio::time::timeout_at(deadline.into(), file.read(&mut b)).await;
-                match read {
-                    Ok(Ok(0)) => None,
-                    Ok(Ok(n)) => {
-                        b.truncate(n);
-                        Some((
-                            Ok::<_, std::io::Error>(bytes::Bytes::from(b)),
-                            (file, guard, deadline),
-                        ))
-                    }
-                    _ => Some((
-                        Err(std::io::Error::other("response interrupted")),
-                        (file, guard, Instant::now()),
-                    )),
-                }
-            },
-        );
-        let mut r = Response::new(Body::from_stream(stream));
-        *r.status_mut() = status;
-        r.headers_mut()
-            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-        r.headers_mut().insert(header::CONTENT_LENGTH, size.into());
-        Ok(r)
+        Ok(spooled_response(file, size, status, budget))
     }
     async fn authenticate(
         &self,
         authorization: Option<String>,
         role: Role,
         identity: &str,
-    ) -> Result<(Credential, OwnedSemaphorePermit)> {
-        let lookup = take(&self.lookups)?;
+        retirement: Option<bool>,
+    ) -> Result<(Credential, ResourcePermit)> {
         let secret = authorization
             .as_deref()
             .filter(|v| v.len() <= 256)
             .and_then(|v| v.strip_prefix("Bearer "));
+        let predicted = secret.map_or(ServiceClass::Standard, |secret| {
+            self.store.db.auth_class(secret)
+        });
+        let lookup = self.lookups.take(1, predicted)?;
         let c = if let Some(secret) = secret {
-            self.store.authenticate(secret, role).await
+            match self.store.authenticate_class(secret, role).await {
+                Err(e) if retirement.is_some() && e.0 == StatusCode::UNAUTHORIZED => {
+                    if retirement == Some(true) {
+                        self.store.retirement_credential(secret).await
+                    } else {
+                        self.store.legacy_retirement_credential(secret).await
+                    }
+                }
+                result => result,
+            }
         } else {
             Err(Error::UNAUTHORIZED)
         };
         match c {
-            Ok(c) => {
-                let admission = take(&self.authenticated)?;
+            Ok((c, class)) => {
+                let admission = self.admit(&self.authenticated, 1, class).await?;
                 drop(lookup);
+                let _database = self.admit(&self.database, 1, class).await?;
                 self.store
                     .rate(&json!([role.table(), c.workspace, c.id]), 2400, false)
                     .await?;
@@ -314,6 +419,9 @@ impl App {
             }
             Err(e) => {
                 if e.0 == StatusCode::UNAUTHORIZED {
+                    let _database = self
+                        .admit(&self.database, 1, ServiceClass::Standard)
+                        .await?;
                     self.store
                         .rate(&json!(["login", identity]), 20, true)
                         .await?;
@@ -354,13 +462,15 @@ impl App {
         &self,
         c: &Credential,
         wait: f64,
-        admission: OwnedSemaphorePermit,
+        admission: ResourcePermit,
     ) -> Result<Option<Poll>> {
         if wait == 0.0 {
             drop(admission);
             return Ok(None);
         }
-        let permit = take(&self.polls)?;
+        let class = admission.class;
+        let permit = self.admit(&self.polls, 1, class).await?;
+        let database = self.admit(&self.database, 1, class).await?;
         // Ownership transfers into the acquisition task before COMMIT. Dropping
         // the awaiting HTTP future still drops/releases the eventual lease.
         let store = self.store.clone();
@@ -368,7 +478,7 @@ impl App {
         let tracker = self.store.db.tasks.clone();
         let task = tracker.spawn(async move {
             let id = store.acquire_poll(&c, wait + 10.0).await?;
-            drop(admission);
+            drop((admission, database));
             Ok::<_, Error>(Poll {
                 store,
                 id,
@@ -435,12 +545,72 @@ impl App {
             ));
         }
         let budget = Arc::new(Budget::default());
+        if path.starts_with("/v2/") && !self.cfg.public_enrollment {
+            return Err(Error::NOT_FOUND);
+        }
+        if path == "/v2/capabilities" && method == Method::GET {
+            let _lane = take(&self.anonymous)?;
+            let mut value = protocol::capabilities(self.push.providers());
+            value["encrypted_transport"] = json!({"version":1,"membership":"signed-linear-v1","public_enrollment":true,"request_max_bytes":ENCRYPTED_REQUEST_MAX,"result_max_bytes":ENCRYPTED_SMALL_MAX});
+            return Ok(axum::Json(value).into_response());
+        }
+        if (path == "/v2/workspaces" || path == "/v2/enrollments") && method == Method::POST {
+            let _lane = take(&self.anonymous)?;
+            budget.keep(
+                self.admit(&self.database, 1, ServiceClass::Standard)
+                    .await?,
+            );
+            self.store
+                .rate(&json!(["public-enrollment", identity]), 10, true)
+                .await?;
+            budget.keep(
+                self.admit(&self.responses, 1, ServiceClass::Standard)
+                    .await?,
+            );
+            let body = self.body(unread, budget.clone(), 64 * 1024).await?;
+            let value = if path == "/v2/workspaces" {
+                self.store.create_workspace(&body).await?
+            } else {
+                self.store.join_workspace(&body).await?
+            };
+            return self.response(value, StatusCode::OK, budget, MIB).await;
+        }
+        if path.starts_with("/v2/enrollments/") && method == Method::GET {
+            let _lane = take(&self.anonymous)?;
+            let id = path.strip_prefix("/v2/enrollments/").ok_or(Error::BAD)?;
+            protocol::uuid(&json!(id), false)?;
+            let secret = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| v.len() <= 256)
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .ok_or(Error::UNAUTHORIZED)?
+                .to_owned();
+            budget.keep(
+                self.admit(&self.database, 1, ServiceClass::Standard)
+                    .await?,
+            );
+            self.store
+                .rate(&json!(["enrollment-status", identity]), 120, true)
+                .await?;
+            let value = self.store.enrollment_status(id, &secret).await?;
+            budget.keep(
+                self.admit(&self.responses, 1, ServiceClass::Standard)
+                    .await?,
+            );
+            return self.response(value, StatusCode::OK, budget, MIB).await;
+        }
         if path == "/v1/pair" && method == Method::POST {
             let _lane = take(&self.anonymous)?;
+            budget.keep(
+                self.admit(&self.database, 1, ServiceClass::Standard)
+                    .await?,
+            );
             self.store
                 .rate(&json!(["pair", identity]), 10, true)
                 .await?;
-            budget.keep(take(&self.responses)?);
+            budget.keep(self.admit(&self.responses, 1, budget.class()).await?);
             let b = self.body(unread, budget.clone(), MIB).await?;
             protocol::fields(&b, &["code", "device_name"], &[])?;
             let v = self
@@ -452,7 +622,7 @@ impl App {
                 .await?;
             return self.response(v, StatusCode::OK, budget, MIB).await;
         }
-        let role = if path.starts_with("/v1/node/") {
+        let role = if path.starts_with("/v1/node/") || path.starts_with("/v2/node/") {
             Role::Node
         } else {
             Role::Device
@@ -465,8 +635,29 @@ impl App {
                     .map(str::to_owned),
                 role,
                 &identity,
+                if (path == "/v2/node/self" && method == Method::DELETE)
+                    || (path == "/v2/node/membership" && method == Method::GET)
+                {
+                    Some(true)
+                } else if path == "/v1/node/self" && method == Method::DELETE {
+                    Some(false)
+                } else {
+                    None
+                },
             )
             .await?;
+        *budget.class.lock().expect("budget class") = admission.class;
+        let pre_database = self.admit(&self.database, 1, budget.class()).await?;
+        let encrypted = self.store.encrypted_credential(&c).await?;
+        if path.starts_with("/v2/") && !encrypted {
+            return Err(Error::CONFLICT);
+        }
+        if path.starts_with("/v1/")
+            && encrypted
+            && !["/v1/capabilities", "/v1/push", "/v1/node/devices"].contains(&path.as_str())
+        {
+            return Err(Error::CONFLICT);
+        }
         let mut params = std::collections::HashMap::new();
         for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
             if params.insert(k.into_owned(), v.into_owned()).is_some() {
@@ -474,6 +665,73 @@ impl App {
             }
         }
         let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+        if (path == "/v2/events" || path == "/v2/node/requests") && method == Method::GET {
+            let wait = params
+                .get("wait")
+                .map_or(Ok(0.0), |s| s.parse::<f64>().map_err(|_| Error::BAD))?;
+            let after = params
+                .get("after")
+                .map_or(Ok(0), |s| s.parse::<i64>().map_err(|_| Error::BAD))?;
+            if !wait.is_finite() || !(0.0..=25.0).contains(&wait) || after < 0 {
+                return Err(Error::BAD);
+            }
+            drop(pre_database);
+            let _lease = self.poll(&c, wait, admission).await?;
+            let deadline = Instant::now() + Duration::from_secs_f64(wait);
+            let topic = if role == Role::Node {
+                format!("node:{}", c.id)
+            } else {
+                format!("workspace:{}", c.workspace)
+            };
+            let mut rx = self.store.db.wake.subscribe();
+            loop {
+                let database = self.admit(&self.database, 1, budget.class()).await?;
+                self.store.authorized(&c).await?;
+                if role == Role::Node {
+                    if self.store.encrypted_pending(&c).await? {
+                        budget.keep(self.admit(&self.large, 1, budget.class()).await?);
+                        // Every capacity refusal precedes the durable claim. Reuse
+                        // these exact spool/CPU reservations for parse and encode;
+                        // no post-claim reacquisition can strand a queued request.
+                        budget.keep(
+                            self.admit(&self.spools, ENCRYPTED_REQUEST_MAX, budget.class())
+                                .await?,
+                        );
+                        let cpu = self.admit(&self.cpu, 1, budget.class()).await?;
+                        let raw = self.store.encrypted_claim_body(&c).await?;
+                        let guard = budget.clone();
+                        let (file, size) = tokio::task::spawn_blocking(move || {
+                            let _keep = (cpu, guard);
+                            let value = match raw {
+                                Some(body) => {
+                                    json!({"requests":[json::parse(body.as_bytes(),32,50000)?]})
+                                }
+                                None => json!({"requests":[]}),
+                            };
+                            encode_response(value, ENCRYPTED_REQUEST_MAX)
+                        })
+                        .await
+                        .map_err(|_| Error::UNAVAILABLE)??;
+                        return Ok(spooled_response(file, size, StatusCode::OK, budget));
+                    }
+                    if Instant::now() >= deadline {
+                        return self
+                            .response(json!({"requests":[]}), StatusCode::OK, budget, MIB)
+                            .await;
+                    }
+                } else {
+                    let value = self.store.encrypted_events(&c, after).await?;
+                    if value["events"].as_array().is_some_and(|v| !v.is_empty())
+                        || Instant::now() >= deadline
+                    {
+                        budget.keep(self.admit(&self.responses, 1, budget.class()).await?);
+                        return self.response(value, StatusCode::OK, budget, MIB).await;
+                    }
+                }
+                drop(database);
+                self.wait(&mut rx, &topic, deadline).await?;
+            }
+        }
         if (path == "/v1/events" || path == "/v1/node/requests") && method == Method::GET {
             let wait = params
                 .get("wait")
@@ -496,6 +754,7 @@ impl App {
                 "1" => true,
                 _ => return Err(Error::BAD),
             };
+            drop(pre_database);
             let _lease = self.poll(&c, wait, admission).await?;
             let deadline = Instant::now() + Duration::from_secs_f64(wait);
             let topic = if role == Role::Node {
@@ -505,10 +764,11 @@ impl App {
             };
             let mut rx = self.store.db.wake.subscribe();
             loop {
+                let database = self.admit(&self.database, 1, budget.class()).await?;
                 self.store.authorized(&c).await?;
                 if role == Role::Node {
                     if self.store.pending(&c, allow).await? {
-                        let lane = take(&self.large)?;
+                        let lane = self.admit(&self.large, 1, budget.class()).await?;
                         if let Some(claim) = self.store.claim(&c, allow).await? {
                             budget.keep(lane);
                             let b = self.work(budget.clone(), move || claim.decode()).await?;
@@ -521,7 +781,7 @@ impl App {
                             .await;
                     }
                 } else {
-                    let lane = take(&self.responses)?;
+                    let lane = self.admit(&self.responses, 1, budget.class()).await?;
                     let events = self.store.events(&c, after).await?;
                     if !events["events"].as_array().ok_or(Error::BAD)?.is_empty()
                         || Instant::now() >= deadline
@@ -530,12 +790,152 @@ impl App {
                         return self.response(events, StatusCode::OK, budget, MIB).await;
                     }
                 }
+                drop(database);
                 self.wait(&mut rx, &topic, deadline).await?;
             }
         }
         budget.keep(admission);
-        budget.keep(take(&self.responses)?);
+        budget.keep(pre_database);
+        budget.keep(self.admit(&self.responses, 1, budget.class()).await?);
+        if path.starts_with("/v2/") && path != "/v2/push" {
+            let page_limit = params
+                .get("limit")
+                .map_or(Ok(100), |v| v.parse::<usize>().map_err(|_| Error::BAD))?;
+            if !(1..=100).contains(&page_limit) {
+                return Err(Error::BAD);
+            }
+            let after = params.get("after").map(String::as_str).unwrap_or("");
+            let (status, value, maximum) = match (method.as_str(), parts.as_slice()) {
+                ("GET", ["v2", "computers"]) => (
+                    StatusCode::OK,
+                    self.store
+                        .encrypted_computers(&c, after, page_limit)
+                        .await?,
+                    3 * MIB,
+                ),
+                ("POST", ["v2", "requests"]) => {
+                    let body = self
+                        .body(unread, budget.clone(), ENCRYPTED_REQUEST_MAX)
+                        .await?;
+                    let (status, value) = self
+                        .store
+                        .encrypted_submit(
+                            &c,
+                            &self.prepare_encrypted(&c, body, budget.clone()).await?,
+                        )
+                        .await?;
+                    (status, value, ENCRYPTED_SMALL_MAX)
+                }
+                ("GET", ["v2", "requests", id]) => (
+                    StatusCode::OK,
+                    self.store.encrypted_receipt(&c, id).await?,
+                    ENCRYPTED_SMALL_MAX,
+                ),
+                ("POST", ["v2", "node", "requests", id, "result"]) => {
+                    let body = self
+                        .body(unread, budget.clone(), ENCRYPTED_SMALL_MAX)
+                        .await?;
+                    self.store
+                        .encrypted_result(
+                            &c,
+                            id,
+                            &self.prepare_encrypted(&c, body, budget.clone()).await?,
+                        )
+                        .await?;
+                    (StatusCode::OK, json!({"ok":true}), MIB)
+                }
+                ("POST", ["v2", "node", "snapshot"]) => {
+                    let body = self
+                        .body(unread, budget.clone(), ENCRYPTED_SMALL_MAX)
+                        .await?;
+                    self.store
+                        .encrypted_snapshot(
+                            &c,
+                            &self.prepare_encrypted(&c, body, budget.clone()).await?,
+                        )
+                        .await?;
+                    (StatusCode::OK, json!({"ok":true}), MIB)
+                }
+                ("GET", ["v2", "node", "routes"]) => {
+                    (StatusCode::OK, self.store.encrypted_routes(&c).await?, MIB)
+                }
+                ("POST", ["v2", "node", "routes"]) => {
+                    let body = self.body(unread, budget.clone(), MIB).await?;
+                    self.store.encrypted_routes_manifest(&c, &body).await?;
+                    (StatusCode::OK, json!({"ok":true}), MIB)
+                }
+                ("DELETE", ["v2", "node", "routes", route]) => {
+                    self.store.withdraw_encrypted_route(&c, route).await?;
+                    (StatusCode::OK, json!({"ok":true}), MIB)
+                }
+                ("POST", ["v2", "node", "signals"]) => {
+                    let body = self.body(unread, budget.clone(), MIB).await?;
+                    self.store.encrypted_signals(&c, &body).await?;
+                    (StatusCode::OK, json!({"ok":true}), MIB)
+                }
+                ("POST", ["v2", "node", "invitations"]) => {
+                    self.store
+                        .rate(&json!(["computer-invite", &c.id]), 10, false)
+                        .await?;
+                    let body = self.body(unread, budget.clone(), MIB).await?;
+                    (
+                        StatusCode::OK,
+                        self.store.computer_invitation(&c, &body).await?,
+                        MIB,
+                    )
+                }
+                ("GET", ["v2", "node", "enrollments"]) => (
+                    StatusCode::OK,
+                    self.store
+                        .pending_enrollments(&c, after, page_limit)
+                        .await?,
+                    MIB,
+                ),
+                ("POST", ["v2", "node", "enrollments", id, "approve"]) => {
+                    let body = self.body(unread, budget.clone(), 64 * 1024).await?;
+                    (
+                        StatusCode::OK,
+                        self.store.approve_enrollment(&c, id, &body).await?,
+                        MIB,
+                    )
+                }
+                ("GET", ["v2", "membership"]) | ("GET", ["v2", "node", "membership"]) => {
+                    let after = if after.is_empty() {
+                        -1
+                    } else {
+                        after.parse::<i64>().map_err(|_| Error::BAD)?
+                    };
+                    if after < -1 {
+                        return Err(Error::BAD);
+                    }
+                    (
+                        StatusCode::OK,
+                        self.store.membership_changes(&c, after, page_limit).await?,
+                        MIB,
+                    )
+                }
+                ("POST", ["v2", "node", "membership"]) | ("DELETE", ["v2", "node", "self"]) => {
+                    let body = self.body(unread, budget.clone(), 64 * 1024).await?;
+                    (
+                        StatusCode::OK,
+                        self.store
+                            .revoke_membership(&c, &body, method == Method::DELETE)
+                            .await?,
+                        MIB,
+                    )
+                }
+                _ => return Err(Error::NOT_FOUND),
+            };
+            return self.response(value, status, budget, maximum).await;
+        }
         let (status, value) = match (method.as_str(), parts.as_slice()) {
+            ("DELETE", ["v1", "node", "self"]) => {
+                let body = self.body(unread, budget.clone(), 64 * 1024).await?;
+                (
+                    StatusCode::OK,
+                    self.store.retire_legacy_node(&c, &body).await?,
+                )
+            }
             ("GET", ["v1", "capabilities"]) => (
                 StatusCode::OK,
                 protocol::capabilities(self.push.providers()),
@@ -610,7 +1010,7 @@ impl App {
                 self.store.revoke_device(&c, id).await?;
                 (StatusCode::OK, json!({"revoked":true}))
             }
-            ("POST", ["v1", "push"]) => {
+            ("POST", ["v1", "push"]) | ("POST", ["v2", "push"]) => {
                 let b = self.body(unread, budget.clone(), MIB).await?;
                 let provider = b["provider"].as_str().ok_or(Error::BAD)?;
                 let target = match provider {
@@ -634,7 +1034,7 @@ impl App {
                 self.store.register_push(&c, provider, target).await?;
                 (StatusCode::OK, json!({"ok":true}))
             }
-            ("DELETE", ["v1", "push"]) => {
+            ("DELETE", ["v1", "push"]) | ("DELETE", ["v2", "push"]) => {
                 self.store.delete_push(&c).await?;
                 (StatusCode::OK, json!({"ok":true}))
             }
@@ -651,9 +1051,34 @@ impl App {
             return;
         }
         let app = self.clone();
-        self.store.db.tasks.spawn(async move{loop{tokio::select!{biased;_=app.stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs_f64(app.cfg.maintenance_interval))=>{if app.store.maintain(false).await.is_err(){eprintln!("relay maintenance deferred");}}}}});
+        self.store.db.tasks.spawn(async move {
+            loop {
+                tokio::select!{biased;
+                    _=app.stop.cancelled()=>break,
+                    _=tokio::time::sleep(Duration::from_secs_f64(app.cfg.maintenance_interval))=>{
+                        crate::db::ordinary_control(async {
+                            if app.store.maintain(false).await.is_err(){eprintln!("relay maintenance deferred");}
+                            if app.cfg.public_enrollment {
+                                if app.store.maintain_encrypted().await.is_err(){eprintln!("encrypted relay maintenance deferred");}
+                                if app.store.maintain_opaque_signals().await.is_err(){eprintln!("encrypted signal maintenance deferred");}
+                                if app.store.maintain_enrollment().await.is_err(){eprintln!("public enrollment maintenance deferred");}
+                            }
+                        }).await;
+                    }
+                }
+            }
+        });
         let app = self.clone();
-        self.store.db.tasks.spawn(async move{loop{tokio::select!{biased;_=app.stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(1))=>{if app.push.once().await.is_err(){eprintln!("relay push delivery deferred");}}}}});
+        self.store.db.tasks.spawn(async move {
+            loop {
+                tokio::select!{biased;
+                    _=app.stop.cancelled()=>break,
+                    _=tokio::time::sleep(Duration::from_secs(1))=>{
+                        if crate::db::ordinary_control(app.push.once()).await.is_err(){eprintln!("relay push delivery deferred");}
+                    }
+                }
+            }
+        });
     }
 }
 /// A computer's phone management names the workspace it showed; a mismatch
@@ -665,7 +1090,9 @@ fn pinned(c: &crate::store::Credential, workspace: Option<&str>) -> Result<()> {
     }
 }
 async fn dispatch(State(app): State<App>, req: Request) -> Response {
-    let deadline = if req.method() == Method::POST && req.uri().path() == "/v1/requests" {
+    let deadline = if req.method() == Method::POST
+        && ["/v1/requests", "/v2/requests"].contains(&req.uri().path())
+    {
         75
     } else {
         40
@@ -747,4 +1174,79 @@ pub async fn serve(
     tasks.close();
     let _ = tokio::time::timeout(Duration::from_secs(app.cfg.shutdown_timeout), tasks.wait()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod admission_cleanup_tests {
+    use super::*;
+    use crate::db::Db;
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+
+    #[tokio::test]
+    async fn cancelled_public_admission_retains_local_capacity_until_shared_acquisition_settles() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            public_enrollment: true,
+            large_payload_slots: 2,
+            max_spool_bytes: 164 * 1024 * 1024,
+            background: false,
+            ..Config::default()
+        };
+        let db = Db::open(
+            &directory.path().join("state/relay.sqlite3"),
+            Arc::new(config),
+        )
+        .await
+        .unwrap();
+        let app = App::new(Store::new(db)).await.unwrap();
+        // Private SQL evidence that acquisition really committed once. This
+        // adds no production hook and uses no additional connection or pool.
+        app.store
+            .db
+            .exec(
+                "CREATE TABLE admitted_cleanup_test(id TEXT PRIMARY KEY)",
+                &[],
+            )
+            .await
+            .unwrap();
+        app.store.db.exec("CREATE TRIGGER admitted_cleanup_test_insert AFTER INSERT ON service_leases WHEN NEW.lane='request' BEGIN INSERT INTO admitted_cleanup_test(id) VALUES(NEW.id); END",&[]).await.unwrap();
+        let total = app.authenticated.total.available_permits();
+        let standard = app.authenticated.standard.available_permits();
+        let held = app.store.db.pool.acquire().await.unwrap();
+        let mut admission = Box::pin(app.admit(&app.authenticated, 1, ServiceClass::Standard));
+        assert!(admission
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+        // Drop the owning future, not merely a Pin<&mut Future> wrapper.
+        drop(admission);
+        assert_eq!(
+            app.authenticated.total.available_permits(),
+            total - 1,
+            "cancelled admission must retain local capacity until its tracked acquisition settles"
+        );
+        assert_eq!(app.authenticated.standard.available_permits(), standard - 1);
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let row = app.store.db.one("SELECT used_total,used_standard,(SELECT count(*) FROM service_leases WHERE lane='request') AS leases,(SELECT count(*) FROM admitted_cleanup_test) AS acquired FROM service_resources WHERE lane='request'",&[]).await.unwrap().unwrap();
+                if row["acquired"] == 1
+                    && row["leases"] == 0
+                    && row["used_total"] == 0
+                    && row["used_standard"] == 0
+                    && app.authenticated.total.available_permits() == total
+                    && app.authenticated.standard.available_permits() == standard
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the detached acquisition must commit once and release both budgets");
+        app.store.db.close().await;
+    }
 }

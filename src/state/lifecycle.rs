@@ -108,6 +108,8 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     let archive_id = nonempty_env("HGS_ARCHIVE_ID");
     std::env::remove_var("HGS_ARCHIVE_ID");
+    let fork_hint_revision = nonempty_env(agent_hint::FORK_REVISION_ENV);
+    std::env::remove_var(agent_hint::FORK_REVISION_ENV);
     let _signals = crate::platform::ShutdownGuard::install().map_err(|e| e.to_string())?;
     // The session host's channel for pauses and input checks (spec D10, D11).
     #[cfg(windows)]
@@ -146,6 +148,8 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         } else {
             "new"
         };
+        let infer_project = startup_kind == "new" && replaced.is_none()
+            && nonempty_env("HGS_FORK_PARENT_ID").is_none();
         let mut record = json!({"version": 1, "run_identity_version": 1, "name": name, "agent": agent, "run_id": token, "pane": pane,
             "cwd": cwd, "launch_dir": cwd, "base": base, "hgs": required_env("HGS_EXECUTABLE")?,
             "shell": nonempty_env("SHELL").unwrap_or_else(|| "/bin/bash".into()), "created": now() as i64,
@@ -161,6 +165,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         std::env::remove_var("HGS_FORK_PARENT_ID");
         std::env::remove_var("HGS_FORK_SOURCE_NAME");
+        agent_hint::inherit_fork(&mut record, fork_hint_revision.as_deref());
         if let Some(expected) = expected {
             let previous = read(&name)?;
             if string(&previous, "conversation_id") != expected
@@ -212,6 +217,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             if let Some(anchor) = previous.get("journal_name") {
                 record["journal_name"] = anchor.clone();
             }
+            agent_hint::carry_resume(&previous, &mut record);
         } else if let Some(requested) = requested {
             // The ID is an explicit request, not proof that the provider has
             // opened it. Only a matching SessionStart confirms the binding.
@@ -222,12 +228,21 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         }
         backend::current().set_run_marker(&name, &token)?;
         write(&mut record)?;
+        // Keep this exact newly-created binding pinned during optional initial
+        // placement. A removal/replacement must not inherit the old folder's
+        // inference. The swarm lock is nonblocking and Git shares one 3s cap.
+        if infer_project {
+            if let Ok(config) = crate::config::Config::load() {
+                crate::swarm::infer_new_session(&config, &name, &cwd);
+            }
+        }
     }
     std::env::set_var("HGS_RUN_ID", &token);
     std::env::set_var("HGS_SESSION", &name);
     std::env::set_var("HGS_STATE_DIR", absolute_root()?);
     std::env::remove_var("HGS_EXPECTED_ID");
-    let permission_mode = crate::accounts::permission_mode(&crate::config::Config::load().map_err(|e|e.message)?,
+    let config = crate::config::Config::load().map_err(|e|e.message)?;
+    let permission_mode = crate::accounts::permission_mode(&config,
         &nonempty_env("HGS_ACCOUNT_ID").unwrap_or_default(), &agent).map_err(|e|e.message)?;
     for argv in [&mut base, &mut first] { crate::accounts::apply_permissions(&agent, &permission_mode, argv); }
     // Claude Code reports its context window only to a status line command.
@@ -548,7 +563,8 @@ fn session_spec(
         ));
     }
     let executable = runner_executable()?;
-    let launch = supervisor_command(record, &executable, argv);
+    let hint_environment = crate::config::agent_hint_environment(string(record, "agent"));
+    let launch = supervisor_command(record, &executable, argv, &hint_environment);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),
         ("HGS_AGENT", string(record, "agent").to_owned()),
@@ -583,6 +599,7 @@ fn session_spec(
             .into_iter()
             .map(|(key, value)| format!("{key}={value}"))
             .chain(account_variables(record))
+            .chain(hint_environment)
             .collect(),
         command: launch,
         detached: true,

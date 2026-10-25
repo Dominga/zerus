@@ -85,24 +85,25 @@ private fun workspaceName(model:ZerusViewModel,catalog:AccountCatalog)=model.con
                 ProviderBadge(account.provider,Modifier.size(24.dp))
                 Column(Modifier.weight(1f)) {
                     Text(account.label,style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.SemiBold,maxLines=1,overflow=TextOverflow.Ellipsis)
-                    Text(DesktopIcons.providerName(account.provider)+" / "+AccountPresentation.type(account),style=MaterialTheme.typography.bodySmall,color=muted,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    Text(listOf(DesktopIcons.providerName(account.provider),AccountPresentation.type(account)).filter(String::isNotBlank).joinToString(" / "),style=MaterialTheme.typography.bodySmall,color=muted,maxLines=1,overflow=TextOverflow.Ellipsis)
                 }
                 Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight,"View account details",Modifier.size(20.dp),tint=muted)
             }
             Column(Modifier.fillMaxWidth().padding(start=34.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
                 FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
                     group.members.groupBy { it.catalog.key }.forEach { (_,members) ->
-                        Column(verticalArrangement=Arrangement.spacedBy(3.dp)) {
-                            AccountMachineLabel(model,members.first().catalog)
-                            members.map { member ->
-                                val marker=AccountPresentation.compactStatus(member.catalog,member.account)
-                                if(marker.isBlank()) "" else (if(members.size>1) "${member.account.id} / " else "")+marker
-                            }.filter(String::isNotBlank).distinct().forEach { marker ->
-                                Text(marker,style=MaterialTheme.typography.labelSmall,color=if(members.any { AccountPresentation.warning(it.account) || it.account.refreshError }) Color(0xFFF0A35B) else muted)
-                            }
-                        }
+                        AccountMachineLabel(model,members.first().catalog)
                     }
                 }
+                group.members.mapNotNull { member ->
+                    AccountPresentation.listProblem(member.account).takeIf(String::isNotBlank)?.let { problem ->
+                        if(group.members.size==1) problem else "${model.machineName(member.catalog.key.connectionId,member.catalog.key.computerId,member.catalog.machineName)}: $problem"
+                    }
+                }.distinct().forEach { problem ->
+                    Text(problem,style=MaterialTheme.typography.labelSmall,color=Color(0xFFF0A35B))
+                }
+                if(AccountPresentation.stale(catalog,account,now) && (account.windows.isNotEmpty() || compactBalance(account)!=null))
+                    Text("Saved usage",style=MaterialTheme.typography.labelSmall,color=muted)
                 account.windows.take(2).forEach { window ->
                     val remaining=AccountPresentation.remaining(window,now)
                     val percentage=AccountPresentation.percent(window.usedPercent)
@@ -121,7 +122,7 @@ private fun workspaceName(model:ZerusViewModel,catalog:AccountCatalog)=model.con
                     }
                 }
                 if(account.windows.size>2) Text("+${account.windows.size-2} more usage windows",style=MaterialTheme.typography.labelSmall,color=muted)
-                if(account.windows.isEmpty()) Text(compactBalance(account) ?: "Usage unknown",style=MaterialTheme.typography.bodySmall,color=muted,maxLines=1,overflow=TextOverflow.Ellipsis)
+                if(account.windows.isEmpty()) compactBalance(account)?.let { Text(it,style=MaterialTheme.typography.bodySmall,color=muted,maxLines=1,overflow=TextOverflow.Ellipsis) }
 
             }
         }
@@ -169,11 +170,10 @@ private fun compactBalance(account:ReportedAccount):String?=when {
                 members.forEach { member ->
                     val a=member.account
                     Text("Profile: ${a.id}"+(if(a.isDefault) " / Default" else ""),style=MaterialTheme.typography.bodySmall)
-                    Text(AccountPresentation.status(a),style=MaterialTheme.typography.bodySmall,color=if(AccountPresentation.warning(a)) Color(0xFFF0A35B) else muted)
-                    val problem=AccountPresentation.compactStatus(member.catalog,a)
+                    Text(AccountPresentation.reportedStatus(member.catalog,a,now),style=MaterialTheme.typography.bodySmall,color=if(AccountPresentation.warning(a)) Color(0xFFF0A35B) else muted)
+                    val problem=AccountPresentation.compactStatus(member.catalog,a,now)
                     if(problem.isNotBlank()) Text(problem,style=MaterialTheme.typography.bodySmall,color=muted)
-                    if(AccountPresentation.stale(member.catalog,a,now)) Text("Last known report",style=MaterialTheme.typography.bodySmall,color=muted)
-                    AccountPresentation.date(a.checkedAt)?.let { Text("Provider updated $it",style=MaterialTheme.typography.bodySmall,color=muted) }
+                    Text(AccountPresentation.freshness(member.catalog,a,now),style=MaterialTheme.typography.bodySmall,color=muted)
                     a.openCode?.let { OpenCodeProvidersDetails(it) }
                 }
             }
@@ -182,11 +182,11 @@ private fun compactBalance(account:ReportedAccount):String?=when {
             Text("Usage report",style=MaterialTheme.typography.labelMedium,color=muted)
             AccountMachineLabel(model,catalog)
         }
-        Text(AccountPresentation.status(account),style=MaterialTheme.typography.labelMedium,color=if(AccountPresentation.warning(account)) Color(0xFFF0A35B) else muted)
-        val marker=AccountPresentation.compactStatus(catalog,account)
+        Text(AccountPresentation.reportedStatus(catalog,account,now),style=MaterialTheme.typography.labelMedium,color=if(AccountPresentation.warning(account)) Color(0xFFF0A35B) else muted)
+        val marker=AccountPresentation.compactStatus(catalog,account,now)
         if(marker.isNotBlank()) Text(marker,style=MaterialTheme.typography.bodySmall,color=muted)
         if(account.identityCached) Text("Identity retained from the last provider report",style=MaterialTheme.typography.bodySmall,color=muted)
-        if(account.refreshing) Text("Provider refresh in progress",style=MaterialTheme.typography.bodySmall,color=muted)
+        if(AccountPresentation.refreshing(catalog,account)) Text("Provider refresh in progress",style=MaterialTheme.typography.bodySmall,color=muted)
         if(account.refreshError) Text("The last provider refresh failed. Retained values may be out of date.",style=MaterialTheme.typography.bodySmall,color=muted)
         account.windows.forEach { window ->
             Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {

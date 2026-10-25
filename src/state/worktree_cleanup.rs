@@ -1,7 +1,8 @@
 //! Review and guarded removal of linked worktrees. Removal repeats every check
 //! under the repository lock used by creation, compares the fingerprint the
 //! person reviewed. Force is limited to explicitly confirmed, content-fingerprinted
-//! uncommitted files; active/locked/nested/unknown worktrees remain protected.
+//! uncommitted files. A separate manual process confirmation accepts only stable
+//! access-denied paths; active/locked/nested and other unknowns stay protected.
 use super::worktrees::{cache_file, canonical, error, git, list, GitError};
 use super::*;
 use fs2::FileExt;
@@ -27,10 +28,11 @@ struct Context {
     /// (display name, full ref) of the main checkout's branch and origin/HEAD.
     bases: Vec<(String, String)>,
     /// Other processes' current directories, or why they cannot be read.
-    processes: std::result::Result<Vec<(u32, PathBuf, String)>, String>,
+    processes: std::result::Result<crate::platform::WorktreeProcesses, String>,
     bindings: Vec<Reference>,
     bindings_complete: bool,
     archives: Vec<Reference>,
+    archives_complete: bool,
 }
 
 fn reason(code: &str, message: impl Into<String>) -> Value {
@@ -160,16 +162,15 @@ fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
     let records = bindings();
     let bindings_complete = records.is_ok();
     let bindings = records.unwrap_or_default();
+    let mut archives=Vec::new();
+    let archives_complete=archive::visit_bounded(deadline,|record|{archives.push(reference(&record));Ok(())}).is_ok();
     Context {
         bases,
-        processes: crate::platform::current_directories(),
+        processes: crate::platform::worktree_processes(deadline),
         bindings,
         bindings_complete,
-        archives: archive::records()
-            .unwrap_or_default()
-            .iter()
-            .map(reference)
-            .collect(),
+        archives,
+        archives_complete,
     }
 }
 
@@ -523,11 +524,6 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
             },
         ));
     }
-    if tree["available"] != true {
-        row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,
-            "locked":row["locked"],"prunable":row["prunable"],"available":false})));
-        return finish(row, reasons, notes);
-    }
     if Instant::now() >= total {
         reasons.push(reason(
             "status_unavailable",
@@ -537,11 +533,19 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     }
 
     // Without the running processes' folders, nothing may count as unused.
-    let samples: Vec<_> = match &context.processes {
-        Ok(processes) => processes
-            .iter()
-            .filter(|(_, cwd, _)| inside(cwd, &path))
-            .collect(),
+    let mut samples: Vec<_> = match &context.processes {
+        Ok(processes) => {
+            if !processes.unreadable.is_empty() {
+                reasons.push(reason("processes_unavailable", format!(
+                    "The OS hides folder or executable paths for {}. Check that no program uses this folder before confirming manual removal.",
+                    plural(processes.unreadable.len(), "process")
+                )));
+                row["unreadable_processes"] = json!(processes.unreadable);
+            }
+            processes.paths.iter()
+                .filter(|(_, cwd, _)| inside(cwd, &path))
+                .collect()
+        }
         Err(error) => {
             reasons.push(reason(
                 "processes_unavailable",
@@ -550,6 +554,8 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
             Vec::new()
         }
     };
+    samples.sort_by_key(|(pid, _, _)| *pid);
+    samples.dedup_by_key(|(pid, _, _)| *pid);
     row["processes"] = json!(samples
         .iter()
         .take(MAX_SAMPLES)
@@ -593,6 +599,15 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     row["sessions"] = json!(sessions);
     let archived = uses(&context.archives).len();
     row["archived_sessions"] = json!(archived);
+    if !context.archives_complete {
+        notes.push(reason("archives_unavailable","Archive references could not be fully checked. Automatic cleanup keeps this worktree."));
+    }
+
+    if tree["available"] != true {
+        row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,
+            "locked":row["locked"],"prunable":row["prunable"],"available":false,"sessions":row["sessions"]})));
+        return finish(row, reasons, notes);
+    }
 
     let mut nested: Vec<String> = trees
         .iter()
@@ -889,6 +904,23 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         "locked":row["locked"],"prunable":row["prunable"],"available":true,
         "status":status.entries,"nested":row["nested"],"sessions":row["sessions"],
         "ignored":row["ignored_fingerprint"],"discard":row["discard_fingerprint"]})));
+    // A complete roster with only stable access-denied paths permits a narrow
+    // manual exception. All other blockers (including any readable use) win.
+    if context.processes.as_ref().is_ok_and(|p| !p.unreadable.is_empty())
+        && reasons.len() == 1 && reasons[0]["code"] == "processes_unavailable"
+    {
+        // Separate SSH requests have different protected launch PIDs. Only
+        // ancestors verified from /proc before AND after the roster use a role
+        // identity. Every other unknown process keeps its exact PID/boot/start.
+        // Retain command, denied-path shape and multiplicity, and keep all
+        // readable paths as blockers even for invocation ancestors.
+        let mut unreadable:Vec<_>=context.processes.as_ref().unwrap().unreadable.iter()
+            .map(crate::platform::UnreadableWorktreeProcess::confirmation_identity).collect();
+        unreadable.sort_by_cached_key(Value::to_string);
+        row["process_fingerprint"] = json!(fingerprint(json!({
+            "worktree":row["fingerprint"], "unreadable":unreadable
+        })));
+    }
     finish(row, reasons, notes)
 }
 
@@ -993,22 +1025,25 @@ pub(super) fn review_command(args: &[String]) -> Result<Value> {
 }
 
 pub(super) fn remove_command(args: &[String]) -> Result<Value> {
-    const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
+    const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut delete_branch = false;
     let mut automatic = false;
+    let mut periodic = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => {}
             "--delete-branch" => delete_branch = true,
             "--automatic" => automatic = true,
+            "--periodic" => periodic = true,
             "--dry-run" => return Err("worktree removal does not support --dry-run".into()),
             key @ ("--path"
             | "--common-dir"
             | "--fingerprint"
             | "--ignored-fingerprint"
             | "--discard-fingerprint"
+            | "--process-fingerprint"
             | "--request-id") => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
@@ -1032,6 +1067,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             .ok_or_else(|| format!("{key} is required"))
     };
     let target = Path::new(required("--path")?);
+    if periodic && !automatic { return Err("Periodic cleanup requires automatic safety checks".into()); }
     let common = Path::new(required("--common-dir")?);
     let expected = required("--fingerprint")?;
     if !target.is_absolute() || !common.is_absolute() {
@@ -1119,7 +1155,14 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
                 .into(),
         );
     }
-    if row["verdict"] == "blocked" && discard.is_none() {
+    let process_consent = options.get("--process-fingerprint").copied();
+    if process_consent.is_some()
+        && (automatic || process_consent != row["process_fingerprint"].as_str()
+            || string(&row, "process_fingerprint").is_empty())
+    {
+        return Err("Process confirmation is stale or this worktree is still protected. Review it again.".into());
+    }
+    if row["verdict"] == "blocked" && discard.is_none() && process_consent.is_none() {
         let reasons: Vec<_> = row["reasons"]
             .as_array()
             .into_iter()
@@ -1133,6 +1176,10 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         ));
     }
     if automatic {
+        let policy = super::worktree_maintenance::policy()?;
+        if !policy.enabled || (!periodic && !policy.after_session) {
+            return Err("Automatic worktree cleanup is disabled".into());
+        }
         if delete_branch
             || options.contains_key("--discard-fingerprint")
             || options.contains_key("--ignored-fingerprint")
@@ -1141,6 +1188,22 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         }
         if super::worktree_lifecycle::owned(&common, &path).is_none() {
             return Err("Not a verified Zerus-created worktree; review it manually".into());
+        }
+        let missing = row["available"] == false;
+        if missing {
+            if !periodic || !policy.missing || fs::symlink_metadata(&path).is_ok()
+                || fs::symlink_metadata(&path).is_err_and(|e| e.kind()!=std::io::ErrorKind::NotFound) {
+                return Err("Missing worktree cleanup is disabled or the path cannot be verified absent".into());
+            }
+            let reference=format!("refs/heads/{}",string(&row,"branch"));
+            let retained=git(&common,&["rev-parse","--verify","--end-of-options",&reference],Instant::now()+Duration::from_secs(2)).ok().map(text);
+            if retained.as_deref()!=Some(string(&row,"head")) {
+                return Err("The missing checkout head is not retained by its branch; review manually".into());
+            }
+        } else {
+        if periodic && !policy.unused_integrated { return Err("Unused worktree cleanup is disabled".into()); }
+        if periodic && (row["last_activity"].as_f64().is_none_or(|at| now()-at < f64::from(policy.grace_hours)*3600.)) {
+            return Err("Worktree is within the configured inactivity grace period".into());
         }
         if row["changes"].as_u64().unwrap_or(1) != 0
             || row["untracked"].as_u64().unwrap_or(1) != 0
@@ -1154,6 +1217,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         ) {
             return Err("Work is not proven integrated; its folder and branch were kept".into());
         }
+        }
     }
     if !automatic && string(&row, "fingerprint") != expected {
         return Err("Worktree changed since the review. Review it again.".into());
@@ -1166,6 +1230,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     let missing = row["verdict"] == "missing";
     if automatic {
         super::worktree_lifecycle::prepare_removal(&common, &row)?;
+        super::worktree_maintenance::reserve(&common, &path)?;
     }
     let spelling = path.to_string_lossy();
     let mut command = vec!["worktree", "remove"];
@@ -1211,10 +1276,13 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             }
         }
     }
-    drop(lock);
-    Ok(
-        json!({"status":if missing {"forgotten"} else {"removed"},"path":path,"branch":branch,
+    let result = json!({"status":if missing {"forgotten"} else {"removed"},"path":path,"branch":branch,
         "branch_deleted":deleted,"branch_error":branch_error,"common_dir":common,
-        "request_id":options.get("--request-id"),"machine":data["machine"]}),
-    )
+        "request_id":options.get("--request-id"),"machine":data["machine"]});
+    if automatic {
+        super::worktree_maintenance::removed(&path,&result)
+            .map_err(|e|format!("Removal could not be confirmed: result could not be saved: {e}"))?;
+    }
+    drop(lock);
+    Ok(result)
 }

@@ -10,14 +10,50 @@ use sqlx::{
     any::{AnyConnectOptions, AnyPoolOptions, AnyTypeInfoKind},
     Any, AnyPool, Column, ConnectOptions, Connection, Row, Transaction, ValueRef,
 };
-use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    path::Path,
+    str::FromStr,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+tokio::task_local! { static ORDINARY_CONTROL:bool; }
+/// Housekeeping cannot consume reserved payload or highest-class auth pools.
+pub async fn ordinary_control<T>(future: impl std::future::Future<Output = T>) -> T {
+    ORDINARY_CONTROL.scope(true, future).await
+}
+/// Cleanup owns its existing tracked task and retries only an idempotent SQL
+/// release, including an unknown COMMIT result. No new tasks or connections.
+/// Do not stop on `Db::stop`: close cancels it before its five-second grace.
+pub(crate) async fn retry_cleanup<F, T>(mut operation: F) -> Result<()>
+where
+    F: FnMut() -> T,
+    T: std::future::Future<Output = Result<()>>,
+{
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match operation().await {
+                Err(error) if error.0 == Error::UNAVAILABLE.0 => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
+    })
+    .await
+    .unwrap_or(Err(Error::UNAVAILABLE))
+}
 pub type RowValue = Value;
 #[derive(Clone)]
 pub struct Db {
     pub pool: AnyPool,
+    auth_standard: Option<AnyPool>,
+    auth_team: Option<AnyPool>,
+    team_hashes: Arc<RwLock<HashSet<String>>>,
+    control_slots: [Arc<Semaphore>; 2],
     pub postgres: bool,
     pub cfg: Arc<Config>,
     pub wake: broadcast::Sender<String>,
@@ -32,6 +68,8 @@ pub struct Tx {
     pub postgres: bool,
     _permit: OwnedSemaphorePermit,
 }
+/// Permanent v2 receipt/binding metadata remains charged after payload removal.
+pub(crate) const ENCRYPTED_METADATA_BYTES: i64 = 1024;
 #[derive(Clone)]
 pub enum Arg<'a> {
     Text(&'a str),
@@ -187,6 +225,44 @@ impl Tx {
         Ok(())
     }
 }
+fn pool_options(pg: bool, min: u32, max: u32) -> AnyPoolOptions {
+    AnyPoolOptions::new()
+        .min_connections(min)
+        .max_connections(max)
+        .acquire_timeout(Duration::from_secs(5))
+        .after_release(|connection, _| {
+            // PostgreSQL otherwise retains the largest read/write buffer
+            // on every pooled socket after a maximum attachment transfer.
+            connection.shrink_buffers();
+            Box::pin(async { Ok(true) })
+        })
+        .after_connect(move |c, _| {
+            Box::pin(async move {
+                if pg {
+                    for statement in [
+                        "SET statement_timeout='15s'",
+                        "SET lock_timeout='5s'",
+                        "SET idle_in_transaction_session_timeout='20s'",
+                        "SET application_name='zerus-mobile:rust'",
+                    ] {
+                        sqlx::query(statement).execute(&mut *c).await?;
+                    }
+                } else {
+                    for statement in [
+                        "PRAGMA foreign_keys=ON",
+                        "PRAGMA journal_mode=DELETE",
+                        "PRAGMA synchronous=FULL",
+                        "PRAGMA secure_delete=ON",
+                        "PRAGMA busy_timeout=5000",
+                        "PRAGMA cache_size=-2048",
+                    ] {
+                        sqlx::query(statement).execute(&mut *c).await?;
+                    }
+                }
+                Ok(())
+            })
+        })
+}
 impl Db {
     pub async fn open(path: &Path, cfg: Arc<Config>) -> Result<Self> {
         sqlx::any::install_default_drivers();
@@ -201,47 +277,33 @@ impl Db {
             .clone()
             .unwrap_or_else(|| format!("sqlite://{}?mode=rw", path.display()));
         let options = AnyConnectOptions::from_str(&url)?.disable_statement_logging();
-        let pool = AnyPoolOptions::new()
-            .min_connections(if pg { cfg.pool_min } else { 1 })
-            .max_connections(if pg { cfg.pool_max } else { 1 })
-            .acquire_timeout(Duration::from_secs(5))
-            .after_release(|connection, _| {
-                // PostgreSQL otherwise retains the largest read/write buffer
-                // on every pooled socket after a maximum attachment transfer.
-                connection.shrink_buffers();
-                Box::pin(async { Ok(true) })
-            })
-            .after_connect(move |c, _| {
-                Box::pin(async move {
-                    if pg {
-                        for statement in [
-                            "SET statement_timeout='15s'",
-                            "SET lock_timeout='5s'",
-                            "SET idle_in_transaction_session_timeout='20s'",
-                            "SET application_name='zerus-mobile:rust'",
-                        ] {
-                            sqlx::query(statement).execute(&mut *c).await?;
-                        }
-                    } else {
-                        for statement in [
-                            "PRAGMA foreign_keys=ON",
-                            "PRAGMA journal_mode=DELETE",
-                            "PRAGMA synchronous=FULL",
-                            "PRAGMA secure_delete=ON",
-                            "PRAGMA busy_timeout=5000",
-                            "PRAGMA cache_size=-2048",
-                        ] {
-                            sqlx::query(statement).execute(&mut *c).await?;
-                        }
-                    }
-                    Ok(())
-                })
-            })
-            .connect_with(options)
-            .await?;
+        let payload_max = if pg { cfg.payload_pool_max() } else { 1 };
+        let pool = pool_options(
+            pg,
+            if pg { cfg.pool_min.min(payload_max) } else { 1 },
+            payload_max,
+        )
+        .connect_with(options.clone())
+        .await?;
+        let (auth_standard, auth_team) = if pg && cfg.public_enrollment {
+            (
+                Some(
+                    pool_options(true, 1, 2)
+                        .connect_with(options.clone())
+                        .await?,
+                ),
+                Some(pool_options(true, 1, 2).connect_with(options).await?),
+            )
+        } else {
+            (None, None)
+        };
         let (wake, _) = broadcast::channel(1024);
         let db = Self {
             pool,
+            auth_standard,
+            auth_team,
+            team_hashes: Arc::new(RwLock::new(HashSet::new())),
+            control_slots: [Arc::new(Semaphore::new(66)), Arc::new(Semaphore::new(66))],
             postgres: pg,
             cfg: cfg.clone(),
             wake,
@@ -254,12 +316,132 @@ impl Db {
             _lock: lock,
         };
         db.initialize().await?;
+        if cfg.public_enrollment {
+            db.adopt_encrypted_metadata().await?;
+        }
         if pg {
             db.start_listener().await?;
         }
+        if cfg.public_enrollment {
+            db.refresh_team_auth().await?;
+            let worker = db.clone();
+            db.tasks.spawn(async move {
+                loop {tokio::select!{_=worker.stop.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(2))=>{
+                    if worker.refresh_team_auth().await.is_err(){eprintln!("relay service authentication cache refresh deferred");}
+                }}}
+            });
+        }
         Ok(db)
     }
+    pub fn auth_class(&self, secret: &str) -> crate::store::ServiceClass {
+        if self.cfg.public_enrollment
+            && self
+                .team_hashes
+                .read()
+                .expect("team hashes")
+                .contains(&digest(secret))
+        {
+            crate::store::ServiceClass::Team
+        } else {
+            crate::store::ServiceClass::Standard
+        }
+    }
+    pub async fn control(&self, class: crate::store::ServiceClass) -> Result<Tx> {
+        let pool = if class == crate::store::ServiceClass::Team {
+            self.auth_team.as_ref()
+        } else {
+            self.auth_standard.as_ref()
+        }
+        .unwrap_or(&self.pool);
+        let permits = if self.cfg.public_enrollment {
+            &self.control_slots[usize::from(class == crate::store::ServiceClass::Team)]
+        } else {
+            &self.slots
+        };
+        let permit = permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::BUSY)?;
+        let inner = pool
+            .begin_with(if self.postgres {
+                "BEGIN"
+            } else {
+                "BEGIN IMMEDIATE"
+            })
+            .await?;
+        Ok(Tx {
+            inner,
+            postgres: self.postgres,
+            _permit: permit,
+        })
+    }
+    /// Public lease cleanup waits for its own class's existing control slot.
+    /// Ordinary admission remains fail-fast and cannot borrow another class.
+    pub(crate) async fn cleanup_control(&self, class: crate::store::ServiceClass) -> Result<Tx> {
+        if !self.cfg.public_enrollment {
+            return self.control(class).await;
+        }
+        let pool = if class == crate::store::ServiceClass::Team {
+            self.auth_team.as_ref()
+        } else {
+            self.auth_standard.as_ref()
+        }
+        .unwrap_or(&self.pool);
+        let permit = self.control_slots[usize::from(class == crate::store::ServiceClass::Team)]
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::UNAVAILABLE)?;
+        let inner = pool
+            .begin_with(if self.postgres {
+                "BEGIN"
+            } else {
+                "BEGIN IMMEDIATE"
+            })
+            .await?;
+        Ok(Tx {
+            inner,
+            postgres: self.postgres,
+            _permit: permit,
+        })
+    }
+    pub async fn control_one(
+        &self,
+        class: crate::store::ServiceClass,
+        sql: &str,
+        arguments: &[Arg<'_>],
+    ) -> Result<Option<RowValue>> {
+        let mut t = self.control(class).await?;
+        let value = t.one(sql, arguments).await?;
+        t.commit().await?;
+        Ok(value)
+    }
+    pub async fn refresh_team_auth(&self) -> Result<()> {
+        let mut hashes = HashSet::new();
+        let mut after = String::new();
+        loop {
+            let mut t = self.control(crate::store::ServiceClass::Team).await?;
+            let rows=t.all("WITH node_page AS (SELECT n.token_hash FROM nodes n JOIN workspaces w ON w.id=n.workspace_id WHERE n.revoked=0 AND w.service_class='team' AND n.token_hash>? ORDER BY n.token_hash LIMIT 256), device_page AS (SELECT d.token_hash FROM devices d JOIN workspaces w ON w.id=d.workspace_id WHERE d.revoked=0 AND w.service_class='team' AND d.token_hash>? ORDER BY d.token_hash LIMIT 256) SELECT token_hash FROM (SELECT token_hash FROM node_page UNION SELECT token_hash FROM device_page) members ORDER BY token_hash LIMIT 256",args![&after,&after]).await?;
+            t.commit().await?;
+            let count = rows.len();
+            for row in rows {
+                after = s(&row, "token_hash").to_owned();
+                hashes.insert(after.clone());
+                if hashes.len() > 4096 {
+                    return Err(Error::BUSY);
+                }
+            }
+            if count < 256 {
+                break;
+            }
+        }
+        *self.team_hashes.write().expect("team hashes") = hashes;
+        Ok(())
+    }
     pub async fn begin(&self) -> Result<Tx> {
+        if self.cfg.public_enrollment && ORDINARY_CONTROL.try_with(|v| *v).unwrap_or(false) {
+            return self.control(crate::store::ServiceClass::Standard).await;
+        }
         self.transaction(false).await
     }
     pub async fn cleanup(&self) -> Result<Tx> {
@@ -296,6 +478,31 @@ impl Db {
         t.commit().await?;
         Ok(r)
     }
+    /// Reserve disk capacity at each real accounting shard as well as HTTP
+    /// lanes. Standard traffic cannot fill the team's retained-payload reserve.
+    pub async fn payload_capacity(&self, t: &mut Tx, w: &str) -> Result<i64> {
+        let capacity = self.control_payload_capacity(t, w).await?;
+        Ok(if self.cfg.public_enrollment {
+            capacity - 1024 * 1024
+        } else {
+            capacity
+        })
+    }
+    pub async fn control_payload_capacity(&self, t: &mut Tx, w: &str) -> Result<i64> {
+        let total = self.cfg.global_max_bytes / self.cfg.quota_shards;
+        if !self.cfg.public_enrollment {
+            return Ok(total);
+        }
+        let row = t
+            .one("SELECT service_class FROM workspaces WHERE id=?", args![w])
+            .await?
+            .ok_or(Error::NOT_FOUND)?;
+        Ok(if row["service_class"] == "team" {
+            total
+        } else {
+            self.cfg.standard_capacity(total as usize) as i64
+        })
+    }
     pub fn shard(&self, w: &str) -> i64 {
         let h = digest(w);
         let n = u64::from_str_radix(&h[..16], 16).expect("SHA256 hex");
@@ -330,6 +537,20 @@ impl Db {
         .await?;
         Ok(())
     }
+    pub(crate) async fn retain_encrypted_metadata(&self, t: &mut Tx, w: &str) -> Result<()> {
+        let usage = self.payload_usage(t, w).await?;
+        let capacity = self.payload_capacity(t, w).await?;
+        if i(&usage, "payload_bytes") + ENCRYPTED_METADATA_BYTES > self.cfg.max_queue_bytes {
+            return Err(Error::BUSY);
+        }
+        if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![ENCRYPTED_METADATA_BYTES,self.shard(w),ENCRYPTED_METADATA_BYTES,capacity]).await?==0{return Err(Error::BUSY);}
+        t.exec(
+            "UPDATE workspace_usage SET payload_bytes=payload_bytes+? WHERE workspace_id=?",
+            args![ENCRYPTED_METADATA_BYTES, w],
+        )
+        .await?;
+        Ok(())
+    }
     pub fn signal(&self, topic: String) {
         let _ = self.wake.send(topic);
     }
@@ -356,6 +577,10 @@ impl Db {
             // Upgrade current Python SQLite databases in place without changing identities.
             for (table, columns) in [
                 (
+                    "workspaces",
+                    vec![("service_class", "TEXT NOT NULL DEFAULT 'standard'")],
+                ),
+                (
                     "nodes",
                     vec![
                         ("computer_id", "TEXT"),
@@ -365,6 +590,7 @@ impl Db {
                         ("presence_at", "DOUBLE PRECISION"),
                         ("presence_until", "DOUBLE PRECISION"),
                         ("mobile_delivery", "TEXT"),
+                        ("retirement_request_id", "TEXT"),
                     ],
                 ),
                 (
@@ -402,6 +628,18 @@ impl Db {
                 ),
                 ("invitations", vec![("added_by", "TEXT")]),
                 (
+                    "encrypted_requests",
+                    vec![("metadata_bytes", "BIGINT NOT NULL DEFAULT 0")],
+                ),
+                (
+                    "encrypted_route_bindings",
+                    vec![("metadata_bytes", "BIGINT NOT NULL DEFAULT 0")],
+                ),
+                (
+                    "opaque_signals",
+                    vec![("metadata_bytes", "BIGINT NOT NULL DEFAULT 0")],
+                ),
+                (
                     "computer_routes",
                     vec![
                         ("presence_at", "DOUBLE PRECISION"),
@@ -427,7 +665,7 @@ impl Db {
         };
         // SQLite new tables need route columns before the common registry backfill.
         let schema = if !self.postgres {
-            schema.replace("snapshot_hash text)","snapshot_hash text,computer_id TEXT,machine_id TEXT,manifest_hash TEXT,presence_at DOUBLE PRECISION,presence_until DOUBLE PRECISION,mobile_delivery TEXT)").replace("reserved_bytes INTEGER NOT NULL DEFAULT 0)","reserved_bytes INTEGER NOT NULL DEFAULT 0,target_computer_id TEXT,target_machine_id TEXT,route_id TEXT)")
+            schema.replace("snapshot_hash text)","snapshot_hash text,computer_id TEXT,machine_id TEXT,manifest_hash TEXT,presence_at DOUBLE PRECISION,presence_until DOUBLE PRECISION,mobile_delivery TEXT,retirement_request_id TEXT)").replace("reserved_bytes INTEGER NOT NULL DEFAULT 0)","reserved_bytes INTEGER NOT NULL DEFAULT 0,target_computer_id TEXT,target_machine_id TEXT,route_id TEXT)")
         } else {
             schema.into()
         };
@@ -451,6 +689,40 @@ impl Db {
             || a["quota_shards"] != self.cfg.quota_shards
         {
             return Err(Error::CONFLICT);
+        }
+        if !self.cfg.public_enrollment
+            && t.one("SELECT lane FROM service_resources LIMIT 1", &[])
+                .await?
+                .is_some()
+        {
+            return Err(Error::CONFLICT);
+        }
+        if self.cfg.public_enrollment {
+            t.exec("INSERT INTO service_resources(lane,total,standard) VALUES('registration',?,?) ON CONFLICT DO NOTHING",args![self.cfg.max_public_workspaces,self.cfg.max_public_workspaces]).await?;
+            let policy = t
+                .one(
+                    "SELECT total FROM service_resources WHERE lane='registration'",
+                    &[],
+                )
+                .await?
+                .ok_or(Error::BAD)?;
+            if policy["total"] != self.cfg.max_public_workspaces {
+                return Err(Error::CONFLICT);
+            }
+            for (lane, total) in self.cfg.service_lanes() {
+                let standard = self.cfg.standard_capacity(total);
+                t.exec("INSERT INTO service_resources(lane,total,standard) VALUES(?,?,?) ON CONFLICT DO NOTHING", args![lane,total,standard]).await?;
+                let row = t
+                    .one(
+                        "SELECT total,standard FROM service_resources WHERE lane=?",
+                        args![lane],
+                    )
+                    .await?
+                    .ok_or(Error::BAD)?;
+                if i(&row, "total") != total as i64 || i(&row, "standard") != standard as i64 {
+                    return Err(Error::CONFLICT);
+                }
+            }
         }
         for id in 0..self.cfg.quota_shards {
             t.exec(
@@ -485,6 +757,38 @@ impl Db {
         }
         t.commit().await
     }
+    async fn adopt_encrypted_metadata(&self) -> Result<()> {
+        for (table, keys) in [
+            ("encrypted_requests", "id"),
+            ("encrypted_route_bindings", "node_id,route_id"),
+            ("opaque_signals", "workspace_id,node_id,scope_id,kind"),
+        ] {
+            loop {
+                let mut t = self.begin().await?;
+                let pending=t.one(&format!("SELECT workspace_id FROM {table} WHERE metadata_bytes=0 ORDER BY workspace_id LIMIT 1"),&[]).await?;
+                let Some(pending) = pending else {
+                    t.commit().await?;
+                    break;
+                };
+                let w = s(&pending, "workspace_id");
+                t.one(
+                    "SELECT workspace_id FROM encrypted_workspaces WHERE workspace_id=? FOR UPDATE",
+                    args![w],
+                )
+                .await?
+                .ok_or(Error::BAD)?;
+                self.payload_usage(&mut t, w).await?;
+                let adopted=t.exec(&format!("UPDATE {table} SET metadata_bytes=? WHERE ({keys}) IN (SELECT {keys} FROM {table} WHERE workspace_id=? AND metadata_bytes=0 ORDER BY {keys} LIMIT 256) AND metadata_bytes=0"),args![ENCRYPTED_METADATA_BYTES,w]).await?;
+                // Historical retained data is real usage even if it already
+                // exceeds a quota. Never delete identities or raise limits to
+                // adopt it; subsequent admissions observe the charged total.
+                self.bytes(&mut t, w, adopted as i64 * ENCRYPTED_METADATA_BYTES)
+                    .await?;
+                t.commit().await?;
+            }
+        }
+        Ok(())
+    }
     pub async fn close(&self) {
         self.stop.cancel();
         self.tasks.close();
@@ -493,6 +797,12 @@ impl Db {
         let _ = tokio::time::timeout(Duration::from_secs(5), async {
             self.tasks.wait().await;
             self.pool.close().await;
+            if let Some(pool) = &self.auth_standard {
+                pool.close().await;
+            }
+            if let Some(pool) = &self.auth_team {
+                pool.close().await;
+            }
         })
         .await;
     }
@@ -511,4 +821,261 @@ pub fn now() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use crate::store::{Credential, Role, ServiceClass, Store};
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll, Waker},
+    };
+
+    async fn fixture() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            public_enrollment: true,
+            large_payload_slots: 2,
+            max_spool_bytes: 164 * 1024 * 1024,
+            background: false,
+            ..Config::default()
+        };
+        let db = Db::open(
+            &directory.path().join("state/relay.sqlite3"),
+            Arc::new(config),
+        )
+        .await
+        .unwrap();
+        (directory, Store::new(db))
+    }
+
+    fn poll_once<T: Future>(future: Pin<&mut T>) -> Poll<T::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    async fn service_id(store: &Store, class: ServiceClass) -> String {
+        let row = store
+            .db
+            .one(
+                "SELECT id FROM service_leases WHERE lane='request' AND service_class=?",
+                args![class.name()],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        s(&row, "id").to_owned()
+    }
+
+    async fn service_counts(store: &Store) -> Value {
+        let row = store
+            .db
+            .one(
+                "SELECT used_total,used_standard FROM service_resources WHERE lane='request'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        json!([row["used_total"], row["used_standard"]])
+    }
+
+    async fn node(store: &Store, class: ServiceClass) -> Credential {
+        let provisioned = store.provision("Synthetic", "Computer").await.unwrap();
+        let credential = Credential {
+            id: s(&provisioned, "node_id").to_owned(),
+            workspace: s(&provisioned, "workspace_id").to_owned(),
+            role: Role::Node,
+        };
+        if class == ServiceClass::Team {
+            store
+                .set_service_class(&credential.workspace, class)
+                .await
+                .unwrap();
+        }
+        credential
+    }
+
+    async fn poll_counts(store: &Store, credential: &Credential) -> Value {
+        let row = store
+            .db
+            .one(
+                "SELECT u.active_polls,p.active FROM workspace_usage u JOIN poll_credentials p ON p.credential_id=? AND p.role=? WHERE u.workspace_id=?",
+                args![&credential.id, credential.role.table(), &credential.workspace],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        json!([row["active_polls"], row["active"]])
+    }
+
+    #[tokio::test]
+    async fn public_service_cleanup_waits_for_its_class_and_decrements_once() {
+        let (_directory, store) = fixture().await;
+        let standard = store
+            .acquire_service("request", ServiceClass::Standard, 1)
+            .await
+            .unwrap();
+        let team = store
+            .acquire_service("request", ServiceClass::Team, 1)
+            .await
+            .unwrap();
+        let standard_id = service_id(&store, ServiceClass::Standard).await;
+        let team_id = service_id(&store, ServiceClass::Team).await;
+        assert_eq!(service_counts(&store).await, json!([2, 1]));
+        let held = store.db.control_slots[0]
+            .clone()
+            .acquire_many_owned(66)
+            .await
+            .unwrap();
+        let mut release =
+            std::pin::pin!(store.release_service(&standard_id, ServiceClass::Standard));
+        // Keep this exact future: the old fail-fast path returns BUSY here.
+        assert!(
+            poll_once(release.as_mut()).is_pending(),
+            "cleanup must wait for its class instead of abandoning the durable lease"
+        );
+        assert!(matches!(
+            store.db.control(ServiceClass::Standard).await,
+            Err(error) if error.0 == Error::BUSY.0
+        ));
+        assert_eq!(service_counts(&store).await, json!([2, 1]));
+        // Team cleanup never waits for or borrows the standard class.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            store.release_service(&team_id, ServiceClass::Team),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(service_counts(&store).await, json!([1, 1]));
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), release.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .release_service(&standard_id, ServiceClass::Standard)
+            .await
+            .unwrap();
+        assert_eq!(service_counts(&store).await, json!([0, 0]));
+        assert!(store
+            .db
+            .one(
+                "SELECT id FROM service_leases WHERE id=?",
+                args![&standard_id]
+            )
+            .await
+            .unwrap()
+            .is_none());
+        drop((standard, team));
+        store.db.close().await;
+    }
+
+    #[tokio::test]
+    async fn public_poll_cleanup_waits_for_its_class_and_decrements_once() {
+        let (_directory, store) = fixture().await;
+        let standard = node(&store, ServiceClass::Standard).await;
+        let team = node(&store, ServiceClass::Team).await;
+        let standard_id = store.acquire_poll(&standard, 35.0).await.unwrap();
+        let team_id = store.acquire_poll(&team, 35.0).await.unwrap();
+        let held = store.db.control_slots[0]
+            .clone()
+            .acquire_many_owned(66)
+            .await
+            .unwrap();
+        let mut release =
+            std::pin::pin!(store.release_poll_reserved(&standard_id, ServiceClass::Standard));
+        assert!(
+            poll_once(release.as_mut()).is_pending(),
+            "poll cleanup must wait for its class instead of abandoning its durable counters"
+        );
+        assert_eq!(poll_counts(&store, &standard).await, json!([1, 1]));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            store.release_poll_reserved(&team_id, ServiceClass::Team),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(poll_counts(&store, &team).await, json!([0, 0]));
+        assert_eq!(poll_counts(&store, &standard).await, json!([1, 1]));
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), release.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .release_poll_reserved(&standard_id, ServiceClass::Standard)
+            .await
+            .unwrap();
+        assert_eq!(poll_counts(&store, &standard).await, json!([0, 0]));
+        assert!(store
+            .db
+            .one("SELECT id FROM poll_leases WHERE id=?", args![&standard_id])
+            .await
+            .unwrap()
+            .is_none());
+        store.db.close().await;
+    }
+
+    #[tokio::test]
+    async fn public_service_cleanup_retries_a_transient_pool_timeout_with_the_same_id() {
+        let (_directory, store) = fixture().await;
+        let lease = store
+            .acquire_service("request", ServiceClass::Standard, 1)
+            .await
+            .unwrap();
+        let id = service_id(&store, ServiceClass::Standard).await;
+        // This is the existing SQLite pool's only connection; no extra pool.
+        let held = store.db.pool.acquire().await.unwrap();
+        let mut release = std::pin::pin!(store.release_service(&id, ServiceClass::Standard));
+        assert!(poll_once(release.as_mut()).is_pending());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(6), release.as_mut())
+                .await
+                .is_err(),
+            "a transient five-second pool timeout must retain the same cleanup future"
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), release.as_mut())
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .release_service(&id, ServiceClass::Standard)
+            .await
+            .unwrap();
+        assert_eq!(service_counts(&store).await, json!([0, 0]));
+        drop(lease);
+        store.db.close().await;
+    }
+
+    #[tokio::test]
+    async fn pending_public_cleanup_does_not_extend_the_five_second_shutdown_grace() {
+        let (_directory, store) = fixture().await;
+        let lease = store
+            .acquire_service("request", ServiceClass::Standard, 1)
+            .await
+            .unwrap();
+        let held = store.db.control_slots[0]
+            .clone()
+            .acquire_many_owned(66)
+            .await
+            .unwrap();
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(6), store.db.close())
+            .await
+            .expect("cleanup cannot extend the existing shutdown grace");
+        // close timed out waiting for cleanup, leaving the existing pool open.
+        // Releasing only these owned permits lets its tracked task finish.
+        assert!(!store.db.pool.is_closed());
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), store.db.tasks.wait())
+            .await
+            .unwrap();
+        assert_eq!(service_counts(&store).await, json!([0, 0]));
+        store.db.close().await;
+    }
 }

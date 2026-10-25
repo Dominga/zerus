@@ -3,7 +3,7 @@
 user's account. Linux uses /proc; macOS reuses test_kimi_native's reviewed
 exec capture and kernel argument-area oracle for the image, start and private
 environment. Run with HGS_KIMI_TEST_BIN=/absolute/path/to/a/pinned/kimi
-and HGS_KIMI_TEST_SHA256 set to one reviewed pin (otherwise skipped).
+and HGS_KIMI_TEST_SHA256 plus its sealed HGS_KIMI_TEST_RECORD.
 
 Kimi's updater replaces the executable it runs from, so each case runs its own
 copy with automatic updates off, never the given file or a shared install, and
@@ -20,6 +20,7 @@ an unfinished wire in a real Kimi; their refusals are unit-tested.
 import hashlib, http.server, io, json, os, shutil, subprocess, sys, tempfile, threading, time, unittest, uuid
 from pathlib import Path
 from unittest import mock
+from kimi_release import admitted_version
 if os.name != 'nt':
     import test_pause as lifecycle
     import test_kimi_native as guard
@@ -34,11 +35,6 @@ KIMI = os.environ.get('HGS_KIMI_TEST_BIN')
 KIMI_SHA256 = os.environ.get('HGS_KIMI_TEST_SHA256', '')
 GUARDED = [Path(path) for path in os.environ.get('HGS_KIMI_GUARD', '').split(os.pathsep) if path]
 EVIDENCE = os.environ.get('HGS_KIMI_EVIDENCE_DIR')
-# The reviewed builds: the maintained Kimi and the one installed for new sessions.
-REVIEWED = {'66f47536e40b02bb1d577cdd324768f73d39b8b9472e0ca140e73d8e225cd7de': '2.1.1',
-            '8ee7405d82958f0a50a3aab0773aba9e01057978bad93ba379eaf89e5b6111af': '2.2.0',
-            '4bab6f96c2c289368b7f05a04f66737c53a59ce740f932d8f149240584758efb': '2.1.1',
-            'dab42ead275f8a49e9ce30a6263f614fce5926455bed103d0d16940655619bf5': '2.2.0'}
 PLATFORM = '/kimi-platform'
 # Exactly these private values reach Kimi; no other KIMI_ key and no credential prefix.
 REQUIRED = ('HOME', 'KIMI_CODE_HOME', 'KIMI_CODE_BASE_URL', 'KIMI_CODE_NO_AUTO_UPDATE', 'KIMI_DISABLE_TELEMETRY',
@@ -51,6 +47,37 @@ CALL = 'call_fixture'
 MARKER = 'printf approved > approved-marker'
 DANGER = 'rm -rf scratch-fixture'
 FEEDBACK = 'Use a dry run instead'
+PLAN_PROMPT = 'Prepare the fixture plan.'
+PLAN_BODY = '# Fixture approval plan\n\n1. Add the isolated plan fixture.\n2. Verify approval and normal completion.'
+GOAL_OBJECTIVE = 'Завершить проверку отдельного intrinsic слоя и новой публикации без production'
+GOAL_CRITERION = 'Все 13 trophy/156 состояний проверены, включая g2★0, без двойного учёта'
+GOAL_OPTIONS = {
+    'manual': (
+        ('auto', 'Switch to Never Ask and start',
+         'Best if you want Kimi Code to keep working while you are away. Tools are approved automatically, and questions are skipped.',
+         'broader'),
+        ('yolo', 'Switch to Ask When Needed and start',
+         'Tools and plan changes are approved automatically. Kimi Code may still ask you questions.', 'broader'),
+        ('manual', 'Start in Always Ask',
+         'Keep approvals on. Kimi Code will ask before risky actions, so the goal may stop and wait for you.', 'once'),
+        ('cancel', 'Do not start', 'Return to the input box with your goal command.', 'once')),
+    'yolo': (
+        ('auto', 'Switch to Never Ask and start',
+         'Best if you want Kimi Code to keep working while you are away. Tools are approved automatically, and questions are skipped.',
+         'broader'),
+        ('yolo', 'Keep Ask When Needed and start',
+         'Tools and plan changes stay approved automatically. Kimi Code may still ask you questions.', 'once'),
+        ('cancel', 'Do not start', 'Return to the input box with your goal command.', 'once')),
+}
+
+
+def goal_mode(method):
+    if not method.startswith('test_goal_'):
+        return None
+    for mode in GOAL_OPTIONS:
+        if method.startswith('test_goal_' + mode + '_'):
+            return mode
+    raise ValueError('a goal scenario must name its manual or yolo mode')
 
 
 def digest(path):
@@ -204,9 +231,74 @@ def trust_chooser_2_2(screen, folder):
         not any(row.strip() for row in rows[rule + len(expected):])
 
 
+def content_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return '\n'.join(part.get('text', '') for part in content
+                         if isinstance(part, dict) and part.get('type') == 'text')
+    return ''
+
+
+def conversation_calls(body):
+    return [(call.get('id'), call.get('function', {}).get('name'))
+            for message in body.get('messages', []) if message.get('role') == 'assistant'
+            for call in message.get('tool_calls', [])]
+
+
+def call_names(body):
+    return [name for _, name in conversation_calls(body)]
+
+
+def tool_result(body, call_id):
+    for message in body.get('messages', []):
+        if message.get('role') == 'tool' and message.get('tool_call_id') == call_id:
+            return content_text(message.get('content'))
+    return None
+
+
+def native_plan_path(body, calls):
+    result = tool_result(body, calls[0][0])
+    paths = [line[len('Plan file: '):].strip() for line in (result or '').splitlines()
+             if line.startswith('Plan file: ')]
+    if len(paths) != 1:
+        raise ValueError('EnterPlanMode did not return exactly one native plan path')
+    path = paths[0]
+    normalized = path.replace('\\', '/')
+    absolute = path.startswith('/') or (len(path) > 2 and path[1] == ':' and path[2] in '/\\')
+    if not absolute or '/agents/main/plans/' not in normalized or not normalized.endswith('.md') \
+            or '..' in normalized.split('/'):
+        raise ValueError('EnterPlanMode returned an unsafe plan path')
+    return path
+
+
+def plan_action(body):
+    tools = {tool.get('function', {}).get('name') for tool in body.get('tools', [])}
+    if not tools:
+        return None
+    calls = conversation_calls(body)
+    names = [name for _, name in calls]
+    if not names:
+        return ('EnterPlanMode', {}) if 'EnterPlanMode' in tools else None
+    if names == ['EnterPlanMode']:
+        if 'Write' not in tools:
+            raise ValueError('native plan mode did not offer Write')
+        return 'Write', dict(path=native_plan_path(body, calls), content=PLAN_BODY)
+    if names == ['EnterPlanMode', 'Write']:
+        if 'ExitPlanMode' not in tools or tool_result(body, calls[1][0]) is None:
+            raise ValueError('native plan Write did not complete')
+        return 'ExitPlanMode', {}
+    if names == ['EnterPlanMode', 'Write', 'ExitPlanMode']:
+        result = tool_result(body, calls[2][0])
+        if result is not None and result.startswith('Exited plan mode.'):
+            return None
+        raise ValueError('ExitPlanMode did not complete successfully')
+    raise ValueError('unexpected native plan tool history: ' + repr(names))
+
+
 class Model(http.server.BaseHTTPRequestHandler):
-    """An OpenAI-compatible stream asking for one Bash call until a tool result
-    arrives, and Kimi's platform, which has nothing to offer."""
+    """An OpenAI-compatible stream driving one tool call or the native plan
+    sequence, and Kimi's platform, which has nothing to offer."""
 
     def log_message(self, *args):
         pass
@@ -245,10 +337,17 @@ class Model(http.server.BaseHTTPRequestHandler):
             data = dict(id='chat_fixture', object='chat.completion.chunk', model='fixture',
                         choices=[dict(index=0, delta=delta, finish_reason=finish)])
             self.wfile.write(b'data: ' + json.dumps(data).encode() + b'\n\n')
-        if 'Bash' in tools and not answered:
-            arguments = json.dumps(dict(command=self.server.command, description='Fixture command'))
+        action = plan_action(body) if self.server.plan else None
+        if not self.server.plan and self.server.tool in tools and not answered:
+            arguments = self.server.arguments
+            if arguments is None:
+                arguments = dict(command=self.server.command, description='Fixture command')
+            action = self.server.tool, arguments
+        if action is not None:
+            tool, arguments = action
+            call_id = CALL + '_' + tool if self.server.plan else CALL
             chunk(dict(role='assistant', content=None, tool_calls=[
-                dict(index=0, id=CALL, type='function', function=dict(name='Bash', arguments=arguments))]))
+                dict(index=0, id=call_id, type='function', function=dict(name=tool, arguments=json.dumps(arguments)))]))
             chunk({}, 'tool_calls')
         else:
             chunk(dict(role='assistant', content='Fixture complete.'))
@@ -257,11 +356,19 @@ class Model(http.server.BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
-def serve(command):
+def serve(command, tool='Bash', arguments=None, plan=False):
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
-    server.requests, server.platform, server.platform_completed, server.command = [], [], [], command
+    server.requests, server.platform, server.platform_completed = [], [], []
+    server.command, server.tool, server.arguments, server.plan = command, tool, arguments, plan
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+def model_config(port, permission_mode):
+    return ('default_model = "fixture"\ntelemetry = false\ndefault_permission_mode = "%s"\n'
+            '[providers.fixture]\ntype = "openai"\nbase_url = "http://127.0.0.1:%d/v1"\napi_key = "fixture-key"\n'
+            '[models.fixture]\nprovider = "fixture"\nmodel = "fixture"\nmax_context_size = 32768\n'
+            '[loop_control]\nmax_attempts_per_step = 1\n' % (permission_mode, port))
 
 
 class ApprovalCases:
@@ -309,9 +416,129 @@ class ApprovalCases:
         self.assertFalse((self.project / 'approved-marker').exists())
 
 
+class GoalCases:
+    def goal_answerable(self):
+        card = self.card()
+        self.assertEqual(card['source'], 'kimi_tool_approval')
+        self.assertEqual((card['approval'], card['approval_choices']), (True, True))
+        self.assertTrue(card['can_answer'], card['answer_unavailable_reason'])
+        self.assertEqual(card['answer_transport'], 'kimi_tui')
+        self.assertEqual(len(card['questions']), 1)
+        item = card['questions'][0]
+        self.assertEqual((item['id'], item['question'], item['header']),
+                         ('goal', 'Approve CreateGoal?', 'CreateGoal'))
+        self.assertEqual(item['body'], 'Start goal: %s\nDone when: %s' % (GOAL_OBJECTIVE, GOAL_CRITERION))
+        self.assertEqual((item['multi_select'], item['allow_other']), (False, False))
+        expected = GOAL_OPTIONS[self.goal_mode]
+        self.assertEqual(item['options'], [dict(id=id, label=label, description=description, scope=scope)
+                                          for id, label, description, scope in expected])
+        screen = ' '.join(self.screen().split())
+        self.assertIn('Approve CreateGoal?', screen)
+        rows = [' '.join(row.split()) for row in self.screen().splitlines()]
+        width = len(next(row.strip() for row in self.screen().splitlines()
+                         if row.strip() and set(row.strip()) == {'─'}))
+        # Every fixture character is one terminal cell; assert Kimi's exact truncation.
+        for prefix, text in (('Start goal: ', GOAL_OBJECTIVE), ('Done when: ', GOAL_CRITERION)):
+            line = '  ' + prefix + text
+            expected_line = line if len(line) <= width else line[:width - 3] + '...'
+            self.assertIn(expected_line.strip(), rows)
+        for number, (_, label, description, _) in enumerate(expected, 1):
+            self.assertIn('%d. %s' % (number, label), screen)
+            self.assertIn(description, screen)
+        return card
+
+    def wire_events(self, kind):
+        rows = [json.loads(line) for line in self.wire.read_text().splitlines()]
+        return [row for row in rows if row.get('type') == kind]
+
+    def assert_mode_change(self, before, modes):
+        after = self.wire_events('permission.set_mode')
+        self.assertEqual(after[:len(before)], before)
+        self.assertEqual([row.get('mode') for row in after[len(before):]], modes)
+
+    def assert_goal_created(self):
+        events = self.wire_events('goal.create')
+        self.assertEqual(len(events), 1, events)
+        self.assertEqual(events[0].get('objective'), GOAL_OBJECTIVE)
+        self.assertEqual(events[0].get('completionCriterion'), GOAL_CRITERION)
+        self.assertTrue(self.tool_results())
+        self.assertIn('Fixture complete.', self.screen())
+
+    def test_goal_yolo_keeps_ask_when_needed(self):
+        card = self.goal_answerable()
+        modes = self.wire_events('permission.set_mode')
+        self.assertEqual(self.decide(card, option='yolo'), {'decision': 'approved', 'selectedLabel': 'yolo'})
+        self.assert_goal_created()
+        self.assert_mode_change(modes, [])
+
+    def test_goal_yolo_auto_switches_to_never_ask(self):
+        card = self.goal_answerable()
+        modes = self.wire_events('permission.set_mode')
+        self.assertEqual(self.decide(card, option='auto'), {'decision': 'approved', 'selectedLabel': 'auto'})
+        self.assert_goal_created()
+        self.assert_mode_change(modes, ['auto'])
+
+    def test_goal_yolo_cancel_does_not_start(self):
+        card = self.goal_answerable()
+        modes = self.wire_events('permission.set_mode')
+        self.assertEqual(self.call('answer', self.payload(card, option='cancel'))['status'], 'answered')
+        self.assertEqual(self.until(lambda: self.resolved()), {'decision': 'cancelled', 'selectedLabel': 'cancel'})
+        self.assertEqual(self.wire_events('goal.create'), [])
+        self.assert_mode_change(modes, [])
+
+    def test_goal_manual_starts_in_manual(self):
+        card = self.goal_answerable()
+        modes = self.wire_events('permission.set_mode')
+        self.assertEqual(self.decide(card, option='manual'), {'decision': 'approved', 'selectedLabel': 'manual'})
+        self.assert_goal_created()
+        self.assert_mode_change(modes, [])
+
+
+class PlanCases:
+    def plan_answerable(self):
+        def pending():
+            cards = [card for card in self.inspect()['pending_questions'] if card['source'] == 'kimi_plan_review']
+            return cards[0] if len(cards) == 1 and cards[0].get('can_answer') else None
+        card = self.until(pending)
+        self.assertEqual(card['source'], 'kimi_plan_review')
+        self.assertTrue(card['plan_review'])
+        self.assertTrue(card['can_answer'], card['answer_unavailable_reason'])
+        self.assertEqual(card['answer_transport'], 'kimi_tui')
+        self.assertTrue(card['tool_call_id'])
+        self.assertEqual(len(card['questions']), 1)
+        item = card['questions'][0]
+        self.assertEqual((item['id'], item['question'], item['header'], item['body']),
+                         ('plan', 'Ready to build with this plan?', 'Plan', PLAN_BODY))
+        self.assertEqual(item['options'], [dict(id='approve', label='Approve', description=''),
+                                          dict(id='reject', label='Reject', description='')])
+        self.assertEqual((item['allow_other'], item['other_label'], item['other_description']),
+                         (True, 'Revise', 'Send feedback and keep planning'))
+        screen = ' '.join(self.screen().split())
+        self.assertIn('Ready to build with this plan?', screen)
+        for text in ('Fixture approval plan', 'Add the isolated plan fixture.',
+                     'Verify approval and normal completion.', '1. Approve', '2. Reject', '3. Revise'):
+            self.assertIn(text, screen)
+        active = self.binding(self.name).get('active_tools', {})
+        if 'ExitPlanMode' in active and card['tool_call_id'] not in active:
+            self.assertEqual(active['ExitPlanMode'].get('name'), 'ExitPlanMode')
+            self.assertTrue(card['can_answer'])
+        return card
+
+    def test_plan_review_approve(self):
+        card = self.plan_answerable()
+        self.assertEqual(Path(card['plan_path']).read_text(), PLAN_BODY)
+        self.assertEqual(self.decide(card, option='approve'),
+                         {'decision': 'approved', 'selectedLabel': 'Approve'})
+        exits = self.wire_events('plan_mode.exit')
+        self.assertEqual(len(exits), 1, exits)
+        primary = [body for body in self.server.requests if call_names(body)]
+        self.assertEqual(call_names(primary[-1]), ['EnterPlanMode', 'Write', 'ExitPlanMode'])
+        self.assertIn('Fixture complete.', self.screen())
+
+
 @unittest.skipUnless(KIMI and (sys.platform.startswith('linux') or sys.platform == 'darwin'),
                      'Set HGS_KIMI_TEST_BIN on Linux/macOS for a pinned native Kimi and local fake API')
-class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
+class NativeKimiApprovals(ApprovalCases, GoalCases, PlanCases, lifecycle.Harness):
     command = MARKER
     rows = None
 
@@ -320,14 +547,17 @@ class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
             self.command = DANGER
         if '_clipped_' in self._testMethodName:
             self.rows = 12
-        self.assertIn(KIMI_SHA256, REVIEWED, 'HGS_KIMI_TEST_SHA256 must be a reviewed pin')
-        self.version = REVIEWED[KIMI_SHA256]
+        self.version = admitted_version(KIMI, KIMI_SHA256)
         source = Path(KIMI).resolve()
         self.guards = seals([source, *GUARDED])
         self.assertEqual(self.guards[str(source)], KIMI_SHA256)
         self.assertFalse([path for path, sealed in self.guards.items() if sealed.startswith('unreadable')], self.guards)
         self.source, self.client, self.client_start = source, None, None
-        self.server = server = serve(self.command)
+        self.goal_mode = goal_mode(self._testMethodName)
+        self.plan_scenario = self._testMethodName.startswith('test_plan_')
+        arguments = dict(objective=GOAL_OBJECTIVE, completionCriterion=GOAL_CRITERION) if self.goal_mode else None
+        self.server = server = serve(self.command, 'CreateGoal' if self.goal_mode else 'Bash', arguments,
+                                     plan=self.plan_scenario)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         # A short private root keeps the trust chooser's folder on one row.
@@ -375,11 +605,7 @@ class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
         (self.project / 'scratch-fixture').mkdir()
         server, home = self.server, self.home
         home.mkdir()
-        (home / 'config.toml').write_text(
-            'default_model = "fixture"\ntelemetry = false\ndefault_permission_mode = "default"\n'
-            '[providers.fixture]\ntype = "openai"\nbase_url = "http://127.0.0.1:%d/v1"\napi_key = "fixture-key"\n'
-            '[models.fixture]\nprovider = "fixture"\nmodel = "fixture"\nmax_context_size = 32768\n'
-            '[loop_control]\nmax_attempts_per_step = 1\n' % server.server_port)
+        (home / 'config.toml').write_text(model_config(server.server_port, self.goal_mode or 'default'))
         (home / 'tui.toml').write_text('[upgrade]\nauto_install = false\n')
         self.assertEqual(Path(shutil.which('kimi', path=self.env['PATH'])).resolve(),
                          (self.bin / 'kimi').resolve() if sys.platform == 'darwin' else self.image)
@@ -546,13 +772,17 @@ class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
             state = self.inspect()
             return state if state.get('first_message_can_send') else None
         state = self.until(started)
-        payload = dict(request_id=str(uuid.uuid4()), text='Run the fixture command.', expected_run_id=state['run_id'],
+        text = 'Start the fixture goal.' if self.goal_mode else 'Run the fixture command.'
+        marker = '1. Switch to Never Ask and start' if self.goal_mode else '1. Approve once'
+        if self.plan_scenario:
+            text, marker = PLAN_PROMPT, 'Ready to build with this plan?'
+        payload = dict(request_id=str(uuid.uuid4()), text=text, expected_run_id=state['run_id'],
                        expected_conversation_id=state.get('conversation_id') or '')
         self.assertEqual(self.call('send', payload)['status'], 'submitted')
 
         def asked():
             wires = list(self.home.glob('sessions/*/*/agents/main/wire.jsonl'))
-            if len(wires) == 1 and '"kind":"approval"' in wires[0].read_text() and '1. Approve once' in self.screen():
+            if len(wires) == 1 and '"kind":"approval"' in wires[0].read_text() and marker in self.screen():
                 return wires[0]
         self.wire = self.until(asked)
         self.assert_process('approval')
@@ -584,7 +814,7 @@ class NativeKimiApprovals(ApprovalCases, lifecycle.Harness):
         return dict(request_id=str(uuid.uuid4()), expected_run_id=card['run_id'],
                     expected_conversation_id=card['conversation_id'], question_id=card['question_id'],
                     expected_question_hash=card['question_hash'],
-                    answers=[dict(question_id='approval', selected_option_ids=[option] if option else [], text=text)])
+                    answers=[dict(question_id=card['questions'][0]['id'], selected_option_ids=[option] if option else [], text=text)])
 
     def resolved(self):
         rows = [json.loads(line) for line in self.wire.read_text().splitlines() if '"interaction.resolved"' in line]
@@ -684,7 +914,7 @@ class FixtureControls(unittest.TestCase):
             def prepare(case):
                 raise OSError('synthetic copy failure')
 
-            with mock.patch.multiple(module, KIMI=str(pin), KIMI_SHA256=sha, REVIEWED={sha: '2.1.1'}, GUARDED=[]), \
+            with mock.patch.multiple(module, KIMI=str(pin), KIMI_SHA256=sha, admitted_version=mock.Mock(return_value='2.1.1'), GUARDED=[]), \
                     mock.patch.object(lifecycle.Harness, 'setUp', base_setup), \
                     mock.patch.object(NativeKimiApprovals, 'prepare', prepare), \
                     mock.patch.object(NativeKimiApprovals, 'tearDown', lambda case: seen.append(dict(case.env))):
@@ -839,6 +1069,32 @@ class FixtureControls(unittest.TestCase):
         self.assertIn('"name": "Bash"', first)
         self.assertIn(json.dumps(json.dumps(dict(command=MARKER, description='Fixture command')))[1:-1], first)
         self.assertIn('Fixture complete.', post([dict(role='tool', content='done')]))
+
+    def test_the_model_writes_the_native_plan_before_exit(self):
+        for path in ('/tmp/private/agents/main/plans/example.md',
+                     'C:\\private\\agents\\main\\plans\\example.md'):
+            with self.subTest(path=path):
+                body = dict(tools=[dict(function=dict(name=name))
+                                   for name in ('EnterPlanMode', 'Write', 'ExitPlanMode')],
+                            messages=[dict(role='user', content=PLAN_PROMPT)])
+
+                def called(name, call_id):
+                    body['messages'].append(dict(role='assistant', tool_calls=[
+                        dict(id=call_id, type='function', function=dict(name=name, arguments='{}'))]))
+
+                self.assertEqual(plan_action(body), ('EnterPlanMode', {}))
+                called('EnterPlanMode', 'call_fixture_EnterPlanMode')
+                body['messages'].append(dict(role='tool', tool_call_id='call_fixture_EnterPlanMode',
+                                             content='Plan mode is now active.\nPlan file: ' + path))
+                self.assertEqual(plan_action(body), ('Write', dict(path=path, content=PLAN_BODY)))
+                called('Write', 'call_fixture_Write')
+                body['messages'].append(dict(role='tool', tool_call_id='call_fixture_Write', content='Wrote plan'))
+                self.assertEqual(plan_action(body), ('ExitPlanMode', {}))
+                called('ExitPlanMode', 'call_fixture_ExitPlanMode')
+                body['messages'].append(dict(role='tool', tool_call_id='call_fixture_ExitPlanMode',
+                                             content='Exited plan mode. Plan mode deactivated.'))
+                self.assertIsNone(plan_action(body))
+                self.assertEqual(call_names(body), ['EnterPlanMode', 'Write', 'ExitPlanMode'])
 
 
 if __name__ == '__main__':

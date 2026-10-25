@@ -65,6 +65,11 @@ private slots:
     void compactRowsKeepTheirGeometryAndHideDetails_data();
     void compactRowsKeepTheirGeometryAndHideDetails();
     void compactRowsHaveAccessibleExpandControls();
+    void sessionRowDoubleClickTogglesAndKeepsTheExpandIcon();
+    void sessionRowDoubleClickRespectsOtherControlsAndSelection();
+    void shiftSelectionUsesVisibleSessionRange();
+    void shiftSelectionFollowsKeysAcrossRefreshAndAnchorRemoval();
+    void keyboardShiftSelectionKeepsTheOpenConversation();
     void compactRowsExposeElidedFields();
     void compactRowPreferencesKeepExactBoundedIdentities();
     void mutedAttentionUsesNeutralPresentation_data();
@@ -225,6 +230,173 @@ void TestWorkspace::compactRowsHaveAccessibleExpandControls()
     for (auto *control : moved) QVERIFY(control->property("sessionKey").toString().toInt() >= 250);
     list.setProperty("expansion", 0.0); list.syncRowExpandButtons();
     for (auto *control : moved) QVERIFY(!control->isVisible());
+}
+
+void TestWorkspace::sessionRowDoubleClickTogglesAndKeepsTheExpandIcon()
+{
+    ListProbe list; list.setItemDelegate(new SessionDelegate(&list)); list.resize(340, 220);
+    auto *row = new QListWidgetItem(&list); row->setData(SessionRoles::Key, "target");
+    row->setData(SessionRoles::Title, "Target session"); row->setData(SessionRoles::Agent, "opencode");
+    row->setData(SessionRoles::Status, "Ready");
+    auto *other = new QListWidgetItem(&list); other->setData(SessionRoles::Key, "other");
+    other->setData(SessionRoles::Title, "Other session"); list.setCurrentItem(other); list.show();
+    QTRY_VERIFY(list.isVisible()); list.syncRowExpandButtons();
+    QVERIFY(list.findChildren<QToolButton *>("compactSessionRow").isEmpty());
+    QVERIFY(list.findChildren<QToolButton *>("expandSessionRow").isEmpty());
+    QStyleOptionViewItem option; list.initViewItemOption(&option); option.widget = &list;
+    option.rect = list.visualItemRect(row); const auto index = list.model()->index(0, 0);
+    QVERIFY(SessionDelegate::rowDensityRect(option, index).isEmpty());
+    const auto title = SessionDelegate::titleLayout(option, index, SessionDelegate::statusForView(option, index));
+    QCOMPARE(title.provider.right(), sessionCardRect(option.rect).right() - 12);
+    QSignalSpy compact(&list, &SessionList::rowCompacted), expand(&list, &SessionList::rowExpanded);
+    connect(&list, &SessionList::rowCompacted, &list, [&](const QString &key) {
+        QCOMPARE(key, QString("target")); row->setData(SessionRoles::RowCollapsed, true); list.doItemsLayout(); list.syncRowExpandButtons();
+    });
+    connect(&list, &SessionList::rowExpanded, &list, [&](const QString &key) {
+        QCOMPARE(key, QString("target")); row->setData(SessionRoles::RowCollapsed, false); list.doItemsLayout(); list.syncRowExpandButtons();
+    });
+    const auto doubleClick = [&] {
+        const auto point = list.visualItemRect(row).center();
+        QTest::mouseDClick(list.viewport(), Qt::LeftButton, {}, point);
+        QTest::mouseRelease(list.viewport(), Qt::LeftButton, {}, point);
+    };
+    QTest::mouseClick(list.viewport(), Qt::LeftButton, {}, list.visualItemRect(row).center()); doubleClick();
+    QCOMPARE(compact.size(), 1); QVERIFY(row->data(SessionRoles::RowCollapsed).toBool());
+    QCOMPARE(list.visualItemRect(row).height(), 40); QCOMPARE(list.currentItem(), row); QVERIFY(row->isSelected());
+    doubleClick(); QCOMPARE(expand.size(), 1); QVERIFY(!row->data(SessionRoles::RowCollapsed).toBool());
+    QVERIFY(list.visualItemRect(row).height() > 40);
+    doubleClick(); QCOMPARE(compact.size(), 2); QVERIFY(row->data(SessionRoles::RowCollapsed).toBool());
+    QPointer<QToolButton> control;
+    for (auto *button : list.findChildren<QToolButton *>("expandSessionRow"))
+        if (button->isVisible()) control = button;
+    QVERIFY(control); QCOMPARE(control->size(), QSize(24, 24));
+    QVERIFY(control->accessibleName().contains("Expand session row: Target session"));
+    auto *accessible = QAccessible::queryAccessibleInterface(control); QVERIFY(accessible);
+    QCOMPARE(accessible->role(), QAccessible::Button); QVERIFY(accessible->actionInterface());
+    const auto iconPoint = control->geometry().center();
+    QTest::mouseClick(control, Qt::LeftButton); QCOMPARE(expand.size(), 2);
+    QVERIFY(!row->data(SessionRoles::RowCollapsed).toBool());
+    // The disappearing icon must not let the second click compact the row again.
+    QTest::mouseDClick(list.viewport(), Qt::LeftButton, {}, iconPoint);
+    QTest::mouseRelease(list.viewport(), Qt::LeftButton, {}, iconPoint);
+    QCOMPARE(compact.size(), 2); QCOMPARE(expand.size(), 2);
+    QVERIFY(!row->data(SessionRoles::RowCollapsed).toBool());
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QVERIFY(list.findChildren<QToolButton *>("compactSessionRow").isEmpty());
+    QVERIFY(list.findChildren<QToolButton *>("expandSessionRow").isEmpty());
+    // Suppression belongs only to the vanished button, not the rest of the row.
+    doubleClick(); QCOMPARE(compact.size(), 3); QVERIFY(row->data(SessionRoles::RowCollapsed).toBool());
+    QCOMPARE(list.currentItem(), row); QVERIFY(row->isSelected()); QVERIFY(!other->isSelected());
+}
+
+void TestWorkspace::sessionRowDoubleClickRespectsOtherControlsAndSelection()
+{
+    ListProbe list; list.setItemDelegate(new SessionDelegate(&list)); list.resize(340, 640);
+    const auto add = [&](const QString &key) {
+        auto *item = new QListWidgetItem(key, &list); item->setData(SessionRoles::Key, key); item->setData(SessionRoles::Title, key); return item;
+    };
+    auto *header = add("header"); header->setData(SessionRoles::Header, true);
+    auto *a = add("a"); a->setData(SessionRoles::HasChildren, true); a->setData(SessionRoles::Children, "1");
+    auto *child = add("child"); child->setData(SessionRoles::ChildId, "child");
+    auto *pending = add("pending"); pending->setData(SessionRoles::LaunchId, "launching");
+    auto *disabled = add("disabled"); disabled->setFlags(disabled->flags() & ~Qt::ItemIsEnabled);
+    auto *b = add("b"); list.setCurrentItem(a); list.show(); QTRY_VERIFY(list.isVisible());
+    QSignalSpy compact(&list, &SessionList::rowCompacted), expand(&list, &SessionList::rowExpanded);
+    const auto doubleClick = [&](QListWidgetItem *item, Qt::KeyboardModifiers modifiers = {}, Qt::MouseButton button = Qt::LeftButton) {
+        const auto point = list.visualItemRect(item).center();
+        QTest::mouseDClick(list.viewport(), button, modifiers, point);
+        QTest::mouseRelease(list.viewport(), button, modifiers, point);
+    };
+    for (auto *item : {header, child, pending, disabled}) doubleClick(item);
+    const auto children = SessionList::childrenControlRect(list.visualItemRect(a), list.model()->index(list.row(a), 0), list.font());
+    QVERIFY(!children.isEmpty()); QTest::mouseDClick(list.viewport(), Qt::LeftButton, {}, children.center());
+    QTest::mouseClick(list.viewport(), Qt::LeftButton, {}, list.visualItemRect(a).center());
+    QTest::mouseClick(list.viewport(), Qt::LeftButton, Qt::ControlModifier, list.visualItemRect(b).center());
+    const auto keys = [&] { QSet<QString> result; for (const auto *item : list.selectedItems()) result.insert(item->data(SessionRoles::Key).toString()); return result; };
+    QCOMPARE(keys(), (QSet<QString>{"a", "b"}));
+    for (auto modifiers : {Qt::ControlModifier, Qt::MetaModifier, Qt::ShiftModifier, Qt::AltModifier}) {
+        doubleClick(b, modifiers); QCOMPARE(keys(), (QSet<QString>{"a", "b"}));
+    }
+    // Real double-click gestures begin with an ordinary click. Ctrl toggles
+    // once, and Shift selects the range once, before the suppressed release.
+    QTest::mouseClick(list.viewport(), Qt::LeftButton, Qt::ControlModifier, list.visualItemRect(b).center());
+    QCOMPARE(keys(), (QSet<QString>{"a"}));
+    doubleClick(b, Qt::ControlModifier); QCOMPARE(keys(), (QSet<QString>{"a"}));
+    QTest::mouseClick(list.viewport(), Qt::LeftButton, {}, list.visualItemRect(a).center());
+    QTest::mouseClick(list.viewport(), Qt::LeftButton, Qt::ShiftModifier, list.visualItemRect(b).center());
+    QCOMPARE(keys(), (QSet<QString>{"a", "b"}));
+    doubleClick(b, Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"a", "b"}));
+    QCOMPARE(list.currentItem(), a);
+    doubleClick(b, {}, Qt::RightButton);
+    list.setProperty("expansion", 0.0); list.doItemsLayout(); doubleClick(a);
+    QCOMPARE(compact.size(), 0); QCOMPARE(expand.size(), 0);
+}
+
+void TestWorkspace::shiftSelectionUsesVisibleSessionRange()
+{
+    SessionList list; list.resize(320, 420);
+    const auto add = [&](const QString &key) { auto *item = new QListWidgetItem(key, &list); item->setData(SessionRoles::Key, key); return item; };
+    auto *header = add("header"); header->setData(SessionRoles::Header, true);
+    auto *a = add("a"); auto *child = add("child"); child->setData(SessionRoles::ChildId, "child");
+    auto *b = add("b"); auto *launch = add("launch"); launch->setData(SessionRoles::LaunchId, "pending");
+    auto *c = add("c"); auto *hidden = add("hidden"); hidden->setHidden(true); auto *d = add("d"); auto *e = add("e");
+    list.show();
+    const auto click = [&](QListWidgetItem *item, Qt::KeyboardModifiers modifiers = {}) {
+        QTest::mouseClick(list.viewport(), Qt::LeftButton, modifiers, list.visualItemRect(item).center());
+    };
+    const auto keys = [&] { QSet<QString> result; for (const auto *item : list.selectedItems()) result.insert(item->data(SessionRoles::Key).toString()); return result; };
+    click(a); click(b, Qt::ControlModifier); QCOMPARE(keys(), (QSet<QString>{"a", "b"}));
+    click(d, Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"b", "c", "d"})); QCOMPARE(list.currentItem(), a);
+    click(e, Qt::ControlModifier | Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"b", "c", "d", "e"}));
+    click(a, Qt::MetaModifier); QCOMPARE(keys(), (QSet<QString>{"a", "b", "c", "d", "e"}));
+    click(c, Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"a", "b", "c"}));
+    click(e, Qt::MetaModifier | Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"a", "b", "c", "d", "e"}));
+    click(header, Qt::ShiftModifier); click(child, Qt::ControlModifier); click(launch, Qt::MetaModifier);
+    QCOMPARE(keys(), (QSet<QString>{"a", "b", "c", "d", "e"}));
+    QVERIFY(!hidden->isSelected()); QCOMPARE(list.currentItem(), a); QVERIFY(list.bulkSelecting());
+}
+
+void TestWorkspace::shiftSelectionFollowsKeysAcrossRefreshAndAnchorRemoval()
+{
+    SessionList list; list.resize(320, 420);
+    const auto populate = [&](const QStringList &keys) {
+        list.clear();
+        for (const auto &key : keys) { auto *row = new QListWidgetItem(key, &list); row->setData(SessionRoles::Key, key); }
+        list.setCurrentRow(keys.indexOf("open"));
+    };
+    const auto click = [&](const QString &key, Qt::KeyboardModifiers modifiers) {
+        for (int i = 0; i < list.count(); ++i) if (list.item(i)->data(SessionRoles::Key) == key)
+            QTest::mouseClick(list.viewport(), Qt::LeftButton, modifiers, list.visualItemRect(list.item(i)).center());
+    };
+    const auto keys = [&] { QSet<QString> result; for (const auto *item : list.selectedItems()) result.insert(item->data(SessionRoles::Key).toString()); return result; };
+    populate({"open", "anchor", "other", "last"}); list.show(); click("anchor", Qt::ControlModifier);
+    // Rebuild with new item objects and order: the anchor is its key, never its old row index.
+    populate({"open", "other", "anchor", "inserted", "last"}); click("last", Qt::ShiftModifier);
+    QCOMPARE(keys(), (QSet<QString>{"anchor", "inserted", "last"})); QCOMPARE(list.currentRow(), 0);
+    list.item(2)->setHidden(true); click("last", Qt::ShiftModifier);
+    QCOMPARE(keys(), (QSet<QString>{"open", "other", "inserted", "last"})); QVERIFY(!list.item(2)->isSelected());
+    populate({"open", "last"}); click("last", Qt::ShiftModifier);
+    QCOMPARE(keys(), (QSet<QString>{"open", "last"}));
+    list.clearBulkSelection(); list.setCurrentRow(-1); click("last", Qt::ShiftModifier);
+    QCOMPARE(keys(), (QSet<QString>{"last"})); QVERIFY(!list.currentItem());
+}
+
+void TestWorkspace::keyboardShiftSelectionKeepsTheOpenConversation()
+{
+    SessionList list; list.resize(320, 240);
+    for (const auto &key : {"a", "header", "b", "hidden", "c", "d"}) {
+        auto *row = new QListWidgetItem(key, &list); row->setData(SessionRoles::Key, key);
+    }
+    list.item(1)->setData(SessionRoles::Header, true); list.item(3)->setHidden(true);
+    list.setCurrentRow(2); list.show(); list.setFocus();
+    const auto keys = [&] { QSet<QString> result; for (const auto *item : list.selectedItems()) result.insert(item->data(SessionRoles::Key).toString()); return result; };
+    QTest::keyClick(&list, Qt::Key_Down, Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"b", "c"}));
+    QTest::keyClick(&list, Qt::Key_Down, Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"b", "c", "d"}));
+    QTest::keyClick(&list, Qt::Key_Up, Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"b", "c"}));
+    QTest::keyClick(&list, Qt::Key_End, Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"b", "c", "d"}));
+    QTest::keyClick(&list, Qt::Key_Home, Qt::ControlModifier | Qt::ShiftModifier); QCOMPARE(keys(), (QSet<QString>{"a", "b", "c", "d"}));
+    QCOMPARE(list.currentRow(), 2); QTest::keyClick(&list, Qt::Key_Escape); QVERIFY(list.selectedItems().isEmpty());
+    QVERIFY(!list.bulkSelecting());
 }
 
 void TestWorkspace::compactRowPreferencesKeepExactBoundedIdentities()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot synthetic picker UI fixture on a disposable GitHub-hosted VM only."""
+"""One finite synthetic UI suite on a disposable GitHub-hosted VM only."""
 import hashlib
 import json
 import os
@@ -17,10 +17,25 @@ import zipfile
 
 RUNNER = "app.zerus.mobile.SessionProjectSmokeInstrumentation"
 CASES = "current_selection,close_no_write,durable_single_post,route_refusal,original_receipt,stale_navigation"
+RESULT_NAMESPACE = "project"
+RESULT_PREFIX = "Session project smoke passed:"
+APP_CLASSES = {"Lapp/zerus/mobile/SessionProjectController;", "Lapp/zerus/mobile/SessionProjectProtocol;"}
 IMAGE = "system-images;android-35;google_apis;x86_64"
 SERIAL = "emulator-5554"
 REVISIONS = {"emulator": "37.2.12", IMAGE: "9.0.0"}
-HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1"})
+HOSTED_IMAGES = frozenset({"20261012.334.1", "20261018.339.1", "20261023.334.3"})
+
+
+def select_suite(arguments):
+    """Only these two reviewed finite runners; no arbitrary instrumentation/argv injection."""
+    global RUNNER, CASES, RESULT_NAMESPACE, RESULT_PREFIX, APP_CLASSES
+    assert arguments in ([], ["--approval-choices"]), "unknown UI suite"
+    if arguments:
+        RUNNER = "app.zerus.mobile.ApprovalChoicesSmokeInstrumentation"
+        CASES = "countdown_once,broader_cancel,broader_confirm,card_replacement,feedback_keyboard,lifecycle_no_submit,readonly_stale_identity"
+        RESULT_NAMESPACE = "approval"
+        RESULT_PREFIX = "Approval choices smoke passed:"
+        APP_CLASSES = {"Lapp/zerus/mobile/QuestionUiKt;", "Lapp/zerus/mobile/QuestionPolicies;", "Lapp/zerus/mobile/ApprovalReview;"}
 
 
 def adb_server_command(adb):
@@ -78,25 +93,136 @@ def validate_inputs(environment, pins):
         assert re.fullmatch(r"https://dl\.google\.com/android/repository/(?:sys-img/google_apis/)?[A-Za-z0-9_.-]+\.zip", archive["url"])
 
 
+def approval_progress_order():
+    """Diagnostic order only; no status record can replace the final result oracle."""
+    assert RESULT_NAMESPACE == "approval" and len(CASES.split(",")) == 7
+    setup = [(stage, "-", 0) for stage in ("ON_START", "STORE_BEGIN", "STORE_READY", "BOOTSTRAP_BEGIN",
+             "ACTIVITY_LAUNCH_BEGIN", "ACTIVITY_LAUNCH_READY", "BOOTSTRAP_READY")]
+    return setup + [(stage, case, index + (stage == "CASE_COMPLETE")) for index, case in enumerate(CASES.split(","))
+                    for stage in ("CASE_BEGIN", "CASE_COMPLETE")]
+
+
 def instrumentation_result(text):
     """Require the one complete custom-runner result, including every case ID."""
     fields, codes = {}, []
+    progress, pending = [], None
     for line in text.splitlines():
         if not line:
             continue
+        if line.startswith("INSTRUMENTATION_STATUS: "):
+            assert RESULT_NAMESPACE == "approval" and not fields and not codes and pending is None and len(progress) < 32
+            key, separator, value = line.removeprefix("INSTRUMENTATION_STATUS: ").partition("=")
+            assert key == "zerus_approval_progress" and separator and len(value) <= 160
+            match = re.fullmatch(r"1\|([1-9][0-9]?)\|([A-Z_]+)\|(-|[a-z_]+)\|([0-7])\|(0|[1-9][0-9]{0,18})", value)
+            assert match is not None
+            sequence, stage, case, completed, elapsed = match.groups()
+            sequence, completed, elapsed = int(sequence), int(completed), int(elapsed)
+            order = approval_progress_order()
+            assert sequence == len(progress) + 1 and sequence <= len(order)
+            assert (stage, case, completed) == order[sequence - 1]
+            assert elapsed <= 2 ** 63 - 1 and (not progress or elapsed >= progress[-1])
+            pending = elapsed
+            continue
+        if line.startswith("INSTRUMENTATION_STATUS_CODE: "):
+            assert pending is not None and line == "INSTRUMENTATION_STATUS_CODE: 1"
+            progress.append(pending)
+            pending = None
+            continue
+        assert pending is None, "truncated approval progress frame"
         if line.startswith("INSTRUMENTATION_CODE: "):
             codes.append(line.removeprefix("INSTRUMENTATION_CODE: "))
             continue
         assert line.startswith("INSTRUMENTATION_RESULT: "), line
         key, separator, value = line.removeprefix("INSTRUMENTATION_RESULT: ").partition("=")
-        assert separator and key not in fields and key in {"project_cases", "project_case_ids", "stream"}
+        assert separator and key not in fields and key in {RESULT_NAMESPACE + "_cases", RESULT_NAMESPACE + "_case_ids", "stream"}
         fields[key] = value
-    assert codes == ["-1"] and set(fields) == {"project_cases", "project_case_ids", "stream"}
-    assert fields["project_cases"] == "6" and fields["project_case_ids"].split(",") == CASES.split(",")
-    assert fields["stream"].startswith("Session project smoke passed:")
+    assert codes == ["-1"] and set(fields) == {RESULT_NAMESPACE + "_cases", RESULT_NAMESPACE + "_case_ids", "stream"}
+    assert fields[RESULT_NAMESPACE + "_cases"] == str(len(CASES.split(","))) and fields[RESULT_NAMESPACE + "_case_ids"].split(",") == CASES.split(",")
+    assert fields["stream"].startswith(RESULT_PREFIX)
+    assert pending is None
+    if RESULT_NAMESPACE == "approval":
+        assert len(progress) == len(approval_progress_order())
     return fields
 
 
+def phone_service_ready(run, alive, device, boot_end):
+    """Require the already-used phone service within the original shared boot deadline."""
+    index = 0
+    while time.monotonic() < boot_end:
+        alive()
+        remaining = boot_end - time.monotonic()
+        assert remaining > 0, "phone service boot deadline"
+        result = run("phone-ready-" + str(index), [*device, "service", "check", "phone"], min(10, remaining))
+        assert time.monotonic() < boot_end, "phone service boot deadline"
+        if result.strip() == "Service phone: found":
+            return
+        assert result.strip() == "Service phone: not found", "unknown phone service readiness"
+        index += 1
+        time.sleep(min(1, max(0, boot_end - time.monotonic())))
+    raise AssertionError("phone service boot deadline")
+
+
+def failure_diagnostics(run, alive, device):
+    """One bounded read on the still-owned emulator; never replace the primary failure."""
+    try:
+        alive()
+        run("failure-logcat", [*device, "logcat", "-d", "-b", "crash", "-b", "main", "-b", "system", "-t", "400",
+                               "ZerusApprovalUI:I", "AndroidRuntime:E", "*:S"], 5)
+        return {"status": "captured", "scope": "owned disposable emulator, last400 crash/main/system records, fixture/runtime tags only"}
+    except BaseException as error:
+        return {"status": "unknown", "error": type(error).__name__}
+
+
+# BEGIN APPROVAL_FOCUS_DIAGNOSTIC definition
+# Android 15 source references, not installed-image equivalence or a focus-owner conclusion:
+# frameworks/native @ android-15.0.0_r1, services/inputflinger/dispatcher/EventLogTags.logtags
+# (SHA256 c7e8aedc514b4ad36b9606b00e106a35aa3542852e566f6c790a118bba669dfb) defines input_focus=62001.
+# InputDispatcher.cpp at the same tag writes entering/leaving channel names and reasons at lines1720-1723;
+# InputMonitor.java writes focus requests. frameworks/base/core/java/android/app/EventLogTags.logtags
+# (SHA256 5963f351940253b23bd595d8af3c371c3cc56832e04adfb846279ef870d12468) defines the five lifecycle tags.
+# Sources: https://android.googlesource.com/platform/frameworks/native/+/android-15.0.0_r1/services/inputflinger/dispatcher/EventLogTags.logtags
+# https://android.googlesource.com/platform/frameworks/base/+/android-15.0.0_r1/core/java/android/app/EventLogTags.logtags
+FOCUS_EVENT_TAGS = ("input_focus", "wm_on_resume_called", "wm_on_paused_called", "wm_on_stop_called",
+                    "wm_on_top_resumed_gained_called", "wm_on_top_resumed_lost_called")
+
+
+def focus_event_observation(text):
+    """Summarize a bounded metadata tail; the unchanged raw artifact retains channel/component names."""
+    assert len(text.encode("utf-8")) <= 65536, "focus event byte cap"
+    counts = dict.fromkeys(FOCUS_EVENT_TAGS, 0)
+    times, headers = [], 0
+    for line in text.splitlines():
+        if not line:
+            continue
+        assert len(line) <= 1024, "focus event line cap"
+        if line == "--------- beginning of events":
+            headers += 1
+            assert headers == 1 and not times, "focus event header"
+            continue
+        match = re.fullmatch(r"\s*([0-9]{1,12})\.([0-9]{3})\s+[0-9]{1,10}\s+[0-9]{1,10}\s+[IWEF]\s+"
+                             r"([a-z_]+)\s*:\s*(\[[ -~]{1,768}\])", line)
+        assert match and match[3] in counts, "unknown focus event metadata"
+        at = int(match[1]) * 1000 + int(match[2])
+        assert len(times) < 128 and (not times or at >= times[-1]), "focus event order/count"
+        times.append(at)
+        counts[match[3]] += 1
+    return {"status": "captured" if times else "empty", "records": len(times), "focus_records": counts["input_focus"],
+            "tags": counts, "first_monotonic_ms": times[0] if times else None, "last_monotonic_ms": times[-1] if times else None,
+            "scope": "last128 events-buffer records before tag filtering; metadata only, no complete-history or focus-owner claim"}
+
+
+def focus_failure_diagnostics(run, alive, device):
+    """One independent failure-only read within the original run deadline; never retries or changes UI state."""
+    try:
+        alive()
+        text = run("failure-focus-events", [*device, "logcat", "-d", "-b", "events", "-v", "threadtime", "-v", "monotonic",
+                                            "-v", "printable", "-t", "128", *[tag + ":I" for tag in FOCUS_EVENT_TAGS], "*:S"], 5)
+        return focus_event_observation(text)
+    except BaseException as error:
+        return {"status": "unknown", "error": type(error).__name__, "scope": "failure-only focus metadata capture; raw output kept when available"}
+
+
+# END APPROVAL_FOCUS_DIAGNOSTIC definition
 def certificate_digest(text):
     lines = [line for line in text.splitlines() if "certificate SHA-256 digest:" in line]
     assert len(lines) == 1
@@ -209,6 +335,8 @@ def main():
     source_before = {}
     apk_before = {}
     success = False
+    instrumentation_started = False
+    primary_failure, diagnostics = None, None
 
     def save(name, value):
         with (evidence / name).open("x") as output:
@@ -294,8 +422,8 @@ def main():
         certificate = matching_signers(*certificate_outputs)
         xml = run("test-manifest", [build / "aapt", "dump", "xmltree", test, "AndroidManifest.xml"])
         instrumentation_manifest(xml)
-        assert "Lapp/zerus/mobile/SessionProjectSmokeInstrumentation;" in defined_classes(test)
-        assert {"Lapp/zerus/mobile/SessionProjectController;", "Lapp/zerus/mobile/SessionProjectProtocol;"} <= defined_classes(app)
+        assert "L" + RUNNER.replace(".", "/") + ";" in defined_classes(test)
+        assert APP_CLASSES <= defined_classes(app)
         for label, apk, package in (("app", app, "app.zerus.mobile"), ("test", test, "app.zerus.mobile.test")):
             assert "package: name='" + package + "'" in run(label + "-package", [build / "aapt", "dump", "badging", apk])
         apk_before = {str(app): sha(app), str(test): sha(test)}
@@ -342,6 +470,7 @@ def main():
             time.sleep(min(1, max(0, boot_end - time.monotonic())))
         assert booted
         device = [*adb_args, "-s", SERIAL, "shell"]
+        phone_service_ready(run, alive, device, boot_end)
         for name, args in (("wifi-off", ["svc", "wifi", "disable"]), ("data-off", ["svc", "data", "disable"]),
                            ("airplane", ["cmd", "connectivity", "airplane-mode", "enable"])):
             alive()
@@ -367,10 +496,20 @@ def main():
             installed = run("install-" + label, [*adb_args, "-s", SERIAL, "install", "--no-streaming", apk], 60)
             assert len(re.findall(r"^Success$", installed, re.M)) == 1 and "Failure" not in installed
         alive()
-        output = run("instrumentation", [*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 90)
+        instrumentation_started = True
+        # Passing runs take about a minute; slow standard runners have needed 1.3-1.8 times as long.
+        output = run("instrumentation", [*device, "am", "instrument", "-w", "-r", "app.zerus.mobile.test/" + RUNNER], 240)
         alive()
         save("instrumentation-result.json", instrumentation_result(output))
         success = True
+    except BaseException as error:
+        primary_failure = {"error": type(error).__name__, "message": str(error)[:2048]}
+        if RESULT_NAMESPACE == "approval" and instrumentation_started:
+            diagnostics = failure_diagnostics(run, alive, device)
+            # BEGIN APPROVAL_FOCUS_DIAGNOSTIC capture
+            diagnostics["focus"] = focus_failure_diagnostics(run, alive, device)
+            # END APPROVAL_FOCUS_DIAGNOSTIC capture
+        raise
     finally:
         cleanup = []
         for entry in reversed(children):
@@ -398,9 +537,11 @@ def main():
         apk_equal = all(sha(path) == digest for path, digest in apk_before.items())
         success = success and equal and source_equal and apk_equal and time.monotonic() < end and all(row.get("reaped") for row in cleanup)
         save("outcome.json", {"qualified": success, "commands": results, "cleanup": cleanup, "tools_unchanged": equal, "source_unchanged": source_equal, "apks_unchanged": apk_equal,
-                              "whole_end_retained": True, "scope": "synthetic picker UI only; no installed/provider/tool-closure proof"})
+                              "primary_failure": primary_failure, "diagnostics": diagnostics,
+                              "whole_end_retained": True, "scope": "synthetic " + RESULT_NAMESPACE + " UI only; no installed/provider/tool-closure proof"})
     assert success
 
 
 if __name__ == "__main__":
+    select_suite(sys.argv[1:])
     main()

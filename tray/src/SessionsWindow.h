@@ -20,6 +20,7 @@ class SwarmController;
 #include "HgsClient.h"
 #include "SessionOrganization.h"
 #include "SessionRowPreferences.h"
+#include "SessionAccounts.h"
 
 class QAction;
 class QLabel;
@@ -46,6 +47,7 @@ class QHBoxLayout;
 class MachinesPage;
 class MachineFilter;
 class ProjectFilter;
+class AccountFilter;
 class DashboardPage;
 class AccountsPage;
 class GoToDialog;
@@ -77,7 +79,7 @@ public:
     void setConnectionError(const QString &error);
     void setPollingHosts(const QSet<QString> &hosts);
     static QString status(const SessionInfo &session, bool reachable = true);
-    // Tests only, so suites need not wait out fixed delays: information notices
+    // Tests only, so suites need not wait out fixed delays: timed notices
     // (5 s), compaction polls (2.5 s), the details poll tick (500 ms) with its
     // Activity interval (2.5 s), and the wait of Send and push now (20 s, which
     // also restarts an armed push's wait). The application keeps the defaults.
@@ -182,7 +184,7 @@ private:
     QElapsedTimer m_readDwell;
     QString m_readCandidate, m_readSelectionKey;
     void acceptInspection(const QString &host, const QString &name, const QJsonObject &data, const QString &archiveId);
-    void showNotice(const QString &message, bool error = false);
+    void showNotice(const QString &message, bool error = false, bool transient = false);
     void clearNotice();
     // Opens a session file like a browser download; see ExternalFile.h.
     void openExternalFile(const QString &path, bool otherMachine);
@@ -209,7 +211,7 @@ private:
     void renameSession();
     void forkSession();
     void populateBatchActions(QMenu *menu);
-    enum class SelectionAction { MarkRead, ReviewLater, Pause, Resume, Archive, Forget, Terminate, Move };
+    enum class SelectionAction { MarkRead, ReviewLater, CompactRows, ExpandRows, Pause, Resume, Archive, Forget, Terminate, Move };
     QList<Entry> selectionEntries() const;
     bool selectionActionApplies(const Entry &entry, SelectionAction action) const;
     static QString selectionActionText(SelectionAction action);
@@ -230,7 +232,7 @@ private:
     QAction *m_clearArchiveAction = nullptr;
     QList<Entry> m_selectionQueue;
     SelectionAction m_selectionOperation = SelectionAction::Pause;
-    QString m_selectionCommand;
+    QString m_selectionCommand, m_selectionRestoreKey;
     // The scoped request of the selected OpenCode binding being forgotten; only
     // its own result advances the selection.
     quint64 m_selectionForgetRequest = 0;
@@ -289,6 +291,7 @@ private:
     void openSessionFolder();
     void openLocalFolder(const QString &directory);
     const Entry *selected() const;
+    bool awaitingRestoredInspection(const Entry &entry) const;
     bool isTerminating(const Entry &entry) const;
     void reconcileTerminations();
     bool archiveNameOccupied(const Entry &archive) const;
@@ -364,6 +367,12 @@ private:
     QSet<QString> m_terminationFinished;
     QString m_terminationCommand;
     QString m_restoreKey, m_renameKey, m_forkKey, m_forkGroup, m_forkBefore;
+    struct PendingRestore { Entry source; QString conversation; bool succeeded = false; };
+    // Durable draft handoffs outlive list navigation. Only m_restoreKey follows
+    // the user's selected conversation, and only one legacy write is in flight.
+    QMap<QString, PendingRestore> m_restores;
+    QString m_restoreWriteKey;
+    QMap<QString, QPair<QString, QString>> m_restoredInspections;
     bool m_renameArchived = false;
     QString m_selectedKey, m_filter = "all";
     bool m_initialSelectionPending = true;
@@ -371,7 +380,9 @@ private:
     bool m_folderFilterCheckout=false;
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
-    QSet<QString> m_hostFilters, m_projectFilters;
+    QSet<QString> m_hostFilters, m_projectFilters, m_accountFilters;
+    SessionAccounts::Catalog m_sessionAccounts;
+    QJsonArray m_sessionAccountProfiles;
     QString selectedHostTarget() const;
     void updateDashboard();
     QJsonObject m_details;
@@ -428,6 +439,7 @@ private:
     MachinesPage *m_machinesPage;
     MachineFilter *m_machineFilter;
     ProjectFilter *m_projectFilter;
+    AccountFilter *m_accountFilter;
     DashboardPage *m_dashboard;
     AccountsPage *m_accountsPage;
     SessionOrganization m_organization;

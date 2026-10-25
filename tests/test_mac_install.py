@@ -67,6 +67,7 @@ sys.exit(subprocess.run(['sh', '-c', command], input=data).returncode)
                 for path in ('services/mobile/connector/Cargo.toml', 'services/mobile/connector/Cargo.lock',
                              'services/mobile/connector/.cargo', 'services/mobile/connector/src',
                              'services/mobile/relay/Cargo.toml', 'services/mobile/relay/src',
+                             'services/mobile/crypto/Cargo.toml', 'services/mobile/crypto/src',
                              'crates/replica/Cargo.toml', 'crates/replica/Cargo.lock',
                              'crates/replica/.cargo', 'crates/replica/src'):
                     self.assertIn(path, sent)

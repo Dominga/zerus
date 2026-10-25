@@ -101,6 +101,52 @@ message search finds their public mentions; Android session search finds mention
 in the available session metadata and previews. A task mention alone does not
 establish a unique session identity.
 
+### Static agent guidance
+
+The static hint source currently covers tracked Claude Code and Codex main
+conversations. Its native delivery contract still requires qualification on the
+reviewed versions before adoption. Kimi, OpenCode and DeepSeek channels remain
+separate work; older hgs peers inject nothing.
+
+The hint points to `hgs guide` with fixed English text, independent of session
+name, computer and hgs version. It uses the existing SessionStart hook context,
+without changing user instruction flags, project launchers or saved native
+arguments. It is not sent as a person's Activity message. New conversations and
+previously unmarked conversations receive an attempt; repeated resumes suppress
+another attempt. Clear and compaction replace context and request a new copy.
+A fork inherits suppression only from the exact marked context it forks.
+Renaming does not change the text or hint revision. Arbitrary commands and native
+subagents receive no hint.
+
+Configure optional injection in the hgs config file or caller environment:
+
+```sh
+HGS_AGENT_HINT=0                         # disable new hint injection globally
+HGS_AGENT_HINT_OFF="native-codex work"   # exclude exact account IDs
+```
+
+Injection defaults to enabled. The global value accepts `0` or `1`; the exclusion
+list is whitespace-separated and uses `native-claude` or `native-codex` for the
+provider's own login. Environment values take precedence, including an explicitly
+empty exclusion list. Invalid or unreadable hint policy disables only optional
+injection with a bounded diagnostic; unrelated configuration validation is
+unchanged. `hgs guide` and `hgs self` remain available when injection is disabled.
+Opt-out does not remove context already retained by the provider.
+
+Each fresh start, resume, recovery, archive restore and fork resolves the current
+caller's effective hint policy again. Only those effective hint values enter the
+new process environment, after login-shell startup on Unix. The hgs config path
+is unchanged and policy is not stored in the saved launch recipe or binding.
+This is a process snapshot: editing the file does not live-reload a running
+native process. An `hgs` invocation inside that agent inherits the snapshot as
+ordinary environment overrides, which can continue to shadow later file edits.
+On Windows, an absent exclusion variable alongside the resolved global value
+means an empty list; the hook does not supplement it from another default file.
+
+The private conversation/revision mark suppresses retries; it does not prove
+stdout delivery or native acceptance. An output failure reports unknown delivery
+and is not automatically retried. There is no crash-atomic exactly-once promise.
+
 <a id="recovery"></a>
 
 ## Pause, resume and reboot
@@ -211,6 +257,24 @@ and any conditional matchers rather than treating a successful file edit as
 proof that hooks are effective. Existing partial Kimi blocks require manual review
 or a supervised launch: explicit repair refuses to rewrite them lossily.
 
+Complete account-wide Kimi tracking registrations, including legacy Python
+compatibility commands, are reused without adding another managed block. If
+that block was already added and contains only the same HGS callbacks and
+options, launch or compatible explicit repair removes the redundant block while
+retaining the original commands and personal settings/hooks. Different options
+or personal entries prevent removal. This edits registration only; a running
+provider's already-loaded settings are not retrofitted.
+
+Activity recognizes duplicate Kimi callbacks by their native turn ID within the
+same run and conversation. Equal captions in separate native turns or cleared
+conversations remain separate messages.
+For older attachment callbacks that lack that ID, a complete bounded native
+history and a unique exact staged-file input can associate their rich file card
+with the one native turn. The confirmed local delivery can supply the receipt
+before its durable inspection metadata arrives; both copies share one delivery
+ID. Incomplete or ambiguous evidence never authorizes this native-turn
+association. The original journal is retained.
+
 The additive mobile operation `hooks_status` exposes only the exact-session
 read, and only when the selected CLI advertises `hooks-health-v1`. Both outbound
 connectors preserve the request/run/conversation identity. The relay and gateway
@@ -237,6 +301,11 @@ that event stay, and older versions still warn about those. An unreadable versio
 a launcher keeps the entry, as does a wrapper script that starts another Claude Code
 without itself changing: delete the entry from its `settings.json` by hand there.
 `PreModelSwitch` is never registered.
+
+Claude Code can offer once, at startup or under a finished reply, to make auto
+mode the default permission mode when the user settings name another default.
+Activity shows the offer with both native choices; Zerus never answers or hides
+it, and only the choice made in Activity or Terminal changes that setting.
 
 Claude Code reports its context window only to a status line command. For a tracked
 Unix start of the `claude` CLI that reports 2.1.296 or later (the version read as
@@ -320,6 +389,12 @@ same name preserves the archive. Restore refuses an occupied live or Saved name
 and removes an archive binding only after the native agent confirms the expected
 conversation. Failed restore keeps it. **Forget archive** preserves native history;
 `resume --all` excludes archives.
+
+Desktop Restore keeps the opened conversation and its message draft when the
+resumed row confirms the archived conversation ID. Text, attachments and editor
+selection move to the live draft key; machine/project/search scopes stay in
+place. An existing live draft is never overwritten: the archive draft remains
+in Saved drafts. A later user selection is not replaced when Restore completes.
 
 ### Browse Archive by date
 
@@ -587,9 +662,10 @@ the conversation and press **Voice** again; opening settings does not start a
 recording. If settings cannot open, the dialog keeps the manual navigation path.
 
 Session rows show provider, machine, current action, model, effort and Git context.
-Right-click a session and choose **Compact session row** to show only its name,
-status and agent type. The expand icon or the Right key restores the full row;
-the row remains selectable and keeps its normal context actions. This device
+Double-click a session row to toggle between the full card and a compact row
+showing only its name, status and agent type. Right-click **Compact session row**
+is also available. Compact rows keep their expand icon; it or the Right key
+restores the full row. The row remains selectable and keeps its normal context actions. This device
 remembers the preference for that conversation across restarts. **Expand all
 collapsed** in the Sessions menu restores every compact row, including sessions
 hidden by the current filters. Row density never compacts the agent's context
@@ -635,6 +711,13 @@ local preferences. **Settings → Appearance → Content scale** adjusts Activit
 questions, the message field and Terminal from 75% to 200% in 5% steps, with 100%
 as the default; the session list, the side panel, the session header and its tabs
 keep their size.
+
+Drag the small handle above the message toolbar upward to enlarge the message
+field, or downward to shrink it. Double-click the handle to restore the default
+height. The height is a local preference shared by sessions and retained across
+restarts; smaller windows temporarily limit it so the conversation stays visible.
+With the handle focused, Up/Down resize it and Home restores the default.
+
 **Settings → Appearance → Activity width** keeps Activity readable in a wide or
 fullscreen window: the transcript, its queued input, questions and the message
 field share one centered column of at most 900 px by default (480–2400 px). The
@@ -690,7 +773,25 @@ and folder scope before project selection or text search, including zero counts.
 Its open checkboxes and selection stay in place during polling. A removed selected
 project remains as **Unavailable project** until removed from the filter.
 
-Changing the state, machine or project filter only changes the session list.
+The account button beside the project chooser selects one or more specific
+accounts, rather than agent types. Its names and verified identity groups follow
+Accounts; different accounts with the same label remain separate. Choices retain
+the exact machine-local profile bindings selected at that moment. A later
+catalog refresh or a newly discovered binding never expands that selection
+silently. Selected accounts appear as removable chips; **All accounts** clears
+the account restriction. Account selection intersects the project, machine,
+state, folder and search scopes, including message search and loaded archives.
+Chooser counts use the other scopes before account selection or text search.
+An unavailable selected account stays selected until explicitly removed.
+Sessions without a recorded account remain distinguishable from known accounts
+and shell sessions; they never borrow the current default account.
+
+**Details** shows the session's bound account, its profile ID and recorded agent
+home when available. Account names come from the selected computer's cached
+catalog; opening the chooser or Details can refresh that catalog without signing
+in, refreshing provider usage or changing any running session.
+
+Changing the state, machine, project or account filter only changes the session list.
 The open conversation and its draft stay in place even when no row matches;
 its row is selected again when it returns to the list. Click another session
 to open it.
@@ -756,9 +857,17 @@ attention keep their reply unread; pending approvals, questions and errors stay
 highlighted.
 
 Ctrl/Command-click selects multiple sessions while preserving the open conversation
-and draft. Batch actions include read/review later, pause, resume, archive, project
-move, termination and forgetting. Applicability is shown per selection. Ctrl-click
-does not select project headers or subagents. Escape or the selection close button
+and draft. Shift-click selects the visible range from the last selection anchor;
+Ctrl/Command+Shift-click adds that range to the selection. Shift with Up/Down or
+Home/End selects ranges by keyboard, using the current filtered row order and
+skipping hidden rows, project headers, subagents and pending launches. Anchors
+follow session identities across refreshes; a hidden or removed anchor falls back
+to the visible open row, or to the clicked row when none is visible.
+Batch actions include local **Compact session rows** and **Expand session rows**
+icons, read/review later, pause, resume, archive, project move, termination and
+forgetting. Both density actions are available for a mixed selection and apply
+only to rows needing that change, including offline rows. Applicability is shown
+per selection. Escape or the selection close button
 clears selection. Context menus and shortcuts preserve the target identity.
 **Clear archive…** requires confirmation, preserves offline records and excludes
 new records created after the confirmation snapshot; native history remains.
@@ -805,7 +914,9 @@ cursor in the message field.
 
 **Send queued messages now** runs the agent's own send-now action for the queue
 shown in Activity, exactly like its **Send now** button; it never sends the text
-being typed. **Send and push now** sends the typed message and, once the agent
+being typed. If the earlier queue is no longer visible, nothing is sent: Activity
+refreshes and a transient error asks you to check Terminal or the current queue
+before retrying. **Send and push now** sends the typed message and, once the agent
 shows it in its queue, sends that queue now. With an empty message field it is
 the same as Send queued messages now. If the message does not appear in the
 queue within 20 seconds, for example because the agent took it directly or a
@@ -872,8 +983,9 @@ Reading older history preserves scroll and selection; **Jump to latest** returns
 to live events without resizing the timeline. Its double-down-arrow icon sits beside
 Voice in the composer toolbar, outside the messages; the tooltip includes the
 number of new events. Subagents use the same icon in their own toolbar.
-Double-clicking a session or
-subagent row, or pressing Enter on it, opens Activity and performs the same jump.
+Pressing Enter on a session or subagent row opens Activity and performs the same
+jump. Double-clicking a subagent row also jumps to latest; double-clicking a
+session row toggles its compact presentation.
 Connect commands remain available through **Copy connect command** in the session
 menu. Claude hands finished
 background work and other sessions' messages back as a new turn. Activity never
@@ -1332,6 +1444,15 @@ Revise, pasting the feedback before Enter; Kimi's recorded decision, including
 the exact feedback, confirms delivery. A clipped or different chooser, or one
 already in Revise feedback mode, stays read-only with **Open Terminal**.
 
+Kimi CreateGoal approval shows the full objective and completion criterion literally,
+with Kimi's own mode choices for Always Ask or Ask When Needed. **Switch to Never
+Ask and start** and a switch between Always Ask and Ask When Needed require a
+separate confirmation because they change permissions beyond this request.
+**Do not start** cancels the tool without creating a goal or changing the mode.
+Zerus answers only the exact native goal panel after the same complete wire and
+process checks as other Kimi approvals; Kimi's recorded decision and mode label
+confirm delivery. A different, clipped or unverifiable panel stays read-only.
+
 Other Kimi tool approvals also appear in Activity, with the complete request from
 Kimi's wire. Kimi's hooks cannot approve, so Zerus answers only in Kimi's own
 panel, and only for a Bash command: the panel must draw that exact command,
@@ -1384,9 +1505,12 @@ unreviewed update command, a panel for another folder or unrelated output above
 it, appears read-only with its visible text and **Open Terminal**. Zerus never
 answers it, and messages wait until it is answered in Terminal.
 
-Claude's auto-mode prompt accepts absolute workspace paths and native `~/…`
-abbreviations that match the verified launch directory. It remains answerable
-after the initial conversation is bound, until a turn starts.
+Before the first turn, Claude's auto-mode prompt accepts absolute workspace paths
+and native `~/…` abbreviations that match the verified launch directory, also
+after the initial conversation is bound. Under a finished or stopped reply, the
+bound conversation and that turn identify it instead. The offer must be the
+complete panel at the bottom of Terminal: panel text quoted in the conversation is
+never answered, and messages wait until the offer is answered.
 Claude's **Resume this conversation?** chooser also appears in Activity when a
 long conversation has gone cold, including between turns in a resident session.
 The card preserves the inactivity, context size and five-hour usage warning.
@@ -1462,6 +1586,10 @@ typed key and returned to its empty prompt leaves nothing unconfirmed, so anothe
 change or a message can follow, including a new session's first message. When the
 agent has not reacted to a typed key, further changes and messages wait for its
 next native event: finish or cancel the change in Terminal and send a message there.
+Codex Ultra's double-chevron composer remains an ordinary input field: a
+confirmed session-only change permits another effort choice, messaging and
+context clearing with the same identity and draft checks. Earlier unconfirmed
+attempts retain their original receipts and are never replayed automatically.
 
 Codex model choices use the selected account's `models_cache.json` and sort by
 ascending signed 32-bit `priority`, preserving source order for ties, as in
@@ -1649,6 +1777,9 @@ Codex may defer `SessionStart` until the fork's first message. Activity enables
 Send once Zerus verifies that the supervised process owns an independent child
 history linked to the source conversation and its native composer is ready.
 The child ID is confirmed by the agent's own event; the source session stays intact.
+On Windows, verification searches only the selected account's history and requires
+the same supervised process to hold exactly one matching child history open.
+Incomplete, unreadable, ambiguous or exhausted verification keeps Send unavailable.
 
 <a id="projects"></a>
 
@@ -1709,6 +1840,23 @@ to the other project. The computer, path and label are preserved, including for
 offline computers. If the destination already has that folder, its existing link
 is reused. Files and session project assignments stay in place. These catalog
 changes use the normal Swarm synchronization.
+An untouched **Inbox** selection in New session follows an unambiguous project
+whose folder is confirmed on the selected computer. Desktop, Android and iOS
+use exact canonical folder membership or a complete, current worktree catalog;
+folder names and path prefixes do not assign projects. Explicit project choices,
+including explicitly choosing Inbox, win. Multiple matching projects or missing
+verification keep the current selection. An untouched Inbox stays a local fallback,
+so later native project discovery cannot be overwritten by launch bookkeeping.
+Older saved desktop launch intents retain their original placement semantics.
+Desktop also checks existing saved folders on that exact computer against the
+CLI-confirmed canonical path, including local Windows drive and UNC folders
+that remain outside the POSIX shared catalog. It does not resolve saved aliases
+or infer from a parent folder. A native project hint must name the same known
+Swarm catalog; a foreign hint never selects a same-ID local project.
+A new tracked CLI session also infers its initial project from that computer's
+existing catalog; resume, fork, adoption,
+manual assignments and explicit unassignment are never reassigned. This optional
+metadata step does not initialize a catalog, join a swarm or create a repository.
 The general **New session** action inherits the selected session's project,
 computer and matching project folder. For a linked worktree, a verified catalog
 selects the main checkout instead. Choosing another folder, project or computer
@@ -1740,8 +1888,12 @@ Existing names and unrelated sessions are never repurposed.
 open mode; DeepSeek uses its embedded native interface.
 
 To join a swarm, configure SSH access and open Zerus on the initial machines so
-existing projects import once. Use **Projects → Swarm… → Connect computer**,
-**Preview connection**, review project mapping and **Join and merge projects**.
+existing projects import once. Projects shows **Connect project catalogs…** when
+an accessible computer has no project-sync connection. Session access over SSH
+alone does not connect project catalogs: the guide opens **Connect computer**
+with the missing computer selected. Choose **Preview connection**, review project
+mapping and **Join and merge projects**. Nothing is paired or joined by opening
+the page. The same flow remains under **Projects → Swarm… → Connect computer**.
 Names alone do not merge projects. Existing swarm membership wins by default;
 turn off that preference to compare conflicting assignments. HGS backs up the
 catalog before a merge. **Connect this member** adds a route to an existing member.
@@ -1769,8 +1921,15 @@ requests without members. Local changes normally trigger exchange within three
 seconds; unchanged peers are checked every 30 seconds, backing off to five minutes
 on failure. Zerus reads the local catalog every five seconds without SSH. Offline
 members catch up later. Independent fields merge; conflicts remain in the Swarm
-review UI. Deletion records prevent old replicas from resurrecting data; this
-version does not prune old journal records.
+review UI. A session's missing/Inbox placement is a fallback: a concurrent choice
+of one known live concrete project wins without review, and identical concrete
+choices coalesce. A newer explicit move to Inbox or unassignment still wins by
+causal identity. Different concrete projects and unknown/deleted project targets
+remain reviewable; project mappings are applied before join comparisons. Local
+passive observations never publish membership, including during import. All
+underlying versions are retained, so the next explicit choice consumes every
+observed candidate. Project/folder deletion records still prevent resurrection;
+this version does not prune old journal records.
 
 The worker records its version and process in `~/.config/hgs/swarm/worker.json`
 and exits when an upgrade replaces its executable, so `Restart=always` or launchd
@@ -1858,7 +2017,83 @@ hgs project rm infra
 Alias names reject spaces, `/` and `=`; logical project names are not restricted
 that way. Absolute paths remain available directly from the CLI.
 
+### Cloning a repository
+
+In desktop **New session**, choose **Working folder** for an existing checkout or
+ordinary folder, or **Git repository** to prepare a new checkout. Project,
+computer, agent, account and session name stay in this one form. The Git source
+accepts an SSH or HTTPS URL from GitHub or another Git server. **Clone to** shows
+the suggested complete destination; edit it to rename the target folder or use
+**Browse…** to choose its parent. A manual destination stays when the URL changes.
+Parent folders are remembered separately for each computer.
+Switching sources keeps the shared controls and action buttons in place.
+
+Select an existing logical project, Inbox, or **New project…**, then use the
+single **Clone and start** action. Progress, access errors and recovery controls
+stay inline. Switching source modes or opening the form never starts a clone.
+**Projects → Clone repository…** offers standalone preparation without starting
+an agent.
+
+**Clone and start** checks the selected computer's installed CLI, Git, parent
+folder, destination and repository access before cloning. Access uses that
+computer's existing SSH configuration and Git credential helpers; passwords and
+tokens embedded in repository addresses are refused. Configure missing access on
+that computer, then try again. These checks run in the background and create no
+checkout. Cloning begins only after explicit confirmation. Existing destinations,
+including empty folders and symlinks, are preserved: choose another name or use
+**Browse…** to select an existing checkout.
+
+A confirmed clone joins the selected project even if the agent cannot start.
+Its confirmed project choice, including Inbox, takes precedence over automatic
+folder-based project detection.
+The normal **Auto** / **None** worktree choice applies to the new checkout. Failed
+launches retain the checkout for another session. Ordinary folders remain
+supported without Git initialization.
+
+Cloning has a ten-minute Git deadline and never automatically retries an
+uncertain operation. Private native receipts and local pending-request metadata
+retain the original identity across dialog or application restarts. **Check
+result** reads that original receipt; a recovered checkout requires an explicit
+**Use checkout** or **Use checkout and start** action. Failed or partial checkouts
+are kept for inspection. A timeout or lost connection is not permission to remove
+files or run the clone again. **Choose another destination…** leaves the original
+checkout and native receipt in place and lets you prepare a different clone.
+
+The CLI is `hgs [@host] repository check --url URL --parent PATH --name NAME
+--json`, followed by `repository clone` with the same fields and an explicit
+`--request-id UUID`. `hgs [@host] repository status --request-id UUID --json`
+reads its durable receipt. Reusing a request ID with identical fields returns
+the original result without repeating Git; different fields are refused.
+Remote acquisition requires the exact selected CLI's `repository-clone-v1`
+capability. Older peers continue to support ordinary folder selection.
+
+The native operation pins the parent and new destination through Git and checks
+their identities before accepting the result. Unix Git starts in the held
+destination directory, so replacing its pathname cannot redirect checkout writes.
+An unpredictable private staging folder is pinned before atomic publication of
+the destination name; its fallback `staging_path` is reserved in the receipt before
+creation. A failed publication can leave that staging folder for inspection.
+Windows creates and holds the new directory atomically and retains its ancestors
+without write/delete sharing; a conflicting handle or reparse point fails closed.
+Zerus never removes a replaced or partially populated directory.
+
+On Unix, a separate native worker owns Git's deadline and watches a wrapper-owned
+pipe. Ending the GUI/SSH wrapper closes that pipe and cancels the worker's own Git
+process group, including its descendants. The original receipt remains
+unconfirmed after abrupt wrapper termination; status and duplicate requests never
+restart the clone. Windows retains the existing kill-on-close job containment.
+The complete encoded receipt is limited to 16 KiB; large Git errors are truncated
+within that envelope, and status and duplicate requests return the same saved
+result. Local paths, including Windows drive, UNC and device paths, are refused.
+A single-letter SSH alias must use an explicit address such as `ssh://c/repo`.
+
 ### Worktrees and ordinary folders
+
+New session keeps **Auto** available when the selected computer confirms the
+working checkout, even if the repository has more checkouts than its bounded
+catalog can list. Missing, bare, stale or unconfirmed folders remain ineligible.
+Opening the form or choosing a folder creates no worktree; creation starts only
+after **Start session**.
 
 Session cards show a checkout line of the form `folder / branch`, such as
 `zerus / work-1a2b`, preceded by a small Git branch icon; **detached HEAD**
@@ -2016,6 +2251,22 @@ confirmation in the manager. That consent is bound to the exact file contents
 and staged Git blobs (bounded to 64 MiB and two seconds), and does not override
 any other protection. A changed or incomplete proof requires a new review.
 
+Linux can deny access to a protected process's current folder or executable,
+including desktop services. A completed process inventory with only those
+access denials offers **Check running programs** in manual cleanup. The folder
+stays protected until you explicitly confirm **I checked these folders are not
+in use; remove them anyway**. This accepts the uncertainty about those programs;
+it does not establish that the folder is unused. The confirmation is bound to
+the exact folder review and unreadable process identities and is checked again
+before removal. A protected ancestor that launches the current CLI request
+(including a fresh SSH session) is matched by its verified invocation role,
+program name, hidden-path shape and computer boot rather than its temporary PID. Other
+protected processes retain exact PID and start identities. Readable ancestor
+paths still protect their folders. A known program or session using the folder, another blocker,
+an incomplete inventory, or changed process identities still prevents removal.
+Automatic cleanup never uses this exception. Older owning CLIs without this
+proof keep the folder; update that computer before trying manual cleanup again.
+
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
 review under the repository lock used by creation, compares the reviewed
@@ -2037,8 +2288,50 @@ not ownership evidence. Automatic cleanup has bounded checks and never changes
 a successful archive into a failed termination. A lost removal acknowledgement
 is reported as unconfirmed, with no automatic replay.
 
-The desktop reports successful automatic cleanup, or keeps **Review worktree:
-<folder>** after Terminate/Archive (**Check worktree:** when the outcome is
+**Settings > Worktrees** controls cleanup on the selected computer across all
+its projects. Each computer keeps its own policy. The master switch and the
+three independent rules default to on:
+
+- Clean an integrated managed worktree after its last session is archived or
+  terminated.
+- Periodically clean unused integrated managed worktrees after **24 hours** of
+  Git inactivity by default (configurable from 1 to 8760 hours). This also covers
+  work integrated after archival and worktrees created without a session.
+- Forget a missing managed checkout only after verifying its retained Git
+  registration, ownership nonce and absence of session references.
+
+Periodic maintenance runs with the existing host recovery service, independently
+of whether automatic provider-error recovery is enabled or the GUI is open. It
+imports at most 64 old ownership receipts and checks at most one queued worktree
+per 30-second round. An indexed private queue schedules retained worktrees for a
+later hourly check; it does not rescan project disks or journals. Archive metadata
+checks stream at most 5000 entries and 32 MiB within their deadline; incomplete
+coverage keeps automatic cleanup from removing the folder. Old removed receipts
+do not repopulate the queue once their Git metadata is gone.
+
+All automatic rules use fresh native checks under the repository/session locks.
+They preserve branches, changed/untracked files and **all ignored local data**,
+including build caches. Running executables inside the checkout protect it even
+when their current directory is elsewhere. An incomplete or inaccessible process
+inventory also keeps the checkout. These checks cover the owning user's processes;
+Windows currently retains automatic candidates because process folders cannot be
+verified there. Cleanup reserves its removal intent
+durably before invoking Git. An interrupted or unconfirmed attempt stays for
+manual review across worker restarts; a periodic sweep cannot replay an uncertain
+archive-triggered deletion. External or old worktrees without matching ownership
+receipts require explicit review in Projects. Recent activity or a folder/branch
+name alone never establishes that a worktree is disposable.
+
+Read the host policy with `hgs [@host] worktrees policy get --json`; save the full
+reviewed policy from JSON stdin with `worktrees policy set --json`. The revision
+must still match. Existing policy files and writes require every versioned field;
+incomplete or invalid policies keep folders instead of enabling defaults.
+`hgs [@host] worktrees sweep --json` performs one bounded automatic
+step and respects the same policy and protections. Reads never start a sweep;
+creation, removal, sweep and policy writes reject `--dry-run`.
+
+The desktop reports successful automatic cleanup, or keeps **Folder kept:
+<folder>** after Terminate/Archive (**Cleanup unconfirmed:** when the outcome is
 unconfirmed). This global reminder names the retained checkout; its tooltip and
 accessible description identify the source session, computer, full folder and
 reason. It can remain while another session is selected and does not expire
@@ -2049,10 +2342,19 @@ recreate an automatically removed checkout on explicit **Restore**; a changed
 branch or occupied destination is refused. Browsing and dry runs never recreate
 a folder. Plain Pause never cleans up.
 
+The cleanup review always shows integration evidence, even when local files
+remain. Git integration uses local refs, not a fresh remote check. The selected
+folder explains unsaved changes, local data loss and why automatic cleanup kept
+it. **Inspect files and commits…** opens the bounded file browser, including
+ignored files; a cache-like filename alone is not proof that data is disposable.
+**Keep folders** makes no removal. Local-data and unsaved-work deletion require
+separate consent. Manual removal keeps conversations and keeps branches by
+default; restoring an archive may require recreating its working folder.
+
 The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
 --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH]
-[--discard-fingerprint HASH] [--delete-branch]
+[--discard-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch]
 --json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
 --common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.
@@ -2179,7 +2481,11 @@ peers). Each phone shows its platform, when it was paired, its last activity
 (recorded at most every five minutes) and the computer whose invitation it used;
 older pairings show "—". **Pair a phone…** shows a single-use QR code with the
 server and code for manual entry; it expires after ten minutes and closing the
-dialog discards it. Scan it in Zerus on the phone through Machines → Pair another
+dialog discards it. Opening **Pair a phone…** refreshes the available workspaces
+before requesting one invitation, including immediately after connecting a workspace.
+The QR code grows for longer encrypted invitations; **Enter the code manually**
+reveals the full selectable code in a bounded field. Scan it in Zerus on the phone
+through Machines → Pair another
 workspace. **Revoke…** asks for confirmation, then removes that phone's
 credential, queued requests and push registration; the phone loses every computer
 of the workspace at once. A computer whose hgs predates phone management is named
@@ -2218,12 +2524,41 @@ known session inventory; live-work filters still require current work evidence.
 
 ### Accounts
 
+In **Accounts → Model and effort…**, save the model and reasoning effort for new
+conversations with the selected account on that computer. Codex and Claude offer
+only models and effort levels from that account's native catalog. Open the agent
+once and refresh Accounts if its catalog is empty. **Provider settings** removes
+the Zerus override; the dialog also shows readable native account defaults.
+Kimi supports a launch model choice; its effort remains controlled by Kimi's
+native settings. OpenCode and DeepSeek continue to manage their defaults natively.
+Existing conversations, saved resumes and forks keep their own choices. Explicit
+native launch options after `--` take precedence. Nothing rewrites native account
+configuration or changes a running agent.
+
+The CLI is `hgs [@host] account model-settings ID` to inspect the catalog and
+`hgs [@host] account model-defaults ID --model MODEL --effort LEVEL --revision REV`
+to save a choice. Omit effort to inherit the selected model's provider default;
+pass `--model ''` to return to provider settings. Revisions prevent overwriting
+another account edit made while the dialog was open.
+
 Accounts collects provider profiles from connected machines. Verified provider
 account ID, or email with organization, groups the same account across hosts;
 matching display names alone do not. Providers, organizations and conflicting
 IDs remain separate. Local results appear first; remote profiles arrive
 incrementally. Known rows and selection survive refresh, failure and offline
 hosts. Limits use one current account snapshot, never the sum of machine usage.
+
+On Android, the refresh status below the toolbar remains readable after a quick
+sync. **Refresh details** lists each workspace's current read/apply stage, last
+received report and failures; retained sessions and counters stay visible when
+a read fails. Phone sync reads machine reports, while providers refresh their
+usage independently. Account cards show the machine's provider refresh state,
+saved/current report and provider update time, including after phone sync ends.
+An unavailable quota report or an expired short-lived Claude usage token does
+not mean the native account is signed out. Explicit native sign-in status takes
+precedence; older authentication problems are labelled **Last reported** when
+their report is stale or offline. Viewing accounts never refreshes Claude's
+credentials on Zerus's behalf.
 
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. Its agents use New
@@ -2332,8 +2667,14 @@ background service. Select an offered `provider/model` (keyless free models are
 listed when the service offers them) and, where the model has variants, an
 effort, or retain the default model. Supported: text and voice conversations,
 queued messages, Stop, native questions and permissions, status and history,
-model and effort change, rename and forgetting the Zerus binding. Pause/resume,
-Terminal, attachments, compaction, fork and child sessions are unavailable.
+model and effort change, rename and forgetting the Zerus binding. The desktop
+Terminal tab opens OpenCode's native TUI on the existing service and conversation,
+also available as `hgs a NAME --existing --run-id RUN`. Disconnecting closes that
+client; the service and conversation keep running. Opening Terminal never starts
+or replaces a service and disables the attach client's automatic updates.
+This interactive capability is separate from pane snapshots: mobile Terminal
+snapshots remain unavailable. Pause/resume, attachments, compaction, fork and
+child sessions are unavailable.
 See [OpenCode versions, service and controls](opencode.md).
 
 From the CLI, `hgs [@host] opencode DIRECTORY --new -n TAG --model PROVIDER/MODEL`
@@ -2353,11 +2694,11 @@ SSH launches; an `opencode` found earlier on PATH keeps precedence.
 
 ## Official DeepSeek Harness
 
-The native adapter is pinned to `@deepseek-ai/dsh@0.2.0-rc.2`. Install it on the
+The native adapter is pinned to `@deepseek-ai/dsh@0.2.1-rc.2`. Install it on the
 agent host, sign in and choose **DeepSeek Harness** in New session:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.0-rc.2
+npm install -g @deepseek-ai/dsh@0.2.1-rc.2
 hgs account login native-dsh
 hgs dsh /path/to/project --new -n work
 ```
@@ -2393,9 +2734,12 @@ keep that output private.
 
 Activity supports creation, messages/images, busy-session submission, questions,
 approvals, per-session model/effort, pause/resume, rename, goals, todos and child
-views. A new child view stays empty until the child's first step records its
-native identity; a child cancelled before that step stays listed with an empty
-view. A child that ran without a valid identity reports native corruption. A
+views. Children are continuable and run independently of the turn that created
+them: the engine records a child's native identity when it creates the child,
+and stopping the parent ends the parent's turn while the child keeps working. A
+new child view stays empty until the child's first step. A one-shot child stored
+by 0.2.0-rc.2 and cancelled before its first step stays listed with an empty
+view. A child without a valid identity reports native corruption. A
 child view shows the child's own model, which reading never changes. Request
 receipts prevent duplicate submission. Uncertain delivery requires inspection.
 Model changes do not replace profile defaults. A child keeps the model it
@@ -2425,8 +2769,10 @@ Hosts are asked at once, each scanning for at most 5 seconds; a stopped host, an
 older adapter or a host that does not answer within 7 seconds reports that
 history as unavailable.
 
-The official optional Schedule bundle (**Automation tasks** in Native UI
-Plugins; shipped profiles leave it off) is listed and managed per exact session:
+The official Schedule plugin (**Automation tasks** in Native UI Plugins) is
+listed and managed per exact session. The web bundle of 0.2.1-rc.2 includes it,
+and the profile Zerus creates layers that bundle, so it is on unless the
+profile's own patch disables it:
 
 ```sh
 hgs schedules dsh/project/work            # tasks of this session as JSON
@@ -2438,7 +2784,7 @@ echo '{"request_id":"UUID","expected_run_id":"RUN","expected_conversation_id":"s
 `action` is `delete`, `update` (the native compare-and-set; `title`, `prompt`
 and the native `change` timing object) or `history` (`limit` 1-100, optional
 `before`). Results keep native codes such as `schedule_conflict` and
-`schedule_not_found`. None of these activate the session. Without the bundle the
+`schedule_not_found`. None of these activate the session. Without the plugin the
 command refuses and listings omit `schedules`.
 
 Account transfer stays in Native UI. Native context reset awaits a supported
@@ -2460,6 +2806,10 @@ Small jitter is applied. Class counters persist within an episode when errors ch
 Temporary overload covers HTTP 500, 502–504 and 529, model capacity errors and the
 520–524 gateway failures that Cloudflare reports for an unreachable or timed-out
 provider, often without a response body.
+Kimi's explicit HTTP 429 message about its rolling 5-hour window uses the
+**Rate limit** schedule, including when the message calls it a quota and offers
+an upgrade. It provides no reset timestamp, so recovery does not invent one.
+Monthly quota, billing and sign-in failures still require manual action.
 
 **Session usage limit** is separate from a temporary rate limit. Its default mode,
 **Wait for reset**, schedules a continuation at the provider's reset time, using
@@ -2731,6 +3081,10 @@ same explicit flag wins again.
 
 See [installation.md](installation.md) for dependency and install commands.
 `~/.local/bin/hgs` must exist on peers because SSH calls use that path.
+The peer's login shell may be any POSIX shell or fish. Arguments are quoted so
+both read them alike, and commands with shell logic, such as the capability
+checks of `wait`, `hooks` and `guide`, `hgs machine check` and
+`hgs machine ssh --directory`, run under `sh -c`.
 
 `hgs status` only reads. For this computer and each peer it shows the hgs
 version, live sessions by what they need (working, needing attention, ready),
@@ -2870,7 +3224,7 @@ needs a console such as Windows Terminal, not the pipes of the mintty Git Bash
 window, and detaches with `Ctrl+B d`.
 
 **Commands.** Commands for another machine (`hgs @host …`) work as on Linux; the
-remote command stays `~/.local/bin/hgs` with POSIX quoting. Until local sessions
+remote command stays `~/.local/bin/hgs` with the same quoting as on Linux. Until local sessions
 are enabled, `ls`, `machine`, `project`, `swarm`, `presence` and `session-host`
 work locally. `account ls` and `account default` without an ID print an empty
 catalog, and `account copy` works between two remote machines. Every other local
@@ -3264,6 +3618,11 @@ from the screen first, so its old signature is no longer acknowledged. It prints
 an unknown session prints `{"ok": false, "error": "not_found"}` and exits with
 status 1. Marks live in `read-marks.json` in the hgs state directory, at most
 eight conversations per session, and follow `hgs rename`.
+Repeating an already-stored current mark reports it as applied without changing
+its timestamp or rewriting the file. Existing-owner writes retain other owners;
+admitting a new owner prunes abandoned entries using the current binding set.
+Unreadable or malformed existing storage is refused rather than reset. The
+global v1 JSON still has population-dependent parse and changed-write costs.
 OpenCode renames publish the new binding and its unchanged v1 read marks before
 retiring the old binding, in shared-read writer order. If a confirmed native title
 change is followed by a local persistence failure, the scoped action remains

@@ -1,5 +1,6 @@
 //! Named, per-machine native agent profiles. The catalog contains labels, never credentials.
 mod inspection;
+mod model_defaults;
 mod claude;
 mod claude_settings;
 mod mcp_servers;
@@ -42,6 +43,8 @@ struct Catalog {
     permission_modes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     defaults: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_defaults: BTreeMap<String, model_defaults::Defaults>,
 }
 fn read(config: &Config) -> Result<Vec<u8>> {
     match fs::read(config.dir.join("accounts.json")) {
@@ -87,6 +90,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
             return Err(Error::new(1, "Invalid default account profile."));
         }
     }
+    model_defaults::validate_catalog(&catalog)?;
     Ok(catalog)
 }
 pub fn default_account(config: &Config, provider: &str) -> Result<Option<String>> {
@@ -329,6 +333,7 @@ fn list(config: &Config) -> Result<Value> {
         row["is_default"] = json!(row["id"].as_str() == Some(catalog.defaults.get(provider).map(String::as_str).unwrap_or(&format!("native-{provider}"))));
         let mode = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("provider");
         permission_status::describe(config, row, mode);
+        model_defaults::describe(row, &catalog);
     }
     // The connector forwards at most 128 KiB of accounts; this row keeps within 32 KiB.
     #[cfg(unix)]
@@ -493,6 +498,8 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     match operation {
         "ls"=>{println!("{}",list(config)?);},
         "inspect"=>{println!("{}",inspection::inspect(config,args)?);},
+        "model-settings"=>{println!("{}",model_defaults::inspect(config,id)?);},
+        "model-defaults"=>{println!("{}",model_defaults::set(config,args,dry)?);},
         "set-key"=>{println!("{}",deepseek::set_key(config,args,dry)?);},
         "install"=>return install::run(id,dry),
         "start"=>{
@@ -849,7 +856,7 @@ fn transport(
         command
             .args(crate::machines::ssh_options(config, host))
             .arg(host)
-            .arg(format!("~/.local/bin/hgs {}", platform::join(args)));
+            .arg(format!("~/.local/bin/hgs {}", platform::remote_join(args)));
     }
     command.stdin(Stdio::null()).stderr(Stdio::null());
     let ssh = platform::spawn_ssh(
@@ -975,14 +982,22 @@ fn copy_account(config: &Config, args: &[String], dry: bool) -> Result<Value> {
 
 /// Account selection is reapplied after shell startup on resume/fork as on initial launch.
 #[cfg(unix)]
-pub fn run_script(account: &str, provider: &str, home: &str) -> String {
-    let environment = run_environment(account, provider, home);
+pub fn run_script(account: &str, provider: &str, home: &str, extra: &[String]) -> String {
+    let mut environment = run_environment(account, provider, home);
+    environment.extend_from_slice(extra);
+    supervisor_script(&environment)
+}
+
+/// Explicit assignments follow login-shell startup, ahead of the unchanged
+/// supervisor and native arguments. The empty hint exclusion list is explicit.
+#[cfg(unix)]
+pub fn supervisor_script(environment: &[String]) -> String {
     if environment.is_empty() {
         return "exec \"$0\" --run \"$@\"".into();
     }
     format!(
         "exec env {} \"$0\" --run \"$@\"",
-        platform::join(&environment)
+        platform::join(environment)
     )
 }
 
@@ -1013,9 +1028,52 @@ pub fn run_environment(account: &str, provider: &str, home: &str) -> Vec<String>
     environment
 }
 
+/// Apply saved model defaults only when creating a new conversation.
+pub fn apply_model_defaults(config: &Config, account: &str, provider: &str, argv: &mut Vec<String>) -> Result<()> {
+    model_defaults::apply(config, account, provider, argv)
+}
+
 #[cfg(test)]
 mod permission_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_hint_effective_values_follow_shell_startup_without_config_redirect_or_argv_change() {
+        let hint = vec!["HGS_AGENT_HINT=1".into(), "HGS_AGENT_HINT_OFF=".into()];
+        let script = run_script(
+            "work-account",
+            "claude",
+            "/private/profile with space",
+            &hint,
+        );
+        let words = shell_words::split(&script).unwrap();
+        assert_eq!(&words[..2], &["exec", "env"]);
+        assert_eq!(&words[words.len() - 3..], &["$0", "--run", "$@"]);
+        assert!(words.contains(&"CLAUDE_CONFIG_DIR=/private/profile with space".into()));
+        assert!(words.contains(&"HGS_ACCOUNT_ID=work-account".into()));
+        assert_eq!(&words[words.len() - 5..words.len() - 3], hint.as_slice());
+        assert!(!words.iter().any(|word| word.starts_with("HGS_CONFIG_DIR=")));
+        assert_eq!(supervisor_script(&[]), "exec \"$0\" --run \"$@\"");
+        assert_eq!(
+            shell_words::split(&run_script("", "codex", "", &hint)).unwrap(),
+            [
+                "exec",
+                "env",
+                "HGS_AGENT_HINT=1",
+                "HGS_AGENT_HINT_OFF=",
+                "$0",
+                "--run",
+                "$@"
+            ]
+        );
+        let quoted = vec![
+            "HGS_AGENT_HINT=1".into(),
+            "HGS_AGENT_HINT_OFF=work 'quoted' $(not-executed)".into(),
+        ];
+        let words = shell_words::split(&supervisor_script(&quoted)).unwrap();
+        assert_eq!(&words[2..4], quoted.as_slice());
+    }
     #[test]
     fn account_defaults_respect_explicit_launch_mode_and_prompt_delimiter() {
         for (provider, flag) in [("claude","--permission-mode"),("codex","--sandbox"),("kimi","--yolo")] {

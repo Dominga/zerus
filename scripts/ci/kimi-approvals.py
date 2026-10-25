@@ -25,7 +25,6 @@ ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('kimi_retained_gate', Path(__file__).with_name('kimi-native.py'))
 retained = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(retained)
-VERSIONS = ('2.1.1', '2.2.0')
 NAMES = ('test_a_danger_warning_is_part_of_the_reviewed_request',
          'test_a_viewed_clipped_panel_is_never_resized_or_answered',
          'test_an_unviewed_clipped_panel_grows_until_answerable',
@@ -33,6 +32,11 @@ NAMES = ('test_a_danger_warning_is_part_of_the_reviewed_request',
          'test_approve_once_runs_the_command',
          'test_reject_never_runs_the_command',
          'test_reject_with_feedback_reaches_the_model')
+GOAL_NAMES = ('test_goal_manual_starts_in_manual',
+              'test_goal_yolo_auto_switches_to_never_ask',
+              'test_goal_yolo_cancel_does_not_start',
+              'test_goal_yolo_keeps_ask_when_needed')
+PLAN_NAMES = ('test_plan_review_approve',)
 LOG_LIMIT, SECONDS = 64 * 1024**2, 900
 digest, strict, write = retained.digest, retained.strict, retained.write
 
@@ -55,6 +59,34 @@ def methods(platform_id):
     cls = ('test_kimi_approvals_windows.NativeWindowsKimiApprovals' if platform_id == 'win32-x64'
            else 'test_kimi_approvals_native.NativeKimiApprovals')
     return tuple(cls + '.' + name for name in NAMES)
+
+
+def goal_methods(platform_id):
+    source = ast.parse((ROOT / 'tests/test_kimi_approvals_native.py').read_text(encoding='utf-8'))
+    common = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == 'GoalCases')
+    names = tuple(sorted(node.name for node in common.body if isinstance(node, ast.FunctionDef)
+                         and node.name.startswith('test_')))
+    if names != GOAL_NAMES:
+        raise ValueError('the exact four goal methods require a new review')
+    cls = ('test_kimi_approvals_windows.NativeWindowsKimiApprovals' if platform_id == 'win32-x64'
+           else 'test_kimi_approvals_native.NativeKimiApprovals')
+    return tuple(cls + '.' + name for name in GOAL_NAMES)
+
+
+def plan_methods(platform_id):
+    source = ast.parse((ROOT / 'tests/test_kimi_approvals_native.py').read_text(encoding='utf-8'))
+    common = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == 'PlanCases')
+    names = tuple(sorted(node.name for node in common.body if isinstance(node, ast.FunctionDef)
+                         and node.name.startswith('test_')))
+    if names != PLAN_NAMES:
+        raise ValueError('the exact one plan method requires a new review')
+    cls = ('test_kimi_approvals_windows.NativeWindowsKimiApprovals' if platform_id == 'win32-x64'
+           else 'test_kimi_approvals_native.NativeKimiApprovals')
+    return tuple(cls + '.' + name for name in PLAN_NAMES)
+
+
+def selected_methods(platform_id):
+    return methods(platform_id) + goal_methods(platform_id) + plan_methods(platform_id)
 
 
 def fetch(url, output, size, sha256):
@@ -102,7 +134,7 @@ def child(result_file, custody_file, oracle=False):
         cls = native.NativeKimiApprovals
     selected = (('test_kimi_approvals_windows.WindowsEnvironmentOracle.'
                  'test_a_known_private_child_environment_matches_the_bounded_reader',) if oracle
-                else methods(platform_id))
+                else selected_methods(platform_id))
     original = cls.__setattr__
 
     def assigned(case, name, value):
@@ -209,8 +241,7 @@ def main():
     if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip() != args.source_sha:
         raise ValueError('the exact source changed')
     platform_id = target()
-    pins = retained.checked_pins(platform_id)
-    selected = methods(platform_id)
+    selected = selected_methods(platform_id)
     os.umask(0o077)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(mode=0o700)
@@ -265,7 +296,8 @@ def main():
         for name in ('conpty.dll', 'OpenConsole.exe'):
             tools[str(conpty / name)] = digest(conpty / name)
     write(evidence / 'plan.json', dict(source=args.source_sha, platform=platform_id, tools=tools,
-          methods=selected, versions=VERSIONS, native_cases=14, mac_shim_compiles=14 if os.name != 'nt' else 0,
+          methods=selected, selection='official latest once; no fallback', native_cases=len(selected),
+          mac_shim_compiles=len(selected) if os.name != 'nt' else 0,
           environment=env, runtime=str(runtime), no_retries=True))
     write(evidence / 'source-before.json', source)
     success = False
@@ -274,30 +306,23 @@ def main():
             oracle = ('test_kimi_approvals_windows.WindowsEnvironmentOracle.'
                       'test_a_known_private_child_environment_matches_the_bounded_reader',)
             invoke(evidence, 'windows-environment-oracle', env, oracle, oracle=True)
-        for version in VERSIONS:
-            pin = pins[version][platform_id]
-            filename = 'kimi-code-' + platform_id + ('.exe' if os.name == 'nt' else '')
-            image = images / (version + ('.exe' if os.name == 'nt' else ''))
-            record = fetch('https://code.kimi.com/kimi-code/binaries/' + version + '/' + filename,
-                           image, pin['size'], pin['sha256'])
-            write(evidence / (version + '-image-fetch.json'), record)
-        write(evidence / 'reservation.json', dict(state='SPENT', versions=VERSIONS, native_cases=14))
-        for version in VERSIONS:
-            if retained.source_map() != source or any(digest(path) != value for path, value in tools.items()):
-                raise ValueError('source or tools changed before execution')
-            image = images / (version + ('.exe' if os.name == 'nt' else ''))
-            case_evidence = evidence / ('native-' + version)
-            case_evidence.mkdir(mode=0o700)
-            native_env = dict(env, HGS_KIMI_TEST_BIN=str(image),
-                HGS_KIMI_TEST_SHA256=pins[version][platform_id]['sha256'],
-                HGS_KIMI_GUARD=os.pathsep.join(str(images / (other + ('.exe' if os.name == 'nt' else '')))
-                                             for other in VERSIONS), HGS_KIMI_EVIDENCE_DIR=str(case_evidence))
-            invoke(evidence, version, native_env, selected)
+        release, image, record_path = retained.stage_latest(images, evidence, platform_id)
+        version = release['version']
+        selected_seals = {str(path): digest(path) for path in (image, record_path, images / 'manifest.json')}
+        write(evidence / 'reservation.json', dict(state='SPENT', versions=[version], native_cases=len(selected),
+              selected_release=release))
+        if retained.source_map() != source or any(digest(path) != value for path, value in tools.items()):
+            raise ValueError('source or tools changed before execution')
+        case_evidence = evidence / ('native-' + version)
+        case_evidence.mkdir(mode=0o700)
+        native_env = dict(env, HGS_KIMI_TEST_BIN=str(image),
+            HGS_KIMI_TEST_SHA256=release['image_sha256'], HGS_KIMI_TEST_RECORD=str(record_path),
+            HGS_KIMI_GUARD=str(image), HGS_KIMI_EVIDENCE_DIR=str(case_evidence))
+        invoke(evidence, version, native_env, selected)
         if retained.source_map() != source or any(digest(path) != value for path, value in tools.items()):
             raise ValueError('source/tool post-seal changed')
-        for version in VERSIONS:
-            if digest(images / (version + ('.exe' if os.name == 'nt' else ''))) != pins[version][platform_id]['sha256']:
-                raise ValueError('an immutable staged image changed')
+        if any(digest(path) != sha for path, sha in selected_seals.items()):
+            raise ValueError('a sealed selected release changed')
         success = True
     except BaseException as error:
         write(evidence / 'failure.json', dict(type=type(error).__name__, message=str(error),
@@ -311,7 +336,7 @@ def main():
         raise
     finally:
         write(evidence / 'receipt.json', dict(source=args.source_sha, outcome='PASS' if success else 'FAIL',
-              native_cases=14 if success else None, platform=platform_id, runtime=str(runtime),
+              native_cases=len(selected) if success else None, platform=platform_id, runtime=str(runtime),
               images_retained=str(images), owner_install=False))
     return 0
 

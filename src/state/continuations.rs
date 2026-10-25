@@ -69,6 +69,31 @@ fn parked(record: &Value) -> Option<String> {
     Some(string(&entry, "parkedJobId").to_owned()).filter(|job| !job.is_empty())
 }
 
+/// The live session whose agent window holds the Claude background job that this
+/// process runs under, while the job is on that session's conversation. A
+/// command such a job runs proves its session this way, as a hook's event does.
+pub(super) fn background_session() -> Option<Value> {
+    let sid = nonempty_env("CLAUDE_CODE_SESSION_ID")?;
+    let claude: u32 = nonempty_env("CLAUDE_PID")?.parse().ok()?;
+    if !runs_under(claude) {
+        return None;
+    }
+    let job = registry(claude)
+        .filter(|entry| entry["kind"] == "bg")
+        .map(|entry| string(&entry, "jobId").to_owned())
+        .filter(|job| !job.is_empty())?;
+    let mut holding = records().ok()?.into_iter().filter(|record| {
+        string(record, "agent") == "claude"
+            && record["state"] != "archived"
+            && string(record, "conversation_id") == sid
+            && parked(record).as_deref() == Some(job.as_str())
+    });
+    match (holding.next(), holding.next()) {
+        (Some(record), None) => Some(record),
+        _ => None,
+    }
+}
+
 fn links() -> PathBuf {
     root().join("background_jobs")
 }

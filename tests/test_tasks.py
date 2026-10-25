@@ -93,7 +93,8 @@ class Fixture(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.root), TASK_FIXTURE=str(self.root),
                         HGS_CONFIG_DIR=str(self.root / "config"), HGS_STATE_DIR=str(self.state),
                         HGS_SELF="test", HGS_TAB="0", PATH=str(self.bin) + ":" + os.environ["PATH"])
-        for variable in ("TMUX", "TMUX_PANE", "HGS_RUN_ID", "HGS_SESSION", "HGS_EXECUTABLE", "HGS_SSH", "HGS_PEERS"):
+        for variable in ("TMUX", "TMUX_PANE", "HGS_RUN_ID", "HGS_SESSION", "HGS_EXECUTABLE", "HGS_SSH", "HGS_PEERS",
+                         "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CONFIG_DIR"):
             self.env.pop(variable, None)
         # hgs puts $HOME/.local/bin first on PATH: the shim there keeps tmux private.
         # Each test stops its own private server, never another one.
@@ -332,6 +333,35 @@ class AgentIdentity(Fixture):
         result = subprocess.run([str(HGS), "task", "list", "--project", "orchard"], env=env,
                                 text=True, capture_output=True, timeout=30)
         self.assertIn("names the agent session codex/api", result.stderr)
+
+    def test_a_background_job_acts_for_the_session_that_moved_it(self):
+        # Claude runs the job in a process that inherited another session's run
+        # token; Claude's registry names the job, and the session's window holds it.
+        window, token = (subprocess.Popen(["sleep", "60"]) for _ in range(2))
+        for process in (window, token):
+            self.addCleanup(process.wait)
+            self.addCleanup(process.kill)
+        conversation, job = str(uuid.uuid4()), str(uuid.uuid4())
+        agent_record(self.state, self.env, "claude/api", "run-window", pid=window.pid, conversation_id=conversation)
+        agent_record(self.state, self.env, "codex/web", "run-token", pid=token.pid)
+        registry = self.root / ".claude/sessions"
+        registry.mkdir(parents=True)
+        held = registry / f"{window.pid}.json"
+        held.write_text(json.dumps(dict(pid=window.pid, kind="interactive", parkedJobId=job)))
+        (registry / f"{os.getpid()}.json").write_text(json.dumps(dict(pid=os.getpid(), kind="bg", jobId=job, sessionId=conversation)))
+        env = dict(self.env, HGS_SESSION="codex/web", HGS_RUN_ID="run-token", CLAUDE_PID=str(os.getpid()),
+                   CLAUDE_CODE_SESSION_ID=conversation)
+        add = lambda env: subprocess.run([str(HGS), "task", "add", "--project", "orchard", "--json"], input="Document the setup",
+                                         env=env, text=True, capture_output=True, timeout=30)
+        result = add(env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        task = json.loads(result.stdout)["task"]
+        self.assertEqual((task["author"]["session"], task["target"]["session"]), ("claude/api", "claude/api"))
+        # Another conversation, or a job the window no longer holds, proves nothing.
+        self.assertIn("names the agent session codex/web", add(dict(env, CLAUDE_CODE_SESSION_ID=str(uuid.uuid4()))).stderr)
+        held.write_text(json.dumps(dict(pid=window.pid, kind="interactive")))
+        self.assertIn("names the agent session codex/web", add(env).stderr)
+        self.assertEqual(len(self.ids("todo")), 1)
 
     def test_a_renamed_session_acts_under_its_current_name(self):
         run = self.agent("codex/api")

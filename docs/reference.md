@@ -908,7 +908,9 @@ window moved it there, as Claude's session registry records (`jobId`,
 `parkedJobId` in `sessions/<pid>.json`). The session follows the job's
 conversation without a clear when its transcript ends with Claude's
 `continued-in` mark for it; a new conversation in the job clears it as `/clear`
-does. Events of jobs that no live session holds are not recorded.
+does. Events of jobs that no live session holds are not recorded. A command
+such a job runs, such as `hgs task` or `hgs self`, acts as that session while
+the job is on its conversation.
 
 ### Sending and attachments
 

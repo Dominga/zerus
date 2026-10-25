@@ -190,8 +190,7 @@ void TeamWorkspace::render()
         const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
         const QString status = displayStatus(*team, live);
         tv->addWidget(teamBar(*team, status));
-        if (const auto *draft = team->phase(team->pendingPhase); draft && draft->draft())
-            if (auto *strip = draftPhase(*team)) tv->addWidget(strip);
+        for (int phase : team->draftPhases()) if (auto *strip = draftPhase(*team, phase)) tv->addWidget(strip);
         if (team->hasFinish) tv->addWidget(finishSummary(*team));
         if (!m_error.isEmpty()) tv->addWidget(errorStrip());
         // Strips: Stuck, plan errors.
@@ -246,7 +245,10 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
     auto *name = label(team.name, c.fg, 14, true, "teamWorkspaceName"); h->addWidget(name);
     h->addWidget(new Pill(statusLabel(status), toneColor(c, statusTone(status)), status, false));
     if (team.pendingPhase > 0) {
-        auto *pending = new Pill(tr("phase %1 pending approval").arg(team.pendingPhase), c.warn);
+        const auto drafts = team.draftPhases();
+        QStringList ids; for (int n : drafts) ids << QString::number(n);
+        auto *pending = new Pill(drafts.size() > 1 ? tr("phases %1 pending approval").arg(ids.join(QStringLiteral(", ")))
+                                                   : tr("phase %1 pending approval").arg(team.pendingPhase), c.warn);
         pending->setObjectName("teamBarPendingPhase");
         h->addWidget(pending);
     }
@@ -300,27 +302,37 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
     return bar;
 }
 
-QWidget *TeamWorkspace::draftPhase(const Team &team)
+QWidget *TeamWorkspace::draftPhase(const Team &team, int phase)
 {
     const Colors c = colorsFor(m_dark);
     PhaseGroup group;
     bool found = false;
-    for (const auto &candidate : phaseGroups(team)) if (candidate.n == team.pendingPhase) { group = candidate; found = true; }
+    for (const auto &candidate : phaseGroups(team)) if (candidate.n == phase) { group = candidate; found = true; }
     if (!found) return nullptr;
     auto *strip = new QFrame; strip->setObjectName("teamWorkspaceDraftPhase");
+    strip->setProperty("phase", phase);
     strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceDraftPhase{background:%1;border-bottom:1px solid %2;}")
                              .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .45).name(QColor::HexArgb)));
     auto *h = new QHBoxLayout(strip); h->setContentsMargins(12, 5, 12, 5); h->setSpacing(8);
     h->addWidget(label(phaseHeading(group), c.fg, 12, true, "teamDraftPhaseHeading"));
     h->addWidget(new Pill(tr("draft"), c.warn));
     if (group.barrier) h->addWidget(new Pill(tr("barrier"), c.muted));
-    h->addWidget(label(tr("waits for your approval"), c.text2, 11));
-    h->addStretch();
+    // Spec 10: every lower phase must be approved and finished before this one
+    // opens; the reason stays on the disabled button as its tooltip.
+    const QString blocked = approveBlocked(team, phase);
+    auto *reason = label(blocked.isEmpty() ? tr("waits for your approval") : blocked, blocked.isEmpty() ? c.text2 : c.warn, 11, false,
+                         "teamDraftPhaseReason");
+    reason->setObjectName("teamDraftPhaseReason");
+    h->addWidget(reason, 1);
     auto *approve = button(tr("Approve phase"), "teamApprovePhase", true);
+    approve->setProperty("phase", phase);
+    approve->setEnabled(blocked.isEmpty());
+    approve->setToolTip(blocked.isEmpty() ? tr("Hand phase %1's tasks out").arg(phase) : blocked);
     auto *discard = button(tr("Discard phase"), "teamDiscardPhase");
+    discard->setProperty("phase", phase);
     discard->setProperty("danger", true);
     // Both decisions go out once: the buttons stay disabled until the answer.
-    const auto decide = [this, id = team.id, phase = group.n, approve, discard](const QString &operation) {
+    const auto decide = [this, id = team.id, phase, approve, discard](const QString &operation) {
         approve->setEnabled(false); discard->setEnabled(false); m_error.clear();
         m_panel->act(operation, {{"team", id}, {"phase", phase}}, [this](bool ok, const QString &message) {
             if (!ok) m_error = message;
@@ -328,7 +340,7 @@ QWidget *TeamWorkspace::draftPhase(const Team &team)
         });
     };
     QObject::connect(approve, &QPushButton::clicked, this, [decide] { decide(QStringLiteral("approve-phase")); });
-    QObject::connect(discard, &QPushButton::clicked, this, [this, decide, phase = group.n, count = group.tasks.size()] {
+    QObject::connect(discard, &QPushButton::clicked, this, [this, decide, phase, count = group.tasks.size()] {
         if (m_panel->confirm("teamDiscardPhaseConfirm", tr("Discard phase?"),
                              tr("Discard phase %1 and its %2 tasks?").arg(phase).arg(count), tr("Discard phase")))
             decide(QStringLiteral("discard-phase"));
@@ -390,6 +402,21 @@ QWidget *TeamWorkspace::answers(const Team &team)
         QObject::connect(go, &QPushButton::clicked, this, [this, host = m.host, session = m.session] { if (openSession) openSession(host, session); });
         r->addWidget(go);
         v->addLayout(r);
+    }
+    // A3: a team question waits for the lead too; Answer opens its task card,
+    // where the reply goes out.
+    for (const auto &task : team.tasks) {
+        for (const auto &asked : openQuestions(task)) {
+            auto *r = row(8);
+            if (!waiting++) r->addWidget(label(tr("Needs your answer"), c.fg, 12, true));
+            else r->addSpacing(QFontMetrics(font()).horizontalAdvance(tr("Needs your answer")) + 4);
+            r->addWidget(new Pill(team.roleOf(task.assignee), roleColor(team.roleOf(task.assignee), m_dark)));
+            r->addWidget(elided(QStringLiteral("#%1 %2 — %3").arg(task.id).arg(task.title, asked.text), c.fg, 12), 1);
+            auto *answer = button(tr("Answer"), "teamWorkspaceAnswerQuestion");
+            QObject::connect(answer, &QPushButton::clicked, this, [this, id = task.id] { m_drawerTask = id; scheduleRender(); });
+            r->addWidget(answer);
+            v->addLayout(r);
+        }
     }
     // The slot stays when nothing waits, so the canvas never jumps.
     if (!waiting) {
@@ -488,6 +515,10 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         node.problem = problemTasks.contains(id);
         node.tone = toneColor(c, node.problem ? problemTone.value(id, Tone::Danger) : status.tone);
         node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
+        // A1: the hovered node's icon names the attempt phase; its tooltip
+        // names the state, the time and the next step.
+        const auto mark = phaseMark(team, *task);
+        node.tooltip = mark.tooltip.isEmpty() ? status.text : mark.tooltip;
         node.draft = task->status == "draft"; node.error = team.cycle.contains(id);
         node.attempt = task->last() ? task->last()->n : 0;
         if (const auto *m = team.member(task->assignee)) node.agent = m->agent;
@@ -565,7 +596,10 @@ QWidget *TeamWorkspace::board(const Team &team)
             const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r->addWidget(pill);
             if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r->addWidget(i); }
-            auto *mark = new StatusMark(s.text, toneColor(c, s.tone), kindOfTask(task, s)); mark->setObjectName("teamBoardState"); r->addWidget(mark);
+            const auto mark = phaseMark(team, task);
+            auto *state = new StatusMark(s.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : s.tone),
+                                         mark.kind.isEmpty() ? kindOfTask(task, s) : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
+            state->setObjectName("teamBoardState"); r->addWidget(state);
             QStringList deps; for (const auto &d : task.deps) deps << QStringLiteral("#%1").arg(d.task);
             if (!deps.isEmpty()) r->addWidget(label(QStringLiteral("← ") + deps.join(' '), c.dim, 10));
             b->addLayout(r);
@@ -648,7 +682,10 @@ QWidget *TeamWorkspace::members(const Team &team)
     const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
     auto *w = new QWidget; w->setObjectName("teamWorkspaceMemberList");
     auto *v = new QVBoxLayout(w); v->setContentsMargins(10, 10, 10, 10); v->setSpacing(6);
-    auto *title = row(6); title->addWidget(label(tr("Members"), c.fg, 12, true)); title->addWidget(label(QString::number(team.members.size()), c.muted, 12)); title->addStretch();
+    const bool finished = team.status == "done" || team.status == "stopped";
+    int active = 0;
+    for (const auto &m : team.members) if (!(finished && leftMember(team, m.id))) ++active;
+    auto *title = row(6); title->addWidget(label(tr("Members"), c.fg, 12, true)); title->addWidget(label(QString::number(active), c.muted, 12)); title->addStretch();
     if (team.status == "planning" || team.status == "running" || team.status == "paused") {
         auto *add = button(tr("+ Member"), "teamWorkspaceAddMember");
         add->setToolTip(tr("Add a member; it starts with the first task it gets"));
@@ -657,6 +694,8 @@ QWidget *TeamWorkspace::members(const Team &team)
     }
     v->addLayout(title);
     for (const auto &m : team.members) {
+        // F7: a session left running after the team ended is shown apart below.
+        if (finished && leftMember(team, m.id)) continue;
         const auto state = live(m);
         const auto status = memberStatus(team, m, state);
         auto *b = new MemberCard; b->setObjectName("teamWorkspaceMember"); b->setCursor(Qt::PointingHandCursor); b->setProperty("teamMember", m.id);
@@ -688,7 +727,20 @@ QWidget *TeamWorkspace::members(const Team &team)
             });
             wait->addWidget(assign); wait->addWidget(ask); wait->addStretch();
             col->addLayout(wait);
-        } else col->addWidget(new StatusMark(team.status == "planning" && m.session.isEmpty() && !m.lead ? tr("On approval") : status.text, toneColor(c, status.tone), status.kind));
+        } else {
+            // A1: the attempt's phase icon and tooltip beside the member.
+            const Task *current = status.task ? team.task(status.task) : nullptr;
+            const auto mark = current ? phaseMark(team, *current) : PhaseMark{};
+            const QString shown = team.status == "planning" && m.session.isEmpty() && !m.lead ? tr("On approval") : status.text;
+            auto *state = new StatusMark(shown, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : status.tone),
+                                         mark.kind.isEmpty() ? status.kind : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
+            state->setObjectName("teamWorkspaceMemberState");
+            state->setProperty("phase", mark.phase);
+            col->addWidget(state);
+        }
+        // A5: the member's queue, the current task first, then the tasks
+        // returned to it.
+        if (auto *queue = memberQueueWidget(team, m, c, [this](int id) { m_drawerTask = id; scheduleRender(); })) col->addWidget(queue);
         bh->addLayout(col, 1);
         auto *right = new QVBoxLayout; right->setSpacing(3);
         auto *ratio = label(QStringLiteral("%1/%2").arg(done).arg(total), c.muted, 11); ratio->setFont(NewSessionDense::mono(11)); ratio->setAlignment(Qt::AlignRight);
@@ -706,6 +758,8 @@ QWidget *TeamWorkspace::members(const Team &team)
         bh->addWidget(more, 0, Qt::AlignTop);
         v->addWidget(b);
     }
+    // F7: the sessions a Done/Stopped team left running, apart from the members.
+    if (finished && !team.leftRunning.isEmpty()) v->addWidget(m_panel->leftoverMembers(team, false));
     v->addStretch();
     return w;
 }

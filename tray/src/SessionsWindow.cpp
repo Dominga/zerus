@@ -1495,6 +1495,23 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(index>=0)m_inspector->setTabText(index,answers?tr("Team ?%1").arg(answers):tr("Team"));
     };
     m_teamPanel->setLive([this](const Teams::Member &member){return teamLive(member);});
+    // F7: sessions a Done/Stopped team left running are stopped here, after the
+    // Team tab confirms; "Take into a new team" opens the New team flow, whose
+    // member editor can adopt the session.
+    m_teamPanel->stopSession=[this](const QString &host,const QString &name){stopTeamSession(host,name);};
+    m_teamPanel->takeIntoTeam=[this](const QString &,const QString &){showNewTeam();};
+    // F8: the free sessions a member may adopt: listed, running, and not a
+    // member of a team that is still going.
+    m_teamPanel->sessionChoices=[this]{
+        QList<Teams::SessionChoice> choices;
+        for(const auto &entry:m_entries){
+            if(entry.session.state!="running")continue;
+            if(const auto *team=m_teams->teamOfSession(entry.host,entry.session.name))
+                if(team->status=="planning"||team->status=="running"||team->status=="paused")continue;
+            choices.append({entry.host,entry.session.name,entry.session.runId,entry.session.conversationId,entry.session.cmd,entry.session.cwd});
+        }
+        return choices;
+    };
     m_collapsedTeams=[]{const auto list=QSettings().value("workspace/collapsedTeams").toStringList();return QSet<QString>(list.cbegin(),list.cend());}();
     connect(m_sessions,&SessionList::teamActivated,this,&SessionsWindow::showTeam);
     m_inspector->addTab(m_teamPanel, tr("Team"));
@@ -6101,6 +6118,22 @@ void SessionsWindow::renameSession()
     m_client.renameSession(original.host, original.session.name, newName, original.session.archiveId);
 }
 
+void SessionsWindow::stopTeamSession(const QString &host, const QString &name)
+{
+    for (const auto &entry : m_entries)
+        if (entry.host == host && entry.session.name == name) { selectSessionEntry(entry); break; }
+    const auto *entry = selected();
+    if (!entry || entry->host != host || entry->session.name != name) {
+        showNotice(tr("%1 is not listed here; open it to stop it").arg(name), true);
+        return;
+    }
+    // The Team tab confirmed with the session's name and the consequence; the
+    // terminate flow below does the rest with the same state checks.
+    m_terminateConfirmed = true;
+    terminateSession();
+    m_terminateConfirmed = false;
+}
+
 void SessionsWindow::terminateSession()
 {
     const auto *e = selected(); if (!e || !e->online || isTerminating(*e) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest
@@ -6124,7 +6157,9 @@ void SessionsWindow::terminateSession()
     confirm.button(QMessageBox::Yes)->setText(live ? (keepArchive ? tr("Stop and archive") : tr("Terminate session"))
         : archived ? tr("Forget archived session") : tr("Forget saved session"));
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
-    if (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original)) return;
+    // A Team-tab leftover row confirmed already and named the same session.
+    if (!m_terminateConfirmed && (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original))) return;
+    if (m_terminateConfirmed && !selectSessionEntry(original)) return;
     const auto *current = selected();
     if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest) return;
     const bool currentBindingOnly = !archived && NativeSessionCapabilities::forgetsBindingOnly(current->session,m_details);

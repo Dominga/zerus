@@ -15,6 +15,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QVBoxLayout>
 #include <QKeyEvent>
 #include <cmath>
 #include <functional>
@@ -106,11 +107,73 @@ inline void glyph(QPainter &p, const QRectF &r, const QColor &color, const QStri
     } else if (kind == "idle" || kind == "pending" || kind == "planning") {
         p.drawEllipse(c);
         if (kind == "idle") p.drawLine(m + QPointF(-s * .45, 0), m + QPointF(s * .45, 0));
-    } else if (kind == "answer" || kind == "no_report" || kind == "stuck") {
+    } else if (kind == "answer" || kind == "stuck") {
         p.drawEllipse(c);
         QFont f; f.setPixelSize(int(c.height() * .8)); f.setBold(true); p.setFont(f);
         p.drawText(c, Qt::AlignCenter, kind == "answer" ? QStringLiteral("?") : QStringLiteral("!"));
-    } else if (kind == "offline" || kind == "unconfirmed" || kind == "rejected" || kind == "failed" || kind == "stopped") {
+    } else if (kind == "sent") {
+        // An outgoing arrow: the hand-off left for the member.
+        p.drawLine(m + QPointF(-s * .45, s * .55), m + QPointF(s * .45, s * .55));
+        p.drawLine(m + QPointF(-s * .45, 0), m + QPointF(s * .3, 0));
+        p.drawLine(m + QPointF(s * .05, -s * .35), m + QPointF(s * .4, 0));
+        p.drawLine(m + QPointF(s * .05, s * .35), m + QPointF(s * .4, 0));
+    } else if (kind == "delivered" || kind == "late") {
+        // An inbox: the task sits in the agent's terminal. "late" adds the dot
+        // of a start that never came.
+        QPainterPath tray;
+        tray.moveTo(c.left() + s * .05, c.top() + s * .45);
+        tray.lineTo(c.left() + s * .05, c.bottom() - s * .15);
+        tray.lineTo(c.right() - s * .05, c.bottom() - s * .15);
+        tray.lineTo(c.right() - s * .05, c.top() + s * .45);
+        p.drawPath(tray);
+        p.drawLine(QPointF(c.left() + s * .05, c.top() + s * .35), QPointF(c.right() - s * .05, c.top() + s * .35));
+        if (kind == "late") {
+            p.setPen(Qt::NoPen); p.setBrush(color);
+            p.drawEllipse(QPointF(c.right() - s * .1, c.top() + s * .1), s * .3, s * .3);
+        }
+    } else if (kind == "asking") {
+        // A speech bubble with the question it carries (A3).
+        const QRectF bubble(c.left(), c.top() + s * .1, c.width(), c.height() - s * .4);
+        p.drawRoundedRect(bubble, 2.5, 2.5);
+        p.drawLine(QPointF(c.left() + s * .55, bubble.bottom()), QPointF(c.left() + s * .3, c.bottom() - s * .05));
+        QFont f; f.setPixelSize(qMax(6, int(c.height() * .7))); f.setBold(true); p.setFont(f);
+        p.drawText(bubble, Qt::AlignCenter, QStringLiteral("?"));
+    } else if (kind == "held") {
+        p.drawEllipse(c);
+        p.drawLine(m + QPointF(-s * .22, -s * .35), m + QPointF(-s * .22, s * .35));
+        p.drawLine(m + QPointF(s * .22, -s * .35), m + QPointF(s * .22, s * .35));
+    } else if (kind == "reported" || kind == "no_report") {
+        // A document: a check for a report, a cross for a turn that ended
+        // without one.
+        QPainterPath doc;
+        doc.moveTo(c.left() + s * .25, c.top());
+        doc.lineTo(c.right() - s * .55, c.top());
+        doc.lineTo(c.right() - s * .15, c.top() + s * .4);
+        doc.lineTo(c.right() - s * .15, c.bottom());
+        doc.lineTo(c.left() + s * .25, c.bottom());
+        doc.closeSubpath();
+        p.drawPath(doc);
+        p.drawLine(QPointF(c.right() - s * .55, c.top()), QPointF(c.right() - s * .55, c.top() + s * .4));
+        p.drawLine(QPointF(c.right() - s * .55, c.top() + s * .4), QPointF(c.right() - s * .15, c.top() + s * .4));
+        if (kind == "reported") {
+            p.drawLine(m + QPointF(-s * .35, s * .1), m + QPointF(-s * .1, s * .35));
+            p.drawLine(m + QPointF(-s * .1, s * .35), m + QPointF(s * .3, -s * .25));
+        } else {
+            p.drawLine(m + QPointF(-s * .3, -s * .2), m + QPointF(s * .2, s * .3));
+            p.drawLine(m + QPointF(-s * .3, s * .3), m + QPointF(s * .2, -s * .2));
+        }
+    } else if (kind == "stopped") {
+        p.setPen(Qt::NoPen); p.setBrush(color);
+        p.drawRoundedRect(QRectF(c.left() + s * .15, c.top() + s * .15, c.width() - s * .3, c.height() - s * .3), 1.5, 1.5);
+    } else if (kind == "rejected") {
+        // A curved arrow back to the member.
+        QPainterPath back;
+        back.moveTo(c.right() - s * .1, c.bottom() - s * .2);
+        back.cubicTo(c.right() - s * .15, c.top() + s * .15, c.left() + s * .1, c.top() + s * .1, c.left() + s * .2, m.y());
+        p.drawPath(back);
+        p.drawLine(QPointF(c.left() + s * .2, m.y()), QPointF(c.left() + s * .5, m.y() - s * .35));
+        p.drawLine(QPointF(c.left() + s * .2, m.y()), QPointF(c.left() + s * .5, m.y() + s * .35));
+    } else if (kind == "offline" || kind == "unconfirmed" || kind == "failed") {
         p.drawEllipse(c); p.drawLine(m + QPointF(-s * .4, -s * .4), m + QPointF(s * .4, s * .4)); p.drawLine(m + QPointF(-s * .4, s * .4), m + QPointF(s * .4, -s * .4));
     } else {
         p.drawEllipse(c);
@@ -118,8 +181,120 @@ inline void glyph(QPainter &p, const QRectF &r, const QColor &color, const QStri
     p.restore();
 }
 
+// A glyph as a pixmap or icon, for buttons and rows that need one.
+inline QPixmap glyphPixmap(const QColor &color, const QString &kind, int size = 14, double ratio = 2.0)
+{
+    QPixmap pix(int(size * ratio), int(size * ratio));
+    pix.setDevicePixelRatio(ratio);
+    pix.fill(Qt::transparent);
+    QPainter p(&pix);
+    glyph(p, QRectF(0, 0, size, size), color, kind);
+    return pix;
+}
+
+inline QIcon glyphIcon(const QColor &color, const QString &kind, int size = 14)
+{
+    return QIcon(glyphPixmap(color, kind, size));
+}
+
+// "just now", "3 min ago", "2 h ago": the time a phase tooltip names.
+inline QString agoText(double then, double now)
+{
+    if (then <= 0 || now <= then + 1) return QCoreApplication::translate("TeamPanel", "just now");
+    const int seconds = int(now - then);
+    if (seconds < 60) return QCoreApplication::translate("TeamPanel", "%1 s ago").arg(seconds);
+    if (seconds < 3600) return QCoreApplication::translate("TeamPanel", "%1 min ago").arg(seconds / 60);
+    if (seconds < 86400) return QCoreApplication::translate("TeamPanel", "%1 h ago").arg(seconds / 3600);
+    return QCoreApplication::translate("TeamPanel", "%1 d ago").arg(seconds / 86400);
+}
+
+// An attempt phase as the desktop draws it (A1, spec 11): the glyph kind, its
+// tone, and a tooltip naming the state, the time and the next step. `phase` is
+// empty when the task has no attempt.
+struct PhaseMark {
+    QString phase, kind, tooltip;
+    Tone tone = Tone::Neutral;
+};
+
+inline PhaseMark phaseMark(const Team &team, const Task &task, double now = 0)
+{
+    PhaseMark mark;
+    mark.phase = lastPhase(task);
+    mark.kind = mark.phase;
+    if (mark.phase.isEmpty()) return mark;
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    if (now <= 0) now = double(QDateTime::currentSecsSinceEpoch());
+    const auto *attempt = task.last();
+    const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
+    const double delivered = attempt ? (attempt->deliveredAt > 0 ? attempt->deliveredAt : attempt->sentAt) : 0;
+    if (mark.phase == "sent") {
+        mark.tone = Tone::Assigned; mark.tooltip = tr("Sending to %1").arg(role);
+    } else if (mark.phase == "delivered") {
+        mark.tone = Tone::Assigned; mark.tooltip = tr("Delivered %1, not started yet").arg(agoText(delivered, now));
+    } else if (mark.phase == "late") {
+        mark.tone = Tone::Warn; mark.tooltip = tr("Delivered %1 and not started: check its terminal").arg(agoText(delivered, now));
+    } else if (mark.phase == "working") {
+        mark.tone = Tone::Active;
+        mark.tooltip = attempt && attempt->startedAt > 0 ? tr("%1 started %2").arg(role, agoText(attempt->startedAt, now))
+                                                         : tr("%1 is working on it").arg(role);
+    } else if (mark.phase == "asking") {
+        mark.tone = Tone::Warn;
+        const auto *question = attempt ? attempt->openQuestion() : nullptr;
+        mark.tooltip = question ? tr("%1 asks: \"%2\" (Answer)").arg(role, question->text)
+                                : tr("%1 asks a question (Answer)").arg(role);
+    } else if (mark.phase == "held") {
+        mark.tone = Tone::Muted;
+        mark.tooltip = task.hold.by.isEmpty() ? tr("Held: waiting for the owner")
+                      : task.hold.reason.isEmpty() ? tr("Held by %1: waiting for the owner").arg(task.hold.by)
+                                                   : tr("Held by %1: %2").arg(task.hold.by, task.hold.reason);
+    } else if (mark.phase == "reported") {
+        mark.tone = Tone::Done;
+        mark.tooltip = !attempt || attempt->reportAt <= 0 ? tr("Report from %1").arg(role)
+                                                          : tr("Report from %1, %2").arg(role, agoText(attempt->reportAt, now));
+    } else if (mark.phase == "no_report") {
+        mark.tone = Tone::Warn; mark.tooltip = tr("Turn ended without a report");
+    } else if (mark.phase == "stopped") {
+        mark.tone = Tone::Danger; mark.tooltip = tr("%1's session stopped").arg(role);
+    } else if (mark.phase == "rejected") {
+        mark.tone = Tone::Danger; mark.tooltip = tr("Rejected: returned to %1").arg(role);
+    } else if (mark.phase == "unconfirmed") {
+        mark.tone = Tone::Danger; mark.tooltip = tr("Delivery unconfirmed");
+    }
+    return mark;
+}
+
+// One row of a member's queue (A5): the task's phase icon, its number and
+// title, and the phase's tooltip. The current task's row comes first.
+inline QPushButton *memberQueueRow(const Team &team, const Task &task, const Colors &c, bool current)
+{
+    const auto mark = phaseMark(team, task);
+    auto *row = new QPushButton;
+    row->setObjectName("teamMemberQueueRow");
+    row->setProperty("task", task.id);
+    row->setProperty("current", current);
+    row->setProperty("phase", mark.phase);
+    row->setIcon(glyphIcon(toneColor(c, mark.tone == Tone::Neutral ? Tone::Muted : mark.tone), mark.kind, 13));
+    row->setIconSize(QSize(13, 13));
+    row->setText(QStringLiteral("#%1 %2").arg(task.id).arg(task.title));
+    row->setFlat(true);
+    row->setCursor(Qt::PointingHandCursor);
+    row->setFixedHeight(18);
+    row->setToolTip(mark.tooltip);
+    if (!mark.tooltip.isEmpty()) row->setAccessibleName(row->text() + QStringLiteral(" - ") + mark.tooltip);
+    row->setStyleSheet(QStringLiteral("QPushButton{text-align:left;font-size:11px;color:%1;border:none;padding:0 2px;}"
+                                      "QPushButton:hover{color:%2;}").arg(current ? c.text2.name() : c.muted.name(), c.fg.name()));
+    return row;
+}
+
+
 inline QString kindOfTask(const Task &task, const Status &status)
 {
+    // A live task shows the attempt's phase (A1); one hgs did not send is
+    // derived (Teams::lastPhase). A decided task keeps its own mark.
+    if (!task.finished() || task.status == "rejected") {
+        const QString phase = lastPhase(task);
+        if (!phase.isEmpty()) return phase;
+    }
     if (status.tone == Tone::Danger) return QStringLiteral("unconfirmed");
     if (status.tone == Tone::Warn) return QStringLiteral("no_report");
     return task.status;
@@ -161,14 +336,19 @@ private:
 };
 
 // A status: mark and text, elided; a fixed width keeps neighbours in place.
+// `tooltip` names the state, the time and the next step when the text alone
+// does not (the attempt phases of the delivery spec).
 class StatusMark : public QWidget {
 public:
-    StatusMark(const QString &text, const QColor &color, const QString &kind, int fixedWidth = 0, Qt::Alignment align = Qt::AlignLeft, QWidget *parent = nullptr)
+    StatusMark(const QString &text, const QColor &color, const QString &kind, int fixedWidth = 0, Qt::Alignment align = Qt::AlignLeft,
+               QWidget *parent = nullptr, const QString &tooltip = {})
         : QWidget(parent), m_text(text), m_color(color), m_kind(kind), m_align(align)
     {
         QFont f = font(); f.setPixelSize(12); setFont(f);
         if (fixedWidth) setFixedWidth(fixedWidth); else setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        setFixedHeight(18); setToolTip(text);
+        setFixedHeight(18);
+        const QString tip = tooltip.isEmpty() ? text : text.isEmpty() ? tooltip : tooltip + QLatin1Char('\n') + text;
+        setToolTip(tip);
     }
     QSize sizeHint() const override { return {fontMetrics().horizontalAdvance(m_text) + 18, 18}; }
 protected:
@@ -211,7 +391,7 @@ private:
 class TaskView : public QWidget {
 public:
     enum Mode { List, Graph, Wide };
-    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
+    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -691,9 +871,18 @@ protected:
         const int id = at(e->position());
         if (m_dragFrom) { m_dragAt = e->position(); m_hover = id; update(); return; }
         if (phaseAt(e->position())) { if (m_hover) { m_hover = 0; update(); } setCursor(Qt::PointingHandCursor); return; }
-        if (id != m_hover) { m_hover = id; setCursor(id ? Qt::PointingHandCursor : Qt::ArrowCursor); update(); }
+        if (id != m_hover) {
+            m_hover = id;
+            // The hovered node's phase tooltip names the state, the time and
+            // the next step (spec 11).
+            QString tip;
+            for (const auto &node : nodes) if (node.id == id) { tip = node.tooltip; break; }
+            setToolTip(tip);
+            setCursor(id ? Qt::PointingHandCursor : Qt::ArrowCursor);
+            update();
+        }
     }
-    void leaveEvent(QEvent *) override { if (!m_dragFrom) { m_hover = 0; update(); } }
+    void leaveEvent(QEvent *) override { if (!m_dragFrom) { m_hover = 0; setToolTip({}); update(); } }
     void mouseReleaseEvent(QMouseEvent *e) override
     {
         const int id = at(e->position());
@@ -791,6 +980,32 @@ inline QLabel *elided(const QString &text, const QColor &color, int pixels = 12)
     l->setMinimumWidth(20);
     l->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     return l;
+}
+
+// A member's queue (A5) under its current task: the open task first, then the
+// tasks returned to it, at most five rows and "+N more". Nothing when the only
+// entry is the current task, which the card already names.
+inline QWidget *memberQueueWidget(const Team &team, const Member &member, const Colors &c, const std::function<void(int)> &open)
+{
+    if (member.queue.size() < 2) return nullptr;
+    auto *box = new QWidget;
+    box->setObjectName("teamMemberQueue");
+    box->setProperty("member", member.id);
+    auto *v = new QVBoxLayout(box);
+    v->setContentsMargins(0, 0, 0, 0); v->setSpacing(1);
+    const int shown = qMin(5, int(member.queue.size()));
+    for (int i = 0; i < shown; ++i) {
+        const auto *task = team.task(member.queue[i]);
+        if (!task) continue;
+        auto *row = memberQueueRow(team, *task, c, i == 0);
+        QObject::connect(row, &QPushButton::clicked, row, [open, id = task->id] { if (open) open(id); });
+        v->addWidget(row);
+    }
+    if (member.queue.size() > shown) {
+        auto *more = label(QCoreApplication::translate("TeamPanel", "+%1 more").arg(member.queue.size() - shown), c.dim, 11, false, "teamMemberQueueMore");
+        v->addWidget(more);
+    }
+    return box;
 }
 
 inline QPushButton *button(const QString &text, const char *name, bool primary = false)

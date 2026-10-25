@@ -115,6 +115,28 @@ void TeamController::finishTeam(const QString &summary, const Done &done)
     act(QStringLiteral("finish"), {{"summary", summary}}, done);
 }
 
+void TeamController::holdTask(int task, const QString &reason, const Done &done)
+{
+    act(QStringLiteral("hold"), {{"task", task}, {"reason", reason}}, done);
+}
+
+void TeamController::releaseTask(int task, const Done &done)
+{
+    act(QStringLiteral("release"), {{"task", task}}, done);
+}
+
+void TeamController::rejectWithHold(int task, const QString &reason, const Done &done)
+{
+    // A5: the same reject, with the task parked for a later release.
+    act(QStringLiteral("reject"), {{"task", task}, {"reason", reason}, {"hold", true}}, done);
+}
+
+void TeamController::answerQuestion(const QString &question, const QString &text, const Done &done)
+{
+    // A3: `reply`, not `answer` (that one stays for native questions).
+    act(QStringLiteral("reply"), {{"question", question}, {"text", text}}, done);
+}
+
 void TeamController::call(const QString &operation, QJsonObject input, const Reply &done, bool change)
 {
     if (change) {

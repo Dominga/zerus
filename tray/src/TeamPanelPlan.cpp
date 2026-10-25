@@ -66,8 +66,8 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
         auto *line1 = row(6);
         const QString role = team.roleOf(member.id);
         line1->addWidget(new Pill(member.lead && member.role != role ? role + QStringLiteral(" · ") + member.role : role, roleColor(role, m_dark)));
-        line1->addWidget(new StatusMark(member.session.isEmpty() ? tr("Created on approval") : tr("Planning"),
-                                        member.session.isEmpty() ? c.dim : c.folder, member.session.isEmpty() ? "not_created" : "planning"));
+        line1->addWidget(new StatusMark(member.session.isEmpty() ? tr("Created on approval") : tr("Existing session"),
+                                        member.session.isEmpty() ? c.dim : c.accent, member.session.isEmpty() ? "not_created" : "working"));
         line1->addStretch();
         body->addLayout(line1);
         auto *line2 = row(6);
@@ -97,7 +97,11 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
         line2->addWidget(agent, 2); line2->addWidget(model, 3);
         body->addLayout(line2);
         int tasks = 0; for (const auto &t : team.tasks) tasks += t.assignee == member.id;
-        body->addWidget(elided((member.computer.isEmpty() ? tr("this computer") : member.computer) + QStringLiteral(" · ") + tr("%n task(s)", nullptr, tasks), c.muted, 11));
+        auto *where = elided((member.session.isEmpty() ? QString() : member.session + QStringLiteral(" · "))
+                                 + (member.computer.isEmpty() ? tr("this computer") : member.computer) + QStringLiteral(" · ")
+                                 + tr("%n task(s)", nullptr, tasks), c.muted, 11);
+        where->setObjectName("teamMemberWhere");
+        body->addWidget(where);
         h->addLayout(body, 1);
         if (!member.lead) {
             auto *more = new QToolButton; more->setObjectName("teamMemberMore"); more->setText(QStringLiteral("⋯")); more->setAutoRaise(true);
@@ -118,6 +122,30 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
                 for (auto &m : edited.members) if (m.id == id) m.folder = on ? "worktree" : "shared";
                 savePlan(edited);
             });
+            menu->addSeparator();
+            // F8: a free session joins with the context it already has.
+            auto *pick = menu->addMenu(tr("Use an existing session…"));
+            pick->setObjectName("teamMemberSessionMenu");
+            const auto choices = sessionChoices ? sessionChoices() : QList<SessionChoice>{};
+            for (const auto &choice : choices) {
+                if (team.memberOfSession(choice.host, choice.name)) continue;
+                const QString label = choice.host.isEmpty() ? choice.name : choice.name + QStringLiteral(" @") + choice.host;
+                auto *action = pick->addAction(label, this, [this, team, id = member.id, choice] {
+                    Team edited = team;
+                    for (auto &m : edited.members) if (m.id == id) {
+                        m.host = choice.host; m.session = choice.name;
+                        m.runId = choice.runId; m.conversationId = choice.conversationId;
+                        if (!choice.agent.isEmpty()) m.agent = choice.agent;
+                        m.folder = QStringLiteral("shared");   // its folder is the session's own
+                        if (!choice.directory.isEmpty()) m.directory = choice.directory;
+                    }
+                    savePlan(edited);
+                });
+                action->setToolTip(choice.directory.isEmpty() ? QString() : tr("Its folder: %1").arg(choice.directory));
+            }
+            pick->setEnabled(!pick->isEmpty());
+            pick->setToolTip(pick->isEmpty() ? tr("No free session on this computer")
+                                             : tr("Adopt a session that already has its context"));
             menu->addSeparator();
             menu->addAction(tr("Remove from plan"), this, [this, team, id = member.id] {
                 Team edited = team;

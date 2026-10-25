@@ -33,11 +33,20 @@ public:
     int openedTask() const { return m_openTask; }
     std::function<void(const QString &host, const QString &session)> openSession;
     std::function<void(const QString &host, const QString &session, const QString &text)> sendMessage;
+    // F7: a member session a Done/Stopped team left running. The panel confirms
+    // and then asks the window to stop it (or to start a new team with it); it
+    // never stops one itself.
+    std::function<void(const QString &host, const QString &session)> stopSession;
+    std::function<void(const QString &host, const QString &session)> takeIntoTeam;
+    // F8: the free sessions a member may adopt instead of starting its own.
+    std::function<QList<Teams::SessionChoice>()> sessionChoices;
     // `?N` for the tab: questions and approvals waiting in member sessions.
     std::function<void(int answers)> answersChanged;
     void render();
     // Shared with the team workspace.
     QWidget *problemActions(const Teams::Team &team, const Teams::Member &member, const Teams::Status &status);
+    // The "Left from <team>" block of a Done/Stopped team (F7).
+    QWidget *leftoverMembers(const Teams::Team &team, bool narrow);
     // Phase groups in the plan, board and graph: a finished phase starts
     // collapsed, the owner's toggles are kept per team for the session.
     bool phaseOpen(const Teams::Team &team, const Teams::PhaseGroup &group) const;

@@ -43,8 +43,9 @@ private:
     void scheduleRender();
     QWidget *teamBar(const Teams::Team &team, const QString &status);
     // A draft phase waits for you: its header with Approve phase and Discard
-    // phase, and the finished team's own summary once it is Done.
-    QWidget *draftPhase(const Teams::Team &team);
+    // phase, and the finished team's own summary once it is Done. Approve is
+    // enabled only while every lower phase is approved and done (spec 10).
+    QWidget *draftPhase(const Teams::Team &team, int phase);
     QWidget *finishSummary(const Teams::Team &team);
     QWidget *errorStrip();
     // The team as the controller currently has it, by id (a poll may have

@@ -28,8 +28,36 @@ struct Member {
     // The member's session once it exists: computer alias (empty = the lead's
     // computer) and name.
     QString host, session;
+    // The identity a hand-written plan may carry to adopt an existing session
+    // (F8); empty for a member Zerus launches itself.
+    QString runId, conversationId;
     bool lead = false;
+    // The member queue (A5): its open task first, then the tasks returned to it
+    // (pending, with attempts). From `team status` when hgs sends it; an older
+    // hgs gets the same list derived from the tasks.
+    QList<int> queue;
+    bool queueKnown = false;   // `queue` was in the JSON, even when empty
     QJsonObject json() const;
+};
+
+// An existing session a member may be given instead of starting one (F8): what
+// `plan` and `add-member` accept as `session`. `directory` is the session's own
+// folder, which an adopted member keeps.
+struct SessionChoice {
+    QString host, name, runId, conversationId, agent, directory;
+};
+
+// A member's question to the lead (A3); open until the lead answers it.
+struct Question {
+    QString id, text, answer, by;
+    double at = 0, answeredAt = 0;
+    bool answered() const { return answeredAt > 0 || !answer.isEmpty(); }
+};
+
+// A report that replaced the reply captured for an attempt (A6).
+struct ReplacedReport {
+    QString text;
+    double at = 0;
 };
 
 struct Attempt {
@@ -37,9 +65,32 @@ struct Attempt {
     QString id, member, state, error, notice, report;
     bool noReport = false;
     double sentAt = 0;
+    // Delivery and start (A1); zero or false in an older team file.
+    double deliveredAt = 0, startedAt = 0, replyAt = 0, turnEndedAt = 0;
+    bool startWarned = false;
+    // The reply id kept with turn_ended_at, so a newer turn is not captured (A2).
+    QString turnReply;
+    double reportAt = 0;
+    bool captured = false;              // the text was taken from the last reply
+    QList<ReplacedReport> replaced;     // oldest first, at most 3
+    // The phase hgs derives for the attempt (spec 2), empty on an older hgs.
+    QString phase;
+    QList<Question> questions;          // oldest first
+    const Question *openQuestion() const
+    {
+        for (const auto &question : questions) if (!question.answered()) return &question;
+        return nullptr;
+    }
 };
 
 struct Dep { int task = 0; bool soft = false; };
+
+// A task parked by the lead or the owner (A5): pending, but never ready,
+// rebalanced or handed out until `release`.
+struct Hold {
+    QString by, reason;
+    double at = 0;
+};
 
 struct Task {
     int id = 0;
@@ -49,6 +100,8 @@ struct Task {
     QStringList criteria;
     QList<Dep> deps;
     QList<Attempt> attempts;   // oldest first
+    bool held = false;         // A5: the lead holds the task
+    Hold hold;
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
     QJsonObject json() const;
@@ -71,6 +124,13 @@ struct Finish {
     double at = 0;
 };
 
+// A member session that still runs after its team is Done or Stopped (F7,
+// spec 9). The desktop shows it apart from the active members and never stops
+// it by itself.
+struct LeftRunning {
+    QString member, role, host, session, runId, conversationId;
+};
+
 struct Team {
     QString id, name, status, project, folder, lead;
     qint64 revision = 0;
@@ -87,7 +147,12 @@ struct Team {
     Finish finish;
     // `team status` and `team list` derive these; old files are derived here.
     bool waitingForLead = false;
-    int pendingPhase = 0;      // the draft phase, 0 when none
+    int pendingPhase = 0;      // the first draft phase, 0 when none
+    // Spec 10: any number of draft phases may wait; approved strictly in order.
+    QList<int> pendingPhases;
+    // Done and Stopped teams: the member sessions that still run (F7).
+    QList<LeftRunning> leftRunning;
+    bool leftRunningKnown = false;
     // Only from `team status`: layers by task, tasks in a cycle, ready tasks,
     // plan errors and warnings.
     bool full = false;
@@ -99,10 +164,13 @@ struct Team {
     const Member *memberOfSession(const QString &host, const QString &session) const;
     const Task *task(int id) const;
     const Phase *phase(int n) const;
+    const LeftRunning *leftOf(const QString &member) const;
     QString roleOf(const QString &member) const;
     // Only a team with a phase record groups its plan by phase.
     bool phased() const { return !phases.isEmpty(); }
     QString effectivePhaseApproval() const { return phaseApproval.isEmpty() ? approval : phaseApproval; }
+    // The draft records in phase order (spec 10).
+    QList<int> draftPhases() const;
 };
 
 // A phase as the plan, board, layers and graph group it. Phase 1 has no
@@ -117,6 +185,12 @@ struct PhaseGroup {
 };
 // The phases to show, in phase order; empty while the plan is phase 1 only.
 QList<PhaseGroup> phaseGroups(const Team &team);
+// Why phase N may not be approved yet (spec 10), empty when it may: every
+// lower phase must be approved and its tasks decided. "Phase 2 opens after
+// phase 1 ends."
+QString approveBlocked(const Team &team, int phase);
+// True when this member's session still runs after the team ended (F7).
+bool leftMember(const Team &team, const QString &member);
 // "Phase 2 · QA fixes · 3/5" (the title is left out when empty).
 QString phaseHeading(const PhaseGroup &group);
 // Layers by longest path inside one phase; dependencies outside it are ignored
@@ -175,13 +249,28 @@ QList<Tone> progress(const Team &team);
 int accepted(const Team &team);
 // The team has at least one task and every task is finished (draft is not).
 bool allDecided(const Team &team);
-// Questions and approvals waiting in member sessions.
+// Questions and approvals waiting for the lead: a member session's native
+// question or approval, and a team question asked with `hgs team ask` (A3).
 int answers(const Team &team, const LiveLookup &live);
 // Ancestors and descendants of a task, itself included.
 QSet<int> chain(const Team &team, int task);
 // Tasks by layer for the list: layer 1 first.
 QMap<int, QList<int>> layered(const Team &team);
 bool ready(const Team &team, const Task &task);
+
+// The shown phase of an attempt (spec 2): sent, delivered, late, working,
+// asking, reported, no_report, stopped, held, rejected, unconfirmed. hgs
+// derives it into the attempt's `phase`; an older hgs gets the same answer
+// from the attempt's fields and its task's hold.
+QString attemptPhase(const Task &task, const Attempt &attempt);
+// The last attempt's phase; empty without attempts.
+QString lastPhase(const Task &task);
+// Unanswered questions of the task's last attempt, oldest first.
+QList<Question> openQuestions(const Task &task);
+const Question *question(const Task &task, const QString &id);
+// The member queue (A5): its open task, then the tasks returned to it
+// (pending, with attempts). Nothing else.
+QList<int> memberQueue(const Team &team, const QString &member);
 
 // The team catalog (`hgs team catalog get`): roles, templates, routing rules
 // and the designer's draft of proposed changes.

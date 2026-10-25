@@ -46,6 +46,48 @@ pub(super) fn observe_start(record: &mut Value, event: &Value) {
 
 const CLEARED_CONVERSATIONS: usize = 32;
 
+/// The id a SessionStart reports is the conversation Zerus follows (H7): a
+/// resume or compaction may continue in a new transcript, so the record takes
+/// the agent's id instead of refusing it. Only a clear starts a new Activity
+/// timeline; a resume keeps it and notes the change. Returns whether the
+/// conversation changed.
+pub(super) fn follow(record: &mut Value, event: &Value) -> bool {
+    let previous = string(record, "conversation_id").to_owned();
+    let next = string(event, "session_id");
+    if next.is_empty() || next == previous {
+        return false;
+    }
+    observe_start(record, event);
+    let source = string(event, "source");
+    if matches!(source, "resume" | "compact") && !previous.is_empty() {
+        record["session_rebound"] = json!({"at":now(),"run_id":record["run_id"],
+            "previous_conversation_id":previous,"conversation_id":next,"source":source});
+    }
+    record["conversation_id"] = json!(next);
+    true
+}
+
+/// A resume or compaction may legitimately open a new conversation (H7).
+pub(super) fn resumed_session(event: &Value) -> bool {
+    matches!(string(event, "source"), "resume" | "compact")
+}
+
+/// The Activity event that records a session following a new conversation
+/// after a resume or compaction (H7).
+pub(super) fn rebound_event(record: &Value) -> Option<Value> {
+    let rebound = &record["session_rebound"];
+    if rebound["run_id"] != record["run_id"]
+        || rebound["conversation_id"] != record["conversation_id"]
+        || rebound["previous_conversation_id"] == rebound["conversation_id"]
+        || rebound["at"].as_f64().is_none_or(|at| at <= 0.0)
+    {
+        return None;
+    }
+    Some(json!({"type":"SessionRebound","at":rebound["at"],"run_id":record["run_id"],
+        "agent_id":"","detail":"","activity_key":format!("rebound:{}:{}:{}",
+            string(record,"run_id"),string(record,"conversation_id"),rebound["at"])}))
+}
+
 /// `resume --fresh` replaces a stopped binding; its Activity continues like a
 /// clear. The new conversation is unknown until the agent's SessionStart.
 pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
@@ -470,6 +512,46 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 }
 #[cfg(test)] mod tests {
     use super::*;
+
+    #[test]
+    fn a_resumed_session_follows_its_new_transcript() {
+        // H7: the hook reports the new conversation; the record follows it and
+        // keeps the Activity timeline (no clear boundary).
+        let mut record = json!({"run_id":"r","conversation_id":"old","agent":"claude"});
+        assert!(follow(&mut record, &json!({"session_id":"new","source":"resume"})));
+        assert_eq!(record["conversation_id"], "new");
+        let rebound = &record["session_rebound"];
+        assert_eq!(
+            (rebound["previous_conversation_id"].as_str(), rebound["conversation_id"].as_str()),
+            (Some("old"), Some("new"))
+        );
+        assert_eq!(rebound["source"], "resume");
+        assert!(record["session_clear"].is_null());
+        assert!(resumed_session(&json!({"source":"resume"})));
+        assert!(rebound_event(&record).is_some());
+        // Once bound, the same start changes nothing.
+        assert!(!follow(&mut record, &json!({"session_id":"new","source":"resume"})));
+    }
+
+    #[test]
+    fn a_compaction_follows_the_new_transcript_too() {
+        let mut record = json!({"run_id":"r","conversation_id":"old"});
+        assert!(follow(&mut record, &json!({"session_id":"after","source":"compact"})));
+        assert_eq!(record["conversation_id"], "after");
+        assert_eq!(record["session_rebound"]["source"], "compact");
+        assert!(resumed_session(&json!({"source":"compact"})));
+        assert!(rebound_event(&record).is_some());
+    }
+
+    #[test]
+    fn a_clear_still_starts_a_new_timeline() {
+        let mut record = json!({"run_id":"r","conversation_id":"old"});
+        assert!(follow(&mut record, &json!({"session_id":"new","source":"clear"})));
+        assert_eq!(record["session_clear"]["previous_conversation_id"], "old");
+        assert!(record["session_rebound"].is_null());
+        assert!(!resumed_session(&json!({"source":"clear"})));
+    }
+
     #[test] fn unavailable_context_actions_name_the_blocking_condition_and_work() {
         let idle=json!({"agent":"claude","run_id":"run","conversation_id":"conversation","activity":"idle","phase":"idle",
             "main_done":true,"active_tools":{},"subagents":{}});

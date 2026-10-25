@@ -1340,6 +1340,7 @@ pub(super) fn hook() -> Result<i32> {
         }
         if !string(&record, "expected_id").is_empty() && sid != string(&record, "expected_id")
             && !clear_context::resumed_start(&record, &event)
+            && !clear_context::resumed_session(&event)
         {
             record["error"] = json!("agent resumed a different conversation");
             record["activity"] = json!("unknown");
@@ -1347,7 +1348,9 @@ pub(super) fn hook() -> Result<i32> {
             return Ok(0);
         }
         if sid != string(&record, "conversation_id") {
-            clear_context::observe_start(&mut record, &event);
+            // The agent's own id wins: a resume or compaction may continue in a
+            // new transcript, and the record follows it (H7).
+            clear_context::follow(&mut record, &event);
             for key in [
                 "clear_context_request",
                 "compact_context_request",
@@ -1412,6 +1415,15 @@ pub(super) fn hook() -> Result<i32> {
         if let Some(mut clear) = clear_context::event(&record) {
             clear["hook_event_name"] = json!("SessionCleared");
             journal::log_event(&record, &clear)?;
+        }
+    }
+    // A resume or compaction that opened a new transcript is one event in the
+    // Activity timeline (H7).
+    if changed_conversation && record["session_rebound"]["journaled"] != true {
+        if let Some(mut rebound) = clear_context::rebound_event(&record) {
+            rebound["hook_event_name"] = json!("SessionRebound");
+            journal::log_event(&record, &rebound)?;
+            record["session_rebound"]["journaled"] = json!(true);
         }
     }
     let hint = agent_hint::start(&mut record, &event);

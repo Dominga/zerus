@@ -60,12 +60,33 @@ fn dsh_member(team: &Team, conversation: &str) -> Option<String> {
 /// elsewhere (a member on another computer) is authorized by its attempt id;
 /// anything else must say it is you.
 fn actor(team: &Team, op: &str, input: &Value) -> anyhow::Result<Actor> {
-    if let Some(record) = caller_record() {
-        let member = calling_member(team, &record).with_context(|| format!("This session is not a member of team {}", team.name))?;
+    resolve_actor(
+        team,
+        op,
+        input,
+        caller_record().as_ref(),
+        nonempty_env("DSH_SESSION_ID").as_deref(),
+        nonempty_env("HGS_SESSION").as_deref(),
+    )
+}
+
+/// The proven identities decide who asks. A stale `HGS_SESSION` (a resumed host
+/// leaks another session's into its members) never names the caller: a member
+/// is proven by its ancestry, its dsh conversation or its attempt id, in that
+/// order (H7).
+fn resolve_actor(
+    team: &Team,
+    op: &str,
+    input: &Value,
+    record: Option<&Value>,
+    dsh: Option<&str>,
+    env: Option<&str>,
+) -> anyhow::Result<Actor> {
+    if let Some(record) = record {
+        let member = calling_member(team, record).with_context(|| format!("This session is not a member of team {}", team.name))?;
         return Ok(Actor::Member(member));
     }
-    ensure!(nonempty_env("HGS_SESSION").is_none(), "Zerus could not verify the calling session");
-    if let Some(member) = dsh_member(team, nonempty_env("DSH_SESSION_ID").unwrap_or_default().as_str()) {
+    if let Some(member) = dsh_member(team, dsh.unwrap_or_default()) {
         return Ok(Actor::Member(member));
     }
     if matches!(op, "report" | "ask") && text(input, "by") != "human" {
@@ -80,6 +101,9 @@ fn actor(team: &Team, op: &str, input: &Value) -> anyhow::Result<Actor> {
         }
         bail!("The attempt is not in this team");
     }
+    // A process outside every session acts as the owner; a session env that
+    // does not own the calling process could name another one (H7).
+    ensure!(env.is_none(), "Zerus could not verify the calling session");
     ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
     Ok(Actor::Human)
 }
@@ -964,6 +988,27 @@ mod tests {
         for status in [TeamStatus::Done, TeamStatus::Stopped] {
             assert!(status_lists_sessions(status), "{status:?}");
         }
+    }
+
+    #[test]
+    fn a_leaked_session_env_never_names_the_caller() {
+        let mut team = running_team();
+        let attempt = team.task(1).unwrap().attempts[0].id.clone();
+        let human = json!({"request_id":"11111111-1111-4111-8111-111111111111","by":"human"});
+        let foreign = Some("codex/AIBalanceTools/AI BalancerUpdate");
+        // Its own session ancestry still proves the member, whatever the env says.
+        let own = json!({"name":"codex/x/dev","run_id":"r1"});
+        assert_eq!(resolve_actor(&team, "ask", &json!({}), Some(&own), None, foreign).unwrap(), Actor::Member("dev".into()));
+        // A dsh member with a leaked env is proven by its conversation.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session.as_mut().unwrap().conversation_id = "c1".into();
+        assert_eq!(resolve_actor(&team, "ask", &json!({}), None, Some("c1"), foreign).unwrap(), Actor::Member("dev".into()));
+        // A report by attempt id is proven too.
+        assert_eq!(resolve_actor(&team, "report", &json!({"attempt":attempt}), None, None, foreign).unwrap(), Actor::Member("dev".into()));
+        // The leaked env alone proves nothing: it cannot act as the owner.
+        let error = resolve_actor(&team, "stop", &human, None, None, foreign).unwrap_err().to_string();
+        assert_eq!(error, "Zerus could not verify the calling session");
+        // Outside every session, the owner may act.
+        assert_eq!(resolve_actor(&team, "stop", &human, None, None, None).unwrap(), Actor::Human);
     }
 
     #[test]

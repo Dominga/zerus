@@ -2669,6 +2669,29 @@ mod tests {
     }
 
     #[test]
+    fn new_exact_resume_preserves_the_whitewh_contract() {
+        let id = "11111111-2222-4333-8444-555555555555";
+        for flag in ["-c", "--resume", "--continue"] {
+            let args = ["--new", flag, id, "-n", "exact-new"].map(String::from);
+            let parsed = LaunchOptions::parse(&args, true).unwrap();
+            assert!(parsed.new_only && parsed.resume);
+            assert_eq!(parsed.resume_id.as_deref(), Some(id));
+            assert_eq!(parsed.tag, "exact-new");
+        }
+        let args = vec![format!("--resume={id}"), "--new".into()];
+        assert_eq!(LaunchOptions::parse(&args, true).unwrap().resume_id.as_deref(), Some(id));
+    }
+
+    #[test]
+    fn new_session_refuses_ambiguous_resume_and_fresh() {
+        for args in [["--new", "-c"], ["--new", "--resume"], ["--new", "--fresh"]] {
+            assert!(LaunchOptions::parse(&args.map(String::from), true).is_err());
+        }
+        let args = ["--new", "-c", "11111111-2222-4333-8444-555555555555", "--fresh"].map(String::from);
+        assert!(LaunchOptions::parse(&args, true).is_err());
+    }
+
+    #[test]
     fn usage_lists_opencode_effort_and_the_explicit_service_start() {
         let usage = usage_text(true);
         // `--effort` is an OpenCode launch option that hgs refuses without

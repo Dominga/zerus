@@ -105,3 +105,20 @@ The separate existing `test_opencode_native.py` suite qualifies the native adapt
 with a private service, private home and keyless loopback model. Its results and
 the transport contract are separate evidence, not a claim that a production
 service or every desktop/mobile platform has been qualified.
+
+
+### Read-only live-service acceptance
+
+`tests/test_wsl_live_opencode.py` is a separate explicit opt-in. Set
+`ZERUS_TEST_WSL_LIVE=1` and the distribution, user and binary variables described
+above. Run it only against an owner-started registered service. It isolates HGS
+configuration/state while retaining the chosen Linux user's native registration,
+checks the account/model catalog, and proves that the explicit Start action
+leaves the service PID and complete registration unchanged. It creates no native
+session, submits no model request, and does not start or stop OpenCode.
+
+For an owner-managed stack, prefer the official `opencode service` lifecycle so
+all clients discover the same registration. Its service configuration can select
+a loopback hostname and port before startup; do not synthesize the registration
+from a separate `serve` process. Changing service configuration may stop the
+service and must be an explicit operator action, never a Zerus readiness probe.

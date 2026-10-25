@@ -503,12 +503,7 @@ impl Flags {
         }
         if self.windows_gateway {
             features.retain(|feature| {
-                ![
-                    "send_agent",
-                    "gateway_one_hop",
-                    "inspect_agent",
-                ]
-                .contains(feature)
+                !["send_agent", "gateway_one_hop", "inspect_agent"].contains(feature)
             });
             reasons.insert("windows_scope".into(), json!("Local Codex, Claude and Kimi sessions, including new ones in project working folders; browsing folders, worktrees, peers, DeepSeek/OpenCode and voice/speech are unavailable"));
         }

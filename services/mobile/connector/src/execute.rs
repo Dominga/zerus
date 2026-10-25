@@ -764,7 +764,11 @@ impl<N: Native + 'static> Connector<N> {
                 // WhiteWh fork: a Windows gateway shows the phone only its
                 // projects' working folders, each without its subfolders.
                 if self.flags.get().windows_gateway {
-                    let folder = kept.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
+                    let folder = kept
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
                     if !self.project_folder(&folder).await? {
                         return Err(Failure::text(crate::windows_paths::PROJECT_FOLDERS_ONLY));
                     }

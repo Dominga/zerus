@@ -583,7 +583,9 @@ impl<N: Native + 'static> Connector<N> {
         let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default();
         let agent = text("agent");
         // WhiteWh fork: a Windows gateway launches only the agents it serves.
-        if self.flags.get().windows_gateway && !crate::capabilities::windows_provider(&payload["agent"]) {
+        if self.flags.get().windows_gateway
+            && !crate::capabilities::windows_provider(&payload["agent"])
+        {
             return Err(Failure::text(crate::capabilities::WINDOWS_PROVIDER_REFUSAL));
         }
         let raw = self
@@ -807,7 +809,10 @@ impl<N: Native + 'static> Connector<N> {
             if let Some(value) = payload.get(field) {
                 // WhiteWh fork: a folder only this Windows computer knows has
                 // no shared catalog id; the project takes the session as is.
-                if value.as_str().is_some_and(|id| id.starts_with(crate::windows_paths::LOCAL_FOLDER_PREFIX)) {
+                if value
+                    .as_str()
+                    .is_some_and(|id| id.starts_with(crate::windows_paths::LOCAL_FOLDER_PREFIX))
+                {
                     continue;
                 }
                 stdin[field] = value.clone();

@@ -83,6 +83,7 @@ private slots:
     void refreshPreservesRowsAndShowsPendingUsage();
     void summaryCountsReadInSingularAndPlural();
     void initialLoadingPublishesOnlyGroupedAccounts();
+    void hiddenStartupWarmsAndPublishesVerifiedIdentities();
     void loadingFinishesWithPartialOrUnavailableResults_data();
     void loadingFinishesWithPartialOrUnavailableResults();
     void permissionsStayBoundToSelectedMachine();
@@ -1010,6 +1011,25 @@ void TestAccountsPage::localWindowsOffersNoDeepSeekOrOpenCode()
         machine->setCurrentIndex(machine->findData(QString("mac"))); QCOMPARE(current(), QString("claude"));
     });
     add->click();
+}
+
+void TestAccountsPage::hiddenStartupWarmsAndPublishesVerifiedIdentities()
+{
+    QFile shared(m_dir.filePath("shared-identity"));QVERIFY(shared.open(QIODevice::WriteOnly));shared.close();
+    AccountsPage page(FakeCli::program(m_script));QSignalSpy changed(&page,&AccountsPage::catalogChanged);
+    page.setFleet(fleet());QVERIFY(!page.isVisible());
+    QTRY_COMPARE(page.profiles().size(),8);
+    const auto identified=[&] {
+        const auto profiles=page.profiles();
+        return std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &value){return !value.toObject()["usage"].toObject()["identity"].toObject()["email"].toString().isEmpty();});
+    };
+    QTRY_VERIFY(identified());QVERIFY(changed.size()>2);
+    const auto grouped=AccountCatalog::group(page.profiles());QCOMPARE(grouped.size(),7);
+    const auto sharedAccount=std::find_if(grouped.cbegin(),grouped.cend(),[](const QJsonValue &value){return value.toObject()["members"].toArray().size()==2;});
+    QVERIFY(sharedAccount!=grouped.cend());QCOMPARE((*sharedAccount).toObject()["provider"].toString(),QString("codex"));
+    QVERIFY(!page.isVisible());
+    const auto calls=[&]{QFile file(m_dir.filePath("calls"));if(!file.open(QIODevice::ReadOnly))return QByteArray();return file.readAll();};
+    const auto before=calls();page.setFleet(fleet());QTest::qWait(60);QCOMPARE(calls(),before); // Ordinary fleet polls do not restart the warm-up.
 }
 
 void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()

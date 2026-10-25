@@ -276,6 +276,7 @@ private slots:
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
     void accountFilterCombinesScopesAndKeepsTheOpenDraft();
+    void accountFilterWarmsAcrossMachinesAndRefreshesOnOpening();
     void accountDetailsResolveOnlyTheRecordedBinding();
     void accountScopeLimitsArchiveRemoval();
     void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
@@ -1326,6 +1327,37 @@ void TestSessionsWindow::accountFilterCombinesScopesAndKeepsTheOpenDraft()
     QCOMPARE(accounts->selection(),QSet<QString>{personal});QCOMPARE(count(),1);
     local.sessions.removeAt(2);state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     QCOMPARE(accounts->selection(),QSet<QString>{personal});QCOMPARE(count(),0); // Disappearance must not broaden the scope.
+}
+
+void TestSessionsWindow::accountFilterWarmsAcrossMachinesAndRefreshesOnOpening()
+{
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject profile{{"id","shared-profile"},{"provider","codex"},{"label","Shared"},{"home","/fixture/shared"},{"installed",true}};
+    const auto catalog=QString::fromUtf8(QJsonDocument(QJsonObject{{"profiles",QJsonArray{profile}}}).toJson(QJsonDocument::Compact));
+    const auto usage=QString::fromUtf8(QJsonDocument(QJsonObject{{"id","shared-profile"},{"provider","codex"},{"home","/fixture/shared"},{"status","ok"},
+        {"identity",QJsonObject{{"account_id","shared-account"},{"email","shared@example.test"}}}}).toJson(QJsonDocument::Compact));
+    const auto fixture=m_dir->filePath("filter-warm");
+    const QByteArray answer="elif c=='account' and a[1:2]==['ls']:\n from pathlib import Path\n data=json.loads("+FakeCli::pythonString(catalog)+")\n label=Path(__file__+'.label')\n if label.exists():data['profiles'][0]['label']=label.read_text()\n print(json.dumps(data))\nelif c=='account' and a[1:2]==['inspect']:print("+FakeCli::pythonString(usage)+")\n";
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    auto state=fleet();auto local=state.local();local.sessions[0].accountId="shared-profile";local.sessions[0].accountHome="/fixture/shared";
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());auto remote=*state.peer("mac");remote.sessions[0].cmd="codex";remote.sessions[0].accountId="shared-profile";remote.sessions[0].accountHome="/fixture/shared";state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();
+    auto *page=window.findChild<AccountsPage *>();QVERIFY(page);QVERIFY(!page->isVisible());
+    const auto identitiesReady=[&]{const auto profiles=page->profiles();return profiles.size()==2 && std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &v){return v.toObject()["usage"].toObject()["identity"].toObject()["account_id"]=="shared-account";});};
+    QTRY_VERIFY(identitiesReady());
+    auto *filter=window.findChild<AccountFilter *>("accountFilterChips");auto *menu=filter->button()->menu();
+    const QSet<QString> bindings{SessionAccounts::binding({},local.sessions[0]),SessionAccounts::binding("mac",remote.sessions[0])};
+    const auto sharedChoice=[&]() -> QCheckBox * {for(auto *choice:menu->findChildren<QCheckBox *>("accountFilterChoice")){const auto members=choice->property("bindings").toStringList();if(QSet<QString>(members.cbegin(),members.cend())==bindings)return choice;}return nullptr;};
+    menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());QTRY_VERIFY(sharedChoice());
+    QVERIFY(sharedChoice()->text().contains("shared@example.test"));sharedChoice()->click();QCOMPARE(filter->selection(),bindings);menu->hide();
+    auto *list=window.findChild<SessionList *>("sessionList");const auto count=[&]{int n=0;for(int i=0;i<list->count();++i)if(!list->item(i)->data(SessionRoles::Header).toBool())++n;return n;};
+    QCOMPARE(count(),2);auto *machines=window.findChild<MachineFilter *>("machineFilterChips");machines->setSelection({"mac"});QCOMPARE(count(),1);QCOMPARE(filter->selection(),bindings);
+    QFile label(fixture+".label");QVERIFY(label.open(QIODevice::WriteOnly));label.write("Renamed shared account");label.close();
+    menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());
+    const auto refreshed=[&]{const auto profiles=page->profiles();return profiles.size()==2 && std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &v){return v.toObject()["label"]=="Renamed shared account";});};
+    QTRY_VERIFY(refreshed());QVERIFY(!page->isVisible());QCOMPARE(filter->selection(),bindings);
+    // Existing actions keep their snapshot; reopening presents the newly read label.
+    menu->hide();menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());QTRY_VERIFY(sharedChoice());QVERIFY(sharedChoice()->text().contains("Renamed shared account"));
 }
 
 void TestSessionsWindow::accountDetailsResolveOnlyTheRecordedBinding()

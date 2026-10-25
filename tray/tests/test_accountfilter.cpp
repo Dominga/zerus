@@ -15,6 +15,7 @@ private slots:
     void duplicateCaptionsNameTheSpecificProfile();
     void missingGroupedBindingsKeepOneNamedChoice();
     void openMenuKeepsPresentationAndBindingsAcrossIdentitySplit();
+    void coldOpenMenuReceivesGroupedAccountsWithoutReopening();
 private:
     static QJsonObject profile(const QString &host, const QString &id, const QString &identity, const QString &email) {
         return {{"host",host},{"machine",host.isEmpty()?QString("workstation"):host},{"id",id},{"provider","codex"},{"label","Work"},
@@ -131,6 +132,24 @@ void TestAccountFilter::openMenuKeepsPresentationAndBindingsAcrossIdentitySplit(
         QVERIFY(current->toolTip().contains(profileId=="one"?"one@example.test":"two@example.test"));
         QVERIFY(current->isChecked());
     }
+}
+void TestAccountFilter::coldOpenMenuReceivesGroupedAccountsWithoutReopening() {
+    QWidget host;auto *layout=new QVBoxLayout(&host);auto *filter=new AccountFilter;
+    layout->addWidget(filter->button());layout->addWidget(filter);host.show();
+    auto *menu=filter->button()->menu();menu->popup(host.mapToGlobal(QPoint(10,10)));QTRY_VERIFY(menu->isVisible());
+    QCOMPARE(menu->findChildren<QCheckBox *>("accountFilterChoice").size(),0);
+    SessionAccounts::Catalog catalog;
+    catalog.reset({profile({},"one","shared","shared@example.test"),profile("mac","other","shared","shared@example.test")});
+    filter->setAccounts(catalog.accounts());
+    const auto choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),1);QVERIFY(menu->isVisible());
+    auto *choice=choices.first();QVERIFY(choice->text().contains("shared@example.test"));
+    QCOMPARE(choice->property("bindings").toStringList().size(),2);
+    choice->click();QCOMPARE(filter->selection(),catalog.accounts().first().bindings);
+    // A newly discovered unrelated account can appear without retargeting this action.
+    catalog.reset({profile({},"one","shared","shared@example.test"),profile("mac","other","shared","shared@example.test"),profile({},"two","separate","two@example.test")});
+    filter->setAccounts(catalog.accounts());QCOMPARE(menu->findChildren<QCheckBox *>("accountFilterChoice").size(),2);
+    QVERIFY(menu->findChildren<QCheckBox *>("accountFilterChoice").contains(choice));
+    QCOMPARE(choice->property("bindings").toStringList().size(),2);
 }
 QTEST_MAIN(TestAccountFilter)
 #include "test_accountfilter.moc"

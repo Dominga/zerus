@@ -21,7 +21,7 @@ index 1ded2fdc..d09c7f5d 100644
      review?.let { draft -> ZerusAlertDialog(onDismissRequest = { review = null }, title = { Text("Review unconfirmed delivery") },
          text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
 diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
-index fb73302d..bfdf59f6 100644
+index fb73302d..01459989 100644
 --- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
 +++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
 @@ -31,6 +31,6 @@ import org.json.JSONObject
@@ -119,11 +119,15 @@ index fb73302d..bfdf59f6 100644
          try {
              pushStatuses = withContext(Dispatchers.IO) { originalConnections.associate { it.id to store.pushStatus(it.id) } }
              for (connection in originalConnections) {
-@@ -2306,13 +2324,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+@@ -2306,13 +2324,21 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                      if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                      catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Reports)
                      val computers = api.computers(connection)
-+                    if(connection.protocolVersion==2) pendingEncryptedPairings-=connection.id
++                    if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
++                    if(connection.protocolVersion==2) {
++                        pendingEncryptedPairings-=connection.id
++                        AppTelemetry.encryptedWorkspaceReady(getApplication(),connection)
++                    }
                      val retained=catalogSessions;val actions=messageState.sessionActions
 +                    val previousMachines=machines;val previousProjects=projects;val previousAccounts=accountCatalogs
                      val prepared = withContext(Dispatchers.Default) {
@@ -139,7 +143,7 @@ index fb73302d..bfdf59f6 100644
                      val catalog = prepared.projects
                      newSessions += catalog.sessions; newProjects += catalog.projects; warnings += catalog.unavailableComputers
                      successfulConnections += connection.id
-@@ -2347,7 +2369,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+@@ -2347,7 +2373,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
              }
              accountsWriter?.edit { old -> AccountSnapshots.merge(old,newAccounts,successfulConnections,originalConnections.map { it.id }.toSet()) }
              androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {

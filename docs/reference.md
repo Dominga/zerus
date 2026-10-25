@@ -773,7 +773,25 @@ and folder scope before project selection or text search, including zero counts.
 Its open checkboxes and selection stay in place during polling. A removed selected
 project remains as **Unavailable project** until removed from the filter.
 
-Changing the state, machine or project filter only changes the session list.
+The account button beside the project chooser selects one or more specific
+accounts, rather than agent types. Its names and verified identity groups follow
+Accounts; different accounts with the same label remain separate. Choices retain
+the exact machine-local profile bindings selected at that moment. A later
+catalog refresh or a newly discovered binding never expands that selection
+silently. Selected accounts appear as removable chips; **All accounts** clears
+the account restriction. Account selection intersects the project, machine,
+state, folder and search scopes, including message search and loaded archives.
+Chooser counts use the other scopes before account selection or text search.
+An unavailable selected account stays selected until explicitly removed.
+Sessions without a recorded account remain distinguishable from known accounts
+and shell sessions; they never borrow the current default account.
+
+**Details** shows the session's bound account, its profile ID and recorded agent
+home when available. Account names come from the selected computer's cached
+catalog; opening the chooser or Details can refresh that catalog without signing
+in, refreshing provider usage or changing any running session.
+
+Changing the state, machine, project or account filter only changes the session list.
 The open conversation and its draft stay in place even when no row matches;
 its row is selected again when it returns to the list. Click another session
 to open it.

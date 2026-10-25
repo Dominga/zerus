@@ -73,6 +73,27 @@ class DevReadiness(unittest.TestCase):
         self.assertEqual(field(job(self.regression, 'checks'), 'uses'), './.github/workflows/checks.yml')
         self.assertNotIn('continue-on-error', self.regression)
 
+    def regression_group(self, build_source, *, wrapper_source='c' * 40, run_id=100):
+        group = re.search(r'(?m)^  group: (.*)$', self.regression)[1]
+        github = SimpleNamespace(sha=wrapper_source, ref='refs/heads/main',
+            workflow='CI regression', run_id=run_id,
+            event=SimpleNamespace(workflow_run=SimpleNamespace(head_sha=build_source)))
+        return re.sub(r'\$\{\{\s*(.*?)\s*\}\}',
+                      lambda match: str(eval(match[1], {'__builtins__': {}}, {'github': github})), group)
+
+    def test_late_older_build_cannot_cancel_newer_source_regression(self):
+        # Build completion can reverse push order. Both workflow_run wrappers
+        # can also have the same default-branch SHA while testing different refs.
+        newer = self.regression_group('b' * 40, run_id=100)
+        late_older = self.regression_group('a' * 40, run_id=101)
+        self.assertNotEqual(newer, late_older)
+
+    def test_duplicate_source_regressions_still_share_cancellation(self):
+        first = self.regression_group('a' * 40, wrapper_source='b' * 40, run_id=100)
+        duplicate = self.regression_group('a' * 40, wrapper_source='c' * 40, run_id=101)
+        self.assertEqual(first, duplicate)
+        self.assertIn('  cancel-in-progress: true\n', self.regression)
+
     def test_other_sources_cannot_enter_the_main_regression_route(self):
         for context in (dict(event='pull_request'), dict(branch='topic'),
                         dict(repository='example/zerus'), dict(source_repository='example/zerus'),

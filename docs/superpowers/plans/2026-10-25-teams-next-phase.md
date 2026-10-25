@@ -403,6 +403,20 @@ answered; a denial cannot carry an explanation.
   alternating stripes per layer (and a small layer label). Owner: report,
   goes into the fix phase after phase 1.
 
+- **G7. Session services are not background work (owner).** MCP servers and
+  similar services (socraticode, server-pdf) start with a session and live as
+  long as it, sometimes longer; today they show as Background, as if a long
+  job ran. Show them as a small services icon on the session (tooltip: names,
+  since when, still running after the session ended), not in Background tasks
+  and not as the Background status. They must not count as Background work
+  for the team capture gate (A2), the blocked reminder (#272) or the time
+  budgets (C12): otherwise a member with MCP servers is never captured and
+  always looks busy. Classify by the process tree and command line (an MCP
+  server is started by the agent's MCP config), with a fixture per agent.
+  CLAUDE.md fixes the Background status contract across desktop, Android,
+  shared fixtures and docs: this is the owner's explicit direction to change
+  it; keep all of them aligned.
+
 ## H. Operations
 
 - **H1. Resume after usage limits.** A flag on the lead (or session): when a

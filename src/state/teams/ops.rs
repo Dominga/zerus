@@ -146,7 +146,6 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         None => String::new(),
     };
     // A lead without a session is started first; an existing lead is briefed.
-    let last_task = tasks.iter().map(|task| task.id).max().unwrap_or(0);
     let team = Team {
         id: id.to_owned(),
         name: name.clone(),
@@ -159,7 +158,6 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         lead: lead.id.clone(),
         members,
         tasks,
-        last_task,
         brief: if start { Notice::Pending } else { Notice::None },
         lead_protocol: clean(&lead_protocol, 8000, "The lead protocol")?,
         ..Default::default()
@@ -254,7 +252,6 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
         .collect();
     team.members = members;
     team.tasks = tasks;
-    team.last_task = team.last_task.max(team.tasks.iter().map(|task| task.id).max().unwrap_or(0));
     team.phases = phases;
     let validation = plan::validate(team, &BTreeSet::new());
     for (id, session) in adopted {
@@ -348,18 +345,9 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         || approval == Approval::Review;
     let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
     let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
-    // Ids continue after every id ever used: a discarded phase keeps its ids,
-    // and last_task remembers one removed from a draft (F10).
-    let last = team
-        .last_task
-        .max(
-            team.tasks
-                .iter()
-                .map(|task| task.id)
-                .chain(team.phases.iter().flat_map(|phase| phase.tasks.iter().copied()))
-                .max()
-                .unwrap_or(0),
-        );
+    // Ids continue after the highest live number: a discarded draft frees its
+    // numbers, and drafts close the gaps (F285).
+    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0);
     let next = last.checked_add(1).context("Task numbers are exhausted")?;
     let end = next.checked_add(tasks.len() as u32).context("Task numbers are exhausted")?;
     let wanted: BTreeSet<u32> = (next..end).collect();
@@ -424,7 +412,6 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         team.tasks.truncate(first_new);
         bail!("Fix {} phase error(s) to extend: {}", errors.len(), errors_text(&errors));
     }
-    team.last_task = team.last_task.max(ids.iter().copied().max().unwrap_or(0));
     if let Some(at) = target {
         // F10: the tasks joined the named draft phase, which did not change
         // anything else; the owner sees the added ids as the diff.
@@ -524,13 +511,26 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         events.push(Event::new("phase_approved", json!({"by":label,"phase":n,"tasks":count})));
         Ok(json!({"status":"phase_approved","phase":n,"tasks":ids}))
     } else {
+        // F285: a discarded draft leaves no trace in the numbering. The record
+        // goes, its Draft tasks go, and the later drafts close the gaps; the
+        // discarded event keeps their titles.
+        let record = team.phases.remove(at);
+        let titles: Vec<Value> = record
+            .tasks
+            .iter()
+            .filter_map(|id| team.task(*id).map(|task| json!({"id":id,"title":task.title})))
+            .collect();
         team.tasks.retain(|task| !wanted.contains(&task.id));
-        let record = &mut team.phases[at];
-        record.state = PhaseState::Discarded;
-        record.decided_by = label.clone();
-        record.decided_at = Some(now());
-        events.push(Event::new("phase_discarded", json!({"by":label,"phase":n,"tasks":count})));
-        Ok(json!({"status":"phase_discarded","phase":n,"tasks":ids}))
+        // A surviving task cannot depend on a discarded one (F285).
+        for task in &mut team.tasks {
+            task.deps.retain(|dep| !wanted.contains(&dep.task));
+        }
+        events.push(Event::new(
+            "phase_discarded",
+            json!({"by":label,"phase":n,"title":record.title,"tasks":titles}),
+        ));
+        let renumbering = renumbered(team, &label, events);
+        Ok(json!({"status":"phase_discarded","phase":n,"tasks":ids,"renumbered":renumbering}))
     }
 }
 
@@ -541,6 +541,77 @@ fn normalize_orders(team: &mut Team) {
     for (index, phase) in team.phases.iter_mut().enumerate() {
         phase.order = index as u32 + 2;
     }
+}
+
+/// F285: drafts stay contiguous after the last approved phase. Their phase
+/// numbers and the ids of their tasks follow the highest live numbers outside
+/// the drafts; dependencies inside the drafts are rewritten, dependencies on
+/// approved work stay. Returns the old -> new mappings.
+fn renumber_drafts(team: &mut Team) -> Value {
+    let drafts: Vec<u32> = team.phases.iter().filter(|phase| phase.state == PhaseState::Draft).map(|phase| phase.n).collect();
+    if drafts.is_empty() {
+        return json!({"phases":[],"tasks":[]});
+    }
+    let last_approved = team.phases.iter().filter(|phase| phase.state == PhaseState::Approved).map(|phase| phase.n).max().unwrap_or(1);
+    let base = team.tasks.iter().filter(|task| !drafts.contains(&task.phase)).map(|task| task.id).max().unwrap_or(0);
+    let phase_map: Vec<(u32, u32)> =
+        drafts.iter().enumerate().map(|(index, old)| (*old, last_approved + 1 + index as u32)).collect();
+    let mut task_map: Vec<(u32, u32)> = Vec::new();
+    let mut next = base + 1;
+    for old in &drafts {
+        let Some(phase) = team.phases.iter().find(|phase| phase.n == *old) else { continue };
+        let mut ids = phase.tasks.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        for id in ids {
+            task_map.push((id, next));
+            next += 1;
+        }
+    }
+    for phase in &mut team.phases {
+        if phase.state != PhaseState::Draft {
+            continue;
+        }
+        if let Some((_, new)) = phase_map.iter().find(|(from, _)| *from == phase.n) {
+            phase.n = *new;
+        }
+        phase.tasks = phase.tasks.iter().map(|id| task_map.iter().find(|(from, _)| from == id).map_or(*id, |(_, to)| *to)).collect();
+    }
+    for task in &mut team.tasks {
+        if let Some((_, new)) = task_map.iter().find(|(from, _)| *from == task.id) {
+            task.id = *new;
+            if let Some((_, new_phase)) = phase_map.iter().find(|(from, _)| *from == task.phase) {
+                task.phase = *new_phase;
+            }
+        }
+    }
+    let map: std::collections::BTreeMap<u32, u32> = task_map.iter().copied().collect();
+    for task in &mut team.tasks {
+        for dep in &mut task.deps {
+            if let Some(new) = map.get(&dep.task) {
+                dep.task = *new;
+            }
+        }
+    }
+    // The display order is the phase number order now.
+    team.phases.sort_by_key(|phase| phase.n);
+    normalize_orders(team);
+    let phases: Vec<Value> = phase_map.iter().filter(|(from, to)| from != to).map(|(from, to)| json!({"from":from,"to":to})).collect();
+    let tasks: Vec<Value> = task_map.iter().filter(|(from, to)| from != to).map(|(from, to)| json!({"from":from,"to":to})).collect();
+    json!({"phases":phases,"tasks":tasks})
+}
+
+/// Renumbers the drafts and records old -> new when anything moved (F285).
+fn renumbered(team: &mut Team, by: &str, events: &mut Vec<Event>) -> Value {
+    let changes = renumber_drafts(team);
+    let empty = |key: &str| changes[key].as_array().is_none_or(|list| list.is_empty());
+    if !(empty("phases") && empty("tasks")) {
+        events.push(Event::new(
+            "phase_renumbered",
+            json!({"by":by,"phases":changes["phases"],"tasks":changes["tasks"]}),
+        ));
+    }
+    changes
 }
 
 /// How many edits a phase keeps for the owner's diff view (F10).
@@ -700,8 +771,6 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         .collect();
     proposed.tasks.retain(|task| !removed.contains(&task.id));
     proposed.phases[at].tasks.retain(|id| !removed.contains(id));
-    // A removed id is never reused (F10).
-    proposed.last_task = proposed.last_task.max(removed.iter().copied().max().unwrap_or(0));
     for change in changes.into_iter().chain(removed_changes) {
         record_change(&mut proposed.phases[at], change);
     }
@@ -713,8 +782,9 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     Ok(json!({"status":"draft_edited","phase":n,"diff":diff,"validation":{"errors":[],"warnings":validation.warnings}}))
 }
 
-/// F10: moves a draft next to another draft - before or after it. The order
-/// field decides display and approval; phase numbers are never reused.
+/// F10/F285: moves a draft next to another draft - before or after it - and
+/// renumbers the drafts (their phase numbers and their tasks' ids stay
+/// contiguous after the approved work).
 fn move_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you move a phase");
     ensure!(
@@ -741,39 +811,34 @@ fn move_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Ev
     let mut proposed = team.clone();
     let at = draft_phase(&proposed, n)?;
     draft_phase(&proposed, to)?;
-    let before: Vec<(u32, u32)> = proposed.phases.iter().map(|phase| (phase.n, phase.order())).collect();
-    let old_position = before.iter().position(|(phase, _)| *phase == n).map(|index| index as u32 + 1).unwrap_or(0);
+    let before: Vec<u32> = proposed.phases.iter().map(|phase| phase.n).collect();
+    let old_position = before.iter().position(|phase| *phase == n).map(|index| index as u32 + 1).unwrap_or(0);
     let phase = proposed.phases.remove(at);
     let index = proposed.phases.iter().position(|phase| phase.n == to).context("Unknown phase")?;
-    proposed.phases.insert(if position == "after" { index + 1 } else { index }, phase);
-    normalize_orders(&mut proposed);
-    let after: Vec<(u32, u32)> = proposed.phases.iter().map(|phase| (phase.n, phase.order())).collect();
-    // The feed says when the other drafts were renumbered too.
-    let mut renumbered = false;
-    for (number, order) in &after {
-        if *number == n {
-            continue;
-        }
-        if let Some((_, was)) = before.iter().find(|(phase, _)| phase == number) {
-            if was != order {
-                renumbered = true;
-                break;
-            }
-        }
-    }
-    let to_position = after.iter().position(|(phase, _)| *phase == n).map(|index| index as u32 + 1).unwrap_or(0);
-    let moved = proposed.phases.iter().position(|phase| phase.n == n).context("Unknown phase")?;
-    record_change(&mut proposed.phases[moved], json!({"kind":"moved","from":old_position,"to":to_position}));
-    let order: Vec<u32> = after.iter().map(|(phase, _)| *phase).collect();
+    let placement = if position == "after" { index + 1 } else { index };
+    proposed.phases.insert(placement, phase);
+    let moved_order: Vec<u32> = proposed.phases.iter().map(|phase| phase.n).collect();
+    // The feed says when the other drafts were renumbered too (F10).
+    let reordered = moved_order != before;
     let by = actor.label(team);
+    record_change(
+        &mut proposed.phases[placement],
+        json!({"kind":"moved","from":old_position,"to":placement as u32 + 1}),
+    );
+    // F285: the drafts close the gaps after the move, and the old -> new
+    // mapping is recorded.
+    renumbered(&mut proposed, &by, events);
+    let to_position = placement as u32 + 1;
+    let order: Vec<u32> = proposed.phases.iter().map(|phase| phase.n).collect();
     *team = proposed;
-    events.push(Event::new("phase_moved", json!({"by":by,"phase":n,"to":to_position,"renumbered":renumbered,"order":order})));
-    Ok(json!({"status":"phase_moved","phase":n,"to":to_position,"renumbered":renumbered,"order":order}))
+    events.push(Event::new("phase_moved", json!({"by":by,"phase":n,"to":to_position,"renumbered":reordered,"order":order})));
+    Ok(json!({"status":"phase_moved","phase":n,"to":to_position,"renumbered":reordered,"order":order}))
 }
 
 /// Closes the open questions of a task: its attempt ended or the task was
 /// decided, so they are never answered and never sent (N5).
-fn close_questions(task: &mut Task) {    let at = now();
+fn close_questions(task: &mut Task) {
+    let at = now();
     for attempt in &mut task.attempts {
         for question in &mut attempt.questions {
             if question.open() {
@@ -1248,6 +1313,14 @@ fn check(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
 /// Applies one human, lead or member request. The dispatcher records its own
 /// changes directly.
 pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    // F285: a stored team with discarded drafts is compacted on its next
+    // change - the dead records leave and the drafts close the gaps - so the
+    // change that follows sees live numbers only.
+    if team.phases.iter().any(|phase| phase.state == PhaseState::Discarded) {
+        team.phases.retain(|phase| phase.state != PhaseState::Discarded);
+        let by = actor.label(team);
+        renumbered(team, &by, events);
+    }
     let human_or_lead = matches!(actor, Actor::Human) || actor.is_lead(team);
     let was_decided = all_decided(team);
     let result = match op {
@@ -1577,20 +1650,20 @@ mod tests {
         }
         let discarded = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!(discarded["tasks"], json!([3]));
-        assert_eq!(team.tasks.iter().map(|task| task.id).collect::<Vec<_>>(), vec![1, 2, 4]);
-        assert_eq!(
-            team.phases.iter().map(|phase| (phase.n, phase.state)).collect::<Vec<_>>(),
-            vec![(2, PhaseState::Discarded), (3, PhaseState::Draft)]
-        );
-        // The next draft opens once phase 1 ended; the discarded phase never blocks.
+        // F285: the later draft closes the gap and takes the discarded number;
+        // its task follows the approved tasks.
+        assert_eq!(team.tasks.iter().map(|task| task.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.state)).collect::<Vec<_>>(), vec![(2, PhaseState::Draft)]);
+        assert_eq!((team.task(3).unwrap().phase, team.task(3).unwrap().title.as_str()), (2, "T"));
+        // The next draft opens once phase 1 ended; the discarded phase is gone.
         for id in [1, 2] {
             apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
         }
-        let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
-        assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([4])));
-        // Numbers are never reused: the next phase is 4, its task #5.
-        let added = extend(&mut team, &json!({"tasks":[{"id":5,"title":"New","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
-        assert_eq!(added["phase"], 4);
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([3])));
+        // The numbers are live, not historical: the next phase is 3, its task #4.
+        let added = extend(&mut team, &json!({"tasks":[{"id":4,"title":"New","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(added["phase"], 3);
     }
 
     #[test]
@@ -1619,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    fn discarding_a_phase_removes_its_tasks_and_never_reuses_ids() {
+    fn discarding_a_phase_removes_its_tasks_and_frees_its_numbers() {
         let mut team = running_team();
         let mut events = Vec::new();
         let none = BTreeSet::new();
@@ -1635,33 +1708,93 @@ mod tests {
         assert_eq!((discarded["status"].as_str(), discarded["phase"].as_u64()), (Some("phase_discarded"), Some(2)));
         assert_eq!(discarded["tasks"], json!([3, 4]));
         assert_eq!(team.tasks.iter().map(|task| task.id).collect::<Vec<_>>(), vec![1, 2]);
-        let phase = &team.phases[0];
-        assert_eq!((phase.state, phase.tasks.clone(), phase.decided_by.as_str()), (PhaseState::Discarded, vec![3, 4], "You"));
-        assert_eq!(events.last().unwrap().kind, "phase_discarded");
-        assert_eq!(events.last().unwrap().payload["tasks"], 2);
-        let error = extend(
+        // The record is gone and the discarded event keeps the titles (F285).
+        assert!(team.phases.is_empty());
+        let event = events.iter().rev().find(|event| event.kind == "phase_discarded").unwrap();
+        assert_eq!(event.payload["tasks"][0]["title"], "Fix");
+        assert_eq!(event.payload["tasks"][1]["title"], "Test");
+        // The numbers are live again: phase 2 and task #3 come back.
+        let added = extend(
             &mut team,
             &json!({"tasks":[{"id":3,"title":"Again","assignee":"dev"}]}),
             &Actor::Human,
             &none,
             &mut events,
         )
-        .unwrap_err()
-        .to_string();
-        assert_eq!(error, "New tasks are numbered from #5");
-        let added = extend(
+        .unwrap();
+        assert_eq!((added["phase"].as_u64(), added["tasks"].clone()), (Some(2), json!([3])));
+        assert_eq!(team.phases[0].state, PhaseState::Draft);
+        assert_eq!(team.phases[0].tasks, vec![3]);
+    }
+
+    #[test]
+    fn later_drafts_renumber_and_their_deps_follow() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        extend(&mut team, &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        extend(&mut team, &json!({"tasks":[{"id":4,"title":"B","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        extend(
             &mut team,
-            &json!({"tasks":[{"id":5,"title":"Again","assignee":"dev"}]}),
-            &Actor::Human,
+            &json!({"tasks":[{"id":5,"title":"C","assignee":"dev","deps":[{"task":4},{"task":2}]}]}),
+            &Actor::Member("lead".into()),
             &none,
             &mut events,
         )
         .unwrap();
-        assert_eq!(added["phase"], 3);
-        let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(error, "Phase 2 is not waiting for approval");
+        // Discard the first draft: phases 3 and 4 become 2 and 3, their tasks 4
+        // and 5 become 3 and 4, and the deps follow (the approved #2 stays).
+        let discarded = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(discarded["tasks"], json!([3]));
+        assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.tasks.clone())).collect::<Vec<_>>(), vec![(2, vec![3]), (3, vec![4])]);
+        assert_eq!(team.tasks.iter().map(|task| task.id).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        let second = team.task(3).unwrap();
+        assert_eq!((second.title.as_str(), second.phase), ("B", 2));
+        let third = team.task(4).unwrap();
+        assert_eq!((third.title.as_str(), third.phase), ("C", 3));
+        assert_eq!(third.deps.iter().map(|dep| dep.task).collect::<Vec<_>>(), vec![3, 2]);
+        // The renumbering event records old -> new (F285).
+        let renumbered = events.iter().rev().find(|event| event.kind == "phase_renumbered").unwrap();
+        assert_eq!(renumbered.payload["phases"], json!([{"from":3,"to":2},{"from":4,"to":3}]));
+        assert_eq!(renumbered.payload["tasks"], json!([{"from":4,"to":3},{"from":5,"to":4}]));
+    }
+
+    #[test]
+    fn an_old_team_with_discarded_drafts_is_compacted_once() {
+        // A team stored before F285: a Discarded record whose tasks are gone,
+        // and a later draft whose number and task id follow it.
+        let old = json!({
+            "id":"t","name":"T","lead":"lead","status":"running",
+            "settings":{"approval":"review"},
+            "members":[{"id":"lead","role":"Lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}},
+                {"id":"dev","role":"Backend","agent":"codex","session":{"name":"codex/x/dev","run_id":"r1"}}],
+            "tasks":[
+                {"id":1,"title":"API","assignee":"dev","status":"accepted"},
+                {"id":2,"title":"UI","assignee":"dev","status":"accepted"},
+                {"id":5,"title":"Next","assignee":"dev","status":"draft","phase":4}],
+            "phases":[
+                {"n":2,"state":"discarded","tasks":[3]},
+                {"n":4,"state":"draft","tasks":[5]}]
+        });
+        let mut team: Team = serde_json::from_value(old).unwrap();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // The next change compacts: the dead record leaves, the draft becomes
+        // phase 2 and its task follows the approved tasks.
+        let added = apply(&mut team, "extend", &json!({"tasks":[{"id":4,"title":"More","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((added["phase"].as_u64(), added["tasks"].clone()), (Some(3), json!([4])));
+        assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.tasks.clone())).collect::<Vec<_>>(), vec![(2, vec![3]), (3, vec![4])]);
+        // The approved work is untouched.
+        assert_eq!((team.task(1).unwrap().id, team.task(1).unwrap().title.as_str()), (1, "API"));
+        assert_eq!((team.task(2).unwrap().id, team.task(2).unwrap().title.as_str()), (2, "UI"));
+        let renumbered = events.iter().find(|event| event.kind == "phase_renumbered").unwrap();
+        assert_eq!(renumbered.payload["phases"], json!([{"from":4,"to":2}]));
+        assert_eq!(renumbered.payload["tasks"], json!([{"from":5,"to":3}]));
+        // Compacted once: a later change finds no dead record.
+        let before = events.iter().filter(|event| event.kind == "phase_renumbered").count();
+        apply(&mut team, "pause", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+        let after = events.iter().filter(|event| event.kind == "phase_renumbered").count();
+        assert_eq!((before, after), (1, 1));
     }
 
     #[test]
@@ -1920,7 +2053,8 @@ mod tests {
         assert_eq!(team.phases[0].state, PhaseState::Discarded);
         assert_eq!(team.phases[0].decided_by, "You");
         assert_eq!(team.idle, Notice::Pending);
-        // The cancelled draft phase no longer blocks the next one.
+        // The cancelled draft's tasks keep their phase number; the next phase
+        // follows it (the record itself is compacted away).
         let added = apply(
             &mut team,
             "extend",
@@ -2709,9 +2843,10 @@ mod tests {
         assert!(changes.iter().any(|change| change["kind"] == "changed" && change["field"] == "assignee" && change["from"] == "dev" && change["to"] == "qa"), "{changes:?}");
         assert_eq!(changes.last().unwrap()["kind"], "removed");
         assert_eq!(changes.last().unwrap()["task"].as_u64(), Some(4));
-        // A removed id is never reused.
-        let next = extend(&mut team, &json!({"tasks":[{"id":5,"title":"Next","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
-        assert_eq!(next["phase"], 3);
+        // A removed id is free again: the next extend takes the highest live
+        // number (F285).
+        let next = extend(&mut team, &json!({"tasks":[{"id":4,"title":"Next","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((next["phase"].as_u64(), next["tasks"].clone()), (Some(3), json!([4])));
     }
 
     #[test]
@@ -2723,27 +2858,35 @@ mod tests {
             extend(&mut team, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         }
         assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.order())).collect::<Vec<_>>(), vec![(2, 2), (3, 3)]);
-        // Move phase 3 before phase 2: the array and the order follow (F10).
+        // Move phase 3 before phase 2: the numbers and the tasks follow the new
+        // order (F285), and the feed hears where it went.
         let moved = apply(&mut team, "move-phase", &json!({"phase":3,"to":2,"position":"before"}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert_eq!((moved["phase"].as_u64(), moved["to"].as_u64(), moved["renumbered"].as_bool()), (Some(3), Some(1), Some(true)));
-        assert_eq!(moved["order"].clone(), json!([3, 2]));
-        assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.order())).collect::<Vec<_>>(), vec![(3, 2), (2, 3)]);
+        assert_eq!(moved["order"].clone(), json!([2, 3]));
+        assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.order())).collect::<Vec<_>>(), vec![(2, 2), (3, 3)]);
+        // The moved draft took phase 2 and task #3; the other took 3 and #4.
+        assert_eq!((team.phases[0].tasks.clone(), team.phases[1].tasks.clone()), (vec![3], vec![4]));
+        assert_eq!(team.task(3).unwrap().title, "T");
         let moved_changes = &team.phases[0].changes;
         assert_eq!(moved_changes.last().unwrap()["kind"], "moved");
         assert_eq!((moved_changes.last().unwrap()["from"].as_u64(), moved_changes.last().unwrap()["to"].as_u64()), (Some(2), Some(1)));
         let event = events.iter().rev().find(|event| event.kind == "phase_moved").unwrap();
         assert_eq!((event.payload["phase"].as_u64(), event.payload["to"].as_u64(), event.payload["renumbered"].as_bool()), (Some(3), Some(1), Some(true)));
-        // Phase 3 opens first; phase 2 waits for it.
+        // The renumbering is recorded old -> new (F285).
+        let renumbered = events.iter().rev().find(|event| event.kind == "phase_renumbered").unwrap();
+        assert_eq!(renumbered.payload["phases"], json!([{"from":3,"to":2},{"from":2,"to":3}]));
+        assert_eq!(renumbered.payload["tasks"], json!([{"from":4,"to":3},{"from":3,"to":4}]));
+        // Phase 2 opens first; phase 3 waits for it.
         for id in [1, 2] {
             apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
         }
-        let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert_eq!(error, "Phase 2 opens after phase 3 ends");
-        let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
-        assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([4])));
-        apply(&mut team, "cancel", &json!({"task":4}), &Actor::Human, &none, &mut events).unwrap();
+        let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Phase 3 opens after phase 2 ends");
         let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
-        assert_eq!(approved["tasks"], json!([3]));
+        assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([3])));
+        apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(approved["tasks"], json!([4]));
     }
 
     #[test]

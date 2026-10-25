@@ -547,10 +547,6 @@ pub(crate) struct Team {
     pub members: Vec<Member>,
     #[serde(default)]
     pub tasks: Vec<Task>,
-    /// The highest task id ever used: a task removed from a draft never gives
-    /// its number back (F10). 0 on a team stored before the field.
-    #[serde(default)]
-    pub last_task: u32,
     /// Phases added by `extend`; the approved initial plan (phase 1) has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<Phase>,

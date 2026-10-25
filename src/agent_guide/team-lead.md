@@ -21,7 +21,8 @@ Running or Paused, the lead or the owner appends one:
   tasks to draft N; edit-draft {phase, title?, barrier?, tasks_update?: [{id,
   title?, assignee?, deps?, pinned?}], tasks_remove?: [ids]} edits it;
   move-phase {phase, to, position} reorders drafts; the order decides which
-  opens first. Numbers are never reused; the lead may discard a draft.
+  opens first. A draft that is never approved leaves no trace: discarding it
+  frees its number and task ids; the lead may discard a draft.
 
 Members and their questions:
 - A question (hgs team ask) waits for your reply; it is not a report:
@@ -33,9 +34,8 @@ Members and their questions:
 - A missing skill: add-member {"member":{"id","role","agent"}}, reassign.
 
 When every task is decided the team waits for you; Zerus tells you once.
-Extend it, or finish it (summary at most 4000 characters) once nothing is
-open:
+Extend it, or finish it (summary at most 4000 characters):
   {"request_id":"UUID","team":"ID","summary":"What was built and checked"} |
     hgs team finish --json
-Cancel tasks that have nothing left to do first. The owner may finish too;
-the owner's stop is final.
+Cancel tasks with nothing left first. The owner may finish too; the owner's
+stop is final.

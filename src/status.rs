@@ -158,6 +158,7 @@ pub(crate) fn locked(path: &std::path::Path) -> bool {
 }
 
 fn ssh(config: &Config, peer: &str, command: &str) -> Result<std::process::Output> {
+    if crate::wsl::profile(config, peer).is_some() { return Err(Error::new(2,"WSL profiles cannot use an SSH command")); }
     if peer.starts_with('-') || peer.chars().any(char::is_whitespace) {
         return Err(Error::new(1, "invalid SSH host alias"));
     }
@@ -178,7 +179,10 @@ fn detail(output: &std::process::Output) -> String {
 }
 
 fn peer(config: &Config, peer: &str) -> Value {
-    let output = match ssh(config, peer, &platform::remote_sh(PEER_COMMAND)) {
+    let response = if let Some(profile) = crate::wsl::profile(config, peer) {
+        crate::wsl::capture(profile, &["status".into(), "--local".into(), "--json".into()], 2 * 1024 * 1024, 10)
+    } else { ssh(config, peer, &platform::remote_sh(PEER_COMMAND)) };
+    let output = match response {
         Ok(output) => output,
         Err(error) => return json!({"host":peer,"ok":false,"error":"offline","detail":error.message}),
     };

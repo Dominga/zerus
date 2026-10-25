@@ -53,8 +53,8 @@ fn npm_program(windows: bool, found: Option<PathBuf>) -> Option<OsString> {
 }
 
 /// The command line that runs the downloaded installer `script`: bash on Unix;
-/// on Windows `powershell` (`platform::powershell`, pwsh.exe or Windows
-/// PowerShell) without profiles, with the execution policy bypassed for this
+/// on Windows verified PowerShell Core 7+ (`platform::powershell`) without
+/// profiles, with the execution policy bypassed for this
 /// process only, as the vendors' documented `irm … | iex` runs the script.
 fn script_command(script: &Path, powershell: Option<&[String]>) -> Vec<OsString> {
     match powershell {

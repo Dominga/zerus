@@ -44,3 +44,10 @@ Path identity is introduced at explicit boundaries; existing saved conversations
 are not silently re-keyed. A WSL connection uses Linux native paths when invoking
 Linux tools. Its configuration must name the intended distribution and user;
 there is no fallback to whichever distribution happens to be the default.
+
+## Development interfaces
+
+See [Windows and local WSL](windows-wsl.md) for connection setup, shell policy
+and isolated checks, and [explicit path identity](path-identity.md) for the
+versioned PathRef CLI. These are development interfaces; no automatic catalog
+migration or stable release is implied.

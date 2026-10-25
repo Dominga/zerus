@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Collect exact host-target Cargo dependency notices for binary distribution."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -11,6 +12,30 @@ import subprocess
 # under Apache-2.0 among others (the relay's sqlx needs crc-catalog).
 APACHE_WITHOUT_TEXT = {"crc-catalog"}
 ROOT = Path(__file__).resolve().parent.parent
+
+
+CANONICALPATH_REV = "50b390675a146874b1555f361e491d1efeb393a7"
+CANONICALPATH_SOURCE = ("git+https://github.com/romanilyin/canonicalpath?rev="
+                        + CANONICALPATH_REV + "#" + CANONICALPATH_REV)
+CANONICALPATH_LICENSE_SHA256 = "0743fa0834be9070ac1b43a8d4fc53843f62fbacf0d799236033452a7b1f558d"
+
+
+def reviewed_monorepo_notice(package):
+    """One reviewed root-level license missing from a package's metadata.
+
+    Pin changes require an explicit review, never a guessed license or a silent
+    missing-notice skip. The retained text is from the exact Git source revision.
+    """
+    if package["name"] != "canonicalpath-rust":
+        return None
+    if package["source"] != CANONICALPATH_SOURCE or package["version"] != "2026.5.18-2":
+        raise SystemExit("Review the CanonicalPath source revision and root license before distribution.")
+    text = (ROOT / "docs/licenses/canonicalpath-LICENSE.txt").read_bytes()
+    if hashlib.sha256(text).hexdigest() != CANONICALPATH_LICENSE_SHA256:
+        raise SystemExit("The retained CanonicalPath license differs from the reviewed revision.")
+    inventory = {"name": package["name"], "version": package["version"], "license": "MIT",
+                 "repository": "https://github.com/romanilyin/canonicalpath"}
+    return text, inventory
 
 
 def main():
@@ -36,6 +61,14 @@ def main():
     destination.mkdir(parents=True, exist_ok=True)
     inventory = []
     for _, package in sorted(packages.items()):
+        reviewed = reviewed_monorepo_notice(package)
+        if reviewed is not None:
+            text, entry = reviewed
+            folder = destination / f"{package['name']}-{package['version']}"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "LICENSE-MIT").write_bytes(text)
+            inventory.append(entry)
+            continue
         source = Path(package["manifest_path"]).parent
         notices = [path for path in source.rglob("*") if path.is_file()
                    and path.name.upper().startswith(("LICENSE", "COPYING", "NOTICE", "UNLICENSE"))]

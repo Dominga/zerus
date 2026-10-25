@@ -2,6 +2,7 @@
 
 #include "ConsoleHost.h"
 #include "MachinePlatform.h"
+#include "PowerShell7.h"
 #include "WindowsConsole.h"
 
 #include <QCoreApplication>
@@ -30,11 +31,6 @@ bool survivesWindowsTerminal(const QString &value)
     return !(value.contains(QLatin1Char(' ')) && value.endsWith(QLatin1Char('\\')));
 }
 
-QString powerShell()
-{
-    const QString root = qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"));
-    return QDir::fromNativeSeparators(root) + QStringLiteral("/System32/WindowsPowerShell/v1.0/powershell.exe");
-}
 } // namespace
 
 WindowsTerminalBackend::WindowsTerminalBackend(OpenMode mode, QString windowsTerminal, QString consoleHost)
@@ -99,12 +95,12 @@ QStringList WindowsTerminalBackend::shellArguments(OpenMode mode, const QString 
 QStringList WindowsTerminalBackend::shell(const QString &pwsh)
 {
     if (!pwsh.isEmpty()) return {pwsh};
-    return {powerShell(), QStringLiteral("-NoLogo")};
+    return {};
 }
 
-QStringList WindowsTerminalBackend::locateShell()
+QStringList WindowsTerminalBackend::locateShell(QString *error)
 {
-    return shell(QStandardPaths::findExecutable(QStringLiteral("pwsh")));
+    return shell(PowerShell7::locate(error));
 }
 
 bool WindowsTerminalBackend::open(const QString &command, QString *error)
@@ -131,7 +127,8 @@ bool WindowsTerminalBackend::openShell(const QString &directory, QString *error)
         return false;
     }
     const QString folder = MachinePlatform::native(directory, MachinePlatform::Style::Windows);
-    const QStringList command = locateShell();
+    const QStringList command = locateShell(error);
+    if (command.isEmpty()) return false;
     if (startTerminal(shellArguments(m_mode, folder, command), QStringLiteral("this folder"),
                       QStringLiteral("the shell")))
         return true;
@@ -164,14 +161,16 @@ QString WindowsTerminalBackend::takeAdvisory()
 bool WindowsTerminalBackend::startShell(const QString &command, QString *error)
 {
 #ifdef Q_OS_WIN
+    const QString program = PowerShell7::locate(error);
+    if (program.isEmpty()) return false;
     QProcess process;
-    process.setProgram(powerShell());
+    process.setProgram(program);
     process.setArguments({QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"), QStringLiteral("-NoExit"),
                           QStringLiteral("-Command"), command});
     process.setWorkingDirectory(QDir::homePath());
     WindowsConsole::show(process, true);
     if (process.startDetached()) return true;
-    *error = QStringLiteral("cannot start %1: %2").arg(QDir::toNativeSeparators(powerShell()), process.errorString());
+    *error = QStringLiteral("cannot start %1: %2").arg(QDir::toNativeSeparators(program), process.errorString());
     return false;
 #else
     Q_UNUSED(command);

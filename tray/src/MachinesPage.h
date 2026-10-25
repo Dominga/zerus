@@ -44,6 +44,9 @@ private:
     QListWidget *m_list;
     QLabel *m_summary, *m_title, *m_status, *m_origin, *m_effective, *m_colorHint, *m_localHost;
     QLineEdit *m_alias, *m_hostname, *m_user, *m_key;
+    QLineEdit *m_wslDistribution, *m_wslUser, *m_wslHgs;
+    QComboBox *m_transport;
+    QWidget *m_keyRow;
     QSpinBox *m_port;
     QCheckBox *m_enabled;
     QFormLayout *m_form;

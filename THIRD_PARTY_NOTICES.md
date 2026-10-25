@@ -40,6 +40,16 @@ LobeHub. Its license is retained in `tray/resources/agent-icons/LICENSE`, also i
 the embedded Qt resource; the Ollama logo is recolored to `#e6e8eb`, and the team views
 paint the monochrome parts of the Kimi and OpenCode logos in the theme's text color.
 
+## CanonicalPath lexical path identity
+
+The CLI links `canonicalpath-rust` from CanonicalPath release `2026.10.24-1`,
+Git revision `50b390675a146874b1555f361e491d1efeb393a7`, under MIT,
+Copyright (c) 2026 Roman Ilyin. The crate still declares version `2026.5.18-2`;
+`Cargo.lock` identifies the exact release source. Its root-level license is
+retained in `docs/licenses/canonicalpath-LICENSE.txt`. The notice collector checks
+the full source pin and license digest before including that text in packages,
+because this revision's Rust package metadata does not declare its root license.
+
 ## Dependencies obtained during build
 
 Rust dependencies and versions are locked in `Cargo.lock` and, for the mobile

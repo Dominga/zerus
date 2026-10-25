@@ -1,5 +1,6 @@
 #include "ForkUpdater.h"
 #include "ChildProcess.h"
+#include "PowerShell7.h"
 #ifdef Q_OS_WIN
 #include "RelayConfiguration.h"
 #include "WindowsMobileServices.h"
@@ -457,6 +458,12 @@ QString ForkUpdater::readyStatus() const
 bool ForkUpdater::startInstall()
 {
     if (!ready() || !QFileInfo::exists(unpacked())) return false;
+    QString shellError;
+    const QString shell = PowerShell7::locate(&shellError);
+    if (shell.isEmpty()) {
+        finish(shellError);
+        return false;
+    }
     const QString script = QDir::temp().filePath(QStringLiteral("zerus-fork-install-%1.ps1").arg(m_readyBuild));
     QFile file(script);
     const QByteArray text = m_layout.versioned ? QByteArray(versionedHead) + bannerScript + versionedBody
@@ -464,7 +471,7 @@ bool ForkUpdater::startInstall()
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(text) != text.size()) return false;
     file.close();
     const auto native = [](const QString &path) { return QDir::toNativeSeparators(path); };
-    QStringList args{QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
+    QStringList args{QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"), QStringLiteral("-STA"), QStringLiteral("-NonInteractive"), QStringLiteral("-ExecutionPolicy"), QStringLiteral("Bypass"),
                           QStringLiteral("-WindowStyle"), QStringLiteral("Hidden"), QStringLiteral("-File"), native(script),
                           QStringLiteral("-ParentPid"), QString::number(QCoreApplication::applicationPid()),
                           QStringLiteral("-New"), native(unpacked()), QStringLiteral("-Stage"), native(m_stage),
@@ -476,7 +483,7 @@ bool ForkUpdater::startInstall()
         args << QStringLiteral("-Install") << native(m_install)
                   << QStringLiteral("-Previous") << native(m_install + QStringLiteral(".previous"));
     QProcess process;
-    process.setProgram(QDir(qEnvironmentVariable("SystemRoot", QStringLiteral("C:\\Windows"))).filePath(QStringLiteral("System32/WindowsPowerShell/v1.0/powershell.exe")));
+    process.setProgram(shell);
     process.setArguments(args);
     // Never inside the folder it moves: a current directory there keeps it in use.
     process.setWorkingDirectory(QDir::tempPath());

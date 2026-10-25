@@ -15,7 +15,7 @@
     ["protected-path", "rm -rf \"$HOME\"/*"],
     ["protected-path", "sudo rm -rf /"],
     ["protected-path", "rm -rf /*"],
-    ["protected-path", "rm -rf /home/someone"],
+    ["protected-path", "rm -rf /home/bob"],
     ["protected-path", "Remove-Item C:\\ -Recurse -Force"],
     ["protected-path", "del /s /q C:\\*"],
     ["protected-path", "cmd /c \"rd /s /q %USERPROFILE%\""],

@@ -46,6 +46,7 @@ impl From<std::io::Error> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
+       hgs path-ref describe|validate|map   explicit lexical identity (JSON stdin)
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
@@ -394,6 +395,12 @@ fn usage_text(tmux: bool) -> Cow<'static, str> {
 }
 
 pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
+    if args.first().is_some_and(|s| s == "swarm") && args.get(1).is_some_and(|s| s == crate::wsl::RECEIVER) {
+        crate::wsl::validate_request(&args[2..])?;
+        if !cfg!(target_os = "linux") { return Err(Error::new(2,"The wsl-local receiver requires a Linux hgs build")); }
+        env::set_var(crate::wsl::POLICY, "existing-only");
+        args.drain(..2);
+    }
     // Private: the screen model behind the differential tmux capture test.
     if args.first().is_some_and(|a| a == "__screen-capture") {
         return crate::screen::cli(&args[1..]).map_err(|e| Error::new(2, e));
@@ -491,6 +498,11 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         return Ok(1);
     };
     let args = &args[index + 1..];
+    if !target.is_empty() && !config.is_self(&target) {
+        if let Some(profile) = crate::wsl::profile(&config, &target) {
+            return crate::wsl::run(profile, command, args, dry);
+        }
+    }
     match command.as_str() {
         "-h" | "--help" | "help" => {
             // Capability probes for a selected computer must inspect that
@@ -500,9 +512,17 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             }
             print!("{}", usage_text(cfg!(unix)));
             println!("Encrypted workspace ABI: guarded-local-v1");
+            println!("WSL local receiver ABI: wsl-local-v1 (OpenCode existing-only)");
             #[cfg(windows)]
             print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);
+        }
+        "path-ref" => {
+            if !target.is_empty() && !config.is_self(&target) {
+                return Err(Error::new(2, "path-ref is local-only; specify the environment in JSON"));
+            }
+            if dry { return Err(Error::new(2, "path-ref does not support --dry-run")); }
+            return crate::path_ref::run(args).map(|()| 0).map_err(|e| Error::new(2, format!("{e:#}")));
         }
         "--version" | "version" => return crate::status::version(&config, &target, args),
         // Read-only on every machine; never routed as an agent launch.
@@ -874,6 +894,7 @@ fn peer_ls(config: &Config, peer: &str, archives: bool) -> String {
     crate::windows_peer::hgs(config, peer, &args).unwrap_or_default()
 }
 fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
+    if let Some(profile) = crate::wsl::profile(config, peer) { return crate::wsl::listing(profile, peer, archives); }
     // WhiteWh fork: a Windows peer answers through its lasting channel.
     if crate::windows_peer::is_windows(config, peer) {
         let mut args: Vec<String> = ["ls", "--local", "--json"].map(String::from).into();
@@ -945,6 +966,7 @@ fn remote(
     args: &[String],
     global_dry: bool,
 ) -> Result<i32> {
+    if let Some(profile) = crate::wsl::profile(config, target) { return crate::wsl::run(profile, command, args, global_dry); }
     if target.starts_with('-') || target.chars().any(char::is_whitespace) {
         return Err(Error::new(1, "invalid SSH host alias"));
     }
@@ -1272,6 +1294,13 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
     local_list(config)?;
     for peer in &config.peers {
         println!("{peer}:");
+        if let Some(profile) = crate::wsl::profile(config, peer) {
+            match crate::wsl::capture(profile, &["ls".into(), "--local".into()], 16 * 1024 * 1024, 10) {
+                Ok(out) if out.status.success() => print!("{}", String::from_utf8_lossy(&out.stdout)),
+                _ => println!("  offline"),
+            }
+            continue;
+        }
         let mut flags = crate::machines::ssh_options(config, peer);
         flags.extend(
             [

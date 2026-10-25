@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.99"
 description = "Persistent local and remote agent sessions for Zerus"
 license = "MIT"
-repository = "https://github.com/ufna/zerus"
+repository = "https://github.com/romanilyin/zerus"
 
 [[bin]]
 name = "hgs"
@@ -16,6 +16,7 @@ path = "src/main.rs"
 socraticode = []
 
 [dependencies]
+canonicalpath-rust = { git = "https://github.com/romanilyin/canonicalpath", rev = "50b390675a146874b1555f361e491d1efeb393a7" }
 anyhow = "1"
 aes-gcm = "0.10.3"
 base64 = "0.22"

@@ -82,11 +82,21 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
     m_effective = new QLabel; m_effective->setObjectName("effectiveMachineConnection"); m_effective->setWordWrap(true); m_effective->setTextFormat(Qt::PlainText); m_effective->setTextInteractionFlags(Qt::TextSelectableByMouse); editor->addWidget(m_effective);
     auto *form = m_form = new QFormLayout; form->setSpacing(12); form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     m_alias = new QLineEdit; m_alias->setObjectName("machineAlias"); m_alias->setPlaceholderText(tr("e.g. studio-mac")); form->addRow(tr("Name / SSH alias"), m_alias);
+    m_transport = new QComboBox; m_transport->setObjectName("machineTransport");
+    m_transport->addItem(tr("SSH"), "ssh"); m_transport->addItem(tr("Local WSL (Windows)"), "wsl-local");
+    form->addRow(tr("Connection type"), m_transport);
+    m_wslDistribution = new QLineEdit; m_wslDistribution->setObjectName("machineWslDistribution");
+    form->addRow(tr("WSL distribution"), m_wslDistribution);
+    m_wslUser = new QLineEdit; m_wslUser->setObjectName("machineWslUser");
+    form->addRow(tr("WSL user"), m_wslUser);
+    m_wslHgs = new QLineEdit; m_wslHgs->setObjectName("machineWslHgs");
+    m_wslHgs->setPlaceholderText(tr("Absolute Linux path to this fork's hgs"));
+    form->addRow(tr("Linux HGS executable"), m_wslHgs);
     m_hostname = new QLineEdit; m_hostname->setObjectName("machineHostname"); m_hostname->setPlaceholderText(tr("Address or existing SSH alias")); form->addRow(tr("Hostname / IP"), m_hostname);
     m_user = new QLineEdit; m_user->setObjectName("machineUser"); m_user->setPlaceholderText(tr("Use SSH configuration")); form->addRow(tr("SSH user"), m_user);
     m_port = new QSpinBox; m_port->setObjectName("machinePort"); m_port->setRange(0, 65535); m_port->setSpecialValueText(tr("SSH configuration (usually 22)")); form->addRow(tr("Port"), m_port);
     auto *keyRow = new QHBoxLayout; m_key = new QLineEdit; m_key->setObjectName("machineKey"); m_key->setPlaceholderText(tr("Use SSH agent / configuration")); keyRow->addWidget(m_key, 1);
-    m_browse = new QPushButton(tr("Browse…")); m_browse->setObjectName("browseMachineKey"); keyRow->addWidget(m_browse); form->addRow(tr("Private key path"), keyRow);
+    m_browse = new QPushButton(tr("Browse…")); m_browse->setObjectName("browseMachineKey"); keyRow->addWidget(m_browse); m_keyRow = new QWidget; keyRow->setContentsMargins(0,0,0,0); m_keyRow->setLayout(keyRow); form->addRow(tr("Private key path"), m_keyRow);
     m_enabled = new QCheckBox(tr("Show sessions and include in background polling")); m_enabled->setObjectName("machineEnabled"); form->addRow(m_enabled); editor->addLayout(form);
     auto *actions = new QHBoxLayout;
     m_save = new QPushButton(tr("Save connection")); m_save->setObjectName("saveMachine");
@@ -154,7 +164,8 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
             m_list->setCurrentRow(m_list->currentRow(),QItemSelectionModel::ClearAndSelect);
         });
     });
-    for (auto *field : {m_alias, m_hostname, m_user, m_key}) connect(field, &QLineEdit::textChanged, this, &MachinesPage::changed);
+    for (auto *field : {m_alias, m_hostname, m_user, m_key, m_wslDistribution, m_wslUser, m_wslHgs}) connect(field, &QLineEdit::textChanged, this, &MachinesPage::changed);
+    connect(m_transport, &QComboBox::currentIndexChanged, this, &MachinesPage::changed);
     connect(m_port, &QSpinBox::valueChanged, this, &MachinesPage::changed); connect(m_enabled, &QCheckBox::toggled, this, &MachinesPage::changed);
     connect(m_browse, &QPushButton::clicked, this, [this] {
         if (!m_key->isEnabled()) return;
@@ -199,7 +210,12 @@ MachinesPage::MachinesPage(const QString &path, QWidget *parent) : QWidget(paren
             renderRows(); loadSelection();
         }
         else if (operation == "check") {
-            if (data.value("ok").toBool()) report(tr("Connected: %1 %2, %3, %4").arg(data.value("os").toString(), data.value("arch").toString(), data.value("hgs").toString(), data.value("tmux").toString()));
+            if (data.value("transport").toString() == "wsl-local") {
+                report(data.value("ok").toBool()
+                    ? tr("Connected to WSL %1 as %2: %3. OpenCode policy: existing-only.").arg(data.value("distribution").toString(), data.value("user").toString(), data.value("hgs").toString())
+                    : data.value("error").toString(), !data.value("ok").toBool());
+            }
+            else if (data.value("ok").toBool()) report(tr("Connected: %1 %2, %3, %4").arg(data.value("os").toString(), data.value("arch").toString(), data.value("hgs").toString(), data.value("tmux").toString()));
             else if (data.value("ssh_ok").toBool()) {
                 QStringList missing;
                 if (data.value("hgs").toString().isEmpty()) missing << tr("HGS");
@@ -249,6 +265,11 @@ bool MachinesPage::aliasExists() const {
     return false;
 }
 QJsonObject MachinesPage::connection() const {
+    if (m_transport->currentData().toString() == "wsl-local") {
+        return {{"transport","wsl-local"},{"enabled",m_enabled->isChecked()},
+            {"wsl", QJsonObject{{"distribution",m_wslDistribution->text().trimmed()},
+                {"user",m_wslUser->text().trimmed()},{"hgs_path",m_wslHgs->text()}}}};
+    }
     return {{"hostname", m_hostname->text().trimmed()}, {"user", m_user->text().trimmed()}, {"port", m_port->value() ? QJsonValue(m_port->value()) : QJsonValue(QJsonValue::Null)}, {"identity_file", m_key->text().trimmed()}, {"enabled", m_enabled->isChecked()}};
 }
 void MachinesPage::report(const QString &text, bool error) { m_status->setText(text); m_status->setStyleSheet(error ? "color:#d37c69;" : QString()); }
@@ -321,6 +342,11 @@ void MachinesPage::loadSelection() {
     const auto localName = m_fleet.local().host.isEmpty() ? m_data.value("local").toString() : m_fleet.local().host;
     m_title->setText(m_new ? tr("New machine") : local ? localName : m_selected);
     m_alias->setText(m_new?QString():local ? localName : m_selected); m_hostname->setText(c.value("hostname").toString()); m_user->setText(c.value("user").toString());
+    m_transport->setCurrentIndex(c.value("transport").toString() == "wsl-local" ? 1 : 0);
+    const auto wsl = c.value("wsl").toObject();
+    m_wslDistribution->setText(wsl.value("distribution").toString());
+    m_wslUser->setText(wsl.value("user").toString());
+    m_wslHgs->setText(wsl.value("hgs_path").toString());
     m_port->setValue(c.value("port").toInt()); m_key->setText(c.value("identity_file").toString()); m_enabled->setChecked(c.value("enabled").toBool(true));
     // A control-only computer (hgs.exe on Windows) runs no agents of its own.
     m_origin->setText(local ? (m_fleet.local().localSessions ? tr("This device runs Zerus. Add a remote machine to manage its agents over SSH.")
@@ -328,6 +354,8 @@ void MachinesPage::loadSelection() {
                                  + (LocalSessionHost::canEnable(m_fleet.local()) ? tr(" Enable local sessions to run them on this computer too.") : QString())) :
         (row.value("source").toString() == "config" ? tr("This alias comes from HGS configuration. ") : QString()) +
         tr("SSH supplies inherited values from your OpenSSH configuration and defaults. Fields below are Zerus overrides; blank fields keep the inherited value.") + (m_data.value("environment_override").toBool() ? tr(" HGS_PEERS in the environment overrides the list of monitored machines.") : QString()));
+    if (!local && m_transport->currentData().toString() == "wsl-local")
+        m_origin->setText(tr("Local WSL uses the explicit distribution, user and Linux HGS executable. OpenCode must already be running; Zerus never starts or replaces it in this mode."));
     m_dirty = false; m_loading = false; m_log->hide(); report(local ? m_localNotice : QString()); updateControls(); resolveConnection();
 }
 QString MachinesPage::appearanceMachine() const {
@@ -350,10 +378,16 @@ void MachinesPage::resolveConnection() {
     m_port->setSpecialValueText(tr("SSH configuration (usually 22)")); m_key->setPlaceholderText(tr("Use SSH agent / configuration"));
     m_effective->setVisible(!m_new && m_selected != "@local");
     if (m_new || m_selected == "@local") return;
-    m_effective->setText(tr("Reading effective SSH connection…")); m_resolveAlias = m_selected;
+    m_effective->setText(m_transport->currentData().toString() == "wsl-local" ? tr("Reading WSL connection…") : tr("Reading effective SSH connection…")); m_resolveAlias = m_selected;
     m_resolveRequest = m_client->requestMachines({"resolve", m_selected});
 }
 void MachinesPage::showEffectiveConnection(const QJsonObject &data) {
+    if (data.value("transport").toString() == "wsl-local") {
+        m_effective->setText(tr("WSL: %1, user %2\nHGS: %3\nOpenCode: existing-only")
+            .arg(data.value("distribution").toString(), data.value("user").toString(), data.value("hgs_path").toString())
+            + (m_dirty ? tr("\nUnsaved edits are not included. Save to refresh these values.") : QString()));
+        return;
+    }
     QStringList keys; for (const auto &key : data.value("identity_files").toArray()) keys << key.toString();
     QStringList details{tr("%1: %2@%3, port %4").arg(m_dirty ? tr("Saved connection") : tr("Effective connection"), data.value("user").toString(), data.value("hostname").toString(), data.value("port").toString())};
     if (!keys.isEmpty()) details << tr("Key paths: %1").arg(keys.join(", "));
@@ -371,10 +405,16 @@ void MachinesPage::updateControls() {
     const bool local = m_selected == "@local", busy = m_request || m_installing;
     const bool validAlias = QRegularExpression("^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,79}$").match(alias()).hasMatch();
     const bool duplicate = m_new && aliasExists();
+    const bool wsl = m_transport->currentData().toString() == "wsl-local";
     m_alias->setReadOnly(!m_new); m_alias->setEnabled(!busy && !local);
     for (auto *field : {m_hostname, m_user, m_key}) field->setEnabled(!busy && !local);
     m_port->setEnabled(!busy && !local); m_enabled->setEnabled(!busy && !local); m_browse->setEnabled(!busy && !local);
-    m_save->setEnabled(!busy && !local && validAlias && !duplicate && (m_dirty || m_new));
+    const QRegularExpression wslName("^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$");
+    const bool validWsl = wslName.match(m_wslDistribution->text().trimmed()).hasMatch()
+        && wslName.match(m_wslUser->text().trimmed()).hasMatch() && m_wslHgs->text().startsWith('/');
+    m_transport->setEnabled(!busy && !local);
+    for (auto *field : {m_wslDistribution, m_wslUser, m_wslHgs}) field->setEnabled(!busy && !local && wsl);
+    m_save->setEnabled(!busy && !local && validAlias && !duplicate && (!wsl || validWsl) && (m_dirty || m_new));
     m_discardDraft->setVisible(m_new);m_discardDraft->setEnabled(!busy);
     m_save->setToolTip(duplicate ? tr("This name already exists. Select the machine in the list to edit it.") : QString());
     for (auto *button : {m_check, m_ssh, m_install, m_reset, m_remove}) button->setEnabled(!busy && !local && !m_new && !m_dirty);
@@ -386,6 +426,9 @@ void MachinesPage::updateControls() {
     }
     m_reset->setEnabled(m_reset->isEnabled() && hasInheritedOverride);
     m_reset->setToolTip(tr("Restore the SSH settings of a machine from the shared configuration."));
+    if (wsl) { m_install->setEnabled(false); m_reset->setEnabled(false); }
+    m_install->setToolTip(wsl ? tr("Install this fork's Linux HGS explicitly in the selected distribution; no agent is installed or restarted here.") : QString());
+    m_ssh->setText(wsl ? tr("Open WSL terminal") : tr("Open SSH terminal"));
     m_sessions->setEnabled(!busy && !m_new); m_accounts->setEnabled(!busy && !m_new); m_add->setEnabled(!busy); m_list->setEnabled(!busy); m_refresh->setEnabled(!busy);
     // A control console has no sessions, accounts or SSH connection of its own, and
     // no Windows computer is reached over SSH, so its page has no connection either.
@@ -393,6 +436,10 @@ void MachinesPage::updateControls() {
     const bool windows = local && !m_new && MachinePlatform::of(m_fleet.local().metrics, true) == MachinePlatform::Style::Windows;
     m_sessions->setVisible(!console); m_accounts->setVisible(!console);
     for (int row = 0; row < m_form->rowCount(); ++row) m_form->setRowVisible(row, !console && !windows);
+    for (QWidget *field : QList<QWidget *>{m_wslDistribution, m_wslUser, m_wslHgs})
+        m_form->setRowVisible(field, !console && !windows && wsl);
+    for (QWidget *field : QList<QWidget *>{m_hostname, m_user, m_keyRow, m_port})
+        m_form->setRowVisible(field, !console && !windows && !wsl);
     for (auto *button : {m_save, m_check, m_ssh, m_install, m_reset, m_remove}) button->setVisible(!console && !windows);
     // Windows (spec D16): this computer shows its session host, and a control
     // console whose CLI reports one can enable local sessions.
@@ -420,7 +467,7 @@ void MachinesPage::save() {
     if (m_new) arguments << "--create";
     m_request = m_client->requestMachines(arguments); updateControls();
 }
-void MachinesPage::check() { m_operation = "check"; report(tr("Testing SSH and checking HGS…")); m_request = m_client->requestMachines({"check", alias()}); updateControls(); }
+void MachinesPage::check() { m_operation = "check"; report(m_transport->currentData().toString() == "wsl-local" ? tr("Testing WSL and checking HGS…") : tr("Testing SSH and checking HGS…")); m_request = m_client->requestMachines({"check", alias()}); updateControls(); }
 void MachinesPage::enableLocalSessions() {
     if (m_request || m_installing) return;
     QMessageBox confirm(QMessageBox::Question, tr("Enable local sessions?"),

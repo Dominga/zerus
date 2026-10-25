@@ -733,10 +733,33 @@ fn reap(mut child: std::process::Child) {
     }
 }
 
+fn existing_only_policy(value: Option<&str>) -> Result<bool> {
+    match value {
+        None | Some("") | Some("managed") => Ok(false),
+        Some("existing-only") => Ok(true),
+        Some(_) => Err("Invalid HGS_OPENCODE_SERVICE_POLICY; use existing-only or managed".into()),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn existing_only_policy_fails_closed_on_unknown_values() {
+    assert!(!existing_only_policy(None).unwrap());
+    assert!(!existing_only_policy(Some("managed")).unwrap());
+    assert!(existing_only_policy(Some("existing-only")).unwrap());
+    assert!(existing_only_policy(Some("Existing-Only")).is_err());
+    assert!(existing_only_policy(Some("auto")).is_err());
+}
+
 /// Connect, starting `opencode service start` only when no service runs.
 /// A live registered process that does not answer is reported, never replaced.
 #[allow(dead_code)]
 pub(super) fn ensure_started() -> Result<Service> {
+    // The WSL receiver sets this before reading configuration or launching any
+    // native operation. No registration, lock or service is created in this mode.
+    if existing_only_policy(std::env::var(crate::wsl::POLICY).ok().as_deref())? {
+        return connect().map_err(|why| format!("{}; OpenCode service policy is existing-only: start or repair the service explicitly in this Linux environment", why.reason("this environment")));
+    }
     let lock_path = root().join("opencode/service-start.lock");
     let _guard = lock(Some(&lock_path))?;
     if let Some(service) = may_start(

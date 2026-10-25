@@ -34,16 +34,24 @@ if (firebaseEnabled) {
     apply(plugin = "com.google.gms.google-services")
     apply(plugin = "com.google.firebase.crashlytics")
 }
+// Explicit side-by-side build: it does not replace the upstream application.
+val forkBuild = providers.gradleProperty("zerusFork").orNull == "true"
+val forkVersion = rootProject.file("../../FORK_VERSION").readText().trim()
 android {
     namespace = "app.zerus.mobile"
     compileSdk = 36
     defaultConfig {
-        applicationId = "app.zerus.mobile"
+        applicationId = if(forkBuild) "app.zerus.mobile.romanilyin" else "app.zerus.mobile"
         minSdk = 26
         targetSdk = 36
         versionCode = updateVersionCode ?: stableVersionCode
         versionName = previewVersionName ?: (devBuildNumber?.let { "$devBaseVersion-dev.$it" } ?: stableVersionName)
         buildConfigField("boolean", "FIREBASE_ENABLED", firebaseEnabled.toString())
+        buildConfigField("boolean", "FORK_BUILD", forkBuild.toString())
+        buildConfigField("String", "DEFAULT_RELAY_URL", if(forkBuild) "\"\"" else "\"https://relay.zerus.dev\"")
+        manifestPlaceholders["appLabel"] = if(forkBuild) "Zerus Fork" else "Zerus"
+        if(forkBuild) { versionName = "$forkVersion-fork"; versionCode = updateVersionCode ?: 2026102601 }
+
         testInstrumentationRunner = providers.gradleProperty("zerusInstrumentationRunner").orNull ?: "androidx.test.runner.AndroidJUnitRunner"
     }
     if(privateSigningFile.isFile) signingConfigs.create("development") {

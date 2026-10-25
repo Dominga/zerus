@@ -404,7 +404,7 @@ impl<N: Native + 'static> Connector<N> {
             snapshot.insert("mobile_archive".into(), state.archive_preview_meta.clone());
         }
         if self.flags.get().windows_gateway {
-            sessions.retain(|row| crate::capabilities::windows_provider(&row["cmd"]));
+            sessions.retain(crate::capabilities::windows_session);
         }
         // Native SSH aliases and the peer-of-peer inventory stay local.
         snapshot.remove("peers");

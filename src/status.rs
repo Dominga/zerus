@@ -49,7 +49,7 @@ fn build_identity() -> Value {
         "source_dirty":env!("ZERUS_BUILD_SOURCE_DIRTY") != "false",
         "os":std::env::consts::OS,"architecture":std::env::consts::ARCH,
         "wsl_receiver_abi":"wsl-local-v1","path_ref_schema":1,
-        "opencode_binding_abi":"opencode-bind-existing-v1"})
+        "opencode_binding_abi":"opencode-bind-existing-v1","external_workstream_abi":"external-workstream-v1"})
 }
 
 #[test]

@@ -77,3 +77,12 @@ Explicit WSL file references can now open their mapped Windows original after
 two-phase session-scoped native verification and bounded local handle/digest
 checks. This is separate from downloading a copy and never marks the original
 as downloaded. See [the reverse-opening contract and limits](path-identity.md#explicit-wsl-file-references-opened-as-windows-originals).
+
+## Four-host and external-chat workflow
+
+[Four-machine setup](four-machine-setup.md) covers matching Windows/WSL builds,
+private relay deployment, per-environment credentials and the side-by-side Android
+fork. [External workstreams](external-workstreams.md) add explicitly declared
+ChatGPT Chat, ChatGPT Work and Codex Chat badges, durable checkpoints and a scoped
+cooperative inbox through the optional Desktop Commander adapter. Queued text is
+not a cloud-chat prompt; an external agent must explicitly read and acknowledge it.

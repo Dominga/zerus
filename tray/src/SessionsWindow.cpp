@@ -1,3 +1,4 @@
+#include "ConversationSource.h"
 #include "WslFileOpenDialog.h"
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
@@ -3122,9 +3123,9 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     const bool terminating=isTerminating(e);
     const QString rowStatus=terminating?tr("Terminating…"):status(s,e.online);
     const QString desc = terminating?tr("Waiting for the session to stop"):currentAction(s, e.online).simplified();
-    roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" ? QString() : tr("Model unknown")) : s.model);
+    roles.insert(SessionRoles::Model, s.model.isEmpty() ? (s.cmd == "sh" || s.cmd=="external" ? QString() : tr("Model unknown")) : s.model);
     roles.insert(SessionRoles::Effort, s.effort.isEmpty() ? QStringLiteral("—") : s.effort);
-    roles.insert(TitleRole, sessionLabel(s)); roles.insert(AgentRole, s.cmd);
+    roles.insert(TitleRole, sessionLabel(s)); roles.insert(AgentRole, ConversationSource::badge(s.cmd,s.clientContext));
     // WhiteWh fork: a team member's card names its role (its id where the
     // role repeats), not the team's long session name.
     if (m_teams) for (const auto &team : m_teams->teams()) {
@@ -3136,6 +3137,8 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
         break;
     }
     QString meta = SessionPresentation::checkoutLine(s);
+    const auto sourceLabel=ConversationSource::label(s.cmd,s.clientContext);
+    if(!sourceLabel.isEmpty())meta=sourceLabel+(meta.isEmpty()?QString():QStringLiteral(" | ")+meta);
     roles.insert(SessionRoles::MetaIcon, SessionPresentation::checkoutIcon(s));
     if (s.state == "archived" && s.archivedAt > 0) {
         if (!meta.isEmpty()) meta += QStringLiteral(" / ");
@@ -3146,7 +3149,7 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     const auto git = SessionPresentation::gitStatus(s, m_client.gitStatusSnapshot(e.host, gitPath), e.online);
     roles.insert(SessionRoles::GitHost, e.host); roles.insert(SessionRoles::GitPath, gitPath);
     roles.insert(SessionRoles::GitStatus, git);
-    roles.insert(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(git));
+    roles.insert(Qt::AccessibleDescriptionRole, (sourceLabel.isEmpty()?QString():sourceLabel+QStringLiteral(". "))+GitStatusBadge::tooltip(git));
     roles.insert(SessionRoles::Attention, !terminating && (s.reviewLater || (e.online && !s.attentionAcknowledged && (s.needsAction() || childNeedsAction(e)))));
     roles.insert(SessionRoles::ReviewLater, s.reviewLater);
     roles.insert(SessionRoles::Muted, s.muted);
@@ -4094,11 +4097,13 @@ void SessionsWindow::renderDetails()
         m_copySessionId->setEnabled(false); m_copyHeaderId->setEnabled(false);
         m_question->setQuestion({}, {}); m_question->hide();
         m_terminal->setAvailable(false, tr("Select a running session."));
+        m_composer->setCooperativeInbox(false);
         m_composer->setAvailability(false, tr("Select a session.")); return;
     }
     m_composer->setFileReferenceTarget(m_subagentId.isEmpty() ? entry->key : QString(), entry->host, entry->machine,
         fileReferenceContext(entry->session, m_details));
     auto s = entry->session;
+    m_composer->setCooperativeInbox(s.cmd=="external");
     if (m_details.value("tracked").toBool() && m_details.value("last_event_at").toDouble() >= s.lastEventAt
         && m_details.value("provider_status_at").toDouble() >= s.providerStatusAt) {
         s.phase = m_details.value("phase").toString(s.phase); s.activity = m_details.value("activity").toString(s.activity);
@@ -4177,9 +4182,10 @@ void SessionsWindow::renderDetails()
     const bool updating = terminating || m_pending || m_settingsRequest || !m_renameKey.isEmpty() || m_composer->isSending(m_selectedKey) || answering || restoredPending;
     const bool occupied = archived && archiveNameOccupied(*entry);
     const bool terminalAvailable=NativeSessionCapabilities::terminal(s,m_details);
-    m_openAction->setVisible(!archived && (s.cmd=="dsh"||terminalAvailable));
-    const QString openCaption = s.cmd == "dsh" ? tr("Open native DeepSeek UI in browser") : m_clipboard ? tr("Copy connect command") : tr("Open externally");
-    m_openAction->setText(openCaption); m_openAction->setEnabled(entry->online && !updating && !archived && (s.cmd=="dsh"||terminalAvailable));
+    const bool externalLink=s.cmd=="external"&&!ConversationSource::chatUrl(m_details.value("external_url").toString()).isEmpty();
+    m_openAction->setVisible(!archived && (s.cmd=="dsh"||terminalAvailable||externalLink));
+    const QString openCaption = externalLink?tr("Open originating chat"):s.cmd == "dsh" ? tr("Open native DeepSeek UI in browser") : m_clipboard ? tr("Copy connect command") : tr("Open externally");
+    m_openAction->setText(openCaption); m_openAction->setEnabled(entry->online && !updating && !archived && (s.cmd=="dsh"||terminalAvailable||externalLink));
     const QString pauseCaption = updating ? tr("Updating…") : archived ? tr("Restore session") : s.state == "running" ? tr("Pause session") : tr("Resume session");
     m_changeAction->setText(pauseCaption);
     // Codex defers SessionStart after resume; its verified restored conversation can pause too.
@@ -4758,6 +4764,12 @@ QString SessionsWindow::messageBlockReason(const Entry &entry) const
     if (!entry.online) return tr("Machine unavailable. Your draft stays here.");
     if (entry.session.state != "running") return tr("Resume the session to send a message.");
     if (m_pending || !m_renameKey.isEmpty()) return tr("Wait for the session update to finish.");
+    if(entry.session.cmd=="external") {
+        if(!m_inspectError.isEmpty()||m_details.isEmpty())return tr("Refresh the external inbox before queueing an instruction.");
+        if(!ConversationSource::cooperative(m_details)||m_details["run_id"].toString()!=entry.session.runId||m_details["conversation_id"].toString()!=entry.session.conversationId)
+            return tr("The external inbox identity or supported protocol is not verified.");
+        return {};
+    }
     if (!QStringList{"codex", "claude", "kimi", "dsh", "opencode"}.contains(entry.session.cmd)) return tr("Use the Terminal tab to type into this session.");
     if (!m_inspectError.isEmpty()) return tr("Refresh the session before sending.");
     if (m_details.isEmpty()) return tr("Checking the session…");
@@ -5896,6 +5908,12 @@ void SessionsWindow::copySessionIdentity()
 void SessionsWindow::openSession()
 {
     const auto *e = selected(); if (!e || !e->online || !m_openAction->isEnabled() || e->session.state == "archived" || awaitingRestoredInspection(*e)) return;
+    if(e->session.cmd=="external") {
+        const auto url=ConversationSource::chatUrl(m_details.value("external_url").toString());
+        if(url.isEmpty()||m_details.value("run_id").toString()!=e->session.runId||m_details.value("conversation_id").toString()!=e->session.conversationId){showNotice(tr("Refresh the exact external conversation before opening it."),true);return;}
+        if(!QDesktopServices::openUrl(url))showNotice(tr("Could not open the conversation in the default browser."),true);
+        return;
+    }
     if (e->session.cmd == "dsh") { m_client.openNativeUi(e->host,e->session.name); return; }
     // `hgs a` resumes a saved session; a copied command starts nothing.
     if (!m_clipboard && e->session.state != "running") {

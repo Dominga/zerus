@@ -51,6 +51,11 @@ import org.json.JSONObject
     Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button,onClickLabel = "Session details",onClick = onDetails),
         verticalArrangement = Arrangement.Center) {
         Text(session.title,maxLines = 1,overflow = TextOverflow.Ellipsis,fontSize = 18.sp,lineHeight = 22.sp)
+        val source = ConversationSource.label(session.agent, model.activity ?: session.raw)
+        if (source.isNotEmpty()) Text(source, color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.labelMedium)
+        if (session.agent == "external") Text(ConversationSource.QUEUE_WARNING, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall)
+
         Spacer(Modifier.height(4.dp))
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             val machineWidth = maxWidth * .4f

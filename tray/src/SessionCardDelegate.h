@@ -113,7 +113,7 @@ public:
         const int left = card.left() + 12, right = expand.left() - 6;
         const int muteWidth = index.data(SessionRoles::Muted).toBool() ? 20 : 0;
         const QString agent = index.data(SessionRoles::Agent).toString();
-        const int naturalProvider = agent.isEmpty() ? 0 : IdentityBadges::width(IdentityBadges::Provider, agent, option.font, 95);
+        const int naturalProvider = agent.isEmpty() ? 0 : IdentityBadges::width(IdentityBadges::Provider, agent, option.font, agent=="codex_chat"?130:95);
         const int naturalStatus = SessionStatusBadge::width(status.caption, status.kind, option.font);
         const int room = qMax(0, right - left - muteWidth);
         // Provider glyphs alone do not distinguish every agent (Codex/Shell).

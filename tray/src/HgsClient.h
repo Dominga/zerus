@@ -16,6 +16,7 @@ class QTimer;
 namespace DownloadCache { struct Pending; }
 
 struct SessionInfo {
+    QJsonObject clientContext;
     QJsonObject recovery;
     QJsonObject providerError;
     QJsonObject gitStatus;

@@ -46,6 +46,7 @@ impl From<std::io::Error> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [-n tag] [-d] [--rc] [--dry-run] [-- args...]
+       hgs external register|checkpoint|handoff|inbox|ack|list --json   cooperative external chats (external-workstream-v1)
        hgs path-ref describe|validate|map   explicit lexical identity (JSON stdin)
        hgs mobile-peers --json        guarded direct-peer discovery (mobile-peer ABI 1)
        hgs approval-log begin|finish|list|detail  local automatic-approval journal (JSON stdin)
@@ -624,6 +625,11 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     }
     if !target.is_empty() && !config.is_self(&target) {
         return remote(&config, &target, command, args, dry);
+    }
+    if command == "external" { return crate::external_workstreams::dispatch(&config,args,dry); }
+    if args.first().is_some_and(|name| crate::external_workstreams::reserved(name))
+        && matches!(command.as_str(), "inspect" | "send" | "history" | "a" | "kill" | "rename" | "archive" | "terminate" | "pause" | "resume" | "fork" | "processes" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "read" | "notifications" | "attachment" | "file-read") {
+        return crate::external_workstreams::session_command(&config,command,args,dry);
     }
     // Commands that only read or change this machine's configuration, or reach
     // remote machines, also run on a build without local sessions.
@@ -1207,6 +1213,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
         {
             raw["local_host"] = crate::host::admin::local_host(&config.state);
         }
+        crate::external_workstreams::append_listing(config,&mut raw)?;
         return Ok(raw);
     }
     let mut projects = serde_json::Map::new();
@@ -1250,6 +1257,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     if !ended.is_empty() {
         merged["ended_launches"] = json!(ended);
     }
+    crate::external_workstreams::append_listing(config,&mut merged)?;
     Ok(merged)
 }
 fn local_list(config: &Config) -> Result<()> {

@@ -188,6 +188,7 @@ static QJsonArray withSolo(QJsonArray models)
 class TestMessageComposer : public QObject {
     Q_OBJECT
 private slots:
+    void cooperativeInboxIsExplicitAndDoesNotAutoSubmit();
     void unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval();
     void compactComposerAppliesMenuChoicesAtOnce();
     void initTestCase();
@@ -2078,6 +2079,21 @@ void TestMessageComposer::inputMethodDoesNotAccidentallySubmit()
     QApplication::sendEvent(editor, &commit);
     QTest::keyClick(editor, Qt::Key_Return);
     QCOMPARE(submissions.size(), 1);
+}
+
+void TestMessageComposer::cooperativeInboxIsExplicitAndDoesNotAutoSubmit()
+{
+    MessageComposer composer;QList<Submission> submissions;observe(composer,submissions);
+    setSessionReady(composer,"external/project/chat");composer.setAvailability(true);composer.setCooperativeInbox(true);composer.show();
+    composer.editor()->setPlainText("Review the saved checkpoint");
+    QTRY_VERIFY(sendButton(composer)->isEnabled());
+    QCOMPARE(sendButton(composer)->text(),QString("Queue"));
+    QVERIFY(sendButton(composer)->toolTip().contains("does not send"));
+    QVERIFY(status(composer)->text().contains("must poll"));
+    QTest::qWait(25);QCOMPARE(submissions.size(),0);
+    composer.setCooperativeInbox(false);
+    QCOMPARE(sendButton(composer)->text(),QString("Send"));
+    QCOMPARE(composer.editor()->toPlainText(),QString("Review the saved checkpoint"));
 }
 
 void TestMessageComposer::availabilityAndBusyGateSubmission()

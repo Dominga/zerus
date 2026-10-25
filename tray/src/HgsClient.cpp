@@ -104,6 +104,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.recovery = obj.value("recovery").toObject();
     s.name = obj.value(QStringLiteral("name")).toString();
     s.cmd = obj.value(QStringLiteral("cmd")).toString();
+    s.clientContext = obj.value("client_context").toObject();
     s.project = nullableString(obj.value(QStringLiteral("project")));
     s.tag = nullableString(obj.value(QStringLiteral("tag")));
     s.attached = obj.value(QStringLiteral("attached")).toInt();

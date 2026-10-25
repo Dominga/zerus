@@ -99,7 +99,9 @@ class AndroidUpdates private constructor(private val context: Context) {
         }
     } }
     suspend fun check(manual: Boolean = false) = withContext(Dispatchers.IO) { mutex.withLock {
-        load();val old=state.value
+        load()
+        if(BuildConfig.FORK_BUILD) { save(state.value.copy(status="idle",available=null,error="This fork has no configured update channel. Install its verified APK explicitly."));return@withLock }
+        val old=state.value
         if(old.sessionId >= 0 || (!manual && !UpdatePolicy.shouldCheck(old.lastCheck,System.currentTimeMillis(),old.channel))) return@withLock
         save(old.copy(status="checking",lastCheck=System.currentTimeMillis(),error=""))
         try {
@@ -131,6 +133,7 @@ class AndroidUpdates private constructor(private val context: Context) {
         check(manual=true)
     }
     suspend fun download(update: AndroidUpdate) = withContext(Dispatchers.IO) { mutex.withLock {
+        check(!BuildConfig.FORK_BUILD) { "This fork has no authorized update publisher; install its verified APK explicitly." }
         load();require(state.value.sessionId < 0 && state.value.available == update) { "Update selection changed." }
         save(state.value.copy(status="downloading",error="",bytes=0))
         try {
@@ -160,6 +163,7 @@ class AndroidUpdates private constructor(private val context: Context) {
         require(info.versionName == update.versionName) { "Unexpected APK version name." }
     }
     suspend fun install(update: AndroidUpdate) = withContext(Dispatchers.IO) { mutex.withLock {
+        check(!BuildConfig.FORK_BUILD) { "This fork has no authorized update publisher; install its verified APK explicitly." }
         load();require(UpdateInstallGuard.canStart(state.value.sessionId,state.value.downloaded,update)) { "An installation is already pending or the update changed." }
         require(context.packageManager.canRequestPackageInstalls()) { "Allow Zerus to install updates in Android settings first." }
         verify(update,apk)

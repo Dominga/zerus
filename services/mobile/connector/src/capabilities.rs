@@ -24,6 +24,34 @@ pub const WINDOWS_PROVIDER_REFUSAL: &str = "provider is unavailable on a Windows
 pub fn windows_provider(provider: &Value) -> bool {
     matches!(provider.as_str(), Some("codex" | "claude" | "kimi"))
 }
+/// External rows are read/inbox targets, never additional launch providers.
+pub fn external_workstream(row: &Value) -> bool {
+    let context = &row["client_context"];
+    row["backend"] == "external-workstream"
+        && row["external_protocol"] == "cooperative-inbox-v1"
+        && row["send_delivery"] == "cooperative_inbox"
+        && row["external_cloud_control"] == false
+        && context["schema_version"].as_u64() == Some(1)
+        && context["evidence"] == "explicit_registration"
+        && matches!(
+            context["kind"].as_str(),
+            Some("chatgpt_chat" | "chatgpt_work" | "codex_chat")
+        )
+        && row["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("external/"))
+}
+pub fn windows_session(row: &Value) -> bool {
+    if row["agent"] == "external" || row["cmd"] == "external" {
+        return external_workstream(row);
+    }
+    windows_provider(&row["agent"]) || windows_provider(&row["cmd"])
+}
+
+pub fn external_operation_allowed(operation: &str) -> bool {
+    matches!(operation, "inspect" | "history" | "send")
+}
+
 pub const WINDOWS_OPERATIONS: &[&str] = &[
     "inspect",
     "history",

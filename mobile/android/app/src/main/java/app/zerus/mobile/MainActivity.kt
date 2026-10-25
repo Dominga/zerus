@@ -211,7 +211,7 @@ class MainActivity : ComponentActivity() {
     if (settings) AppSettingsScreen(model, updater) { settings = false }
     LaunchedEffect(tab, model.selected) { if (model.selected == null) AppTelemetry.screen(when (tab) { 0 -> TelemetryScreen.Sessions; 1 -> TelemetryScreen.Projects; 2 -> TelemetryScreen.Drafts; 4 -> TelemetryScreen.Accounts; else -> TelemetryScreen.Machines }) }
     var pairing by rememberSaveable { mutableStateOf(false) }
-    var server by rememberSaveable { mutableStateOf("https://relay.zerus.dev") }
+    var server by rememberSaveable { mutableStateOf(BuildConfig.DEFAULT_RELAY_URL) }
     var code by remember { mutableStateOf("") }
     var disconnect by remember { mutableStateOf<Connection?>(null) }
     var review by remember { mutableStateOf<Draft?>(null) }
@@ -1192,6 +1192,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 }
 @Composable private fun MessageComposer(model: ZerusViewModel, session: Session, online: Boolean,
     onReview: (Draft) -> Unit, onAttach: (Target) -> Unit, onReviewOutgoing: (OutgoingMessage) -> Unit) {
+    val cooperative = ConversationSource.cooperative(model.activity ?: session.raw)
     val target = session.target
     val draft = model.draft(target)
     val recording = model.speech.recording
@@ -1292,7 +1293,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         if (previous?.status == "uncertain") OutgoingRecovery(previous,
             "outgoing:${previous.requestId}" in model.receiptFlights,
             { model.checkOutgoing(previous) }, { onReviewOutgoing(previous) })
-        CompactMessageInput(state = editor, placeholder = "Message",
+        CompactMessageInput(state = editor, placeholder = if(cooperative) "Queue instruction" else "Message",
             modifier = if (retainedPreview) Modifier.weight(1f, fill = false) else Modifier,
             sharedPreviewSpace = retainedPreview,
             recordingContent = if (recording) ({ SpeechRecordingRow(model.speech) }) else null,
@@ -1323,7 +1324,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                     containerColor = if (canSend) Mint else Color(0xFF2B3B3B), contentColor = if (canSend) Background else Muted,
                     disabledContainerColor = Color(0xFF2B3B3B), disabledContentColor = Muted) {
                     if (!recording && !canSend && sendReason.isNotBlank()) Icon(Icons.Default.Info, "Why sending is unavailable", Modifier.size(22.dp))
-                    else Icon(Icons.AutoMirrored.Filled.Send, "Send message", Modifier.size(22.dp))
+                    else Icon(Icons.AutoMirrored.Filled.Send, if(cooperative) "Queue instruction for external agent" else "Send message", Modifier.size(22.dp))
                 }
             })
     }

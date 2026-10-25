@@ -13,10 +13,17 @@
 namespace IdentityBadges {
 enum Kind { Provider, Machine };
 inline QString providerName(const QString &value) {
+    if(value=="chatgpt_chat")return QStringLiteral("GPT Chat");
+    if(value=="chatgpt_work")return QStringLiteral("GPT Work");
+    if(value=="codex_chat")return QStringLiteral("Codex Chat");
+    if(value=="external")return QStringLiteral("External");
     return value == "codex" ? QStringLiteral("Codex") : value == "claude" ? QStringLiteral("Claude") :
         value == "kimi" ? QStringLiteral("Kimi") : value == "opencode" ? QStringLiteral("OpenCode") : value == "dsh" ? QStringLiteral("DeepSeek") : value == "sh" ? QStringLiteral("Shell") : value;
 }
 inline QColor providerColor(const QString &value, bool dark) {
+    if(value=="chatgpt_chat")return QColor(dark?"#9ec5ff":"#245da3");
+    if(value=="chatgpt_work")return QColor(dark?"#d0b3ff":"#7047a5");
+    if(value=="codex_chat")return QColor(dark?"#f5cf88":"#805900");
     return value == "claude" ? QColor(dark ? "#e8b29b" : "#956044") :
         value == "kimi" ? QColor(dark ? "#bac1ff" : "#5657a2") :
         value == "dsh" ? QColor(dark ? "#8cb9ff" : "#315bb1") : QColor(dark ? "#a6d8c5" : "#38755d");

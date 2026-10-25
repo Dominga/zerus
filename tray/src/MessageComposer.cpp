@@ -1,3 +1,4 @@
+#include "ConversationSource.h"
 #include "MessageComposer.h"
 #include "OpenCodeEffort.h"
 #include "OpenCodeModelPicker.h"
@@ -589,6 +590,15 @@ void MessageComposer::setAttachmentAvailability(bool available, const QString &r
     m_attachmentsAvailable=available;m_attachmentsReason=reason;updateControls();
 }
 
+void MessageComposer::setCooperativeInbox(bool enabled)
+{
+    if(m_cooperativeInbox==enabled)return;
+    m_cooperativeInbox=enabled;
+    m_editor->setAccessibleName(enabled?tr("Instruction for external agent inbox"):tr("Message to selected agent"));
+    m_editor->setPlaceholderText(enabled?tr("Queue an instruction; the external agent must read it…"):tr("Message this agent…"));
+    updateControls();
+}
+
 void MessageComposer::setAvailability(bool available, const QString &reason)
 {
     if (available != m_available || reason != m_unavailableReason) QToolTip::hideText();
@@ -1140,10 +1150,11 @@ void MessageComposer::updateControls()
         : m_attachmentsAvailable ? tr("Attach files, paste an image, or drop files onto this session") : m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
-    const QString sendText = draft.sending ? tr("Sending…") : waiting ? tr("Waiting to send…") : tr("Send");
+    const QString sendText = draft.sending ? (m_cooperativeInbox?tr("Queueing…"):tr("Sending…")) : waiting ? tr("Waiting to send…") : m_cooperativeInbox?tr("Queue"):tr("Send");
     // WhiteWh fork: the compact card's Send is a pill that says Send; other states keep only the icon.
-    m_send->setText(m_compact && sendText != tr("Send") ? QString() : sendText); m_send->setAccessibleName(sendText);
+    m_send->setText(m_compact && sendText != tr("Send") && sendText != tr("Queue") ? QString() : sendText); m_send->setAccessibleName(sendText);
     m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_compact ? sendText + " · " + tr("Enter; new line: Shift+Enter") : tr("Send: Enter; new line: Shift+Enter"));
+    if(m_cooperativeInbox)m_send->setToolTip(ConversationSource::queueWarning());
     m_retry->setVisible(draft.uncertain && !operationLocked);
     m_refreshStatus->setVisible(!m_sessionStatus.isEmpty() && m_sessionStatusError);
     m_refreshStatus->setEnabled(!operationLocked);
@@ -1156,6 +1167,7 @@ void MessageComposer::updateControls()
     const bool ownError = (!waiting && draft.error) || tooLong || !draft.storageError.isEmpty();
     if (status.isEmpty() && !draft.attachments.isEmpty() && !m_attachmentsAvailable) status=m_attachmentsReason;
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_sessionStatus.isEmpty() ? m_sessionStatus : m_unavailableReason;
+    if(status.isEmpty()&&m_cooperativeInbox)status=ConversationSource::queueWarning();
     const auto detail = !m_sessionStatus.isEmpty() && m_sessionStatus != status ? status + '\n' + m_sessionStatus : status;
     m_status->setText(status); m_status->setToolTip(Qt::convertFromPlainText(detail)); m_status->setAccessibleName(status);
     m_status->setAccessibleDescription(detail);

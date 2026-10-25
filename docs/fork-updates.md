@@ -19,6 +19,13 @@ A failing step publishes nothing. The run number is embedded in `hgs-tray.exe` a
 `ZERUS_FORK_BUILD`, together with the feed address `ZERUS_FORK_FEED_URL`; CMake
 accepts only release assets of `WhiteWh/zerus` for the latter.
 
+An experimental build of any commit: push a tag `whitewh-exp-<name>` for it. The
+same workflow builds, tests and packages that commit and publishes the zip as a
+prerelease named after the tag. It is never the latest release and has no feed,
+and its `hgs-tray.exe` embeds neither a fork build number nor a feed, so the
+updater neither offers it nor replaces it. It is installed by hand, and going
+back to the regular builds is a hand install of a `whitewh-<build>` zip.
+
 ## Feed
 
 `https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json`,

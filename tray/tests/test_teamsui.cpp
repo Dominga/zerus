@@ -427,14 +427,25 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     // The answers slot stays when nothing waits.
     QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceAnswers"));
     // The graph fills the canvas: at least its height, centered.
-    auto *graph = workspace.findChild<QWidget *>("teamWorkspaceGraph");
-    auto *canvas = workspace.findChild<QScrollArea *>("teamWorkspaceCanvas");
-    const int bar = canvas->style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, canvas);
-    QTRY_VERIFY(graph->height() >= canvas->viewport()->height() - bar - 2);
+    // Async status/feed updates rebuild the canvas. Never retain its raw
+    // widget pointers across QTRY/qWait: a completed render retires them.
+    const auto graphFillsCanvas = [&workspace] {
+        auto *graph = workspace.findChild<QWidget *>("teamWorkspaceGraph");
+        auto *canvas = workspace.findChild<QScrollArea *>("teamWorkspaceCanvas");
+        if (!graph || !canvas) return false;
+        const int bar = canvas->style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, canvas);
+        return graph->height() >= canvas->viewport()->height() - bar - 2;
+    };
+    const auto graphSize = [&workspace] {
+        auto *graph = workspace.findChild<QWidget *>("teamWorkspaceGraph");
+        return graph ? graph->size() : QSize();
+    };
+    QTRY_VERIFY(graphFillsCanvas());
     // ...and holds still: no scroll bar comes and goes under it.
     QTest::qWait(150);
-    const QSize settled = graph->size();
-    for (int i = 0; i < 5; ++i) { QTest::qWait(40); QCOMPARE(graph->size(), settled); }
+    const QSize settled = graphSize();
+    QVERIFY(settled.isValid());
+    for (int i = 0; i < 5; ++i) { QTest::qWait(40); QCOMPARE(graphSize(), settled); }
     // A divider the owner moves stands between the canvas and the side column.
     auto *split = workspace.findChild<QSplitter *>("teamWorkspaceSplit");
     QVERIFY(split && split->handleWidth() >= 5);
@@ -450,6 +461,7 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     QCOMPARE(workspace.findChildren<QPushButton *>("teamConversationAsk"), asks);
     // The views are icons with their names as tooltips.
     auto *views = workspace.findChild<QWidget *>("teamWorkspaceView");
+    QVERIFY(views);
     for (auto *b : views->findChildren<QPushButton *>()) QVERIFY(b->text().isEmpty() && !b->icon().isNull() && !b->toolTip().isEmpty());
     for (auto *b : views->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));

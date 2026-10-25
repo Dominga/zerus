@@ -387,6 +387,20 @@ answered; a denial cannot carry an explanation.
   and the target agent and model), but never swaps silently on its own. Zerus
   also shows a member stopped by a usage limit (with the reset time when
   known) in the lead's inbox. Owner: yes.
+- **H7. Session identity after a resume (urgent, seen 2026-10-26).** After the
+  reboot the lead session claude/Zerus/TeamUpdate was resumed and Claude Code
+  continued in a new transcript (78521e2d-...) while Zerus still tracks the old
+  conversation bfa1e069 (its transcript stopped at 00:10). Zerus therefore
+  reads stale usage: the prompt cache was last observed at 23:49 with a 1 h
+  TTL, so from 00:49 the session shows "Cold cache" and the send dialog warns
+  although the session works with a warm cache (568k tokens read from cache
+  on every request). The same stale binding can feed inspect, last reply
+  capture and the team's lead identity. Fix: follow the conversation the agent
+  actually writes after resume or compaction (the SessionStart/PostCompact hook
+  reports it; a newer transcript of the same session in the project folder is a
+  fallback), record the change as an event, re-bind team members, and treat a
+  usage observation older than the last turn as unknown, never as cold.
+  Owner: yes, as soon as possible.
 
 ## Order of work (proposal)
 

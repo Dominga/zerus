@@ -169,6 +169,7 @@ void SessionsWindow::updateSelectionActions()
     m_sessions->setSelectionBar(m_selectionBar, !entries.isEmpty() && (m_sessions->bulkSelecting() || entries.size() > 1));
     int archived = 0;
     for (const auto &entry : m_entries) if (entry.session.state == "archived"
+        && SessionAccounts::accepts(m_accountFilters, entry.host, entry.session)
         && (m_projectFilters.isEmpty() || m_projectFilters.contains(m_organization.groupFor(entry.identity)))
         && (m_hostFilters.isEmpty() || m_hostFilters.contains(entry.host.isEmpty() ? "@local" : entry.host))
         && selectionActionApplies(entry, SelectionAction::Forget)) ++archived;
@@ -224,6 +225,7 @@ void SessionsWindow::clearArchive()
 {
     QList<Entry> entries;
     for (const auto &entry : m_entries) if (entry.session.state == "archived"
+        && SessionAccounts::accepts(m_accountFilters, entry.host, entry.session)
         && (m_projectFilters.isEmpty() || m_projectFilters.contains(m_organization.groupFor(entry.identity)))
         && (m_hostFilters.isEmpty() || m_hostFilters.contains(entry.host.isEmpty() ? "@local" : entry.host))
         && m_archiveBrowser->includes(entry.session.archivedAt)) entries << entry;

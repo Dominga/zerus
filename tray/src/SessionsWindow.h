@@ -20,6 +20,7 @@ class SwarmController;
 #include "HgsClient.h"
 #include "SessionOrganization.h"
 #include "SessionRowPreferences.h"
+#include "SessionAccounts.h"
 
 class QAction;
 class QLabel;
@@ -46,6 +47,7 @@ class QHBoxLayout;
 class MachinesPage;
 class MachineFilter;
 class ProjectFilter;
+class AccountFilter;
 class DashboardPage;
 class AccountsPage;
 class GoToDialog;
@@ -376,7 +378,9 @@ private:
     bool m_folderFilterCheckout=false;
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
-    QSet<QString> m_hostFilters, m_projectFilters;
+    QSet<QString> m_hostFilters, m_projectFilters, m_accountFilters;
+    SessionAccounts::Catalog m_sessionAccounts;
+    QJsonArray m_sessionAccountProfiles;
     QString selectedHostTarget() const;
     void updateDashboard();
     QJsonObject m_details;
@@ -433,6 +437,7 @@ private:
     MachinesPage *m_machinesPage;
     MachineFilter *m_machineFilter;
     ProjectFilter *m_projectFilter;
+    AccountFilter *m_accountFilter;
     DashboardPage *m_dashboard;
     AccountsPage *m_accountsPage;
     SessionOrganization m_organization;

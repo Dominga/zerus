@@ -561,6 +561,12 @@ target_link_libraries(test_accountspage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-
 zerus_add_test(accountspage test_accountspage)
 set_tests_properties(accountspage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_accountfilter test_accountfilter.cpp)
+target_include_directories(test_accountfilter PRIVATE ../src)
+target_link_libraries(test_accountfilter PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(accountfilter test_accountfilter)
+set_tests_properties(accountfilter PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_accountusage test_accountusage.cpp)
 target_include_directories(test_accountusage PRIVATE ../src)
 target_link_libraries(test_accountusage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)

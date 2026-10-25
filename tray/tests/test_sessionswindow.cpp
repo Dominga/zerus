@@ -339,6 +339,7 @@ private slots:
     void inspectorPreservesWorkspaceAndReportsTasks();
     void tasksTabFollowsTheOpenSessionsProject();
     void tasksDropOnTheirProjectsSessionsAndHeader();
+    void tasksPreview();
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
@@ -1089,6 +1090,111 @@ QString TestSessionsWindow::tasksFixture(const QString &name, const QJsonArray &
         + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + "),'damaged':[]}))\n";
     const QString fixture = m_dir->filePath(name);
     return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? fixture : QString();
+}
+
+// Renders the Tasks tab beside design/task-tracker: the prototype's projects,
+// sessions and tasks, each stage in both themes, hovered rows and the dialogs.
+void TestSessionsWindow::tasksPreview()
+{
+    const auto directory = qEnvironmentVariable("HGS_PREVIEW_DIR");
+    if (directory.isEmpty()) QSKIP("Set HGS_PREVIEW_DIR to render the tasks preview");
+    QDir().mkpath(directory);
+    SessionOrganization org; const auto orchard = org.createGroup("orchard"), lumen = org.createGroup("lumen");
+    for (const auto *name : {"claude/orchard/api", "codex/orchard/web", "claude/orchard/docs"}) org.moveSession(org.observe("arch", name, ""), orchard);
+    for (const auto *name : {"claude/lumen/main", "codex/lumen/mobile"}) org.moveSession(org.observe("arch", name, ""), lumen);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    const auto session = [](const QString &name, const QString &activity, const QString &phase, const QString &prompt, const QString &model, const QString &effort) {
+        SessionInfo info; info.name = name; info.cmd = name.section('/', 0, 0); info.project = name.section('/', 1, 1); info.tag = name.section('/', 2);
+        info.tracked = true; info.resumable = true; info.activity = activity; info.phase = phase; info.prompt = prompt; info.model = model; info.effort = effort;
+        if (phase == "tool") info.currentTool = "Bash";
+        return info;
+    };
+    BoxState arch; arch.host = "arch"; arch.ok = true; arch.metrics = QJsonObject{{"platform", "linux"}};
+    arch.sessions = {session("claude/orchard/api", "busy", "tool", "T-bt41xh: Add rate limiting to POST /v1/orders", "opus-5-5", "high"),
+                     session("codex/orchard/web", "busy", "input", "T-vg42sm: The checkout e2e test fails in CI now and then", "gpt-6.1-sol", "high"),
+                     session("claude/orchard/docs", "idle", "idle", "Collect questions for partners about their API limits", "sonnet-5-5", "medium"),
+                     session("claude/lumen/main", "busy", "tool", "The image upload test sometimes fails in parallel runs", "opus-5-5", "xhigh"),
+                     session("codex/lumen/mobile", "idle", "idle", "Polish the onboarding screens", "gpt-6.1-sol", "high")};
+    FleetState fleet; fleet.setLocal(arch, QDateTime::currentMSecsSinceEpoch());
+    // The prototype's orchard tasks in its order; IDs keep its numbers.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch(), minute = 60000;
+    const auto ran = [](const QString &name) { return FakeTasksCli::pinned(name); };
+    const auto agent = [](const QString &name) { return QJsonObject{{"kind", "agent"}, {"session", name}}; };
+    QJsonArray tasks;
+    const auto add = [&](const QString &id, const QString &stage, const QString &text, QJsonObject extra = {}) {
+        auto task = FakeTasksCli::task(int(tasks.size()) + 1, stage, extra); task["uuid"] = "uuid-" + id; task["id"] = id; task["ref"] = "orchard/" + id;
+        task["text"] = text; task["rank"] = QString(QChar(char16_t(u'a' + tasks.size()))); task["created_at"] = double(now - 90 * minute);
+        if (!extra.contains("stage_at")) task["stage_at"] = double(now - 60 * minute);
+        QJsonArray log{QJsonObject{{"actor", extra.value("author").toObject().isEmpty() ? QJsonObject{{"kind", "person"}} : extra.value("author")},
+                                   {"at", double(now - 90 * minute)}, {"kind", "created"}, {"session", QJsonValue()}}};
+        if (extra.contains("session")) log << QJsonObject{{"actor", QJsonObject{{"kind", "person"}}}, {"at", task["stage_at"]}, {"kind", "sent"}, {"session", extra.value("session")}};
+        task["log"] = log; tasks << task;
+    };
+    add("T-ka38pd", "done", "Add a /healthz endpoint: check the database and Redis, answer 200 or 503 with the reason.",
+        {{"session", ran("claude/orchard/api")}, {"summary", "/healthz checks the database and Redis; tests are green."}});
+    add("T-mc39fw", "review", "Make a multi-stage Dockerfile for web; the image should get much smaller.",
+        {{"session", ran("codex/orchard/web")}, {"summary", "Image 1.2 GB → 310 MB."}});
+    add("T-qe40rn", "done", "Remove the N+1 in GET /v1/orders and add a test for the number of database queries.",
+        {{"session", ran("claude/orchard/api")}, {"summary", "select_related and a query-count test."}});
+    add("T-bt41xh", "active", "Add rate limiting to POST /v1/orders: at most 30 requests per minute per API key. The limit comes from the config; answer 429 with Retry-After. Cover it with tests.",
+        {{"session", ran("claude/orchard/api")}, {"stage_at", double(now - 13 * minute)}});
+    add("T-vg42sm", "active", "The checkout e2e test fails in CI now and then. Find the cause and make it stable without disabling it.",
+        {{"session", ran("codex/orchard/web")}, {"stage_at", double(now - 34 * minute)}});
+    add("T-dn44wk", "todo", "Move the sessions table to UUID keys. The migration must not cause downtime: new column, backfill, switch, drop the old one.",
+        {{"target", ran("claude/orchard/api")}});
+    add("T-hy43ce", "todo", "Add an Export CSV button to the admin orders page: current filters, all pages, UTF-8 with BOM for Excel.");
+    add("T-zu46lo", "todo", "Update Next.js to 15.4 and fix the type errors. The build and e2e must be green.");
+    add("T-pr45ja", "todo", "Document in the README how to run the local environment: docker-compose, seeds, stripe-mock, ports.",
+        {{"target", ran("claude/orchard/api")}, {"author", agent("claude/orchard/api")}});
+    add("T-fw47tb", "backlog", "Add a dark theme to the dashboard with a switch in the user profile.");
+    add("T-co48yv", "backlog", "Find out why /search takes 2–3 s on a copy of the production database. Measure first, then propose options.");
+    add("T-ji49mr", "backlog", "Replace moment.js with date-fns across web without changing date formats.");
+    add("T-sx50ge", "backlog", "Collect questions for partners about their API limits and draft an email.",
+        {{"target", ran("claude/orchard/docs")}, {"author", agent("claude/orchard/docs")}});
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject settings{{"task_template", "[Zerus task {ref}]\nWritten by {author}.\n{prompt}\n{history}\nWhen you finish, or find that it cannot be done, report with\n"
+                                                 "{tools}.task_report: one to three sentences on what you changed, how you\nchecked it, and what is left undone or why it cannot be done."},
+                               {"cancel_template", "[Zerus task {ref} cancelled]\nThe person cancelled this task. Stop working on it. Do not continue and do\n"
+                                                   "not revert anything; list what you changed and wait for the person."},
+                               {"agents_other", true}, {"agent_limit", 0}};
+    const auto json = [](const QJsonValue &value) {
+        return FakeCli::pythonString(QString::fromUtf8(value.isArray() ? QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact) : QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact)));
+    };
+    const QByteArray answer = "elif c=='task':\n T=json.loads(" + json(tasks) + ")\n P={'id':a[a.index('--project')+1] if '--project' in a else '','name':'orchard'}\n"
+        " if a[1]=='get':print(json.dumps({'project':P,'task':[t for t in T if t['uuid']==a[2]][0]}))\n"
+        " elif a[1]=='settings':print(json.dumps({'project':P,'settings':json.loads(" + json(settings) + ")}))\n"
+        " else:print(json.dumps({'project':P,'tasks':T,'damaged':[]}))\n";
+    const QString fixture = m_dir->filePath("tasks-preview-hgs");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.resize(1240, 800); window.setFleet(fleet); window.show();
+    window.showSession({}, "claude/orchard/api");
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>(); QVERIFY(tabs && view);
+    tabs->setCurrentWidget(view); QTRY_VERIFY(view->findChild<QWidget *>("taskRow:T-mc39fw"));
+    const auto stage = [&](const QString &name) { view->findChild<QAbstractButton *>("taskTile:" + name)->click(); QTest::qWait(80); };
+    const auto hover = [&](const QString &id) {
+        auto *row = view->findChild<QWidget *>("taskRow:" + id); QVERIFY(row);
+        QEnterEvent enter(QPointF(20, 10), QPointF(20, 10), QPointF(20, 10)); QApplication::sendEvent(row, &enter); QTest::qWait(40);
+    };
+    const auto save = [&](QWidget *widget, const QString &name) { QVERIFY(widget->grab().save(directory + "/" + name + ".png")); };
+    auto *themeChoice = window.findChild<QComboBox *>("workspaceTheme"); QVERIFY(themeChoice);
+    for (const auto &theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
+        themeChoice->setCurrentIndex(themeChoice->findData(theme)); QTest::qWait(100);
+        for (const auto &name : {"review", "active", "todo", "backlog", "done"}) { stage(name); save(&window, QStringLiteral("real-%1-%2").arg(name, theme)); }
+    }
+    themeChoice->setCurrentIndex(themeChoice->findData("dark")); QTest::qWait(100);
+    stage("todo"); hover("T-dn44wk"); save(&window, "real-todo-hover");
+    view->findChild<QToolButton *>("taskOnlySession")->click(); QTest::qWait(80); save(&window, "real-todo-only");
+    view->findChild<QToolButton *>("taskOnlySession")->click(); QTest::qWait(80);
+    stage("active"); hover("T-bt41xh"); save(&window, "real-active-hover");
+    view->findChild<QWidget *>("taskRow:T-bt41xh")->findChild<QToolButton *>("taskAction:cancel")->click();
+    QDialog *dialog = nullptr; QTRY_VERIFY((dialog = window.findChild<QDialog *>("taskCancelDialog")) && dialog->isVisible());
+    QTest::qWait(60); save(dialog, "real-cancel"); dialog->reject(); QTest::qWait(40);
+    stage("todo"); QTest::mouseClick(view->findChild<QWidget *>("taskRow:T-dn44wk"), Qt::LeftButton, {}, QPoint(300, 30));
+    QTRY_VERIFY((dialog = window.findChild<QDialog *>("taskDialog")) && dialog->isVisible());
+    QTest::qWait(60); save(dialog, "real-task-settings"); dialog->reject(); QTest::qWait(40);
+    view->findChild<QToolButton *>("taskSettings")->click();
+    QTRY_VERIFY((dialog = window.findChild<QDialog *>("taskSettingsDialog")) && dialog->isVisible());
+    QTest::qWait(60); save(dialog, "real-project-settings"); dialog->reject();
 }
 
 void TestSessionsWindow::tasksDropOnTheirProjectsSessionsAndHeader()

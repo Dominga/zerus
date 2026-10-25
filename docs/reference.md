@@ -773,7 +773,25 @@ and folder scope before project selection or text search, including zero counts.
 Its open checkboxes and selection stay in place during polling. A removed selected
 project remains as **Unavailable project** until removed from the filter.
 
-Changing the state, machine or project filter only changes the session list.
+The account button beside the project chooser selects one or more specific
+accounts, rather than agent types. Its names and verified identity groups follow
+Accounts; different accounts with the same label remain separate. Choices retain
+the exact machine-local profile bindings selected at that moment. A later
+catalog refresh or a newly discovered binding never expands that selection
+silently. Selected accounts appear as removable chips; **All accounts** clears
+the account restriction. Account selection intersects the project, machine,
+state, folder and search scopes, including message search and loaded archives.
+Chooser counts use the other scopes before account selection or text search.
+An unavailable selected account stays selected until explicitly removed.
+Sessions without a recorded account remain distinguishable from known accounts
+and shell sessions; they never borrow the current default account.
+
+**Details** shows the session's bound account, its profile ID and recorded agent
+home when available. Account names come from the selected computer's cached
+catalog; opening the chooser or Details can refresh that catalog without signing
+in, refreshing provider usage or changing any running session.
+
+Changing the state, machine, project or account filter only changes the session list.
 The open conversation and its draft stay in place even when no row matches;
 its row is selected again when it returns to the list. Click another session
 to open it.
@@ -2220,6 +2238,22 @@ confirmation in the manager. That consent is bound to the exact file contents
 and staged Git blobs (bounded to 64 MiB and two seconds), and does not override
 any other protection. A changed or incomplete proof requires a new review.
 
+Linux can deny access to a protected process's current folder or executable,
+including desktop services. A completed process inventory with only those
+access denials offers **Check running programs** in manual cleanup. The folder
+stays protected until you explicitly confirm **I checked these folders are not
+in use; remove them anyway**. This accepts the uncertainty about those programs;
+it does not establish that the folder is unused. The confirmation is bound to
+the exact folder review and unreadable process identities and is checked again
+before removal. A protected ancestor that launches the current CLI request
+(including a fresh SSH session) is matched by its verified invocation role,
+program name, hidden-path shape and computer boot rather than its temporary PID. Other
+protected processes retain exact PID and start identities. Readable ancestor
+paths still protect their folders. A known program or session using the folder, another blocker,
+an incomplete inventory, or changed process identities still prevents removal.
+Automatic cleanup never uses this exception. Older owning CLIs without this
+proof keep the folder; update that computer before trying manual cleanup again.
+
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
 review under the repository lock used by creation, compares the reviewed
@@ -2307,7 +2341,7 @@ default; restoring an archive may require recreating its working folder.
 The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
 --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH]
-[--discard-fingerprint HASH] [--delete-branch]
+[--discard-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch]
 --json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
 --common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.

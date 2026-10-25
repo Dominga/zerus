@@ -1,4 +1,5 @@
 #include "SessionSearch.h"
+#include "SessionAccounts.h"
 #include "SessionPresentation.h"
 #include "IdentityBadge.h"
 #include "WorkspaceList.h"
@@ -165,6 +166,12 @@ void SessionSearch::setProjectScope(const QSet<QString> &sessionKeys, bool enabl
     m_projectScope = enabled; m_projectKeys = sessionKeys;
     if (active()) rebuild();
 }
+void SessionSearch::setAccountScope(const QSet<QString> &bindings)
+{
+    if (m_accountBindings == bindings) return;
+    m_accountBindings = bindings;
+    if (active()) rebuild();
+}
 void SessionSearch::setTheme(bool dark)
 {
     m_dark = dark; m_list->setProperty("hgsDark", dark); m_list->viewport()->update();
@@ -175,6 +182,7 @@ bool SessionSearch::accepts(const QString &host, const SessionInfo &s, bool onli
 {
     const QString key = host + '\n' + s.name + (s.state == "archived" ? '\n' + s.archiveId : QString());
     if (m_projectScope && !m_projectKeys.contains(key)) return false;
+    if (!SessionAccounts::accepts(m_accountBindings, host, s)) return false;
     if (!m_hosts.isEmpty() && !m_hosts.contains(host.isEmpty()?QStringLiteral("@local"):host)) return false;
     if(!m_folderPath.isEmpty()&&(host!=m_folderHost||!MachinePlatform::same(m_folderCheckout?s.gitRoot:s.canonicalCwd,m_folderPath,MachinePlatform::of(m_fleet.local().metrics,host.isEmpty()))))return false;
     if (m_filter == "archived") return s.state == "archived";

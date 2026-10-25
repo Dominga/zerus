@@ -73,8 +73,11 @@ struct Attempt {
     double reportAt = 0;
     bool captured = false;              // the text was taken from the last reply
     QList<ReplacedReport> replaced;     // oldest first, at most 3
-    // The phase hgs derives for the attempt (spec 2), empty on an older hgs.
+    // The phase hgs derives for the attempt (spec 2). `phaseKnown` records that
+    // hgs sent the key at all: it sends null on purpose for a finished task and
+    // for a revoked or refused attempt, and only an older hgs sends no key.
     QString phase;
+    bool phaseKnown = false;
     QList<Question> questions;          // oldest first
     const Question *openQuestion() const
     {
@@ -109,12 +112,24 @@ struct Task {
 
 // A phase appended by `extend`; the approved initial plan (phase 1) has no
 // record. A `draft` phase waits for the owner, `auto` becomes approved at once.
+// F10: one line of what the lead changed in a draft, as the store reports it,
+// so the owner can read the diff before approving. `task` is the number the
+// change names; `from`/`to` say what moved or changed.
+struct PhaseChange {
+    QString kind;     // added, removed, changed, moved
+    int task = 0;
+    QString title, from, to;
+    bool added() const { return kind == "added"; }
+    bool removed() const { return kind == "removed"; }
+};
+
 struct Phase {
     int n = 0;
     QString title, approval, state, addedBy, decidedBy;
     bool barrier = false;      // no task starts before every lower phase is finished
     double addedAt = 0, decidedAt = 0;
     QList<int> tasks;          // task ids; a discarded phase keeps them
+    QList<PhaseChange> changes; // F10: the lead's changes since the owner last saw it
     bool draft() const { return state == "draft"; }
 };
 
@@ -185,10 +200,30 @@ struct PhaseGroup {
 };
 // The phases to show, in phase order; empty while the plan is phase 1 only.
 QList<PhaseGroup> phaseGroups(const Team &team);
+// G6: the team's progress in two small numbers instead of one over every task.
+// The first bar follows the phase in work — the lowest phase that is not a
+// draft and still has open tasks — or, when none is in work, the next draft
+// waiting for approval. The second counts finished phases out of the planned
+// ones; a discarded draft is not planned and never counts.
+struct PhaseProgress {
+    int phase = 0;          // the live number of the phase the first bar shows
+    QString title;
+    bool draft = false;     // that phase waits for approval
+    int done = 0, total = 0;
+    int phasesDone = 0, phasesTotal = 0;
+    bool valid() const { return phase > 0 && total > 0; }
+    QString phaseText() const { return QStringLiteral("%1/%2").arg(done).arg(total); }
+    QString phasesText() const { return QStringLiteral("%1/%2").arg(phasesDone).arg(phasesTotal); }
+    QString tooltip() const;
+};
+PhaseProgress phaseProgress(const Team &team);
 // Why phase N may not be approved yet (spec 10), empty when it may: every
 // lower phase must be approved and its tasks decided. "Phase 2 opens after
 // phase 1 ends."
 QString approveBlocked(const Team &team, int phase);
+// The same reason for the compact draft row ("after phase 3"); the full
+// sentence stays its tooltip.
+QString approveBlockedShort(const Team &team, int phase);
 // True when this member's session still runs after the team ended (F7).
 bool leftMember(const Team &team, const QString &member);
 // "Phase 2 · QA fixes · 3/5" (the title is left out when empty).

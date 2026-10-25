@@ -407,7 +407,8 @@ private:
     class QFrame *m_teamStrip=nullptr;
     class QLabel *m_teamStripText=nullptr;
     void openTeamTask(int task);
-    void showNewTeam();
+    // F7: a session named here is taken into the new team as its existing lead.
+    void showNewTeam(const QString &host = {}, const QString &name = {});
     void showTeamDesigner();
     void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
     QString m_teamDesignerFolder,m_teamDesignerProject;
@@ -484,8 +485,9 @@ private:
     QSet<QString> m_inspectionBehindSettings;
     QByteArray m_settingsIdentity; // The automatic apply in flight.
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
-    // The Team tab's leftover Stop already confirmed and named the session.
-    bool m_terminateConfirmed = false;
+    // N7: the Team tab's leftover Stop names a session; its entry key waits
+    // here until the inspection that decides the real action has loaded.
+    QString m_terminateAfterInspect;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
     QSet<QString> m_retryReads;

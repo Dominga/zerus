@@ -252,6 +252,16 @@ void TeamNewDialog::applyTemplate()
     validate();
 }
 
+void TeamNewDialog::preselectExistingLead(const QString &host, const QString &name)
+{
+    if (!host.isEmpty() || name.isEmpty()) return;   // only this computer's sessions can lead here
+    const int index = m_existingLead->findData(name);
+    if (index < 0) return;
+    m_existingLead->setCurrentIndex(index);
+    m_useExisting->setChecked(true);
+    validate();
+}
+
 void TeamNewDialog::validate()
 {
     const Colors c = colorsFor(palette().color(QPalette::Window).lightness() < 128);

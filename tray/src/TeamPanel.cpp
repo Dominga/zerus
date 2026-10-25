@@ -344,9 +344,9 @@ QWidget *TeamPanel::summary(const Team &team, const QString &status, bool narrow
         chips->addStretch();
         v->addLayout(chips);
     }
-    QList<QColor> segments;
-    for (auto tone : progress(team)) segments.append(toneColor(c, tone));
-    v->addWidget(new Progress(segments, 6, c.border));
+    // G6: two bars — the phase in work (or the next draft) and the phases —
+    // instead of one over every task of every phase.
+    v->addWidget(new PhaseProgressBars(c, phaseProgress(team)));
     const int problemCount = problems(team, live).size();
     QString meta = tr("%1/%2 accepted").arg(accepted(team)).arg(team.tasks.size()).toHtmlEscaped();
     if (problemCount) meta += QStringLiteral(" &nbsp;<span style=\"color:%1;\">%2</span>").arg(c.warn.name(),
@@ -417,6 +417,7 @@ QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
         // A1: the attempt's phase icon and its tooltip beside the member.
         auto *statusMark = new StatusMark(status.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : status.tone),
                                           mark.kind.isEmpty() ? status.kind : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
+        statusMark->setObjectName("teamSummaryMemberState");
         statusMark->setMaximumWidth(narrow ? 120 : 170);
         h->addWidget(statusMark);
         bv->addWidget(line);
@@ -462,11 +463,13 @@ QWidget *TeamPanel::leftoverMembers(const Team &team, bool narrow)
         h->addLayout(body, 1);
         auto *stop = button(tr("Stop…"), "teamLeftoverStop", false);
         stop->setProperty("danger", true);
-        QObject::connect(stop, &QPushButton::clicked, this, [this, host = left.host, name = left.session, role] {
-            if (confirm("teamStopLeftoverConfirm", tr("Stop session?"),
-                        tr("Stop %1 (%2)? Its running processes will stop; the conversation history is kept, and Zerus never stops it by itself.")
-                            .arg(name, role), tr("Stop")))
-                if (stopSession) stopSession(host, name);
+        // N7: this row names a session, not the action. The session's own stop
+        // dialog names what really happens (stop and archive, terminate without
+        // an archive, or forget an OpenCode binding) once its details load, so
+        // the Team tab promises nothing here.
+        stop->setToolTip(tr("Asks the session's own stop confirmation"));
+        QObject::connect(stop, &QPushButton::clicked, this, [this, host = left.host, name = left.session] {
+            if (stopSession) stopSession(host, name);
         });
         h->addWidget(stop);
         auto *take = button(tr("Take into a new team"), "teamLeftoverTake");
@@ -511,9 +514,8 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
     more->setMenu(menu);
     top->addWidget(more);
     v->addLayout(top);
-    QList<QColor> segments;
-    for (auto tone : progress(team)) segments.append(toneColor(c, tone));
-    v->addWidget(new Progress(segments, 6, c.border));
+    // G6: the header shows the same two bars, not one over every task.
+    v->addWidget(new PhaseProgressBars(c, phaseProgress(team)));
     QMap<Tone, int> counts;
     for (const auto &task : team.tasks) ++counts[taskStatus(task).tone];
     QStringList legend;

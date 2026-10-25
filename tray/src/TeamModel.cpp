@@ -95,32 +95,44 @@ QString Team::roleOf(const QString &id) const
 
 QList<int> memberQueue(const Team &team, const QString &member)
 {
-    QList<int> queue;
-    for (const auto &task : team.tasks)
-        if (const auto *attempt = openOf(task); attempt && attempt->member == member) { queue.append(task.id); break; }
+    // The same list hgs sends for an older hgs: every task with an open attempt
+    // of this member (ascending, as hgs sorts them), then the tasks returned to
+    // it (pending, with attempts), also ascending (L7).
+    QList<int> open, returned;
     for (const auto &task : team.tasks) {
-        if (!queue.isEmpty() && task.id == queue.first()) continue;
+        if (const auto *attempt = openOf(task); attempt && attempt->member == member) open.append(task.id);
         // Returned to it: handed out before, not finished, and waiting.
-        if (task.assignee != member || task.finished() || task.status != "pending" || task.attempts.isEmpty()) continue;
-        queue.append(task.id);
+        if (task.assignee == member && !task.finished() && task.status == "pending" && !task.attempts.isEmpty())
+            returned.append(task.id);
     }
-    return queue;
+    std::sort(open.begin(), open.end());
+    std::sort(returned.begin(), returned.end());
+    return open + returned;
 }
 
 QString attemptPhase(const Task &task, const Attempt &attempt)
 {
-    if (!attempt.phase.isEmpty()) return attempt.phase;   // hgs derived it
+    // hgs derives the phase and sends null on purpose when the task or the
+    // attempt has none: a finished task, a revoked attempt that another attempt
+    // replaced, or a refused attempt nothing reached. Only an older hgs sends no
+    // key at all; then the same answer is derived here, mirroring
+    // ops::attempt_phase (which also knows the live session's state, so an
+    // older hgs never yields "stopped").
+    if (attempt.phaseKnown) return attempt.phase;
+    if (task.finished()) return {};
     if (task.held) return QStringLiteral("held");
-    if (attempt.state == "delivering") return QStringLiteral("sent");
     if (attempt.state == "unconfirmed") return QStringLiteral("unconfirmed");
+    if (attempt.state == "delivering") return QStringLiteral("sent");
     if (attempt.state == "rejected") return QStringLiteral("rejected");
+    if (attempt.state == "refused" || attempt.state == "revoked") return {};
+    if (attempt.state != "delivered" && attempt.state != "reported") return {};
+    // A question is not a report, and the attempt stays open (A3).
+    if (attempt.openQuestion()) return QStringLiteral("asking");
     if (attempt.state == "reported") return QStringLiteral("reported");
     if (attempt.noReport) return QStringLiteral("no_report");
-    if (attempt.openQuestion()) return QStringLiteral("asking");
     if (attempt.startedAt > 0) return QStringLiteral("working");
     if (attempt.startWarned) return QStringLiteral("late");
-    if (attempt.state == "delivered") return QStringLiteral("delivered");
-    return attempt.state;
+    return QStringLiteral("delivered");
 }
 
 QString lastPhase(const Task &task)
@@ -202,7 +214,11 @@ Team parse(const QJsonObject &v)
             attempt.deliveredAt = a.value("delivered_at").toDouble(); attempt.startedAt = a.value("started_at").toDouble();
             attempt.startWarned = a.value("start_warned").toBool();
             attempt.replyAt = a.value("reply_at").toDouble(); attempt.turnEndedAt = a.value("turn_ended_at").toDouble();
-            attempt.turnReply = str(a, "turn_reply"); attempt.phase = str(a, "phase");
+            attempt.turnReply = str(a, "turn_reply");
+            // The key's presence is the contract: hgs sends null when the task
+            // or the attempt has no phase, and an older hgs sends no key.
+            attempt.phaseKnown = a.contains("phase");
+            attempt.phase = str(a, "phase");
             const auto report = a.value("report").toObject();
             attempt.report = report.value("text").toString();
             attempt.reportAt = report.value("at").toDouble(); attempt.captured = report.value("captured").toBool();
@@ -236,6 +252,20 @@ Team parse(const QJsonObject &v)
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
         phase.addedAt = p.value("added_at").toDouble(); phase.decidedAt = p.value("decided_at").toDouble();
         for (const auto &id : p.value("tasks").toArray()) phase.tasks.append(id.toInt());
+        // F10: the lead's diff for this draft, when the store reports one.
+        for (const auto &value : p.value("changes").toArray()) {
+            const auto entry = value.toObject();
+            const auto text = [](const QJsonValue &value) {
+                return value.isDouble() ? QString::number(value.toInt()) : value.toString();
+            };
+            PhaseChange change;
+            change.kind = str(entry, "kind");
+            change.task = entry.value("task").toInt();
+            change.title = str(entry, "title");
+            change.from = text(entry.value("from"));
+            change.to = text(entry.value("to"));
+            if (!change.kind.isEmpty()) phase.changes.append(change);
+        }
         if (phase.n < 1) continue;   // phase 0 and negative numbers collide with task ids
         team.phases.append(phase);
     }
@@ -380,6 +410,10 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
     // A3: a question to the lead leaves the attempt open and pauses the work.
     if (attempt && attempt->openQuestion())
         return make("asking", tr("Waiting for your answer"), tr("Answer"), Tone::Warn, current->id, true);
+    // QA: an attempt that only left for the member reads as sending, not as
+    // work (its icon says the same).
+    if (attempt && attempt->state == "delivering")
+        return make("sent", tr("Sending #%1 %2").arg(current->id).arg(current->title), QStringLiteral("Sending"), Tone::Assigned, current->id);
     if (attempt)
         return make("working", tr("Working on #%1 %2").arg(current->id).arg(current->title), QStringLiteral("#%1").arg(current->id), Tone::Active, current->id);
     for (const auto &task : team.tasks)
@@ -584,6 +618,59 @@ QList<PhaseGroup> phaseGroups(const Team &team)
     return groups;
 }
 
+QString PhaseProgress::tooltip() const
+{
+    if (!valid()) return {};
+    const QString phaseLine = draft
+        ? tr("Phase %1 · %2 tasks done, waiting for your approval").arg(phase).arg(tr("%1 of %2").arg(done).arg(total))
+        : tr("Phase %1 · %2 tasks done").arg(phase).arg(tr("%1 of %2").arg(done).arg(total));
+    return phaseLine + QLatin1Char('\n')
+        + tr("%1 of %2 phases finished; discarded drafts do not count").arg(phasesDone).arg(phasesTotal);
+}
+
+PhaseProgress phaseProgress(const Team &team)
+{
+    const auto discarded = [&team](int phase) {
+        const auto *record = team.phase(phase);
+        return record && record->state == "discarded";
+    };
+    PhaseProgress progress;
+    const auto groups = phaseGroups(team);
+    for (const auto &group : groups) {
+        if (discarded(group.n)) continue;   // a discarded draft is not planned
+        ++progress.phasesTotal;
+        progress.phasesDone += group.finished();
+    }
+    // The phase in work: the lowest non-draft phase that still has open tasks.
+    for (const auto &group : groups) {
+        if (discarded(group.n) || group.draft || group.finished()) continue;
+        progress.phase = group.n; progress.title = group.title;
+        progress.done = group.done; progress.total = group.tasks.size();
+        break;
+    }
+    // Nothing in work: the next draft waiting for approval.
+    if (!progress.phase) for (const auto &group : groups) {
+        if (discarded(group.n) || !group.draft) continue;
+        progress.phase = group.n; progress.title = group.title; progress.draft = true;
+        progress.done = group.done; progress.total = group.tasks.size();
+        break;
+    }
+    // Everything is decided and no draft waits: the last phase stands for the
+    // finished plan, so the bar reads done/done.
+    if (!progress.phase) for (const auto &group : groups) {
+        if (discarded(group.n)) continue;
+        progress.phase = group.n; progress.title = group.title;
+        progress.done = group.done; progress.total = group.tasks.size();
+    }
+    // A team without phase records still gets the two bars: its plan is phase 1.
+    if (!progress.phase && !team.tasks.isEmpty()) {
+        int done = 0; for (const auto &task : team.tasks) done += task.finished();
+        progress.phase = 1; progress.done = done; progress.total = team.tasks.size();
+        progress.phasesTotal = 1; progress.phasesDone = done == team.tasks.size();
+    }
+    return progress;
+}
+
 QString phaseHeading(const PhaseGroup &group)
 {
     const QString phase = group.title.isEmpty() ? tr("Phase %1").arg(group.n)
@@ -596,24 +683,50 @@ bool leftMember(const Team &team, const QString &member)
     return team.leftOf(member) != nullptr;
 }
 
-QString approveBlocked(const Team &team, int phase)
+namespace {
+// Why phase N may not be approved yet: the nearest lower phase that is still a
+// draft or unapproved, or the nearest one with open tasks.
+struct PhaseBlocker { int phase = 0; bool approved = false; int open = 0; };
+PhaseBlocker nearestBlocker(const Team &team, int phase)
 {
-    const auto *record = team.phase(phase);
-    if (!record || !record->draft()) return tr("Phase %1 is not a draft").arg(phase);
-    for (int lower = 1; lower < phase; ++lower) {
+    for (int lower = phase - 1; lower >= 1; --lower) {
         const auto *previous = team.phase(lower);
         // A discarded phase is out of the plan, and phase 1 has no record: the
         // approved initial plan is approved by definition.
         if (previous && previous->state == "discarded") continue;
-        if (previous && previous->draft()) return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(lower);
-        if (previous && previous->state != "approved") return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(lower);
+        if (previous && (previous->draft() || previous->state != "approved"))
+            return {lower, false, 0};
         int open = 0;
         for (const auto &task : team.tasks) if (task.phase == lower && !task.finished()) ++open;
-        if (open)
-            return QCoreApplication::translate("Teams", "Phase %1 opens after phase %2 ends: %n task(s) still open", nullptr, open)
-                .arg(phase).arg(lower);
+        if (open) return {lower, true, open};
     }
     return {};
+}
+}
+
+QString approveBlocked(const Team &team, int phase)
+{
+    const auto *record = team.phase(phase);
+    if (!record || !record->draft()) return tr("Phase %1 is not a draft").arg(phase);
+    // QA: name the nearest phase that still has to open or end, not the first
+    // one above the plan: for drafts 2, 3 and 4, phase 4 waits for phase 3.
+    const auto blocker = nearestBlocker(team, phase);
+    if (!blocker.phase) return {};
+    if (!blocker.approved) return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(blocker.phase);
+    return QCoreApplication::translate("Teams", "Phase %1 opens after phase %2 ends: %n task(s) still open", nullptr, blocker.open)
+        .arg(phase).arg(blocker.phase);
+}
+
+// The same reason, short enough for the compact draft row; the full sentence
+// stays in the row's tooltip.
+QString approveBlockedShort(const Team &team, int phase)
+{
+    const auto *record = team.phase(phase);
+    if (!record || !record->draft()) return {};
+    const auto blocker = nearestBlocker(team, phase);
+    if (!blocker.phase) return {};
+    if (!blocker.approved) return tr("after phase %1").arg(blocker.phase);
+    return QCoreApplication::translate("Teams", "after phase %1 ends · %n open", nullptr, blocker.open).arg(blocker.phase);
 }
 
 QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks)
@@ -667,6 +780,12 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
                             : tr("Added phase %1 · %2 · %3 tasks").arg(n).arg(title).arg(d.value("tasks").toInt());
     }
     else if (k == "phase_approved") t = tr("Approved phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt());
+    else if (k == "phase_moved") {
+        // F10: the drafts are numbered live; a move renumbers them, and the
+        // feed says where the phase went.
+        t = d.value("renumbered").toBool() ? tr("Moved phase %1 to position %2 · drafts renumbered").arg(d.value("from").toInt()).arg(d.value("to").toInt())
+                                           : tr("Moved phase %1 to position %2").arg(d.value("from").toInt()).arg(d.value("to").toInt());
+    }
     else if (k == "phase_discarded") { t = tr("Discarded phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Muted; }
     else if (k == "all_decided") { t = tr("All tasks decided · waiting for the lead"); line.tone = Tone::Active; }
     else if (k == "finished") { t = tr("Finished · %1 of %2 tasks accepted").arg(d.value("accepted").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Done; }

@@ -124,6 +124,16 @@ connection line to `~/.local/state/hgs/zerus.log`, beside the relay's
 in the system's text viewer. Past 4 MiB the file moves to `zerus.log.1`,
 replacing the older copy.
 
+A launch writes `Zerus launched (pid N)` first, so every launch has its own
+line. A launch that finds the tray already running writes `Already running
+(pid N): …` and exits; the process that takes the single-instance lock writes
+`Single instance: pid N holds <lock>`; and only the process that becomes the
+tray writes `Zerus <version> started (pid N)`. Counting `started` lines
+therefore counts windows, not launches, and a crash timeline names the process
+that owned the tray. `HGS_TRAY_HOME` (log and single-instance socket) and
+`HGS_TRAY_LOCK_DIR` (the lock) point a launch at another home and lock folder;
+the launch-log test uses them so it never touches the real tray.
+
 ## Optional extensions
 
 Integrations with optional third-party tools stay outside the core as

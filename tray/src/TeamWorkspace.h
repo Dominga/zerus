@@ -42,10 +42,11 @@ protected:
 private:
     void scheduleRender();
     QWidget *teamBar(const Teams::Team &team, const QString &status);
-    // A draft phase waits for you: its header with Approve phase and Discard
-    // phase, and the finished team's own summary once it is Done. Approve is
-    // enabled only while every lower phase is approved and done (spec 10).
+    // G5/F10: a draft waits for approval as one compact, foldable line at the
+    // top of the members column; opened, it shows its tasks and the lead's diff,
+    // and its arrows move it among the drafts (move-phase).
     QWidget *draftPhase(const Teams::Team &team, int phase);
+    QWidget *draftDetail(const Teams::Team &team, const Teams::PhaseGroup &group);
     QWidget *finishSummary(const Teams::Team &team);
     QWidget *errorStrip();
     // The team as the controller currently has it, by id (a poll may have
@@ -71,6 +72,10 @@ private:
     QString m_team, m_view = QStringLiteral("graph"), m_filter = QStringLiteral("all"), m_focus;
     QString m_error;
     bool m_dark = true, m_pending = false, m_feedOpen = false, m_fit = true;
+    // G5: the two blocks of the members column fold independently, and the
+    // owner's choice survives a restart; one draft at a time opens.
+    bool m_phasesOpen = true, m_membersOpen = true;
+    int m_openDraft = 0;
     double m_zoom = 1.0;
     int m_drawerTask = 0;
     QHash<QString, QPoint> m_scroll;

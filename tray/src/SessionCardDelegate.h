@@ -436,25 +436,27 @@ private:
         p->drawRoundedRect(QRectF(right - badgeW, r.y() + 3, badgeW, 16), 8, 8);
         p->setPen(tone); p->drawText(QRect(right - badgeW, r.y() + 3, badgeW, 16), Qt::AlignCenter, label);
         right -= badgeW + 6;
-        QFont mono = option.font;
-        mono.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), QStringLiteral("Menlo"), mono.family()});
-        mono.setPixelSize(11); p->setFont(mono); p->setPen(muted);
-        const QString counts = team.value("meta").toString();
-        const int countsW = QFontMetrics(mono).horizontalAdvance(counts) + 2;
-        p->drawText(QRect(right - countsW, r.y(), countsW, r.height()), Qt::AlignVCenter | Qt::AlignRight, counts);
-        right -= countsW + 6;
-        const auto tones = team.value("progress").toList();
-        // The name comes first: the bar goes when it would leave the name
-        // less than a short word's room (accepted/total still says it).
-        const int barW = right - r.x() - 26 - 52 >= 96 ? 44 : 0, gap = 1;
-        const double seg = tones.isEmpty() ? barW : (barW - gap * (tones.size() - 1)) / double(tones.size());
-        p->setPen(Qt::NoPen);
-        if (barW && tones.isEmpty()) { p->setBrush(teamTone(5, dark)); p->drawRoundedRect(QRectF(right - barW, r.y() + 9, barW, 4), 2, 2); }
-        for (int i = 0; barW && i < tones.size(); ++i) {
-            p->setBrush(teamTone(tones[i].toInt(), dark));
-            p->drawRoundedRect(QRectF(right - barW + i * (seg + gap), r.y() + 9, qMax(1.0, seg), 4), 1, 1);
-        }
-        if (barW) right -= barW + 8;
+        // G6: two compact bars — the phase in work (or the next draft waiting
+        // for approval) as done/total, and the phases as finished/planned —
+        // instead of one bar and one count over every task of every phase. Each
+        // is a count over a thin bar; the strip's tooltip explains both.
+        const auto block = [&](int rightEdge, const QString &text, int done, int total, const QColor &fill) {
+            QFont monoB = option.font;
+            monoB.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), QStringLiteral("Menlo"), monoB.family()});
+            monoB.setPixelSize(11);
+            const QFontMetrics bfm(monoB);
+            const int width = qMax(22, bfm.horizontalAdvance(text) + 2);
+            p->setFont(monoB); p->setPen(muted);
+            p->drawText(QRect(rightEdge - width, r.y() + 3, width, 14), Qt::AlignVCenter | Qt::AlignRight, text);
+            p->setPen(Qt::NoPen); p->setBrush(QColor(dark ? "#2c323b" : "#dce2e8"));
+            p->drawRoundedRect(QRectF(rightEdge - width, r.y() + 18, width, 3), 1.5, 1.5);
+            const double fraction = total > 0 ? qBound(0.0, done / double(total), 1.0) : 0.0;
+            if (fraction > 0) { p->setBrush(fill); p->drawRoundedRect(QRectF(rightEdge - width, r.y() + 18, width * fraction, 3), 1.5, 1.5); }
+            return rightEdge - width - 6;
+        };
+        right = block(right, team.value("phasesText").toString(), team.value("phasesDone").toInt(), team.value("phasesTotal").toInt(),
+                      QColor(dark ? "#7c8896" : "#697a8b"));
+        right = block(right, team.value("phaseText").toString(), team.value("phaseDone").toInt(), team.value("phaseTotal").toInt(), tone);
         QFont font = option.font; font.setPixelSize(12); font.setWeight(QFont::DemiBold); p->setFont(font); p->setPen(fg);
         const QRect name(r.x() + 26, r.y(), qMax(0, right - r.x() - 26), r.height());
         CachedText::draw(p, name, Qt::AlignVCenter | Qt::AlignLeft, CachedText::elided(font, team.value("name").toString(), Qt::ElideRight, name.width()));

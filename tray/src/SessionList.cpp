@@ -255,6 +255,15 @@ bool SessionList::viewportEvent(QEvent *event)
                 QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), question);
                 return true;
             }
+            // G6: the two progress bars name the phase they follow and the
+            // phases they count.
+            const auto team = row->data(SessionRoles::TeamLead).toMap();
+            const auto teamStrip = SessionList::teamStripRect(visualItemRect(row));
+            if (!team.isEmpty() && teamStrip.contains(help->pos())) {
+                const auto text = team.value("progressTooltip").toString();
+                if (!text.isEmpty()) QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), teamStrip);
+                return true;
+            }
             const auto rect = SessionDelegate::gitStatusRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool());
             if (rect.contains(help->pos())) {
                 const auto text = GitStatusBadge::tooltip(row->data(SessionRoles::GitStatus).toJsonObject());

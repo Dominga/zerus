@@ -29,6 +29,10 @@ public:
                   const QString &folder, const QString &project, QWidget *parent = nullptr);
     // The created team's id, once Create team succeeded.
     QString createdTeam() const { return m_created; }
+    // F7: take a session a finished team left running into a new team. The
+    // dialog's only existing-session slot is the lead, so it is preselected
+    // there; a session on another computer cannot lead from here.
+    void preselectExistingLead(const QString &host, const QString &name);
     struct Row {
         QWidget *box; QComboBox *role, *agent, *account, *model, *effort, *permissions, *computer; QCheckBox *worktree; QLabel *error;
         QString prompt;

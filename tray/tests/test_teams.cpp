@@ -138,8 +138,10 @@ private slots:
     void modelReadsPhasesPinnedAndTheWaitingState();
     void leftRunningMembersOfAFinishedTeam();
     void draftPhasesApproveInOrder();
+    void phaseProgressShowsThePhaseInWorkAndThePhases();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void attemptPhasesAreDerivedForAnOlderHgs();
+    void finishedRevokedAndRefusedAttemptsHaveNoPhase();
     void oldStatusJsonStillParses();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
     void aRunningTeamIsStuckWhenNothingCanMove();
@@ -341,6 +343,85 @@ void TestTeams::leftRunningMembersOfAFinishedTeam()
     QCOMPARE(parse(withIds).member("backend")->conversationId, QStringLiteral("c9"));
 }
 
+// G6: two numbers instead of one over every task — the phase in work (or, when
+// none is in work, the next draft waiting for approval) and the phases.
+void TestTeams::phaseProgressShowsThePhaseInWorkAndThePhases()
+{
+    // phasedTeam: phase 1 holds the ten checkout tasks (one accepted), phase 2
+    // is a draft of two tasks.
+    const auto parsed = parse(phasedTeam());
+    auto progress = phaseProgress(parsed);
+    QCOMPARE(progress.phase, 1);          // phase 1 is in work
+    QCOMPARE(progress.draft, false);
+    QCOMPARE(progress.total, 10);
+    QCOMPARE(progress.done, 1);
+    QCOMPARE(progress.phaseText(), QStringLiteral("1/10"));
+    QCOMPARE(progress.phasesTotal, 2);    // phase 1 and the draft
+    QCOMPARE(progress.phasesDone, 0);
+    QCOMPARE(progress.phasesText(), QStringLiteral("0/2"));
+    QVERIFY(progress.tooltip().contains(QStringLiteral("Phase 1")));
+    QVERIFY(progress.tooltip().contains(QStringLiteral("0 of 2 phases")));
+    // Phase 1 decided: nothing is in work, so the next draft waits for approval.
+    auto decided = phasedTeam();
+    auto decidedTasks = decided["tasks"].toArray();
+    for (int i = 0; i < decidedTasks.size(); ++i) {
+        auto task = decidedTasks[i].toObject();
+        if (task["phase"].toInt(1) == 1) task["status"] = "accepted";
+        decidedTasks[i] = task;
+    }
+    decided["tasks"] = decidedTasks;
+    const auto waiting = phaseProgress(parse(decided));
+    QCOMPARE(waiting.phase, 2);
+    QVERIFY(waiting.draft);
+    QCOMPARE(waiting.phaseText(), QStringLiteral("0/2"));
+    QVERIFY(waiting.tooltip().contains(QStringLiteral("waiting for your approval")));
+    QCOMPARE(waiting.phasesDone, 1);
+    QCOMPARE(waiting.phasesTotal, 2);
+    // A discarded draft is not planned: it never counts, and it is never the
+    // phase the bar follows.
+    auto withDiscard = decided;
+    withDiscard["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "Discarded"}, {"state", "discarded"}, {"tasks", QJsonArray{11, 12}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}}}};
+    auto discardTasks = withDiscard["tasks"].toArray();
+    auto polish = QJsonObject{{"id", 13}, {"phase", 3}, {"title", "Polish the card"}, {"assignee", "backend"}, {"status", "draft"}};
+    discardTasks.append(polish);
+    for (int i = 0; i < discardTasks.size(); ++i) {
+        auto task = discardTasks[i].toObject();
+        if (task["phase"].toInt() == 2) task["status"] = "cancelled";
+        discardTasks[i] = task;
+    }
+    withDiscard["tasks"] = discardTasks;
+    const auto afterDiscard = phaseProgress(parse(withDiscard));
+    QCOMPARE(afterDiscard.phase, 3);          // the only draft left
+    QVERIFY(afterDiscard.draft);
+    QCOMPARE(afterDiscard.phasesTotal, 2);    // phase 1 and phase 3
+    QCOMPARE(afterDiscard.phasesDone, 1);
+    QCOMPARE(afterDiscard.phasesText(), QStringLiteral("1/2"));
+    // Everything decided and no draft: the last phase stands for the finished plan.
+    auto all = withDiscard;
+    auto allTasks = all["tasks"].toArray();
+    for (int i = 0; i < allTasks.size(); ++i) {
+        auto task = allTasks[i].toObject();
+        if (task["phase"].toInt() == 3) task["status"] = "accepted";
+        allTasks[i] = task;
+    }
+    all["tasks"] = allTasks;
+    const auto allDone = phaseProgress(parse(all));
+    QCOMPARE(allDone.phase, 3);
+    QCOMPARE(allDone.phaseText(), QStringLiteral("1/1"));
+    QCOMPARE(allDone.phasesTotal, 2);
+    QCOMPARE(allDone.phasesDone, 2);
+    // A team without phase records still gets the two bars for its plan.
+    const auto plainTeam = parse(deliveryTeam());
+    const auto plain = phaseProgress(plainTeam);
+    int plainDone = 0; for (const auto &task : plainTeam.tasks) plainDone += task.finished();
+    QCOMPARE(plain.phase, 1);
+    QCOMPARE(plain.total, 6);
+    QCOMPARE(plain.done, plainDone);
+    QCOMPARE(plain.phasesTotal, 1);
+}
+
 void TestTeams::draftPhasesApproveInOrder()
 {
     auto roadmap = phasedTeam();
@@ -364,7 +445,38 @@ void TestTeams::draftPhasesApproveInOrder()
     // Only the next phase may be approved, and only once every lower one ended.
     QCOMPARE(approveBlocked(team, 2), QString());
     QVERIFY(approveBlocked(team, 3).contains(QStringLiteral("Phase 3 opens after phase 2 is approved")));
-    QVERIFY(approveBlocked(team, 4).contains(QStringLiteral("Phase 4 opens after phase 2 is approved")));
+    // QA: the nearest open phase is named, not the first draft of the plan.
+    QVERIFY(approveBlocked(team, 4).contains(QStringLiteral("Phase 4 opens after phase 3 is approved")));
+    // F10: the lead's diff travels with the draft, and a move renumbers the
+    // drafts; the feed says where the phase went.
+    auto withDiff = roadmap;
+    withDiff["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "draft"}, {"tasks", QJsonArray{11, 12}},
+                    {"changes", QJsonArray{QJsonObject{{"kind", "added"}, {"task", 15}, {"title", "New check"}},
+                                           QJsonObject{{"kind", "removed"}, {"task", 9}, {"title", "Old check"}},
+                                           QJsonObject{{"kind", "changed"}, {"task", 11}, {"title", "Draft 11"}, {"from", "Fix it"}, {"to", "Fix it now"}},
+                                           QJsonObject{{"kind", "moved"}, {"from", 3}, {"to", 2}}}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}}},
+        QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{14}}}};
+    const auto diffed = parse(withDiff);
+    const auto *secondPhase = diffed.phase(2);
+    QVERIFY(secondPhase);
+    QCOMPARE(secondPhase->changes.size(), 4);
+    QVERIFY(secondPhase->changes[0].added());
+    QCOMPARE(secondPhase->changes[0].task, 15);
+    QCOMPARE(secondPhase->changes[0].title, QStringLiteral("New check"));
+    QVERIFY(secondPhase->changes[1].removed());
+    QCOMPARE(secondPhase->changes[2].kind, QStringLiteral("changed"));
+    QCOMPARE(secondPhase->changes[2].from, QStringLiteral("Fix it"));
+    QCOMPARE(secondPhase->changes[2].to, QStringLiteral("Fix it now"));
+    QCOMPARE(secondPhase->changes[3].kind, QStringLiteral("moved"));
+    QCOMPARE(secondPhase->changes[3].from, QStringLiteral("3"));
+    QCOMPARE(secondPhase->changes[3].to, QStringLiteral("2"));
+    QJsonObject moved{{"kind", "phase_moved"}, {"seq", 9}, {"at", 1700.0},
+                      {"detail", QJsonObject{{"from", 3}, {"to", 2}, {"renumbered", true}}}};
+    const auto line = feedLine(diffed, moved);
+    QVERIFY2(line.text.contains(QStringLiteral("Moved phase 3 to position 2")), qPrintable(line.text));
+    QVERIFY(line.text.contains(QStringLiteral("renumbered")));
     // Approved but not finished yet: its tasks still hold the next phase back.
     auto running = roadmap;
     running["phases"] = QJsonArray{
@@ -454,6 +566,29 @@ void TestTeams::modelReadsAttemptStatesQuestionsHoldsAndReports()
     QVERIFY(!question(*team.task(4), "q9"));
     QCOMPARE(lastPhase(*team.task(4)), QStringLiteral("asking"));
     QVERIFY(openQuestions(*team.task(1)).isEmpty());
+    // A question closed by the store (answered_at set, the answer left empty as
+    // when an attempt ends) counts as closed: no open row, no "asking".
+    auto withClosed = deliveryTeam();
+    auto closedTasks = withClosed["tasks"].toArray();
+    for (int i = 0; i < closedTasks.size(); ++i) {
+        auto task = closedTasks[i].toObject();
+        if (task["id"].toInt() != 4) continue;
+        auto attempts = task["attempts"].toArray();
+        auto attempt = attempts[0].toObject();
+        auto questions = attempt["questions"].toArray();
+        questions.append(QJsonObject{{"id", "q9"}, {"text", "Closed when the attempt ended"}, {"at", 1600},
+                                     {"answer", ""}, {"answered_at", 1610}, {"by", "Zerus"}});
+        attempt["questions"] = questions; attempts[0] = attempt;
+        task["attempts"] = attempts; closedTasks[i] = task;
+    }
+    withClosed["tasks"] = closedTasks;
+    const auto closedTeam = parse(withClosed);
+    QCOMPARE(openQuestions(*closedTeam.task(4)).size(), 1);   // only q1 stays open
+    const auto *closed = question(*closedTeam.task(4), "q9");
+    QVERIFY(closed && closed->answered());
+    QVERIFY(closed->answer.isEmpty());
+    QCOMPARE(closed->answeredAt, 1610.0);
+    QCOMPARE(closed->by, QStringLiteral("Zerus"));
     // The member card says it waits for the lead, and that counts as an answer.
     const auto quiet = [](const Member &) { Live state; state.known = true; return state; };
     const auto waiting = memberStatus(team, *team.member("tester"), quiet(*team.member("tester")));
@@ -477,6 +612,16 @@ void TestTeams::modelReadsAttemptStatesQuestionsHoldsAndReports()
     QVERIFY(explicitQueue.member("tester")->queueKnown);
     QVERIFY(explicitQueue.member("tester")->queue.isEmpty());
     QCOMPARE(explicitQueue.member("backend")->queue, (QList<int>{1, 3}));
+    // L7: the fallback lists every open task hgs would send, in hgs order, not
+    // only the first one.
+    auto twoOpen = deliveryTeam();
+    auto someTasks = twoOpen["tasks"].toArray();
+    auto fourth = someTasks[3].toObject();
+    fourth["assignee"] = QStringLiteral("backend"); fourth["status"] = QStringLiteral("in_progress");
+    fourth["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "o4"}, {"member", "backend"}, {"state", "delivered"}}};
+    someTasks[3] = fourth; twoOpen["tasks"] = someTasks;
+    // Open tasks ascending, then the returned one, as hgs sends them.
+    QCOMPARE(memberQueue(parse(twoOpen), "backend"), (QList<int>{1, 4, 3}));
     // A start warning is the "late" phase.
     QCOMPARE(lastPhase(*team.task(5)), QStringLiteral("late"));
 }
@@ -509,11 +654,80 @@ void TestTeams::attemptPhasesAreDerivedForAnOlderHgs()
     task.held = false;
     attempt.state = "reported";
     QCOMPARE(attemptPhase(task, attempt), QStringLiteral("reported"));
-    // hgs decides when it sends the phase itself.
+    // hgs decides when it sends the phase itself, null included (N4).
+    attempt.phaseKnown = true;
     attempt.phase = QStringLiteral("stopped");
     QCOMPARE(attemptPhase(task, attempt), QStringLiteral("stopped"));
+    attempt.phase.clear();
+    QCOMPARE(attemptPhase(task, attempt), QString());   // hgs said: no phase
+    // An open question outranks a reported attempt, as in hgs (L7).
+    attempt.phaseKnown = false;
+    attempt.state = "reported";
+    Question asked; asked.id = "q7"; asked.text = "Still true?";
+    attempt.questions.append(asked);
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("asking"));
+    attempt.questions.clear();
     // No attempts, no phase.
     QCOMPARE(lastPhase(task), QString());
+}
+
+void TestTeams::finishedRevokedAndRefusedAttemptsHaveNoPhase()
+{
+    // hgs sends "phase": null on purpose for a finished task and for a revoked
+    // or refused attempt; the desktop then shows the task's own mark and never
+    // invents an attempt phase (N4). Only an older hgs with no key at all gets
+    // the derived answer.
+    auto done = phasedTeam();
+    auto tasks = done["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        task["status"] = "accepted";
+        task["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "backend"}, {"state", "reported"},
+                                                 {"phase", QJsonValue()}, {"report", QJsonObject{{"text", "Done"}, {"at", 1800}}}}};
+        tasks[i] = task;
+    }
+    done["tasks"] = tasks;
+    const auto accepted = parse(done);
+    const auto *first = accepted.task(1);
+    QVERIFY(first);
+    QVERIFY(first->last()->phaseKnown);          // the key was there, as null
+    QCOMPARE(lastPhase(*first), QString());
+    QCOMPARE(taskStatus(*first).kind, QStringLiteral("accepted"));   // its own mark, not "reported"
+    QCOMPARE(taskStatus(*first).text, QStringLiteral("Accepted"));
+    // A final rejection keeps the task's own rejected mark.
+    auto rejected = parse(done);
+    for (auto &task : rejected.tasks) { task.status = "rejected"; task.reason = QStringLiteral("No"); }
+    const auto *final = rejected.task(2);
+    QVERIFY(final);
+    QCOMPARE(lastPhase(*final), QString());
+    QCOMPARE(taskStatus(*final).kind, QStringLiteral("rejected"));
+    QCOMPARE(taskStatus(*final).text, QStringLiteral("Rejected"));
+    // A cancelled task too.
+    auto cancelled = parse(done);
+    for (auto &task : cancelled.tasks) task.status = "cancelled";
+    QCOMPARE(taskStatus(*cancelled.task(1)).kind, QStringLiteral("cancelled"));
+    // Revoked and refused attempts of a live task have no phase either, whether
+    // hgs sent null or an older hgs sent no key at all.
+    for (const char *state : {"revoked", "refused"}) {
+        auto live = phasedTeam();
+        auto liveTasks = live["tasks"].toArray();
+        auto one = liveTasks[0].toObject();
+        one["status"] = "pending";
+        one["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "backend"}, {"state", state}, {"phase", QJsonValue()}}};
+        liveTasks[0] = one;
+        live["tasks"] = liveTasks;
+        const auto task = parse(live);
+        QCOMPARE(lastPhase(*task.task(1)), QString());
+        QCOMPARE(taskStatus(*task.task(1)).kind, QStringLiteral("pending"));
+        auto older = live;
+        auto olderTasks = older["tasks"].toArray();
+        auto oldOne = olderTasks[0].toObject();
+        auto oldAttempts = oldOne["attempts"].toArray();
+        auto oldAttempt = oldAttempts[0].toObject(); oldAttempt.remove("phase"); oldAttempts[0] = oldAttempt;
+        oldOne["attempts"] = oldAttempts; olderTasks[0] = oldOne; older["tasks"] = olderTasks;
+        const auto derived = parse(older);
+        QCOMPARE(lastPhase(*derived.task(1)), QString());
+    }
 }
 
 void TestTeams::oldStatusJsonStillParses()

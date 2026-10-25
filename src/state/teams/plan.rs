@@ -170,10 +170,17 @@ fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
 
 /// A barrier phase's tasks wait until every task of a lower phase is finished:
 /// accepted, rejected or cancelled. A Draft task left in an earlier phase also
-/// holds the barrier.
+/// holds the barrier. "Lower" follows the display and approval order (F10), so
+/// a moved draft keeps its barrier semantics with its new place.
 fn barrier_holds(team: &Team, task: &Task) -> bool {
     let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return false };
-    phase.barrier && team.tasks.iter().any(|other| other.phase < task.phase && !other.status.finished())
+    if !phase.barrier {
+        return false;
+    }
+    let target = phase.order();
+    // A phase without a record (the approved plan's phase 1) keeps its number.
+    let order_of = |n: u32| team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order());
+    team.tasks.iter().any(|other| other.phase != task.phase && order_of(other.phase) < target && !other.status.finished())
 }
 
 /// Pending tasks whose dependencies and phase barrier are satisfied, in id order.

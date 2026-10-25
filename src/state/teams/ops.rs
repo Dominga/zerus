@@ -146,6 +146,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         None => String::new(),
     };
     // A lead without a session is started first; an existing lead is briefed.
+    let last_task = tasks.iter().map(|task| task.id).max().unwrap_or(0);
     let team = Team {
         id: id.to_owned(),
         name: name.clone(),
@@ -158,6 +159,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         lead: lead.id.clone(),
         members,
         tasks,
+        last_task,
         brief: if start { Notice::Pending } else { Notice::None },
         lead_protocol: clean(&lead_protocol, 8000, "The lead protocol")?,
         ..Default::default()
@@ -223,6 +225,11 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
         });
     }
     phases.sort_by_key(|phase| phase.n);
+    // The plan lists the phases in order; the owner may move a draft later (F10).
+    // Phase 1 is the approved plan and has no record, so the orders start at 2.
+    for (index, phase) in phases.iter_mut().enumerate() {
+        phase.order = index as u32 + 2;
+    }
     let listed: BTreeSet<u32> = phases.iter().map(|phase| phase.n).collect();
     for task in &tasks {
         ensure!(task.phase == 1 || listed.contains(&task.phase), "Task #{} is in phase {}, which the plan does not list", task.id, task.phase);
@@ -247,6 +254,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
         .collect();
     team.members = members;
     team.tasks = tasks;
+    team.last_task = team.last_task.max(team.tasks.iter().map(|task| task.id).max().unwrap_or(0));
     team.phases = phases;
     let validation = plan::validate(team, &BTreeSet::new());
     for (id, session) in adopted {
@@ -319,36 +327,56 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     ensure!(values.len() <= 50, "A phase has at most 50 tasks");
     ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
     ensure!(team.phases.len() < 100, "A team has at most 100 phases");
+    // F10: with "phase": N the tasks join that draft phase instead of a new one.
+    let target = match input.get("phase") {
+        None => None,
+        Some(value) => {
+            let n = value
+                .as_u64()
+                .and_then(|phase| u32::try_from(phase).ok())
+                .filter(|phase| *phase > 0)
+                .context("A phase number is required")?;
+            Some(draft_phase(team, n)?)
+        }
+    };
     let approval = phase_approval(team);
     // Several drafts may queue, in order; a phase added while an earlier one is
     // still a Draft is a Draft too, whatever the approval says (F9).
-    let drafting = team.status == TeamStatus::Planning
+    let drafting = target.is_some()
+        || team.status == TeamStatus::Planning
         || team.phases.iter().any(|phase| phase.state == PhaseState::Draft)
         || approval == Approval::Review;
     let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
     let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
-    // Ids continue after every id ever used: a discarded phase keeps its ids.
+    // Ids continue after every id ever used: a discarded phase keeps its ids,
+    // and last_task remembers one removed from a draft (F10).
     let last = team
-        .tasks
-        .iter()
-        .map(|task| task.id)
-        .chain(team.phases.iter().flat_map(|phase| phase.tasks.iter().copied()))
-        .max()
-        .unwrap_or(0);
+        .last_task
+        .max(
+            team.tasks
+                .iter()
+                .map(|task| task.id)
+                .chain(team.phases.iter().flat_map(|phase| phase.tasks.iter().copied()))
+                .max()
+                .unwrap_or(0),
+        );
     let next = last.checked_add(1).context("Task numbers are exhausted")?;
     let end = next.checked_add(tasks.len() as u32).context("Task numbers are exhausted")?;
     let wanted: BTreeSet<u32> = (next..end).collect();
     let given: BTreeSet<u32> = tasks.iter().map(|task| task.id).collect();
     ensure!(given == wanted, "New tasks are numbered from #{next}");
-    let n = team
-        .tasks
-        .iter()
-        .map(|task| task.phase)
-        .chain(team.phases.iter().map(|phase| phase.n))
-        .max()
-        .unwrap_or(1)
-        .checked_add(1)
-        .context("Phase numbers are exhausted")?;
+    let n = match target {
+        Some(at) => team.phases[at].n,
+        None => team
+            .tasks
+            .iter()
+            .map(|task| task.phase)
+            .chain(team.phases.iter().map(|phase| phase.n))
+            .max()
+            .unwrap_or(1)
+            .checked_add(1)
+            .context("Phase numbers are exhausted")?,
+    };
     for task in &mut tasks {
         task.phase = n;
         if !drafting {
@@ -375,6 +403,17 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
     let by = actor.label(team);
     let state = if drafting { PhaseState::Draft } else { PhaseState::Approved };
+    // The new phase goes after every phase that exists: phase 1, the planned
+    // ones and any phase still named by a task (F10). Read before the new tasks
+    // join, whose phase number is this phase's own.
+    let order = team
+        .tasks
+        .iter()
+        .map(|task| task.phase)
+        .chain(team.phases.iter().map(|phase| phase.order()))
+        .max()
+        .unwrap_or(1)
+        + 1;
     // Validate the team as the phase would make it, in place; a refusal puts
     // the tasks back (nothing changed) without cloning every stored report.
     let first_new = team.tasks.len();
@@ -385,8 +424,26 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         team.tasks.truncate(first_new);
         bail!("Fix {} phase error(s) to extend: {}", errors.len(), errors_text(&errors));
     }
+    team.last_task = team.last_task.max(ids.iter().copied().max().unwrap_or(0));
+    if let Some(at) = target {
+        // F10: the tasks joined the named draft phase, which did not change
+        // anything else; the owner sees the added ids as the diff.
+        let added: Vec<(u32, String)> = team
+            .tasks
+            .iter()
+            .filter(|task| ids.contains(&task.id))
+            .map(|task| (task.id, task.title.clone()))
+            .collect();
+        for (id, title) in added {
+            record_change(&mut team.phases[at], json!({"kind":"added","task":id,"title":title}));
+        }
+        team.phases[at].tasks.extend(ids.iter().copied());
+        events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids}})));
+        return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":{"errors":[],"warnings":validation.warnings}}));
+    }
     team.phases.push(Phase {
         n,
+        order,
         title: title.clone(),
         barrier,
         approval,
@@ -396,6 +453,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         added_at: now(),
         decided_by: String::new(),
         decided_at: None,
+        changes: Vec::new(),
     });
     events.push(Event::new(
         "phase_added",
@@ -404,13 +462,15 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":{"errors":[],"warnings":validation.warnings}}))
 }
 
-/// Approves a draft phase once every earlier phase ended (owner), or discards
-/// it with its tasks.
+/// Approves a draft phase once every phase before it ended (owner), or discards
+/// it with its tasks (the lead or the owner, F10).
 fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(
-        matches!(actor, Actor::Human),
-        if approve { "You approve a phase in Zerus" } else { "You discard a phase in Zerus" }
-    );
+    if approve {
+        ensure!(matches!(actor, Actor::Human), "You approve a phase in Zerus");
+    } else {
+        // The lead adds drafts, so it may drop its own; the owner may too (F10).
+        ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you discard a phase");
+    }
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = input["phase"]
         .as_u64()
@@ -425,12 +485,24 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     let ids = team.phases[at].tasks.clone();
     let wanted: BTreeSet<u32> = ids.iter().copied().collect();
     if approve {
-        // The owner approves a phase strictly after the one before it ended:
-        // every lower phase is approved and all its tasks are decided (F9).
-        for earlier in 1..n {
-            let open = team.tasks.iter().any(|task| task.phase == earlier && !task.status.finished());
-            let waiting = team.phases.iter().any(|phase| phase.n == earlier && phase.state == PhaseState::Draft);
-            ensure!(!open && !waiting, "Phase {n} opens after phase {earlier} ends");
+        // The owner approves a phase strictly after the phases before it ended,
+        // in the display and approval order (F10): every lower phase is approved
+        // and all its tasks are decided (F9). Phase 1 has no record and counts
+        // as approved.
+        let target = team.phases[at].order();
+        let mut numbers: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).collect();
+        numbers.extend(team.phases.iter().map(|phase| phase.n));
+        for phase_n in numbers {
+            let listed = team.phases.iter().find(|phase| phase.n == phase_n);
+            let order = listed.map_or(phase_n, |phase| phase.order());
+            if order >= target {
+                continue;
+            }
+            let open = team.tasks.iter().any(|task| task.phase == phase_n && !task.status.finished());
+            ensure!(
+                listed.is_none_or(|phase| phase.state != PhaseState::Draft) && !open,
+                "Phase {n} opens after phase {phase_n} ends"
+            );
         }
         // An assignee may have been removed since the phase was added.
         let validation = plan::validate(team, offline);
@@ -462,10 +534,246 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     }
 }
 
+/// Numbers the listed phases by their position in the array, which is the
+/// display and approval order (F10). Phase 1 is the approved plan and has no
+/// record, so the listed phases keep orders from 2.
+fn normalize_orders(team: &mut Team) {
+    for (index, phase) in team.phases.iter_mut().enumerate() {
+        phase.order = index as u32 + 2;
+    }
+}
+
+/// How many edits a phase keeps for the owner's diff view (F10).
+const PHASE_CHANGES: usize = 50;
+
+/// Records one edit of a draft phase, keeping the newest changes only (F10).
+fn record_change(phase: &mut Phase, change: Value) {
+    phase.changes.push(change);
+    if phase.changes.len() > PHASE_CHANGES {
+        let drop = phase.changes.len() - PHASE_CHANGES;
+        phase.changes.drain(..drop);
+    }
+}
+
+/// A short form of a task field for the change list.
+fn brief(value: &str) -> String {
+    let short: String = value.chars().take(200).collect();
+    if value.chars().count() > 200 {
+        format!("{short}...")
+    } else {
+        short
+    }
+}
+
+/// The draft phase numbered `n` and its index.
+fn draft_phase(team: &Team, n: u32) -> anyhow::Result<usize> {
+    let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
+    ensure!(
+        team.phases[at].state == PhaseState::Draft,
+        "Phase {n} is approved or discarded; only a draft phase can change"
+    );
+    Ok(at)
+}
+
+/// F10: edits a draft phase until the owner approves it - its title, its
+/// barrier, fields of its draft tasks by id, and task removals. The event
+/// carries the diff the owner sees.
+fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you edit a draft");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team edits a draft"
+    );
+    let n = input["phase"]
+        .as_u64()
+        .and_then(|phase| u32::try_from(phase).ok())
+        .filter(|phase| *phase > 0)
+        .context("A phase number is required")?;
+    let mut proposed = team.clone();
+    let at = draft_phase(&proposed, n)?;
+    let by = actor.label(team);
+    let mut diff = json!({"updated":[],"removed":[]});
+    let mut changes: Vec<Value> = Vec::new();
+    if let Some(value) = input.get("title") {
+        let title = clean(value.as_str().unwrap_or_default().trim(), 120, "A phase title")?;
+        if proposed.phases[at].title != title {
+            diff["title"] = json!({"from":proposed.phases[at].title,"to":title});
+            proposed.phases[at].title = title;
+        }
+    }
+    if let Some(value) = input.get("barrier") {
+        let barrier = value.as_bool().context("barrier is true or false")?;
+        if proposed.phases[at].barrier != barrier {
+            diff["barrier"] = json!({"from":proposed.phases[at].barrier,"to":barrier});
+            proposed.phases[at].barrier = barrier;
+        }
+    }
+    for value in input["tasks_update"].as_array().into_iter().flatten() {
+        let id = value["id"].as_u64().and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0).context("A task id is required")?;
+        ensure!(proposed.phases[at].tasks.contains(&id), "Task #{id} is not in phase {n}");
+        let assignee = match value.get("assignee") {
+            None => None,
+            Some(value) => Some(member_id(value.as_str().unwrap_or_default())?),
+        };
+        if let Some(assignee) = &assignee {
+            ensure!(proposed.member(assignee).is_some_and(|member| member.state != MemberState::Removed), "Unknown member {assignee}");
+        }
+        let task = proposed.task_mut(id).context("Unknown task")?;
+        ensure!(task.status == TaskStatus::Draft, "Task #{id} is not a draft");
+        let mut fields: Vec<&str> = Vec::new();
+        if let Some(value) = value.get("title") {
+            let old = task.title.clone();
+            task.title = clean(value.as_str().unwrap_or_default().trim(), 200, "A task title")?;
+            ensure!(!task.title.is_empty(), "Task #{id} needs a title");
+            if old != task.title {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"title","from":old,"to":task.title}));
+            }
+            fields.push("title");
+        }
+        if let Some(value) = value.get("description") {
+            let old = task.description.clone();
+            task.description = clean(value.as_str().unwrap_or_default(), 20_000, "A task description")?;
+            if old != task.description {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"description","from":brief(&old),"to":brief(&task.description)}));
+            }
+            fields.push("description");
+        }
+        if let Some(value) = value.get("criteria") {
+            let list = value.as_array().context("criteria is a list")?;
+            let old = task.criteria.join("; ");
+            task.criteria = list
+                .iter()
+                .map(|item| clean(item.as_str().unwrap_or_default(), 500, "An acceptance criterion"))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            if old != task.criteria.join("; ") {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"criteria","from":brief(&old),"to":brief(&task.criteria.join("; "))}));
+            }
+            fields.push("criteria");
+        }
+        if let Some(value) = value.get("deps") {
+            let old: Vec<String> = task.deps.iter().map(|dep| format!("#{}", dep.task)).collect();
+            task.deps = serde_json::from_value(value.clone()).context("Invalid dependencies")?;
+            let mut seen = BTreeSet::new();
+            task.deps.retain(|dep| seen.insert(dep.task));
+            ensure!(task.deps.iter().all(|dep| dep.task != id), "Task #{id} depends on itself");
+            let new: Vec<String> = task.deps.iter().map(|dep| format!("#{}", dep.task)).collect();
+            if old != new {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"deps","from":old.join(", "),"to":new.join(", ")}));
+            }
+            fields.push("deps");
+        }
+        if let Some(assignee) = assignee {
+            if task.assignee != assignee {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"assignee","from":task.assignee,"to":assignee}));
+            }
+            task.assignee = assignee;
+            fields.push("assignee");
+        }
+        if let Some(value) = value.get("pinned") {
+            let pinned = value.as_bool().context("pinned is true or false")?;
+            if task.pinned != pinned {
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"pinned","from":if task.pinned {"on"} else {"off"},"to":if pinned {"on"} else {"off"}}));
+            }
+            task.pinned = pinned;
+            fields.push("pinned");
+        }
+        if !fields.is_empty() {
+            diff["updated"].as_array_mut().unwrap().push(json!({"id":id,"fields":fields}));
+        }
+    }
+    let mut removed: Vec<u32> = Vec::new();
+    for value in input["tasks_remove"].as_array().into_iter().flatten() {
+        let id = value.as_u64().and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0).context("A task id is required")?;
+        ensure!(proposed.phases[at].tasks.contains(&id), "Task #{id} is not in phase {n}");
+        ensure!(proposed.task(id).is_some_and(|task| task.status == TaskStatus::Draft), "Task #{id} is not a draft");
+        ensure!(!removed.contains(&id), "Task #{id} is removed twice");
+        removed.push(id);
+    }
+    for id in &removed {
+        if let Some(dependent) = proposed.tasks.iter().find(|task| task.deps.iter().any(|dep| dep.task == *id)) {
+            bail!("#{} depends on #{id}; change its deps first", dependent.id);
+        }
+    }
+    let removed_changes: Vec<Value> = removed
+        .iter()
+        .filter_map(|id| proposed.task(*id).map(|task| json!({"kind":"removed","task":id,"title":task.title})))
+        .collect();
+    proposed.tasks.retain(|task| !removed.contains(&task.id));
+    proposed.phases[at].tasks.retain(|id| !removed.contains(id));
+    // A removed id is never reused (F10).
+    proposed.last_task = proposed.last_task.max(removed.iter().copied().max().unwrap_or(0));
+    for change in changes.into_iter().chain(removed_changes) {
+        record_change(&mut proposed.phases[at], change);
+    }
+    diff["removed"] = json!(removed);
+    let validation = plan::validate(&proposed, offline);
+    ensure!(validation.errors.is_empty(), "Fix {} plan error(s) to edit: {}", validation.errors.len(), errors_text(&validation.errors));
+    *team = proposed;
+    events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":diff})));
+    Ok(json!({"status":"draft_edited","phase":n,"diff":diff,"validation":{"errors":[],"warnings":validation.warnings}}))
+}
+
+/// F10: moves a draft next to another draft - before or after it. The order
+/// field decides display and approval; phase numbers are never reused.
+fn move_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you move a phase");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team moves phases"
+    );
+    let n = input["phase"]
+        .as_u64()
+        .and_then(|phase| u32::try_from(phase).ok())
+        .filter(|phase| *phase > 0)
+        .context("A phase number is required")?;
+    // The desktop sends {to, position}; a plain "before" still works (F10).
+    let to = match input.get("to").or_else(|| input.get("before")) {
+        Some(value) => value
+            .as_u64()
+            .and_then(|to| u32::try_from(to).ok())
+            .filter(|to| *to > 0)
+            .context("A neighbouring phase is required")?,
+        None => bail!("A neighbouring phase (\"to\") is required"),
+    };
+    let position = text(input, "position");
+    ensure!(position.is_empty() || position == "before" || position == "after", "position is before or after");
+    ensure!(n != to, "Phase {n} is already next to itself");
+    let mut proposed = team.clone();
+    let at = draft_phase(&proposed, n)?;
+    draft_phase(&proposed, to)?;
+    let before: Vec<(u32, u32)> = proposed.phases.iter().map(|phase| (phase.n, phase.order())).collect();
+    let old_position = before.iter().position(|(phase, _)| *phase == n).map(|index| index as u32 + 1).unwrap_or(0);
+    let phase = proposed.phases.remove(at);
+    let index = proposed.phases.iter().position(|phase| phase.n == to).context("Unknown phase")?;
+    proposed.phases.insert(if position == "after" { index + 1 } else { index }, phase);
+    normalize_orders(&mut proposed);
+    let after: Vec<(u32, u32)> = proposed.phases.iter().map(|phase| (phase.n, phase.order())).collect();
+    // The feed says when the other drafts were renumbered too.
+    let mut renumbered = false;
+    for (number, order) in &after {
+        if *number == n {
+            continue;
+        }
+        if let Some((_, was)) = before.iter().find(|(phase, _)| phase == number) {
+            if was != order {
+                renumbered = true;
+                break;
+            }
+        }
+    }
+    let to_position = after.iter().position(|(phase, _)| *phase == n).map(|index| index as u32 + 1).unwrap_or(0);
+    let moved = proposed.phases.iter().position(|phase| phase.n == n).context("Unknown phase")?;
+    record_change(&mut proposed.phases[moved], json!({"kind":"moved","from":old_position,"to":to_position}));
+    let order: Vec<u32> = after.iter().map(|(phase, _)| *phase).collect();
+    let by = actor.label(team);
+    *team = proposed;
+    events.push(Event::new("phase_moved", json!({"by":by,"phase":n,"to":to_position,"renumbered":renumbered,"order":order})));
+    Ok(json!({"status":"phase_moved","phase":n,"to":to_position,"renumbered":renumbered,"order":order}))
+}
+
 /// Closes the open questions of a task: its attempt ended or the task was
 /// decided, so they are never answered and never sent (N5).
-fn close_questions(task: &mut Task) {
-    let at = now();
+fn close_questions(task: &mut Task) {    let at = now();
     for attempt in &mut task.attempts {
         for question in &mut attempt.questions {
             if question.open() {
@@ -945,6 +1253,8 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
     let result = match op {
         "plan" => plan(team, input, actor, events),
         "extend" => extend(team, input, actor, offline, events),
+        "edit-draft" => edit_draft(team, input, actor, offline, events),
+        "move-phase" => move_phase(team, input, actor, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "finish" => finish(team, input, actor, events),
@@ -1367,16 +1677,21 @@ mod tests {
             &mut events,
         )
         .unwrap();
+        // The owner approves; the lead may only discard its own draft (F10).
+        let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("You "), "{error}");
+        // A finished team refuses both.
         for op in ["approve-phase", "discard-phase"] {
-            let error = apply(&mut team, op, &json!({"phase":2}), &Actor::Member("lead".into()), &none, &mut events)
-                .unwrap_err()
-                .to_string();
-            assert!(error.starts_with("You "), "{op}: {error}");
-            team.status = TeamStatus::Done;
-            let error = apply(&mut team, op, &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+            let mut stopped = team.clone();
+            stopped.status = TeamStatus::Done;
+            let error = apply(&mut stopped, op, &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
             assert_eq!(error, "The team is not running");
-            team.status = TeamStatus::Running;
         }
+        // The lead discards its own draft.
+        let discarded = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(discarded["status"], "phase_discarded");
         let error = apply(&mut team, "approve-phase", &json!({"phase":9}), &Actor::Human, &none, &mut events)
             .unwrap_err()
             .to_string();
@@ -2350,5 +2665,114 @@ mod tests {
         )
         .unwrap();
         assert!(events.iter().any(|event| event.kind == "member_adopted" && event.payload["member"] == "Tester"), "{events:?}");
+    }
+
+    #[test]
+    fn a_draft_phase_takes_added_changed_and_removed_tasks() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        extend(&mut team, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.phases.len(), 1);
+        // extend with "phase": 2 adds to the draft, not to a new phase (F10).
+        let added = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"More","assignee":"qa"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((added["status"].as_str(), added["phase"].as_u64()), (Some("edited"), Some(2)));
+        assert_eq!((team.phases.len(), team.phases[0].tasks.clone()), (1, vec![3, 4]));
+        assert_eq!(team.task(4).unwrap().phase, 2);
+        // edit-draft changes the phase and its draft tasks, and removes one.
+        let edited = apply(
+            &mut team,
+            "edit-draft",
+            &json!({"phase":2,"title":"QA fixes","barrier":true,
+                "tasks_update":[{"id":3,"title":"Fix the login crash","assignee":"qa","pinned":true}],
+                "tasks_remove":[4]}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(edited["status"], "draft_edited");
+        assert_eq!((team.phases[0].title.as_str(), team.phases[0].barrier), ("QA fixes", true));
+        let task = team.task(3).unwrap();
+        assert_eq!((task.title.as_str(), task.assignee.as_str(), task.pinned), ("Fix the login crash", "qa", true));
+        assert!(team.task(4).is_none() && team.phases[0].tasks == vec![3]);
+        // The event carries the diff the owner sees, and the phase keeps its
+        // edits for the draft view (F10).
+        let diff = events.iter().rev().find(|event| event.kind == "phase_edited").unwrap();
+        assert_eq!(diff.payload["diff"]["removed"], json!([4]));
+        assert_eq!(diff.payload["diff"]["title"]["to"], "QA fixes");
+        assert_eq!((diff.payload["diff"]["updated"][0]["id"].as_u64(), diff.payload["diff"]["updated"][0]["fields"].clone()), (Some(3), json!(["title","assignee","pinned"])));
+        let changes = &team.phases[0].changes;
+        assert_eq!(changes[0]["kind"], "added");
+        assert_eq!((changes[0]["task"].as_u64(), changes[0]["title"].as_str()), (Some(4), Some("More")));
+        assert!(changes.iter().any(|change| change["kind"] == "changed" && change["field"] == "title" && change["from"] == "Fix" && change["to"] == "Fix the login crash"), "{changes:?}");
+        assert!(changes.iter().any(|change| change["kind"] == "changed" && change["field"] == "assignee" && change["from"] == "dev" && change["to"] == "qa"), "{changes:?}");
+        assert_eq!(changes.last().unwrap()["kind"], "removed");
+        assert_eq!(changes.last().unwrap()["task"].as_u64(), Some(4));
+        // A removed id is never reused.
+        let next = extend(&mut team, &json!({"tasks":[{"id":5,"title":"Next","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(next["phase"], 3);
+    }
+
+    #[test]
+    fn moving_a_draft_changes_the_approval_order() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [3, 4] {
+            extend(&mut team, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
+        assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.order())).collect::<Vec<_>>(), vec![(2, 2), (3, 3)]);
+        // Move phase 3 before phase 2: the array and the order follow (F10).
+        let moved = apply(&mut team, "move-phase", &json!({"phase":3,"to":2,"position":"before"}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((moved["phase"].as_u64(), moved["to"].as_u64(), moved["renumbered"].as_bool()), (Some(3), Some(1), Some(true)));
+        assert_eq!(moved["order"].clone(), json!([3, 2]));
+        assert_eq!(team.phases.iter().map(|phase| (phase.n, phase.order())).collect::<Vec<_>>(), vec![(3, 2), (2, 3)]);
+        let moved_changes = &team.phases[0].changes;
+        assert_eq!(moved_changes.last().unwrap()["kind"], "moved");
+        assert_eq!((moved_changes.last().unwrap()["from"].as_u64(), moved_changes.last().unwrap()["to"].as_u64()), (Some(2), Some(1)));
+        let event = events.iter().rev().find(|event| event.kind == "phase_moved").unwrap();
+        assert_eq!((event.payload["phase"].as_u64(), event.payload["to"].as_u64(), event.payload["renumbered"].as_bool()), (Some(3), Some(1), Some(true)));
+        // Phase 3 opens first; phase 2 waits for it.
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Phase 2 opens after phase 3 ends");
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([4])));
+        apply(&mut team, "cancel", &json!({"task":4}), &Actor::Human, &none, &mut events).unwrap();
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(approved["tasks"], json!([3]));
+    }
+
+    #[test]
+    fn approved_phases_refuse_every_edit() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        extend(&mut team, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        for (op, input) in [
+            ("edit-draft", json!({"phase":2,"title":"Later"})),
+            ("move-phase", json!({"phase":2,"to":3,"position":"before"})),
+        ] {
+            let error = apply(&mut team, op, &input, &Actor::Human, &none, &mut events).unwrap_err().to_string();
+            assert_eq!(error, "Phase 2 is approved or discarded; only a draft phase can change", "{op}");
+        }
+        let error = extend(&mut team, &json!({"phase":2,"tasks":[{"id":4,"title":"More","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Phase 2 is approved or discarded; only a draft phase can change");
+        // The lead discards its own draft, and the owner still approves (F10).
+        let added = extend(&mut team, &json!({"tasks":[{"id":4,"title":"Next","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(added["phase"], 3);
+        let discarded = apply(&mut team, "discard-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(discarded["status"], "phase_discarded");
+        let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
+        assert!(error.starts_with("You "), "{error}");
     }
 }

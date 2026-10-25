@@ -482,6 +482,10 @@ pub(crate) enum PhaseState {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Phase {
     pub n: u32,
+    /// The display and approval order (F10): drafts may be moved before each
+    /// other. 0 on a team stored before the field means n order.
+    #[serde(default)]
+    pub order: u32,
     #[serde(default)]
     pub title: String,
     /// No task of this phase starts before every lower phase is finished.
@@ -503,6 +507,22 @@ pub(crate) struct Phase {
     pub decided_by: String,
     #[serde(default)]
     pub decided_at: Option<f64>,
+    /// The lead's edits to this draft since it was added, newest last, for the
+    /// owner's diff view (F10): {"kind":"added|removed|changed|moved", ...}.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<serde_json::Value>,
+}
+
+impl Phase {
+    /// The display and approval order; a team stored before the field keeps
+    /// its phase numbers as the order (F10).
+    pub(crate) fn order(&self) -> u32 {
+        if self.order == 0 {
+            self.n
+        } else {
+            self.order
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -527,6 +547,10 @@ pub(crate) struct Team {
     pub members: Vec<Member>,
     #[serde(default)]
     pub tasks: Vec<Task>,
+    /// The highest task id ever used: a task removed from a draft never gives
+    /// its number back (F10). 0 on a team stored before the field.
+    #[serde(default)]
+    pub last_task: u32,
     /// Phases added by `extend`; the approved initial plan (phase 1) has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<Phase>,

@@ -277,6 +277,7 @@ private slots:
     void projectFilterCombinesScopesCountsAndNavigation();
     void accountFilterCombinesScopesAndKeepsTheOpenDraft();
     void accountFilterWarmsAcrossMachinesAndRefreshesOnOpening();
+    void accountChooserMatchesAccountsAndKeepsRemovedProfileDetails();
     void accountDetailsResolveOnlyTheRecordedBinding();
     void accountScopeLimitsArchiveRemoval();
     void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
@@ -1414,6 +1415,44 @@ elif c=='account' and a[1:2]==['inspect']:
     QVERIFY(!sharedChoice()->text().contains("Renamed shared account"));
     // Existing actions keep their snapshot; reopening presents the newly read label.
     menu->hide();menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());QTRY_VERIFY(sharedChoice());QVERIFY(sharedChoice()->text().contains("Renamed shared account"));
+}
+
+void TestSessionsWindow::accountChooserMatchesAccountsAndKeepsRemovedProfileDetails()
+{
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject usage{{"id","current"},{"provider","claude"},{"home","/fixture/current"},{"status","ok"},
+        {"identity",QJsonObject{{"account_id","shared-account"},{"email","shared@example.test"},{"organization","Workspace"}}}};
+    const QJsonObject current{{"id","current"},{"provider","claude"},{"label","shared@example.test"},{"home","/fixture/current"},{"installed",true},{"account_status",usage}};
+    const QJsonObject removedDefault{{"id","native-claude"},{"provider","claude"},{"label","Default account"},{"home","/fixture/default"},{"installed",true}};
+    const QJsonObject retired{{"id","retired"},{"provider","claude"},{"label","shared@example.test"},{"home","/fixture/retired"},{"installed",true}};
+    const auto catalog=QString::fromUtf8(QJsonDocument(QJsonObject{{"profiles",QJsonArray{current}},{"removed_profiles",QJsonArray{removedDefault,retired}}}).toJson(QJsonDocument::Compact));
+    const auto path=m_dir->filePath("account-catalog");
+    const auto answer="elif c=='account' and a[1:2]==['ls']:print("+FakeCli::pythonString(catalog)+")\nelif c=='account' and a[1:2]==['inspect']:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(usage).toJson(QJsonDocument::Compact)))+")\n";
+    QVERIFY(FakeCli::install(path,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    auto state=fleet();auto local=state.local();local.sessions[0].cmd="claude";local.sessions[0].accountId="current";local.sessions[0].accountHome="/fixture/current";
+    local.sessions[1].cmd="claude";local.sessions[1].accountId.clear();local.sessions[1].accountHome="/fixture/current";
+    auto past=local.sessions[0];past.name="claude/project/retired";past.state="stopped";past.accountId="retired";past.accountHome="/fixture/retired";local.sessions.append(past);
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());auto remote=*state.peer("mac");remote.sessions[0].cmd="claude";remote.sessions[0].accountId="current";remote.sessions[0].accountHome="/fixture/current";state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(path));keepDetailsPollsOut(window);window.setFleet(state);window.show();
+    auto *page=window.findChild<AccountsPage *>();QVERIFY(page);
+    QTRY_COMPARE(page->profiles(true).size(),6);QTRY_COMPARE(page->catalogProfiles().size(),2);
+    QPushButton *accountsNav=nullptr;for(auto *button:window.findChildren<QPushButton *>("railButton"))if(button->accessibleName()=="Agent accounts")accountsNav=button;
+    QVERIFY(accountsNav);accountsNav->click();QTRY_VERIFY(page->isVisible());
+    auto *accountRows=page->findChild<QListWidget *>("accountProfiles");QVERIFY(accountRows);QTRY_COMPARE(accountRows->count(),1);
+    const auto published=accountRows->item(0)->data(Qt::UserRole).toJsonObject();QCOMPARE(published["members"].toArray().size(),2);
+    window.showSessionList();QVERIFY(!page->isVisible());
+    auto *filter=window.findChild<AccountFilter *>("accountFilterChips");auto *menu=filter->button()->menu();
+    menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());
+    const auto choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),accountRows->count());
+    QCOMPARE(choices.first()->property("account").toString(),published["account_key"].toString());
+    QVERIFY(!choices.first()->text().contains("Default account"));
+    const QSet<QString> expected{SessionAccounts::binding({},local.sessions[0]),SessionAccounts::binding({},local.sessions[1]),SessionAccounts::binding("mac",remote.sessions[0])};
+    const auto members=choices.first()->property("bindings").toStringList();QCOMPARE(QSet<QString>(members.cbegin(),members.cend()),expected);
+    choices.first()->click();QCOMPARE(filter->selection(),expected);menu->hide();
+    window.showSession({},past.name);
+    auto *inspector=window.findChild<QTabWidget *>("sessionInspector");auto *toggle=window.findChild<QPushButton *>("toggleInspector");QVERIFY(inspector&&toggle);toggle->setChecked(true);inspector->setCurrentIndex(1);
+    auto *browser=window.findChild<QTextBrowser *>("sessionInfo");QVERIFY(browser);QTRY_VERIFY(browser->toPlainText().contains("/fixture/retired"));
+    QVERIFY(browser->toPlainText().contains("shared@example.test"));QVERIFY(!browser->toPlainText().contains("Workspace"));
 }
 
 void TestSessionsWindow::accountDetailsResolveOnlyTheRecordedBinding()

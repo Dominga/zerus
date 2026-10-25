@@ -389,6 +389,7 @@ private:
     QSet<QString> m_hostFilters, m_projectFilters, m_accountFilters;
     SessionAccounts::Catalog m_sessionAccounts;
     QJsonArray m_sessionAccountProfiles;
+    QJsonArray m_sessionAccountDetailsProfiles;
     QString selectedHostTarget() const;
     void updateDashboard();
     QJsonObject m_details;

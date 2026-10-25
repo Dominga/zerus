@@ -784,6 +784,8 @@ the account restriction. Account selection intersects the project, machine,
 state, folder and search scopes, including message search and loaded archives.
 Chooser counts use the other scopes before account selection or text search.
 An unavailable selected account stays selected until explicitly removed.
+The chooser uses the same published, current profile catalog as Accounts;
+removed profiles and historical session-only bindings do not create extra choices.
 Sessions without a recorded account remain distinguishable from known accounts
 and shell sessions; they never borrow the current default account.
 

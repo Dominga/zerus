@@ -306,7 +306,7 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     connect(&m_client, &HgsClient::accountsReady, this, [this](quint64 id, const QString &host, const QJsonObject &data) {
         if (!m_requests.contains(id)) return;
         const QString op = m_requests.take(id).second;
-        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { render(); return; }
+        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { m_catalogRefreshQueued.remove(host); render(); return; }
         if (op == "model-settings") {
             const auto profile = m_modelProfile; m_modelProfile = {};
             render();
@@ -321,6 +321,7 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
             request(host, {"ls"}); render(); return;
         }
         if (op == "ls" || op == "add" || op == "rename" || op == "rm" || op == "restore" || op == "set-key" || op == "permissions" || op == "default" || op == "model-defaults") m_catalogs[host] = data;
+        if (op == "ls") requestQueuedCatalog(host);
         if (op == "rename" && !m_renameQueue.isEmpty()) { renameNext(); render(); return; }
         if (op != "ls") {
             emit notice(op == "model-defaults" ? tr("Model defaults saved for new sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "default" ? tr("Default account saved for new sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "permissions" ? tr("Permission mode saved for new and resumed sessions on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "set-key" ? tr("DeepSeek API key saved on %1.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "restore" ? tr("Account added on %1 using its saved sign-in.").arg(host.isEmpty() ? m_fleet.local().host : host) : op == "rename" ? tr("Account name updated.") : op == "copy" ? tr("Account copied into a new profile. It is available in New session on that machine.") : op == "rm" ? tr("Account removed from %1. Add it again whenever you need it.").arg(host.isEmpty() ? m_fleet.local().host : host) : tr("Account profile created. Sign in to use it."));
@@ -340,8 +341,9 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     connect(&m_client, &HgsClient::accountsFailed, this, [this](quint64 id, const QString &host, const QString &error) {
         if (!m_requests.contains(id)) return;
         const auto op = m_requests.take(id).second;
-        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { render(); return; }
+        if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { m_catalogRefreshQueued.remove(host); render(); return; }
         m_loginAfterAddId.clear(); m_renameQueue.clear();
+        if (op == "ls") requestQueuedCatalog(host);
         if (op != "ls" || isVisible()) emit notice((host.isEmpty() ? tr("This machine") : host) + ": " + error,true);
         render();emit catalogChanged();
     });
@@ -370,6 +372,9 @@ void AccountsPage::setFleet(const FleetState &fleet)
 {
     m_fleet = fleet;m_usageStore->setFleet(fleet); const QString selectedHost = m_machine->currentData().toString();
     const auto desired = accountHosts(fleet, m_explicitHost);
+    for (auto it = m_catalogRefreshQueued.begin(); it != m_catalogRefreshQueued.end();) {
+        if (!desired.contains(*it)) it = m_catalogRefreshQueued.erase(it); else ++it;
+    }
     // Warm each newly configured machine once, even before Accounts is opened.
     // Normal navigation/refresh handles later reads; fleet polling must not
     // repeatedly probe all accounts in the background.
@@ -448,10 +453,18 @@ void AccountsPage::ensureCatalogs(bool force)
     const auto now=QDateTime::currentMSecsSinceEpoch();
     for(const auto &host:hosts) {
         bool pending=false;for(const auto &r:m_requests)if(r.first==host && r.second=="ls")pending=true;
+        if (pending) { if (force) m_catalogRefreshQueued.insert(host); continue; }
         if(!pending && (force || !m_catalogChecked.contains(host) || now-m_catalogChecked[host]>=30000)) {
             m_catalogChecked[host]=now;request(host,{"ls"});
         }
     }
+}
+void AccountsPage::requestQueuedCatalog(const QString &host)
+{
+    // Only an explicit refresh can queue this one follow-up. A failed read alone
+    // never retries. Wait for every older read so none can overwrite the refresh.
+    for (const auto &pending : m_requests) if (pending.first == host && pending.second == "ls") return;
+    if (m_catalogRefreshQueued.remove(host) && accountHosts(m_fleet, m_explicitHost).contains(host)) request(host, {"ls"});
 }
 QJsonArray AccountsPage::profiles(bool includeRemoved) const
 {

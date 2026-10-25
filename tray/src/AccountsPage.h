@@ -2,6 +2,7 @@
 #include <QWidget>
 #include <QHash>
 #include <QJsonObject>
+#include <QSet>
 #include "FleetState.h"
 class QComboBox; class QListWidget; class QLabel; class QPushButton; class QLayout; class QStackedLayout;
 class QTreeWidget;
@@ -49,6 +50,7 @@ private:
     void inspectProfiles(bool refresh = false);
     void renameNext();
     void request(const QString &host, const QStringList &args);
+    void requestQueuedCatalog(const QString &host);
     QJsonObject m_modelProfile;
     QJsonObject selected() const;
     QJsonObject selectedAccount() const;
@@ -74,6 +76,7 @@ private:
     AccountUsage::Panel *m_usage;
     AccountUsageStore *m_usageStore;
     QHash<QString,qint64> m_catalogChecked;
+    QSet<QString> m_catalogRefreshQueued;
     QString m_requestedProfile;
     QString m_activeProfile, m_machineSignature;
     QList<QJsonObject> m_renameQueue;

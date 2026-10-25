@@ -227,7 +227,7 @@ public:
     void invalidateWorktreeCache(const QString &host, const QString &commonDir);
     QJsonObject worktreeReview(const QString &host, const QString &commonDir, int maxAgeSeconds = 300) const;
     quint64 removeWorktree(const QString &host, const QString &path, const QString &commonDir,
-                           const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {}, const QString &discardFingerprint = {});
+                           const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {}, const QString &discardFingerprint = {}, const QString &processFingerprint = {});
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
     quint64 createDirectory(const QString &host, const QString &path);
     // Selected-computer capability probe precedes every acquisition operation.

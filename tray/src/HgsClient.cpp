@@ -1444,13 +1444,14 @@ quint64 HgsClient::inspectWorktree(const QString &host,const QString &path,const
     return request;
 }
 
-quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint,const QString &discardFingerprint)
+quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint,const QString &discardFingerprint,const QString &processFingerprint)
 {
     const auto request=++m_worktreeRequest;const auto token=QUuid::createUuid().toString(QUuid::WithoutBraces);
     QStringList args{"worktrees","remove","--path",path,"--common-dir",commonDir,"--fingerprint",fingerprint,"--request-id",token,"--json"};
     if(deleteBranch)args<<"--delete-branch";if(!host.isEmpty())args.prepend('@'+host);
     if(!ignoredFingerprint.isEmpty())args<<"--ignored-fingerprint"<<ignoredFingerprint;
     if(!discardFingerprint.isEmpty())args<<"--discard-fingerprint"<<discardFingerprint;
+    if(!processFingerprint.isEmpty())args<<"--process-fingerprint"<<processFingerprint;
     const auto forget=[this,host,commonDir]{invalidateWorktreeCache(host,commonDir);};
     runHgs(m_hgs,args,330000,this,[this,request,token,path,forget](const QByteArray &out){
         forget();const auto data=QJsonDocument::fromJson(out).object();

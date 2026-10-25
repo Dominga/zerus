@@ -775,7 +775,8 @@ project remains as **Unavailable project** until removed from the filter.
 
 The account button beside the project chooser selects one or more specific
 accounts, rather than agent types. Its names and verified identity groups follow
-Accounts; different accounts with the same label remain separate. Choices retain
+Accounts: one verified account on several machines is one choice, and the machine
+filter remains independent. Different accounts with the same label remain separate. Choices retain
 the exact machine-local profile bindings selected at that moment. A later
 catalog refresh or a newly discovered binding never expands that selection
 silently. Selected accounts appear as removable chips; **All accounts** clears
@@ -787,9 +788,10 @@ Sessions without a recorded account remain distinguishable from known accounts
 and shell sessions; they never borrow the current default account.
 
 **Details** shows the session's bound account, its profile ID and recorded agent
-home when available. Account names come from the selected computer's cached
-catalog; opening the chooser or Details can refresh that catalog without signing
-in, refreshing provider usage or changing any running session.
+home when available. Account catalogs and identities are warmed at startup and
+shared with Accounts. Opening the chooser refreshes the catalogs, reusing cached
+identity checks. Newly loaded choices appear without reopening an empty chooser.
+These reads do not sign in or change any running session.
 
 Changing the state, machine, project or account filter only changes the session list.
 The open conversation and its draft stay in place even when no row matches;

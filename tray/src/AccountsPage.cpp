@@ -335,17 +335,19 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
             if (op == "copy") ensureCatalogs(true);
             if (op == "set-key") inspectProfiles(true);
         }
-        render();emit catalogChanged(); if (isVisible()) inspectProfiles();
+        render();emit catalogChanged(); inspectProfiles();
     });
     connect(&m_client, &HgsClient::accountsFailed, this, [this](quint64 id, const QString &host, const QString &error) {
         if (!m_requests.contains(id)) return;
         const auto op = m_requests.take(id).second;
         if (!host.isEmpty() && !m_fleet.peerNames().contains(host) && host != m_explicitHost) { render(); return; }
-        m_loginAfterAddId.clear(); m_renameQueue.clear(); emit notice((host.isEmpty() ? tr("This machine") : host) + ": " + error,true); render();emit catalogChanged();
+        m_loginAfterAddId.clear(); m_renameQueue.clear();
+        if (op != "ls" || isVisible()) emit notice((host.isEmpty() ? tr("This machine") : host) + ": " + error,true);
+        render();emit catalogChanged();
     });
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){
         if (m_renderQueued) return; m_renderQueued = true;
-        QTimer::singleShot(0, this, [this] { m_renderQueued = false; render(); });
+        QTimer::singleShot(0, this, [this] { m_renderQueued = false; render(); emit catalogChanged(); });
     });
     auto *timer=new QTimer(this);timer->setInterval(30000);connect(timer,&QTimer::timeout,this,[this]{if(isVisible()){ensureCatalogs();inspectProfiles();}});timer->start();
     setTheme(false); selectionChanged();
@@ -368,6 +370,10 @@ void AccountsPage::setFleet(const FleetState &fleet)
 {
     m_fleet = fleet;m_usageStore->setFleet(fleet); const QString selectedHost = m_machine->currentData().toString();
     const auto desired = accountHosts(fleet, m_explicitHost);
+    // Warm each newly configured machine once, even before Accounts is opened.
+    // Normal navigation/refresh handles later reads; fleet polling must not
+    // repeatedly probe all accounts in the background.
+    for (const auto &host : desired) if (!m_catalogChecked.contains(host)) request(host, {"ls"});
     bool same = m_machine->count() == desired.size() + 1;
     for (int i = 0; same && i < desired.size(); ++i)
         same = m_machine->itemData(i + 1).toString() == desired[i] && m_machine->itemText(i + 1) == machineChoice(fleet, desired[i]);

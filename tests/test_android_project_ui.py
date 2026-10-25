@@ -369,8 +369,11 @@ class NativeToolEnvironmentTests(unittest.TestCase):
 
     def test_prepared_tools_remain_reachable_with_a_different_private_home(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            native = self.fixture(root)
+            actual = Path(directory) / "actual"
+            actual.mkdir(mode=0o700)
+            root = Path(directory) / "alias"
+            root.symlink_to(actual, target_is_directory=True)
+            native = self.fixture(root).resolve()
             private = {"HOME": str(root / "fixture-home"), "GRADLE_USER_HOME": str(root / "fixture-gradle"),
                        "ANDROID_USER_HOME": str(root / "fixture-android")}
             with patch.dict(os.environ, {"CARGO_HOME": "/untrusted/cargo", "RUSTUP_HOME": "/untrusted/rustup",

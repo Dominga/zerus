@@ -138,6 +138,7 @@ private slots:
     void modelReadsPhasesPinnedAndTheWaitingState();
     void leftRunningMembersOfAFinishedTeam();
     void draftPhasesApproveInOrder();
+    void phaseProgressShowsThePhaseInWorkAndThePhases();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
@@ -340,6 +341,85 @@ void TestTeams::leftRunningMembersOfAFinishedTeam()
     members[1] = m; withIds["members"] = members;
     QCOMPARE(parse(withIds).member("backend")->runId, QStringLiteral("r9"));
     QCOMPARE(parse(withIds).member("backend")->conversationId, QStringLiteral("c9"));
+}
+
+// G6: two numbers instead of one over every task — the phase in work (or, when
+// none is in work, the next draft waiting for approval) and the phases.
+void TestTeams::phaseProgressShowsThePhaseInWorkAndThePhases()
+{
+    // phasedTeam: phase 1 holds the ten checkout tasks (one accepted), phase 2
+    // is a draft of two tasks.
+    const auto parsed = parse(phasedTeam());
+    auto progress = phaseProgress(parsed);
+    QCOMPARE(progress.phase, 1);          // phase 1 is in work
+    QCOMPARE(progress.draft, false);
+    QCOMPARE(progress.total, 10);
+    QCOMPARE(progress.done, 1);
+    QCOMPARE(progress.phaseText(), QStringLiteral("1/10"));
+    QCOMPARE(progress.phasesTotal, 2);    // phase 1 and the draft
+    QCOMPARE(progress.phasesDone, 0);
+    QCOMPARE(progress.phasesText(), QStringLiteral("0/2"));
+    QVERIFY(progress.tooltip().contains(QStringLiteral("Phase 1")));
+    QVERIFY(progress.tooltip().contains(QStringLiteral("0 of 2 phases")));
+    // Phase 1 decided: nothing is in work, so the next draft waits for approval.
+    auto decided = phasedTeam();
+    auto decidedTasks = decided["tasks"].toArray();
+    for (int i = 0; i < decidedTasks.size(); ++i) {
+        auto task = decidedTasks[i].toObject();
+        if (task["phase"].toInt(1) == 1) task["status"] = "accepted";
+        decidedTasks[i] = task;
+    }
+    decided["tasks"] = decidedTasks;
+    const auto waiting = phaseProgress(parse(decided));
+    QCOMPARE(waiting.phase, 2);
+    QVERIFY(waiting.draft);
+    QCOMPARE(waiting.phaseText(), QStringLiteral("0/2"));
+    QVERIFY(waiting.tooltip().contains(QStringLiteral("waiting for your approval")));
+    QCOMPARE(waiting.phasesDone, 1);
+    QCOMPARE(waiting.phasesTotal, 2);
+    // A discarded draft is not planned: it never counts, and it is never the
+    // phase the bar follows.
+    auto withDiscard = decided;
+    withDiscard["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "Discarded"}, {"state", "discarded"}, {"tasks", QJsonArray{11, 12}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}}}};
+    auto discardTasks = withDiscard["tasks"].toArray();
+    auto polish = QJsonObject{{"id", 13}, {"phase", 3}, {"title", "Polish the card"}, {"assignee", "backend"}, {"status", "draft"}};
+    discardTasks.append(polish);
+    for (int i = 0; i < discardTasks.size(); ++i) {
+        auto task = discardTasks[i].toObject();
+        if (task["phase"].toInt() == 2) task["status"] = "cancelled";
+        discardTasks[i] = task;
+    }
+    withDiscard["tasks"] = discardTasks;
+    const auto afterDiscard = phaseProgress(parse(withDiscard));
+    QCOMPARE(afterDiscard.phase, 3);          // the only draft left
+    QVERIFY(afterDiscard.draft);
+    QCOMPARE(afterDiscard.phasesTotal, 2);    // phase 1 and phase 3
+    QCOMPARE(afterDiscard.phasesDone, 1);
+    QCOMPARE(afterDiscard.phasesText(), QStringLiteral("1/2"));
+    // Everything decided and no draft: the last phase stands for the finished plan.
+    auto all = withDiscard;
+    auto allTasks = all["tasks"].toArray();
+    for (int i = 0; i < allTasks.size(); ++i) {
+        auto task = allTasks[i].toObject();
+        if (task["phase"].toInt() == 3) task["status"] = "accepted";
+        allTasks[i] = task;
+    }
+    all["tasks"] = allTasks;
+    const auto allDone = phaseProgress(parse(all));
+    QCOMPARE(allDone.phase, 3);
+    QCOMPARE(allDone.phaseText(), QStringLiteral("1/1"));
+    QCOMPARE(allDone.phasesTotal, 2);
+    QCOMPARE(allDone.phasesDone, 2);
+    // A team without phase records still gets the two bars for its plan.
+    const auto plainTeam = parse(deliveryTeam());
+    const auto plain = phaseProgress(plainTeam);
+    int plainDone = 0; for (const auto &task : plainTeam.tasks) plainDone += task.finished();
+    QCOMPARE(plain.phase, 1);
+    QCOMPARE(plain.total, 6);
+    QCOMPARE(plain.done, plainDone);
+    QCOMPARE(plain.phasesTotal, 1);
 }
 
 void TestTeams::draftPhasesApproveInOrder()

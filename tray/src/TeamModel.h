@@ -200,6 +200,23 @@ struct PhaseGroup {
 };
 // The phases to show, in phase order; empty while the plan is phase 1 only.
 QList<PhaseGroup> phaseGroups(const Team &team);
+// G6: the team's progress in two small numbers instead of one over every task.
+// The first bar follows the phase in work — the lowest phase that is not a
+// draft and still has open tasks — or, when none is in work, the next draft
+// waiting for approval. The second counts finished phases out of the planned
+// ones; a discarded draft is not planned and never counts.
+struct PhaseProgress {
+    int phase = 0;          // the live number of the phase the first bar shows
+    QString title;
+    bool draft = false;     // that phase waits for approval
+    int done = 0, total = 0;
+    int phasesDone = 0, phasesTotal = 0;
+    bool valid() const { return phase > 0 && total > 0; }
+    QString phaseText() const { return QStringLiteral("%1/%2").arg(done).arg(total); }
+    QString phasesText() const { return QStringLiteral("%1/%2").arg(phasesDone).arg(phasesTotal); }
+    QString tooltip() const;
+};
+PhaseProgress phaseProgress(const Team &team);
 // Why phase N may not be approved yet (spec 10), empty when it may: every
 // lower phase must be approved and its tasks decided. "Phase 2 opens after
 // phase 1 ends."

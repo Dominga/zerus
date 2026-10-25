@@ -292,6 +292,7 @@ private slots:
     void phaseApprovalAndFinishAskTheOwner();
     void leftoverMembersAreShownApart();
     void memberEditorPicksAnExistingSession();
+    void phaseProgressShowsTwoBars();
     void severalDraftPhasesRenderAndApproveInOrder();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
@@ -1420,6 +1421,67 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
     shot(&panel, "member-adopted-light");
     darkPalette();
     panel.setTheme(true);
+}
+
+// G6: the team card, its header and the workspace bar carry two compact bars —
+// the phase in work (or the next draft waiting) and the phases — readable at
+// 420 and 290 px in both themes.
+void TestTeamsUi::phaseProgressShowsTwoBars()
+{
+    auto phased = phasedTeam();
+    // Phase 1 is decided, phase 2 is in work (one of its two tasks done) and
+    // phase 3 waits as a draft.
+    setTeam(phased);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.resize(420, 820); panel.show();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(!panel.findChildren<QWidget *>("teamPhaseProgress").isEmpty());
+    const auto check = [&](const char *shotName) {
+        const auto bars = panel.findChildren<QWidget *>("teamPhaseProgress");
+        QVERIFY(!bars.isEmpty());
+        const auto *bar = bars.first();
+        QCOMPARE(bar->property("phase").toInt(), 2);
+        QCOMPARE(bar->property("phaseDone").toInt(), 1);
+        QCOMPARE(bar->property("phaseTotal").toInt(), 2);
+        QCOMPARE(bar->property("phaseDraft").toBool(), false);
+        QCOMPARE(bar->property("phasesDone").toInt(), 1);
+        QCOMPARE(bar->property("phasesTotal").toInt(), 3);
+        QVERIFY(bar->toolTip().contains(QStringLiteral("Phase 2")));
+        QVERIFY(bar->toolTip().contains(QStringLiteral("1 of 3 phases")));
+        shot(&panel, shotName);
+    };
+    check("team-progress-420-dark");
+    lightPalette();
+    panel.setTheme(false); panel.render();
+    QTRY_VERIFY(!panel.findChildren<QWidget *>("teamPhaseProgress").isEmpty());
+    check("team-progress-420-light");
+    panel.resize(290, 820);
+    panel.render();
+    QTRY_VERIFY(!panel.findChildren<QWidget *>("teamPhaseProgress").isEmpty());
+    check("team-progress-290-light");
+    darkPalette();
+    panel.setTheme(true); panel.render();
+    QTRY_VERIFY(!panel.findChildren<QWidget *>("teamPhaseProgress").isEmpty());
+    check("team-progress-290-dark");
+    // No phase in work: the bars follow the next draft waiting for approval.
+    auto waiting = phased;
+    auto waitingTasks = waiting["tasks"].toArray();
+    for (int i = 0; i < waitingTasks.size(); ++i) {
+        auto task = waitingTasks[i].toObject();
+        if (task["phase"].toInt(1) == 2) task["status"] = "accepted";
+        waitingTasks[i] = task;
+    }
+    waiting["tasks"] = waitingTasks;
+    setTeam(waiting);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        const auto bars = panel.findChildren<QWidget *>("teamPhaseProgress");
+        return !bars.isEmpty() && bars.first()->property("phase").toInt() == 3 && bars.first()->property("phaseDraft").toBool();
+    })());
+    QVERIFY(panel.findChildren<QWidget *>("teamPhaseProgress").first()->toolTip().contains(QStringLiteral("waiting for your approval")));
+    shot(&panel, "team-progress-draft-dark");
 }
 
 void TestTeamsUi::severalDraftPhasesRenderAndApproveInOrder()

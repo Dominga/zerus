@@ -618,6 +618,59 @@ QList<PhaseGroup> phaseGroups(const Team &team)
     return groups;
 }
 
+QString PhaseProgress::tooltip() const
+{
+    if (!valid()) return {};
+    const QString phaseLine = draft
+        ? tr("Phase %1 · %2 tasks done, waiting for your approval").arg(phase).arg(tr("%1 of %2").arg(done).arg(total))
+        : tr("Phase %1 · %2 tasks done").arg(phase).arg(tr("%1 of %2").arg(done).arg(total));
+    return phaseLine + QLatin1Char('\n')
+        + tr("%1 of %2 phases finished; discarded drafts do not count").arg(phasesDone).arg(phasesTotal);
+}
+
+PhaseProgress phaseProgress(const Team &team)
+{
+    const auto discarded = [&team](int phase) {
+        const auto *record = team.phase(phase);
+        return record && record->state == "discarded";
+    };
+    PhaseProgress progress;
+    const auto groups = phaseGroups(team);
+    for (const auto &group : groups) {
+        if (discarded(group.n)) continue;   // a discarded draft is not planned
+        ++progress.phasesTotal;
+        progress.phasesDone += group.finished();
+    }
+    // The phase in work: the lowest non-draft phase that still has open tasks.
+    for (const auto &group : groups) {
+        if (discarded(group.n) || group.draft || group.finished()) continue;
+        progress.phase = group.n; progress.title = group.title;
+        progress.done = group.done; progress.total = group.tasks.size();
+        break;
+    }
+    // Nothing in work: the next draft waiting for approval.
+    if (!progress.phase) for (const auto &group : groups) {
+        if (discarded(group.n) || !group.draft) continue;
+        progress.phase = group.n; progress.title = group.title; progress.draft = true;
+        progress.done = group.done; progress.total = group.tasks.size();
+        break;
+    }
+    // Everything is decided and no draft waits: the last phase stands for the
+    // finished plan, so the bar reads done/done.
+    if (!progress.phase) for (const auto &group : groups) {
+        if (discarded(group.n)) continue;
+        progress.phase = group.n; progress.title = group.title;
+        progress.done = group.done; progress.total = group.tasks.size();
+    }
+    // A team without phase records still gets the two bars: its plan is phase 1.
+    if (!progress.phase && !team.tasks.isEmpty()) {
+        int done = 0; for (const auto &task : team.tasks) done += task.finished();
+        progress.phase = 1; progress.done = done; progress.total = team.tasks.size();
+        progress.phasesTotal = 1; progress.phasesDone = done == team.tasks.size();
+    }
+    return progress;
+}
+
 QString phaseHeading(const PhaseGroup &group)
 {
     const QString phase = group.title.isEmpty() ? tr("Phase %1").arg(group.n)

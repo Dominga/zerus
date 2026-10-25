@@ -344,9 +344,9 @@ QWidget *TeamPanel::summary(const Team &team, const QString &status, bool narrow
         chips->addStretch();
         v->addLayout(chips);
     }
-    QList<QColor> segments;
-    for (auto tone : progress(team)) segments.append(toneColor(c, tone));
-    v->addWidget(new Progress(segments, 6, c.border));
+    // G6: two bars — the phase in work (or the next draft) and the phases —
+    // instead of one over every task of every phase.
+    v->addWidget(new PhaseProgressBars(c, phaseProgress(team)));
     const int problemCount = problems(team, live).size();
     QString meta = tr("%1/%2 accepted").arg(accepted(team)).arg(team.tasks.size()).toHtmlEscaped();
     if (problemCount) meta += QStringLiteral(" &nbsp;<span style=\"color:%1;\">%2</span>").arg(c.warn.name(),
@@ -514,9 +514,8 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
     more->setMenu(menu);
     top->addWidget(more);
     v->addLayout(top);
-    QList<QColor> segments;
-    for (auto tone : progress(team)) segments.append(toneColor(c, tone));
-    v->addWidget(new Progress(segments, 6, c.border));
+    // G6: the header shows the same two bars, not one over every task.
+    v->addWidget(new PhaseProgressBars(c, phaseProgress(team)));
     QMap<Tone, int> counts;
     for (const auto &task : team.tasks) ++counts[taskStatus(task).tone];
     QStringList legend;

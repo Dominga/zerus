@@ -781,7 +781,14 @@ void TestSessionsWindow::agentTeamsGroupTheirSessions()
     const auto strip = list->item(leadRow)->data(SessionRoles::TeamLead).toMap();
     QCOMPARE(strip.value("id").toString(), QStringLiteral("team-1"));
     QCOMPARE(strip.value("name").toString(), QStringLiteral("Checkout"));
-    QCOMPARE(strip.value("meta").toString(), QStringLiteral("0/2"));
+    // G6: two compact bars — the phase in work (or the next draft) and the
+    // phases — instead of one count over every task.
+    QCOMPARE(strip.value("phaseText").toString(), QStringLiteral("0/2"));
+    QCOMPARE(strip.value("phaseNumber").toInt(), 1);
+    QCOMPARE(strip.value("phaseDraft").toBool(), false);
+    QCOMPARE(strip.value("phasesText").toString(), QStringLiteral("0/1"));
+    QVERIFY(strip.value("progressTooltip").toString().contains(QStringLiteral("Phase 1")));
+    QVERIFY(strip.value("progressTooltip").toString().contains(QStringLiteral("0 of 1 phases")));
     QCOMPARE(strip.value("members").toString(), QStringLiteral("2"));
     QCOMPARE(SessionList::childrenLabel(list->model()->index(leadRow, 0)), QStringLiteral("Team"));
     // The lead's card grows by the strip, and the strip opens the Team tab.

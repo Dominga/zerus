@@ -264,10 +264,9 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
         waiting->setObjectName("teamBarWaitingForLead");
         h->addWidget(waiting);
     }
-    QList<QColor> segments; for (auto tone : progress(team)) segments.append(toneColor(c, tone));
-    auto *bar2 = new Progress(segments, 6, c.border); bar2->setFixedWidth(200); h->addWidget(bar2);
-    auto *counts = label(QStringLiteral("%1/%2").arg(accepted(team)).arg(team.tasks.size()), c.muted, 11); counts->setFont(NewSessionDense::mono(11));
-    h->addWidget(counts);
+    // G6: the phase in work (or the next draft) and the phases, not one bar
+    // over every task.
+    h->addWidget(new PhaseProgressBars(c, phaseProgress(team), true));
     if (team.created > 0) h->addWidget(label(duration(QDateTime::currentSecsSinceEpoch() - team.created), c.muted, 11));
     h->addStretch();
     const auto add = [&](const QString &text, const char *objectName, bool primary, const std::function<void()> &run) {

@@ -3598,10 +3598,17 @@ void SessionsWindow::rebuild()
         if (const auto *team = leadTeam.isEmpty() || !m_teams ? nullptr : m_teams->team(leadTeam)) {
             const auto live = [this](const Teams::Member &member) { return teamLive(member); };
             const QString status = Teams::displayStatus(*team, live);
-            QVariantList tones; for (auto tone : Teams::progress(*team)) tones.append(int(tone));
+            // G6: two compact bars — the phase in work (or the next draft) and
+            // the phases — replace one bar over every task of every phase.
+            const auto bars = Teams::phaseProgress(*team);
             teamStrip = {{"id", team->id}, {"name", team->name}, {"status", status}, {"label", Teams::statusLabel(status)},
-                         {"tone", int(Teams::statusTone(status))}, {"meta", QStringLiteral("%1/%2").arg(Teams::accepted(*team)).arg(team->tasks.size())},
-                         {"members", QString::number(team->members.size())}, {"answers", Teams::answers(*team, live)}, {"progress", tones}};
+                         {"tone", int(Teams::statusTone(status))},
+                         {"phaseText", bars.phaseText()}, {"phasesText", bars.phasesText()},
+                         {"phaseDone", bars.done}, {"phaseTotal", bars.total},
+                         {"phasesDone", bars.phasesDone}, {"phasesTotal", bars.phasesTotal},
+                         {"phaseDraft", bars.draft}, {"phaseNumber", bars.phase},
+                         {"progressTooltip", bars.tooltip()},
+                         {"members", QString::number(team->members.size())}, {"answers", Teams::answers(*team, live)}};
         }
         item->setData(SessionRoles::TeamLead, teamStrip.isEmpty() ? QVariant() : QVariant(teamStrip));
         item->setData(SessionRoles::HasChildren, hasChildren || !leadTeam.isEmpty());

@@ -384,6 +384,53 @@ private:
     QList<QColor> m_segments; QColor m_empty;
 };
 
+// G6: the two compact bars that replace one bar over every task: the phase in
+// work (or the next draft waiting for approval) with its done/total, and the
+// phases with finished/planned, where a discarded draft never counts. The
+// caption carries the live phase number; both bars share one tooltip.
+class PhaseProgressBars : public QWidget {
+public:
+    PhaseProgressBars(const Colors &colors, const Teams::PhaseProgress &progress, bool compact = false, QWidget *parent = nullptr)
+        : QWidget(parent), m_c(colors), m_p(progress), m_compact(compact)
+    {
+        setObjectName("teamPhaseProgress");
+        setProperty("phase", progress.phase);
+        setProperty("phaseDone", progress.done);
+        setProperty("phaseTotal", progress.total);
+        setProperty("phaseDraft", progress.draft);
+        setProperty("phasesDone", progress.phasesDone);
+        setProperty("phasesTotal", progress.phasesTotal);
+        setToolTip(progress.tooltip());
+        setFixedHeight(compact ? 16 : 18);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        setFixedWidth((compact ? 62 : 92) * 2 + (compact ? 8 : 10));
+    }
+    QSize sizeHint() const override { return {width(), height()}; }
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        if (!m_p.valid()) return;
+        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
+        const int blockWidth = m_compact ? 62 : 92, gap = m_compact ? 8 : 10;
+        const auto block = [&](int x, const QString &caption, const QString &count, int done, int total) {
+            QFont f = font(); f.setPixelSize(9); f.setWeight(QFont::DemiBold); p.setFont(f);
+            p.setPen(m_c.dim);
+            p.drawText(QRect(x, 0, blockWidth, 10), Qt::AlignLeft | Qt::AlignVCenter, caption);
+            QFont mono = font(); mono.setPixelSize(9); p.setFont(mono); p.setPen(m_c.text2);
+            p.drawText(QRect(x, 0, blockWidth, 10), Qt::AlignRight | Qt::AlignVCenter, count);
+            const QRectF track(x, 12, blockWidth, 4);
+            p.setPen(Qt::NoPen); p.setBrush(m_c.border); p.drawRoundedRect(track, 2, 2);
+            const double fraction = total > 0 ? qBound(0.0, done / double(total), 1.0) : 0.0;
+            if (fraction > 0) { p.setBrush(m_c.accent); p.drawRoundedRect(QRectF(x, 12, blockWidth * fraction, 4), 2, 2); }
+        };
+        const QString phaseCaption = m_p.draft ? tr("Phase %1 · draft").arg(m_p.phase) : tr("Phase %1").arg(m_p.phase);
+        block(0, phaseCaption, m_p.phaseText(), m_p.done, m_p.total);
+        block(blockWidth + gap, tr("Phases"), m_p.phasesText(), m_p.phasesDone, m_p.phasesTotal);
+    }
+private:
+    Colors m_c; Teams::PhaseProgress m_p; bool m_compact;
+};
+
 // Tasks as a graph or as a list by layer. Painted, so hovering a task lights
 // its chain without moving anything. Graph runs top to bottom (the inspector);
 // Wide runs left to right with layer columns (the team workspace). While

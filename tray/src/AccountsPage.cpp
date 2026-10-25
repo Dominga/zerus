@@ -540,12 +540,7 @@ void AccountsPage::render()
     const int scroll = m_list->verticalScrollBar()->value();
     QListWidgetItem *selection = nullptr;
     int row = 0;
-    QJsonArray displayed;
-    for (const auto &value : m_displayProfiles) {
-        const auto host=value.toObject()["host"].toString();
-        if (host.isEmpty() || m_fleet.peerNames().contains(host) || host==m_explicitHost) displayed.append(value);
-    }
-    for (const auto &entry : AccountCatalog::group(displayed)) {
+    for (const auto &entry : AccountCatalog::group(catalogProfiles())) {
         const auto p = entry.toObject();
         bool visible = m_machine->currentData().toString() == "*";
         for (const auto &member : p["members"].toArray()) visible |= member.toObject()["host"] == m_machine->currentData().toString();
@@ -578,6 +573,15 @@ void AccountsPage::render()
     if (!m_list->currentItem() && m_list->count()) m_list->setCurrentRow(0);
     m_list->verticalScrollBar()->setValue(scroll);
     selectionChanged();
+}
+QJsonArray AccountsPage::catalogProfiles() const
+{
+    QJsonArray result;
+    for (const auto &value : m_displayProfiles) {
+        const auto host = value.toObject()["host"].toString();
+        if (host.isEmpty() || m_fleet.peerNames().contains(host) || host == m_explicitHost) result.append(value);
+    }
+    return result;
 }
 void AccountsPage::selectionChanged()
 {

@@ -1523,8 +1523,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_accountsPage,&AccountsPage::notice,this,[this](const QString &message, bool error){showNotice(message,error);});
     connect(m_accountsPage,&AccountsPage::catalogChanged,this,[this]{
         updateDashboardAccounts(m_pages->currentIndex()==3);
-        const auto profiles=m_accountsPage->profiles(true);
-        if(profiles!=m_sessionAccountProfiles){m_sessionAccountProfiles=profiles;QTimer::singleShot(0,this,[this]{rebuild();});}
+        const auto profiles=m_accountsPage->catalogProfiles(), details=m_accountsPage->profiles(true);
+        if(profiles!=m_sessionAccountProfiles || details!=m_sessionAccountDetailsProfiles){m_sessionAccountProfiles=profiles;m_sessionAccountDetailsProfiles=details;QTimer::singleShot(0,this,[this]{rebuild();});}
     });
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){renderAccountUsage();updateDashboardAccounts();});
     connect(m_machinesPage,&MachinesPage::accountsRequested,this,[this](const QString &host) { m_pages->setCurrentIndex(4); m_accountsPage->showMachine(host); });
@@ -3061,8 +3061,9 @@ void SessionsWindow::rebuild()
             requestedSelection = m_renameKey; m_renameKey.clear(); break;
         }
     }
-    m_sessionAccountProfiles = m_accountsPage->profiles(true);
-    m_sessionAccounts.reset(m_sessionAccountProfiles);
+    m_sessionAccountProfiles = m_accountsPage->catalogProfiles();
+    m_sessionAccountDetailsProfiles = m_accountsPage->profiles(true);
+    m_sessionAccounts.reset(m_sessionAccountProfiles, m_sessionAccountDetailsProfiles);
     for (const auto &entry : m_entries) m_sessionAccounts.observe(entry.host, entry.machine, entry.session);
     QSet<QString> projectKeys;
     for (const auto &entry : m_entries) {
@@ -3135,7 +3136,7 @@ void SessionsWindow::rebuild()
         m_machineFilter->setSessionCounts(machineCounts, countCaption + (m_projectFilters.isEmpty() ? QString() : tr(" / selected projects")) + (m_accountFilters.isEmpty() ? QString() : tr(" / selected accounts"))); }
     { const QSignalBlocker block(m_projectFilter); m_projectFilter->setSelection(m_projectFilters); m_projectFilter->setProjects(m_organization.groups());
         m_projectFilter->setSessionCounts(projectCounts, countCaption + (m_hostFilters.isEmpty() ? QString() : tr(" / selected machines")) + (m_accountFilters.isEmpty() ? QString() : tr(" / selected accounts"))); }
-    { const QSignalBlocker block(m_accountFilter); m_accountFilter->setSelection(m_accountFilters); m_accountFilter->setAccounts(m_sessionAccounts.accounts());
+    { const QSignalBlocker block(m_accountFilter); m_accountFilter->setSelection(m_accountFilters); m_accountFilter->setAccounts(m_sessionAccounts.catalogAccounts());
         m_accountFilter->setSessionCounts(accountCounts, countCaption + (m_hostFilters.isEmpty() ? QString() : tr(" / selected machines")) + (m_projectFilters.isEmpty() ? QString() : tr(" / selected projects"))); }
     struct Row { QString group; int entry = -1; bool hidden = false; QString child, launch; };
     QList<Row> rows;
@@ -4068,8 +4069,11 @@ void SessionsWindow::renderDetails()
     m_copySessionId->setEnabled(!identity.isEmpty());
     m_copySessionId->setToolTip(copyCaption); m_copySessionId->setAccessibleName(copyCaption);
     m_copyHeaderId->setEnabled(!identity.isEmpty()); m_copyHeaderId->setToolTip(copyCaption); m_copyHeaderId->setAccessibleName(copyCaption);
+    SessionAccounts::Catalog detailsAccounts;
+    detailsAccounts.reset(m_sessionAccountDetailsProfiles);
+    detailsAccounts.observe(entry->host, entry->machine, s);
     QString info = QString("<h3>%1</h3><p>%2</p><h3>%3</h3><p>%4</p>")
-        .arg(tr("Session"), htmlText(s.name), tr("Account"), htmlText(m_sessionAccounts.description(entry->host, s)));
+        .arg(tr("Session"), htmlText(s.name), tr("Account"), htmlText(detailsAccounts.description(entry->host, s)));
     if (!s.accountId.isEmpty()) info += QString("<h3>%1</h3><p>%2</p>").arg(tr("Account profile"), htmlText(s.accountId));
     if (!s.accountHome.isEmpty()) info += QString("<h3>%1</h3><p>%2</p>").arg(tr("Agent home"), htmlText(s.accountHome));
     info += QString("<h3>Directory</h3><p>%1</p><h3>Last recorded event</h3><p>%2</p><h3>History</h3><p>Activity stays on %3. Closing this window does not stop your agent.</p>")

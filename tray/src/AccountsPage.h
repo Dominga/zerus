@@ -20,6 +20,7 @@ public:
     void reload();
     void ensureCatalogs(bool force = false);
     QJsonArray profiles(bool includeRemoved = false) const;
+    QJsonArray catalogProfiles() const;
     void setTheme(bool dark);
     void refreshAppearance();
 signals:

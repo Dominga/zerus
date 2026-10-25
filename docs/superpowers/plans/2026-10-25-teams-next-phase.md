@@ -337,6 +337,10 @@ answered; a denial cannot carry an explanation.
   runs on the installed Zerus without phases.
 - **G2.** Show the task number on each member (exists) and make working vs
   idle vs waiting clearly visible (icons from A1).
+- **G3. Graph order inside a column.** A dead-end task (no task depends on
+  it) goes to the bottom of its column, below tasks whose chains continue,
+  so the edges of the chain stay short and the eye follows the path.
+  Owner: yes, in phase 2.
 
 ## H. Operations
 

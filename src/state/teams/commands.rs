@@ -22,6 +22,10 @@ fn text<'a>(input: &'a Value, key: &str) -> &'a str {
     input[key].as_str().unwrap_or_default()
 }
 
+/// How many active teams a status or an adoption looks at (C1): the indexed
+/// Planning/Running/Paused query, bounded, never every stored team.
+const ACTIVE_TEAMS: i64 = 1000;
+
 /// The member whose session runs this CLI, proven by process ancestry.
 fn calling_member(team: &Team, record: &Value) -> Option<String> {
     let name = record["name"].as_str()?;
@@ -184,8 +188,9 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
 }
 
 /// A team as the session list shows it: members with their sessions and each
-/// task's state, without descriptions, reports or the feed.
-fn summary_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
+/// task's state, without descriptions, reports or the feed. The list never
+/// reads the live session listing: the desktop polls it often (C1).
+fn summary(team: &Team) -> Value {
     let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
     let members: Vec<Value> = team
         .members
@@ -206,20 +211,13 @@ fn summary_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatche
                     "phase":ops::attempt_phase(t, false)}))})
         })
         .collect();
-    let mut value = json!({
+    json!({
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
         "lead":team.lead,"members":members,"tasks":tasks,
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "revision":team.revision,"updated":team.updated,
         "waiting_for_lead":waiting_for_lead(team),"pending_phase":pending_phase(team),
-    });
-    // Done and Stopped teams say which of their members still run (F7).
-    if let Some(sessions) = sessions {
-        if matches!(team.status, TeamStatus::Done | TeamStatus::Stopped) {
-            value["left_running"] = json!(left_running(team, teams, sessions));
-        }
-    }
-    value
+    })
 }
 
 fn create(input: &Value) -> anyhow::Result<Value> {
@@ -337,6 +335,29 @@ fn no_attempt_text(team: &Team, member: &str) -> String {
     format!("#{} {state}", task.id)
 }
 
+/// The team a `current` request names (N3): only one that still runs
+/// (Planning, Running or Paused), never a finished team.
+fn current_team<'a>(teams: &'a [Team], named: &str, mut member_of: impl FnMut(&Team) -> Option<String>) -> anyhow::Result<(&'a Team, String)> {
+    let mut found: Vec<(&Team, String)> = Vec::new();
+    for team in teams {
+        if !matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused) {
+            continue;
+        }
+        if !named.is_empty() && team.id != named {
+            continue;
+        }
+        if let Some(member) = member_of(team) {
+            found.push((team, member));
+        }
+    }
+    match found.as_slice() {
+        [] if named.is_empty() => bail!("This session is not a member of a running team"),
+        [] => bail!("This session is not a member of team {named}"),
+        [only] => Ok((only.0, only.1.clone())),
+        many => bail!("This session is a member of {} teams; name one with \"team\"", many.len()),
+    }
+}
+
 /// The member's live attempt from its own session; `team` is optional when the
 /// session belongs to one team (spec section 5). Read only.
 fn current(input: &Value) -> anyhow::Result<Value> {
@@ -346,26 +367,12 @@ fn current(input: &Value) -> anyhow::Result<Value> {
         ensure!(!conversation.is_empty(), "hgs team current runs in a member's session");
     }
     let named = text(input, "team");
-    let teams = Store::open(false)?.teams(false, 1000)?;
-    let mut found: Vec<(&Team, String)> = Vec::new();
-    for team in &teams {
-        if !named.is_empty() && team.id != named {
-            continue;
-        }
-        let member = match &record {
-            Some(record) => calling_member(team, record),
-            None => dsh_member(team, &conversation),
-        };
-        if let Some(member) = member {
-            found.push((team, member));
-        }
-    }
-    let (team, member) = match found.as_slice() {
-        [] if named.is_empty() => bail!("This session is not a member of a team"),
-        [] => bail!("This session is not a member of team {named}"),
-        [only] => (only.0, only.1.clone()),
-        many => bail!("This session is a member of {} teams; name one with \"team\"", many.len()),
-    };
+    // Only the teams that still run, from the indexed query (N3, C1).
+    let teams = Store::open(false)?.active_teams(ACTIVE_TEAMS)?;
+    let (team, member) = current_team(&teams, named, |team| match &record {
+        Some(record) => calling_member(team, record),
+        None => dsh_member(team, &conversation),
+    })?;
     current_view(team, &member)
 }
 
@@ -473,6 +480,14 @@ fn adopted_session(team: &Team, member: &Member, teams: &[Team], sessions: &[sup
     };
     let worktree = member.folder == MemberFolder::Worktree;
     if worktree {
+        // Git runs on this computer; a session elsewhere cannot be checked, so
+        // it is refused with that reason instead of a wrong "not a repository" (L5).
+        ensure!(
+            host.is_empty(),
+            "{} runs on {}; a worktree member's session must be on this computer so its repository can be checked",
+            session.name,
+            here
+        );
         ensure!(same_repository(&found.cwd, &team.folder), "{}'s folder {} is not the team's repository", session.name, found.cwd);
     }
     Ok(Adopted { session, directory: found.cwd.clone(), worktree })
@@ -480,13 +495,33 @@ fn adopted_session(team: &Team, member: &Member, teams: &[Team], sessions: &[sup
 
 /// Adopts the existing sessions a plan or a new member names (F8): the session
 /// as `hgs ls` shows it and its own folder, or a clear refusal before the team
-/// changes.
-fn adopt_existing_sessions(store: &Store, team: &Team, members: &mut [Value]) -> anyhow::Result<()> {
+/// changes. A request that already has a receipt returns before any of it, so
+/// a retry gives the stored receipt instead of listing sessions again (L4).
+fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str, filled: &mut Value) -> anyhow::Result<()> {
+    if store.receipt(request, input)?.is_some() {
+        return Ok(());
+    }
+    let Ok(Some(team)) = store.load(text(input, "team")) else { return Ok(()) };
+    let planned = op == "plan" && team.status == TeamStatus::Planning;
+    let joined = op == "add-member" && matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused);
+    if planned {
+        if let Some(members) = filled["members"].as_array_mut() {
+            adopt_members(store, &team, members)?;
+        }
+    } else if joined {
+        adopt_members(store, &team, std::slice::from_mut(&mut filled["member"]))?;
+    }
+    Ok(())
+}
+
+/// Checks and fills the members that name an existing session (F8).
+fn adopt_members(store: &Store, team: &Team, members: &mut [Value]) -> anyhow::Result<()> {
     if !members.iter().any(|member| member["session"].is_object()) {
         return Ok(());
     }
     let sessions = live_sessions()?;
-    let teams = store.teams(false, 10_000)?;
+    // Only the teams that still run, from the indexed query (C1).
+    let teams = store.active_teams(ACTIVE_TEAMS)?;
     for value in members.iter_mut() {
         if !value["session"].is_object() {
             continue;
@@ -519,6 +554,17 @@ fn drop_report(input: &Value) -> anyhow::Result<Value> {
         "note":"The team's files are read-only here; Zerus records this report from your folder."}))
 }
 
+/// The teams a finished team's `left_running` looks at: only the ones that
+/// still run, from the indexed query, never every stored team (C1).
+fn active_team_records(store: &Store) -> anyhow::Result<Vec<Team>> {
+    store.active_teams(ACTIVE_TEAMS)
+}
+
+/// The stored team list the desktop polls: no live session listing (C1).
+fn list_items(teams: &[Team]) -> Value {
+    json!({"items":teams.iter().map(summary).collect::<Vec<_>>()})
+}
+
 fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
@@ -529,7 +575,8 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 return Ok(json!({"items":[]}));
             }
             let limit = input["limit"].as_i64().unwrap_or(200).clamp(1, 1000);
-            let teams = Store::open(false)?.teams(input["include_archived"].as_bool() == Some(true), limit)?;
+            let store = Store::open(false)?;
+            let teams = store.teams(input["include_archived"].as_bool() == Some(true), limit)?;
             // The desktop lists teams while it shows them: a dispatcher that
             // stopped (an update, a crash) starts again while a team needs one.
             if teams.iter().any(|t| t.status == TeamStatus::Running || (t.status == TeamStatus::Planning && t.brief == Notice::Pending)) {
@@ -537,13 +584,9 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                     eprintln!("hgs: the team dispatcher did not start: {error}");
                 }
             }
-            // A finished team lists the members whose sessions still run (F7).
-            let sessions = teams
-                .iter()
-                .any(|team| matches!(team.status, TeamStatus::Done | TeamStatus::Stopped))
-                .then(live_sessions)
-                .and_then(|sessions| sessions.ok());
-            Ok(json!({"items":teams.iter().map(|team| summary_with(team, &teams, sessions.as_deref())).collect::<Vec<_>>()}))
+            // Stored teams only: a live session listing belongs to status, not
+            // to this list the desktop polls (C1).
+            Ok(list_items(&teams))
         }
         "status" => {
             let store = Store::open(false)?;
@@ -551,8 +594,9 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
             // From the live listing; a failure leaves the members out (F7).
             let sessions = finished.then(live_sessions).and_then(|sessions| sessions.ok());
-            // The sessions of every active team are left out of left_running.
-            let teams = if finished { store.teams(false, 10_000)? } else { Vec::new() };
+            // Only the teams that still run, from the indexed query, so a
+            // finished team's status never reads every team (C1).
+            let teams = if finished { active_team_records(&store)? } else { Vec::new() };
             Ok(view_with(&team, &teams, sessions.as_deref()))
         }
         "events" => {
@@ -596,18 +640,8 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             if matches!(op, "plan" | "add-member") {
                 // An existing session must run here and be free of another
                 // active team; its own folder replaces the planned one (F8).
-                if let Ok(Some(team)) = store.load(team_id) {
-                    let planned = op == "plan" && team.status == TeamStatus::Planning;
-                    let joined = op == "add-member"
-                        && matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused);
-                    if planned {
-                        if let Some(members) = filled["members"].as_array_mut() {
-                            adopt_existing_sessions(&store, &team, members)?;
-                        }
-                    } else if joined {
-                        adopt_existing_sessions(&store, &team, std::slice::from_mut(&mut filled["member"]))?;
-                    }
-                }
+                // A retry returns here before any listing (L4).
+                adopt_existing_sessions(&store, request, input, op, &mut filled)?;
             }
             let receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = actor(team, op, &filled)?;
@@ -707,7 +741,7 @@ mod tests {
         paused.status = TeamStatus::Paused;
         assert_eq!(view_with(&paused, &[], None)["waiting_for_lead"], false);
         // The session list carries both too.
-        let listed = summary_with(&paused, &[], None);
+        let listed = summary(&paused);
         assert_eq!((listed["waiting_for_lead"].as_bool(), listed["pending_phase"].as_u64()), (Some(false), Some(2)));
         // A team that is over shows no pending phase, even with a stale record.
         let mut done = team.clone();
@@ -909,7 +943,7 @@ mod tests {
         assert_eq!(members.iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
         assert_eq!(members.iter().find(|member| member["id"] == "lead").unwrap()["queue"], json!([]));
         // The session list carries the same queue.
-        let listed = summary_with(&team, &[], None);
+        let listed = summary(&team);
         assert_eq!(listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
     }
 
@@ -963,6 +997,23 @@ mod tests {
         worktree.folder = MemberFolder::Worktree;
         let refused = adopted_session(&team, &worktree, &[], &sessions);
         assert!(refused.unwrap_err().to_string().contains("is not the team's repository"));
+        // A session on another computer joins in its own shared folder, but a
+        // worktree member is refused clearly: git runs here, not there (L5).
+        let mut remote = existing_member();
+        remote.computer = "msi".into();
+        remote.session.as_mut().unwrap().host = "msi".into();
+        let remote_sessions = vec![Seen {
+            host: "msi".into(),
+            name: "dsh/x/dev2".into(),
+            live: true,
+            cwd: "/work/w".into(),
+            ..Default::default()
+        }];
+        let adopted = adopted_session(&team, &remote, &[], &remote_sessions).unwrap();
+        assert_eq!((adopted.directory.as_str(), adopted.worktree), ("/work/w", false));
+        remote.folder = MemberFolder::Worktree;
+        let refused = adopted_session(&team, &remote, &[], &remote_sessions);
+        assert!(refused.unwrap_err().to_string().contains("must be on this computer"));
     }
 
     #[test]
@@ -1014,8 +1065,8 @@ mod tests {
         assert!(view_with(&team, &[], Some(&sessions)).get("left_running").is_none());
         team.status = TeamStatus::Done;
         assert_eq!(view_with(&team, &[], Some(&[]))["left_running"], json!([]));
-        // The session list says the same.
-        assert_eq!(summary_with(&team, &[], Some(&sessions))["left_running"], value["left_running"]);
+        // The session list never carries a live listing: only status does (C1).
+        assert!(summary(&team).get("left_running").is_none());
     }
 
     #[test]
@@ -1037,13 +1088,91 @@ mod tests {
         working.members.iter_mut().find(|member| member.id == "dev").unwrap().session = Some(dev.clone());
         let value = view_with(&done, &[working.clone()], Some(&sessions));
         assert_eq!(value["left_running"], json!([]));
-        // The list agrees, and a paused team keeps the session out too.
-        assert_eq!(summary_with(&done, &[working.clone()], Some(&sessions))["left_running"], json!([]));
+        // A paused team keeps the session out too.
         working.status = TeamStatus::Paused;
         assert_eq!(view_with(&done, &[working.clone()], Some(&sessions))["left_running"], json!([]));
         // Once that team is over, the session is left running again.
         working.status = TeamStatus::Done;
         assert_eq!(view_with(&done, &[working], Some(&sessions))["left_running"], json!([{"member":"dev","role":"Backend","session":dev}]));
+    }
+
+    #[test]
+    fn current_ignores_finished_teams() {
+        let mut done = running_team();
+        done.id = "done".into();
+        done.status = TeamStatus::Done;
+        let mut running = running_team();
+        running.id = "running".into();
+        running.name = "Running".into();
+        let dev = |team: &Team| team.members.iter().find(|member| member.id == "dev").map(|member| member.id.clone());
+        // Only a finished team is not "a running team" any more (N3).
+        let error = current_team(&[done.clone()], "", dev).unwrap_err().to_string();
+        assert_eq!(error, "This session is not a member of a running team");
+        // The same session in a running team is found; the finished one is not.
+        let teams = [done.clone(), running.clone()];
+        let (team, member) = current_team(&teams, "", dev).unwrap();
+        assert_eq!((team.id.as_str(), member.as_str()), ("running", "dev"));
+        assert!(current_team(&[done], "done", dev).is_err());
+    }
+
+    #[test]
+    fn a_retried_adopted_session_request_returns_its_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut team = running_team();
+        team.status = TeamStatus::Planning;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        // The first plan records its receipt for a member with a session.
+        const PLAN: &str = "44444444-4444-4444-8444-444444444444";
+        let input = json!({"members":[{"id":"dev2","role":"Backend","agent":"dsh","session":{"name":"dsh/x/dev2"}}],
+            "tasks":[{"id":1,"title":"A","assignee":"dev2"}]});
+        let receipt = store
+            .mutate(Some((PLAN, &input)), "t", None, |team, events| {
+                ops::apply(team, "plan", &input, &Actor::Human, &BTreeSet::new(), events)
+            })
+            .unwrap();
+        // The retry returns the receipt before listing sessions (the named
+        // session is not live, so adoption would refuse it) - L4.
+        let mut filled = input.clone();
+        adopt_existing_sessions(&store, PLAN, &input, "plan", &mut filled).unwrap();
+        assert_eq!(filled, input);
+        assert_eq!(store.receipt(PLAN, &input).unwrap().unwrap(), receipt);
+    }
+
+    #[test]
+    fn status_of_a_finished_team_reads_only_active_teams() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut done = running_team();
+        done.id = "done".into();
+        done.status = TeamStatus::Done;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), done, vec![]).unwrap();
+        for n in 0..20u32 {
+            let mut old = running_team();
+            old.id = format!("old{n}");
+            old.status = TeamStatus::Done;
+            store.create(&format!("22222222-2222-4222-8222-{n:012}"), &json!({}), old, vec![]).unwrap();
+        }
+        let mut active = running_team();
+        active.id = "active".into();
+        active.status = TeamStatus::Paused;
+        store.create("33333333-3333-4333-8333-333333333333", &json!({}), active, vec![]).unwrap();
+        // The status path reads the indexed active query, not the 21 finished
+        // teams (C1).
+        let teams = active_team_records(&store).unwrap();
+        assert_eq!(teams.iter().map(|team| team.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
+    }
+
+    #[test]
+    fn the_team_list_is_stored_only() {
+        let mut done = running_team();
+        done.status = TeamStatus::Done;
+        // A list item comes from the stored record alone: no left_running, no
+        // live session listing (C1).
+        let items = list_items(&[done]);
+        assert_eq!(items["items"].as_array().unwrap().len(), 1);
+        assert!(items["items"][0].get("left_running").is_none());
+        assert!(items["items"][0]["members"][0]["queue"].is_array());
     }
 
     #[test]

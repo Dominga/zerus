@@ -123,6 +123,34 @@ impl Store {
         rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
     }
 
+    /// The teams that still run: Planning, Running or Paused, most recently
+    /// changed first, at most `limit`. Uses the (status, updated) index, so a
+    /// finished team's status never reads every team (C1).
+    pub(crate) fn active_teams(&self, limit: i64) -> anyhow::Result<Vec<Team>> {
+        let mut statement = self.db.prepare(
+            "SELECT payload FROM teams WHERE status IN ('planning','running','paused') ORDER BY updated DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// The stored receipt of an identical request, read only: a retry returns
+    /// it before the request does any outside work (L4).
+    pub(crate) fn receipt(&self, id: &str, input: &Value) -> anyhow::Result<Option<Value>> {
+        ensure!(canonical_uuid(id), "A canonical request_id is required");
+        let stored: Option<(String, String)> = self
+            .db
+            .query_row("SELECT digest,receipt FROM operations WHERE id=?1", params![id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        match stored {
+            None => Ok(None),
+            Some((digest_text, receipt)) => {
+                ensure!(digest_text == digest(input), "This request_id was already used for another request");
+                Ok(Some(serde_json::from_str(&receipt)?))
+            }
+        }
+    }
+
     /// A page of one team's feed, newest first; `before` is the previous page's
     /// cursor. Entries appended meanwhile never shift an older page.
     pub(crate) fn events(&self, team: &str, before: Option<i64>, limit: i64) -> anyhow::Result<Value> {
@@ -258,6 +286,7 @@ fn record(transaction: &rusqlite::Transaction, id: &str, input: &Value, receipt:
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::{TeamStatus};
     use super::*;
 
     fn store() -> (tempfile::TempDir, Store) {
@@ -279,6 +308,33 @@ mod tests {
         assert!(store.create(REQUEST, &json!({"name":"Other"}), team("t2"), vec![]).is_err());
         assert!(store.create("not-a-uuid", &input, team("t3"), vec![]).is_err());
         assert_eq!(store.load("t1").unwrap().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn the_active_teams_query_is_bounded() {
+        let (_dir, mut store) = store();
+        for n in 0..12u32 {
+            let mut t = team(&format!("t{n}"));
+            t.status = if n % 4 == 0 { TeamStatus::Running } else { TeamStatus::Done };
+            let request = format!("00000000-0000-4000-8000-{n:012}");
+            store.create(&request, &json!({}), t, vec![]).unwrap();
+        }
+        // Only the three running teams, never the nine done ones, and at most
+        // the requested limit (C1).
+        let active = store.active_teams(1000).unwrap();
+        assert_eq!(active.len(), 3);
+        assert!(active.iter().all(|team| team.status == TeamStatus::Running));
+        assert_eq!(store.active_teams(2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_receipt_is_read_before_the_request_runs() {
+        let (_dir, mut store) = store();
+        store.create(REQUEST, &json!({"name":"Checkout"}), team("t1"), vec![]).unwrap();
+        assert_eq!(store.receipt(REQUEST, &json!({"name":"Checkout"})).unwrap().unwrap()["status"], "created");
+        assert!(store.receipt("22222222-2222-4222-8222-222222222222", &json!({})).unwrap().is_none());
+        // The same id with another request is refused, as a mutation would.
+        assert!(store.receipt(REQUEST, &json!({"name":"Other"})).is_err());
     }
 
     #[test]

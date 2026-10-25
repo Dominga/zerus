@@ -24,7 +24,7 @@ object OptionalFirebase {
         val generation = synchronized(tokenLock) { ++tokenGeneration }
         CoroutineScope(Dispatchers.IO).launch {
             runCatching { synchronized(tokenLock) {
-                if (generation == tokenGeneration) { PrivateStore(context).saveFirebaseToken(token); enqueue(context) }
+                if (generation == tokenGeneration) saveTokenAndEnqueue(context,token)
             } }
         }
     }
@@ -46,7 +46,7 @@ object OptionalFirebase {
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
             CoroutineScope(Dispatchers.IO).launch {
                 runCatching { synchronized(tokenLock) {
-                    if (generation == tokenGeneration) { PrivateStore(context).saveFirebaseToken(token); enqueue(context) }
+                    if (generation == tokenGeneration) saveTokenAndEnqueue(context,token)
                 } }
             }
         }.addOnFailureListener {
@@ -59,16 +59,38 @@ object OptionalFirebase {
             }
         }
     }
-    fun enqueue(context: Context) {
+    private fun saveTokenAndEnqueue(context:Context,token:String) {
+        val store=PrivateStore(context)
+        val policy=if(store.firebaseToken()!=token) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP
+        store.saveFirebaseToken(token)
+        enqueue(context,policy)
+    }
+    private fun enqueue(context: Context,policy:ExistingWorkPolicy) {
         val store = PrivateStore(context)
         val token = store.firebaseToken()
         if (token.isBlank()) return
         store.connections().filter { FcmRegistrationPolicy.needsRegistration(token, store.firebaseBinding(it.id)) }.forEach { connection ->
-            val request = OneTimeWorkRequestBuilder<FirebaseTokenWorker>()
-                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-                .setInputData(Data.Builder().putString("connection", connection.id).build()).build()
-            WorkManager.getInstance(context).enqueueUniqueWork("zerus-fcm:${connection.id}", ExistingWorkPolicy.REPLACE, request)
+            enqueue(context,connection,policy)
         }
+    }
+    /** A verified catalog repairs registration without inheriting pending work's
+     * backoff. Its separate KEEP chain never cancels a registration in flight;
+     * both chains serialize and recheck the binding inside PushSetupLocks. */
+    @JvmStatic fun ready(context:Context,connection:Connection) {
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val store=PrivateStore(context);val token=store.firebaseToken()
+                if(store.connections().contains(connection) &&
+                    FcmRegistrationPolicy.needsRegistration(token,store.firebaseBinding(connection.id)))
+                    enqueue(context,connection,ExistingWorkPolicy.KEEP,ready=true)
+            }
+        }
+    }
+    private fun enqueue(context:Context,connection:Connection,policy:ExistingWorkPolicy,ready:Boolean=false) {
+        val request=OneTimeWorkRequestBuilder<FirebaseTokenWorker>()
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setInputData(Data.Builder().putString("connection",connection.id).build()).build()
+        WorkManager.getInstance(context).enqueueUniqueWork(FcmRegistrationPolicy.workName(connection.id,ready),policy,request)
     }
 }
 private class FirebaseBackend(private val context: Context,
@@ -143,16 +165,21 @@ class FirebaseTokenWorker(context: Context, parameters: WorkerParameters) : Coro
         if (!FcmRegistrationPolicy.needsRegistration(token, store.firebaseBinding(connection.id))) return Result.success()
         return PushSetupLocks.withConnection(connection.id) { try {
             val api = RelayApi(workspace=store.workspaceJournal)
-            val providers = api.capabilities(connection).optJSONArray("push_providers")
-            if (providers == null || (0 until providers.length()).none { providers.optString(it) == "fcm" }) {
-                store.savePushStatusIfCurrent(connection, "Gateway Firebase push is not configured. Use the live connection.")
-                return@withConnection Result.failure()
+            when(api.registerFcmWhenReady(connection,token,
+                isCurrent={ store.connections().contains(connection) && store.firebaseToken()==token &&
+                    FcmRegistrationPolicy.needsRegistration(token,store.firebaseBinding(connection.id)) },
+                confirm={ store.confirmFirebaseBinding(connection,token) })) {
+                FcmRegistrationResult.Complete -> Result.success()
+                FcmRegistrationResult.Pending -> {
+                    store.savePushStatusIfCurrent(connection,"Firebase push setup is waiting for encrypted phone approval.")
+                    Result.retry()
+                }
+                FcmRegistrationResult.Removed -> Result.failure()
+                FcmRegistrationResult.Unsupported -> {
+                    store.savePushStatusIfCurrent(connection,"Gateway Firebase push is not configured. Use the live connection.")
+                    Result.failure()
+                }
             }
-            // Push registration is idempotent and separate from native session mutations.
-            if (!store.connections().contains(connection) || store.firebaseToken() != token) return@withConnection Result.success()
-            api.registerPush(connection,"fcm",token)
-            store.confirmFirebaseBinding(connection, token)
-            Result.success()
         } catch (e: CancellationException) { throw e }
         catch (e: RelayException) {
             store.savePushStatusIfCurrent(connection, "Firebase push setup waiting for gateway connection.")

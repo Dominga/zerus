@@ -70,18 +70,42 @@ internal suspend fun RelayApi.synchronizeWorkspace(connection:Connection):Worksp
                 if(page.isNull("next_after")) { require(nextMembership.revision==latest);break }
                 require(changes.isNotEmpty() && WorkspaceProtocol.number(page,"next_after")==nextMembership.revision)
             }
-            val approval=requireNotNull(state.enrollment);val membership=requireNotNull(state.membership)
-            require(journal.head(connection,approval.membership.revision)==approval.membership.head()) { "Enrollment is not on this workspace's verified history." }
-            check(membership.members[state.identity.device.deviceId]==state.identity.device) { "This phone has been removed from the workspace." }
+            val membership=requireNotNull(state.membership)
+            state.requireEnrollmentHistory(journal,connection)
+            check(state.isActiveMember(membership)) { "This phone has been removed from the workspace." }
             state
         }
     }
 
+private fun WorkspaceState.requireEnrollmentHistory(journal:WorkspaceJournal,connection:Connection) {
+    val approval=requireNotNull(enrollment)
+    require(journal.head(connection,approval.membership.revision)==approval.membership.head()) { "Enrollment is not on this workspace's verified history." }
+}
+private fun WorkspaceState.isActiveMember(current:WorkspaceMembership)=
+    enrollment!=null && current.members[identity.device.deviceId]==identity.device
+
 private fun WorkspaceState.requireActive():WorkspaceMembership {
     val current=checkNotNull(membership) { "Waiting for the inviting computer to approve this phone. Refresh to check again." }
-    check(enrollment!=null && current.members[identity.device.deviceId]==identity.device) { "This encrypted phone enrollment is not active." }
+    check(isActiveMember(current)) { "This encrypted phone enrollment is not active." }
     return current
 }
+
+internal enum class WorkspacePushReadiness { Pending, Active, Removed }
+
+/** Local verified authority only. A pending credential must never POST /push.
+ * The sync lock excludes the intermediate approval+bootstrap save before its
+ * signed Add reaches the history index. No enrollment POST or recovery occurs. */
+internal suspend fun RelayApi.workspacePushReadiness(connection:Connection):WorkspacePushReadiness =
+    WorkspaceFlights.locks.getOrPut(connection.id) { Mutex() }.withLock {
+        withContext(Dispatchers.IO) {
+            val journal=journal();val state=journal.load(connection)
+            val approval=state.enrollment;val membership=state.membership
+            if(approval==null || membership==null || membership.revision<approval.membership.revision)
+                return@withContext WorkspacePushReadiness.Pending
+            state.requireEnrollmentHistory(journal,connection)
+            if(state.isActiveMember(membership)) WorkspacePushReadiness.Active else WorkspacePushReadiness.Removed
+        }
+    }
 
 internal suspend fun RelayApi.encryptedComputers(connection:Connection):JSONObject=withContext(Dispatchers.Default) {
     val state=synchronizeWorkspace(connection);val membership=state.requireActive();val journal=journal()

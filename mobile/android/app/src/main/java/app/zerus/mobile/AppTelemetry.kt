@@ -34,6 +34,10 @@ object AppTelemetry {
         if (BuildConfig.FIREBASE_ENABLED) Class.forName("app.zerus.mobile.OptionalFirebase")
             .getMethod("start", Context::class.java).invoke(null, context)
     }
+    fun encryptedWorkspaceReady(context:Context,connection:Connection) {
+        if (BuildConfig.FIREBASE_ENABLED && connection.protocolVersion==2) Class.forName("app.zerus.mobile.OptionalFirebase")
+            .getMethod("ready", Context::class.java, Connection::class.java).invoke(null,context,connection)
+    }
 }
 class ZerusApplication : Application() {
     private lateinit var telemetry: AndroidTelemetryPreferences

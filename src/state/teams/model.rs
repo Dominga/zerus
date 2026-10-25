@@ -57,6 +57,10 @@ pub(crate) struct Settings {
     /// told once that the member has not started (A1).
     #[serde(default = "default_start_timeout")]
     pub start_timeout_seconds: u64,
+    /// How long a finished turn may stay blocked by an open question or by
+    /// Background work before the lead is told once (N5).
+    #[serde(default = "default_blocked_timeout")]
+    pub blocked_timeout_seconds: u64,
 }
 
 fn default_max_members() -> usize {
@@ -67,6 +71,9 @@ fn default_report_timeout() -> u64 {
 }
 fn default_start_timeout() -> u64 {
     180
+}
+fn default_blocked_timeout() -> u64 {
+    1800
 }
 fn default_phase() -> u32 {
     1
@@ -82,6 +89,7 @@ impl Default for Settings {
             max_members: default_max_members(),
             report_timeout_seconds: default_report_timeout(),
             start_timeout_seconds: default_start_timeout(),
+            blocked_timeout_seconds: default_blocked_timeout(),
         }
     }
 }
@@ -319,8 +327,10 @@ pub(crate) struct Question {
 }
 
 impl Question {
+    /// Still waiting for an answer. A question closed with its attempt or a
+    /// finished task has `answered_at` and no answer.
     pub(crate) fn open(&self) -> bool {
-        self.answer.is_empty()
+        self.answer.is_empty() && self.answered_at.is_none()
     }
 }
 
@@ -357,6 +367,14 @@ pub(crate) struct Attempt {
     /// When the member's turn after the hand-off ended, for No report.
     #[serde(default)]
     pub turn_ended_at: Option<f64>,
+    /// The first tick that saw the capture gate open: the report timeout counts
+    /// from here, not from the reply (C2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_ready_at: Option<f64>,
+    /// The first tick that saw the finished turn blocked by an open question or
+    /// by Background work; the lead is told once it lasts too long (N5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_since: Option<f64>,
     /// The member's session reply id at `turn_ended_at`: a newer turn is never
     /// captured as this attempt's report (A2).
     #[serde(default, skip_serializing_if = "String::is_empty")]

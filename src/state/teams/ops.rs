@@ -59,6 +59,10 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         (30..=3600).contains(&settings.start_timeout_seconds),
         "The start warning waits 30 to 3600 seconds after delivery"
     );
+    ensure!(
+        (60..=86_400).contains(&settings.blocked_timeout_seconds),
+        "The blocked warning waits 60 to 86400 seconds"
+    );
     Ok(())
 }
 
@@ -444,9 +448,25 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     }
 }
 
+/// Closes the open questions of a task: its attempt ended or the task was
+/// decided, so they are never answered and never sent (N5).
+fn close_questions(task: &mut Task) {
+    let at = now();
+    for attempt in &mut task.attempts {
+        for question in &mut attempt.questions {
+            if question.open() {
+                question.answered_at = Some(at);
+                question.by = "Zerus".into();
+            }
+        }
+    }
+}
+
 /// The task's open attempt must be revoked before another starts. The
 /// dispatcher interrupts the old worker separately.
 fn revoke(task: &mut Task, why: &str) -> Option<u32> {
+    // The attempt is over: its questions close with it (N5).
+    close_questions(task);
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
     attempt.error = why.to_owned();
@@ -707,7 +727,17 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
         bail!("Unknown question {question}")
     };
     let asked = &team.tasks[task].attempts[attempt].questions[question_at];
-    ensure!(asked.open(), "Question {question} was already answered");
+    ensure!(
+        !team.tasks[task].status.finished(),
+        "Task #{} is decided; its question {question} is closed",
+        team.tasks[task].id
+    );
+    if !asked.open() {
+        bail!(
+            "Question {question} was {}",
+            if asked.answer.is_empty() { "closed with its attempt" } else { "already answered" }
+        );
+    }
     let (task_id, n) = (team.tasks[task].id, team.tasks[task].attempts[attempt].n);
     let label = actor.label(team);
     let asked = &mut team.tasks[task].attempts[attempt].questions[question_at];
@@ -876,6 +906,8 @@ fn check(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
         attempt.state = AttemptState::Refused;
         attempt.error = "not delivered (checked)".into();
         task.status = TaskStatus::Pending;
+        // Nothing reached the member: its questions close with the attempt (N5).
+        close_questions(task);
     }
     events.push(Event::new("checked", json!({"by":"You","task":id,"attempt":n,"delivered":arrived})));
     Ok(json!({"status":if arrived {"in_progress"} else {"pending"},"task":id}))
@@ -2201,5 +2233,48 @@ mod tests {
         assert_eq!(error, "The start warning waits 30 to 3600 seconds after delivery");
         plan(&mut team, &json!({"tasks":[],"settings":{"start_timeout_seconds":3600}}), &Actor::Human, &mut events).unwrap();
         assert_eq!(team.settings.start_timeout_seconds, 3600);
+        // The long-block warning defaults to 30 min and is bounded (N5).
+        let (team, _) = create("t", &json!({"name":"T","lead":lead})).unwrap();
+        assert_eq!(team.settings.blocked_timeout_seconds, 1800);
+        for seconds in [59, 86_401] {
+            let error = create("t", &json!({"name":"T","lead":lead,"settings":{"blocked_timeout_seconds":seconds}}))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, "The blocked warning waits 60 to 86400 seconds", "{seconds}");
+        }
+        let (team, _) = create("t", &json!({"name":"T","lead":lead,"settings":{"blocked_timeout_seconds":60}})).unwrap();
+        assert_eq!(team.settings.blocked_timeout_seconds, 60);
+    }
+
+    #[test]
+    fn questions_close_with_their_attempt_or_task() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        hand_out(&mut team, 1);
+        apply(&mut team, "ask", &json!({"text":"Which database?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+        assert!(team.task(1).unwrap().attempts[0].open_question().is_some());
+        // The attempt ends with a rejection: its question closes and is never
+        // answered or sent (N5).
+        let attempt = team.task(1).unwrap().attempts[0].id.clone();
+        report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        decide(&mut team, &json!({"task":1,"reason":"No"}), &Actor::Member("lead".into()), false, &mut events).unwrap();
+        let question = &team.task(1).unwrap().attempts[0].questions[0];
+        assert!(!question.open() && question.answer.is_empty() && question.answered_at.is_some());
+        assert_eq!((question.by.as_str(), question.notice), ("Zerus", Notice::None));
+        let error = apply(&mut team, "reply", &json!({"question":"q1","text":"Yes"}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("closed with its attempt"), "{error}");
+        // A finished task closes its questions too, and reply names the task.
+        let mut cancelled = running_team();
+        hand_out(&mut cancelled, 1);
+        apply(&mut cancelled, "ask", &json!({"text":"Which?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+        apply(&mut cancelled, "cancel", &json!({"task":1}), &Actor::Human, &none, &mut events).unwrap();
+        assert!(!cancelled.task(1).unwrap().attempts[0].questions[0].open());
+        let error = apply(&mut cancelled, "reply", &json!({"question":"q1","text":"Yes"}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Task #1 is decided; its question q1 is closed");
     }
 }

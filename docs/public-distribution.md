@@ -85,18 +85,25 @@ remain explicit; desktop continues to provide notifications and instructions.
 
 For dev, the provenance origin is successful upstream-main **CI artifacts** plus
 the lightweight `dev` Git tag, rather than a new GitHub Release for every push.
-Only an upstream main push builds Dev candidates. `ci.yml` requires shared
-Rust/protocol/connector, Linux CLI, Arch, macOS and Android checks. Windows and
-iOS are qualified by Nightly and affected PRs. After this run's gate succeeds,
+Only an upstream main push builds public Dev candidates. `ci.yml` requires
+successful distributable builds, package identity and installation checks rather
+than the full regression matrix. Its Dev-only Arch and Mac modes skip regression
+test execution. After this run's build gate succeeds,
 the protected Android job assembles/seals one APK with the existing signer and
 removes private inputs; it never waits on a polling runner. Android unit/lint
-checks remain credential-free before the gate.
+checks remain credential-free in the independent `CI regression` workflow.
 
-The credential-free pinned-Qt Mac bundle starts with the checks and packages its
-actual tested Release app. After the same run's gate and unsigned bundle pass,
+The credential-free pinned-Qt Mac bundle starts with the Arch package and packages
+its Release app. After the same run's build gate and unsigned bundle pass,
 `macos-cask.yml` signs/notarizes/installs it and seals the ZIP/DMG. Dev assembly
 still waits for the Arch, Android and enabled Mac candidates. No signing input
 or publication credential reaches PR code or the parallel unsigned build.
+
+Full regression tests start separately when the build run completes. Their
+failures remain visible and are fixed in separate follow-up work, while the
+successfully built Dev stays available for testing. Stable and Nightly retain
+their full qualification policy. Internal same-repository PRs do not need an
+additional manual trust step before ordinary Dev integration.
 
 The final main-only release-environment job advances `refs/tags/dev` to that
 commit using a fast-forward update. A late older build cannot move the tag back;

@@ -137,9 +137,14 @@ audit record durably before delivery, and retain exact run/conversation/question
 identity. Unknown delivery never authorizes replay. Ordinary questions, startup
 trust and broader persistent permission changes remain manual.
 
-Hosted Dev CI checks shared Rust/protocol contracts, Linux CLI, Arch, macOS and
-Android on main. PRs add Windows/iOS for affected desktop, native or shared paths;
-unknown change inventories retain both. Nightly and Stable run the full matrix.
+Dev publication is build-gated: successful distributables, package/source identity,
+signatures and installation checks admit Dev without waiting for the full regression
+matrix. Main regression tests run separately and keep failures visible; file and fix
+them as follow-up work without blocking an available Dev. Internal same-repository
+PRs need no additional manual trust approval for ordinary Dev integration.
+Main regressions cover shared Rust/protocol contracts, Linux CLI, Arch, macOS and
+Android. PRs add Windows/iOS for affected desktop, native or shared paths;
+unknown change inventories retain both. Nightly and Stable retain the full matrix.
 iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
 source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise

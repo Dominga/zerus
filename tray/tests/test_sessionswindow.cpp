@@ -3,6 +3,8 @@
 #include <QApplication>
 #include <QFrame>
 #include <QToolButton>
+#include <QAbstractButton>
+#include <tuple>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QDateTime>
@@ -58,6 +60,7 @@
 #include "SessionsWindow.h"
 #include "DownloadCache.h"
 #include "ProcessView.h"
+#include "TasksView.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
 #include "ExternalFile.h"
@@ -97,6 +100,8 @@
 #include "PopupMouse.h"
 #include "AccountsPage.h"
 #include "FakeCli.h"
+#include "FakeTasksCli.h"
+#include "TaskDrag.h"
 #include "LaunchWarnings.h"
 #include "LocalSessionHost.h"
 #include "ProcessRunner.h"
@@ -347,6 +352,9 @@ private slots:
     void sessionRowsHaveNoHoverPopup();
     void subagentGroupsAndUnavailableActivity();
     void inspectorPreservesWorkspaceAndReportsTasks();
+    void tasksTabFollowsTheOpenSessionsProject();
+    void tasksDropOnTheirProjectsSessionsAndHeader();
+    void tasksPreview();
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
@@ -548,6 +556,9 @@ private:
     // A copy of the base fixture whose inspect answers with these details, so
     // polls that arrive while a test waits cannot replace them.
     QString programInspecting(const QString &name, const QJsonObject &details, const QJsonObject &child = {}, const QJsonObject &usage = {}) const;
+    // A copy of the base fixture, named `name`, whose `hgs task …` calls answer with
+    // this listing of project "Work"; each call's argv is appended to <fixture>.tasks.
+    QString tasksFixture(const QString &name, const QJsonArray &tasks) const;
     // Created by initTestCase(): listing the data rows (-datatags, as
     // RunQtShard.cmake does) exits without destroying the test object. That
     // listing calls every *_data() function first, so none may use m_dir.
@@ -1071,6 +1082,217 @@ void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
         }
     }
     window.showSession("mac","claude/infra/review"); QVERIFY(projects->selection().isEmpty()); QCOMPARE(parents(),5);
+}
+
+void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
+{
+    SessionOrganization org; const auto work=org.createGroup("Work");
+    org.moveSession(org.observe("arch","codex/hgs/dashboard",""),work); org.moveSession(org.observe("arch","kimi/docs/research",""),work);
+    QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    // The fake replica: one task in review and two in To do, one pinned to the
+    // project's other session.
+    QJsonArray tasks;
+    for (const auto &[id, stage, session] : QList<std::tuple<QString, QString, QString>>{{"T-000001","review",""},{"T-000002","todo","kimi/docs/research"},{"T-000003","todo",""}}) {
+        QJsonObject task{{"uuid",id},{"id",id},{"ref","Work/"+id},{"text","Task "+id},{"stage",stage},{"summary",""},{"cancel_reason",""},
+            {"cancelled_at",QJsonValue()},{"created_at",1},{"stage_at",1},{"writable",true},{"author",QJsonObject{{"kind","person"}}},
+            {"target",session.isEmpty()?QJsonObject{{"kind","any"}}:QJsonObject{{"kind","session"},{"machine","m"},{"session",session},{"host",""}}},
+            {"session",QJsonValue()},{"rank","V"}};
+        tasks<<task;
+    }
+    const QString fixture = tasksFixture("tasks-hgs", tasks); QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>();
+    auto *badge = window.findChild<TaskTabBadge *>("taskTabBadge"); QVERIFY(tabs && view && badge);
+    QCOMPARE(tabs->tabBar()->tabButton(tabs->indexOf(view), QTabBar::RightSide), badge);
+    // The label counts the project's tasks in In review and To do.
+    QTRY_COMPARE(badge->property("todo").toInt(), 2); QCOMPARE(badge->property("review").toInt(), 1); QVERIFY(badge->isVisible());
+    // The counts take room in the label: the tab widens to hold the text and the badge.
+    QTRY_VERIFY(badge->width() >= badge->sizeHint().width() && badge->width() > 0);
+    QVERIFY(tabs->tabBar()->tabRect(tabs->indexOf(view)).width() > QFontMetrics(tabs->tabBar()->font()).horizontalAdvance("Tasks") + badge->width());
+    QVERIFY(tabs->tabBar()->tabRect(tabs->indexOf(view)).contains(badge->geometry()));
+    QFile calls(fixture + ".tasks"); QVERIFY(calls.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(calls.readLine()).array(), QJsonArray({"task", "list", "--project", work}));
+    tabs->setCurrentWidget(view); QTRY_VERIFY(view->isVisible());
+    // The tab keeps Activity's column: the task input lines up with the message input.
+    auto *messages = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(messages);
+    QTRY_COMPARE(view->composer()->mapTo(&window, QPoint()).x(), messages->mapTo(&window, QPoint()).x());
+    QCOMPARE(view->composer()->width(), messages->width());
+    QCOMPARE(view->findChild<QWidget *>("taskTile:review")->mapTo(&window, QPoint()).x(), messages->mapTo(&window, QPoint()).x());
+    QCOMPARE(view->composer()->sessionKey(), QString("task-draft\n\ncodex/hgs/dashboard"));
+    // The project's other session exists, so its pinned task can be sent.
+    view->findChild<QAbstractButton *>("taskTile:todo")->click();
+    auto *row = view->findChild<QWidget *>("taskRow:T-000002"); QVERIFY(row);
+    QVERIFY(row->findChild<QToolButton *>("taskAction:sendNow")->isEnabled());
+    QVERIFY(row->findChild<QLabel *>("taskMeta")->text().contains("→ research"));
+    // The side panel's first tab is the agent's own plan, not the project's tasks.
+    QCOMPARE(window.findChild<QTabWidget *>("sessionInspector")->tabText(0), QString("Plan && agents"));
+    // A session in no project explains where tasks live.
+    window.showSession({}, "codex/website/navigation");
+    QTRY_VERIFY(view->findChild<QLabel *>("taskEmpty")->text().startsWith("Tasks belong to a project"));
+    QCOMPARE(badge->property("todo").toInt(), 0); QVERIFY(!badge->isVisible());
+}
+
+QString TestSessionsWindow::tasksFixture(const QString &name, const QJsonArray &tasks) const
+{
+    QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
+    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':json.loads("
+        + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + "),'damaged':[]}))\n";
+    const QString fixture = m_dir->filePath(name);
+    return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? fixture : QString();
+}
+
+// Renders the Tasks tab beside design/task-tracker: the prototype's projects,
+// sessions and tasks, each stage in both themes, hovered rows and the dialogs.
+void TestSessionsWindow::tasksPreview()
+{
+    const auto directory = qEnvironmentVariable("HGS_PREVIEW_DIR");
+    if (directory.isEmpty()) QSKIP("Set HGS_PREVIEW_DIR to render the tasks preview");
+    QDir().mkpath(directory);
+    SessionOrganization org; const auto orchard = org.createGroup("orchard"), lumen = org.createGroup("lumen");
+    for (const auto *name : {"claude/orchard/api", "codex/orchard/web", "claude/orchard/docs"}) org.moveSession(org.observe("arch", name, ""), orchard);
+    for (const auto *name : {"claude/lumen/main", "codex/lumen/mobile"}) org.moveSession(org.observe("arch", name, ""), lumen);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    const auto session = [](const QString &name, const QString &activity, const QString &phase, const QString &prompt, const QString &model, const QString &effort) {
+        SessionInfo info; info.name = name; info.cmd = name.section('/', 0, 0); info.project = name.section('/', 1, 1); info.tag = name.section('/', 2);
+        info.tracked = true; info.resumable = true; info.activity = activity; info.phase = phase; info.prompt = prompt; info.model = model; info.effort = effort;
+        if (phase == "tool") info.currentTool = "Bash";
+        return info;
+    };
+    BoxState arch; arch.host = "arch"; arch.ok = true; arch.metrics = QJsonObject{{"platform", "linux"}};
+    arch.sessions = {session("claude/orchard/api", "busy", "tool", "T-bt41xh: Add rate limiting to POST /v1/orders", "opus-5-5", "high"),
+                     session("codex/orchard/web", "busy", "input", "T-vg42sm: The checkout e2e test fails in CI now and then", "gpt-6.1-sol", "high"),
+                     session("claude/orchard/docs", "idle", "idle", "Collect questions for partners about their API limits", "sonnet-5-5", "medium"),
+                     session("claude/lumen/main", "busy", "tool", "The image upload test sometimes fails in parallel runs", "opus-5-5", "xhigh"),
+                     session("codex/lumen/mobile", "idle", "idle", "Polish the onboarding screens", "gpt-6.1-sol", "high")};
+    FleetState fleet; fleet.setLocal(arch, QDateTime::currentMSecsSinceEpoch());
+    // The prototype's orchard tasks in its order; IDs keep its numbers.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch(), minute = 60000;
+    const auto ran = [](const QString &name) { return FakeTasksCli::pinned(name); };
+    const auto agent = [](const QString &name) { return QJsonObject{{"kind", "agent"}, {"session", name}}; };
+    QJsonArray tasks;
+    const auto add = [&](const QString &id, const QString &stage, const QString &text, QJsonObject extra = {}) {
+        auto task = FakeTasksCli::task(int(tasks.size()) + 1, stage, extra); task["uuid"] = "uuid-" + id; task["id"] = id; task["ref"] = "orchard/" + id;
+        task["text"] = text; task["rank"] = QString(QChar(char16_t(u'a' + tasks.size()))); task["created_at"] = double(now - 90 * minute);
+        if (!extra.contains("stage_at")) task["stage_at"] = double(now - 60 * minute);
+        QJsonArray log{QJsonObject{{"actor", extra.value("author").toObject().isEmpty() ? QJsonObject{{"kind", "person"}} : extra.value("author")},
+                                   {"at", double(now - 90 * minute)}, {"kind", "created"}, {"session", QJsonValue()}}};
+        if (extra.contains("session")) log << QJsonObject{{"actor", QJsonObject{{"kind", "person"}}}, {"at", task["stage_at"]}, {"kind", "sent"}, {"session", extra.value("session")}};
+        task["log"] = log; tasks << task;
+    };
+    add("T-ka38pd", "done", "Add a /healthz endpoint: check the database and Redis, answer 200 or 503 with the reason.",
+        {{"session", ran("claude/orchard/api")}, {"summary", "/healthz checks the database and Redis; tests are green."}});
+    add("T-mc39fw", "review", "Make a multi-stage Dockerfile for web; the image should get much smaller.",
+        {{"session", ran("codex/orchard/web")}, {"summary", "Image 1.2 GB → 310 MB."}});
+    add("T-qe40rn", "done", "Remove the N+1 in GET /v1/orders and add a test for the number of database queries.",
+        {{"session", ran("claude/orchard/api")}, {"summary", "select_related and a query-count test."}});
+    add("T-bt41xh", "active", "Add rate limiting to POST /v1/orders: at most 30 requests per minute per API key. The limit comes from the config; answer 429 with Retry-After. Cover it with tests.",
+        {{"session", ran("claude/orchard/api")}, {"stage_at", double(now - 13 * minute)}});
+    add("T-vg42sm", "active", "The checkout e2e test fails in CI now and then. Find the cause and make it stable without disabling it.",
+        {{"session", ran("codex/orchard/web")}, {"stage_at", double(now - 34 * minute)}});
+    add("T-dn44wk", "todo", "Move the sessions table to UUID keys. The migration must not cause downtime: new column, backfill, switch, drop the old one.",
+        {{"target", ran("claude/orchard/api")}});
+    add("T-hy43ce", "todo", "Add an Export CSV button to the admin orders page: current filters, all pages, UTF-8 with BOM for Excel.");
+    add("T-zu46lo", "todo", "Update Next.js to 15.4 and fix the type errors. The build and e2e must be green.");
+    add("T-pr45ja", "todo", "Document in the README how to run the local environment: docker-compose, seeds, stripe-mock, ports.",
+        {{"target", ran("claude/orchard/api")}, {"author", agent("claude/orchard/api")}});
+    add("T-fw47tb", "backlog", "Add a dark theme to the dashboard with a switch in the user profile.");
+    add("T-co48yv", "backlog", "Find out why /search takes 2–3 s on a copy of the production database. Measure first, then propose options.");
+    add("T-ji49mr", "backlog", "Replace moment.js with date-fns across web without changing date formats.");
+    add("T-sx50ge", "backlog", "Collect questions for partners about their API limits and draft an email.",
+        {{"target", ran("claude/orchard/docs")}, {"author", agent("claude/orchard/docs")}});
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject settings{{"task_template", "[Zerus task {ref}]\nWritten by {author}.\n{prompt}\n{history}\nWhen you finish, or find that it cannot be done, report with\n"
+                                                 "{tools}.task_report: one to three sentences on what you changed, how you\nchecked it, and what is left undone or why it cannot be done."},
+                               {"cancel_template", "[Zerus task {ref} cancelled]\nThe person cancelled this task. Stop working on it. Do not continue and do\n"
+                                                   "not revert anything; list what you changed and wait for the person."},
+                               {"agents_other", true}, {"agent_limit", 0}};
+    const auto json = [](const QJsonValue &value) {
+        return FakeCli::pythonString(QString::fromUtf8(value.isArray() ? QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact) : QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact)));
+    };
+    const QByteArray answer = "elif c=='task':\n T=json.loads(" + json(tasks) + ")\n P={'id':a[a.index('--project')+1] if '--project' in a else '','name':'orchard'}\n"
+        " if a[1]=='get':print(json.dumps({'project':P,'task':[t for t in T if t['uuid']==a[2]][0]}))\n"
+        " elif a[1]=='settings':print(json.dumps({'project':P,'settings':json.loads(" + json(settings) + ")}))\n"
+        " else:print(json.dumps({'project':P,'tasks':T,'damaged':[]}))\n";
+    const QString fixture = m_dir->filePath("tasks-preview-hgs");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.resize(1240, 800); window.setFleet(fleet); window.show();
+    window.showSession({}, "claude/orchard/api");
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>(); QVERIFY(tabs && view);
+    tabs->setCurrentWidget(view); QTRY_VERIFY(view->findChild<QWidget *>("taskRow:T-mc39fw"));
+    const auto stage = [&](const QString &name) { view->findChild<QAbstractButton *>("taskTile:" + name)->click(); QTest::qWait(80); };
+    const auto hover = [&](const QString &id) {
+        auto *row = view->findChild<QWidget *>("taskRow:" + id); QVERIFY(row);
+        QEnterEvent enter(QPointF(20, 10), QPointF(20, 10), QPointF(20, 10)); QApplication::sendEvent(row, &enter); QTest::qWait(40);
+    };
+    const auto save = [&](QWidget *widget, const QString &name) { QVERIFY(widget->grab().save(directory + "/" + name + ".png")); };
+    auto *themeChoice = window.findChild<QComboBox *>("workspaceTheme"); QVERIFY(themeChoice);
+    for (const auto &theme : {QStringLiteral("dark"), QStringLiteral("light")}) {
+        themeChoice->setCurrentIndex(themeChoice->findData(theme)); QTest::qWait(100);
+        for (const auto &name : {"review", "active", "todo", "backlog", "done"}) { stage(name); save(&window, QStringLiteral("real-%1-%2").arg(name, theme)); }
+    }
+    themeChoice->setCurrentIndex(themeChoice->findData("dark")); QTest::qWait(100);
+    // Activity beside it: the Tasks tab keeps its column.
+    tabs->setCurrentIndex(0); QTest::qWait(80); save(&window, "real-activity"); tabs->setCurrentWidget(view); QTest::qWait(80);
+    stage("todo"); hover("T-dn44wk"); save(&window, "real-todo-hover");
+    view->findChild<QToolButton *>("taskOnlySession")->click(); QTest::qWait(80); save(&window, "real-todo-only");
+    view->findChild<QToolButton *>("taskOnlySession")->click(); QTest::qWait(80);
+    stage("active"); hover("T-bt41xh"); save(&window, "real-active-hover");
+    view->findChild<QWidget *>("taskRow:T-bt41xh")->findChild<QToolButton *>("taskAction:cancel")->click();
+    QDialog *dialog = nullptr; QTRY_VERIFY((dialog = window.findChild<QDialog *>("taskCancelDialog")) && dialog->isVisible());
+    QTest::qWait(60); save(dialog, "real-cancel"); dialog->reject(); QTest::qWait(40);
+    stage("todo"); QTest::mouseClick(view->findChild<QWidget *>("taskRow:T-dn44wk"), Qt::LeftButton, {}, QPoint(300, 30));
+    QTRY_VERIFY((dialog = window.findChild<QDialog *>("taskDialog")) && dialog->isVisible());
+    QTest::qWait(60); save(dialog, "real-task-settings"); dialog->reject(); QTest::qWait(40);
+    view->findChild<QToolButton *>("taskSettings")->click();
+    QTRY_VERIFY((dialog = window.findChild<QDialog *>("taskSettingsDialog")) && dialog->isVisible());
+    QTest::qWait(60); save(dialog, "real-project-settings"); dialog->reject();
+}
+
+void TestSessionsWindow::tasksDropOnTheirProjectsSessionsAndHeader()
+{
+    SessionOrganization org; const auto work=org.createGroup("Work"), docs=org.createGroup("Docs");
+    org.moveSession(org.observe("arch","codex/hgs/dashboard",""),work); org.moveSession(org.observe("arch","kimi/docs/research",""),work);
+    org.moveSession(org.observe("mac","claude/infra/review",""),docs);
+    QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    const auto any=FakeTasksCli::task(1,"todo"), pinned=FakeTasksCli::task(2,"todo",{{"target",FakeTasksCli::pinned("kimi/docs/research")}});
+    const QString fixture=tasksFixture("tasks-drop-hgs",{any,pinned}); QVERIFY(!fixture.isEmpty());
+    SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
+    window.showSession({}, "codex/hgs/dashboard");
+    auto *list=window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    const auto find=[&](const QString &group, const QString &session) -> QListWidgetItem * {
+        for(int i=0;i<list->count();++i) {
+            auto *item=list->item(i); if(item->data(SessionRoles::Group)!=group) continue;
+            if(session.isEmpty() ? item->data(SessionRoles::Header).toBool() : item->data(SessionRoles::TaskTarget).toStringList().value(1)==session) return item;
+        }
+        return nullptr;
+    };
+    // Live sessions name where a task dropped on them goes; a project header names none.
+    QTRY_VERIFY(find(work,"kimi/docs/research") && find(docs,"claude/infra/review") && find(work,{}));
+    QCOMPARE(find(work,"kimi/docs/research")->data(SessionRoles::TaskTarget).toStringList(), QStringList({"", "kimi/docs/research"}));
+    QCOMPARE(find(docs,"claude/infra/review")->data(SessionRoles::TaskTarget).toStringList(), QStringList({"mac", "claude/infra/review"}));
+    QVERIFY(find(work,{})->data(SessionRoles::TaskTarget).toStringList().isEmpty());
+    const auto drop=[&](const QJsonObject &task, QListWidgetItem *item) {
+        list->scrollToItem(item); const QPoint point=list->visualItemRect(item).center();
+        std::unique_ptr<QMimeData> mime(TaskDrag::of(work, TaskBoard::item(task)).mimeData());
+        QDragEnterEvent enter(point,Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier); QApplication::sendEvent(list->viewport(),&enter);
+        QDragMoveEvent move(point,Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier); QApplication::sendEvent(list->viewport(),&move);
+        if(!move.isAccepted()) return false;
+        QDropEvent event(QPointF(point),Qt::MoveAction,mime.get(),Qt::LeftButton,Qt::NoModifier); QApplication::sendEvent(list->viewport(),&event);
+        return event.isAccepted();
+    };
+    const auto called=[&](const QJsonArray &argv) {
+        QFile calls(fixture+".tasks"); if(!calls.open(QIODevice::ReadOnly)) return false;
+        while(!calls.atEnd()) if(QJsonDocument::fromJson(calls.readLine()).array()==argv) return true;
+        return false;
+    };
+    // Another project's session refuses the task; a session of its project pins it there.
+    QVERIFY(!drop(any, find(docs,"claude/infra/review")));
+    QVERIFY(drop(any, find(work,"kimi/docs/research")));
+    QTRY_VERIFY(called({"task","target","uuid-1","kimi/docs/research","--project",work}));
+    // The project's header makes a pinned task Any session.
+    QVERIFY(drop(pinned, find(work,{})));
+    QTRY_VERIFY(called({"task","target","uuid-2","any","--project",work}));
 }
 
 void TestSessionsWindow::accountFilterCombinesScopesAndKeepsTheOpenDraft()
@@ -2972,20 +3194,21 @@ if a[:1]!=['a']:
     constexpr int activityMs=1000;window.setDetailsPollForTests(100,activityMs);
     auto log=[&]{QList<QJsonArray> result;QFile file(temp.filePath("inspections.jsonl"));if(file.open(QIODevice::ReadOnly))while(!file.atEnd())result<<QJsonDocument::fromJson(file.readLine()).array();return result;};
     auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");QVERIFY(tabs);
+    const int processes=tabs->indexOf(window.findChild<ProcessView *>());QCOMPARE(processes,4);
     QTRY_VERIFY(!log().isEmpty());QTest::qWait(200);
-    QVERIFY(!tabs->isTabVisible(3));for(const auto &call:log())QVERIFY(call.contains("--skip-processes"));
+    QVERIFY(!tabs->isTabVisible(processes));for(const auto &call:log())QVERIFY(call.contains("--skip-processes"));
     auto *settings=window.findChild<QWidget *>("settingsPage");
     settings->findChild<QDoubleSpinBox *>("activeSeconds")->setValue(1);
     settings->findChild<QDoubleSpinBox *>("backgroundSeconds")->setValue(5);
     QCOMPARE(QSettings().value("processes/activeSeconds").toDouble(),1.);
     ProcessSettings::setPollFloorForTests(0.2);QSettings().setValue("processes/activeSeconds",0.2);
     const auto before=log().size();QTRY_VERIFY(log().size()>before);
-    QVERIFY(log().last().contains("--skip-processes"));QCOMPARE(tabs->tabText(3),QString("Processes"));
-    auto *enabled=settings->findChild<QCheckBox *>("processesEnabled");QVERIFY(enabled);enabled->setChecked(true);QVERIFY(tabs->isTabVisible(3));
+    QVERIFY(log().last().contains("--skip-processes"));QCOMPARE(tabs->tabText(processes),QString("Processes"));
+    auto *enabled=settings->findChild<QCheckBox *>("processesEnabled");QVERIFY(enabled);enabled->setChecked(true);QVERIFY(tabs->isTabVisible(processes));
     // Only the Processes interval can poll the open tab again within 3 s: Activity
     // now waits a minute and Terminal 5 s.
     window.setDetailsPollForTests(100,60000);
-    tabs->setCurrentIndex(3);QTRY_VERIFY(!log().last().contains("--skip-processes"));
+    tabs->setCurrentIndex(processes);QTRY_VERIFY(!log().last().contains("--skip-processes"));
     const auto active=log().size();QTRY_VERIFY_WITH_TIMEOUT(log().size()>active,3000);QVERIFY(!log().last().contains("--skip-processes"));
     window.setDetailsPollForTests(100,activityMs);
     tabs->setCurrentIndex(1);settle();const auto terminal=log().size();QTest::qWait(activityMs+400);QCOMPARE(log().size(),terminal);
@@ -2994,7 +3217,7 @@ if a[:1]!=['a']:
     // Every Activity poll after settle() is at least the background interval, here
     // 0.2 s, after the last Processes poll: it would include processes if enabled.
     QSettings().setValue("processes/backgroundSeconds",0.2);
-    tabs->setCurrentIndex(3);QTest::qWait(200);enabled->setChecked(false);QVERIFY(!tabs->isTabVisible(3));QCOMPARE(tabs->currentIndex(),0);
+    tabs->setCurrentIndex(processes);QTest::qWait(200);enabled->setChecked(false);QVERIFY(!tabs->isTabVisible(processes));QCOMPARE(tabs->currentIndex(),0);
     settle();const auto disabled=log().size();QTRY_VERIFY(log().size()>disabled);
     for(const auto &call:log().sliced(disabled))QVERIFY(call.contains("--skip-processes"));
     window.hide();settle();const auto hidden=log().size();QTest::qWait(activityMs+400);QCOMPARE(log().size(),hidden);
@@ -6297,9 +6520,10 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     auto *splitter = window.findChild<QSplitter *>("sessionWorkSplitter");
     auto *editor = window.findChild<MessageComposer *>("messageComposer")->findChild<QPlainTextEdit *>("messageInput");
     QVERIFY(tabs && inspector && toggle && panel && splitter && editor);
-    QCOMPARE(tabs->count(), 4); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
-    QCOMPARE(tabs->tabText(3),QString("Processes"));QVERIFY(tabs->isTabVisible(3));
-    QVERIFY(tabs->isTabVisible(1)); QVERIFY(!tabs->isTabVisible(2));
+    QCOMPARE(tabs->count(), 5); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
+    QCOMPARE(tabs->tabText(2), QString("Tasks")); QCOMPARE(tabs->tabText(3), QString("Native UI"));
+    QCOMPARE(tabs->tabText(4),QString("Processes"));QVERIFY(tabs->isTabVisible(4));
+    QVERIFY(tabs->isTabVisible(1)); QVERIFY(tabs->isTabVisible(2)); QVERIFY(!tabs->isTabVisible(3));
     QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle);
     editor->setPlainText("Keep this draft"); const int originalWidth = tabs->width();
     QTest::mouseClick(toggle, Qt::LeftButton); QTest::qWait(40);
@@ -6330,8 +6554,8 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
         QJsonObject{{"id","build"},{"command","cargo build --release"},{"description","Build the updated CLI"},{"owner","main"},{"cwd","/workspace/zerus"},{"status","running"},{"started_at",QDateTime::currentSecsSinceEpoch()-23}},
         QJsonObject{{"id","tests"},{"command","python3 tests/test_dsh_native.py -v"},{"owner","main"},{"cwd","/workspace/zerus"},{"status","completed"},{"started_at",QDateTime::currentSecsSinceEpoch()-65},{"ended_at",QDateTime::currentSecsSinceEpoch()-12},{"exit_code",0}}
     }}};
-    client->inspectionReady({},"codex/hgs/dashboard",data);QCOMPARE(tabs->tabText(3),QString("Processes (1)"));
-    tabs->setCurrentIndex(3);QVERIFY(window.findChild<QTreeWidget*>("processList")->isVisible());QCOMPARE(editor->toPlainText(),QString("Keep this draft"));
+    client->inspectionReady({},"codex/hgs/dashboard",data);QCOMPARE(tabs->tabText(tabs->indexOf(window.findChild<ProcessView *>())),QString("Processes (1)"));
+    tabs->setCurrentWidget(window.findChild<ProcessView *>());QVERIFY(window.findChild<QTreeWidget*>("processList")->isVisible());QCOMPARE(editor->toPlainText(),QString("Keep this draft"));
     if(!qEnvironmentVariable("HGS_PROCESSES_WINDOW_PREVIEW").isEmpty()){
         QTest::mouseClick(toggle,Qt::LeftButton);QTest::qWait(80);QVERIFY(window.grab().save(qEnvironmentVariable("HGS_PROCESSES_WINDOW_PREVIEW")));QTest::mouseClick(toggle,Qt::LeftButton);
     }
@@ -10093,7 +10317,7 @@ void TestSessionsWindow::openCodeCapabilitiesPreserveDraftWithoutTerminal()
     SessionsWindow window(fake);window.setFleet(state);window.show();window.showSession({},name);
     auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
     settleSelectedInspection(composer,client,{},name,details);setComposerText(composer,"Keep my local model draft");
-    auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");QVERIFY(tabs);QVERIFY(!tabs->isTabVisible(1));QVERIFY(!tabs->isTabVisible(2));
+    auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");QVERIFY(tabs);QVERIFY(!tabs->isTabVisible(1));QVERIFY(!tabs->isTabVisible(3));
     QTRY_VERIFY2(composer->findChild<QPushButton *>("sendMessage")->isEnabled(),qPrintable(composer->findChild<QLabel *>("messageStatus")->text()+" key="+composer->sessionKey()+" draft="+composer->editor()->toPlainText()));QVERIFY(!composer->canAttachFiles());
     QVERIFY(!composer->findChild<QPushButton *>("attachMessageFile")->isEnabled());
     QVERIFY(!window.findChild<QPushButton *>("clearSessionAction")->isEnabled());QVERIFY(!window.findChild<QAction *>("forgetSessionAction")->isEnabled());
@@ -10997,7 +11221,7 @@ else: print('{}')
     // no browser endpoint. It must not open an external browser automatically.
     QSignalSpy external(client, &HgsClient::writeDone), connection(client, &HgsClient::nativeUiFailed);
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
-    QVERIFY(!tabs->isTabVisible(1)); QVERIFY(tabs->isTabVisible(2));
+    QVERIFY(!tabs->isTabVisible(1)); QCOMPARE(tabs->tabText(3), QString("Native UI")); QVERIFY(tabs->isTabVisible(3));
     window.findChild<QPushButton *>("nativeSignInButton")->click();
     QCOMPARE(tabs->currentWidget()->objectName(), QString("nativeUiView"));
     QTRY_COMPARE(connection.size(), 1); QCOMPARE(external.size(), 0);
@@ -11034,7 +11258,7 @@ else: print('{}')
     QTRY_VERIFY(!inspected.isEmpty());
     client->inspectionReady({}, session.name, details);
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
-    QVERIFY(!tabs->isTabVisible(1)); QVERIFY(!tabs->isTabVisible(2));
+    QVERIFY(!tabs->isTabVisible(1)); QVERIFY(!tabs->isTabVisible(3));
     QSignalSpy written(client, &HgsClient::writeDone);
     window.findChild<QPushButton *>("nativeSignInButton")->click();
     QTRY_COMPARE(written.size(), 1); QCOMPARE(tabs->currentIndex(), 0);
@@ -12308,9 +12532,9 @@ void TestSessionsWindow::shortcutsCycleSessionTabs()
         window.showSession({}, "codex/hgs/dashboard");
         auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *terminal = window.findChild<TerminalView *>();
         auto *processView = window.findChild<ProcessView *>(); QVERIFY(tabs); QVERIFY(terminal); QVERIFY(processView);
-        QVERIFY(!tabs->isTabVisible(2)); // Native UI belongs to DeepSeek sessions.
+        QVERIFY(!tabs->isTabVisible(3)); // Native UI belongs to DeepSeek sessions.
         QCOMPARE(tabs->isTabVisible(tabs->indexOf(processView)), processes);
-        QList<QWidget *> order{tabs->widget(0), terminal}; if (processes) order << processView;
+        QList<QWidget *> order{tabs->widget(0), terminal, window.findChild<TasksView *>()}; if (processes) order << processView;
         auto *composer = window.findChild<MessageComposer *>("messageComposer");
         composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
         for (int step = 1; step <= order.size(); ++step) {
@@ -12530,7 +12754,7 @@ void TestSessionsWindow::reboundChordsApplyAtOnce()
     pressSequence(&window, previousTab); // No longer bound: Terminal keeps it.
     QCOMPARE(tabs->currentWidget(), terminal);
     pressCommand(&window, "tab.next");
-    QCOMPARE(tabs->currentIndex(), 0);
+    QCOMPARE(tabs->currentWidget(), window.findChild<TasksView *>());
 }
 
 void TestSessionsWindow::projectListKeepsItsReorderKeys()

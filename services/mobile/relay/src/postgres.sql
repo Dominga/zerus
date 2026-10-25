@@ -91,6 +91,9 @@ CREATE INDEX IF NOT EXISTS file_history ON requests(updated,id) WHERE operation=
 
 CREATE INDEX IF NOT EXISTS archive_history ON requests(updated,id) WHERE operation='archive_list' AND state IN ('completed','failed','uncertain');
 
+CREATE INDEX IF NOT EXISTS task_exchange_history ON requests(updated,id) WHERE operation='task_exchange' AND state IN ('completed','failed','uncertain');
+
+CREATE INDEX IF NOT EXISTS task_done_history ON requests(updated,id) WHERE operation='task_done' AND state IN ('completed','failed','uncertain');
 -- Content-free hook diagnostics expire independently of native mutations.
 CREATE INDEX IF NOT EXISTS hook_health_history ON requests(updated,id) WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain');
 

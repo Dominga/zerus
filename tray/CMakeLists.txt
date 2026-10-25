@@ -147,7 +147,7 @@ add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/Fle
     src/AnalyticsClient.cpp src/AnalyticsData.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
     src/SwarmController.cpp src/DesktopPresence.cpp src/AttentionNotifier.h src/CommandBackend.cpp
-    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp
+    src/LocalSessionHost.cpp src/DownloadCache.cpp src/AutomaticApprovals.cpp src/TaskBoard.cpp
     # Main-thread watchdog (MainThreadWatchdog.h): every platform, prompted by macOS.
     src/MainThreadWatchdog.cpp)
 if(NOT WIN32)
@@ -180,7 +180,7 @@ add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp s
     src/MachineFilter.cpp src/ProjectFilter.cpp src/AccountFilter.cpp src/SessionSearch.cpp src/MachinesPage.cpp src/AccountsPage.cpp
     src/ComposerToolbar.cpp src/MessageComposer.cpp src/QuestionCard.cpp src/DirectoryDialog.cpp
     src/RepositoryClone.cpp src/CloneRepositoryDialog.cpp src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
-    src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
+    src/ProcessView.cpp src/TaskRow.cpp src/TasksView.cpp src/TaskDialogs.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
     src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon
@@ -257,10 +257,12 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD 17)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
     add_library(hgs-tray-mac STATIC src/MacBackend.cpp src/QtTrayIcon.cpp src/MacTrayMenu.mm
-        src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm src/MacPresenceSource.cpp)
+        src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm src/MacPresenceSource.cpp
+        src/MacSystemPower.cpp)
     set_source_files_properties(src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(hgs-tray-mac PUBLIC hgs-tray-core Qt6::Widgets
-        PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics")
+        PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics"
+        "-framework IOKit")
 endif()
 
 # Qt finalization imports macOS permission plugins selected by our Info.plist.

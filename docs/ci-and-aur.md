@@ -27,11 +27,11 @@ conservative change selection, including both sides of renames.
 | Job | Automatic CI | Checks |
 | --- | --- | --- |
 | Resolve commit | Always | Exact test commit and suite selection for every other job |
-| Quick checks | Always | Privacy, Gitleaks 8.30.1 on the tree and every fetched branch and tag, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests |
+| Quick checks | Always | Privacy, Gitleaks 8.30.1 on the tree and every fetched branch and tag, Python/Bash syntax, version consistency, actionlint, stable/nightly publication contracts, locked Rust 1.99 unit tests, the replica crate (format, clippy, tests, golden vectors), Rust license notices |
 | Rust relay | Always | Rust 1.99 format, clippy, and every storage contract (cross-worker ones included) on its own PostgreSQL database; every `services/mobile/tests` module, with the Rust relay fixtures on per-test PostgreSQL databases and no skips; the speech suites against the Python reference relay; the deployment image and its 256 MiB envelope |
 | Rust mobile connector | Always | Rust 1.99 format, clippy, vector, binary and journal handoff tests; the black-box suites against the Python and Rust connectors concurrently with differential traces compared against the reviewed allowlist, and a 300 s soak of the Rust build (`services/mobile/tests/BLACKBOX.md`) |
 | Rust mobile connector on macOS | Always | Cold Rust 1.99 build, unit, vector and binary tests, and the black-box modules that need no real `hgs`, journal handoffs with the Python connector included |
-| iOS core tests and simulator build | Affected PR; full nightly/stable | `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
+| iOS core tests and simulator build | Affected PR; full nightly/stable | The project task replica built with Rust 1.99.1 for the iPhone, the simulator and macOS (`mobile/ios/scripts/build-replica.sh`, without the release profile's LTO in this check), then `swift test` for the ZerusKit core and an unsigned Release build of the app for the iOS simulator, with the newest installed Xcode 26 or later and no signing identity |
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Arch desktop | Always | Qt build and all CTest suites |
@@ -174,7 +174,7 @@ save them.
 
 | Family | Job | Key after the prefix | Saved when | Bound |
 | --- | --- | --- | --- | --- |
-| `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each |
+| `msrv-`, `cli-`, `windows-cli-` | Quick checks, CLI, Windows | OS/arch, hash of `rustc -Vv`, month, `Cargo.lock` hash | Exact key missed; Rust build passed | Monthly restart; about 200–250 MB each; the quick checks' `target/replica` (the replica crate's own lockfile) rides under the same key |
 | `connector-` | Rust mobile connector | OS/arch, hash of `rustc +1.99.1 -Vv`, month, `services/mobile/connector/Cargo.lock` hash | Exact key missed; connector tests passed | Monthly restart; about 400 MB before compression, without incremental state |
 | `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
@@ -377,6 +377,11 @@ from Claude's status line input in `hgs inspect` for the exact run, conversation
 model: before the first reply, after a reply, after a session-only model change, a
 compaction and a clear, and in a resumed run. In a linked worktree whose repository's
 local settings set a status line, Claude keeps that status line and no window is reported.
+`tests/test_task_context_native.py` takes the exact bytes `hgs __state hook` prints
+for a start that a fake agent's tracked launch recorded, returns them from the real
+agent's SessionStart hook, and requires the task instructions in the request the
+real Claude Code (`claude -p`) or Codex (`codex exec`) sends to its loopback model;
+it runs with the Claude and the Codex suites.
 `tests/test_claude_permission_native.py` leaves Claude's one-time auto-mode offer
 enabled for a fixture account whose default mode is manual. Claude 2.1.296 and
 2.1.308 coverage requires an answerable Activity card under the launch prompt's reply
@@ -854,8 +859,8 @@ prints folders relative to the real one, which the suites place projects by.
 
 On Linux and macOS, Claude Code runs every `tests/test_claude_*_native.py` suite
 plus the Claude clear and compaction fixtures: exact input, questions, approvals,
-trust, resume, clear, compaction, session-only model settings and the status line
-context window. Each test launches the real TUI under `env -i`, or through a tracked
+trust, resume, clear, compaction, session-only model settings, the status line
+context window and the session-start task instructions. Each test launches the real TUI under `env -i`, or through a tracked
 `hgs` launch without the caller's `ANTHROPIC_` and `CLAUDE` variables, with a fixture
 API key, a loopback or local fake API and no nonessential traffic, so no account,
 telemetry or model request leaves the runner. On Windows each agent runs its class of

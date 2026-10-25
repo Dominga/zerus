@@ -329,6 +329,8 @@ final class ConversationModel {
             activity = nil
             activeFrame = nil
             activityVerified = false
+            // Tasks opens over a conversation and closes with it.
+            app.tasks.closeTasks()
         }
         return true
     }
@@ -347,6 +349,7 @@ final class ConversationModel {
         activity = nil
         activeFrame = nil
         activityVerified = false
+        app.tasks.closeTasks()
     }
 
     func cancelDetail() {

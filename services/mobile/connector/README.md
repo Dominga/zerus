@@ -274,6 +274,34 @@ refuse video before invocation; a mismatched video acknowledgement remains
 uncertain. `test_bb_voice` exercises the same media/replay contract against both
 connector implementations. See [voice and video messages](../../../docs/voice-messages.md).
 
+The phone's task exchange is this connector's own addition, which the Python
+connector never offers
+(`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`, "Phone").
+When native help names `hgs task exchange|digests --json`, `task_exchange` is
+advertised, for a peer as well when its hgs names it. The request, checked
+with the relay's own payload rules, runs `hgs task exchange --json` (30 s) with
+its payload on stdin on the machine the route names; its delivered receipt
+leaves the journal after two minutes as a short read (`TASK_READ_SQL`, beside
+the frozen Python predicates, so the journal schema is unchanged; the prune
+finds them through `journal_operation`, never by walking delivered mutation
+tombstones). hgs answers a refusal on stdout with a failing exit status, and
+its reason becomes the receipt's error. With an initialized swarm catalog every
+15 s, `hgs task digests --json` (5 s) adds each project's `tasks_digest`. A
+project without one in a heartbeat is unknown this time (another command held
+it, or the read failed), not empty. After a rollback
+to Python only the exchanges of the last two minutes stay in the journal, as
+Python's mutation tombstones. `tests/task_exchange.rs` and
+`test_bb_task_exchange` pin it.
+
+When native help also names `hgs task mobile-send|mobile-cancel|mobile-done
+--json`, the connector offers the phone's Send now (`task_send`), Cancel
+(`task_cancel`) and Done list (`task_done`), each with its payload on stdin on
+the machine the route names. Send now and Cancel are mutations: the journal
+runs each identity once, hgs's JSON refusal before anything happened fails the
+receipt with its reason, and any other outcome once the call began (a prompt
+sent but not recorded, a crash, a timeout) is uncertain. `task_done` is a short
+read like the exchange (`TASK_READ_SQL`).
+
 ## Divergences from the Python connector
 
 Each divergence is listed in the design; this build implements every row.

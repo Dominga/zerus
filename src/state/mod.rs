@@ -19,6 +19,7 @@ pub(crate) mod voice;
 mod interrupt;
 mod clear_context;
 mod compact_context;
+mod continuations;
 mod cache_hint;
 mod claude_approval;
 mod attempts;
@@ -647,6 +648,13 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
     output["session_reference"] = json!({"machine_id":reference.machine,"host":reference.host,"original_name":reference.name,
         "name":name,"conversation_id":reference.conversation,"agent_id":reference.agent});
     Ok(output)
+}
+
+/// Pastes a task prompt or cancel message into `name` for its current run and
+/// conversation, the way `hgs send` does, and returns the durable receipt.
+pub(crate) fn submit_task_text(name: &str, text: &str) -> Result<Value> {
+    local_sessions()?;
+    input::submit_text(name, text)
 }
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.

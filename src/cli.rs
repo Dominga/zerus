@@ -64,7 +64,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] inspect <session> [--archive <id>] [--after <cursor>]   activity as JSON
        hgs [@host] reference <session> --json [--archive ID] [--agent ID]   copy a session reference
        hgs self [--json]              the calling agent's own session reference
-       hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions
+       hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions and use tasks
        hgs inspect 'zerus://session?...'   resolve and inspect a referenced conversation
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
@@ -142,6 +142,9 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] resume <session> --fresh [-d] [--expected-run-id ID]   same settings, new conversation
        hgs notify [--bell] <session> [text]   event for the tray (no tray = no-op)
        hgs project ls [--json] | add <name> <dir> | set <name> <dir> | rm <name>
+       hgs task list|get|add|edit|move|stage|target|send|cancel|report|comment|settings …   project tasks (JSON; agents read one line)
+       hgs task exchange|digests --json                 the phone's task exchange (mobile)
+       hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
   cmd      claude | codex | kimi (know --resume) | opencode (native API) | sh (login shell) | any command
@@ -676,6 +679,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         "swarm" => crate::swarm::dispatch(&config, args, dry),
         "account" => crate::accounts::dispatch(&config, args, dry),
         "project" => project(&config, args, dry),
+        "task" => crate::tasks::dispatch(&config, args, dry),
         _ => launch(&config, command, args, &client, dry),
     }
 }

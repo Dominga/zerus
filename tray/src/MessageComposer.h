@@ -37,7 +37,8 @@ public:
     void ensureDraftLoaded(const QString &key);
     void setAvailability(bool available, const QString &reason = {});
     // Session feedback uses the existing action row and never replaces a draft.
-    void setSessionStatus(const QString &text, bool error = false, bool blockInput = false);
+    // html: the same status with emphasis, shown while nothing else takes its place.
+    void setSessionStatus(const QString &text, bool error = false, bool blockInput = false, const QString &html = {});
     // Independent of delivery/loading locks; keeps the existing draft selectable.
     void setRecording(bool recording);
     void setAttachmentAvailability(bool available, const QString &reason = {});
@@ -123,6 +124,12 @@ public:
     // Send and push now (message.push) in this field; off by default. Only the
     // main message field pushes: a subagent message bypasses the session's queue.
     void setPushEnabled(bool enabled);
+    // The Tasks tab's input: text only, no toolbar, model settings or Stop; the
+    // send button carries the stage a new task goes to. Drafts keep their keys.
+    void setTaskMode(bool taskMode);
+    void setSendLabel(const QString &label);
+    // Shown in an empty field when the agent has no suggestion.
+    void setPlaceholder(const QString &placeholder);
 
 signals:
     void sessionRefreshRequested(const QString &sessionKey);
@@ -192,7 +199,7 @@ private:
     QSet<QString> m_savingKeys;
     QSet<QString> m_failedSaves;
     QString m_key, m_unavailableReason;
-    QString m_sessionStatus;
+    QString m_sessionStatus, m_sessionStatusHtml;
     bool m_sessionStatusError = false, m_sessionStatusBlocksInput = false;
     bool m_available = false, m_loading = false, m_dark = true, m_recording = false, m_attachmentsAvailable = true;
     QString m_attachmentsReason;
@@ -253,4 +260,6 @@ private:
     // Composer-scope commands (Shortcuts.h) on the field.
     QAction *m_sendAction, *m_pushAction;
     bool m_pushEnabled = false, m_pushing = false;
+    bool m_taskMode = false;
+    QString m_sendLabel, m_placeholder;
 };

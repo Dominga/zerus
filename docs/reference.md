@@ -896,7 +896,7 @@ application and window switchers.
 | Rename session | F2 | F2 |
 | Search sessions | Ctrl+F | ⌘F |
 | Refresh | Ctrl+R, F5 | ⌘R, F5 |
-| Next / previous tab (Activity, Terminal, Processes, Native UI) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
+| Next / previous tab (Activity, Terminal, Tasks, Native UI, Processes) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
 | Switch between Activity and Terminal | Ctrl+` | ⌃` |
 | Show or hide the side panel | Ctrl+I | ⌘I |
 | Next / previous area (list, conversation, message field, side panel) | F6 / Shift+F6 | F6 / ⇧F6 |
@@ -1011,6 +1011,18 @@ Child events preserve the parent's conversation, model and history; ephemeral
 children show their recorded request, tools and result. Unknown inherited
 SessionStart events cannot replace an established parent. `/new` and `/clear`
 still change the main native conversation.
+Claude's background service runs jobs in processes that inherited the run token
+of whichever session started the service. A hook names its Claude process and
+conversation (`CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`); an event from a Claude
+process that is neither the session's agent nor runs under it never changes that
+session by its token. A background job belongs to the live session whose agent
+window moved it there, as Claude's session registry records (`jobId`,
+`parkedJobId` in `sessions/<pid>.json`). The session follows the job's
+conversation without a clear when its transcript ends with Claude's
+`continued-in` mark for it; a new conversation in the job clears it as `/clear`
+does. Events of jobs that no live session holds are not recorded. A command
+such a job runs, such as `hgs task` or `hgs self`, acts as that session while
+the job is on its conversation.
 
 ### Sending and attachments
 
@@ -1687,9 +1699,10 @@ Claude's recorded compaction boundary replaces the earlier context size with its
 reported summary size. It invalidates the earlier prompt cache estimate; a new
 warm countdown requires fresh native usage with a reported TTL.
 
-**Tasks & agents**, **Details** and **Worktrees** occupy the resizable inspector.
+**Plan & agents**, **Details** and **Worktrees** occupy the resizable inspector.
 Its width, tab and open state are local; toggling it preserves Activity, drafts and
-Terminal attachment. Successful native task/plan tools supply recorded pending,
+Terminal attachment. Plan & agents shows the agent's own plan, not the project's
+Zerus tasks (the Tasks tab). Successful native task/plan tools supply recorded pending,
 in-progress and completed items. Tool failures and Stop do not complete tasks.
 There are up to 100 items per list and 65 lists, with truncation disclosed.
 Old data shows **Last recorded**; unavailable history is not reconstructed.
@@ -1715,7 +1728,7 @@ The expanded session tree hides children whose latest reported turn is finished
 or failed by default. Session and Overview cards then show only the active count, omitting
 an empty indicator when no active or uncertain children remain.
 **Settings → Sessions → Show completed subagents** restores completed rows and
-active/total card counts. The **Tasks & agents** inspector always shows the full
+active/total card counts. The **Plan & agents** inspector always shows the full
 reported roster and its active/total counts, including completed turns.
 Unknown states, paused agents and input/approval requests remain visible.
 An open child's Activity and draft stay in place when its turn finishes. A child's
@@ -2365,6 +2378,108 @@ The CLI is `hgs [@host] worktrees review --path PATH
 --json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
 --common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.
+
+## Project tasks
+
+`hgs task` keeps a project's task list: prompts that wait in Backlog or To do
+until someone sends them to a session. Every computer of the swarm holds every
+task and works with them offline. Every command prints
+JSON. Tasks belong to a catalog project, named by its ID or name; a task is
+`T-` plus six characters, and `PROJECT/T-xxxxxx` names it anywhere.
+
+```sh
+hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt
+hgs task list --project orchard [--stage todo]
+hgs task get orchard/T-a1b2c3
+hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
+hgs task report orchard/T-a1b2c3 < summary.txt
+hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
+hgs task stage orchard/T-a1b2c3 backlog|todo|done
+hgs task move orchard/T-a1b2c3 --top|--before REF|--after REF
+hgs task edit orchard/T-a1b2c3 < prompt.txt
+hgs task comment orchard/T-a1b2c3 < comment.txt
+hgs task target orchard/T-a1b2c3 codex/api|any [--host ALIAS]
+hgs task settings --project orchard [--set < settings.json]
+```
+
+Send pastes the task prompt into its session through the same input path as
+`hgs send`; the task becomes In progress, and Zerus does not
+check that the agent received it. The prompt asks the agent to report with
+`hgs task report`, which moves the task to In review. Cancel moves a task In
+progress to In review and pastes the cancel message without stopping the turn;
+its reason is kept as a comment and never pasted. A task this computer already
+shows In progress is not sent again. Run inside a session (`HGS_SESSION` and
+`HGS_RUN_ID`), `hgs task` acts as that session's agent: `add` files the task
+for that session, and the project settings can keep agents to their own
+session or limit how many tasks they start per hour. `settings --set` reads a
+JSON object and changes only the fields it names.
+
+`--host ALIAS` names a session on another computer of the swarm that this
+computer verified itself. A send or cancel for such a session runs on that
+computer: it gets the project's tasks first, refuses a task its own copy shows
+In progress, pastes and records there, and its copy comes back (`synced` is
+false when it could not; the next sync brings it). When it cannot
+be reached, or its Zerus is too old to share tasks, a send is refused with the
+reason and nothing changes, while a cancel goes through here: the task moves
+to In review, its session gets no cancel message, and that computer's copy
+follows when it syncs. Listings
+name the computer of every session reference (the target, the session, the
+author and each history entry's session and actor) as `host`: empty for this
+one, the alias of a verified member, or null. Windows keeps no verified
+bindings yet, so there `--host` is refused and other computers read null.
+
+Tasks are Loro documents below `HGS_STATE_DIR/replica`, one directory per
+project; a task file that fails to load is listed under `damaged` and left in
+place until another computer of the swarm sends its copy, which replaces it;
+the damaged file stays beside it as `<file>.damaged-<time>`. The swarm worker
+replicates them with the catalog: after each catalog
+sync it compares every project's digest with the member's and exchanges only
+the changes each side lacks, in pages of at most 1 MiB, and a task changed
+here goes out within seconds. Changes made on several computers at once merge.
+A member whose Zerus does not share tasks keeps syncing the catalog and is
+named in the Swarm settings.
+
+Phones reach a project's tasks through the mobile relay and the Rust mobile
+connector, which uses two commands of its own. `hgs task digests --json` prints
+each project's digest of what a phone holds (the project document and every
+task that is not Done), which the connector adds to its heartbeat;
+`hgs task exchange --json` reads a phone's request on stdin, imports the
+phone's changes and answers a page of what the phone lacks, at most 512 KiB of
+updates, with a larger task in parts. A task the phone holds keeps coming to it
+after it becomes Done. A request may cover a range of task UUIDs, so a large
+inventory goes in parts; a refusal prints `{"schema": 1, "ok": false, "error":
+…}` with exit status 1. The phone's Send now and Cancel run on the session's
+computer as `hgs task mobile-send --json` and `mobile-cancel --json`, which do
+what `send` and `cancel` do and answer only the task's stage (a refusal says
+`"uncertain": true` when the prompt was pasted but could not be recorded);
+`hgs task mobile-done --json` answers a page of at most 50 Done tasks, newest
+first, with how many there are and how many from the last 7 days. See
+`services/mobile/relay/README.md`.
+
+Agents use the same `hgs task` commands in their own shell. A command run inside
+an agent session acts as that session when it proves it as `hgs self` does (the
+run is live here and the command descends from the agent; renames are
+followed) and is refused when its environment names a session it cannot prove.
+It works on the session's catalog project unless a reference or `--project`
+names another. A change an agent makes prints one line saying what happened,
+for example `orchard/T-a1b2c3 sent to codex/api.`; `--json` prints the task, and
+reads print JSON. Claude Code and Codex sessions read the instructions for the
+task list from Zerus's SessionStart hook; `hgs guide tasks` lists the commands.
+There is no MCP server; sessions without bypassed permissions are not covered
+(Claude Code asks first, Codex's sandbox blocks the task store and SSH).
+
+In the desktop, the **Tasks** tab beside Activity and Terminal shows the open
+session's project. Stage tiles (In review, In progress, To do, Backlog, Done)
+filter one list; the funnel tile keeps only the open session's tasks and the Any
+session tasks it can take, and the gear opens the project's task settings. A row
+shows its actions on hover, and a click opens the task: its prompt and session
+(editable in To do and Backlog), history and comments. The input below files a
+task for the open session in To do, or in Backlog while Backlog is open. The tab
+label counts the tasks In review and in To do. Done lists the last 7 days, and
+Show older adds the rest. A session outside every project has no tasks.
+To do and Backlog rows can be dragged: onto the other list's tile to move them
+there, within To do to reorder it, onto a session of the project in the session
+list to pin them to it, or onto the project's header to make them Any session.
 
 ## Machines and accounts
 
@@ -3051,6 +3166,10 @@ user-interactive QoS, as for an app started from Finder. Without that key launch
 starts a daemon and clamps all its threads below ordinary CPU load, niced load
 included: a busy machine then starves the whole window until the main-thread
 watchdog aborts it, and no QoS request from inside the process lifts the clamp.
+The watchdog counts only time the Mac is awake and holds its check from the
+system's sleep notification until the GUI thread runs again after the wake, for at
+most ten minutes: macOS does not schedule that thread during the transition into
+sleep or in a dark wake on battery.
 `launchctl print "gui/$(id -u)/com.hgdev.hgs-tray"` shows `spawn type = interactive`.
 At startup the GUI reads the highest priority its main thread may reach: a login item
 (`XPC_SERVICE_NAME` `com.hgdev.hgs-tray`) limited below 31 offers **Fix login item**,

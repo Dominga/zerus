@@ -225,7 +225,7 @@ class MainActivity : ComponentActivity() {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(model, lifecycle, updater) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) model.flushDrafts()
+            if (event == Lifecycle.Event.ON_STOP) { model.flushDrafts(); model.stopTaskSync() }
             if (event == Lifecycle.Event.ON_RESUME) updater.recover()
         }
         lifecycle.addObserver(observer)
@@ -237,6 +237,15 @@ class MainActivity : ComponentActivity() {
             delay(5_000)
             if (model.selected != null) model.refreshActivity()
             else if (tab != 2) model.refresh()
+        }
+    } }
+    // The phone's task replicas follow their computers while the app is visible, on every tab.
+    // The first check waits for the catalog the loop above reads after five seconds.
+    LaunchedEffect(model, lifecycle) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        delay(6_000)
+        while (true) {
+            model.syncTasks()
+            delay(15_000)
         }
     } }
     fun back() {
@@ -380,7 +389,7 @@ class MainActivity : ComponentActivity() {
         Text(text, Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = color, style = MaterialTheme.typography.labelSmall)
     }
 }
-@Composable private fun SessionBadge(session: Session, online: Boolean, modifier: Modifier = Modifier) {
+@Composable internal fun SessionBadge(session: Session, online: Boolean, modifier: Modifier = Modifier) {
     val badge = DesktopSessionPalette.badge(session, online)
     val dark = MaterialTheme.colorScheme.background.luminance() < .5f
     val colors = DesktopSessionPalette.colors(badge.kind, dark)

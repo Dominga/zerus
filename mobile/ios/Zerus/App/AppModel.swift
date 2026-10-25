@@ -38,6 +38,9 @@ final class AppModel {
     private(set) var sessions: [Session] = []
     private(set) var projects: [ProjectSummary] = []
     private(set) var projectWarnings: [String] = []
+    /// For each catalogued project, every computer's tasks digest, and when the catalog named them.
+    private(set) var taskDigests: [ProjectKey: [String: String]] = [:]
+    @ObservationIgnored private(set) var taskDigestsAt = Date.distantPast
 
     // MARK: Status
 
@@ -97,6 +100,8 @@ final class AppModel {
     @ObservationIgnored private(set) var speechProviders: SpeechProviders!
     /// Session alerts and push registration.
     @ObservationIgnored private(set) var notifications: SessionNotifications!
+    /// The projects' task replicas and the Tasks screen.
+    @ObservationIgnored private(set) var tasks: TasksModel!
 
     init(client: RelayClient, connectionStore: ConnectionStore, sealedStore: SealedFileStore?,
          cache: ConversationCache? = nil, pages: ConversationPageCache? = nil, attachmentStore: AttachmentStore? = nil,
@@ -117,6 +122,7 @@ final class AppModel {
         playback = VoicePlayback(app: self)
         speechProviders = SpeechProviders(app: self)
         notifications = SessionNotifications(app: self)
+        tasks = TasksModel(app: self)
     }
 
     static func live() -> AppModel {
@@ -257,6 +263,7 @@ final class AppModel {
                 startNotifications()
             }
         case .background:
+            tasks.stopTaskSync()
             voice.background()
             notifications.setActive(false)
             AppDelegate.scheduleRefresh()
@@ -387,6 +394,8 @@ final class AppModel {
             notifications.forget(connection: connection.id)
             await voice.forget(connection: connection.id)
             await conversation.forget(connection: connection.id)
+            taskDigests = taskDigests.filter { $0.key.connectionId != connection.id }
+            await tasks.purge(connection.id)
         } catch {
             self.error = connection.protocolVersion == 2
                 ? "Could not finish forgetting this encrypted connection. Try Forget again. \(Self.message(error, fallback: ""))"
@@ -452,6 +461,7 @@ final class AppModel {
         var warnings: [String] = []
         var operations: [MachineKey: Set<String>] = [:]
         var features: [MachineKey: Set<String>] = [:]
+        var digests: [ProjectKey: [String: String]] = [:]
         var reached = Set<String>()
         for connection in original {
             if explicit || relayOperations[connection.id] == nil {
@@ -478,6 +488,7 @@ final class AppModel {
                 features.merge(catalog.features) { $1 }
                 nextSessions += catalog.projects.sessions
                 nextProjects += catalog.projects.projects
+                digests.merge(catalog.projects.taskDigests) { $1 }
                 warnings += catalog.projects.unavailableComputers
                 reached.insert(connection.id)
             } catch is CancellationError {
@@ -503,6 +514,7 @@ final class AppModel {
                 return copy
             }
             nextProjects += projects.filter { unavailable.contains($0.key.connectionId) }
+            digests.merge(taskDigests.filter { unavailable.contains($0.key.connectionId) }) { $1 }
         }
         let accounts = nextAccounts, successful = reached, connected = Set(original.map(\.id))
         while true {
@@ -520,6 +532,8 @@ final class AppModel {
         machineFeatures = features
         projects = nextProjects
         projectWarnings = warnings
+        taskDigests = digests
+        taskDigestsAt = Date()
         if let scope = sessionProjectScope { sessionProjectScope = projects.first { $0.key == scope.key } ?? scope }
         publishSessions()
         conversation.refreshReadAttention()

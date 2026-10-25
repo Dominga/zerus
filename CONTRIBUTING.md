@@ -67,6 +67,9 @@ job durations live in ignored `artifacts/test-results/`. Set
 stable Rust: `rust-version` and the toolchain pinned in CI follow the latest
 stable release, and raising them is routine maintenance. Run
 `cargo +1.99.1 test --locked` for that pinned toolchain.
+The replica crate has its own lockfile: run
+`cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml`; its
+golden vectors must keep decoding, and `ZERUS_BLESS=1` only adds new ones.
 
 On Linux, the three worktree modules run through `scripts/ci/worktree-tests.py`
 in a fresh PID/mount namespace, including their live process blockers and private

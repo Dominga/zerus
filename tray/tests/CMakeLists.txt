@@ -256,6 +256,26 @@ target_link_libraries(test_swarmcontroller PRIVATE Qt6::Test Qt6::Widgets hgs-tr
 zerus_add_test(swarmcontroller test_swarmcontroller)
 set_tests_properties(swarmcontroller PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# The Tasks tab over a fake `hgs task` (support/FakeTasksCli.h).
+add_executable(test_tasksview test_tasksview.cpp)
+target_include_directories(test_tasksview PRIVATE ../src)
+target_link_libraries(test_tasksview PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(tasksview test_tasksview)
+set_tests_properties(tasksview PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_executable(test_taskdialogs test_taskdialogs.cpp)
+target_include_directories(test_taskdialogs PRIVATE ../src)
+target_link_libraries(test_taskdialogs PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(taskdialogs test_taskdialogs)
+set_tests_properties(taskdialogs PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Dragging tasks out of the Tasks tab (TaskDrag.h).
+add_executable(test_taskdrag test_taskdrag.cpp)
+target_include_directories(test_taskdrag PRIVATE ../src)
+target_link_libraries(test_taskdrag PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(taskdrag test_taskdrag)
+set_tests_properties(taskdrag PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_processview test_processview.cpp)
 target_include_directories(test_processview PRIVATE ../src)
 target_link_libraries(test_processview PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
@@ -266,6 +286,12 @@ add_executable(test_fleetstate test_fleetstate.cpp)
 target_include_directories(test_fleetstate PRIVATE ../src)
 target_link_libraries(test_fleetstate PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
 zerus_add_test(fleetstate test_fleetstate)
+
+# Project tasks as the Tasks tab shows them (TaskBoard.h).
+add_executable(test_taskboard test_taskboard.cpp)
+target_include_directories(test_taskboard PRIVATE ../src)
+target_link_libraries(test_taskboard PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
+zerus_add_test(taskboard test_taskboard)
 
 # Folder paths per machine (MachinePlatform.h, header-only): both styles everywhere.
 add_executable(test_machineplatform test_machineplatform.cpp)

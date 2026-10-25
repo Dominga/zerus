@@ -361,6 +361,44 @@ view. Back returns to project details and preserves the normal Sessions query
 and filter. Archives are assigned by their UUID, so an archived and live session
 with the same name can belong to different projects.
 
+### Project tasks
+
+The phone keeps a replica of every catalogued project's tasks (the project
+document, every task that is not Done and any task it already holds) below
+`noBackupFilesDir/task-replicas-v1`, one folder per relay connection and swarm,
+without further encryption; backups and device transfer never include it, and
+removing a connection removes its replicas. While the app is visible it checks
+every 15 seconds, on every tab, with the catalog's tasks digests, or with its own
+read of the computers when the catalog has not been read for 20 seconds. It
+exchanges a project with every online computer that advertises `task_exchange`
+(on its relay too) and names a digest other than the phone's own, one computer
+at a time; a computer whose exchange failed waits a minute. The Rust exchange
+(`zerus-replica`'s `phone` module through `TaskExchange`) decides each request:
+ranges of task UUIDs that fit the relay, large documents in parts, and the
+phone's own changes the computer lacks; `TaskSync.kt` only carries its JSON.
+
+The Tasks button in a conversation's tools row, after Terminal, opens the
+project's tasks full-screen (`TasksUi.kt`, modelled by `TasksPresentation.kt`);
+its badge counts the tasks In review. Edits are made in the phone's replica and
+exchanged with the project's computers at once. Send now first exchanges the
+project with the session's computer, then asks it for `task_send`, then
+exchanges again; a failed first exchange sends nothing. A task pinned to a
+session goes to the computer that runs it, an Any session task to the session
+chosen in the chips. A receipt the computer cannot confirm, or a lost answer
+from the relay, says the task may have been sent, and Send now for it waits
+until an exchange with that computer completes. Cancel goes to
+the session's computer, or, while it is out of reach, to another online
+computer of the project, which cancels it there without the cancel message;
+the dialog says which. A session whose computer does not report its native ID
+takes no tasks: the input says why. Done comes from a computer in
+pages of 50 through `task_done`: the last 7 days, then "Show older (N)",
+and with Only this session only the tasks sent to that session;
+opening a Done task fetches it into the replica, where it stays. Tasks sends
+no notifications. See "Phone" in
+`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md` and
+"Android interface" in
+`docs/superpowers/specs/2026-10-13-project-task-queue-design.md`.
+
 ## Conversation history and native controls
 
 The conversation keeps a bounded hot window rather than imposing a total chat
@@ -630,8 +668,15 @@ the complete voice request and result between enrolled endpoints.
 
 ## Build and install
 
-Install JDK 17 or 21 and Android SDK platform 36 / build tools 35.0.0. Set
-`JAVA_HOME` and `ANDROID_HOME` for those tools, then run:
+Install JDK 17 or 21, Android SDK platform 36 / build tools 36.0.0 and NDK
+28.2.13676358, Rust 1.99.1 with the targets `aarch64-linux-android`,
+`armv7-linux-androideabi` and `x86_64-linux-android`, and
+`cargo install cargo-ndk --version 4.1.2 --locked`. Set `JAVA_HOME` and
+`ANDROID_HOME` for those tools. The build compiles the task replica
+(`crates/replica-ffi`) for each packaged ABI (arm64-v8a, armeabi-v7a, x86_64),
+generates its Kotlin bindings with UniFFI from the host library, which the unit
+tests load, and collects the Rust crates' licence notices into Third-party
+notices. Then run:
 
 ```sh
 cd mobile/android

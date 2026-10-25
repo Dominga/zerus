@@ -47,6 +47,8 @@ private slots:
     void notificationsUseStdinAndRequireExactCasConfirmation();
     void notificationsRequireLocalCapabilityEvenForANewPeer();
     void readMarksUseStdinAndAcceptOnlyHostAnswers();
+    void taskCommandsUseStdinAndReportFailures();
+    void sendsAndCancelsWaitForAnotherComputer();
     void cliVersionUsesConfiguredExecutableAndRefreshes();
     void parsesSavedSessions();
     void parsesActivityMetadata();
@@ -2154,6 +2156,35 @@ void TestHgsClient::parsesSharedReadState()
     QVERIFY(!box.sessions[2].sharedRead);
 }
 
+void TestHgsClient::taskCommandsUseStdinAndReportFailures()
+{
+    QTemporaryDir directory; QFile script(directory.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
+    script.write(R"(#!/usr/bin/env python3
+import json,pathlib,sys
+text=sys.stdin.read()
+pathlib.Path(__file__).with_name('task.json').write_text(json.dumps({'argv':sys.argv[1:],'stdin':text}))
+if sys.argv[2]=='fail': print('no task T-zz in this project',file=sys.stderr);sys.exit(1)
+if sys.argv[2]=='garbage': print('not json');sys.exit(0)
+print(json.dumps({'task':{'id':'T-1'}}))
+)");
+    script.close(); QVERIFY(FakeCli::makeRunnable(script.fileName()));
+    HgsClient client(FakeCli::program(script.fileName()));
+    QSignalSpy ready(&client, &HgsClient::taskReady), failed(&client, &HgsClient::taskFailed);
+    const QString prompt = "Fix '$HOME' and `quotes`\nsecond line";
+    const auto id = client.requestTask({"add", "--project", "orchard"}, prompt);
+    QTRY_COMPARE(ready.size(), 1); QCOMPARE(ready[0][0].toULongLong(), id);
+    QCOMPARE(ready[0][1].toJsonObject().value("task").toObject().value("id").toString(), QString("T-1"));
+    QFile log(directory.filePath("task.json")); QVERIFY(log.open(QIODevice::ReadOnly));
+    const auto call = QJsonDocument::fromJson(log.readAll()).object();
+    QCOMPARE(call.value("argv").toArray(), QJsonArray({"task", "add", "--project", "orchard"}));
+    QCOMPARE(call.value("stdin").toString(), prompt);
+    const auto missing = client.requestTask({"fail"});
+    QTRY_COMPARE(failed.size(), 1); QCOMPARE(failed[0][0].toULongLong(), missing);
+    QCOMPARE(failed[0][1].toString(), QString("no task T-zz in this project"));
+    client.requestTask({"garbage"});
+    QTRY_COMPARE(failed.size(), 2); QCOMPARE(failed[1][1].toString(), QString("Invalid task response"));
+}
+
 void TestHgsClient::readMarksUseStdinAndAcceptOnlyHostAnswers()
 {
     QTemporaryDir directory; QFile script(directory.filePath("hgs")); QVERIFY(script.open(QIODevice::WriteOnly));
@@ -2221,6 +2252,14 @@ print('{"ok":true}')
     client.setPresence(5, false);
     QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 3, 10000);
     QVERIFY(finished[2][0].toString().contains("presence unavailable"));
+}
+
+void TestHgsClient::sendsAndCancelsWaitForAnotherComputer() {
+    // A send or cancel may run on another computer of the swarm, after exchanging its tasks.
+    QCOMPARE(HgsClient::taskTimeoutMs({"send", "uuid-1", "--project", "project-1"}), 90000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"cancel", "uuid-1", "--project", "project-1"}), 90000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"list", "--project", "project-1"}), 30000);
+    QCOMPARE(HgsClient::taskTimeoutMs({"edit", "uuid-1", "--project", "project-1"}), 30000);
 }
 
 QTEST_GUILESS_MAIN(TestHgsClient)

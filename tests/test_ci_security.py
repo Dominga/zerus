@@ -387,6 +387,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertLess(configure, gradle)
         self.assertLess(names.index("Restore Gradle cache"), gradle)
         self.assertLess(gradle, names.index("Save Gradle cache"))
+        # cargo-ndk comes from the cache when it holds this version.
+        self.assertLess(names.index("Restore Gradle cache"), names.index("Rust and cargo-ndk for the task replica"))
         # The signed build's toolchain and Firebase variant, with placeholder values only.
         signed = self.dev_android()
         sdkmanager = r'(?m)^ +"\$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" (.+)$'
@@ -394,7 +396,15 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"', listed[configure])
         self.assertIn("os.environ['JAVA_HOME_17_X64']", signed)
         self.assertIn("        working-directory: mobile/android\n"
-                      "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease -PzerusFirebase=true\n", listed[gradle])
+                      "        run: ./gradlew --no-daemon testDebugUnitTest lintRelease checkReplicaPackaging -PzerusFirebase=true\n", listed[gradle])
+        # The task replica is built for every packaged ABI with the pinned toolchain and NDK, in
+        # the check and in the signed build alike (the sdkmanager lines match above).
+        for line in ("rustup toolchain install 1.99.1 --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android",
+                     "cargo +1.99.1 install cargo-ndk --version 4.1.2 --locked"):
+            with self.subTest(line=line):
+                self.assertIn(line, android)
+                self.assertIn(line, signed)
+        self.assertIn("'ndk;28.2.13676358'", android)
         self.assertIn("-PzerusFirebase=true", signed)
         # Retain the three actual JVM suites on success as well as failure, using
         # only explicit files staged outside all cache paths. Missing any
@@ -439,10 +449,13 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_android_gradle_cache_is_a_monthly_content_keyed_family(self):
         restore = self.checks_step("android", "gradle-cache")
         self.assertIn('echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"', self.checks_step("android", "gradle"))
-        self.assertEqual(self.step_paths(restore), ["~/.gradle/caches", "~/.gradle/wrapper"])
+        # Cargo's registry and the installed cargo-ndk (with Cargo's records of it) travel along.
+        self.assertEqual(self.step_paths(restore), ["~/.gradle/caches", "~/.gradle/wrapper", "~/.cargo/registry/index",
+                                                    "~/.cargo/registry/cache", "~/.cargo/bin/cargo-ndk",
+                                                    "~/.cargo/.crates.toml", "~/.cargo/.crates2.json"])
         family = "android-gradle-v1-${{ steps.gradle.outputs.epoch }}-"
         content = ("${{ hashFiles('mobile/android/gradle/wrapper/gradle-wrapper.properties', "
-                   "'mobile/android/**/*.gradle.kts') }}")
+                   "'mobile/android/**/*.gradle.kts', 'crates/replica/Cargo.lock', 'crates/replica-ffi/Cargo.lock') }}")
         self.assertIn(f"          key: {family}{content}\n          restore-keys: {family}\n", restore)
         # cache-trim groups main entries by the key without its last segment:
         # that segment must be the content hash, so the month stays in the family.
@@ -529,7 +542,12 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(field(quick, "name"), "Quick checks (source and Rust 1.99)")
         for line in ("run: python3 scripts/ci/check-source.py", "-p 'test_*publication.py'", "-p test_ci_security.py",
                      "sha256sum --check --ignore-missing actionlint_1.7.12_checksums.txt",
-                     "run: cargo +1.99.1 test --locked"):
+                     "run: cargo +1.99.1 test --locked",
+                     "cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml --target-dir target/replica",
+                     "cargo +1.99.1 fmt --check --manifest-path crates/replica-ffi/Cargo.toml",
+                     "cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi --all-targets -- -D warnings",
+                     "cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi",
+                     'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
             self.assertIn(line, quick)
         for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "cli-macos-debug", "arch", "arch-package",
                      "mac-desktop", "windows-desktop", "windows-host"):
@@ -566,7 +584,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual({path.name for path in tests.glob("test_b*.py")},
                          {path.name for path in tests.glob("test_bb_*.py")})
         self.assertTrue(list(tests.glob("test_bb_*.py")))
-        for variable in ("ZERUS_RELAY_BINARY", "ZERUS_DIRECTORY_TEST_HGS"):
+        for variable in ("ZERUS_RELAY_BINARY", "ZERUS_DIRECTORY_TEST_HGS", "ZERUS_TASK_TEST_HGS"):
             self.assertIn(f"\n          export {variable}=", relay)
         # The relay fixtures' database driver is a test-only requirement.
         self.assertIn('\n          "$RUNNER_TEMP/relay-venv/bin/pip" install ./services/mobile'
@@ -711,6 +729,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", ios), ["actions/checkout"])
         self.assertIn("persist-credentials: false", ios)
         self.assertIn("swift test", ios)
+        # ZerusKit links the project task replica, built before its tests.
+        self.assertLess(ios.index("bash mobile/ios/scripts/build-replica.sh"), ios.index("swift test"))
         self.assertIn("CODE_SIGNING_ALLOWED=NO", ios)
         self.assertIn("'ios': json.loads(os.environ['RUN_IOS']),", job(checks, "gate"))
         gate = job(checks, "gate")
@@ -1199,7 +1219,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         suites = job(checks, "gate")
         self.assertIn("android", field(suites, "needs").strip("[]").split(", "))
         self.assertIn("'android': True,", suites)
-        self.assertIn("testDebugUnitTest lintRelease -PzerusFirebase=true", job(checks, "android"))
+        self.assertIn("testDebugUnitTest lintRelease checkReplicaPackaging -PzerusFirebase=true", job(checks, "android"))
 
     def test_cache_trim_is_main_only_housekeeping_without_checked_out_code(self):
         trim = job(self.ci, "cache-trim")
@@ -1350,6 +1370,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('test "$WORKFLOW_REPOSITORY" = ufna/zerus', upload)
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@[0-9a-f]{40} # v", upload), ["actions/checkout"])
         self.assertIn("persist-credentials: false", upload)
+        # The task replica's Rust build, whose dependencies run build scripts, ends before any secret is in the environment.
+        self.assertLess(upload.index("bash mobile/ios/scripts/build-replica.sh"), upload.index("secrets."))
         self.assertIn('if: always()\n        run: |\n          security delete-keychain '
                       '"$RUNNER_TEMP/app-store-connect/signing.keychain-db" 2> /dev/null || true\n'
                       '          rm -rf "$RUNNER_TEMP/app-store-connect"', upload)

@@ -35,6 +35,8 @@ pub const READS: &[&str] = &[
     "speech_status",
     "voice_profiles",
     "voice_status",
+    "task_exchange",
+    "task_done",
 ];
 /// Predicate of the persisted `read_history_v3` index and the one-hour read
 /// retention class. `attachment_read` is a read with its own shorter class
@@ -66,6 +68,14 @@ pub const SPEECH_READ_SQL: &str =
     "('speech_profiles','speech_stats','speech_status','voice_profiles','voice_status')";
 pub const SPEECH_AUDIO_MAX: usize = 16000 * 2 * 120;
 pub const COMPUTER: &[&str] = &["set_mobile_delivery"];
+/// Computer-scoped: the phone's tasks, which only the Rust connector offers.
+/// The exchange and the Done list are short reads the computer answers from
+/// its own replica; Send now and Cancel are mutations on the session's computer.
+pub const TASKS: &[&str] = &["task_exchange", "task_send", "task_cancel", "task_done"];
+/// A Done page lists at most this many tasks.
+pub const TASK_DONE_MAX: u64 = 50;
+/// The longest cancel reason, in characters.
+pub const TASK_REASON_MAX: usize = 4096;
 pub const MOBILE_DELIVERY: &[&str] = &[
     "immediate",
     "away",
@@ -133,6 +143,10 @@ pub const OPERATIONS: &[&str] = &[
     "terminate",
     "worktree_create",
     "worktrees",
+    "task_exchange",
+    "task_send",
+    "task_cancel",
+    "task_done",
 ];
 pub const FEATURES: &[&str] = &[
     "clear_context_dismiss",
@@ -144,6 +158,10 @@ pub const FEATURES: &[&str] = &[
     "send_agent",
     "voice_video",
 ];
+/// The most updates one `task_exchange` carries; a phone sends the rest next.
+pub const TASK_UPDATES_MAX: usize = 256;
+/// The longest project ID, in bytes, that the task replica stores.
+pub const TASK_PROJECT_MAX: usize = 128;
 /// Largest decoded chunk one `attachment_read` result may carry. Its base64
 /// form and metadata stay below the ordinary 1 MiB result limit.
 pub const ATTACHMENT_CHUNK_MAX: u64 = 512 * 1024;
@@ -455,7 +473,8 @@ pub fn request(v: &Value) -> Result<()> {
             || op == "archive_list"
             || LAUNCH.contains(&op)
             || COMPUTER.contains(&op)
-            || SPEECH.contains(&op),
+            || SPEECH.contains(&op)
+            || TASKS.contains(&op),
     )?;
     if crate::repositories::OPERATIONS.contains(&op) {
         if v["session"] != "" {
@@ -521,6 +540,11 @@ pub fn request(v: &Value) -> Result<()> {
             return Err(Error::BAD);
         }
         speech(op, p, id)?;
+    } else if TASKS.contains(&op) {
+        if v["session"] != "" {
+            return Err(Error::BAD);
+        }
+        task_payload(op, p)?;
     } else if COMPUTER.contains(&op) {
         fields(p, &["value"], &[])?;
         if v["session"] != "" || !MOBILE_DELIVERY.iter().any(|x| p["value"] == *x) {
@@ -810,6 +834,128 @@ pub fn request(v: &Value) -> Result<()> {
     }
     Ok(())
 }
+/// The request `hgs task exchange --json` reads on stdin: the phone's
+/// inventory of one project, its updates and the next part it asks for.
+/// The connector checks a claimed payload with it again.
+pub fn task_exchange(p: &Value) -> Result<()> {
+    fields(
+        p,
+        &["schema", "project", "inventory"],
+        &["updates", "continue", "range"],
+    )?;
+    task_project(p)?;
+    // The task UUIDs the request covers: after `after`, up to `through`.
+    let (mut after, mut through) = (None, None);
+    if let Some(range) = p.get("range") {
+        fields(range, &[], &["after", "through"])?;
+        for (key, bound) in [("after", &mut after), ("through", &mut through)] {
+            if !range[key].is_null() {
+                *bound = Some(uuid(&range[key], false)?);
+            }
+        }
+        if after
+            .zip(through)
+            .is_some_and(|(after, through)| after >= through)
+        {
+            return Err(Error::BAD);
+        }
+    }
+    let inventory = &p["inventory"];
+    fields(inventory, &["project", "tasks"], &[])?;
+    version(&inventory["project"])?;
+    for (task, v) in inventory["tasks"].as_object().ok_or(Error::BAD)? {
+        uuid(&Value::from(task.as_str()), false)?;
+        let task = task.as_str();
+        if after.is_some_and(|after| task <= after) || through.is_some_and(|through| task > through)
+        {
+            return Err(Error::BAD);
+        }
+        version(v)?;
+    }
+    if let Some(updates) = p.get("updates") {
+        let updates = updates.as_array().ok_or(Error::BAD)?;
+        if updates.len() > TASK_UPDATES_MAX {
+            return Err(Error::BAD);
+        }
+        for update in updates {
+            fields(update, &["task", "bytes"], &[])?;
+            document(&update["task"])?;
+            STANDARD
+                .decode(update["bytes"].as_str().ok_or(Error::BAD)?)
+                .map_err(|_| Error::BAD)?;
+        }
+    }
+    if let Some(next) = p.get("continue") {
+        fields(next, &["task", "sha256", "offset"], &[])?;
+        document(&next["task"])?;
+        hex(&next["sha256"])?;
+        next["offset"].as_u64().ok_or(Error::BAD)?;
+    }
+    Ok(())
+}
+/// The payload of one of the phone's task operations (`TASKS`). The
+/// connector checks a claimed payload with it again.
+pub fn task_payload(op: &str, p: &Value) -> Result<()> {
+    match op {
+        "task_exchange" => task_exchange(p),
+        "task_send" => {
+            fields(p, &["schema", "project", "task", "session"], &[])?;
+            task_request(p)?;
+            text(&p["session"], 1024, false)?;
+            Ok(())
+        }
+        "task_cancel" => {
+            fields(p, &["schema", "project", "task"], &["reason"])?;
+            task_request(p)?;
+            // A reason becomes a comment: lines and tabs, no other control characters.
+            if let Some(reason) = p.get("reason") {
+                let reason = reason.as_str().ok_or(Error::BAD)?;
+                if reason.chars().count() > TASK_REASON_MAX
+                    || reason
+                        .chars()
+                        .any(|c| (c < ' ' && c != '\n' && c != '\t') || c == '\u{7f}')
+                {
+                    return Err(Error::BAD);
+                }
+            }
+            Ok(())
+        }
+        "task_done" => {
+            fields(p, &["schema", "project", "limit"], &["before", "session"])?;
+            task_project(p)?;
+            if p["limit"]
+                .as_u64()
+                .is_none_or(|n| !(1..=TASK_DONE_MAX).contains(&n))
+            {
+                return Err(Error::BAD);
+            }
+            if let Some(before) = p.get("before") {
+                fields(before, &["at", "uuid"], &[])?;
+                before["at"].as_u64().ok_or(Error::BAD)?;
+                uuid(&before["uuid"], false)?;
+            }
+            // Only this session: the Done tasks sent to one session.
+            if let Some(session) = p.get("session") {
+                fields(session, &["machine", "session"], &[])?;
+                text(&session["machine"], TASK_PROJECT_MAX, false)?;
+                text(&session["session"], 1024, false)?;
+            }
+            Ok(())
+        }
+        _ => Err(Error::BAD),
+    }
+}
+/// The schema and a project ID as the replica stores it.
+fn task_project(p: &Value) -> Result<()> {
+    if p["schema"] != 1 {
+        return Err(Error::BAD);
+    }
+    let project = text(&p["project"], TASK_PROJECT_MAX, false)?;
+    if project.len() > TASK_PROJECT_MAX || project.chars().any(char::is_control) {
+        return Err(Error::BAD);
+    }
+    Ok(())
+}
 /// The OpenCode message a `remove_queued` names: `msg_` and 1-124 ASCII
 /// letters, digits, `_` or `-`, as hgs and the connector check it
 /// (`tests/fixtures/opencode-queued-message-ids.json`). The computer decides
@@ -823,6 +969,32 @@ fn queued_message(v: &Value) -> Result<()> {
             .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
     {
         return Err(Error::BAD);
+    }
+    Ok(())
+}
+/// A Send now or Cancel: the project and the task's UUID.
+fn task_request(p: &Value) -> Result<()> {
+    task_project(p)?;
+    uuid(&p["task"], false)?;
+    Ok(())
+}
+/// A Loro version: each peer's decimal ID and its change count.
+fn version(v: &Value) -> Result<()> {
+    for (peer, count) in v.as_object().ok_or(Error::BAD)? {
+        if peer.is_empty()
+            || peer.len() > 20
+            || !peer.bytes().all(|b| b.is_ascii_digit())
+            || count.as_u64().is_none_or(|n| n > i32::MAX as u64)
+        {
+            return Err(Error::BAD);
+        }
+    }
+    Ok(())
+}
+/// The project document (`null`) or a task by UUID.
+fn document(v: &Value) -> Result<()> {
+    if !v.is_null() {
+        uuid(v, false)?;
     }
     Ok(())
 }

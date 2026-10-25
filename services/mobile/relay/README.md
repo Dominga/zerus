@@ -674,6 +674,88 @@ Update the native CLI and connector before enabling the relay capability, then
 update clients; an older relay/CLI is reported as unavailable, not an empty page.
 No native agent or phone read-mark migration is needed.
 
+### Phone task exchange
+
+`task_exchange` is an additive capability-gated, computer-scoped read (empty
+session) that only the Rust connector offers: the phone's replica of one
+project's tasks
+(`docs/superpowers/specs/2026-10-18-task-replication-loro-design.md`, "Phone").
+The payload is exactly the request `hgs task exchange --json` reads on stdin:
+`schema` 1, `project` (at most 128 bytes, the replica's project ID),
+`inventory` (`project` and `tasks` by UUID, each a map from decimal Loro peer
+IDs to change counts), optional `updates` (at most 256, each a `task` UUID, or
+`null` for the project document, and base64 `bytes`), optional `continue`
+(`task`, the whole update's `sha256` and the `offset` of the next part) and
+optional `range`. The ordinary 1 MiB request and result bounds apply; an answer
+carries at most 512 KiB of update bytes, and a larger document comes in parts
+the phone asks for one by one. The connector invokes only
+`hgs task exchange --json` with the payload on stdin; hgs validates it again,
+and Loro merges are idempotent, so a repeated request changes nothing twice.
+
+Every process that writes a task adds a Loro peer to its version, so an
+inventory grows by roughly 30 bytes and two JSON values per edit of every task
+the phone holds. A phone whose inventory would not fit one request beside its
+updates (1 MiB and 50,000 JSON values in all) sends it in parts: `range`
+names the task UUIDs after `after` and up to `through` (canonical UUIDs in text
+order, either one left out at its end of the range), the inventory lists only
+tasks within it, and the computer answers only for that range. The project
+document belongs to the range without `after`. A computer refuses a request
+whose inventory lies outside its range.
+
+The result names `imported` (documents the phone's updates changed),
+`refused` (`uuid` and `error` of each update that did not apply), `updates`
+(the same shape as the request's), `more` and `digest` (this computer's phone
+view after the import, as its heartbeat names it). A document larger than a
+page comes as `part` (`task`, `size`, `sha256` of the whole update, `offset`
+and base64 `bytes`) with no `updates`; the phone asks for the next part with
+`continue`, and a part of an update that changed meanwhile starts again at
+offset 0. An answer with a part always says `more`. An answer with neither
+updates nor a part also names `inventory`, what this computer holds of the
+phone's view (within the range), from which the phone computes the updates
+this computer lacks and sends them in its next request. A refusal comes back as
+a failed receipt with hgs's reason, for example "the project's tasks are busy;
+try again", which a later exchange retries, or `no project "…" here`.
+`digest` and `tasks_digest` are the lowercase hexadecimal SHA-256 of the
+inventory as compact JSON with its keys sorted (`{"project":{…},"tasks":{…}}`),
+over the project document and every task that is not Done.
+
+The operation counts as a read, never reserves mutation capacity, and has its
+own `task_exchange_history` index with two-minute retention after completion;
+the established `read_history_v3` predicate stays unchanged. Apply the additive
+index to both PostgreSQL workers during the normal coordinated runtime
+replacement. A phone exchanges only when both the relay's capabilities and the
+computer's heartbeat list the operation, and the relay refuses it (409) for a
+computer that does not, so the relay, hgs and the connector update in any order.
+Each computer's heartbeat also names every project's phone-view digest
+(`mobile_projects.projects[].tasks_digest`), which the relay keeps as part of
+the opaque snapshot.
+
+### Phone task actions
+
+Three more operations of the `TASKS` family, which only the Rust connector
+offers, carry the phone's Send now, Cancel and Done list; each runs only on a
+computer whose heartbeat lists it (409 otherwise), with an empty session:
+
+- `task_send` (`schema` 1, `project`, `task` UUID, `session` at most 1024
+  characters) and `task_cancel` (`schema`, `project`, `task`, optional `reason`
+  of at most 4096 characters, which may hold lines and tabs but no other
+  control characters) are mutations: the relay keeps their durable
+  identity, mutation quota and retention as for any mutation, a duplicate
+  replays its receipt, and the connector journal runs each identity once. A
+  receipt is failed when hgs refused before anything happened, with its reason,
+  and uncertain when the outcome cannot be confirmed (for example a prompt sent
+  but not recorded). The phone exchanges the project first, so its edits reach
+  that computer, and again afterwards to show the result.
+- `task_done` (`schema`, `project`, `limit` 1–50, optional `before` with `at`
+  and `uuid`, optional `session` with `machine` and `session` for Only this
+  session, which lists and counts only the tasks sent to it) is a short read with its own `task_done_history` index and
+  two-minute retention: one page of the Done tasks newest first (`uuid`, `id`,
+  the first 200 characters of `text`, `session`, `accepted_at`), the cursor
+  `next`, `total`, `recent` (the last 7 days) and `damaged` (the page's tasks
+  that could not be read, left out of it). Opening a Done task fetches
+  its document through the exchange, with that task in the inventory.
+
+Apply the additive index with the normal coordinated runtime replacement.
 ### Git checkout status reads
 
 `git_status` is a sessionless computer read offered by the Rust connector only

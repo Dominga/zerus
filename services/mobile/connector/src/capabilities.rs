@@ -88,6 +88,10 @@ pub const IMPLEMENTED: &[&str] = &[
     "speech_stats",
     "speech_status",
     "speech_submit",
+    "task_cancel",
+    "task_done",
+    "task_exchange",
+    "task_send",
     "terminal_input",
     "terminal_snapshot",
     "voice_cancel",
@@ -134,6 +138,10 @@ pub enum Gate {
     Lifecycle,
     /// The bounded, computer-scoped Git checkout projection.
     GitStatus,
+    /// The phone's task exchange and the projects' tasks digests.
+    TaskExchange,
+    /// The phone's Send now, Cancel and Done list.
+    TaskActions,
     Repository,
 }
 
@@ -143,6 +151,8 @@ impl Gate {
         match self {
             Gate::Lifecycle => flags.lifecycle,
             Gate::GitStatus => flags.git_status,
+            Gate::TaskExchange => flags.task_exchange,
+            Gate::TaskActions => flags.task_actions,
             Gate::Repository => flags.repository,
         }
     }
@@ -153,6 +163,8 @@ impl Gate {
         match self {
             Gate::Lifecycle => "lifecycle",
             Gate::GitStatus => "git_status",
+            Gate::TaskExchange => "task_exchange",
+            Gate::TaskActions => "task_actions",
             Gate::Repository => "repository",
         }
     }
@@ -162,6 +174,8 @@ impl Gate {
         match self {
             Gate::Lifecycle => "hgs session-action <session> --json",
             Gate::GitStatus => crate::git_status::HELP_MARKER,
+            Gate::TaskExchange => "hgs task exchange|digests --json",
+            Gate::TaskActions => "hgs task mobile-send|mobile-cancel|mobile-done --json",
             Gate::Repository => crate::repositories::HELP_MARKER,
         }
     }
@@ -208,6 +222,27 @@ pub const CONNECTOR_ONLY: &[ConnectorOnly] = &[
     ConnectorOnly {
         operation: "repository_status",
         gate: Gate::Repository,
+        class: Class::Read,
+    },
+    // The phone's tasks (docs/superpowers/specs/2026-10-18-task-replication-loro-design.md, "Phone").
+    ConnectorOnly {
+        operation: "task_exchange",
+        gate: Gate::TaskExchange,
+        class: Class::Read,
+    },
+    ConnectorOnly {
+        operation: "task_send",
+        gate: Gate::TaskActions,
+        class: Class::Mutation,
+    },
+    ConnectorOnly {
+        operation: "task_cancel",
+        gate: Gate::TaskActions,
+        class: Class::Mutation,
+    },
+    ConnectorOnly {
+        operation: "task_done",
+        gate: Gate::TaskActions,
         class: Class::Read,
     },
 ];
@@ -290,6 +325,10 @@ pub struct Flags {
     pub speech_config: bool,
     /// Both peer markers (`fleet.supported`).
     pub peers: bool,
+    /// The phone's task exchange, which the Python connector never offers.
+    pub task_exchange: bool,
+    /// The phone's Send now, Cancel and Done list, which it never offers either.
+    pub task_actions: bool,
 }
 
 impl Flags {
@@ -334,6 +373,8 @@ impl Flags {
             voice_video: has("voice-video-v1"),
             speech_config: has("Speech profile management v1"),
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
+            task_exchange: has("hgs task exchange|digests --json"),
+            task_actions: has("hgs task mobile-send|mobile-cancel|mobile-done --json"),
         };
         if flags.windows_gateway {
             return flags.windows_local();

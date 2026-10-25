@@ -30,6 +30,8 @@ struct ConversationView: View {
     @State private var terminal = false
     @State private var terminalOpen = false
     @State private var terminalUnavailable: String?
+    @State private var tasks = false
+    @State private var tasksOpen = false
 
     private var model: ConversationModel { app.conversation }
 
@@ -74,7 +76,7 @@ struct ConversationView: View {
                 .opacity(!app.demo && (model.detailProgress || historyProgress || openingProgress) ? 1 : 0)
                 .accessibilityHidden(loadStatus?.initial != false || loadStatus?.spinner != true)
                 .accessibilityLabel(loadStatus?.text ?? "")
-            SessionHeaderTools(session: session, details: $details, search: $searching, terminal: $terminal)
+            SessionHeaderTools(session: session, details: $details, search: $searching, terminal: $terminal, tasks: $tasks)
             statusStrip(unread: unread, offered: offered, questions: questions, target: target)
             if !notice.isEmpty {
                 HStack {
@@ -185,7 +187,7 @@ struct ConversationView: View {
         .reviewDialogs(review: $review, reviewOutgoing: $reviewOutgoing, discard: $discard)
         .sheet(isPresented: $details) { SessionDetailsSheet(session: session) }
         .modifier(ConversationTools(session: session, raw: raw, archived: archived, online: online, terminal: $terminal, terminalOpen: $terminalOpen,
-                                    terminalUnavailable: $terminalUnavailable))
+                                    terminalUnavailable: $terminalUnavailable, tasks: $tasks, tasksOpen: $tasksOpen))
         .onChange(of: model.returnToSessions) { dismiss() }
         .onAppear {
             openIfNeeded()
@@ -538,6 +540,8 @@ private struct ConversationTools: ViewModifier {
     @Binding var terminal: Bool
     @Binding var terminalOpen: Bool
     @Binding var terminalUnavailable: String?
+    @Binding var tasks: Bool
+    @Binding var tasksOpen: Bool
 
     func body(content: Content) -> some View {
         let target = session.target
@@ -556,6 +560,15 @@ private struct ConversationTools: ViewModifier {
                 Text(terminalUnavailable ?? "")
             }
             .fullScreenCover(isPresented: $terminalOpen) { TerminalView(session: session) }
+            .onChange(of: tasks) { _, requested in
+                guard requested else { return }
+                tasks = false
+                app.tasks.openTasks(session)
+                tasksOpen = app.tasks.tasksKey != nil
+            }
+            // Tasks opens over this conversation and closes with it.
+            .onChange(of: target) { tasksOpen = false }
+            .fullScreenCover(isPresented: $tasksOpen, onDismiss: { app.tasks.closeTasks() }) { TasksView() }
             .task(id: VoiceObservation(revision: app.conversation.revision, verified: app.conversation.activityVerified, ready: app.voice.ready)) {
                 if !app.demo && app.conversation.activityVerified { app.voice.observe(target, events: app.conversation.events) }
             }

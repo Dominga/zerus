@@ -155,6 +155,55 @@ impl Drop for Poll {
         });
     }
 }
+fn encode_response(value: Value, maximum: usize) -> Result<(std::fs::File, usize)> {
+    use std::io::{Seek, Write};
+    let file = tempfile::tempfile()?;
+    let mut w = json::LimitWriter {
+        inner: std::io::BufWriter::new(file),
+        remaining: maximum,
+    };
+    json::encode(&value, &mut w).map_err(|_| Error::LARGE)?;
+    w.flush()?;
+    let size = maximum - w.remaining;
+    let mut file = w.inner.into_inner().map_err(|_| Error::UNAVAILABLE)?;
+    file.rewind()?;
+    Ok((file, size))
+}
+fn spooled_response(
+    file: std::fs::File,
+    size: usize,
+    status: StatusCode,
+    budget: Arc<Budget>,
+) -> Response {
+    let file = tokio::fs::File::from_std(file);
+    let stream = stream::unfold(
+        (file, budget, Instant::now() + Duration::from_secs(30)),
+        |(mut file, guard, deadline)| async move {
+            let mut b = vec![0u8; 65536];
+            let read = tokio::time::timeout_at(deadline.into(), file.read(&mut b)).await;
+            match read {
+                Ok(Ok(0)) => None,
+                Ok(Ok(n)) => {
+                    b.truncate(n);
+                    Some((
+                        Ok::<_, std::io::Error>(bytes::Bytes::from(b)),
+                        (file, guard, deadline),
+                    ))
+                }
+                _ => Some((
+                    Err(std::io::Error::other("response interrupted")),
+                    (file, guard, Instant::now()),
+                )),
+            }
+        },
+    );
+    let mut r = Response::new(Body::from_stream(stream));
+    *r.status_mut() = status;
+    r.headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    r.headers_mut().insert(header::CONTENT_LENGTH, size.into());
+    r
+}
 impl App {
     pub async fn new(store: Store) -> Result<Self> {
         let cfg = store.db.cfg.clone();
@@ -203,12 +252,27 @@ impl App {
         class: ServiceClass,
     ) -> Result<ResourcePermit> {
         let local = lane.take(units, class)?;
-        let shared = self.store.acquire_service(lane.name, class, units).await?;
-        Ok(ResourcePermit {
-            _local: local,
-            _shared: shared,
-            class,
-        })
+        if !self.cfg.public_enrollment {
+            return Ok(ResourcePermit {
+                _local: local,
+                _shared: None,
+                class,
+            });
+        }
+        let store = self.store.clone();
+        let name = lane.name;
+        let tracker = store.db.tasks.clone();
+        // Ownership transfers before COMMIT. If HTTP disappears, the task
+        // retains local capacity and its eventual shared lease still drops.
+        let task = tracker.spawn(async move {
+            let shared = store.acquire_service(name, class, units).await?;
+            Ok::<_, Error>(ResourcePermit {
+                _local: local,
+                _shared: shared,
+                class,
+            })
+        });
+        task.await.map_err(|_| Error::UNAVAILABLE)?
     }
     async fn work<T: Send + 'static>(
         &self,
@@ -310,49 +374,9 @@ impl App {
         let reserve = self.admit(&self.spools, maximum, budget.class()).await?;
         budget.keep(reserve);
         let (file, size) = self
-            .work(budget.clone(), move || {
-                use std::io::{Seek, Write};
-                let file = tempfile::tempfile()?;
-                let mut w = json::LimitWriter {
-                    inner: std::io::BufWriter::new(file),
-                    remaining: maximum,
-                };
-                json::encode(&value, &mut w).map_err(|_| Error::LARGE)?;
-                w.flush()?;
-                let size = maximum - w.remaining;
-                let mut file = w.inner.into_inner().map_err(|_| Error::UNAVAILABLE)?;
-                file.rewind()?;
-                Ok((file, size))
-            })
+            .work(budget.clone(), move || encode_response(value, maximum))
             .await?;
-        let file = tokio::fs::File::from_std(file);
-        let stream = stream::unfold(
-            (file, budget, Instant::now() + Duration::from_secs(30)),
-            |(mut file, guard, deadline)| async move {
-                let mut b = vec![0u8; 65536];
-                let read = tokio::time::timeout_at(deadline.into(), file.read(&mut b)).await;
-                match read {
-                    Ok(Ok(0)) => None,
-                    Ok(Ok(n)) => {
-                        b.truncate(n);
-                        Some((
-                            Ok::<_, std::io::Error>(bytes::Bytes::from(b)),
-                            (file, guard, deadline),
-                        ))
-                    }
-                    _ => Some((
-                        Err(std::io::Error::other("response interrupted")),
-                        (file, guard, Instant::now()),
-                    )),
-                }
-            },
-        );
-        let mut r = Response::new(Body::from_stream(stream));
-        *r.status_mut() = status;
-        r.headers_mut()
-            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-        r.headers_mut().insert(header::CONTENT_LENGTH, size.into());
-        Ok(r)
+        Ok(spooled_response(file, size, status, budget))
     }
     async fn authenticate(
         &self,
@@ -666,20 +690,29 @@ impl App {
                 if role == Role::Node {
                     if self.store.encrypted_pending(&c).await? {
                         budget.keep(self.admit(&self.large, 1, budget.class()).await?);
+                        // Every capacity refusal precedes the durable claim. Reuse
+                        // these exact spool/CPU reservations for parse and encode;
+                        // no post-claim reacquisition can strand a queued request.
+                        budget.keep(
+                            self.admit(&self.spools, ENCRYPTED_REQUEST_MAX, budget.class())
+                                .await?,
+                        );
+                        let cpu = self.admit(&self.cpu, 1, budget.class()).await?;
                         let raw = self.store.encrypted_claim_body(&c).await?;
-                        let value = self
-                            .work(budget.clone(), move || {
-                                Ok(match raw {
-                                    Some(body) => {
-                                        json!({"requests":[json::parse(body.as_bytes(),32,50000)?]})
-                                    }
-                                    None => json!({"requests":[]}),
-                                })
-                            })
-                            .await?;
-                        return self
-                            .response(value, StatusCode::OK, budget, ENCRYPTED_REQUEST_MAX)
-                            .await;
+                        let guard = budget.clone();
+                        let (file, size) = tokio::task::spawn_blocking(move || {
+                            let _keep = (cpu, guard);
+                            let value = match raw {
+                                Some(body) => {
+                                    json!({"requests":[json::parse(body.as_bytes(),32,50000)?]})
+                                }
+                                None => json!({"requests":[]}),
+                            };
+                            encode_response(value, ENCRYPTED_REQUEST_MAX)
+                        })
+                        .await
+                        .map_err(|_| Error::UNAVAILABLE)??;
+                        return Ok(spooled_response(file, size, StatusCode::OK, budget));
                     }
                     if Instant::now() >= deadline {
                         return self
@@ -1141,4 +1174,79 @@ pub async fn serve(
     tasks.close();
     let _ = tokio::time::timeout(Duration::from_secs(app.cfg.shutdown_timeout), tasks.wait()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod admission_cleanup_tests {
+    use super::*;
+    use crate::db::Db;
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+
+    #[tokio::test]
+    async fn cancelled_public_admission_retains_local_capacity_until_shared_acquisition_settles() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            public_enrollment: true,
+            large_payload_slots: 2,
+            max_spool_bytes: 164 * 1024 * 1024,
+            background: false,
+            ..Config::default()
+        };
+        let db = Db::open(
+            &directory.path().join("state/relay.sqlite3"),
+            Arc::new(config),
+        )
+        .await
+        .unwrap();
+        let app = App::new(Store::new(db)).await.unwrap();
+        // Private SQL evidence that acquisition really committed once. This
+        // adds no production hook and uses no additional connection or pool.
+        app.store
+            .db
+            .exec(
+                "CREATE TABLE admitted_cleanup_test(id TEXT PRIMARY KEY)",
+                &[],
+            )
+            .await
+            .unwrap();
+        app.store.db.exec("CREATE TRIGGER admitted_cleanup_test_insert AFTER INSERT ON service_leases WHEN NEW.lane='request' BEGIN INSERT INTO admitted_cleanup_test(id) VALUES(NEW.id); END",&[]).await.unwrap();
+        let total = app.authenticated.total.available_permits();
+        let standard = app.authenticated.standard.available_permits();
+        let held = app.store.db.pool.acquire().await.unwrap();
+        let mut admission = Box::pin(app.admit(&app.authenticated, 1, ServiceClass::Standard));
+        assert!(admission
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+        // Drop the owning future, not merely a Pin<&mut Future> wrapper.
+        drop(admission);
+        assert_eq!(
+            app.authenticated.total.available_permits(),
+            total - 1,
+            "cancelled admission must retain local capacity until its tracked acquisition settles"
+        );
+        assert_eq!(app.authenticated.standard.available_permits(), standard - 1);
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let row = app.store.db.one("SELECT used_total,used_standard,(SELECT count(*) FROM service_leases WHERE lane='request') AS leases,(SELECT count(*) FROM admitted_cleanup_test) AS acquired FROM service_resources WHERE lane='request'",&[]).await.unwrap().unwrap();
+                if row["acquired"] == 1
+                    && row["leases"] == 0
+                    && row["used_total"] == 0
+                    && row["used_standard"] == 0
+                    && app.authenticated.total.available_permits() == total
+                    && app.authenticated.standard.available_permits() == standard
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the detached acquisition must commit once and release both budgets");
+        app.store.db.close().await;
+    }
 }

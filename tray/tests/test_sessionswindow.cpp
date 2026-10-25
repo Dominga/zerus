@@ -85,6 +85,7 @@
 #include "SessionOrganization.h"
 #include "MachineFilter.h"
 #include "ProjectFilter.h"
+#include "AccountFilter.h"
 #include "SessionSearch.h"
 #include "DashboardPage.h"
 #include "AccountUsage.h"
@@ -269,6 +270,9 @@ private slots:
     void dashboardAndMultiMachineNavigation();
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
+    void accountFilterCombinesScopesAndKeepsTheOpenDraft();
+    void accountDetailsResolveOnlyTheRecordedBinding();
+    void accountScopeLimitsArchiveRemoval();
     void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
     void projectHeaderFiltersOnlyThisProject();
     void retiredGraphHasNoNavigationOrContextActions();
@@ -1067,6 +1071,73 @@ void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
         }
     }
     window.showSession("mac","claude/infra/review"); QVERIFY(projects->selection().isEmpty()); QCOMPARE(parents(),5);
+}
+
+void TestSessionsWindow::accountFilterCombinesScopesAndKeepsTheOpenDraft()
+{
+    auto state=fleet();auto local=state.local();local.sessions[0].accountId="work";local.sessions[2].accountId="personal";
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    auto remote=*state.peer("mac");remote.sessions[0].cmd="codex";remote.sessions[0].accountId="work";
+    state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
+    SessionOrganization org;const auto project=org.createGroup("Focus");
+    org.moveSession(org.observe("arch",local.sessions[0].name,""),project);
+    org.moveSession(org.observe("mac",remote.sessions[0].name,""),project);
+    QSettings().setValue("workspace/organization",QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program());keepDetailsPollsOut(window);window.setFleet(state);window.resize(1100,760);window.show();
+    auto *accounts=window.findChild<AccountFilter *>("accountFilterChips");auto *projects=window.findChild<ProjectFilter *>("projectFilterChips");
+    auto *machines=window.findChild<MachineFilter *>("machineFilterChips");auto *list=window.findChild<SessionList *>("sessionList");QVERIFY(accounts&&projects&&machines&&list);
+    const auto count=[&]{int n=0;for(int i=0;i<list->count();++i)if(!list->item(i)->data(SessionRoles::Header).toBool())++n;return n;};
+    const auto work=SessionAccounts::binding({},local.sessions[0]),personal=SessionAccounts::binding({},local.sessions[2]),mac=SessionAccounts::binding("mac",remote.sessions[0]);
+    accounts->setSelection({work});QCOMPARE(count(),1);
+    for(auto *button:window.findChildren<QPushButton *>("sessionFilter"))if(button->property("filter")=="all")QCOMPARE(button->property("count").toInt(),1);
+    accounts->setSelection({work,personal,mac});QCOMPARE(count(),3);
+    projects->setSelection({project});QCOMPARE(count(),2);machines->setSelection({"mac"});QCOMPARE(count(),1);
+    machines->setSelection({});projects->setSelection({});accounts->setSelection({work});
+    auto *search=window.findChild<QLineEdit *>("search");auto *results=window.findChild<QListWidget *>("searchResults");
+    search->setText("navigation");QCOMPARE(results->count(),0);accounts->setSelection({personal});QCOMPARE(results->count(),1);search->clear();
+    window.showSession({},local.sessions[0].name);auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    setComposerText(composer,"Keep this account-filter draft");const auto open=composer->sessionKey();
+    accounts->setSelection({personal});QCOMPARE(count(),1);QCOMPARE(composer->sessionKey(),open);
+    QCOMPARE(composer->editor()->toPlainText(),QString("Keep this account-filter draft"));
+    window.showProjects();window.showSessionList();QCOMPARE(accounts->selection(),QSet<QString>{personal});QCOMPARE(count(),1);
+    local.sessions[2].name="codex/website/renamed";state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QCOMPARE(accounts->selection(),QSet<QString>{personal});QCOMPARE(count(),1);
+    local.sessions.removeAt(2);state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+    QCOMPARE(accounts->selection(),QSet<QString>{personal});QCOMPARE(count(),0); // Disappearance must not broaden the scope.
+}
+
+void TestSessionsWindow::accountDetailsResolveOnlyTheRecordedBinding()
+{
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject profile{{"id","profile-work"},{"provider","codex"},{"label","<Work>"},{"home","/fixture/work"},{"installed",true},
+        {"account_status",QJsonObject{{"status","ok"},{"identity",QJsonObject{{"email","work@example.test"},{"account_id","identity-work"}}}}}};
+    const auto answer=QJsonDocument(QJsonObject{{"profiles",QJsonArray{profile}}}).toJson(QJsonDocument::Compact);
+    const auto path=m_dir->filePath("account-details");
+    QVERIFY(FakeCli::install(path,original.readAll().replace("if False:pass\n","if False:pass\nelif c=='account' and a[1:2]==['ls']:print("+FakeCli::pythonString(QString::fromUtf8(answer))+")\n")));
+    auto state=fleet();auto local=state.local();local.sessions[0].accountId="profile-work";local.sessions[0].accountHome="/fixture/work";
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(path));keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},local.sessions[0].name);
+    auto *inspector=window.findChild<QTabWidget *>("sessionInspector");auto *toggle=window.findChild<QPushButton *>("toggleInspector");
+    QVERIFY(inspector&&toggle);toggle->setChecked(true);inspector->setCurrentIndex(1);
+    auto *browser=window.findChild<QTextBrowser *>("sessionInfo");QVERIFY(browser);
+    window.findChild<AccountsPage *>()->ensureCatalogs();
+    QTRY_VERIFY(browser->toPlainText().contains("work@example.test"));
+    QVERIFY(browser->toPlainText().contains("<Work>"));QVERIFY(browser->toPlainText().contains("profile-work"));QVERIFY(browser->toPlainText().contains("/fixture/work"));
+    window.showSession({},local.sessions[1].name);
+    QTRY_VERIFY(browser->toPlainText().contains("Account not recorded"));QVERIFY(!browser->toPlainText().contains("work@example.test"));
+}
+
+void TestSessionsWindow::accountScopeLimitsArchiveRemoval()
+{
+    auto state=fleet();auto local=state.local();auto one=local.sessions[0];one.state="archived";one.archiveId="account-one";one.accountId="work";
+    auto two=one;two.archiveId="account-two";two.accountId="personal";local.sessions<<one<<two;state.setLocal(local,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program());keepDetailsPollsOut(window);window.setFleet(state);window.show();
+    auto *accounts=window.findChild<AccountFilter *>("accountFilterChips");auto *clear=window.findChild<QAction *>("clearArchive");QVERIFY(accounts&&clear);
+    accounts->setSelection({SessionAccounts::binding({},one)});QVERIFY(clear->isEnabled());
+    auto *client=window.findChild<HgsClient *>();QSignalSpy writes(client,&HgsClient::writeDone);
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("confirmSelectionAction");QVERIFY(dialog);
+        QVERIFY(dialog->text().contains("1 archived"));dialog->reject();});clear->trigger();QCOMPARE(writes.size(),0);
+    accounts->setSelection({SessionAccounts::binding({},QString("codex"),QString("absent"))});QVERIFY(!clear->isEnabled());
 }
 
 void TestSessionsWindow::projectHeaderFiltersOnlyThisProject()

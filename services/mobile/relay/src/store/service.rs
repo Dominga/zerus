@@ -178,7 +178,11 @@ impl Store {
     }
 
     pub async fn release_service(&self, id: &str, class: ServiceClass) -> Result<()> {
-        let mut t = self.db.control(class).await?;
+        crate::db::retry_cleanup(|| self.release_service_once(id, class)).await
+    }
+
+    async fn release_service_once(&self, id: &str, class: ServiceClass) -> Result<()> {
+        let mut t = self.db.cleanup_control(class).await?;
         if let Some(row) = t
             .one("SELECT lane FROM service_leases WHERE id=?", args![id])
             .await?

@@ -311,6 +311,104 @@ mod tests {
     }
 
     #[test]
+    fn the_new_attempt_fields_survive_the_store_and_a_replay() {
+        use super::super::model::{
+            Attempt, AttemptState, Hold, Member, ReplacedReport, Report, Settings, Task, TaskStatus, TeamStatus,
+        };
+        use super::super::ops::{self, Actor};
+        use std::collections::BTreeSet;
+        let (_dir, mut store) = store();
+        let mut stored = team("t1");
+        stored.status = TeamStatus::Running;
+        stored.settings = Settings { start_timeout_seconds: 300, ..Default::default() };
+        stored.members = vec![
+            Member { id: "lead".into(), agent: "claude".into(), ..Default::default() },
+            Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() },
+        ];
+        stored.tasks = vec![
+            Task {
+                id: 1,
+                title: "API".into(),
+                assignee: "dev".into(),
+                status: TaskStatus::InProgress,
+                attempts: vec![
+                    Attempt {
+                        n: 1,
+                        id: "00000000-0000-4000-8000-000000000001".into(),
+                        member: "dev".into(),
+                        state: AttemptState::Reported,
+                        sent_at: 1.0,
+                        delivered_at: Some(2.0),
+                        started_at: Some(3.0),
+                        start_warned: true,
+                        turn_ended_at: Some(4.0),
+                        turn_reply: "reply-7".into(),
+                        report: Some(Report {
+                            text: "Done".into(),
+                            at: 6.0,
+                            captured: true,
+                            replaced: vec![ReplacedReport { text: "Building".into(), at: 5.5 }],
+                        }),
+                        ..Default::default()
+                    },
+                    Attempt {
+                        n: 2,
+                        id: "00000000-0000-4000-8000-000000000002".into(),
+                        member: "dev".into(),
+                        state: AttemptState::Delivered,
+                        sent_at: 8.0,
+                        delivered_at: Some(9.0),
+                        started_at: Some(10.0),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            Task {
+                id: 2,
+                title: "Tests".into(),
+                assignee: "dev".into(),
+                status: TaskStatus::Pending,
+                hold: Some(Hold { by: "Lead".into(), at: 7.0, reason: "Busy with #1".into() }),
+                ..Default::default()
+            },
+        ];
+        store.create(REQUEST, &json!({}), stored.clone(), vec![]).unwrap();
+        let loaded = store.load("t1").unwrap().unwrap();
+        assert_eq!(loaded.tasks, stored.tasks);
+        assert_eq!(loaded.settings.start_timeout_seconds, 300);
+        assert_eq!(loaded.tasks[1].hold.as_ref().map(|hold| hold.reason.as_str()), Some("Busy with #1"));
+
+        // A member's question, replayed with the same request: one receipt.
+        const ASK: &str = "33333333-3333-4333-8333-333333333333";
+        let input = json!({"text":"Must I keep the old JSON field?"});
+        let ask = |store: &mut Store, input: &Value| {
+            store.mutate(Some((ASK, input)), "t1", None, |team, events| {
+                ops::apply(team, "ask", input, &Actor::Member("dev".into()), &BTreeSet::new(), events)
+            })
+        };
+        let first = ask(&mut store, &input).unwrap();
+        assert_eq!((first["status"].as_str(), first["question"].as_str()), (Some("asked"), Some("q1")));
+        assert_eq!((first["task"].as_u64(), first["attempt"].as_u64()), (Some(1), Some(2)));
+        assert_eq!(ask(&mut store, &input).unwrap(), first);
+        let loaded = store.load("t1").unwrap().unwrap();
+        let questions = &loaded.tasks[0].attempts[1].questions;
+        assert_eq!(questions.len(), 1);
+        assert_eq!(
+            (questions[0].id.as_str(), questions[0].text.as_str(), questions[0].answered_at),
+            ("q1", "Must I keep the old JSON field?", None)
+        );
+        // The feed has the question once, not once per replay.
+        let feed = store.events("t1", None, PAGE).unwrap();
+        let asked: Vec<&Value> =
+            feed["items"].as_array().unwrap().iter().filter(|item| item["kind"] == "question_asked").collect();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0]["seq"].as_i64().is_some());
+        assert_eq!(asked[0]["detail"]["question"], json!("q1"));
+        assert_eq!(loaded.revision, 2);
+    }
+
+    #[test]
     fn a_mutation_checks_the_revision_and_appends_its_events() {
         let (_dir, mut store) = store();
         store.create(REQUEST, &json!({}), team("t1"), vec![]).unwrap();

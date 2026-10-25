@@ -183,6 +183,8 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .tasks
         .iter()
         .filter(|task| task.status == TaskStatus::Pending && !cycles.contains(&task.id))
+        // A held task is Pending but never ready: the lead returns it later (A5).
+        .filter(|task| task.hold.is_none())
         .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
         .filter(|task| !barrier_holds(team, task))
         .map(|task| task.id)

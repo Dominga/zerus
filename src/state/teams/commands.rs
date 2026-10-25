@@ -84,6 +84,17 @@ pub(crate) fn view(team: &Team) -> Value {
     value["ready"] = json!(plan::ready(team));
     value["waiting_for_lead"] = json!(waiting_for_lead(team));
     value["pending_phase"] = json!(pending_phase(team));
+    // Each task's last attempt carries its derived phase (spec section 2). The
+    // stored record knows no live session, so `stopped` stays to the dispatcher.
+    if let Some(tasks) = value["tasks"].as_array_mut() {
+        for (task, value) in team.tasks.iter().zip(tasks) {
+            if let Some(phase) = ops::attempt_phase(task, false) {
+                if let Some(attempt) = value["attempts"].as_array_mut().and_then(|attempts| attempts.last_mut()) {
+                    attempt["phase"] = json!(phase);
+                }
+            }
+        }
+    }
     value
 }
 
@@ -106,7 +117,8 @@ fn summary(team: &Team) -> Value {
         .map(|t| {
             let attempt = t.attempts.last();
             json!({"id":t.id,"title":t.title,"status":t.status,"assignee":t.assignee,
-                "attempt":attempt.map(|a| json!({"n":a.n,"state":a.state,"no_report":a.no_report}))})
+                "attempt":attempt.map(|a| json!({"n":a.n,"state":a.state,"no_report":a.no_report,
+                    "phase":ops::attempt_phase(t, false)}))})
         })
         .collect();
     json!({

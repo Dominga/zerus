@@ -1841,7 +1841,7 @@ mod tests {
     }
 
     fn attempt_with_report(member: &str, text: &str, state: AttemptState) -> Attempt {
-        Attempt { n: 1, member: member.into(), state, report: Some(Report { text: text.into(), at: 0.0 }), ..Default::default() }
+        Attempt { n: 1, member: member.into(), state, report: Some(Report { text: text.into(), at: 0.0, ..Default::default() }), ..Default::default() }
     }
 
     #[test]

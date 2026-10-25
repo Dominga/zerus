@@ -52,6 +52,16 @@ fn member_id(value: &str) -> anyhow::Result<String> {
     Ok(value.to_owned())
 }
 
+/// The bounds on a team's settings, for the settings a request sets.
+fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
+    ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
+    ensure!(
+        (30..=3600).contains(&settings.start_timeout_seconds),
+        "The start warning waits 30 to 3600 seconds after delivery"
+    );
+    Ok(())
+}
+
 fn parse_member(value: &Value) -> anyhow::Result<Member> {
     let mut member: Member = serde_json::from_value(value.clone()).context("Invalid member")?;
     member.id = member_id(&member.id)?;
@@ -84,6 +94,7 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     // sets the computed phase afterwards.
     task.phase = 1;
     task.attempts.clear();
+    task.hold = None;
     task.decided_by = None;
     Ok(task)
 }
@@ -101,7 +112,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     } else {
         serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?
     };
-    ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
+    validate_settings(&settings)?;
     // From the desktop: the members and template tasks proposed for the
     // lead's plan; the lead starts and gets a planning brief.
     let mut members = vec![lead.clone()];
@@ -172,7 +183,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     ensure!(tasks.len() <= 200, "A plan has at most 200 tasks");
     if !input["settings"].is_null() {
         let settings: Settings = serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?;
-        ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
+        validate_settings(&settings)?;
         team.settings = settings;
     }
     team.members = members;
@@ -445,6 +456,50 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     Ok(json!({"status":"finished"}))
 }
 
+/// The phase of a task's last attempt as `status`, `current` and the desktop
+/// show it (spec section 2): `sent`, `delivered`, `late`, `working`, `asking`,
+/// `reported`, `no_report`, `stopped`, `held`, `rejected` or `unconfirmed`.
+/// The plan's "input accepted" is `delivered` here; a decided task has no
+/// attempt phase. `session_stopped` is known only from the live session
+/// listing, so the caller passes it and the stored status passes false.
+pub(crate) fn attempt_phase(task: &Task, session_stopped: bool) -> Option<&'static str> {
+    if task.status.finished() {
+        return None;
+    }
+    if task.hold.is_some() {
+        return Some("held");
+    }
+    let attempt = task.attempts.last()?;
+    let phase = match attempt.state {
+        AttemptState::Unconfirmed => "unconfirmed",
+        AttemptState::Delivering => "sent",
+        AttemptState::Rejected => "rejected",
+        // Nothing reached the agent, or another attempt replaced this one:
+        // the task itself is Pending, so it has no phase of its own.
+        AttemptState::Refused | AttemptState::Revoked => return None,
+        AttemptState::Delivered | AttemptState::Reported => {
+            if attempt.open_question().is_some() {
+                // A question is not a report, and the attempt stays open (A3).
+                "asking"
+            } else if attempt.state == AttemptState::Reported {
+                "reported"
+            } else if session_stopped {
+                "stopped"
+            } else if attempt.no_report {
+                "no_report"
+            } else if attempt.started_at.is_some() {
+                "working"
+            } else if attempt.start_warned {
+                // Delivered and not started: the lead was told once (A1).
+                "late"
+            } else {
+                "delivered"
+            }
+        }
+    };
+    Some(phase)
+}
+
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let attempt_id = text(input, "attempt");
@@ -459,26 +514,183 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(task.attempts.iter().any(|a| a.id == attempt_id), "Task #{id} has no attempt {attempt_id}");
     let current = task.open_attempt().map(|a| (a.id.clone(), a.member.clone(), a.n));
-    let Some((open_id, member, n)) = current.filter(|(open, member, _)| open == attempt_id && (by_member.is_empty() || *member == by_member))
-    else {
-        // A late report of a revoked or replaced attempt is refused and shown.
-        let n = task.attempts.iter().find(|a| a.id == attempt_id).map(|a| a.n);
-        // The refusal is a result, not an error, so its feed entry is kept.
-        events.push(Event::new("stale_report", json!({"by":label,"task":id,"attempt":n})));
-        return Ok(json!({"status":"stale","task":id,"attempt":n}));
+    let open = current.filter(|(open, member, _)| open == attempt_id && (by_member.is_empty() || *member == by_member));
+    if let Some((open_id, member, n)) = open {
+        let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
+        attempt.state = AttemptState::Reported;
+        attempt.report = Some(Report { text: body, at: now(), ..Default::default() });
+        attempt.no_report = false;
+        // The lead hears of a report unless it wrote it.
+        attempt.notice = if member == team_lead { Notice::None } else { Notice::Pending };
+        task.status = TaskStatus::Submitted;
+        task.decided_by = None;
+        let title = task.title.clone();
+        let role = team.role_of(&member);
+        events.push(Event::new("reported", json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
+        return Ok(json!({"status":"submitted","task":id,"attempt":n}));
+    }
+    // A6: while the task is Submitted and its report was captured, the member
+    // may send the real report for that attempt. It replaces the text, keeps
+    // the captured one in `replaced` and is never a stale report.
+    let Some(attempt) = task.attempts.iter_mut().find(|a| a.id == attempt_id) else {
+        unreachable!("the attempt was checked above")
     };
-    let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
-    attempt.state = AttemptState::Reported;
-    attempt.report = Some(Report { text: body.clone(), at: now() });
-    attempt.no_report = false;
-    // The lead hears of a report unless it wrote it.
-    attempt.notice = if member == team_lead { Notice::None } else { Notice::Pending };
-    task.status = TaskStatus::Submitted;
-    task.decided_by = None;
-    let title = task.title.clone();
-    let role = team.role_of(&member);
-    events.push(Event::new("reported", json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
-    Ok(json!({"status":"submitted","task":id,"attempt":n}))
+    let replaceable = task.status == TaskStatus::Submitted
+        && attempt.state == AttemptState::Reported
+        && (by_member.is_empty() || attempt.member == by_member)
+        && attempt.report.as_ref().is_some_and(|report| report.captured);
+    if replaceable {
+        let n = attempt.n;
+        let member = attempt.member.clone();
+        let report = attempt.report.as_mut().expect("a captured report");
+        let captured = std::mem::take(&mut report.text);
+        report.replaced.push(ReplacedReport { text: captured, at: report.at });
+        // At most the newest three kept; a longer record would grow without bound.
+        if report.replaced.len() > 3 {
+            report.replaced.remove(0);
+        }
+        report.text = body;
+        report.at = now();
+        report.captured = false;
+        attempt.no_report = false;
+        // The lead hears the real report as a report, not as the captured one.
+        if member != team_lead {
+            attempt.notice = Notice::Pending;
+        }
+        let title = task.title.clone();
+        let role = team.role_of(&member);
+        events.push(Event::new(
+            "report_replaced",
+            json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()}),
+        ));
+        return Ok(json!({"status":"submitted","task":id,"attempt":n}));
+    }
+    // A late report of a revoked or replaced attempt is refused and shown.
+    let n = task.attempts.iter().find(|a| a.id == attempt_id).map(|a| a.n);
+    // The refusal is a result, not an error, so its feed entry is kept.
+    events.push(Event::new("stale_report", json!({"by":label,"task":id,"attempt":n})));
+    Ok(json!({"status":"stale","task":id,"attempt":n}))
+}
+
+/// The id of the next question of a team: `q1`, `q2`, ... Questions are never
+/// removed, so an id names one question for the whole team (A3), which lets a
+/// reply name it without a task.
+fn next_question(team: &Team) -> String {
+    let asked: usize = team.tasks.iter().flat_map(|task| &task.attempts).map(|attempt| attempt.questions.len()).sum();
+    format!("q{}", asked + 1)
+}
+
+/// A member asks the lead about its open attempt (A3). The attempt stays open
+/// and is not captured while the question is open.
+fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+    let Actor::Member(member) = actor else {
+        bail!("Only a team member asks the lead");
+    };
+    ensure!(*member != team.lead, "The lead has no task to ask about");
+    let body = clean(text(input, "text").trim(), 4000, "A question")?;
+    ensure!(!body.is_empty(), "A question needs text");
+    let given = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
+    // Only an attempt that is still open belongs to the caller.
+    let open: Vec<(usize, usize)> = team
+        .tasks
+        .iter()
+        .enumerate()
+        .filter_map(|(task, value)| {
+            value.attempts.iter().rposition(|attempt| attempt.state.open() && attempt.member == *member).map(|attempt| (task, attempt))
+        })
+        .collect();
+    let (task, attempt) = match given {
+        Some(id) => open
+            .iter()
+            .copied()
+            .find(|(task, _)| team.tasks[*task].id == id)
+            .with_context(|| format!("Task #{id} has no open attempt of yours"))?,
+        None => match open.as_slice() {
+            [only] => *only,
+            [] => bail!("You have no open attempt to ask about"),
+            many => bail!(
+                "You have {} open attempts: {}; name one with \"task\"",
+                many.len(),
+                many.iter().map(|(task, _)| format!("#{}", team.tasks[*task].id)).collect::<Vec<_>>().join(", ")
+            ),
+        },
+    };
+    let attempt_value = &team.tasks[task].attempts[attempt];
+    ensure!(attempt_value.questions.len() < 20, "This attempt has 20 questions already (the most allowed)");
+    ensure!(
+        attempt_value.questions.iter().filter(|question| question.open()).count() < 3,
+        "This attempt has 3 open questions; wait for the lead's answer"
+    );
+    let (task_id, n) = (team.tasks[task].id, attempt_value.n);
+    let question = next_question(team);
+    let role = team.role_of(member);
+    team.tasks[task].attempts[attempt].questions.push(Question { id: question.clone(), text: body, at: now(), ..Default::default() });
+    events.push(Event::new("question_asked", json!({"by":role,"task":task_id,"attempt":n,"question":question})));
+    Ok(json!({"status":"asked","question":question,"task":task_id,"attempt":n}))
+}
+
+/// The lead (or you) answers one of a member's questions (A3); the member gets
+/// the answer as a message.
+fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you answer a member's question");
+    let question = clean(text(input, "question").trim(), 40, "A question id")?;
+    ensure!(!question.is_empty(), "A question id is required");
+    let body = clean(text(input, "text").trim(), 4000, "An answer")?;
+    ensure!(!body.is_empty(), "An answer needs text");
+    // A question id names one question of the team; find it and its attempt.
+    let mut found = None;
+    for (task, value) in team.tasks.iter().enumerate() {
+        for (attempt, value) in value.attempts.iter().enumerate() {
+            if let Some(question_at) = value.questions.iter().position(|q| q.id == question) {
+                found = Some((task, attempt, question_at));
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    let Some((task, attempt, question_at)) = found else {
+        bail!("Unknown question {question}")
+    };
+    let asked = &team.tasks[task].attempts[attempt].questions[question_at];
+    ensure!(asked.open(), "Question {question} was already answered");
+    let (task_id, n) = (team.tasks[task].id, team.tasks[task].attempts[attempt].n);
+    let label = actor.label(team);
+    let asked = &mut team.tasks[task].attempts[attempt].questions[question_at];
+    asked.answer = body;
+    asked.answered_at = Some(now());
+    asked.by = label.clone();
+    events.push(Event::new("question_answered", json!({"by":label,"task":task_id,"attempt":n,"question":question})));
+    Ok(json!({"status":"answered","question":question}))
+}
+
+/// A5: keeps a pending task back from the dispatcher until `release`.
+fn hold(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you hold a task");
+    let id = task_id(input)?;
+    let reason = clean(text(input, "reason").trim(), 4000, "A reason")?;
+    let label = actor.label(team);
+    let task = team.task_mut(id).context("Unknown task")?;
+    ensure!(!task.status.finished(), "Task #{id} is already decided");
+    ensure!(task.status == TaskStatus::Pending, "Only a pending task can be held");
+    ensure!(task.hold.is_none(), "Task #{id} is already held");
+    task.hold = Some(Hold { by: label.clone(), at: now(), reason: reason.clone() });
+    events.push(Event::new("held", json!({"by":label,"task":id,"reason":reason})));
+    Ok(json!({"status":"held","task":id}))
+}
+
+/// A5: clears a hold; the task is handed out again when it is ready.
+fn release(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you release a task");
+    let id = task_id(input)?;
+    let label = actor.label(team);
+    let task = team.task_mut(id).context("Unknown task")?;
+    ensure!(task.hold.is_some(), "Task #{id} is not held");
+    task.hold = None;
+    events.push(Event::new("released", json!({"by":label,"task":id})));
+    Ok(json!({"status":"released","task":id}))
 }
 
 fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -490,6 +702,9 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let reason = clean(text(input, "reason").trim(), 4000, "A reason")?;
     ensure!(accept || !reason.is_empty(), "A rejection needs a reason");
+    // A5: a rejection may keep the task for a member that is not ready for it.
+    let hold = !accept && input["hold"].as_bool() == Some(true);
+    ensure!(!(hold && input["final"].as_bool() == Some(true)), "A final rejection cannot be held");
     let label = actor.label(team);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
@@ -508,6 +723,9 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         }
         revoke(task, "rejected");
         task.status = if input["final"].as_bool() == Some(true) { TaskStatus::Rejected } else { TaskStatus::Pending };
+        if hold {
+            task.hold = Some(Hold { by: label.clone(), at: now(), reason: reason.clone() });
+        }
     }
     task.decided_by = Some(if human { Decider::Human } else { Decider::Lead });
     task.decision_reason = reason.clone();
@@ -518,6 +736,9 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         if accept { "accepted" } else { "rejected" },
         json!({"by":label,"task":id,"title":title,"attempt":n,"reason":reason,"manual":manual}),
     ));
+    if hold {
+        events.push(Event::new("held", json!({"by":label,"task":id,"reason":reason})));
+    }
     let status = serde_json::to_value(team.task(id).unwrap().status)?;
     Ok(json!({"status":status,"task":id}))
 }
@@ -655,6 +876,10 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
             report(team, input, actor, events)
         }
+        "ask" => ask(team, input, actor, events),
+        "reply" => reply(team, input, actor, events),
+        "hold" => hold(team, input, actor, events),
+        "release" => release(team, input, actor, events),
         "accept" => decide(team, input, actor, true, events),
         "reject" => decide(team, input, actor, false, events),
         "reassign" => reassign(team, input, actor, events),
@@ -1497,5 +1722,338 @@ mod tests {
         assert_eq!(team.task(1).unwrap().attempts[0].state, AttemptState::Revoked);
         apply(&mut team, "archive", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         assert_eq!(team.status, TeamStatus::Archived);
+    }
+
+    #[test]
+    fn a_member_asks_about_its_open_attempt() {
+        let mut team = running_team();
+        let attempt = hand_out(&mut team, 1);
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let error = apply(&mut team, "ask", &json!({"text":"Which?"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Only a team member asks the lead");
+        let error = apply(&mut team, "ask", &json!({"text":"Which?"}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "The lead has no task to ask about");
+        let asked = apply(
+            &mut team,
+            "ask",
+            &json!({"text":"  Must I keep the old field?  "}),
+            &Actor::Member("dev".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((asked["status"].as_str(), asked["question"].as_str()), (Some("asked"), Some("q1")));
+        assert_eq!((asked["task"].as_u64(), asked["attempt"].as_u64()), (Some(1), Some(1)));
+        assert_eq!(events.last().unwrap().kind, "question_asked");
+        assert_eq!(events.last().unwrap().payload["by"], "Backend");
+        let task = team.task(1).unwrap();
+        assert_eq!(task.attempts[0].id, attempt);
+        assert_eq!(task.attempts[0].questions[0].text, "Must I keep the old field?");
+        assert_eq!(task.attempts[0].open_question().map(|question| question.id.as_str()), Some("q1"));
+        assert_eq!(task.status, TaskStatus::InProgress);
+        // A task without the caller's open attempt, and a member without one.
+        let error = apply(&mut team, "ask", &json!({"task":2,"text":"Which?"}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Task #2 has no open attempt of yours");
+        let error = apply(&mut team, "ask", &json!({"text":"Which?"}), &Actor::Member("qa".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "You have no open attempt to ask about");
+        // Two open attempts need a task number.
+        team.task_mut(2).unwrap().assignee = "dev".into();
+        hand_out(&mut team, 2);
+        let error = apply(&mut team, "ask", &json!({"text":"Which?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "You have 2 open attempts: #1, #2; name one with \"task\"");
+        let asked = apply(&mut team, "ask", &json!({"task":2,"text":"Which tests?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+        assert_eq!((asked["question"].as_str(), asked["task"].as_u64()), (Some("q2"), Some(2)));
+        // Only a running or paused team takes questions.
+        team.status = TeamStatus::Done;
+        let error = apply(&mut team, "ask", &json!({"text":"Which?"}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "The team is not running");
+    }
+
+    #[test]
+    fn question_bounds_are_refused_clearly() {
+        let mut team = running_team();
+        hand_out(&mut team, 1);
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let ask = |team: &mut Team, events: &mut Vec<Event>, input: Value| {
+            apply(team, "ask", &input, &Actor::Member("dev".into()), &none, events)
+        };
+        let reply = |team: &mut Team, events: &mut Vec<Event>, question: &str| {
+            apply(team, "reply", &json!({"question":question,"text":"Keep it"}), &Actor::Member("lead".into()), &none, events)
+        };
+        let error = ask(&mut team, &mut events, json!({"text":"  "})).unwrap_err().to_string();
+        assert_eq!(error, "A question needs text");
+        let error = ask(&mut team, &mut events, json!({"text":"x".repeat(4001)})).unwrap_err().to_string();
+        assert_eq!(error, "A question is too long");
+        for _ in 0..3 {
+            ask(&mut team, &mut events, json!({"text":"Which?"})).unwrap();
+        }
+        let error = ask(&mut team, &mut events, json!({"text":"Again?"})).unwrap_err().to_string();
+        assert_eq!(error, "This attempt has 3 open questions; wait for the lead's answer");
+        for id in 1..=3 {
+            reply(&mut team, &mut events, &format!("q{id}")).unwrap();
+        }
+        // Questions are never removed: an attempt takes at most 20.
+        for _ in 0..17 {
+            ask(&mut team, &mut events, json!({"text":"More?"})).unwrap();
+            let question = team.task(1).unwrap().attempts[0].questions.last().unwrap().id.clone();
+            reply(&mut team, &mut events, &question).unwrap();
+        }
+        assert_eq!(team.task(1).unwrap().attempts[0].questions.len(), 20);
+        let error = ask(&mut team, &mut events, json!({"text":"Too many?"})).unwrap_err().to_string();
+        assert_eq!(error, "This attempt has 20 questions already (the most allowed)");
+    }
+
+    #[test]
+    fn the_lead_answers_a_question_once() {
+        let mut team = running_team();
+        hand_out(&mut team, 1);
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        apply(&mut team, "ask", &json!({"text":"Must I keep it?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+        let error = apply(&mut team, "reply", &json!({"question":"q1","text":"Yes"}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only the lead or you answer a member's question");
+        let error = apply(&mut team, "reply", &json!({"question":"q9","text":"Yes"}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Unknown question q9");
+        let error = apply(&mut team, "reply", &json!({"text":"Yes"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "A question id is required");
+        let error = apply(&mut team, "reply", &json!({"question":"q1","text":"  "}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "An answer needs text");
+        let answered = apply(
+            &mut team,
+            "reply",
+            &json!({"question":"q1","text":"  Yes, keep it.  "}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((answered["status"].as_str(), answered["question"].as_str()), (Some("answered"), Some("q1")));
+        assert_eq!(events.last().unwrap().kind, "question_answered");
+        assert_eq!(events.last().unwrap().payload["by"], "You");
+        let question = &team.task(1).unwrap().attempts[0].questions[0];
+        assert_eq!((question.answer.as_str(), question.by.as_str()), ("Yes, keep it.", "You"));
+        assert!(question.answered_at.is_some());
+        assert!(team.task(1).unwrap().attempts[0].open_question().is_none());
+        let error = apply(&mut team, "reply", &json!({"question":"q1","text":"Again"}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Question q1 was already answered");
+    }
+
+    #[test]
+    fn rejecting_with_hold_keeps_the_task_out_of_reach() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // A rejection without a hold returns the task as before.
+        let attempt = hand_out(&mut team, 1);
+        report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        let rejected = apply(&mut team, "reject", &json!({"task":1,"reason":"Needs #2"}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(rejected["status"], "pending");
+        assert!(team.task(1).unwrap().hold.is_none());
+        // Rejected again, held this time.
+        let attempt = hand_out(&mut team, 1);
+        report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        let error = apply(
+            &mut team,
+            "reject",
+            &json!({"task":1,"reason":"Later","hold":true,"final":true}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "A final rejection cannot be held");
+        let held = apply(&mut team, "reject", &json!({"task":1,"reason":"Wait for #2","hold":true}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(held["status"], "pending");
+        let task = team.task(1).unwrap();
+        assert_eq!((task.status, task.attempts[1].state), (TaskStatus::Pending, AttemptState::Rejected));
+        let hold = task.hold.as_ref().unwrap();
+        assert_eq!((hold.by.as_str(), hold.reason.as_str()), ("Lead", "Wait for #2"));
+        assert_eq!(events.iter().rev().take(2).map(|event| event.kind).collect::<Vec<_>>(), vec!["held", "rejected"]);
+        assert_eq!(attempt_phase(task, false), Some("held"));
+        // A held task is never ready.
+        assert!(!plan::ready(&team).contains(&1));
+        let released = apply(&mut team, "release", &json!({"task":1}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(released["status"], "released");
+        assert!(team.task(1).unwrap().hold.is_none());
+        assert!(plan::ready(&team).contains(&1));
+        assert_eq!(events.last().unwrap().kind, "released");
+        let error = apply(&mut team, "release", &json!({"task":1}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Task #1 is not held");
+        // The lead may hold a pending task so a busy member is not handed it.
+        let held = apply(&mut team, "hold", &json!({"task":1,"reason":"Busy"}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(held["status"], "held");
+        assert_eq!(team.task(1).unwrap().hold.as_ref().unwrap().reason, "Busy");
+        assert!(!plan::ready(&team).contains(&1));
+        let error = apply(&mut team, "hold", &json!({"task":1}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Task #1 is already held");
+        // Only a pending task is held, and only by the lead or you.
+        hand_out(&mut team, 2);
+        let error = apply(&mut team, "hold", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Only a pending task can be held");
+        let error = apply(&mut team, "hold", &json!({"task":1}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only the lead or you hold a task");
+        cancel(&mut team, &json!({"task":2}), &Actor::Human, &mut events).unwrap();
+        let error = apply(&mut team, "hold", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Task #2 is already decided");
+    }
+
+    #[test]
+    fn the_attempt_phase_follows_the_spec() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // No attempt, and a decided task, have no phase.
+        assert_eq!(attempt_phase(team.task(2).unwrap(), false), None);
+        hand_out(&mut team, 1);
+        let phase = |team: &Team, stopped: bool| attempt_phase(team.task(1).unwrap(), stopped);
+        assert_eq!(phase(&team, false), Some("delivered"));
+        team.task_mut(1).unwrap().attempts[0].start_warned = true;
+        assert_eq!(phase(&team, false), Some("late"));
+        team.task_mut(1).unwrap().attempts[0].started_at = Some(5.0);
+        assert_eq!(phase(&team, false), Some("working"));
+        assert_eq!(phase(&team, true), Some("stopped"));
+        team.task_mut(1).unwrap().attempts[0].no_report = true;
+        assert_eq!(phase(&team, false), Some("no_report"));
+        // An open question wins over working and late; the attempt stays open.
+        apply(&mut team, "ask", &json!({"text":"Which JSON?"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+        assert_eq!(phase(&team, false), Some("asking"));
+        apply(&mut team, "reply", &json!({"question":"q1","text":"The old one"}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(phase(&team, false), Some("no_report"));
+        let attempt = team.task(1).unwrap().attempts[0].id.clone();
+        report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        assert_eq!(phase(&team, false), Some("reported"));
+        apply(&mut team, "accept", &json!({"task":1}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(phase(&team, false), None);
+        // The earlier states are the stored attempt states, not new enums.
+        let mut sent = running_team();
+        hand_out(&mut sent, 1);
+        for (state, expected) in [
+            (AttemptState::Delivering, Some("sent")),
+            (AttemptState::Unconfirmed, Some("unconfirmed")),
+            (AttemptState::Refused, None),
+            (AttemptState::Revoked, None),
+        ] {
+            sent.task_mut(1).unwrap().attempts[0].state = state;
+            assert_eq!(attempt_phase(sent.task(1).unwrap(), false), expected, "{state:?}");
+        }
+        // Rejected shows the rejection; a hold wins over it.
+        let mut rejected = running_team();
+        let attempt = hand_out(&mut rejected, 1);
+        report(&mut rejected, &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        decide(&mut rejected, &json!({"task":1,"reason":"No"}), &Actor::Member("lead".into()), false, &mut events).unwrap();
+        assert_eq!(attempt_phase(rejected.task(1).unwrap(), false), Some("rejected"));
+        apply(&mut rejected, "hold", &json!({"task":1,"reason":"Wait"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(attempt_phase(rejected.task(1).unwrap(), false), Some("held"));
+    }
+
+    #[test]
+    fn a_captured_report_is_replaced_by_the_members_report() {
+        let mut team = running_team();
+        let attempt = hand_out(&mut team, 1);
+        // What the dispatcher captures today: a progress line from a turn end.
+        {
+            let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+            attempt.state = AttemptState::Reported;
+            attempt.report = Some(Report { text: "Building and running the tests...".into(), at: 20.0, captured: true, ..Default::default() });
+            attempt.notice = Notice::Sent;
+        }
+        team.task_mut(1).unwrap().status = TaskStatus::Submitted;
+        let mut events = Vec::new();
+        let replaced = report(
+            &mut team,
+            &json!({"task":1,"attempt":attempt,"text":"  Done: the tests pass.  "}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((replaced["status"].as_str(), replaced["attempt"].as_u64()), (Some("submitted"), Some(1)));
+        let value = &team.task(1).unwrap().attempts[0];
+        let captured = value.report.as_ref().unwrap();
+        assert_eq!(captured.text, "Done: the tests pass.");
+        assert!(!captured.captured);
+        assert_eq!(captured.replaced, vec![ReplacedReport { text: "Building and running the tests...".into(), at: 20.0 }]);
+        assert_eq!(value.notice, Notice::Pending);
+        assert_eq!(value.state, AttemptState::Reported);
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+        assert_eq!(events.last().unwrap().kind, "report_replaced");
+        assert_eq!(events.last().unwrap().payload["by"], "Backend");
+        // A report that is not captured is never replaced.
+        let late = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Again"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        assert_eq!(late["status"], "stale");
+        assert_eq!(events.last().unwrap().kind, "stale_report");
+        // Another member's report, and a decided task's, are stale too.
+        team.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().captured = true;
+        let foreign = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Mine"}), &Actor::Member("qa".into()), &mut events).unwrap();
+        assert_eq!(foreign["status"], "stale");
+        assert_eq!(team.task(1).unwrap().attempts[0].report.as_ref().unwrap().text, "Done: the tests pass.");
+        team.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().captured = false;
+        apply(&mut team, "accept", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let decided = report(&mut team, &json!({"task":1,"attempt":attempt,"text":"Late"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        assert_eq!(decided["status"], "stale");
+        // At most the newest three replaced texts are kept.
+        let mut team = running_team();
+        let attempt = hand_out(&mut team, 1);
+        {
+            let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+            attempt.state = AttemptState::Reported;
+            attempt.report = Some(Report { text: "Building".into(), at: 20.0, captured: true, ..Default::default() });
+        }
+        team.task_mut(1).unwrap().status = TaskStatus::Submitted;
+        let mut events = Vec::new();
+        report(&mut team, &json!({"task":1,"attempt":attempt,"text":"First"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        for n in 0..4 {
+            team.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().captured = true;
+            report(&mut team, &json!({"task":1,"attempt":attempt,"text":format!("Real {n}")}), &Actor::Member("dev".into()), &mut events).unwrap();
+        }
+        let captured = team.task(1).unwrap().attempts[0].report.as_ref().unwrap();
+        assert_eq!(captured.text, "Real 3");
+        let texts: Vec<&str> = captured.replaced.iter().map(|replaced| replaced.text.as_str()).collect();
+        assert_eq!(texts, vec!["Real 0", "Real 1", "Real 2"]);
+    }
+
+    #[test]
+    fn the_start_timeout_is_bounded_and_defaults() {
+        let lead = json!({"id":"lead","agent":"claude"});
+        let (team, _) = create("t", &json!({"name":"T","lead":lead})).unwrap();
+        assert_eq!(team.settings.start_timeout_seconds, 180);
+        let (team, _) = create("t", &json!({"name":"T","lead":lead,"settings":{"start_timeout_seconds":60}})).unwrap();
+        assert_eq!(team.settings.start_timeout_seconds, 60);
+        for seconds in [0, 29, 3601] {
+            let error = create("t", &json!({"name":"T","lead":lead,"settings":{"start_timeout_seconds":seconds}}))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, "The start warning waits 30 to 3600 seconds after delivery", "{seconds}");
+        }
+        let (mut team, _) = create("t", &json!({"name":"T","lead":lead})).unwrap();
+        let mut events = Vec::new();
+        let error = plan(&mut team, &json!({"tasks":[],"settings":{"start_timeout_seconds":2}}), &Actor::Human, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "The start warning waits 30 to 3600 seconds after delivery");
+        plan(&mut team, &json!({"tasks":[],"settings":{"start_timeout_seconds":3600}}), &Actor::Human, &mut events).unwrap();
+        assert_eq!(team.settings.start_timeout_seconds, 3600);
     }
 }

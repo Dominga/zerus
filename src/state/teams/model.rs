@@ -53,6 +53,10 @@ pub(crate) struct Settings {
     /// Idle time after a delivered turn ends before a member shows No report.
     #[serde(default = "default_report_timeout")]
     pub report_timeout_seconds: u64,
+    /// How long a delivered hand-off may stay unstarted before the lead is
+    /// told once that the member has not started (A1).
+    #[serde(default = "default_start_timeout")]
+    pub start_timeout_seconds: u64,
 }
 
 fn default_max_members() -> usize {
@@ -60,6 +64,9 @@ fn default_max_members() -> usize {
 }
 fn default_report_timeout() -> u64 {
     120
+}
+fn default_start_timeout() -> u64 {
+    180
 }
 fn default_phase() -> u32 {
     1
@@ -74,6 +81,7 @@ impl Default for Settings {
             phase_approval: None,
             max_members: default_max_members(),
             report_timeout_seconds: default_report_timeout(),
+            start_timeout_seconds: default_start_timeout(),
         }
     }
 }
@@ -270,6 +278,56 @@ pub(crate) struct Finish {
 pub(crate) struct Report {
     pub text: String,
     pub at: f64,
+    /// Zerus took the member's last reply as the report (A2); the member may
+    /// replace it while the task is undecided (A6).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub captured: bool,
+    /// Captured texts this report replaced, the newest three (A6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaced: Vec<ReplacedReport>,
+}
+
+/// A report text that a member's real report replaced (A6).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ReplacedReport {
+    pub text: String,
+    pub at: f64,
+}
+
+/// A member's question to the lead about its open attempt (A3): one message
+/// per question, answered once by the lead or the owner.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Question {
+    pub id: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub at: f64,
+    /// Empty while the question waits for an answer.
+    #[serde(default)]
+    pub answer: String,
+    #[serde(default)]
+    pub answered_at: Option<f64>,
+    /// The lead or you, who answered.
+    #[serde(default)]
+    pub by: String,
+}
+
+impl Question {
+    pub(crate) fn open(&self) -> bool {
+        self.answer.is_empty()
+    }
+}
+
+/// A task kept back from the dispatcher until the lead releases it (A5): a
+/// rejection may return a task to a member who is not ready for it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Hold {
+    /// The lead or you.
+    pub by: String,
+    pub at: f64,
+    #[serde(default)]
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -284,14 +342,28 @@ pub(crate) struct Attempt {
     pub sent_at: f64,
     #[serde(default)]
     pub delivered_at: Option<f64>,
+    /// The first dispatcher tick after delivery that showed the member working
+    /// on it (A1); absent until it really started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+    /// The lead was told once that the member did not start in time (A1).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub start_warned: bool,
     /// When the member's turn after the hand-off ended, for No report.
     #[serde(default)]
     pub turn_ended_at: Option<f64>,
+    /// The member's session reply id at `turn_ended_at`: a newer turn is never
+    /// captured as this attempt's report (A2).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub turn_reply: String,
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
     #[serde(default)]
     pub report: Option<Report>,
+    /// Questions this attempt asked the lead, oldest first (A3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<Question>,
     /// The report's message to the lead.
     #[serde(default)]
     pub notice: Notice,
@@ -307,6 +379,13 @@ pub(crate) struct Attempt {
     /// attempt's member instead (a free member with the same role).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rebalanced_from: String,
+}
+
+impl Attempt {
+    /// The attempt's first question still waiting for an answer (A3).
+    pub(crate) fn open_question(&self) -> Option<&Question> {
+        self.questions.iter().find(|question| question.open())
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -331,6 +410,9 @@ pub(crate) struct Task {
     pub pinned: bool,
     #[serde(default)]
     pub status: TaskStatus,
+    /// Held back from the dispatcher until the lead releases it (A5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<Hold>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default)]
@@ -557,5 +639,116 @@ mod tests {
         assert_eq!(auto.phase_approval.unwrap_or(auto.approval), Approval::Auto);
         let review_phases = Settings { approval: Approval::Auto, phase_approval: Some(Approval::Review), ..Default::default() };
         assert_eq!(review_phases.phase_approval.unwrap_or(review_phases.approval), Approval::Review);
+    }
+
+    /// An old attempt and report: no start, question, hold or capture fields.
+    fn old_attempt_team() -> Value {
+        json!({
+            "id":"old","name":"Old team","lead":"lead","status":"running",
+            "members":[{"id":"lead","role":"Lead","agent":"claude"},{"id":"dev","role":"Backend","agent":"codex"}],
+            "tasks":[{"id":1,"title":"API","assignee":"dev","status":"submitted",
+                "attempts":[{"n":1,"id":"00000000-0000-4000-8000-000000000001","member":"dev",
+                    "state":"reported","sent_at":10.0,"delivered_at":11.0,"turn_ended_at":20.0,
+                    "report":{"text":"Done","at":30.0}}]}]
+        })
+    }
+
+    #[test]
+    fn an_old_attempt_loads_with_the_new_fields_at_their_defaults() {
+        let team: Team = serde_json::from_value(old_attempt_team()).unwrap();
+        assert_eq!(team.settings.start_timeout_seconds, 180);
+        let attempt = &team.tasks[0].attempts[0];
+        assert_eq!((attempt.started_at, attempt.start_warned), (None, false));
+        assert!(attempt.turn_reply.is_empty());
+        assert!(attempt.questions.is_empty());
+        assert_eq!(attempt.open_question(), None);
+        assert_eq!(team.tasks[0].hold, None);
+        let report = attempt.report.as_ref().unwrap();
+        assert!(!report.captured);
+        assert!(report.replaced.is_empty());
+        // Writing it back adds only the default start timeout to the settings;
+        // the new fields stay absent so an old binary reads the file.
+        let value = serde_json::to_value(&team).unwrap();
+        assert_eq!(value["settings"]["start_timeout_seconds"], json!(180));
+        let attempt = &value["tasks"][0]["attempts"][0];
+        for key in ["started_at", "start_warned", "turn_reply", "questions"] {
+            assert!(attempt.get(key).is_none(), "{key} should be skipped when empty");
+        }
+        assert!(value["tasks"][0].get("hold").is_none());
+        let report = &attempt["report"];
+        assert!(report.get("captured").is_none() && report.get("replaced").is_none());
+        let back: Team = serde_json::from_value(value).unwrap();
+        assert_eq!(back, team);
+    }
+
+    fn held_team() -> Team {
+        Team {
+            id: "held".into(),
+            name: "Held".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            settings: Settings { start_timeout_seconds: 300, ..Default::default() },
+            tasks: vec![Task {
+                id: 7,
+                title: "API".into(),
+                assignee: "dev".into(),
+                status: TaskStatus::Pending,
+                hold: Some(Hold { by: "Lead".into(), at: 1792940000.5, reason: "Busy with #9".into() }),
+                attempts: vec![Attempt {
+                    n: 1,
+                    id: "00000000-0000-4000-8000-000000000007".into(),
+                    member: "dev".into(),
+                    state: AttemptState::Rejected,
+                    sent_at: 1792939000.0,
+                    delivered_at: Some(1792939001.0),
+                    started_at: Some(1792939010.0),
+                    start_warned: true,
+                    turn_ended_at: Some(1792939500.0),
+                    turn_reply: "r7".into(),
+                    questions: vec![
+                        Question { id: "q1".into(), text: "Keep the old field?".into(), at: 1792939100.0, answer: "Yes".into(), answered_at: Some(1792939200.0), by: "Lead".into() },
+                        Question { id: "q2".into(), text: "Which JSON?".into(), at: 1792939300.0, ..Default::default() },
+                    ],
+                    report: Some(Report {
+                        text: "Done".into(),
+                        at: 1792939600.0,
+                        captured: true,
+                        replaced: vec![ReplacedReport { text: "Building and running...".into(), at: 1792939550.0 }],
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_attempt_and_hold_fields_round_trip() {
+        let team = held_team();
+        let text = serde_json::to_string(&team).unwrap();
+        let back: Team = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, team);
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["settings"]["start_timeout_seconds"], json!(300));
+        let task = &value["tasks"][0];
+        assert_eq!(task["hold"], json!({"by":"Lead","at":1792940000.5,"reason":"Busy with #9"}));
+        let attempt = &task["attempts"][0];
+        assert_eq!(attempt["started_at"], json!(1792939010.0));
+        assert_eq!(attempt["start_warned"], json!(true));
+        assert_eq!(attempt["turn_reply"], json!("r7"));
+        // Every field of a question has its own name, answers stay visible.
+        assert_eq!(attempt["questions"][0], json!({
+            "id":"q1","text":"Keep the old field?","at":1792939100.0,"answer":"Yes",
+            "answered_at":1792939200.0,"by":"Lead"}));
+        assert_eq!(attempt["questions"][1]["answered_at"], Value::Null);
+        assert_eq!(attempt["questions"][1]["answer"], "");
+        let report = &attempt["report"];
+        assert_eq!(report["captured"], json!(true));
+        assert_eq!(report["replaced"], json!([{"text":"Building and running...","at":1792939550.0}]));
+        // The open question is the unanswered one.
+        let attempt = &back.tasks[0].attempts[0];
+        assert_eq!(attempt.open_question().map(|q| q.id.as_str()), Some("q2"));
+        assert!(!attempt.questions[0].open());
     }
 }

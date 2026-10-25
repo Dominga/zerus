@@ -1,7 +1,10 @@
 #include "FakeTasksCli.h"
 #include "HgsClient.h"
 #include "TaskDialogs.h"
+#include "SessionStatusBadge.h"
 #include "TasksView.h"
+#include <QFontInfo>
+#include <QTextDocumentFragment>
 #include <QAbstractButton>
 #include <QCheckBox>
 #include <QLabel>
@@ -19,7 +22,7 @@
 namespace {
 QList<TaskSession> sessions() {
     TaskSession stopped{"", "codex/stopped", "Stopped", "The agent is not running. Resume it before sending."}; stopped.running = false;
-    return {{"", "codex/api", "Ready", ""}, {"", "codex/web", "Working", ""}, stopped};
+    return {{"", "codex/api", "Ready", ""}, {"", "codex/web", "Working", "", true, true, SessionStatusBadge::Working}, stopped};
 }
 QJsonObject withLog(QJsonObject task, const QJsonArray &log) { task["log"] = log; return task; }
 QJsonObject entry(const QString &kind, const QString &text = {}, const QJsonObject &extra = {}) {
@@ -65,6 +68,12 @@ void TestTaskDialogs::theTaskDialogEditsAListedTaskAndShowsItsHistory() {
     for (const char *name : {"taskSession:any", "taskSession:/codex/api", "taskSession:/codex/web", "taskSession:/codex/gone"})
         QVERIFY2(dialog.findChild<QPushButton *>(name), name);
     QVERIFY(dialog.findChild<QPushButton *>("taskSession:/codex/gone")->isChecked());
+    // Sessions are named as the session list names them, with their status beside them, and
+    // can also be chosen by dragging; Save is the main button.
+    auto *web = dialog.findChild<QPushButton *>("taskSession:/codex/web");
+    QCOMPARE(web->text(), QString("web")); QVERIFY(!web->icon().isNull()); QCOMPARE(web->toolTip(), QString("codex/web · Working"));
+    QVERIFY(dialog.findChild<QLabel *>("taskSessionHint")->text().startsWith("Or drag the task onto a session"));
+    QVERIFY(dialog.findChild<QPushButton *>("saveTask")->property("primaryAction").toBool());
     const auto history = dialog.findChild<QTextBrowser *>("taskHistory")->toPlainText();
     QVERIFY2(history.contains("created the task") && history.contains("sent it to api") && history.contains("commented: Use the config value."), qPrintable(history));
     QVERIFY2(history.contains("ios @orchard-mac"), qPrintable(history));   // an agent on another computer
@@ -88,6 +97,12 @@ void TestTaskDialogs::aReviewTaskIsReadOnlyWithItsActions() {
     QVERIFY(dialog.findChild<QPlainTextEdit *>("taskPrompt")->isReadOnly());
     QVERIFY(!dialog.findChild<QPushButton *>("saveTask")); QVERIFY(dialog.findChild<QPushButton *>("closeTask"));
     QCOMPARE(dialog.findChild<QLabel *>("taskDialogSession")->text(), QString("api"));
+    // Two sessions that the session list names alike keep their full names here.
+    auto alike = sessions(); alike << TaskSession{"", "claude/web", "Ready", ""};
+    TaskDialog todo(withLog(FakeTasksCli::task(10, "todo"), {}), alike, {}, false);
+    QCOMPARE(todo.findChild<QPushButton *>("taskSession:/codex/web")->text(), QString("codex/web"));
+    QCOMPARE(todo.findChild<QPushButton *>("taskSession:/claude/web")->text(), QString("claude/web"));
+    QCOMPARE(todo.findChild<QPushButton *>("taskSession:/codex/api")->text(), QString("api"));
     QVERIFY(dialog.findChild<QLabel *>("taskDialogSummary")->text().contains("Token bucket; 6 tests."));
     QSignalSpy acted(&dialog, &TaskDialog::actionRequested);
     QVERIFY(dialog.findChild<QPushButton *>("taskDialogAction:backToTodo"));
@@ -99,18 +114,24 @@ void TestTaskDialogs::aReviewTaskIsReadOnlyWithItsActions() {
 void TestTaskDialogs::theCancelAndProjectSettingsDialogs() {
     auto item = TaskBoard::item(FakeTasksCli::task(9, "active", {{"session", FakeTasksCli::pinned("codex/web")}}));
     TaskCancelDialog working(item, true, true);
-    QCOMPARE(working.findChild<QLabel *>("taskCancelWarning")->text(),
+    QCOMPARE(QTextDocumentFragment::fromHtml(working.findChild<QLabel *>("taskCancelWarning")->text()).toPlainText(),
              QString("T-000009 moves to In review, and web gets the cancel message. web is working; it reads the message when its turn ends."));
     QVERIFY(working.findChild<QPushButton *>("keepTaskRunning")->isDefault());
     working.findChild<QLineEdit *>("taskCancelReason")->setText("  Wrong approach  "); QCOMPARE(working.reason(), QString("Wrong approach"));
     TaskCancelDialog stopped(item, false, false);
     TaskCancelDialog idle(item, true, false);
-    QCOMPARE(idle.findChild<QLabel *>("taskCancelWarning")->text(), QString("T-000009 moves to In review, and web gets the cancel message."));
+    const auto plain = [](QLabel *label) { return QTextDocumentFragment::fromHtml(label->text()).toPlainText(); };
+    QCOMPARE(plain(idle.findChild<QLabel *>("taskCancelWarning")), QString("T-000009 moves to In review, and web gets the cancel message."));
+    QVERIFY(idle.findChild<QLabel *>("taskCancelWarning")->text().contains("<b>T-000009</b>"));
     QVERIFY(stopped.findChild<QLabel *>("taskCancelWarning")->text().contains("The agent is not running, so hgs will refuse the message"));
     const QJsonObject settings{{"task_template", "[Zerus task {ref}]\n{prompt}"}, {"cancel_template", "[Zerus task {ref} cancelled]"},
                                {"agents_other", true}, {"agent_limit", 0}};
     TaskSettingsDialog dialog("orchard", settings);
     QCOMPARE(dialog.windowTitle(), QString("Project tasks · orchard")); QVERIFY(dialog.changes().isEmpty());
+    // The templates are code: a fixed-pitch font, under a Service prompts heading.
+    QVERIFY(QFontInfo(dialog.findChild<QPlainTextEdit *>("taskTemplate")->font()).fixedPitch());
+    QVERIFY(QFontInfo(dialog.findChild<QPlainTextEdit *>("cancelTemplate")->font()).fixedPitch());
+    QVERIFY(dialog.findChild<QLabel *>("taskServicePrompts"));
     QCOMPARE(dialog.findChild<QSpinBox *>("agentLimit")->text(), QString("no limit"));
     dialog.findChild<QSpinBox *>("agentLimit")->setValue(3); dialog.findChild<QCheckBox *>("agentsOther")->setChecked(false);
     QCOMPARE(dialog.changes(), QJsonObject({{"agent_limit", 3}, {"agents_other", false}}));

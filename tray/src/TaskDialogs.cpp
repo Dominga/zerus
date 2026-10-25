@@ -1,10 +1,17 @@
 #include "TaskDialogs.h"
 #include "ScopeFilterWidgets.h"
+#include "SessionStatusBadge.h"
 #include "TasksView.h"
 #include "WorkspaceIcons.h"
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QDateTime>
+#include <QFontDatabase>
+#include <QHash>
+#include <QIcon>
+#include <QPainter>
+#include <QPixmap>
+#include <algorithm>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -17,10 +24,24 @@
 #include <QVBoxLayout>
 
 namespace {
+// A field's name, small and muted; a heading groups fields.
 QLabel *section(const QString &text) {
     auto *label = new QLabel(text); label->setProperty("taskSection", true);
-    QFont font = label->font(); font.setPixelSize(11); font.setWeight(QFont::DemiBold); label->setFont(font);
+    QFont font = label->font(); font.setPixelSize(11); label->setFont(font);
     return label;
+}
+QLabel *heading(const QString &text, const QString &name) {
+    auto *label = new QLabel(text); label->setObjectName(name);
+    QFont font = label->font(); font.setPixelSize(13); font.setWeight(QFont::DemiBold); label->setFont(font);
+    return label;
+}
+// A session's status as a dot: the session list's colour for it, muted otherwise.
+QIcon statusDot(int kind, bool dark, const QColor &muted) {
+    QColor color = SessionStatusBadge::edge(SessionStatusBadge::Kind(kind), dark);
+    if (!color.isValid()) color = muted;
+    QPixmap dot(16, 16); dot.fill(Qt::transparent);
+    QPainter p(&dot); p.setRenderHint(QPainter::Antialiasing); p.setPen(Qt::NoPen); p.setBrush(color); p.drawEllipse(QRectF(4, 4, 8, 8));
+    return QIcon(dot);
 }
 QLabel *errorLabel(const QString &name) {
     auto *label = new QLabel; label->setObjectName(name); label->setWordWrap(true); label->setTextFormat(Qt::PlainText);
@@ -80,22 +101,32 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
     layout->addWidget(section(tr("Session")));
     if (m_editable) {
         // The sessions wrap onto rows and scroll past three, however many the project has.
-        auto *area = new QScrollArea; area->setObjectName("taskSessionChoices"); area->setWidgetResizable(true);
+        auto *area = m_choicesArea = new QScrollArea; area->setObjectName("taskSessionChoices"); area->setWidgetResizable(true);
         area->setFrameShape(QFrame::NoFrame); area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); area->setMaximumHeight(104);
         auto *choices = new QWidget; auto *chips = new ScopeFilterWidgets::ChipFlow(choices); m_sessions = new QButtonGroup(this);
         m_choices << TaskTarget{true, {}, {}};
         for (const auto &session : sessions) m_choices << TaskTarget{false, session.host, session.name};
         // A pinned session that no longer exists stays a choice until it is changed.
         if (!m_target.any && !m_choices.contains(m_target)) m_choices << m_target;
+        // Sessions the session list names alike keep their full names here.
+        QHash<QString, int> named;
+        for (const auto &choice : std::as_const(m_choices)) if (!choice.any) ++named[TaskBoard::sessionLabel(choice.host, choice.session)];
         for (int i = 0; i < m_choices.size(); ++i) {
             const auto &choice = m_choices.at(i);
-            auto *chip = new QPushButton(choice.any ? tr("Any session") : TaskBoard::sessionLabel(choice.host, choice.session));
+            const QString label = TaskBoard::sessionLabel(choice.host, choice.session);
+            const QString full = choice.session + (choice.host.isEmpty() ? QString() : QStringLiteral(" @") + choice.host);
+            auto *chip = new QPushButton(choice.any ? tr("Any session") : named.value(label) > 1 ? full : label);
             chip->setObjectName(QStringLiteral("taskSession:") + (choice.any ? QStringLiteral("any") : choice.host + QLatin1Char('/') + choice.session));
+            chip->setProperty("taskSessionChoice", true); chip->setCursor(Qt::PointingHandCursor);
             chip->setCheckable(true); chip->setChecked(choice == m_target); m_sessions->addButton(chip, i); chips->addWidget(chip);
-            for (const auto &session : sessions)
-                if (!choice.any && session.host == choice.host && session.name == choice.session) chip->setToolTip(session.status);
+            if (choice.any) continue;
+            const auto found = std::find_if(sessions.begin(), sessions.end(), [&](const TaskSession &s) { return s.host == choice.host && s.name == choice.session; });
+            chip->setIcon(statusDot(found == sessions.end() ? 0 : found->kind, dark, colors.muted));
+            chip->setToolTip(full + (found == sessions.end() ? QString() : QStringLiteral(" · ") + found->status));
         }
         area->setWidget(choices); layout->addWidget(area);
+        auto *drag = new QLabel(tr("Or drag the task onto a session in the list; onto the project header for Any session."));
+        drag->setObjectName("taskSessionHint"); drag->setProperty("taskSection", true); drag->setWordWrap(true); layout->addWidget(drag);
         connect(m_sessions, &QButtonGroup::idClicked, this, &TaskDialog::refreshButtons);
     } else {
         auto *fixed = new QLabel(m_task.sessionName.isEmpty() ? (m_task.targetSession.isEmpty() ? tr("Any session")
@@ -120,14 +151,17 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
         auto *button = new QPushButton(workspaceIcon(TaskBoard::actionIcon(action), colors.muted), TaskBoard::actionLabel(action).remove(QChar(0x2026)));
         button->setObjectName(QStringLiteral("taskDialogAction:") + TaskRow::actionKey(action)); button->setAutoDefault(false);
         button->setProperty("taskAction", int(action));
-        if (action == stageActions.last()) button->setStyleSheet(QStringLiteral("color:%1;").arg(colors.accent.name()));
+        if (action == stageActions.last()) {
+            QColor edge = colors.accent; edge.setAlphaF(.5);
+            button->setStyleSheet(QStringLiteral("QPushButton:enabled{color:%1;border-color:%2;}").arg(colors.accent.name(), edge.name(QColor::HexArgb)));
+        }
         connect(button, &QPushButton::clicked, this, [this, action] { setBusy(true); emit actionRequested(edits(), action); });
         actions->addWidget(button);
     }
     actions->addStretch();
     if (m_editable) {
         auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("discardTaskEdits"); cancel->setAutoDefault(false);
-        auto *save = new QPushButton(tr("Save")); save->setObjectName("saveTask"); save->setDefault(true);
+        auto *save = new QPushButton(tr("Save")); save->setObjectName("saveTask"); save->setDefault(true); save->setProperty("primaryAction", true);
         connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
         connect(save, &QPushButton::clicked, this, [this] { setBusy(true); emit saveRequested(edits()); });
         connect(m_prompt, &QPlainTextEdit::textChanged, this, &TaskDialog::refreshButtons);
@@ -138,6 +172,12 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
     }
     layout->addLayout(actions);
     refreshButtons();
+}
+
+// The sessions take the rows they need, up to three, then scroll.
+void TaskDialog::resizeEvent(QResizeEvent *event) {
+    QDialog::resizeEvent(event);
+    if (m_choicesArea) m_choicesArea->setFixedHeight(qMin(104, m_choicesArea->widget()->layout()->heightForWidth(m_choicesArea->width())));
 }
 
 TaskTarget TaskDialog::chosenTarget() const {
@@ -191,17 +231,18 @@ TaskCancelDialog::TaskCancelDialog(const TaskItem &task, bool running, bool work
     auto *text = new QLabel(task.text); text->setObjectName("taskCancelText"); text->setWordWrap(true); text->setTextFormat(Qt::PlainText);
     text->setMaximumHeight(text->fontMetrics().lineSpacing() * 4 + 4); layout->addWidget(text);
     const QString session = TaskBoard::sessionLabel(task.sessionHost, task.sessionName);
-    QString what = tr("%1 moves to In review, and %2 gets the cancel message.").arg(task.id, session);
-    if (!running) what += QLatin1Char(' ') + tr("The agent is not running, so hgs will refuse the message; the task is cancelled all the same.");
-    else if (working) what += QLatin1Char(' ') + tr("%1 is working; it reads the message when its turn ends.").arg(session);
-    auto *warning = new QLabel(what); warning->setObjectName("taskCancelWarning"); warning->setWordWrap(true); layout->addWidget(warning);
+    QString what = tr("%1 moves to In review, and %2 gets the cancel message.").toHtmlEscaped()
+        .arg(QStringLiteral("<b>%1</b>").arg(task.id.toHtmlEscaped()), session.toHtmlEscaped());
+    if (!running) what += QLatin1Char(' ') + tr("The agent is not running, so hgs will refuse the message; the task is cancelled all the same.").toHtmlEscaped();
+    else if (working) what += QLatin1Char(' ') + tr("%1 is working; it reads the message when its turn ends.").toHtmlEscaped().arg(session.toHtmlEscaped());
+    auto *warning = new QLabel(what); warning->setObjectName("taskCancelWarning"); warning->setTextFormat(Qt::RichText); warning->setWordWrap(true);
+    layout->addWidget(warning);
     layout->addWidget(section(tr("Reason (optional) — saved as a comment on the task, not sent to the agent")));
     m_reason = new QLineEdit; m_reason->setObjectName("taskCancelReason"); m_reason->setPlaceholderText(tr("Why it is cancelled"));
     layout->addWidget(m_reason);
     auto *buttons = new QHBoxLayout;
     auto *keep = new QPushButton(tr("Keep running")); keep->setObjectName("keepTaskRunning"); keep->setDefault(true);
     auto *cancel = new QPushButton(tr("Cancel task")); cancel->setObjectName("confirmTaskCancel"); cancel->setAutoDefault(false);
-    cancel->setStyleSheet(QStringLiteral("color:#e06c75;"));
     connect(keep, &QPushButton::clicked, this, &QDialog::reject); connect(cancel, &QPushButton::clicked, this, &QDialog::accept);
     buttons->addWidget(keep); buttons->addStretch(); buttons->addWidget(cancel); layout->addLayout(buttons);
 }
@@ -212,13 +253,18 @@ TaskSettingsDialog::TaskSettingsDialog(const QString &projectName, const QJsonOb
     : QDialog(parent), m_settings(settings) {
     setObjectName("taskSettingsDialog"); setWindowTitle(tr("Project tasks · %1").arg(projectName)); resize(620, 560);
     auto *layout = new QVBoxLayout(this); layout->setSpacing(8);
-    layout->addWidget(section(tr("Task prompt (Send now)")));
-    m_task = new QPlainTextEdit(settings.value("task_template").toString()); m_task->setObjectName("taskTemplate"); layout->addWidget(m_task, 1);
+    layout->addWidget(heading(tr("Service prompts"), "taskServicePrompts"));
+    // The templates are code: a fixed-pitch font.
+    QFont code = QFontDatabase::systemFont(QFontDatabase::FixedFont); code.setPixelSize(12);
+    layout->addWidget(section(tr("Task (Send now)")));
+    m_task = new QPlainTextEdit(settings.value("task_template").toString()); m_task->setObjectName("taskTemplate"); m_task->setFont(code);
+    layout->addWidget(m_task, 1);
     layout->addWidget(section(tr("Cancel message")));
-    m_cancel = new QPlainTextEdit(settings.value("cancel_template").toString()); m_cancel->setObjectName("cancelTemplate"); layout->addWidget(m_cancel, 1);
-    auto *hint = new QLabel(tr("Placeholders: {ref}, {author}, {prompt}, {tools}, {history}")); hint->setObjectName("taskTemplateHint");
+    m_cancel = new QPlainTextEdit(settings.value("cancel_template").toString()); m_cancel->setObjectName("cancelTemplate"); m_cancel->setFont(code);
+    layout->addWidget(m_cancel, 1);
+    auto *hint = section(tr("Placeholders: {ref}, {author}, {prompt}, {tools}, {history}")); hint->setObjectName("taskTemplateHint");
     layout->addWidget(hint);
-    layout->addWidget(section(tr("Agents")));
+    layout->addSpacing(6); layout->addWidget(heading(tr("Agents"), "taskAgentsHeading"));
     m_agentsOther = new QCheckBox(tr("Agents may start and cancel tasks in other sessions")); m_agentsOther->setObjectName("agentsOther");
     m_agentsOther->setChecked(settings.value("agents_other").toBool(true)); layout->addWidget(m_agentsOther);
     auto *limit = new QHBoxLayout;
@@ -229,7 +275,7 @@ TaskSettingsDialog::TaskSettingsDialog(const QString &projectName, const QJsonOb
     m_error = errorLabel("taskSettingsError"); layout->addWidget(m_error);
     auto *buttons = new QHBoxLayout; buttons->addStretch();
     auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("cancelTaskSettings"); cancel->setAutoDefault(false);
-    m_save = new QPushButton(tr("Save")); m_save->setObjectName("saveTaskSettings"); m_save->setDefault(true);
+    m_save = new QPushButton(tr("Save")); m_save->setObjectName("saveTaskSettings"); m_save->setDefault(true); m_save->setProperty("primaryAction", true);
     connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
     connect(m_save, &QPushButton::clicked, this, [this] { m_save->setEnabled(false); m_error->hide(); emit saveRequested(changes()); });
     buttons->addWidget(cancel); buttons->addWidget(m_save); layout->addLayout(buttons);

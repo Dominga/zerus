@@ -13,6 +13,7 @@ class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QScrollArea;
 class QSpinBox;
 class QTextBrowser;
 struct TaskSession;
@@ -50,6 +51,8 @@ signals:
     void saveRequested(const TaskEdits &edits);
     void actionRequested(const TaskEdits &edits, TaskAction action);
     void commentRequested(const QString &text);
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 private:
     void setBusy(bool busy);
     // Each button's state: busy, an empty prompt, a newer task, and Send now's
@@ -63,6 +66,7 @@ private:
     bool m_busy = false;
     QPlainTextEdit *m_prompt;
     QButtonGroup *m_sessions = nullptr;
+    QScrollArea *m_choicesArea = nullptr;
     QList<TaskTarget> m_choices;
     QTextBrowser *m_history;
     QLineEdit *m_comment;

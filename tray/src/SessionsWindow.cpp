@@ -1814,6 +1814,14 @@ void SessionsWindow::applyTheme()
         QColorDialog#workspaceColorDialog { background:%1; color:%2; }
         QDialog#savedDraftsDialog { background:%1; color:%2; }
         QDialog#taskDialog, QDialog#taskCancelDialog, QDialog#taskSettingsDialog { background:%1; color:%2; }
+        QPlainTextEdit#taskPrompt, QPlainTextEdit#taskTemplate, QPlainTextEdit#cancelTemplate { background:%11; color:%2; border:1px solid %4; border-radius:9px; padding:6px; selection-background-color:%10; selection-color:%2; }
+        QPlainTextEdit#taskPrompt:focus, QPlainTextEdit#taskTemplate:focus, QPlainTextEdit#cancelTemplate:focus { border-color:%5; }
+        QScrollArea#taskSessionChoices, QScrollArea#taskSessionChoices > QWidget, QScrollArea#taskSessionChoices > QWidget > QWidget { background:transparent; }
+        QPushButton[taskSessionChoice="true"] { padding:4px 10px; min-height:18px; font-size:12px; }
+        QPushButton[taskSessionChoice="true"]:checked { background:%10; color:%5; border-color:%5; font-weight:600; }
+        QLabel[taskSection="true"] { color:%6; }
+        QLabel#taskCancelText { background:%3; border-radius:8px; padding:9px 11px; }
+        QPushButton#confirmTaskCancel { color:%12; border-color:%12; font-weight:600; }
         QWidget#automaticApprovalSettings { background:transparent; color:%2; }
         QPlainTextEdit#approvalJournalDetail { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:10px; selection-background-color:%10; selection-color:%2; }
         QTableWidget#approvalJournal::item { padding:7px 10px; border-bottom:1px solid %4; }
@@ -1842,9 +1850,9 @@ void SessionsWindow::applyTheme()
         QToolButton#manageLaunchProject:disabled { color:%6; }
         QPushButton:focus[keyboardFocus="true"] { border:1px solid %5; }
         QPushButton:disabled { color:%6; background:%1; border-color:%4; }
-        QPushButton#primary, QPushButton[archiveRestore="true"] { background:%5; color:%8; border-color:%5; font-weight:600; }
-        QPushButton#primary:hover, QPushButton[archiveRestore="true"]:hover { background:%9; }
-        QPushButton#primary:disabled, QPushButton[archiveRestore="true"]:disabled { color:%6; background:%1; border-color:%4; }
+        QPushButton#primary, QPushButton[archiveRestore="true"], QPushButton[primaryAction="true"] { background:%5; color:%8; border-color:%5; font-weight:600; }
+        QPushButton#primary:hover, QPushButton[archiveRestore="true"]:hover, QPushButton[primaryAction="true"]:hover { background:%9; }
+        QPushButton#primary:disabled, QPushButton[archiveRestore="true"]:disabled, QPushButton[primaryAction="true"]:disabled { color:%6; background:%1; border-color:%4; }
         QPushButton#nav { text-align:left; border:1px solid transparent; padding:10px 9px; background:transparent; }
         QPushButton#nav:hover { background:%7; }
         QPushButton#nav:checked { background:%10; color:%5; font-weight:600; }

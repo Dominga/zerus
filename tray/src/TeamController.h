@@ -40,6 +40,13 @@ public:
     void discardPhase(int phase, const Done &done = {});
     // Lead or owner: finish a team whose tasks are all decided.
     void finishTeam(const QString &summary, const Done &done = {});
+    // A5: park a task (a pending one, or a report that goes back later) and let
+    // it go again; a rejected report may be returned with a hold.
+    void holdTask(int task, const QString &reason, const Done &done = {});
+    void releaseTask(int task, const Done &done = {});
+    void rejectWithHold(int task, const QString &reason, const Done &done = {});
+    // A3: answer a member's question; the reply reaches it as a message.
+    void answerQuestion(const QString &question, const QString &text, const Done &done = {});
     // Any `hgs team` operation ("catalog get", "create", ...) with its whole
     // answer. Changes get by and request_id like act().
     using Reply = std::function<void(bool ok, const QJsonObject &result, const QString &error)>;

@@ -76,6 +76,57 @@ QString Team::roleOf(const QString &id) const
     return id;
 }
 
+QList<int> memberQueue(const Team &team, const QString &member)
+{
+    QList<int> queue;
+    for (const auto &task : team.tasks)
+        if (const auto *attempt = openOf(task); attempt && attempt->member == member) { queue.append(task.id); break; }
+    for (const auto &task : team.tasks) {
+        if (!queue.isEmpty() && task.id == queue.first()) continue;
+        // Returned to it: handed out before, not finished, and waiting.
+        if (task.assignee != member || task.finished() || task.status != "pending" || task.attempts.isEmpty()) continue;
+        queue.append(task.id);
+    }
+    return queue;
+}
+
+QString attemptPhase(const Task &task, const Attempt &attempt)
+{
+    if (!attempt.phase.isEmpty()) return attempt.phase;   // hgs derived it
+    if (task.held) return QStringLiteral("held");
+    if (attempt.state == "delivering") return QStringLiteral("sent");
+    if (attempt.state == "unconfirmed") return QStringLiteral("unconfirmed");
+    if (attempt.state == "rejected") return QStringLiteral("rejected");
+    if (attempt.state == "reported") return QStringLiteral("reported");
+    if (attempt.noReport) return QStringLiteral("no_report");
+    if (attempt.openQuestion()) return QStringLiteral("asking");
+    if (attempt.startedAt > 0) return QStringLiteral("working");
+    if (attempt.startWarned) return QStringLiteral("late");
+    if (attempt.state == "delivered") return QStringLiteral("delivered");
+    return attempt.state;
+}
+
+QString lastPhase(const Task &task)
+{
+    const auto *last = task.last();
+    return last ? attemptPhase(task, *last) : QString();
+}
+
+QList<Question> openQuestions(const Task &task)
+{
+    QList<Question> open;
+    if (const auto *attempt = task.last())
+        for (const auto &question : attempt->questions) if (!question.answered()) open.append(question);
+    return open;
+}
+
+const Question *question(const Task &task, const QString &id)
+{
+    if (const auto *attempt = task.last())
+        for (const auto &item : attempt->questions) if (item.id == id) return &item;
+    return nullptr;
+}
+
 Team parse(const QJsonObject &v)
 {
     Team team;
@@ -97,6 +148,14 @@ Team parse(const QJsonObject &v)
         member.folder = str(m, "folder"); member.directory = str(m, "directory"); member.prompt = str(m, "prompt");
         const auto session = m.value("session").toObject();
         member.host = str(session, "host"); member.session = str(session, "name");
+        if (m.value("queue").isArray()) {
+            member.queueKnown = true;
+            for (const auto &item : m.value("queue").toArray()) {
+                const auto object = item.toObject();
+                const int id = item.isDouble() ? item.toInt() : object.value("task").toInt(object.value("id").toInt());
+                if (id > 0) member.queue.append(id);
+            }
+        }
         member.lead = member.id == team.lead;
         if (member.lead && member.role.isEmpty()) member.role = tr("Lead");
         team.members.append(member);
@@ -110,12 +169,37 @@ Team parse(const QJsonObject &v)
         task.decidedBy = str(t, "decided_by"); task.reason = str(t, "decision_reason");
         for (const auto &c : t.value("criteria").toArray()) task.criteria.append(c.toString());
         for (const auto &d : t.value("deps").toArray()) task.deps.append({d.toObject().value("task").toInt(), str(d.toObject(), "kind") == "soft"});
+        if (t.value("hold").isObject()) {
+            // A5: parked by the lead or by you until `release`.
+            const auto h = t.value("hold").toObject();
+            task.held = true;
+            task.hold.by = str(h, "by"); task.hold.reason = str(h, "reason"); task.hold.at = h.value("at").toDouble();
+        }
         const auto readAttempt = [&](const QJsonObject &a) {
             Attempt attempt;
             attempt.n = a.value("n").toInt(); attempt.id = str(a, "id"); attempt.member = str(a, "member");
             attempt.state = str(a, "state"); attempt.error = str(a, "error"); attempt.notice = str(a, "notice");
             attempt.noReport = a.value("no_report").toBool(); attempt.sentAt = a.value("sent_at").toDouble();
-            attempt.report = a.value("report").toObject().value("text").toString();
+            // A1/A2: when it was delivered and started, and the turn that ended.
+            attempt.deliveredAt = a.value("delivered_at").toDouble(); attempt.startedAt = a.value("started_at").toDouble();
+            attempt.startWarned = a.value("start_warned").toBool();
+            attempt.replyAt = a.value("reply_at").toDouble(); attempt.turnEndedAt = a.value("turn_ended_at").toDouble();
+            attempt.turnReply = str(a, "turn_reply"); attempt.phase = str(a, "phase");
+            const auto report = a.value("report").toObject();
+            attempt.report = report.value("text").toString();
+            attempt.reportAt = report.value("at").toDouble(); attempt.captured = report.value("captured").toBool();
+            for (const auto &r : report.value("replaced").toArray()) {
+                const auto item = r.toObject();
+                attempt.replaced.append({item.value("text").toString(), item.value("at").toDouble()});
+            }
+            // A3: questions to the lead, answered or open.
+            for (const auto &q : a.value("questions").toArray()) {
+                const auto item = q.toObject();
+                Question entry;
+                entry.id = str(item, "id"); entry.text = str(item, "text"); entry.answer = str(item, "answer"); entry.by = str(item, "by");
+                entry.at = item.value("at").toDouble(); entry.answeredAt = item.value("answered_at").toDouble();
+                attempt.questions.append(entry);
+            }
             if (attempt.member.isEmpty()) attempt.member = task.assignee;
             return attempt;
         };
@@ -123,6 +207,9 @@ Team parse(const QJsonObject &v)
         else if (t.value("attempt").isObject()) task.attempts.append(readAttempt(t.value("attempt").toObject()));
         team.tasks.append(task);
     }
+    // A5: the queue is in `team status`; an older hgs (or a list summary) gets
+    // the same list from the attempts.
+    for (auto &member : team.members) if (!member.queueKnown) member.queue = memberQueue(team, member.id);
     for (const auto &value : v.value("phases").toArray()) {
         const auto p = value.toObject();
         Phase phase;
@@ -215,6 +302,7 @@ QList<Team> parseList(const QJsonObject &value)
 
 bool ready(const Team &team, const Task &task)
 {
+    if (task.held) return false;   // A5: a held task is never ready
     if (task.status != "pending" || team.cycle.contains(task.id)) return false;
     for (const auto &dep : task.deps) {
         const auto *d = team.task(dep.task);
@@ -246,6 +334,9 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
     if (attempt && attempt->state == "unconfirmed")
         return make("unconfirmed", tr("Delivery unconfirmed"), tr("Unconfirmed"), Tone::Danger, current->id, true);
     if (attempt && attempt->noReport) return make("no_report", tr("No report"), tr("No report"), Tone::Warn, current->id, true);
+    // A3: a question to the lead leaves the attempt open and pauses the work.
+    if (attempt && attempt->openQuestion())
+        return make("asking", tr("Waiting for your answer"), tr("Answer"), Tone::Warn, current->id, true);
     if (attempt)
         return make("working", tr("Working on #%1 %2").arg(current->id).arg(current->title), QStringLiteral("#%1").arg(current->id), Tone::Active, current->id);
     for (const auto &task : team.tasks)
@@ -263,6 +354,7 @@ Status taskStatus(const Task &task)
     const int n = task.last() ? task.last()->n : 0;
     if (open && open->state == "unconfirmed") { s.text = tr("Delivery unconfirmed"); s.tone = Tone::Danger; s.problem = true; }
     else if (open && open->noReport) { s.text = tr("No report"); s.tone = Tone::Warn; s.problem = true; }
+    else if (task.held) { s.text = tr("Held"); s.tone = Tone::Muted; }
     else if (task.status == "draft") { s.text = tr("Draft"); s.tone = Tone::Dim; }
     else if (task.status == "pending") { s.text = tr("Pending"); s.tone = Tone::Muted; }
     else if (task.status == "assigned") { s.text = tr("Assigned"); s.tone = Tone::Assigned; }
@@ -383,8 +475,10 @@ bool allDecided(const Team &team)
 int answers(const Team &team, const LiveLookup &live)
 {
     int n = 0;
-    if (!live) return 0;
-    for (const auto &member : team.members) n += !member.session.isEmpty() && live(member).attention;
+    if (live)
+        for (const auto &member : team.members) n += !member.session.isEmpty() && live(member).attention;
+    // A3: a question asked with `hgs team ask` waits for the lead too.
+    for (const auto &task : team.tasks) n += openQuestions(task).size();
     return n;
 }
 
@@ -506,9 +600,26 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "lead_told" && d.value("kind").toString() == "all_decided") t = tr("Told the Lead that all tasks are decided");
     else if (k == "handed_out") { line.by = tr("Lead"); t = tr("Task to %1 · %2%3").arg(d.value("to").toString(), ref, attempt); }
     else if (k == "delivered") t = tr("Delivered %1%2").arg(ref, attempt);
+    else if (k == "started") t = tr("Started %1%2").arg(ref, attempt);
+    else if (k == "start_late") { t = tr("Delivered and not started yet · %1%2").arg(ref, attempt); line.tone = Tone::Warn; }
     else if (k == "refused") { t = tr("Not delivered %1%2 (%3); handed out again later").arg(ref, attempt, d.value("error").toString()); line.tone = Tone::Warn; }
     else if (k == "unconfirmed") { t = tr("Delivery unconfirmed · %1%2 (%3)").arg(ref, attempt, d.value("error").toString()); line.tone = Tone::Danger; }
     else if (k == "reported") t = tr("Report to Lead · %1%2").arg(ref, attempt);
+    else if (k == "report_replaced") t = tr("Replaced the captured reply · %1%2").arg(ref, attempt);
+    else if (k == "question_asked") {
+        const QString text = d.value("text").toString();
+        t = text.isEmpty() ? tr("A question for the Lead · %1%2").arg(ref, attempt)
+                           : tr("Question from the member · %1%2: %3").arg(ref, attempt, text);
+        line.tone = Tone::Warn;
+    }
+    else if (k == "question_answered") t = tr("Answered the question · %1%2").arg(ref, attempt);
+    else if (k == "held") {
+        const QString reason = d.value("reason").toString();
+        t = reason.isEmpty() ? tr("Held %1%2").arg(ref, attempt) : tr("Held %1%2: %3").arg(ref, attempt, reason);
+        line.tone = Tone::Muted;
+    }
+    else if (k == "released") t = tr("Released %1%2").arg(ref, attempt);
+    else if (k == "member_adopted") t = tr("Adopted the existing session · %1").arg(d.value("session").toString());
     else if (k == "stale_report") { t = tr("Late report refused · %1%2").arg(ref, attempt); line.tone = Tone::Warn; }
     else if (k == "accepted") { t = tr("Accepted %1").arg(ref); line.tone = Tone::Done; }
     else if (k == "rejected") { t = tr("Rejected %1%2: “%3”").arg(ref, attempt, d.value("reason").toString()); line.tone = Tone::Danger; }

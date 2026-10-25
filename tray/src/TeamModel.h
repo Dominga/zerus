@@ -29,7 +29,25 @@ struct Member {
     // computer) and name.
     QString host, session;
     bool lead = false;
+    // The member queue (A5): its open task first, then the tasks returned to it
+    // (pending, with attempts). From `team status` when hgs sends it; an older
+    // hgs gets the same list derived from the tasks.
+    QList<int> queue;
+    bool queueKnown = false;   // `queue` was in the JSON, even when empty
     QJsonObject json() const;
+};
+
+// A member's question to the lead (A3); open until the lead answers it.
+struct Question {
+    QString id, text, answer, by;
+    double at = 0, answeredAt = 0;
+    bool answered() const { return answeredAt > 0 || !answer.isEmpty(); }
+};
+
+// A report that replaced the reply captured for an attempt (A6).
+struct ReplacedReport {
+    QString text;
+    double at = 0;
 };
 
 struct Attempt {
@@ -37,9 +55,32 @@ struct Attempt {
     QString id, member, state, error, notice, report;
     bool noReport = false;
     double sentAt = 0;
+    // Delivery and start (A1); zero or false in an older team file.
+    double deliveredAt = 0, startedAt = 0, replyAt = 0, turnEndedAt = 0;
+    bool startWarned = false;
+    // The reply id kept with turn_ended_at, so a newer turn is not captured (A2).
+    QString turnReply;
+    double reportAt = 0;
+    bool captured = false;              // the text was taken from the last reply
+    QList<ReplacedReport> replaced;     // oldest first, at most 3
+    // The phase hgs derives for the attempt (spec 2), empty on an older hgs.
+    QString phase;
+    QList<Question> questions;          // oldest first
+    const Question *openQuestion() const
+    {
+        for (const auto &question : questions) if (!question.answered()) return &question;
+        return nullptr;
+    }
 };
 
 struct Dep { int task = 0; bool soft = false; };
+
+// A task parked by the lead or the owner (A5): pending, but never ready,
+// rebalanced or handed out until `release`.
+struct Hold {
+    QString by, reason;
+    double at = 0;
+};
 
 struct Task {
     int id = 0;
@@ -49,6 +90,8 @@ struct Task {
     QStringList criteria;
     QList<Dep> deps;
     QList<Attempt> attempts;   // oldest first
+    bool held = false;         // A5: the lead holds the task
+    Hold hold;
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
     QJsonObject json() const;
@@ -175,13 +218,28 @@ QList<Tone> progress(const Team &team);
 int accepted(const Team &team);
 // The team has at least one task and every task is finished (draft is not).
 bool allDecided(const Team &team);
-// Questions and approvals waiting in member sessions.
+// Questions and approvals waiting for the lead: a member session's native
+// question or approval, and a team question asked with `hgs team ask` (A3).
 int answers(const Team &team, const LiveLookup &live);
 // Ancestors and descendants of a task, itself included.
 QSet<int> chain(const Team &team, int task);
 // Tasks by layer for the list: layer 1 first.
 QMap<int, QList<int>> layered(const Team &team);
 bool ready(const Team &team, const Task &task);
+
+// The shown phase of an attempt (spec 2): sent, delivered, late, working,
+// asking, reported, no_report, stopped, held, rejected, unconfirmed. hgs
+// derives it into the attempt's `phase`; an older hgs gets the same answer
+// from the attempt's fields and its task's hold.
+QString attemptPhase(const Task &task, const Attempt &attempt);
+// The last attempt's phase; empty without attempts.
+QString lastPhase(const Task &task);
+// Unanswered questions of the task's last attempt, oldest first.
+QList<Question> openQuestions(const Task &task);
+const Question *question(const Task &task, const QString &id);
+// The member queue (A5): its open task, then the tasks returned to it
+// (pending, with attempts). Nothing else.
+QList<int> memberQueue(const Team &team, const QString &member);
 
 // The team catalog (`hgs team catalog get`): roles, templates, routing rules
 // and the designer's draft of proposed changes.

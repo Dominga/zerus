@@ -86,6 +86,40 @@ QJsonObject phasedTeam()
     return team;
 }
 
+// The delivery fixture of the team delivery spec (A1-A6): an attempt that
+// started, a captured report that was replaced, a question to the lead, a late
+// start and a task held after a rejection.
+QJsonObject deliveryTeam()
+{
+    return QJsonDocument::fromJson(R"({
+ "id":"team-2","name":"Delivery","status":"running","project":"Checkout","folder":"/work/delivery","lead":"lead",
+ "revision":3,"created":1000,"updated":5000,
+ "settings":{"all_hard":false,"report_timeout_seconds":120,"start_timeout_seconds":180},
+ "members":[
+  {"id":"lead","role":"Architect","agent":"claude","state":"active","session":{"host":"","name":"claude/delivery/lead"}},
+  {"id":"backend","role":"Backend","agent":"codex","state":"active","session":{"host":"","name":"codex/delivery/backend"}},
+  {"id":"tester","role":"Tester","agent":"kimi","state":"active","session":{"host":"","name":"kimi/delivery/tester"}},
+  {"id":"reviewer","role":"Reviewer","agent":"claude","state":"active","session":{"host":"","name":"claude/delivery/reviewer"}}],
+ "tasks":[
+  {"id":1,"title":"Saved cards API","assignee":"backend","status":"in_progress",
+   "attempts":[{"n":2,"id":"a2","member":"backend","state":"delivered","sent_at":1300,"delivered_at":1301,
+                "started_at":1305,"phase":"working"}]},
+  {"id":2,"title":"Address form","assignee":"backend","status":"submitted",
+   "attempts":[{"n":1,"id":"a1","member":"backend","state":"reported","delivered_at":1100,"started_at":1105,
+    "report":{"text":"The real report","at":1200,"captured":false,
+              "replaced":[{"text":"Building and running the tests...","at":1150}]}}]},
+  {"id":3,"title":"Held retry","assignee":"backend","status":"pending",
+   "hold":{"by":"Lead","at":1400,"reason":"waiting for the owner"},
+   "attempts":[{"n":1,"id":"a3","member":"backend","state":"rejected"}]},
+  {"id":4,"title":"Ask about the field","assignee":"tester","status":"in_progress",
+   "attempts":[{"n":1,"id":"a4","member":"tester","state":"delivered","delivered_at":1500,"started_at":1505,
+    "questions":[{"id":"q1","text":"Must I keep the old JSON field?","at":1510,"answer":"","answered_at":null,"by":""},
+                 {"id":"q2","text":"Which branch?","at":1501,"answer":"main","answered_at":1502,"by":"Lead"}]}]},
+  {"id":5,"title":"Late start","assignee":"reviewer","status":"in_progress",
+   "attempts":[{"n":1,"id":"a5","member":"reviewer","state":"delivered","delivered_at":1600,"start_warned":true}]},
+  {"id":6,"title":"Untouched pending","assignee":"backend","status":"pending","deps":[{"task":1}]}]})").object();
+}
+
 Live live(const Member &member)
 {
     Live state; state.known = true;
@@ -102,11 +136,16 @@ private slots:
     void initTestCase();
     void modelReadsTheTeamAndDerivesMemberStates();
     void modelReadsPhasesPinnedAndTheWaitingState();
+    void modelReadsAttemptStatesQuestionsHoldsAndReports();
+    void attemptPhasesAreDerivedForAnOlderHgs();
+    void oldStatusJsonStillParses();
+    void feedLinesSpeakOfStartsQuestionsAndHolds();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
     void feedLinesSpeakOfPhasesAndTheEndOfThePlan();
     void controllerReadsOnceAndSendsChangesAsYou();
     void controllerSendsPhaseDecisionsAndFinish();
+    void controllerSendsHoldReleaseRejectAndReply();
     void panelShowsProblemsWithTheirActions_data();
     void panelShowsProblemsWithTheirActions();
 private:
@@ -245,6 +284,179 @@ void TestTeams::modelReadsPhasesPinnedAndTheWaitingState()
     QVERIFY(parseTemplate(QJsonObject{{"id", "dev"}}).phaseApproval.isEmpty());
 }
 
+void TestTeams::modelReadsAttemptStatesQuestionsHoldsAndReports()
+{
+    const auto team = parse(deliveryTeam());
+    // A1: delivery and start are kept apart from the attempt's own state.
+    const auto *working = team.task(1)->last();
+    QVERIFY(working);
+    QCOMPARE(working->n, 2);
+    QCOMPARE(working->deliveredAt, 1301.0);
+    QCOMPARE(working->startedAt, 1305.0);
+    QCOMPARE(working->phase, QStringLiteral("working"));   // hgs derived it
+    QVERIFY(!working->startWarned);
+    QCOMPARE(lastPhase(*team.task(1)), QStringLiteral("working"));
+    // A2/A6: the report that replaced the captured reply keeps the old text.
+    const auto *replaced = team.task(2)->last();
+    QCOMPARE(replaced->report, QStringLiteral("The real report"));
+    QCOMPARE(replaced->reportAt, 1200.0);
+    QVERIFY(!replaced->captured);
+    QCOMPARE(replaced->replaced.size(), 1);
+    QCOMPARE(replaced->replaced.first().text, QStringLiteral("Building and running the tests..."));
+    QCOMPARE(replaced->replaced.first().at, 1150.0);
+    QCOMPARE(lastPhase(*team.task(2)), QStringLiteral("reported"));
+    // A5: a held task and its hold.
+    const auto *held = team.task(3);
+    QVERIFY(held->held);
+    QCOMPARE(held->hold.by, QStringLiteral("Lead"));
+    QCOMPARE(held->hold.reason, QStringLiteral("waiting for the owner"));
+    QCOMPARE(held->hold.at, 1400.0);
+    QCOMPARE(held->status, QStringLiteral("pending"));
+    QCOMPARE(lastPhase(*held), QStringLiteral("held"));
+    QCOMPARE(taskStatus(*held).text, QStringLiteral("Held"));
+    QCOMPARE(taskStatus(*held).tone, Tone::Muted);
+    QVERIFY(!ready(team, *held));
+    auto released = parse(deliveryTeam());
+    for (auto &task : released.tasks) if (task.id == 3) { task.held = false; task.hold = {}; }
+    QVERIFY(ready(released, *released.task(3)));   // it waits for the release, not for a dependency
+    // A3: open questions stay apart from answered ones.
+    const auto *asking = team.task(4)->last();
+    QCOMPARE(asking->questions.size(), 2);
+    QCOMPARE(asking->openQuestion()->id, QStringLiteral("q1"));
+    QCOMPARE(openQuestions(*team.task(4)).size(), 1);
+    QCOMPARE(openQuestions(*team.task(4)).first().text, QStringLiteral("Must I keep the old JSON field?"));
+    const auto *answered = question(*team.task(4), "q2");
+    QVERIFY(answered && answered->answered());
+    QCOMPARE(answered->answer, QStringLiteral("main"));
+    QCOMPARE(answered->answeredAt, 1502.0);
+    QCOMPARE(answered->by, QStringLiteral("Lead"));
+    QVERIFY(!question(*team.task(4), "q9"));
+    QCOMPARE(lastPhase(*team.task(4)), QStringLiteral("asking"));
+    QVERIFY(openQuestions(*team.task(1)).isEmpty());
+    // The member card says it waits for the lead, and that counts as an answer.
+    const auto quiet = [](const Member &) { Live state; state.known = true; return state; };
+    const auto waiting = memberStatus(team, *team.member("tester"), quiet(*team.member("tester")));
+    QCOMPARE(waiting.kind, QStringLiteral("asking"));
+    QCOMPARE(waiting.task, 4);
+    QVERIFY(waiting.problem);
+    QCOMPARE(memberStatus(team, *team.member("backend"), quiet(*team.member("backend"))).kind, QStringLiteral("working"));
+    QCOMPARE(answers(team, quiet), 1);
+    // A5: the queue is the open task, then the tasks returned to the member.
+    QCOMPARE(team.member("backend")->queue, (QList<int>{1, 3}));
+    QCOMPARE(team.member("tester")->queue, (QList<int>{4}));
+    QCOMPARE(team.member("reviewer")->queue, (QList<int>{5}));
+    QVERIFY(team.member("lead")->queue.isEmpty());
+    QCOMPARE(memberQueue(team, "backend"), (QList<int>{1, 3}));
+    // A queue in the status wins over the derived one, even when empty.
+    auto given = deliveryTeam();
+    auto members = given["members"].toArray();
+    auto tester = members[2].toObject(); tester["queue"] = QJsonArray{}; members[2] = tester;
+    given["members"] = members;
+    const auto explicitQueue = parse(given);
+    QVERIFY(explicitQueue.member("tester")->queueKnown);
+    QVERIFY(explicitQueue.member("tester")->queue.isEmpty());
+    QCOMPARE(explicitQueue.member("backend")->queue, (QList<int>{1, 3}));
+    // A start warning is the "late" phase.
+    QCOMPARE(lastPhase(*team.task(5)), QStringLiteral("late"));
+}
+
+void TestTeams::attemptPhasesAreDerivedForAnOlderHgs()
+{
+    Task task;
+    Attempt attempt;
+    attempt.state = "delivering";
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("sent"));
+    attempt.state = "delivered";
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("delivered"));
+    attempt.startWarned = true;
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("late"));
+    attempt.startedAt = 1305;
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("working"));
+    Question open; open.id = "q1"; open.text = "Keep it?";
+    attempt.questions.append(open);
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("asking"));
+    attempt.questions.clear();
+    attempt.noReport = true;
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("no_report"));
+    attempt.noReport = false;
+    attempt.state = "unconfirmed";
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("unconfirmed"));
+    attempt.state = "rejected";
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("rejected"));
+    task.held = true;
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("held"));
+    task.held = false;
+    attempt.state = "reported";
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("reported"));
+    // hgs decides when it sends the phase itself.
+    attempt.phase = QStringLiteral("stopped");
+    QCOMPARE(attemptPhase(task, attempt), QStringLiteral("stopped"));
+    // No attempts, no phase.
+    QCOMPARE(lastPhase(task), QString());
+}
+
+void TestTeams::oldStatusJsonStillParses()
+{
+    // A team file written before A1-A6: every new field defaults, the old ones
+    // keep their meaning.
+    const auto team = parse(checkout());
+    QCOMPARE(team.members.size(), 6);
+    QCOMPARE(team.task(3)->attempts.size(), 2);
+    const auto *reported = team.task(2)->last();
+    QVERIFY(reported);
+    QCOMPARE(reported->report, QStringLiteral("Form ready"));
+    QVERIFY(!reported->captured);
+    QVERIFY(reported->replaced.isEmpty());
+    QVERIFY(reported->questions.isEmpty());
+    QVERIFY(reported->phase.isEmpty());
+    QCOMPARE(reported->deliveredAt, 0.0);
+    QCOMPARE(reported->startedAt, 0.0);
+    QCOMPARE(reported->turnEndedAt, 0.0);
+    QVERIFY(!reported->startWarned);
+    QVERIFY(reported->turnReply.isEmpty());
+    QVERIFY(!reported->openQuestion());
+    QVERIFY(!team.task(3)->held);
+    QVERIFY(team.task(3)->hold.by.isEmpty());
+    QCOMPARE(team.task(3)->hold.at, 0.0);
+    // The phases an older hgs did not send are the same answer.
+    QCOMPARE(lastPhase(*team.task(2)), QStringLiteral("reported"));
+    QCOMPARE(lastPhase(*team.task(3)), QStringLiteral("delivered"));
+    QCOMPARE(lastPhase(*team.task(6)), QStringLiteral("unconfirmed"));
+    QCOMPARE(lastPhase(*team.task(4)), QString());
+    QCOMPARE(taskStatus(*team.task(3)).text, QStringLiteral("In progress · attempt 2"));
+    QVERIFY(openQuestions(*team.task(2)).isEmpty());
+    QVERIFY(openQuestions(*team.task(6)).isEmpty());
+    // The queue is derived from the attempts alone.
+    QCOMPARE(team.member("backend")->queue, (QList<int>{3}));
+    QCOMPARE(team.member("tester")->queue, (QList<int>{6}));
+    QCOMPARE(team.member("frontend")->queue, (QList<int>{}));
+    QVERIFY(team.member("backend")->queueKnown == false);
+}
+
+void TestTeams::feedLinesSpeakOfStartsQuestionsAndHolds()
+{
+    const auto team = parse(deliveryTeam());
+    const auto line = [&](const char *kind, const QJsonObject &detail) {
+        return feedLine(team, QJsonObject{{"at", 1}, {"seq", 1}, {"kind", kind}, {"detail", detail}});
+    };
+    QCOMPARE(line("started", QJsonObject{{"task", 1}, {"attempt", 2}, {"member", "Backend"}}).text,
+             QStringLiteral("Started #1 Saved cards API · attempt 2"));
+    QCOMPARE(line("started", QJsonObject{{"task", 1}, {"attempt", 2}, {"member", "Backend"}}).by, QStringLiteral("Backend"));
+    QCOMPARE(line("start_late", QJsonObject{{"task", 5}, {"attempt", 1}}).tone, Tone::Warn);
+    const auto asked = line("question_asked", QJsonObject{{"task", 4}, {"attempt", 1}, {"member", "Tester"}, {"text", "Keep it?"}});
+    QCOMPARE(asked.text, QStringLiteral("Question from the member · #4 Ask about the field · attempt 1: Keep it?"));
+    QCOMPARE(asked.tone, Tone::Warn);
+    QCOMPARE(line("question_asked", QJsonObject{{"task", 4}}).text, QStringLiteral("A question for the Lead · #4 Ask about the field"));
+    QCOMPARE(line("question_answered", QJsonObject{{"by", "Lead"}, {"task", 4}, {"attempt", 1}}).text,
+             QStringLiteral("Answered the question · #4 Ask about the field · attempt 1"));
+    QCOMPARE(line("held", QJsonObject{{"task", 3}, {"reason", "waiting for the owner"}}).text,
+             QStringLiteral("Held #3 Held retry: waiting for the owner"));
+    QCOMPARE(line("held", QJsonObject{{"task", 3}}).text, QStringLiteral("Held #3 Held retry"));
+    QCOMPARE(line("released", QJsonObject{{"by", "Lead"}, {"task", 3}}).text, QStringLiteral("Released #3 Held retry"));
+    QCOMPARE(line("report_replaced", QJsonObject{{"task", 2}, {"attempt", 1}}).text,
+             QStringLiteral("Replaced the captured reply · #2 Address form · attempt 1"));
+}
+
 void TestTeams::aRunningTeamIsStuckWhenNothingCanMove()
 {
     auto team = parse(checkout());
@@ -375,6 +587,63 @@ void TestTeams::controllerSendsPhaseDecisionsAndFinish()
     QCOMPARE(finish["summary"].toString(), QStringLiteral("All phases are in."));
     QVERIFY(!QUuid(finish["request_id"].toString()).isNull());
     QVERIFY(approve["request_id"].toString() != finish["request_id"].toString());
+}
+
+void TestTeams::controllerSendsHoldReleaseRejectAndReply()
+{
+    QFile::remove(script() + ".calls");
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.watch("team-1");
+    bool done = false, ok = false; QString message;
+    const auto send = [&](const std::function<void(TeamController::Done)> &call) {
+        done = false; ok = false;
+        call([&](bool success, const QString &text) { done = true; ok = success; message = text; });
+        QTRY_VERIFY(done);
+        QVERIFY2(ok, qPrintable(message));
+    };
+    send([&](const TeamController::Done &callback) { controller.holdTask(3, QStringLiteral("waiting for the owner"), callback); });
+    send([&](const TeamController::Done &callback) { controller.releaseTask(3, callback); });
+    send([&](const TeamController::Done &callback) { controller.rejectWithHold(4, QStringLiteral("not yet"), callback); });
+    send([&](const TeamController::Done &callback) { controller.answerQuestion(QStringLiteral("q1"), QStringLiteral("Yes, keep it."), callback); });
+    QFile calls(script() + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+    QJsonObject hold, release, reject, reply;
+    for (const auto &line : calls.readAll().split('\n')) {
+        const auto call = QJsonDocument::fromJson(line).object();
+        const auto args = call["args"].toArray();
+        if (args.size() < 2) continue;
+        const auto operation = args.at(1).toString();
+        if (operation == "hold") hold = call["input"].toObject();
+        else if (operation == "release") release = call["input"].toObject();
+        else if (operation == "reject") reject = call["input"].toObject();
+        else if (operation == "reply") reply = call["input"].toObject();
+    }
+    // The spec's payloads (A3, A5): request_id, team, and what the command takes.
+    QCOMPARE(hold.keys(), (QStringList{"by", "reason", "request_id", "task", "team"}));
+    QCOMPARE(hold["task"].toInt(), 3);
+    QCOMPARE(hold["reason"].toString(), QStringLiteral("waiting for the owner"));
+    QCOMPARE(hold["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(hold["by"].toString(), QStringLiteral("human"));
+    QVERIFY(!QUuid(hold["request_id"].toString()).isNull());
+    // Release names no reason and only the task.
+    QCOMPARE(release.keys(), (QStringList{"by", "request_id", "task", "team"}));
+    QCOMPARE(release["task"].toInt(), 3);
+    QVERIFY(!QUuid(release["request_id"].toString()).isNull());
+    // Reject with a hold is the same reject plus "hold": true.
+    QCOMPARE(reject.keys(), (QStringList{"by", "hold", "reason", "request_id", "task", "team"}));
+    QCOMPARE(reject["task"].toInt(), 4);
+    QCOMPARE(reject["reason"].toString(), QStringLiteral("not yet"));
+    QCOMPARE(reject["hold"].toBool(), true);
+    QVERIFY(!QUuid(reject["request_id"].toString()).isNull());
+    // Answering is `reply`, with the question and the text.
+    QCOMPARE(reply.keys(), (QStringList{"by", "question", "request_id", "team", "text"}));
+    QCOMPARE(reply["question"].toString(), QStringLiteral("q1"));
+    QCOMPARE(reply["text"].toString(), QStringLiteral("Yes, keep it."));
+    QCOMPARE(reply["team"].toString(), QStringLiteral("team-1"));
+    QVERIFY(!QUuid(reply["request_id"].toString()).isNull());
+    QVERIFY(hold["request_id"].toString() != release["request_id"].toString());
+    QVERIFY(release["request_id"].toString() != reject["request_id"].toString());
+    QVERIFY(reject["request_id"].toString() != reply["request_id"].toString());
 }
 
 void TestTeams::panelShowsProblemsWithTheirActions_data()

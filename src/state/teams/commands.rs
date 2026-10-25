@@ -60,9 +60,18 @@ fn waiting_for_lead(team: &Team) -> bool {
     team.status == TeamStatus::Running && ops::all_decided(team)
 }
 
-/// The phase record still waiting for the owner, if any.
+/// The phase record still waiting for the owner, if any. A team that is over
+/// shows none, even if an old record was left in draft.
 fn pending_phase(team: &Team) -> Option<u32> {
+    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+        return None;
+    }
     team.phases.iter().find(|phase| phase.state == PhaseState::Draft).map(|phase| phase.n)
+}
+
+/// Operations after which new work may be ready for the dispatcher.
+fn starts_worker(op: &str) -> bool {
+    matches!(op, "approve" | "resume" | "extend" | "approve-phase")
 }
 
 /// The team with what Zerus derives from it: plan findings, layers and the
@@ -250,7 +259,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 Err(error) if op == "report" && read_only(&error) => return drop_report(input),
                 Err(error) => return Err(error),
             };
-            if matches!(op, "approve" | "resume" | "extend") {
+            if starts_worker(op) {
                 // The dispatcher runs while any team runs; it exits by itself.
                 if let Err(error) = super::dispatcher::ensure_worker() {
                     eprintln!("hgs: the team dispatcher did not start: {error}");
@@ -341,5 +350,20 @@ mod tests {
         // The session list carries both too.
         let listed = summary(&paused);
         assert_eq!((listed["waiting_for_lead"].as_bool(), listed["pending_phase"].as_u64()), (Some(false), Some(2)));
+        // A team that is over shows no pending phase, even with a stale record.
+        let mut done = team.clone();
+        done.status = TeamStatus::Done;
+        assert!(view(&done)["pending_phase"].is_null());
+        assert_eq!(pending_phase(&done), None);
+    }
+
+    #[test]
+    fn the_commands_that_create_work_start_the_worker() {
+        for op in ["approve", "resume", "extend", "approve-phase"] {
+            assert!(starts_worker(op), "{op}");
+        }
+        for op in ["report", "cancel", "finish", "discard-phase"] {
+            assert!(!starts_worker(op), "{op}");
+        }
     }
 }

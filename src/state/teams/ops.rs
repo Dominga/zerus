@@ -249,6 +249,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
             bail!("Phase {} waits for the owner's approval", draft.n);
         }
     }
+    let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
     let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
     // Ids continue after every id ever used: a discarded phase keeps its ids.
     let last = team
@@ -278,13 +279,22 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
             task.status = TaskStatus::Pending;
         }
     }
-    // Validate the team as the phase would make it; older tasks stay immutable.
-    let mut trial = team.clone();
-    trial.tasks.extend(tasks.iter().cloned());
-    let validation = plan::validate(&trial, offline);
-    let errors = phase_errors(&validation, &wanted, true);
-    ensure!(errors.is_empty(), "Fix {} phase error(s) to extend: {}", errors.len(), errors_text(&errors));
-    let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
+    // A dependency already cancelled or finally rejected can never let its new
+    // dependent start, so extend refuses it instead of leaving it waiting.
+    for task in &tasks {
+        for dep in &task.deps {
+            if let Some(found) = team.task(dep.task) {
+                if matches!(found.status, TaskStatus::Cancelled | TaskStatus::Rejected) {
+                    bail!(
+                        "#{} depends on #{}, which is {}",
+                        task.id,
+                        found.id,
+                        if found.status == TaskStatus::Cancelled { "cancelled" } else { "rejected" }
+                    );
+                }
+            }
+        }
+    }
     let barrier = input["barrier"].as_bool() == Some(true);
     let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
     let by = actor.label(team);
@@ -292,7 +302,16 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         Approval::Review => PhaseState::Draft,
         Approval::Auto => PhaseState::Approved,
     };
+    // Validate the team as the phase would make it, in place; a refusal puts
+    // the tasks back (nothing changed) without cloning every stored report.
+    let first_new = team.tasks.len();
     team.tasks.extend(tasks);
+    let validation = plan::validate(team, offline);
+    let errors = phase_errors(&validation, &wanted, true);
+    if !errors.is_empty() {
+        team.tasks.truncate(first_new);
+        bail!("Fix {} phase error(s) to extend: {}", errors.len(), errors_text(&errors));
+    }
     team.phases.push(Phase {
         n,
         title: title.clone(),
@@ -377,6 +396,33 @@ pub(crate) fn all_decided(team: &Team) -> bool {
     !team.tasks.is_empty() && team.tasks.iter().all(|task| task.status.finished())
 }
 
+/// Marks every draft phase record discarded: a team that is over keeps no
+/// "pending approval" record.
+fn discard_draft_records(team: &mut Team, by: &str) {
+    let at = now();
+    for record in &mut team.phases {
+        if record.state == PhaseState::Draft {
+            record.state = PhaseState::Discarded;
+            record.decided_by = by.to_owned();
+            record.decided_at = Some(at);
+        }
+    }
+}
+
+/// A draft phase with no Draft task left is over: it never blocks an extend
+/// or stays "pending approval".
+fn discard_empty_draft(team: &mut Team, phase: u32, by: &str) {
+    if team.tasks.iter().any(|task| task.phase == phase && task.status == TaskStatus::Draft) {
+        return;
+    }
+    let at = now();
+    if let Some(record) = team.phases.iter_mut().find(|record| record.n == phase && record.state == PhaseState::Draft) {
+        record.state = PhaseState::Discarded;
+        record.decided_by = by.to_owned();
+        record.decided_at = Some(at);
+    }
+}
+
 /// Ends the team with the lead's or your summary; Done is final.
 fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you finish the team");
@@ -388,6 +434,7 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let by = actor.label(team);
     let accepted = team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
     let summary_chars = summary.chars().count();
+    discard_draft_records(team, &by);
     team.finish = Some(Finish { by: by.clone(), summary, at: now() });
     team.idle = Notice::None;
     team.status = TeamStatus::Done;
@@ -438,6 +485,9 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     let id = task_id(input)?;
     let human = matches!(actor, Actor::Human);
     ensure!(human || actor.is_lead(team), "Only the lead or you decide on a report");
+    // Deciding is part of the running state machine; a finished or stopped team
+    // keeps its reports as they are.
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let reason = clean(text(input, "reason").trim(), 4000, "A reason")?;
     ensure!(accept || !reason.is_empty(), "A rejection needs a reason");
     let label = actor.label(team);
@@ -522,8 +572,10 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished(), "Task #{id} is already decided");
     let revoked = revoke(task, "cancelled");
+    let phase = task.phase;
     task.status = TaskStatus::Cancelled;
     events.push(Event::new("cancelled", json!({"by":label,"task":id,"revoked_attempt":revoked})));
+    discard_empty_draft(team, phase, &label);
     Ok(json!({"status":"cancelled","task":id,"revoked_attempt":revoked}))
 }
 
@@ -589,6 +641,8 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                     task.status = TaskStatus::Cancelled;
                 }
             }
+            let by = actor.label(team);
+            discard_draft_records(team, &by);
             Ok(set_status(team, TeamStatus::Stopped, "stopped", actor, events))
         }
         "archive" => {
@@ -671,7 +725,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
     // and hears again only after new work is decided.
     if matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         let decided = all_decided(team);
-        if !was_decided && decided {
+        // A legacy record can be all-decided with no message armed (the old
+        // code stopped deciding while Paused); it hears once like any other.
+        if decided && (!was_decided || team.idle == Notice::None) {
             team.idle = Notice::Pending;
             let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
             events.push(Event::new(
@@ -679,7 +735,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 json!({"accepted":count(TaskStatus::Accepted),"rejected":count(TaskStatus::Rejected),
                     "cancelled":count(TaskStatus::Cancelled),"tasks":team.tasks.len()}),
             ));
-        } else if was_decided && !decided {
+        } else if !decided {
             team.idle = Notice::None;
         }
     }
@@ -1012,6 +1068,9 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("Dependency cycle"), "{error}");
+        // A refused phase puts the tasks back: nothing changed.
+        assert_eq!(team.tasks.len(), 2);
+        assert!(team.phases.is_empty());
         let added = extend(
             &mut team,
             &json!({"tasks":[
@@ -1082,6 +1141,174 @@ mod tests {
         assert!(error.contains("no assignee"), "{error}");
         assert_eq!(team.phases[0].state, PhaseState::Draft);
         assert_eq!(team.task(3).unwrap().status, TaskStatus::Draft);
+    }
+
+    #[test]
+    fn extend_refuses_dependencies_on_cancelled_or_rejected_tasks() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        apply(&mut team, "cancel", &json!({"task":1}), &Actor::Human, &none, &mut events).unwrap();
+        apply(&mut team, "cancel", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap();
+        let error = apply(
+            &mut team,
+            "extend",
+            &json!({"tasks":[{"id":3,"title":"A","assignee":"dev","deps":[{"task":1}]}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "#3 depends on #1, which is cancelled");
+        team.task_mut(2).unwrap().status = TaskStatus::Rejected;
+        let error = apply(
+            &mut team,
+            "extend",
+            &json!({"tasks":[{"id":3,"title":"A","assignee":"dev","deps":[{"task":2,"kind":"soft"}]}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "#3 depends on #2, which is rejected");
+    }
+
+    #[test]
+    fn cancelling_a_draft_phases_last_task_discards_the_phase() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        apply(
+            &mut team,
+            "extend",
+            &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"},{"id":4,"title":"B","assignee":"dev"}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(team.phases[0].state, PhaseState::Draft);
+        apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.phases[0].state, PhaseState::Draft);
+        apply(&mut team, "cancel", &json!({"task":4}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.phases[0].state, PhaseState::Discarded);
+        assert_eq!(team.phases[0].decided_by, "You");
+        assert_eq!(team.idle, Notice::Pending);
+        // The cancelled draft phase no longer blocks the next one.
+        let added = apply(
+            &mut team,
+            "extend",
+            &json!({"tasks":[{"id":5,"title":"C","assignee":"dev"}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(added["phase"], 3);
+    }
+
+    #[test]
+    fn stop_discards_a_draft_phase_record() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        apply(
+            &mut team,
+            "extend",
+            &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        apply(&mut team, "stop", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.status, TeamStatus::Stopped);
+        let record = &team.phases[0];
+        assert_eq!((record.state, record.decided_by.as_str()), (PhaseState::Discarded, "You"));
+        assert!(record.decided_at.is_some());
+    }
+
+    #[test]
+    fn finish_discards_a_leftover_draft_record() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        team.phases.push(Phase { n: 2, state: PhaseState::Draft, ..Default::default() });
+        let done = apply(&mut team, "finish", &json!({"summary":"Done"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(done["status"], "finished");
+        let record = &team.phases[0];
+        assert_eq!((record.state, record.decided_by.as_str()), (PhaseState::Discarded, "You"));
+    }
+
+    #[test]
+    fn a_legacy_all_decided_team_hears_once_on_resume() {
+        let mut team = running_team();
+        for task in &mut team.tasks {
+            task.status = TaskStatus::Cancelled;
+        }
+        team.status = TeamStatus::Paused;
+        team.idle = Notice::None;
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        apply(&mut team, "resume", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((team.status, team.idle), (TeamStatus::Running, Notice::Pending));
+        assert_eq!(events.last().unwrap().kind, "all_decided");
+        // An already sent (or uncertain) message is never armed again.
+        team.idle = Notice::Sent;
+        apply(
+            &mut team,
+            "add-member",
+            &json!({"member":{"id":"docs","role":"Writer","agent":"codex"}}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(team.idle, Notice::Sent);
+        assert_eq!(events.iter().filter(|event| event.kind == "all_decided").count(), 1);
+    }
+
+    #[test]
+    fn a_long_phase_title_is_refused_before_the_task_errors() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let error = apply(
+            &mut team,
+            "extend",
+            &json!({"phase_title":"x".repeat(121),"tasks":[{"id":9,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "A phase title is too long");
+    }
+
+    #[test]
+    fn deciding_is_refused_once_the_team_is_done() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        apply(&mut team, "finish", &json!({"summary":"Done"}), &Actor::Human, &none, &mut events).unwrap();
+        for op in ["accept", "reject"] {
+            let error = apply(&mut team, op, &json!({"task":1,"reason":"late"}), &Actor::Human, &none, &mut events)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, "The team is not running", "{op}");
+        }
     }
 
     /// What the dispatcher records for a delivered hand-off.

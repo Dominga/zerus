@@ -322,6 +322,8 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
 /// Bounds for the dependency reports a hand-off carries.
 const DEPENDENCY_REPORT_CHARS: usize = 2_000;
 const DEPENDENCY_REPORTS_CHARS: usize = 6_000;
+/// Header lines a hand-off lists before it summarizes the rest.
+const DEPENDENCY_LIMIT: usize = 20;
 
 /// The stored report a hand-off shows for one dependency: the reported attempt
 /// that accepted it, else the latest attempt with a report. Only report text
@@ -335,29 +337,39 @@ fn dependency_attempt(task: &Task) -> Option<&Attempt> {
 }
 
 /// Where a dependency's member works, prefixed with its computer when that is
-/// not the lead's. The lead's own tasks show the team's folder.
-fn dependency_folder(team: &Team, member_id: &str) -> String {
+/// not the lead's; a member without one works on this computer. The lead's own
+/// tasks show the team's folder.
+fn dependency_folder(team: &Team, member_id: &str, local_host: &str) -> String {
     if member_id == team.lead {
         return team.folder.clone();
     }
     let Some(member) = team.member(member_id) else { return String::new() };
     let folder = member_folder_path(team, member).unwrap_or_default();
     let lead_host = team.member(&team.lead).map(|lead| lead.computer.as_str()).unwrap_or_default();
-    if !member.computer.is_empty() && member.computer != lead_host {
-        format!("{}:{folder}", member.computer)
-    } else {
-        folder
+    if member.computer == lead_host {
+        return folder;
     }
+    let host = if member.computer.is_empty() { local_host } else { member.computer.as_str() };
+    format!("{host}:{folder}")
 }
 
 /// The "From dependencies" section: every dependency with a stored report, in
-/// `deps` order, each report bounded to 2,000 characters and 6,000 in total.
-fn dependencies_text(team: &Team, task: &Task) -> String {
+/// `deps` order, each report bounded to 2,000 characters and 6,000 in total,
+/// and at most 20 header lines.
+fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
+    let listed: Vec<(&Task, &Attempt)> = task
+        .deps
+        .iter()
+        .filter_map(|dep| team.task(dep.task))
+        .filter_map(|found| dependency_attempt(found).map(|attempt| (found, attempt)))
+        .collect();
     let mut text = String::new();
     let mut used = 0usize;
-    for dep in &task.deps {
-        let Some(found) = team.task(dep.task) else { continue };
-        let Some(attempt) = dependency_attempt(found) else { continue };
+    for (index, (found, attempt)) in listed.iter().enumerate() {
+        if index == DEPENDENCY_LIMIT {
+            text += &format!("[{} more dependencies omitted]\n", listed.len() - index);
+            break;
+        }
         let Some(report) = attempt.report.as_ref() else { continue };
         let status = serde_json::to_value(found.status).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
         text += &format!(
@@ -367,7 +379,7 @@ fn dependencies_text(team: &Team, task: &Task) -> String {
             status.replace('_', " "),
             attempt.member,
             team.role_of(&attempt.member),
-            dependency_folder(team, &attempt.member)
+            dependency_folder(team, &attempt.member, local_host)
         );
         let total = report.text.chars().count();
         let room = DEPENDENCY_REPORTS_CHARS.saturating_sub(used);
@@ -431,7 +443,7 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     if !deps.is_empty() {
         text += &format!("\nDepends on: {}\n", deps.join(", "));
     }
-    text += &dependencies_text(team, task);
+    text += &dependencies_text(team, task, report_host);
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
         text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
     }
@@ -1866,6 +1878,43 @@ mod tests {
         let text = hand_off_text(&team, &task, &attempt, "", "");
         assert!(text.contains("by lead (Lead), folder: work"), "{text}");
         assert!(!text.contains("lead-dir"), "{text}");
+        // A member on this computer in a team led from a peer is prefixed with
+        // the local host name.
+        team.members.iter_mut().find(|m| m.id == "lead").unwrap().computer = "peer".into();
+        team.members.iter_mut().find(|m| m.id == "dev").unwrap().folder = MemberFolder::Shared;
+        team.members.iter_mut().find(|m| m.id == "dev").unwrap().computer.clear();
+        team.task_mut(1).unwrap().attempts = vec![attempt_with_report("dev", "dev report", AttemptState::Reported)];
+        let text = hand_off_text(&team, &task, &attempt, "msi", "");
+        assert!(text.contains("by dev (Backend), folder: msi:work"), "{text}");
+    }
+
+    #[test]
+    fn a_hand_off_lists_at_most_twenty_dependencies() {
+        let mut team = team();
+        team.folder = "work".into();
+        let first = team.task_mut(1).unwrap();
+        first.status = TaskStatus::Accepted;
+        first.attempts = vec![attempt_with_report("dev", "first", AttemptState::Reported)];
+        let mut deps = vec![Dependency { task: 1, kind: DependencyKind::Hard }];
+        for id in 4..=27 {
+            team.tasks.push(Task {
+                id,
+                title: format!("Dep {id}"),
+                status: TaskStatus::Accepted,
+                assignee: "dev".into(),
+                attempts: vec![attempt_with_report("dev", "rest", AttemptState::Reported)],
+                ..Default::default()
+            });
+            deps.push(Dependency { task: id, kind: DependencyKind::Hard });
+        }
+        team.task_mut(3).unwrap().deps = deps;
+        let task = team.task(3).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "A".into(), member: "qa".into(), ..Default::default() };
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        // 1 + 19 more header lines, then only the count of the rest.
+        assert!(text.contains("#22 Dep 22 (accepted)"), "{text}");
+        assert!(!text.contains("#23 Dep 23 (accepted) by"), "{text}");
+        assert!(text.contains("[5 more dependencies omitted]"), "{text}");
     }
 
     #[test]

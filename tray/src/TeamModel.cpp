@@ -352,9 +352,14 @@ Status taskStatus(const Task &task)
     Status s; s.kind = task.status; s.task = task.id;
     const auto *open = openOf(task);
     const int n = task.last() ? task.last()->n : 0;
+    const QString phase = lastPhase(task);
     if (open && open->state == "unconfirmed") { s.text = tr("Delivery unconfirmed"); s.tone = Tone::Danger; s.problem = true; }
     else if (open && open->noReport) { s.text = tr("No report"); s.tone = Tone::Warn; s.problem = true; }
     else if (task.held) { s.text = tr("Held"); s.tone = Tone::Muted; }
+    // A1/A3: the attempt's own phase where it changes what the task is doing.
+    else if (phase == "asking") { s.text = tr("Waiting for an answer"); s.tone = Tone::Warn; }
+    else if (phase == "late") { s.text = tr("Not started"); s.tone = Tone::Warn; }
+    else if (phase == "stopped") { s.text = tr("Stopped"); s.tone = Tone::Danger; }
     else if (task.status == "draft") { s.text = tr("Draft"); s.tone = Tone::Dim; }
     else if (task.status == "pending") { s.text = tr("Pending"); s.tone = Tone::Muted; }
     else if (task.status == "assigned") { s.text = tr("Assigned"); s.tone = Tone::Assigned; }

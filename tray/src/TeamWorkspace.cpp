@@ -391,6 +391,21 @@ QWidget *TeamWorkspace::answers(const Team &team)
         r->addWidget(go);
         v->addLayout(r);
     }
+    // A3: a team question waits for the lead too; Answer opens its task card,
+    // where the reply goes out.
+    for (const auto &task : team.tasks) {
+        for (const auto &asked : openQuestions(task)) {
+            auto *r = row(8);
+            if (!waiting++) r->addWidget(label(tr("Needs your answer"), c.fg, 12, true));
+            else r->addSpacing(QFontMetrics(font()).horizontalAdvance(tr("Needs your answer")) + 4);
+            r->addWidget(new Pill(team.roleOf(task.assignee), roleColor(team.roleOf(task.assignee), m_dark)));
+            r->addWidget(elided(QStringLiteral("#%1 %2 — %3").arg(task.id).arg(task.title, asked.text), c.fg, 12), 1);
+            auto *answer = button(tr("Answer"), "teamWorkspaceAnswerQuestion");
+            QObject::connect(answer, &QPushButton::clicked, this, [this, id = task.id] { m_drawerTask = id; scheduleRender(); });
+            r->addWidget(answer);
+            v->addLayout(r);
+        }
+    }
     // The slot stays when nothing waits, so the canvas never jumps.
     if (!waiting) {
         strip->setFixedHeight(28);
@@ -488,6 +503,10 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         node.problem = problemTasks.contains(id);
         node.tone = toneColor(c, node.problem ? problemTone.value(id, Tone::Danger) : status.tone);
         node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
+        // A1: the hovered node's icon names the attempt phase; its tooltip
+        // names the state, the time and the next step.
+        const auto mark = phaseMark(team, *task);
+        node.tooltip = mark.tooltip.isEmpty() ? status.text : mark.tooltip;
         node.draft = task->status == "draft"; node.error = team.cycle.contains(id);
         node.attempt = task->last() ? task->last()->n : 0;
         if (const auto *m = team.member(task->assignee)) node.agent = m->agent;
@@ -565,7 +584,10 @@ QWidget *TeamWorkspace::board(const Team &team)
             const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r->addWidget(pill);
             if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r->addWidget(i); }
-            auto *mark = new StatusMark(s.text, toneColor(c, s.tone), kindOfTask(task, s)); mark->setObjectName("teamBoardState"); r->addWidget(mark);
+            const auto mark = phaseMark(team, task);
+            auto *state = new StatusMark(s.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : s.tone),
+                                         mark.kind.isEmpty() ? kindOfTask(task, s) : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
+            state->setObjectName("teamBoardState"); r->addWidget(state);
             QStringList deps; for (const auto &d : task.deps) deps << QStringLiteral("#%1").arg(d.task);
             if (!deps.isEmpty()) r->addWidget(label(QStringLiteral("← ") + deps.join(' '), c.dim, 10));
             b->addLayout(r);
@@ -688,7 +710,20 @@ QWidget *TeamWorkspace::members(const Team &team)
             });
             wait->addWidget(assign); wait->addWidget(ask); wait->addStretch();
             col->addLayout(wait);
-        } else col->addWidget(new StatusMark(team.status == "planning" && m.session.isEmpty() && !m.lead ? tr("On approval") : status.text, toneColor(c, status.tone), status.kind));
+        } else {
+            // A1: the attempt's phase icon and tooltip beside the member.
+            const Task *current = status.task ? team.task(status.task) : nullptr;
+            const auto mark = current ? phaseMark(team, *current) : PhaseMark{};
+            const QString shown = team.status == "planning" && m.session.isEmpty() && !m.lead ? tr("On approval") : status.text;
+            auto *state = new StatusMark(shown, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : status.tone),
+                                         mark.kind.isEmpty() ? status.kind : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
+            state->setObjectName("teamWorkspaceMemberState");
+            state->setProperty("phase", mark.phase);
+            col->addWidget(state);
+        }
+        // A5: the member's queue, the current task first, then the tasks
+        // returned to it.
+        if (auto *queue = memberQueueWidget(team, m, c, [this](int id) { m_drawerTask = id; scheduleRender(); })) col->addWidget(queue);
         bh->addLayout(col, 1);
         auto *right = new QVBoxLayout; right->setSpacing(3);
         auto *ratio = label(QStringLiteral("%1/%2").arg(done).arg(total), c.muted, 11); ratio->setFont(NewSessionDense::mono(11)); ratio->setAlignment(Qt::AlignRight);

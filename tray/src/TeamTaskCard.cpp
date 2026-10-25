@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QCursor>
 #include <QGraphicsOpacityEffect>
+#include <QLineEdit>
 #include <QTimer>
 #include <QMenu>
 #include <QPlainTextEdit>
@@ -78,7 +79,13 @@ void TeamTaskCard::rebuild()
     v->addLayout(head);
     auto *meta = row(8);
     const QString statusText = problem && !status.problem ? memberState.text : status.shortText;
-    meta->addWidget(new StatusMark(statusText, tone, problem && !status.problem ? memberState.kind : kindOfTask(*task, status)));
+    // A1: the attempt's phase icon, with the tooltip that names the state, the
+    // time and the next step (spec 11).
+    const auto phase = phaseMark(m_team, *task);
+    auto *state = new StatusMark(statusText, tone, problem && !status.problem ? memberState.kind : kindOfTask(*task, status),
+                                 0, Qt::AlignLeft, nullptr, phase.tooltip);
+    state->setObjectName("teamTaskState");
+    meta->addWidget(state);
     if (task->last()) meta->addWidget(label(tr("Attempt %1").arg(task->last()->n), c.muted, 11));
     const QString role = task->assignee.isEmpty() ? tr("You") : m_team.roleOf(task->assignee);
     meta->addWidget(new Pill(role, roleColor(role, m_dark)));
@@ -99,6 +106,7 @@ void TeamTaskCard::rebuild()
             explain = tr("Zerus sent attempt %1 to %2 on %3 at %4 and got no confirmation. It is never re-sent automatically.")
                           .arg(attempt->n).arg(assignee->agent, where, clock(attempt->sentAt));
         else if (kind == "no_report") explain = tr("The turn ended without hgs team report.");
+        else if (kind == "asking") explain = tr("The attempt stays open until you answer; nothing is captured as its report meanwhile.");
         else if (kind == "offline") explain = tr("%1 does not answer. Open attempts are not revoked automatically.").arg(where);
         else if (kind == "answer") explain = tr("A question or approval waits in the member's session.");
         else if (kind == "failed") explain = assignee->error;
@@ -112,6 +120,35 @@ void TeamTaskCard::rebuild()
         v->addWidget(banner);
     }
     const auto section = [&](const QString &name) { v->addWidget(label(name, c.text3, 12, true)); };
+    // A3: open questions to the lead. The attempt stays open until one is
+    // answered, and the answer goes out once as `reply`.
+    const auto questions = openQuestions(*task);
+    if (!questions.isEmpty()) {
+        section(tr("Questions"));
+        for (const auto &asked : questions) {
+            auto *box = card(c, c.warn);
+            box->setObjectName("teamTaskQuestion");
+            box->setProperty("question", asked.id);
+            auto *b = new QVBoxLayout(box); b->setContentsMargins(10, 7, 10, 7); b->setSpacing(5);
+            auto *text = label(asked.text, c.fg, 12); text->setWordWrap(true); b->addWidget(text);
+            auto *answerRow = row(6);
+            auto *edit = new QLineEdit; edit->setObjectName("teamAnswerText"); edit->setProperty("question", asked.id);
+            edit->setPlaceholderText(tr("Answer %1…").arg(m_team.roleOf(task->assignee)));
+            answerRow->addWidget(edit, 1);
+            auto *send = button(tr("Send"), "teamAnswerSend", true);
+            send->setProperty("question", asked.id);
+            send->setToolTip(tr("Send this answer to %1; it reaches the member as a message").arg(m_team.roleOf(task->assignee)));
+            QObject::connect(send, &QPushButton::clicked, this, [this, edit, id = asked.id] {
+                const auto answer = edit->text().trimmed();
+                if (answer.isEmpty()) { edit->setFocus(); return; }
+                if (act) act("reply", {{"question", id}, {"text", answer}});
+            });
+            QObject::connect(edit, &QLineEdit::returnPressed, send, &QPushButton::click);
+            answerRow->addWidget(send);
+            b->addLayout(answerRow);
+            v->addWidget(box);
+        }
+    }
     if (!task->description.isEmpty()) {
         section(tr("Description"));
         auto *d = label(task->description, c.fg, 12); d->setWordWrap(true); d->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -218,33 +255,76 @@ void TeamTaskCard::rebuild()
                                .arg(c.card.name(), c.accentMuted.name()));
         auto *b = new QVBoxLayout(box); b->setContentsMargins(10, 8, 10, 8);
         auto *text = label(a.report, c.fg, 12); text->setWordWrap(true); text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        text->setObjectName("teamReportText");
         b->addWidget(text);
+        // A2: the reply Zerus captured while the member may still be working.
+        if (a.captured) {
+            auto *captured = label(tr("Captured from the member's last reply; it can still send the real report."), c.warn, 11, false, "teamReportCaptured");
+            captured->setWordWrap(true);
+            b->addWidget(captured);
+        }
+        // A6: the real report replaced the captured one; the old text stays,
+        // folded.
+        if (!a.replaced.isEmpty()) {
+            auto *replaced = new QWidget; replaced->setObjectName("teamReportReplaced");
+            auto *rv = new QVBoxLayout(replaced); rv->setContentsMargins(0, 6, 0, 0); rv->setSpacing(3);
+            auto *head = row(6);
+            head->addWidget(label(tr("Replaced the captured reply"), c.text3, 11, true));
+            auto *toggle = new QToolButton; toggle->setObjectName("teamReportReplacedToggle");
+            toggle->setText(tr("Show")); toggle->setCheckable(true); toggle->setAutoRaise(true);
+            toggle->setToolTip(tr("Show the reply Zerus captured before the report"));
+            head->addWidget(toggle); head->addStretch();
+            rv->addLayout(head);
+            auto *old = label(a.replaced.last().text, c.muted, 11, false, "teamReportReplacedText");
+            old->setWordWrap(true); old->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            old->setVisible(false);
+            QObject::connect(toggle, &QToolButton::toggled, old, [old, toggle](bool on) {
+                old->setVisible(on);
+                toggle->setText(on ? TeamTaskCard::tr("Hide") : TeamTaskCard::tr("Show"));
+            });
+            rv->addWidget(old);
+            b->addWidget(replaced);
+        }
         v->addWidget(box);
         break;
     }
     if (!task->reason.isEmpty() && task->status == "accepted") {
         auto *reason = label(tr("Decision: %1").arg(task->reason), c.muted, 11); reason->setWordWrap(true); v->addWidget(reason);
     }
-    // Inline forms.
+    // Inline forms: reject, hold or a manual done.
     if (!m_form.isEmpty()) {
-        auto *box = card(c, m_form == "reject" ? c.danger : c.accent);
-        box->setObjectName(m_form == "reject" ? "teamRejectForm" : "teamDoneForm");
+        const bool reject = m_form == "reject", hold = m_form == "hold";
+        auto *box = card(c, reject ? c.danger : hold ? c.muted : c.accent);
+        box->setObjectName(reject ? "teamRejectForm" : hold ? "teamHoldForm" : "teamDoneForm");
         auto *b = new QVBoxLayout(box); b->setContentsMargins(10, 8, 10, 8); b->setSpacing(6);
-        b->addWidget(label(m_form == "reject" ? tr("Reject with comment") : tr("Mark done manually"), c.fg, 12, true));
-        b->addWidget(label(m_form == "reject" ? tr("The comment goes to the member with the next attempt.")
-                                              : tr("The task counts as accepted without a report; the reason stays in the feed."), c.muted, 11));
+        b->addWidget(label(reject ? tr("Reject with comment") : hold ? tr("Hold task") : tr("Mark done manually"), c.fg, 12, true));
+        b->addWidget(label(reject ? tr("The comment goes to the member with the next attempt.")
+                                 : hold ? tr("The task stays with its member and is not handed out until you release it.")
+                                        : tr("The task counts as accepted without a report; the reason stays in the feed."), c.muted, 11));
         auto *edit = new QPlainTextEdit; edit->setObjectName("teamTaskFormText"); edit->setFixedHeight(66);
-        edit->setPlaceholderText(m_form == "reject" ? tr("What must change?") : tr("Why is it done?"));
+        edit->setPlaceholderText(reject ? tr("What must change?") : hold ? tr("Why does it wait?") : tr("Why is it done?"));
         b->addWidget(edit);
+        // A5: a rejection may return the task with a hold instead of handing it
+        // straight back.
+        QCheckBox *returnLater = nullptr;
+        if (reject) {
+            returnLater = new QCheckBox(tr("Return later (hold): keep it with the member until released"));
+            returnLater->setObjectName("teamRejectHold");
+            b->addWidget(returnLater);
+        }
         auto *buttons = row(6);
-        auto *ok = button(m_form == "reject" ? tr("Reject && send back") : tr("Mark done"), "teamTaskFormSubmit", true);
+        auto *ok = button(reject ? tr("Reject && send back") : hold ? tr("Hold") : tr("Mark done"), "teamTaskFormSubmit", true);
         auto *cancel = button(tr("Cancel"), "teamTaskFormCancel");
         QObject::connect(cancel, &QPushButton::clicked, this, [this] { m_form.clear(); rebuild(); });
-        QObject::connect(ok, &QPushButton::clicked, this, [this, edit, id = task->id] {
+        QObject::connect(ok, &QPushButton::clicked, this, [this, edit, returnLater, id = task->id] {
             const auto reason = edit->toPlainText().trimmed();
             if (reason.isEmpty()) { edit->setFocus(); return; }
             if (act) {
-                if (m_form == "reject") act("reject", {{"task", id}, {"reason", reason}});
+                if (m_form == "reject") {
+                    QJsonObject input{{"task", id}, {"reason", reason}};
+                    if (returnLater && returnLater->isChecked()) input.insert("hold", true);
+                    act("reject", input);
+                } else if (m_form == "hold") act("hold", {{"task", id}, {"reason", reason}});
                 else act("accept", {{"task", id}, {"reason", reason}, {"manual", true}});
             }
             m_form.clear(); rebuild();
@@ -285,11 +365,16 @@ void TeamTaskCard::rebuild()
         if (n == 0 || !confirm || confirm("teamRetryConfirm", tr("Retry task?"), tr("Revoke attempt %1 and hand the task out again?").arg(n), tr("Retry")))
             if (act) act("retry", {{"task", id}});
     };
+    const auto holdForm = [this] { m_form = "hold"; rebuild(); };
+    const auto releaseNow = [this, id] { if (act) act("release", {{"task", id}}); };
     if (submitted) {
         add(tr("Accept"), "teamTaskAccept", true, accept);
         add(tr("Reject with comment…"), "teamTaskReject", false, rejectForm);
         add(tr("Reassign…"), "teamTaskReassign", false, reassignNow);
     } else if (open) {
+        // A5: a held task waits for this button; a pending one can be parked.
+        if (task->held) add(tr("Release"), "teamTaskRelease", true, releaseNow);
+        else if (task->status == "pending") add(tr("Hold…"), "teamTaskHold", false, holdForm);
         add(tr("Reassign…"), "teamTaskReassign", false, reassignNow);
         add(tr("Take over"), "teamTaskTakeOver", false, takeOver);
         auto *cancel = add(tr("Cancel"), "teamTaskCancel", false, cancelTask);
@@ -306,6 +391,10 @@ void TeamTaskCard::rebuild()
     };
     const QString decidedWhy = tr("Task #%1 is already decided").arg(id);
     item(tr("Retry"), open, decided ? decidedWhy : tr("Nothing to retry yet"), retry);
+    // A5: park and release are here too, with the reason they do not apply.
+    item(tr("Hold…"), !decided && task->status == "pending" && !task->held,
+         task->held ? tr("Already held") : decided ? decidedWhy : tr("Only a pending task can be held"), holdForm);
+    item(tr("Release"), task->held, task->held ? QString() : tr("Not held"), releaseNow);
     if (!submitted) {
         item(tr("Accept"), false, decided ? decidedWhy : tr("Nothing to accept yet: no report"), accept);
         item(tr("Reject with comment…"), false, decided ? decidedWhy : tr("Nothing to reject yet: no report"), rejectForm);

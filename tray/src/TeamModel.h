@@ -28,6 +28,9 @@ struct Member {
     // The member's session once it exists: computer alias (empty = the lead's
     // computer) and name.
     QString host, session;
+    // The identity a hand-written plan may carry to adopt an existing session
+    // (F8); empty for a member Zerus launches itself.
+    QString runId, conversationId;
     bool lead = false;
     // The member queue (A5): its open task first, then the tasks returned to it
     // (pending, with attempts). From `team status` when hgs sends it; an older
@@ -35,6 +38,13 @@ struct Member {
     QList<int> queue;
     bool queueKnown = false;   // `queue` was in the JSON, even when empty
     QJsonObject json() const;
+};
+
+// An existing session a member may be given instead of starting one (F8): what
+// `plan` and `add-member` accept as `session`. `directory` is the session's own
+// folder, which an adopted member keeps.
+struct SessionChoice {
+    QString host, name, runId, conversationId, agent, directory;
 };
 
 // A member's question to the lead (A3); open until the lead answers it.
@@ -114,6 +124,13 @@ struct Finish {
     double at = 0;
 };
 
+// A member session that still runs after its team is Done or Stopped (F7,
+// spec 9). The desktop shows it apart from the active members and never stops
+// it by itself.
+struct LeftRunning {
+    QString member, role, host, session, runId, conversationId;
+};
+
 struct Team {
     QString id, name, status, project, folder, lead;
     qint64 revision = 0;
@@ -130,7 +147,12 @@ struct Team {
     Finish finish;
     // `team status` and `team list` derive these; old files are derived here.
     bool waitingForLead = false;
-    int pendingPhase = 0;      // the draft phase, 0 when none
+    int pendingPhase = 0;      // the first draft phase, 0 when none
+    // Spec 10: any number of draft phases may wait; approved strictly in order.
+    QList<int> pendingPhases;
+    // Done and Stopped teams: the member sessions that still run (F7).
+    QList<LeftRunning> leftRunning;
+    bool leftRunningKnown = false;
     // Only from `team status`: layers by task, tasks in a cycle, ready tasks,
     // plan errors and warnings.
     bool full = false;
@@ -142,10 +164,13 @@ struct Team {
     const Member *memberOfSession(const QString &host, const QString &session) const;
     const Task *task(int id) const;
     const Phase *phase(int n) const;
+    const LeftRunning *leftOf(const QString &member) const;
     QString roleOf(const QString &member) const;
     // Only a team with a phase record groups its plan by phase.
     bool phased() const { return !phases.isEmpty(); }
     QString effectivePhaseApproval() const { return phaseApproval.isEmpty() ? approval : phaseApproval; }
+    // The draft records in phase order (spec 10).
+    QList<int> draftPhases() const;
 };
 
 // A phase as the plan, board, layers and graph group it. Phase 1 has no
@@ -160,6 +185,12 @@ struct PhaseGroup {
 };
 // The phases to show, in phase order; empty while the plan is phase 1 only.
 QList<PhaseGroup> phaseGroups(const Team &team);
+// Why phase N may not be approved yet (spec 10), empty when it may: every
+// lower phase must be approved and its tasks decided. "Phase 2 opens after
+// phase 1 ends."
+QString approveBlocked(const Team &team, int phase);
+// True when this member's session still runs after the team ended (F7).
+bool leftMember(const Team &team, const QString &member);
 // "Phase 2 · QA fixes · 3/5" (the title is left out when empty).
 QString phaseHeading(const PhaseGroup &group);
 // Layers by longest path inside one phase; dependencies outside it are ignored

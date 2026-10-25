@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QJsonValue>
 #include <QRegularExpression>
+#include <algorithm>
 #include <functional>
 
 namespace Teams {
@@ -67,6 +68,22 @@ const Phase *Team::phase(int n) const
 {
     for (const auto &p : phases) if (p.n == n) return &p;
     return nullptr;
+}
+
+const LeftRunning *Team::leftOf(const QString &member) const
+{
+    for (const auto &left : leftRunning) if (left.member == member) return &left;
+    return nullptr;
+}
+
+QList<int> Team::draftPhases() const
+{
+    QList<int> drafts;
+    // A finished team opens nothing new, even if a record was left in draft.
+    if (status == "done" || status == "stopped" || status == "archived") return drafts;
+    for (const auto &phase : phases) if (phase.draft()) drafts.append(phase.n);
+    std::sort(drafts.begin(), drafts.end());
+    return drafts;
 }
 
 QString Team::roleOf(const QString &id) const
@@ -148,6 +165,7 @@ Team parse(const QJsonObject &v)
         member.folder = str(m, "folder"); member.directory = str(m, "directory"); member.prompt = str(m, "prompt");
         const auto session = m.value("session").toObject();
         member.host = str(session, "host"); member.session = str(session, "name");
+        member.runId = str(session, "run_id"); member.conversationId = str(session, "conversation_id");
         if (m.value("queue").isArray()) {
             member.queueKnown = true;
             for (const auto &item : m.value("queue").toArray()) {
@@ -230,9 +248,28 @@ Team parse(const QJsonObject &v)
     // hgs derives both; a team file without them (an older hgs) gets the same
     // answer from the tasks and the phase records.
     team.waitingForLead = v.value("waiting_for_lead").toBool() || (team.status == "running" && allDecided(team));
-    team.pendingPhase = v.value("pending_phase").toInt();
-    if (!team.pendingPhase)
-        for (const auto &phase : team.phases) if (phase.draft()) { team.pendingPhase = phase.n; break; }
+    // Spec 10: several drafts may wait; they keep their order. A team that is
+    // over shows none, even if an old record was left in draft.
+    const bool over = team.status == "done" || team.status == "stopped" || team.status == "archived";
+    if (!over) {
+        team.pendingPhase = v.value("pending_phase").toInt();
+        for (const auto &value : v.value("pending_phases").toArray()) if (value.toInt() > 0) team.pendingPhases.append(value.toInt());
+        if (team.pendingPhases.isEmpty())
+            for (const auto &phase : team.phases) if (phase.draft()) team.pendingPhases.append(phase.n);
+        std::sort(team.pendingPhases.begin(), team.pendingPhases.end());
+        if (!team.pendingPhase) team.pendingPhase = team.pendingPhases.isEmpty() ? 0 : team.pendingPhases.first();
+    }
+    // F7: the member sessions that still run after the team ended.
+    team.leftRunningKnown = v.contains("left_running");
+    for (const auto &value : v.value("left_running").toArray()) {
+        const auto l = value.toObject();
+        LeftRunning left;
+        left.member = str(l, "member"); left.role = str(l, "role");
+        const auto session = l.value("session").toObject();
+        left.host = str(session, "host"); left.session = str(session, "name");
+        left.runId = str(session, "run_id"); left.conversationId = str(session, "conversation_id");
+        if (!left.session.isEmpty()) team.leftRunning.append(left);
+    }
     if (v.contains("layers")) {
         team.full = true;
         const auto layers = v.value("layers").toObject();
@@ -254,7 +291,13 @@ QJsonObject Member::json() const
     QJsonObject o{{"id", id}, {"role", role}, {"agent", agent}, {"account", account}, {"model", model}, {"effort", effort},
                   {"permissions", permissions}, {"computer", computer}, {"directory", directory}, {"prompt", prompt}};
     if (!folder.isEmpty()) o.insert("folder", folder);
-    if (!session.isEmpty()) o.insert("session", QJsonObject{{"host", host}, {"name", session}});
+    if (!session.isEmpty()) {
+        // F8: an adopted session keeps its identity, so hgs finds the same one.
+        QJsonObject ref{{"host", host}, {"name", session}};
+        if (!runId.isEmpty()) ref.insert("run_id", runId);
+        if (!conversationId.isEmpty()) ref.insert("conversation_id", conversationId);
+        o.insert("session", ref);
+    }
     return o;
 }
 
@@ -546,6 +589,31 @@ QString phaseHeading(const PhaseGroup &group)
     const QString phase = group.title.isEmpty() ? tr("Phase %1").arg(group.n)
                                                 : tr("Phase %1 · %2").arg(group.n).arg(group.title);
     return tr("%1 · %2/%3").arg(phase).arg(group.done).arg(group.tasks.size());
+}
+
+bool leftMember(const Team &team, const QString &member)
+{
+    return team.leftOf(member) != nullptr;
+}
+
+QString approveBlocked(const Team &team, int phase)
+{
+    const auto *record = team.phase(phase);
+    if (!record || !record->draft()) return tr("Phase %1 is not a draft").arg(phase);
+    for (int lower = 1; lower < phase; ++lower) {
+        const auto *previous = team.phase(lower);
+        // A discarded phase is out of the plan, and phase 1 has no record: the
+        // approved initial plan is approved by definition.
+        if (previous && previous->state == "discarded") continue;
+        if (previous && previous->draft()) return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(lower);
+        if (previous && previous->state != "approved") return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(lower);
+        int open = 0;
+        for (const auto &task : team.tasks) if (task.phase == lower && !task.finished()) ++open;
+        if (open)
+            return QCoreApplication::translate("Teams", "Phase %1 opens after phase %2 ends: %n task(s) still open", nullptr, open)
+                .arg(phase).arg(lower);
+    }
+    return {};
 }
 
 QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks)

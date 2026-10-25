@@ -329,7 +329,10 @@ QWidget *TeamPanel::summary(const Team &team, const QString &status, bool narrow
     if (team.pendingPhase > 0 || team.waitingForLead) {
         auto *chips = row(6);
         if (team.pendingPhase > 0) {
-            auto *pill = new Pill(tr("phase %1 pending approval").arg(team.pendingPhase), c.warn);
+            const auto drafts = team.draftPhases();
+            QStringList ids; for (int n : drafts) ids << QString::number(n);
+            auto *pill = new Pill(drafts.size() > 1 ? tr("phases %1 pending approval").arg(ids.join(QStringLiteral(", ")))
+                                                    : tr("phase %1 pending approval").arg(team.pendingPhase), c.warn);
             pill->setObjectName("teamPendingPhase");
             chips->addWidget(pill);
         }
@@ -388,10 +391,17 @@ QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
     auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(2);
     auto *title = row(6);
     title->addWidget(label(tr("Members"), c.fg, 12, true));
-    title->addWidget(label(QString::number(team.members.size()), c.muted, 12));
+    // F7: the sessions a finished team left running are counted apart.
+    int active = 0;
+    for (const auto &m : team.members)
+        if (!((team.status == "done" || team.status == "stopped") && leftMember(team, m.id))) ++active;
+    title->addWidget(label(QString::number(active), c.muted, 12));
     title->addStretch();
     v->addLayout(title);
     for (const auto &m : team.members) {
+        // F7: a session that still runs after a Done/Stopped team is shown
+        // apart, never as an active member.
+        if ((team.status == "done" || team.status == "stopped") && leftMember(team, m.id)) continue;
         const auto status = memberStatus(team, m, live(m));
         const Task *current = status.task ? team.task(status.task) : nullptr;
         const auto mark = current ? phaseMark(team, *current) : PhaseMark{};
@@ -416,6 +426,56 @@ QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
             bv->addLayout(indent);
         }
         v->addWidget(block);
+    }
+    if ((team.status == "done" || team.status == "stopped") && !team.leftRunning.isEmpty()) v->addWidget(leftoverMembers(team, narrow));
+    return box;
+}
+
+QWidget *TeamPanel::leftoverMembers(const Team &team, bool narrow)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *box = new QWidget; box->setObjectName("teamLeftover");
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 6, 0, 0); v->setSpacing(6);
+    auto *title = row(6);
+    title->addWidget(label(tr("Left from %1").arg(team.name), c.fg, 12, true, "teamLeftoverTitle"));
+    title->addWidget(new Pill(QString::number(team.leftRunning.size()), c.muted));
+    title->addStretch();
+    v->addLayout(title);
+    auto *hint = label(tr("These sessions still run after the team ended. Zerus never stops them by itself."), c.muted, 11);
+    hint->setWordWrap(true);
+    v->addWidget(hint);
+    for (const auto &left : team.leftRunning) {
+        auto *line = card(c);
+        line->setObjectName("teamLeftoverMember");
+        line->setProperty("member", left.member);
+        line->setProperty("session", left.session);
+        auto *h = new QHBoxLayout(line); h->setContentsMargins(8, 6, 6, 6); h->setSpacing(8);
+        auto *tile = new QLabel; tile->setPixmap(workspaceIcon("terminal", c.muted).pixmap(14, 14));
+        h->addWidget(tile, 0, Qt::AlignTop);
+        auto *body = new QVBoxLayout; body->setSpacing(2);
+        auto *top = row(6);
+        const QString role = left.role.isEmpty() ? left.member : left.role;
+        top->addWidget(new Pill(role, roleColor(role, m_dark)));
+        top->addWidget(elided(left.session, c.text2, 11), 1);
+        body->addLayout(top);
+        body->addWidget(label((left.host.isEmpty() ? tr("this computer") : left.host) + tr(" · still running"), c.muted, 11));
+        h->addLayout(body, 1);
+        auto *stop = button(tr("Stop…"), "teamLeftoverStop", false);
+        stop->setProperty("danger", true);
+        QObject::connect(stop, &QPushButton::clicked, this, [this, host = left.host, name = left.session, role] {
+            if (confirm("teamStopLeftoverConfirm", tr("Stop session?"),
+                        tr("Stop %1 (%2)? Its running processes will stop; the conversation history is kept, and Zerus never stops it by itself.")
+                            .arg(name, role), tr("Stop")))
+                if (stopSession) stopSession(host, name);
+        });
+        h->addWidget(stop);
+        auto *take = button(tr("Take into a new team"), "teamLeftoverTake");
+        take->setToolTip(tr("Start a new team with this session as a member"));
+        QObject::connect(take, &QPushButton::clicked, this, [this, host = left.host, name = left.session] {
+            if (takeIntoTeam) takeIntoTeam(host, name);
+        });
+        h->addWidget(take);
+        v->addWidget(line);
     }
     return box;
 }

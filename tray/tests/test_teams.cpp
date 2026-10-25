@@ -136,6 +136,8 @@ private slots:
     void initTestCase();
     void modelReadsTheTeamAndDerivesMemberStates();
     void modelReadsPhasesPinnedAndTheWaitingState();
+    void leftRunningMembersOfAFinishedTeam();
+    void draftPhasesApproveInOrder();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void attemptPhasesAreDerivedForAnOlderHgs();
     void oldStatusJsonStillParses();
@@ -282,6 +284,125 @@ void TestTeams::modelReadsPhasesPinnedAndTheWaitingState()
     QCOMPARE(catalog.phaseApproval, QStringLiteral("auto"));
     QCOMPARE(catalog.json().value("phase_approval").toString(), QStringLiteral("auto"));
     QVERIFY(parseTemplate(QJsonObject{{"id", "dev"}}).phaseApproval.isEmpty());
+}
+
+void TestTeams::leftRunningMembersOfAFinishedTeam()
+{
+    auto done = phasedTeam();
+    done["status"] = "done";
+    done["left_running"] = QJsonArray{
+        QJsonObject{{"member", "backend"}, {"role", "Backend"},
+                    {"session", QJsonObject{{"host", ""}, {"name", "codex/checkout/backend"}, {"run_id", "r1"}, {"conversation_id", "c1"}}}},
+        QJsonObject{{"member", "tester"}, {"role", "Tester"},
+                    {"session", QJsonObject{{"host", "msi-old"}, {"name", "kimi/checkout/tester"}}}}};
+    const auto team = parse(done);
+    QVERIFY(team.leftRunningKnown);
+    QCOMPARE(team.leftRunning.size(), 2);
+    const auto &left = team.leftRunning.first();
+    QCOMPARE(left.member, QStringLiteral("backend"));
+    QCOMPARE(left.role, QStringLiteral("Backend"));
+    QCOMPARE(left.host, QString());
+    QCOMPARE(left.session, QStringLiteral("codex/checkout/backend"));
+    QCOMPARE(left.runId, QStringLiteral("r1"));
+    QCOMPARE(left.conversationId, QStringLiteral("c1"));
+    QCOMPARE(team.leftRunning.last().host, QStringLiteral("msi-old"));
+    QVERIFY(leftMember(team, "backend"));
+    QVERIFY(leftMember(team, "tester"));
+    QVERIFY(!leftMember(team, "lead"));
+    QVERIFY(team.leftOf("backend"));
+    QVERIFY(!team.leftOf("lead"));
+    // A team list summary carries the same field.
+    auto listed = done;
+    listed.remove("layers"); listed.remove("ready");
+    QCOMPARE(parse(listed).leftRunning.size(), 2);
+    // A running team and an old file have none.
+    QVERIFY(!parse(checkout()).leftRunningKnown);
+    QVERIFY(parse(checkout()).leftRunning.isEmpty());
+    // F8: an adopted member's session keeps its identity in the plan input.
+    Member adopted;
+    adopted.id = "adopted"; adopted.role = "Backend"; adopted.agent = "codex";
+    adopted.host = QString(); adopted.session = QStringLiteral("codex/checkout/backend");
+    adopted.runId = QStringLiteral("r1"); adopted.conversationId = QStringLiteral("c1");
+    const auto session = adopted.json().value("session").toObject();
+    QCOMPARE(session.value("name").toString(), QStringLiteral("codex/checkout/backend"));
+    QCOMPARE(session.value("run_id").toString(), QStringLiteral("r1"));
+    QCOMPARE(session.value("conversation_id").toString(), QStringLiteral("c1"));
+    // A session without the new ids keeps the old shape.
+    Member fresh;
+    fresh.id = "fresh"; fresh.role = "Tester"; fresh.agent = "kimi"; fresh.session = QStringLiteral("kimi/x/t");
+    QCOMPARE(fresh.json().value("session").toObject().keys(), (QStringList{"host", "name"}));
+    // A status session carries its ids too.
+    auto withIds = checkout();
+    auto members = withIds["members"].toArray();
+    auto m = members[1].toObject();
+    m["session"] = QJsonObject{{"host", ""}, {"name", "codex/checkout/backend"}, {"run_id", "r9"}, {"conversation_id", "c9"}};
+    members[1] = m; withIds["members"] = members;
+    QCOMPARE(parse(withIds).member("backend")->runId, QStringLiteral("r9"));
+    QCOMPARE(parse(withIds).member("backend")->conversationId, QStringLiteral("c9"));
+}
+
+void TestTeams::draftPhasesApproveInOrder()
+{
+    auto roadmap = phasedTeam();
+    roadmap["pending_phase"] = QJsonValue();
+    roadmap["pending_phases"] = QJsonArray{2, 3, 4};
+    roadmap["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "draft"}, {"tasks", QJsonArray{11, 12}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}}},
+        QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{14}}}};
+    auto tasks = roadmap["tasks"].toArray();
+    // Phase 1 is decided; the drafts carry draft tasks.
+    for (int i = 0; i < tasks.size(); ++i) { auto task = tasks[i].toObject(); task["status"] = "accepted"; tasks[i] = task; }
+    for (int id = 11; id <= 14; ++id)
+        tasks.append(QJsonObject{{"id", id}, {"phase", id == 11 || id == 12 ? 2 : id == 13 ? 3 : 4},
+                                 {"title", QStringLiteral("Draft %1").arg(id)}, {"assignee", "backend"}, {"status", "draft"}});
+    roadmap["tasks"] = tasks;
+    const auto team = parse(roadmap);
+    QCOMPARE(team.draftPhases(), (QList<int>{2, 3, 4}));
+    QCOMPARE(team.pendingPhases, (QList<int>{2, 3, 4}));
+    QCOMPARE(team.pendingPhase, 2);
+    // Only the next phase may be approved, and only once every lower one ended.
+    QCOMPARE(approveBlocked(team, 2), QString());
+    QVERIFY(approveBlocked(team, 3).contains(QStringLiteral("Phase 3 opens after phase 2 is approved")));
+    QVERIFY(approveBlocked(team, 4).contains(QStringLiteral("Phase 4 opens after phase 2 is approved")));
+    // Approved but not finished yet: its tasks still hold the next phase back.
+    auto running = roadmap;
+    running["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "approved"}, {"tasks", QJsonArray{11, 12}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}}},
+        QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{14}}}};
+    const auto second = parse(running);
+    const auto blocked = approveBlocked(second, 3);
+    QVERIFY(blocked.contains(QStringLiteral("Phase 3 opens after phase 2 ends")));
+    QVERIFY(blocked.contains(QStringLiteral("2 task(s) still open")));
+    // Phase 2's tasks accepted: phase 3 opens, phase 4 still waits for phase 3.
+    auto finished = running;
+    auto finishedTasks = finished["tasks"].toArray();
+    for (int i = 0; i < finishedTasks.size(); ++i) {
+        auto task = finishedTasks[i].toObject();
+        if (task["id"].toInt() == 11 || task["id"].toInt() == 12) task["status"] = "accepted";
+        finishedTasks[i] = task;
+    }
+    finished["tasks"] = finishedTasks;
+    const auto third = parse(finished);
+    QCOMPARE(approveBlocked(third, 3), QString());
+    QVERIFY(approveBlocked(third, 4).contains(QStringLiteral("Phase 4 opens after phase 3 is approved")));
+    // A discarded lower phase never blocks the road ahead.
+    auto discarded = finished;
+    discarded["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "discarded"}, {"tasks", QJsonArray{11, 12}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}}},
+        QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{14}}}};
+    QCOMPARE(approveBlocked(parse(discarded), 3), QString());
+    // A phase that is not a draft cannot be approved.
+    QVERIFY(approveBlocked(third, 2).contains(QStringLiteral("not a draft")));
+    QVERIFY(approveBlocked(third, 9).contains(QStringLiteral("not a draft")));
+    // Old single-draft files keep their meaning (this fixture has phase 2 as
+    // its one draft).
+    const auto single = parse(phasedTeam());
+    QCOMPARE(single.draftPhases(), (QList<int>{2}));
+    QCOMPARE(single.pendingPhase, 2);
+    QVERIFY(!single.leftRunningKnown);
 }
 
 void TestTeams::modelReadsAttemptStatesQuestionsHoldsAndReports()

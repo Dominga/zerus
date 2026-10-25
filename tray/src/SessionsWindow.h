@@ -210,6 +210,10 @@ private:
     // when the selection changed while the warning was open.
     bool confirmLocalStart(const Entry &original);
     void terminateSession();
+    // F7: a member session a Done/Stopped team left running. The Team tab has
+    // already confirmed; this selects it and runs the terminate flow without
+    // asking a second time.
+    void stopTeamSession(const QString &host, const QString &name);
     void archiveSession();
     // Native lifecycle cleanup reports its result after Archive or Terminate.
     // Keep a review action for remaining work. Host, session, root, common dir.
@@ -480,6 +484,8 @@ private:
     QSet<QString> m_inspectionBehindSettings;
     QByteArray m_settingsIdentity; // The automatic apply in flight.
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
+    // The Team tab's leftover Stop already confirmed and named the session.
+    bool m_terminateConfirmed = false;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
     QSet<QString> m_retryReads;

@@ -44,6 +44,17 @@ reverse_focus_wait = _focus_projection.reverse_focus_wait
 BASELINES = _focus_projection.BASELINES
 
 
+def without_native_tool_preparation(source):
+    """Reverse only the exact three additive CI setup regions; retain the original UI driver pin."""
+    pattern = re.compile(r'^([ ]*)# BEGIN NATIVE_TOOL_PREPARATION ([a-z-]+)\n[\s\S]*?'
+                         r'^\1# END NATIVE_TOOL_PREPARATION \2\n', re.M)
+    expected = {'environment': '49fab68cc8d71b606afe8b6b7208d32c41c46b385c58fa766251c413054b9356', 'clean-env': 'c58d49ffa7706370446a921cceabdaf83ca674bc3a379fd8fa14ed21e2134c95', 'versions': 'a50cf2b520b2759368ec46bfb151f52dd64e4aaebc17589ab71d56fd68d114c4'}
+    matches = list(pattern.finditer(source))
+    assert [match[2] for match in matches] == list(expected)
+    assert all(hashlib.sha256(match[0].encode()).hexdigest() == expected[match[2]] for match in matches)
+    return pattern.sub('', source)
+
+
 def without_android_focus_diagnostics(source):
     """Remove only the two explicitly additive failure-diagnostic regions for parent equivalence."""
     pattern = re.compile(r'^([ ]*)# BEGIN APPROVAL_FOCUS_DIAGNOSTIC ([a-z-]+)\n[\s\S]*?'
@@ -1230,9 +1241,21 @@ class ApprovalHarnessTests(unittest.TestCase):
         self.assertEqual(re.findall(r'boundary\("(begin|complete)", "([a-z_]+)"\)', fixture), expected)
         self.assertEqual(re.findall(r'cases \+= "([a-z_]+)"', fixture), self.ui.CASES.split(","))
 
+    def test_native_preparation_reverse_rejects_changed_missing_or_duplicate_regions(self):
+        source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
+        without_native_tool_preparation(source)
+        begin = source.index("# BEGIN NATIVE_TOOL_PREPARATION environment")
+        end = source.index("# END NATIVE_TOOL_PREPARATION environment\n", begin) + len("# END NATIVE_TOOL_PREPARATION environment\n")
+        region = source[begin:end]
+        for altered in (source.replace(region, region.replace('"CARGO_BUILD_JOBS": "2"', '"CARGO_BUILD_JOBS": "8"')),
+                        source.replace(region, ""), source.replace(region, region + region)):
+            self.assertNotEqual(altered, source)
+            with self.assertRaises(AssertionError):
+                without_native_tool_preparation(altered)
+
     def test_android_focus_diagnostics_project_to_exact_reviewed_driver_and_unchanged_ui(self):
         source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
-        self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(source).encode()).hexdigest(),
+        self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(without_native_tool_preparation(source)).encode()).hexdigest(),
                          "49c3814a3ef8cdb7be01e3a4792a6f5045559fb7c89db87fd53784feb4e76450")
         for path, digest in {
             "mobile/android/app/src/androidTest/java/app/zerus/mobile/ApprovalChoicesSmokeInstrumentation.kt": "73cee450f08e33c007ad6f3188a6a69135674e2503f80ea48582ba8aa394a9f7",

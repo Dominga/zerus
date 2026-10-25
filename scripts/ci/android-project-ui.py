@@ -303,6 +303,28 @@ def defined_classes(apk):
     return classes
 
 
+# BEGIN NATIVE_TOOL_PREPARATION environment
+def native_environment(runner_temp, java):
+    """Only the fixed disposable job's prepared Rust homes cross the clean-env boundary."""
+    root = Path(runner_temp).resolve(strict=True) / "android-project-ui-native"
+    cargo, rustup = root / "cargo", root / "rustup"
+    for directory in (root, cargo, rustup, cargo / "bin"):
+        info = directory.lstat()
+        assert directory.is_dir() and not directory.is_symlink() and info.st_uid == os.getuid()
+        assert info.st_mode & 0o777 == 0o700, "private native tool home"
+    for name in ("rustup", "cargo-ndk"):
+        binary = cargo / "bin" / name
+        assert binary.is_file() and not binary.is_symlink() and os.access(binary, os.X_OK)
+        assert binary.stat().st_uid == os.getuid() and binary.stat().st_nlink == 1
+    for name in ("cargo", "rustc", "rustdoc"):
+        proxy = cargo / "bin" / name
+        assert proxy.is_symlink() and os.readlink(proxy) == "rustup"
+        assert proxy.resolve(strict=True) == cargo / "bin/rustup"
+    return {"CARGO_HOME": str(cargo), "RUSTUP_HOME": str(rustup), "CARGO_BUILD_JOBS": "2",
+            "PATH": str(java / "bin") + ":" + str(cargo / "bin") + ":/usr/bin:/bin"}
+
+
+# END NATIVE_TOOL_PREPARATION environment
 def main():
     assert sys.platform == "linux" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
     assert os.environ.get("ImageVersion") in HOSTED_IMAGES
@@ -329,6 +351,9 @@ def main():
         path.mkdir(mode=0o700)
         env[key] = str(path)
     env["GRADLE_OPTS"] += " -Duser.home=" + env["HOME"]
+    # BEGIN NATIVE_TOOL_PREPARATION clean-env
+    env.update(native_environment(os.environ["RUNNER_TEMP"], java))
+    # END NATIVE_TOOL_PREPARATION clean-env
     end = time.monotonic() + 1200
     children, handles, results = [], [], []
     tools_before = {}
@@ -400,6 +425,20 @@ def main():
             if path.is_file():
                 tools_before[str(path)] = sha(path)
         save("tools-before.json", tools_before)
+        # BEGIN NATIVE_TOOL_PREPARATION versions
+        native_bin = Path(env["CARGO_HOME"]) / "bin"
+        ndk_properties = dict(tuple(part.strip() for part in line.split("=", 1)) for line in
+                              (sdk / "ndk/28.2.13676358/source.properties").read_text().splitlines() if "=" in line)
+        assert ndk_properties["Pkg.Revision"] == "28.2.13676358"
+        for path in (native_bin / "rustup", native_bin / "cargo-ndk", sdk / "ndk/28.2.13676358/source.properties"):
+            tools_before[str(path)] = sha(path)
+        assert run("rust-version", [native_bin / "rustc", "+1.99.1", "--version"]).startswith("rustc 1.99.1 ")
+        assert run("cargo-ndk-version", [native_bin / "cargo", "+1.99.1", "ndk", "--version"]).strip() == "cargo-ndk 4.1.2"
+        targets = run("rust-targets", [native_bin / "rustup", "target", "list", "--installed", "--toolchain", "1.99.1"]).splitlines()
+        assert {"aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android"} <= set(targets)
+        save("native-tools.json", {"cargo_home": env["CARGO_HOME"], "rustup_home": env["RUSTUP_HOME"], "targets": targets,
+                                   "scope": "prepared disposable hosted tools only; no inherited owner tool/cache environment"})
+        # END NATIVE_TOOL_PREPARATION versions
         missing = root / "absent-signing.properties"
         assert not missing.exists()
         gradle = project / "mobile/android/gradlew"

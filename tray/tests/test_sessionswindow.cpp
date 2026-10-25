@@ -354,6 +354,7 @@ private slots:
     void detailsPollingPreservesReadingPosition();
     void nativeGoalIsIndependentOfTurnState();
     void fileReferencesKeepMachineAndWorkspace();
+    void mappedFileActionRetainsItsOriginalConversation();
     void composerFileReferencesFollowHostAndChildSelection();
     void activityAttachmentsOpenLikeDownloads();
     void fileReferenceOpeningOutlivesDialog_data();
@@ -6636,6 +6637,7 @@ void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
         auto *dialog = window.findChild<QDialog *>("sessionFileDialog"); QVERIFY(dialog);
         QCOMPARE(dialog->findChild<QLineEdit *>("sessionFilePath")->text(), QString("/local/project/docs/README.md"));
         QVERIFY(dialog->findChild<QPushButton *>("openSessionFile"));
+        QVERIFY(!dialog->findChild<QPushButton *>("openMappedSessionFile"));
         QVERIFY(!dialog->findChild<QPushButton *>("openSessionFileSsh"));
         auto *copy=dialog->findChild<QPushButton *>("copySessionFilePath");
         QVERIFY(copy->text().isEmpty());QVERIFY(!copy->icon().isNull());
@@ -6664,6 +6666,63 @@ void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
     activity->fileReferenceActivated("docs/README.md");
     QCOMPARE(copied.size(), 1); QCOMPARE(copied.takeFirst().at(0).toString(), QString("/Users/remote/project/docs/README.md"));
     QCOMPARE(ssh.size(), 1); QCOMPARE(ssh.takeFirst().at(0).toString(), QString("mac"));
+}
+
+void TestSessionsWindow::mappedFileActionRetainsItsOriginalConversation()
+{
+#ifndef Q_OS_WIN
+    QSKIP("The explicit original-file action belongs to a Windows desktop");
+#else
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray answer=R"PY(elif c=='--help':print('wsl-file-proof-v1')
+elif c=='machine' and a[1:]==['ls']:
+ print(json.dumps({'local':'fixture-controller','machines':[{'alias':'mac','connection':{'transport':'wsl-local','enabled':True,'wsl':{'distribution':'Ubuntu-24.04','user':'alice','hgs_path':'/opt/zerus/hgs'}}}]}))
+elif c=='machine' and a[1:3]==['file-proof','mac']:
+ p=json.load(sys.stdin)
+ open(__file__+'.proof','w').write(json.dumps(p))
+ print('The selected fixture conversation changed; nothing was opened',file=sys.stderr);sys.exit(1)
+elif c=='inspect':
+ print(json.dumps({'tracked':True,'run_id':'run-source','conversation_id':'conversation-source','cwd':'/mnt/c/fixture','events':[],'cursor':0}))
+)PY";
+    const auto fixture=m_dir->filePath("mapped-file-scope-hgs");
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    auto state=fleet();auto peer=*state.peer("mac");
+    peer.sessions[0].runId="run-source";peer.sessions[0].conversationId="conversation-source";
+    state.setPeer(peer,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture));window.setFleet(state);window.show();
+    window.showSession("mac","claude/infra/review");QTest::qWait(80);
+    auto *client=window.findChild<HgsClient *>();
+    client->inspectionReady("mac","claude/infra/review",{{"tracked",true},{"run_id","run-source"},{"conversation_id","conversation-source"},{"cwd","/mnt/c/fixture"}});
+    FolderUrlRecorder opened;
+    bool observed=false;
+    QTimer::singleShot(0,&window,[&]{
+        auto *reference=window.findChild<QDialog *>("sessionFileDialog");QVERIFY(reference);
+        const auto closeReference=qScopeGuard([&]{reference->reject();});
+        auto *button=reference->findChild<QPushButton *>("openMappedSessionFile");QVERIFY(button);QVERIFY(button->isEnabled());
+        QTimer::singleShot(0,&window,[&]{
+            auto *dialog=reference->findChild<QDialog *>("wslFileOpenDialog");QVERIFY(dialog);
+            const auto closeDialog=qScopeGuard([&]{dialog->reject();});observed=true;
+            auto *root=dialog->findChild<QLineEdit *>("fileMappingWindowsRoot");QVERIFY(root);QTRY_VERIFY(root->isEnabled());
+            root->setText("C:/fixture");dialog->findChild<QLineEdit *>("fileMappingMountRoot")->setText("/mnt");
+            dialog->findChild<QLineEdit *>("fileMappingWorkspaceId")->setText("fixture");
+            // A new run arrives while this modal stays open. Its request must
+            // still name the original run, so the native guard can refuse it.
+            auto changed=peer;changed.sessions[0].runId="run-replaced";changed.sessions[0].conversationId="conversation-replaced";
+            state.setPeer(changed,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
+            dialog->findChild<QPushButton *>("previewMappedFile")->click();
+            QTRY_VERIFY(dialog->findChild<QLabel *>("mappedFileNotice")->text().contains("fixture conversation changed"));
+            QVERIFY(!dialog->findChild<QPushButton *>("openMappedFile")->isEnabled());
+            QFile record(fixture+".proof");QVERIFY(record.open(QIODevice::ReadOnly));const auto selection=QJsonDocument::fromJson(record.readAll()).object()["selection"].toObject();
+            QCOMPARE(selection["session"].toString(),QString("claude/infra/review"));
+            QCOMPARE(selection["run_id"].toString(),QString("run-source"));
+            QCOMPARE(selection["conversation_id"].toString(),QString("conversation-source"));
+            QCOMPARE(selection["path"].toString(),QString("/mnt/c/fixture/docs/README.md"));
+        });
+        button->click();
+    });
+    window.findChild<ActivityView *>("mainActivity")->fileReferenceActivated("docs/README.md");
+    QVERIFY(observed);QVERIFY(opened.urls.isEmpty());QVERIFY(opened.revealed.isEmpty());
+#endif
 }
 
 void TestSessionsWindow::composerFileReferencesFollowHostAndChildSelection()

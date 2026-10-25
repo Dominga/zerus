@@ -206,6 +206,7 @@ public:
     // a fresh request identity per call. A failure is reported, never retried.
     quint64 requestOpenCodeFavorite(const QString &host, const QString &value, bool favorite);
     // Local lexical mapping only: no remote process or filesystem access.
+    quint64 requestWslFileProof(const QString &alias, const QJsonObject &input);
     quint64 requestPathRef(const QString &operation, const QJsonObject &input);
     quint64 requestMachines(const QStringList &arguments = {QStringLiteral("ls")});
     // hgs [@host] mobile …: phones of the workspace that host's mobile connection
@@ -345,6 +346,8 @@ signals:
     void effortFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
     void searchReady(quint64 request, const QString &host, const QJsonObject &data);
     void searchFailed(quint64 request, const QString &host, const QString &error);
+    void wslFileProofReady(quint64 request, const QJsonObject &result);
+    void wslFileProofFailed(quint64 request, const QString &error);
     void pathRefReady(quint64 request, const QJsonObject &result);
     void pathRefFailed(quint64 request, const QString &error);
     void accountsReady(quint64 request, const QString &host, const QJsonObject &result);
@@ -473,6 +476,7 @@ private:
     quint64 m_swarmRequest = 0;
     quint64 m_teamRequest = 0;
     quint64 m_sessionHostRequest = 0;
+    quint64 m_wslFileProofRequest = 0;
     quint64 m_pathRefRequest = 0;
     quint64 m_accountRequest = 0;
     quint64 m_socratiCodeRequest = 0;

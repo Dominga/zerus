@@ -1920,8 +1920,19 @@ mod process {
         deadline: Instant,
         cancelled: &dyn Fn() -> bool,
     ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+        run_bounded_stdin(command, Stdio::null(), limits, deadline, cancelled)
+    }
+
+    /// Bounded execution with explicitly supplied stdin; ownership/deadlines match run_bounded.
+    pub fn run_bounded_stdin(
+        command: &mut Command,
+        input: Stdio,
+        limits: [usize; 2],
+        deadline: Instant,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
         command
-            .stdin(Stdio::null())
+            .stdin(input)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = spawn_group(command).map_err(RunError::Spawn)?;

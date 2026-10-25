@@ -1,3 +1,4 @@
+#include "WslFileOpenDialog.h"
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
@@ -830,6 +831,21 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             download->setAutoDefault(false); open->setAutoDefault(false); showFile->setAutoDefault(false);
             const QString remotePath = path.isEmpty() && target.path.startsWith("~/") ? target.path : path;
             const bool downloadable = online && !remotePath.isEmpty();
+#ifdef Q_OS_WIN
+            // Keep the source conversation immutable across the nested modal.
+            // Native proof, not a lexical mapping, authorizes each read.
+            QJsonObject scope{{"session",entry->session.name},{"run_id",entry->session.runId},
+                {"conversation_id",entry->session.conversationId},{"path",remotePath}};
+            if(!entry->session.archiveId.isEmpty())scope["archive_id"]=entry->session.archiveId;
+            if(!m_subagentId.isEmpty())scope["agent_id"]=m_subagentId;
+            auto *mapped=new QPushButton(tr("Open mapped Windows original…"));mapped->setObjectName("openMappedSessionFile");mapped->setAutoDefault(false);
+            mapped->setEnabled(downloadable&&!entry->session.runId.isEmpty()&&!entry->session.conversationId.isEmpty()&&remotePath.startsWith('/'));
+            layout->insertWidget(layout->count()-1,mapped);
+            connect(mapped,&QPushButton::clicked,&dialog,[this,host,scope,&dialog]{
+                WslFileOpenDialog original(m_client.executable(),host,scope,&dialog);
+                if(original.exec()==QDialog::Accepted)showNotice(original.outcomeNotice());
+            });
+#endif
             download->setEnabled(downloadable); open->setEnabled(downloadable);
             if (!online) hint->setText(tr("%1 is offline. Connect to this machine to download its files.").arg(machine));
             else if (remotePath.isEmpty()) hint->setText(tr("The session folder is unknown. Copy the path or use the SSH terminal to locate the file."));

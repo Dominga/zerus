@@ -1,4 +1,5 @@
 #include "WslPathMappingDialog.h"
+#include "WslPathMapping.h"
 #include <QCheckBox>
 #include <QCryptographicHash>
 #include <QDialogButtonBox>
@@ -18,10 +19,8 @@ WslPathMappingDialog::WslPathMappingDialog(const QString &hgsPath, const QString
 {
     setObjectName("wslPathMappingDialog"); setWindowTitle(tr("Map a Windows path to this WSL environment")); resize(660,420);
     m_environment = "wsl:" + profile["distribution"].toString() + ':' + profile["user"].toString();
-    const auto identity = QJsonDocument(QJsonObject{{"host",host},{"machine",machineId},{"profile",profile}}).toJson(QJsonDocument::Compact);
-    m_key = "pathMappings/" + QString::fromLatin1(QCryptographicHash::hash(identity,QCryptographicHash::Sha256).toHex());
-    const QByteArray stored = QSettings().value(m_key).toByteArray();
-    const auto saved = stored.size() <= 16384 ? QJsonDocument::fromJson(stored).object() : QJsonObject();
+    m_key = WslPathMapping::key(host,machineId,profile);
+    const auto saved = WslPathMapping::load(m_key);
     m_mappingId = saved["mapping_id"].toString(); if (m_mappingId.isEmpty()) m_mappingId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     auto *layout = new QVBoxLayout(this);
     auto *target = new QLabel(tr("Machine: %1\nDistribution: %2\nLinux user: %3\nEnvironment: %4").arg(host,profile["distribution"].toString(),profile["user"].toString(),m_environment));

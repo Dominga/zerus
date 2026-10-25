@@ -1111,9 +1111,20 @@ pub fn run_bounded(
     deadline: Instant,
     cancelled: &dyn Fn() -> bool,
 ) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
+    run_bounded_stdin(command, Stdio::null(), limits, deadline, cancelled)
+}
+
+/// Bounded execution with explicitly supplied stdin; ownership/deadlines match run_bounded.
+pub fn run_bounded_stdin(
+    command: &mut Command,
+    input: Stdio,
+    limits: [usize; 2],
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<(ExitStatus, Vec<u8>, Vec<u8>), RunError> {
     command
         .process_group(0)
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(RunError::Spawn)?;
@@ -1991,6 +2002,22 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(session, child.id() as i32);
+    }
+
+    #[test]
+    fn bounded_input_handle_preserves_bytes_eof_and_output_limits() {
+        use std::io::{Seek, SeekFrom, Write};
+        let make = || {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(b"literal \x00\xff\n").unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            Stdio::from(file)
+        };
+        let (status,out,err)=run_bounded_stdin(&mut Command::new("cat"),make(),[64,64],
+            Instant::now()+Duration::from_secs(5),&||false).unwrap();
+        assert!(status.success());assert_eq!(out,b"literal \x00\xff\n");assert!(err.is_empty());
+        assert!(matches!(run_bounded_stdin(&mut Command::new("cat"),make(),[2,64],
+            Instant::now()+Duration::from_secs(5),&||false),Err(RunError::TooLarge)));
     }
 
     #[test]

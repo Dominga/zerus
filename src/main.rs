@@ -19,6 +19,7 @@ mod session_reference;
 mod extensions;
 mod windows_peer;
 mod wsl;
+mod wsl_file;
 mod peer_channel;
 mod platform;
 mod presence;

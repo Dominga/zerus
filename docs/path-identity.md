@@ -127,6 +127,73 @@ connection. Another user/distribution does not inherit it. Saved presets do not
 remember a selected path or a previous verification result: every use requires
 a new preview. Mapping changes receive a new mapping identity.
 
-This step maps folder inputs into WSL. Automatic reverse mapping for opening
-remote files in Windows editors remains a separate integration: it must preserve
-file-read authorization and must not silently turn remote paths into local ones.
+This folder step never silently turns a remote file reference into a local one.
+The separate, explicit reverse-opening workflow below verifies its own access
+and content evidence on every use.
+
+
+## Explicit WSL file references opened as Windows originals
+
+On a Windows desktop, a remote session file-reference dialog offers **Open mapped
+Windows original...**. This is distinct from downloading a copy. Select the
+workspace root, drive mount root and workspace identity explicitly, or reuse a
+previously remembered preset for the exact connection. Use **Preview and verify**
+and review both paths before **Open mapped original**. Any mapping edit clears
+the preview. Merely opening the dialog queries connection metadata, not file
+contents. Preview does not open an editor or modify either original.
+
+The local `hgs machine file-proof <alias> --json` contract accepts a bounded JSON
+selection, including the exact WSL distribution/user/receiver, session name,
+run/conversation identity, optional archive/child identity, absolute POSIX path
+and explicit mapping. It uses only that named WSL connection. A closed-input help
+probe checks the scoped native read capability before sending `file-read`; no SSH,
+default distribution, new session or service-start fallback exists. Native reads
+are bounded to the existing 10 MiB regular-file limit and retain the original
+conversation, archive and child checks. The input is limited to 64 KiB and the
+native response to a bounded encoded snapshot. Snapshot bytes are never returned
+in the proof or persisted by this operation.
+
+The proof checks all echoed request/identity fields, recomputes the snapshot
+SHA-256, checks the native resolved path against the selected mapped path, and
+re-reads the local connection after the operation. A changed connection, another
+native target, malformed reply or missing capability fails closed. The proof
+contains paths, digest, size and a preview identity; it explicitly states
+`local_verified: false`. It is evidence for the desktop, not an authorization
+token to bypass another environment's permissions. An opening request repeats
+the native check and must reproduce the preview identity exactly.
+
+The desktop then independently verifies the Windows file on a worker thread.
+It accepts only ordinary paths on a local fixed drive, rejects UNC/device/ADS
+names, trailing-dot/space aliases and reparse points in every path component,
+checks final handle paths, and hashes the same bounded bytes. Read handles remain
+held while dispatching the explicit opener, denying ordinary replacement or
+write access to the checked leaf during that dispatch. A mismatch opens nothing;
+there is no automatic fallback to an unrelated local file or downloaded copy.
+
+The original is passed to the existing `ExternalFile` policy as **ThisComputer**:
+no Mark of the Web is added, removed or rewritten. Runnable scripts/programs
+remain reveal-only rather than executed. Data-file handlers remain the owner's
+configured default Windows applications. The dialog warns that editing changes
+the original. Optional mapping persistence remains unchecked and local-only.
+
+### Deliberate boundaries
+
+This workflow is for explicitly mapped drive-mounted workspace files, not WSL
+home directories or arbitrary UNC/network aliases. Linux symbolic redirects,
+Windows junctions and ambiguous final spellings are refused. Files above 10 MiB,
+empty/nonregular files, unknown child identities and unselected conversations
+remain unsupported by this scoped workflow. Ordinary download actions are not
+silently repurposed as proof of local authorization.
+
+Equal content and an operator-selected alias do not establish identical inode or
+volume identity across WSL/Windows. The implementation verifies the requested
+alias and current bytes, not an independently attested mount topology. Handles
+are held through dispatch, not through the lifetime of the external editor;
+after handoff the file may be edited or changed normally. A default application
+may also use a custom file association; Zerus preserves its existing executable
+classification rather than claiming to sandbox that application.
+
+Implementation references: Microsoft's [CreateFileW sharing/reparse semantics](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+and [GetFinalPathNameByHandleW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew).
+Tests use disposable session bindings, local files and fake open/reveal handlers;
+no owner conversation, native model prompt or external editor is used.

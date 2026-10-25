@@ -568,6 +568,11 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         ));
     }
     match command {
+        "file-proof" => {
+            if args.len()!=3 || args[2]!="--json" {return Err(Error::new(2,"usage: hgs machine file-proof <alias> --json"));}
+            crate::wsl_file::run(config,alias,dry).map_err(|e|Error::new(1,e.to_string()))?;
+            Ok(0)
+        }
         "resolve" => {
             if args.len() != 2 {
                 return Err(Error::new(1, "usage: hgs machine resolve <alias>"));

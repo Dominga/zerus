@@ -580,6 +580,34 @@ quint64 HgsClient::requestMobile(const QString &host, const QStringList &argumen
     return request;
 }
 
+quint64 HgsClient::requestWslFileProof(const QString &alias,const QJsonObject &input)
+{
+    const auto id=++m_wslFileProofRequest;
+    const auto payload=QJsonDocument(input).toJson(QJsonDocument::Compact);
+    if(alias.isEmpty()||payload.size()>64*1024){
+        QTimer::singleShot(0,this,[this,id]{emit wslFileProofFailed(id,tr("Invalid or oversized file mapping request."));});return id;
+    }
+    auto help=processRequest(m_hgs,{"--help"});help.timeoutMs=5000;help.maximumOutputBytes=128*1024;help.input=QByteArray();
+    ProcessRunner::run(std::move(help),this,[this,id,alias,payload](const ProcessRunner::Result &reply){
+        if(reply.outcome!=ProcessRunner::Result::Finished||reply.exitCode||reply.exitStatus!=QProcess::NormalExit
+            ||!reply.standardOutput.contains("wsl-file-proof-v1")){
+            emit wslFileProofFailed(id,tr("Update the matching local CLI to use scoped WSL file mapping."));return;
+        }
+        auto request=processRequest(m_hgs,{"machine","file-proof",alias,"--json"});
+        request.timeoutMs=30000;request.maximumOutputBytes=128*1024;request.input=payload;
+        ProcessRunner::run(std::move(request),this,[this,id](const ProcessRunner::Result &reply){
+            if(reply.outcome!=ProcessRunner::Result::Finished||reply.exitCode||reply.exitStatus!=QProcess::NormalExit){
+                const auto why=QString::fromUtf8(reply.standardError).trimmed().left(2000);
+                emit wslFileProofFailed(id,why.isEmpty()?tr("The scoped WSL file proof was unavailable or refused."):why);return;
+            }
+            const auto data=QJsonDocument::fromJson(reply.standardOutput);
+            if(!data.isObject()){emit wslFileProofFailed(id,tr("Invalid scoped WSL file proof."));return;}
+            emit wslFileProofReady(id,data.object());
+        });
+    });
+    return id;
+}
+
 quint64 HgsClient::requestPathRef(const QString &operation, const QJsonObject &input)
 {
     const quint64 request = ++m_pathRefRequest;

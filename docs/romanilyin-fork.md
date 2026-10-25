@@ -72,3 +72,8 @@ service management during inspection.
 Build identity, update isolation and matching Windows/WSL delivery are described
 in [fork candidates](fork-candidates.md). Candidate labels do not rename saved
 applications or sessions and do not authorize public releases.
+
+Explicit WSL file references can now open their mapped Windows original after
+two-phase session-scoped native verification and bounded local handle/digest
+checks. This is separate from downloading a copy and never marks the original
+as downloaded. See [the reverse-opening contract and limits](path-identity.md#explicit-wsl-file-references-opened-as-windows-originals).

@@ -134,6 +134,19 @@ def run(module, binary):
     if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size < 512 * 1024**2:
         raise ValueError("The selected normal CLI is not a bounded regular file")
     binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
+    fixture_tools = {}
+    if module == "test_worktree_maintenance":
+        # Resolve the hosted runner's selected tools before entering the fresh
+        # UID. /usr/bin/cc is a dispatcher, not the selected clang executable.
+        developer = Path(os.environ.get("DEVELOPER_DIR") or
+                         command("/usr/bin/xcode-select", "--print-path").stdout.strip()).resolve(strict=True)
+        compiler = Path(command("/usr/bin/xcrun", "--sdk", "macosx", "--find", "clang").stdout.strip()).resolve(strict=True)
+        sdk = Path(command("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path").stdout.strip()).resolve(strict=True)
+        if (not developer.is_dir() or not compiler.is_file() or not os.access(compiler, os.X_OK)
+                or compiler.parent == Path("/usr/bin") or not (sdk / "SDKSettings.plist").is_file()):
+            raise ValueError("The selected native fixture compiler or macOS SDK is unavailable")
+        fixture_tools = {"HGS_TEST_WORKTREE_CC": str(compiler), "SDKROOT": str(sdk),
+                         "DEVELOPER_DIR": str(developer)}
     inventory = dscl("-list", "/Users", "UniqueID").stdout
     used = {int(row.split()[-1]) for row in inventory.splitlines() if row.split() and row.split()[-1].isdigit()}
     uid = next((candidate for candidate in range(60000, 60128)
@@ -149,6 +162,9 @@ def run(module, binary):
     report = dict(source=source, module=module, uid=uid, user=name, generated=generated,
                   root=str(root), binary_sha256=binary_hash, account_removed=False, tests_started=False,
                   user_domain_absent_before=True)
+    if fixture_tools:
+        report["fixture_tools"] = dict(fixture_tools,
+                                      compiler_sha256=hashlib.sha256(Path(fixture_tools["HGS_TEST_WORKTREE_CC"]).read_bytes()).hexdigest())
     output = ROOT/"artifacts/test-results/mac-worktree-scope"
     output.mkdir(parents=True, exist_ok=True)
     destination = output/(module + ".json")
@@ -198,6 +214,7 @@ def run(module, binary):
                   "HOME=" + str(home), "USER=" + name, "LOGNAME=" + name, "SHELL=/bin/bash",
                   "PATH=" + paths, "TMPDIR=" + str(runtime), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8",
                   "HGS_TEST_BIN=" + str(hgs), "PYTHONDONTWRITEBYTECODE=1"]
+        prefix.extend(key + "=" + value for key, value in fixture_tools.items())
         probe = "import os,json,sys; print(json.dumps([os.getpid(),os.getuid(),os.geteuid()]),flush=True); sys.stdin.buffer.read(1)"
         child = subprocess.Popen([*prefix, sys.executable, "-I", "-B", "-c", probe],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

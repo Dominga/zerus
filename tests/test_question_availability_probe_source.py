@@ -14,7 +14,8 @@ original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
-# fixtures first reverse the composed workspace and push-registration changes to ac601e36,
+# fixtures first reverse the reviewed task-tracker additions to 86aeab6d, then
+# the composed workspace and push-registration changes to ac601e36,
 # then the 962699e6 read-catalog/badge update and c1eebe96 mobile checkout
 # additions. None changes question eligibility or the ten verification writes.
 # No Git history or Android SDK is needed at run time.
@@ -24,6 +25,9 @@ UPDATES = ROOT / "tests/fixtures/question-availability-reviewed-updates.patch"
 UPDATES_SHA = "5088def68877668c9a7e261851d552cd30b0fee1806aa072a911172f6ff4f60a"
 WORKSPACE_UPDATES = ROOT / "tests/fixtures/question-availability-workspace-updates.patch"
 WORKSPACE_UPDATES_SHA = "ff2e0ae7ccf5f14a49be075a38978757f453e59f2461fda329d3d8b51a9d0443"
+# Exact 86aeab6d -> 53170eee feature delta; policy and baseline pins stay fixed.
+TASK_TRACKER_UPDATES = ROOT / "tests/fixtures/question-availability-task-tracker-updates.patch"
+TASK_TRACKER_UPDATES_SHA = "5cb5f076e3f176069d8e57d945f1286cea7763fcf37c3dbfb6f61383cf5c1e34"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -75,6 +79,7 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha):
 
 
 def reverse_reviewed_updates(name, source):
+    source = reverse_reviewed_patch(name, source, TASK_TRACKER_UPDATES, TASK_TRACKER_UPDATES_SHA)
     source = reverse_reviewed_patch(name, source, WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
     return reverse_reviewed_patch(name, source, UPDATES, UPDATES_SHA)
 
@@ -95,7 +100,9 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
     def test_workspace_projection_matches_reviewed_current_main_exactly(self):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
-                projected = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                current = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                                                TASK_TRACKER_UPDATES, TASK_TRACKER_UPDATES_SHA)
+                projected = reverse_reviewed_patch(name, current,
                                                   WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
                 self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(), digest)
 
@@ -126,6 +133,18 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                            "online && model.activityVerified && !model.contextBlocked(target)"):
             self.assertIn(expression, main)
             self.assertFalse(original_source("MainActivity.kt", main.replace(expression, "true", 1)))
+
+    def test_task_tracker_projection_refuses_changed_missing_or_duplicate_reviewed_hunks(self):
+        additions = {
+            "ZerusViewModel.kt": "    fun stopTaskSync() { taskSyncJob?.cancel(); projectSyncs.toList().forEach { it.cancel() } }\n",
+            "MainActivity.kt": "            model.syncTasks()\n",
+        }
+        for name, addition in additions.items():
+            source = (MAIN / name).read_text()
+            self.assertEqual(source.count(addition), 1)
+            for replacement in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):
+                with self.subTest(source=name, replacement=replacement):
+                    self.assertFalse(original_source(name, source.replace(addition, replacement, 1)))
 
     def test_reverse_updates_refuse_changed_missing_or_duplicate_reviewed_hunks(self):
         source = (MAIN / "ZerusViewModel.kt").read_text()

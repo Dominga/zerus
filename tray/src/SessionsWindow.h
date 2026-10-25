@@ -407,7 +407,8 @@ private:
     class QFrame *m_teamStrip=nullptr;
     class QLabel *m_teamStripText=nullptr;
     void openTeamTask(int task);
-    void showNewTeam();
+    // F7: a session named here is taken into the new team as its existing lead.
+    void showNewTeam(const QString &host = {}, const QString &name = {});
     void showTeamDesigner();
     void startTeamDesigner(const QString &folder,const QString &goal,const QJsonObject &agent);
     QString m_teamDesignerFolder,m_teamDesignerProject;

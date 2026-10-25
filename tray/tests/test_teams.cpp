@@ -365,7 +365,8 @@ void TestTeams::draftPhasesApproveInOrder()
     // Only the next phase may be approved, and only once every lower one ended.
     QCOMPARE(approveBlocked(team, 2), QString());
     QVERIFY(approveBlocked(team, 3).contains(QStringLiteral("Phase 3 opens after phase 2 is approved")));
-    QVERIFY(approveBlocked(team, 4).contains(QStringLiteral("Phase 4 opens after phase 2 is approved")));
+    // QA: the nearest open phase is named, not the first draft of the plan.
+    QVERIFY(approveBlocked(team, 4).contains(QStringLiteral("Phase 4 opens after phase 3 is approved")));
     // Approved but not finished yet: its tasks still hold the next phase back.
     auto running = roadmap;
     running["phases"] = QJsonArray{
@@ -455,6 +456,29 @@ void TestTeams::modelReadsAttemptStatesQuestionsHoldsAndReports()
     QVERIFY(!question(*team.task(4), "q9"));
     QCOMPARE(lastPhase(*team.task(4)), QStringLiteral("asking"));
     QVERIFY(openQuestions(*team.task(1)).isEmpty());
+    // A question closed by the store (answered_at set, the answer left empty as
+    // when an attempt ends) counts as closed: no open row, no "asking".
+    auto withClosed = deliveryTeam();
+    auto closedTasks = withClosed["tasks"].toArray();
+    for (int i = 0; i < closedTasks.size(); ++i) {
+        auto task = closedTasks[i].toObject();
+        if (task["id"].toInt() != 4) continue;
+        auto attempts = task["attempts"].toArray();
+        auto attempt = attempts[0].toObject();
+        auto questions = attempt["questions"].toArray();
+        questions.append(QJsonObject{{"id", "q9"}, {"text", "Closed when the attempt ended"}, {"at", 1600},
+                                     {"answer", ""}, {"answered_at", 1610}, {"by", "Zerus"}});
+        attempt["questions"] = questions; attempts[0] = attempt;
+        task["attempts"] = attempts; closedTasks[i] = task;
+    }
+    withClosed["tasks"] = closedTasks;
+    const auto closedTeam = parse(withClosed);
+    QCOMPARE(openQuestions(*closedTeam.task(4)).size(), 1);   // only q1 stays open
+    const auto *closed = question(*closedTeam.task(4), "q9");
+    QVERIFY(closed && closed->answered());
+    QVERIFY(closed->answer.isEmpty());
+    QCOMPARE(closed->answeredAt, 1610.0);
+    QCOMPARE(closed->by, QStringLiteral("Zerus"));
     // The member card says it waits for the lead, and that counts as an answer.
     const auto quiet = [](const Member &) { Live state; state.known = true; return state; };
     const auto waiting = memberStatus(team, *team.member("tester"), quiet(*team.member("tester")));
@@ -478,6 +502,16 @@ void TestTeams::modelReadsAttemptStatesQuestionsHoldsAndReports()
     QVERIFY(explicitQueue.member("tester")->queueKnown);
     QVERIFY(explicitQueue.member("tester")->queue.isEmpty());
     QCOMPARE(explicitQueue.member("backend")->queue, (QList<int>{1, 3}));
+    // L7: the fallback lists every open task hgs would send, in hgs order, not
+    // only the first one.
+    auto twoOpen = deliveryTeam();
+    auto someTasks = twoOpen["tasks"].toArray();
+    auto fourth = someTasks[3].toObject();
+    fourth["assignee"] = QStringLiteral("backend"); fourth["status"] = QStringLiteral("in_progress");
+    fourth["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "o4"}, {"member", "backend"}, {"state", "delivered"}}};
+    someTasks[3] = fourth; twoOpen["tasks"] = someTasks;
+    // Open tasks ascending, then the returned one, as hgs sends them.
+    QCOMPARE(memberQueue(parse(twoOpen), "backend"), (QList<int>{1, 4, 3}));
     // A start warning is the "late" phase.
     QCOMPARE(lastPhase(*team.task(5)), QStringLiteral("late"));
 }

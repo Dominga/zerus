@@ -95,16 +95,19 @@ QString Team::roleOf(const QString &id) const
 
 QList<int> memberQueue(const Team &team, const QString &member)
 {
-    QList<int> queue;
-    for (const auto &task : team.tasks)
-        if (const auto *attempt = openOf(task); attempt && attempt->member == member) { queue.append(task.id); break; }
+    // The same list hgs sends for an older hgs: every task with an open attempt
+    // of this member (ascending, as hgs sorts them), then the tasks returned to
+    // it (pending, with attempts), also ascending (L7).
+    QList<int> open, returned;
     for (const auto &task : team.tasks) {
-        if (!queue.isEmpty() && task.id == queue.first()) continue;
+        if (const auto *attempt = openOf(task); attempt && attempt->member == member) open.append(task.id);
         // Returned to it: handed out before, not finished, and waiting.
-        if (task.assignee != member || task.finished() || task.status != "pending" || task.attempts.isEmpty()) continue;
-        queue.append(task.id);
+        if (task.assignee == member && !task.finished() && task.status == "pending" && !task.attempts.isEmpty())
+            returned.append(task.id);
     }
-    return queue;
+    std::sort(open.begin(), open.end());
+    std::sort(returned.begin(), returned.end());
+    return open + returned;
 }
 
 QString attemptPhase(const Task &task, const Attempt &attempt)
@@ -617,13 +620,15 @@ QString approveBlocked(const Team &team, int phase)
 {
     const auto *record = team.phase(phase);
     if (!record || !record->draft()) return tr("Phase %1 is not a draft").arg(phase);
-    for (int lower = 1; lower < phase; ++lower) {
+    // QA: name the nearest phase that still has to open or end, not the first
+    // one above the plan: for drafts 2, 3 and 4, phase 4 waits for phase 3.
+    for (int lower = phase - 1; lower >= 1; --lower) {
         const auto *previous = team.phase(lower);
         // A discarded phase is out of the plan, and phase 1 has no record: the
         // approved initial plan is approved by definition.
         if (previous && previous->state == "discarded") continue;
-        if (previous && previous->draft()) return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(lower);
-        if (previous && previous->state != "approved") return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(lower);
+        if (previous && (previous->draft() || previous->state != "approved"))
+            return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(lower);
         int open = 0;
         for (const auto &task : team.tasks) if (task.phase == lower && !task.finished()) ++open;
         if (open)

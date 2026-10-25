@@ -1501,7 +1501,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // Team tab confirms; "Take into a new team" opens the New team flow, whose
     // member editor can adopt the session.
     m_teamPanel->stopSession=[this](const QString &host,const QString &name){stopTeamSession(host,name);};
-    m_teamPanel->takeIntoTeam=[this](const QString &,const QString &){showNewTeam();};
+    m_teamPanel->takeIntoTeam=[this](const QString &host,const QString &name){showNewTeam(host,name);};
     // F8: the free sessions a member may adopt: listed, running, and not a
     // member of a team that is still going.
     m_teamPanel->sessionChoices=[this]{
@@ -6533,16 +6533,23 @@ void SessionsWindow::ensureTeamNewForm()
     m_teamNewTab->layout()->addWidget(m_teamNewForm);
     m_teamNewForm->show();
 }
-void SessionsWindow::showNewTeam()
+void SessionsWindow::showNewTeam(const QString &host, const QString &name)
 {
     if(!m_teams)return;
-    if(m_teamNewTab&&m_detailTabs->indexOf(m_teamNewTab)>=0){m_pages->setCurrentIndex(0);m_detailTabs->setCurrentWidget(m_teamNewTab);return;}
+    if(m_teamNewTab&&m_detailTabs->indexOf(m_teamNewTab)>=0){
+        m_pages->setCurrentIndex(0);m_detailTabs->setCurrentWidget(m_teamNewTab);
+        if(!name.isEmpty())showNotice(tr("%1 is offered as the lead in the form above.").arg(name));
+        return;
+    }
     if(!m_teams->catalogReady()){
         auto *once=new QMetaObject::Connection;
-        *once=connect(m_teams,&TeamController::catalogChanged,this,[this,once]{disconnect(*once);delete once;showNewTeam();});
+        *once=connect(m_teams,&TeamController::catalogChanged,this,[this,once,host,name]{disconnect(*once);delete once;showNewTeam(host,name);});
         m_teams->refreshCatalog();return;
     }
     std::unique_ptr<TeamNewDialog> dialog(teamNewForm(this));
+    // F7: "Take into a new team" names the session it came from; the dialog's
+    // only existing-session slot is the lead, so it is preselected there.
+    if(!name.isEmpty())dialog->preselectExistingLead(host,name);
     if(dialog->exec()!=QDialog::Accepted)return;
     m_teams->refresh();
     showTeam(dialog->createdTeam());

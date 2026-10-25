@@ -426,6 +426,10 @@ public:
     // Wide: the visible canvas; the graph centers in it and its layer bands
     // fill its height (design D3, no empty bottom).
     QSize area;
+    // G4: one entry per layer inside a phase band, with the small "L2 · 3"
+    // label rect and the count; the paint draws its stripe and label from this.
+    struct BandLayer { int phase = 0, layer = 0, count = 0; QRectF rect; };
+    QList<BandLayer> bandLayers() const { return m_bandLayers; }
     // Wide: the graph's own size at zoom 1.
     QSizeF natural() const
     {
@@ -450,7 +454,7 @@ public:
     }
     void layout()
     {
-        m_rects.clear(); m_bandRects.clear(); m_summaries.clear(); m_bandBackgrounds.clear(); m_listLayers.clear();
+        m_rects.clear(); m_bandRects.clear(); m_summaries.clear(); m_bandBackgrounds.clear(); m_listLayers.clear(); m_bandLayers.clear();
         QMap<int, int> column;
         if (m_mode == Graph) {
             if (banded()) {
@@ -500,6 +504,21 @@ public:
                         m_rects.insert(id, QRectF(x + 6 + node->layer * WideStep, m_oy + BandTop + used[node->layer]++ * (WideH + 12), WideW, WideH));
                     }
                     if (band.collapsed) { m_summaries.insert(band.n, QRectF(x + 6, m_oy + BandTop, WideW, WideH)); m_rects.insert(-band.n, m_summaries.value(band.n)); }
+                    // G4: the band keeps its own layer columns, so each layer
+                    // inside it gets a stripe and a small label.
+                    if (!band.collapsed) {
+                        QMap<int, int> counts;
+                        for (int id : band.tasks) if (const Node *node = nodeOf(id)) ++counts[node->layer];
+                        const double bandRight = x + width - BandGap;
+                        for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
+                            const double left = x + 6 + it.key() * WideStep;
+                            const double w = qMin(double(WideStep), bandRight - left);
+                            if (w <= 4) continue;
+                            BandLayer layer; layer.phase = band.n; layer.layer = it.key(); layer.count = it.value();
+                            layer.rect = QRectF(left, m_oy + BandHead, w, BandTop - BandHead);
+                            m_bandLayers.append(layer);
+                        }
+                    }
                     x += width + BandGap;
                 }
                 m_layers = 0;
@@ -551,7 +570,7 @@ public:
     QPair<int, int> selectedEdge() const { return m_edge; }
 protected:
     static constexpr int NodeW = 118, NodeH = 46, Gutter = 20, WideW = 146, WideH = 76, WideStep = 170;
-    static constexpr int BandHead = 26, BandTop = 32, BandGap = 10, BandMin = 240;
+    static constexpr int BandHead = 26, BandTop = 42, BandGap = 10, BandMin = 240;
     bool banded() const { return !bands.isEmpty(); }
     const Node *nodeOf(int id) const
     {
@@ -707,12 +726,25 @@ protected:
         };
         if (graph()) {
             p.scale(zoom, zoom);
-            if (banded() && m_mode == Wide)
+            if (banded() && m_mode == Wide) {
                 for (int i = 0; i < m_bandBackgrounds.size(); ++i)
                     if (i % 2) p.fillRect(m_bandBackgrounds[i], alpha(m_c.fg, .025));
+                // G4: the alternating layer stripes and the small layer label
+                // live inside every band, under its phase header.
+                QFont caps = font(); caps.setPixelSize(9); caps.setWeight(QFont::DemiBold); caps.setLetterSpacing(QFont::AbsoluteSpacing, .5);
+                const double bottom = height() / zoom;
+                for (const auto &layer : m_bandLayers) {
+                    if (layer.layer % 2)
+                        p.fillRect(QRectF(layer.rect.left(), layer.rect.top(), layer.rect.width(), qMax(0.0, bottom - layer.rect.top())), alpha(m_c.fg, .03));
+                    p.setFont(caps); p.setPen(m_c.dim);
+                    p.drawText(layer.rect.adjusted(2, 0, -2, 0), Qt::AlignLeft | Qt::AlignVCenter,
+                               QStringLiteral("L%1 · %2").arg(layer.layer + 1).arg(layer.count));
+                }
+            }
             QFont small = font(); small.setPixelSize(10); p.setFont(small); p.setPen(m_c.dim);
             if (banded()) {
-                // The phase headers name the bands; their own layers need no labels.
+                // The phase headers name the bands; each band draws its own layer
+                // labels and stripes above.
             } else if (m_mode == Wide) {
                 QMap<int, int> counts; for (const auto &n : nodes) ++counts[n.layer];
                 for (int l = 0; l < m_layers; ++l) {
@@ -920,6 +952,7 @@ private:
     // the list's phase groups.
     QMap<int, QRectF> m_bandRects, m_summaries;
     QList<QRectF> m_bandBackgrounds;
+    QList<BandLayer> m_bandLayers;
     struct ListLayer { int phase = 0, n = 0, count = 0; QRectF rect; };
     QList<ListLayer> m_listLayers;
 };

@@ -29,11 +29,14 @@ namespace {
 const QStringList agents{"claude", "codex", "kimi", "dsh", "opencode"};
 const QMap<QString, QString> agentNames{{"claude", "Claude Code"}, {"codex", "Codex"}, {"kimi", "Kimi"}, {"dsh", "DeepSeek"}, {"opencode", "OpenCode"}};
 
-// The board's columns, by what a task needs.
+// The board's columns, by what a task needs. Accepted, rejected and cancelled
+// are all decided, but only an accepted task is done: the others get their own
+// column so a rejected task never sits under Accepted (QA).
 QString column(const Task &task, bool problem)
 {
     if (problem) return QStringLiteral("problems");
-    if (task.status == "accepted" || task.status == "rejected" || task.status == "cancelled") return QStringLiteral("accepted");
+    if (task.status == "accepted") return QStringLiteral("accepted");
+    if (task.status == "rejected" || task.status == "cancelled") return QStringLiteral("decided");
     if (task.status == "submitted") return QStringLiteral("submitted");
     if (task.status == "assigned" || task.status == "in_progress") return QStringLiteral("active");
     return QStringLiteral("pending");
@@ -637,7 +640,7 @@ QWidget *TeamWorkspace::board(const Team &team)
         auto *rowBox = new QWidget; auto *h = new QHBoxLayout(rowBox);
         h->setContentsMargins(12, 4, 12, 8); h->setSpacing(8);
         for (const auto &[key, name] : QList<std::pair<QString, QString>>{{"pending", tr("Pending")}, {"active", tr("Active")}, {"problems", tr("Problems")},
-                                                                         {"submitted", tr("Submitted")}, {"accepted", tr("Accepted")}})
+                                                                         {"submitted", tr("Submitted")}, {"decided", tr("Decided")}, {"accepted", tr("Accepted")}})
             h->addWidget(makeColumn(key, name, ids, phase), 1);
         return rowBox;
     };

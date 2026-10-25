@@ -3479,6 +3479,12 @@ void SessionsWindow::updateTasks(const Entry *entry)
         TaskSession session{other.host, other.session.name, status(other.session, other.online), {}, true};
         session.running = other.online && other.session.state == "running" && other.session.processState != "exited";
         session.working = SessionPresentation::working(other.session, other.online);
+        // In progress rows show its state as the session list does.
+        const bool attention = other.online && other.session.needsAction(), error = other.online && other.session.phase == "error";
+        session.kind = attention ? SessionStatusBadge::Attention : error ? SessionStatusBadge::Error
+            : session.working ? (session.status == tr("Background") ? SessionStatusBadge::Background : SessionStatusBadge::Working)
+            : session.status == tr("Paused") ? SessionStatusBadge::Paused : SessionStatusBadge::Neutral;
+        if (session.kind == SessionStatusBadge::Working && session.status != tr("Compacting")) session.status = tr("Working");
         if (!session.running) session.blocker = tr("The agent is not running. Resume it before sending.");
         else if (other.session.needsAction()) session.blocker = tr("agent is waiting for input, approval, or has an unknown state; open Terminal");
         sessions << session;

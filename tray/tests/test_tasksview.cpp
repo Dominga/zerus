@@ -2,6 +2,7 @@
 #include "HgsClient.h"
 #include "MessageComposer.h"
 #include "TaskBoard.h"
+#include "SessionStatusBadge.h"
 #include "TasksView.h"
 #include <QAbstractButton>
 #include <QDateTime>
@@ -19,7 +20,7 @@ namespace {
 const qint64 Hour = 60LL * 60 * 1000;
 qint64 now() { return QDateTime::currentMSecsSinceEpoch(); }
 QList<TaskSession> sessions() {
-    return {{"", "codex/api", "Ready", ""}, {"", "codex/web", "Working", ""},
+    return {{"", "codex/api", "Ready", ""}, {"", "codex/web", "Working", "", true, true, SessionStatusBadge::Working},
             {"orchard-mac", "codex/ios", "Ready", ""}, {"", "codex/stopped", "Stopped", "The agent is not running. Resume it before sending."}};
 }
 QAbstractButton *tile(TasksView &view, const QString &stage) { return view.findChild<QAbstractButton *>("taskTile:" + stage); }
@@ -102,9 +103,18 @@ void TestTasksView::rowsShowTheQueueAndTheOpenSessionsTasks() {
     QVERIFY(row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("web") && !row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("codex/web"));
     QVERIFY(row(view, 3)->findChild<QLabel *>("taskMeta")->text().contains("any session"));
     for (const char *name : {"edit", "toBacklog", "top", "sendNow"}) QVERIFY2(action(row(view, 1), name), name);
+    QVERIFY(!row(view, 1)->findChild<QWidget *>("taskStatus")->isVisible());
+    QVERIFY(!row(view, 1)->findChild<QWidget *>("taskGlyph")->property("spinning").toBool());
     tile(view, "active")->click();
-    const auto meta = row(view, 4)->findChild<QLabel *>("taskMeta")->text();
-    QVERIFY2(meta.contains("Working") && meta.contains("filed by web"), qPrintable(meta));
+    // In progress names the session, then its status as the session list shows it, and spins.
+    auto *status = row(view, 4)->findChild<QWidget *>("taskStatus"); QVERIFY(status); QTRY_VERIFY(status->isVisible());
+    QCOMPARE(status->property("caption").toString(), QString("Working"));
+    QCOMPARE(status->property("kind").toInt(), int(SessionStatusBadge::Working));
+    auto *metaLabel = row(view, 4)->findChild<QLabel *>("taskMeta"); const auto meta = metaLabel->text();
+    QVERIFY2(meta.contains("web") && !meta.contains("Working"), qPrintable(meta));
+    QVERIFY(status->x() >= metaLabel->x() + metaLabel->width());
+    QVERIFY2(row(view, 4)->findChild<QLabel *>("taskTail")->text().contains("filed by web"), qPrintable(row(view, 4)->findChild<QLabel *>("taskTail")->text()));
+    QVERIFY(row(view, 4)->findChild<QWidget *>("taskGlyph")->property("spinning").toBool());
     QVERIFY(action(row(view, 4), "cancel"));
 }
 

@@ -1,4 +1,5 @@
 #include "TaskRow.h"
+#include "SessionStatusBadge.h"
 #include "TaskDrag.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
@@ -17,10 +18,49 @@
 
 TaskColors TaskColors::of(bool dark) {
     if (dark) return {QColor("#e8edf4"), QColor("#9eabba"), QColor("#242d36"), QColor("#34404a"), QColor("#8bdfc0"),
-                      QColor("#2b3540"), QColor("#edbd77"), QColor("#98bdeb"), QColor("#c5a8f5")};
+                      QColor("#2b3540"), QColor("#edbd77"), QColor("#98bdeb"), QColor("#c5a8f5"), true};
     return {QColor("#1a2733"), QColor("#657487"), QColor("#f3f6f8"), QColor("#dbe3e9"), QColor("#167357"),
-            QColor("#edf2f5"), QColor("#9b6216"), QColor("#366ba9"), QColor("#6c43b8")};
+            QColor("#edf2f5"), QColor("#9b6216"), QColor("#366ba9"), QColor("#6c43b8"), false};
 }
+
+// The stage circle; In progress spins a half ring inside it while the row shows.
+class TaskGlyph : public QLabel {
+public:
+    TaskGlyph() { connect(&m_timer, &QTimer::timeout, this, [this] { m_angle = (m_angle + 12) % 360; update(); }); m_timer.setInterval(33); }
+    void setSpinning(bool spinning, const QColor &color) {
+        m_color = color; setProperty("spinning", spinning);
+        if (spinning && isVisible()) m_timer.start(); else if (!spinning) m_timer.stop();
+        update();
+    }
+protected:
+    void showEvent(QShowEvent *event) override { QLabel::showEvent(event); if (property("spinning").toBool()) m_timer.start(); }
+    void hideEvent(QHideEvent *event) override { QLabel::hideEvent(event); m_timer.stop(); }
+    void paintEvent(QPaintEvent *event) override {
+        QLabel::paintEvent(event);
+        if (!property("spinning").toBool()) return;
+        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(QPen(m_color, 2)); const QPointF center = QRectF(rect()).center();
+        p.drawArc(QRectF(center.x() - 3, center.y() - 3, 6, 6), (-45 - m_angle) * 16, 180 * 16);
+    }
+private:
+    QTimer m_timer; QColor m_color; int m_angle = 0;
+};
+
+// The session's status as the session list shows it.
+class TaskStatusPill : public QWidget {
+public:
+    void setStatus(const QString &caption, int kind, bool dark) {
+        setProperty("caption", caption); setProperty("kind", kind); m_dark = dark;
+        setFixedSize(SessionStatusBadge::width(caption, SessionStatusBadge::Kind(kind), font()), 18); update();
+    }
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        SessionStatusBadge::paint(&p, rect(), property("caption").toString(), SessionStatusBadge::Kind(property("kind").toInt()), m_dark);
+    }
+private:
+    bool m_dark = true;
+};
 
 QColor TaskColors::stage(const QString &stage) const {
     if (stage == QLatin1String("review")) return warn;
@@ -75,7 +115,7 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     // Tab reaches a row, Enter or Space opens it, and its actions follow the focus.
     setFocusPolicy(Qt::TabFocus);
     auto *layout = new QHBoxLayout(this); layout->setContentsMargins(12, 6, 12, 10); layout->setSpacing(11);
-    m_glyph = new QLabel; m_glyph->setObjectName("taskGlyph"); m_glyph->setFixedSize(18, 18); m_glyph->setAlignment(Qt::AlignCenter);
+    m_glyph = new TaskGlyph; m_glyph->setObjectName("taskGlyph"); m_glyph->setFixedSize(18, 18); m_glyph->setAlignment(Qt::AlignCenter);
     auto *glyphColumn = new QVBoxLayout; glyphColumn->setContentsMargins(0, 4, 0, 0); glyphColumn->addWidget(m_glyph); glyphColumn->addStretch();
     layout->addLayout(glyphColumn);
     auto *main = new QVBoxLayout; main->setContentsMargins(0, 0, 0, 0); main->setSpacing(0); layout->addLayout(main, 1);
@@ -84,10 +124,14 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     auto *headerLayout = new QHBoxLayout(header); headerLayout->setContentsMargins(0, 0, 0, 0); headerLayout->setSpacing(8);
     // The rich-text labels take no mouse input: presses, drags and clicks on them are the row's.
     m_meta = new QLabel; m_meta->setObjectName("taskMeta"); m_meta->setTextFormat(Qt::RichText); m_meta->setTextInteractionFlags(Qt::NoTextInteraction);
-    m_meta->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    // The meta keeps its width, then In progress's status, then the rest, which gives way first.
+    m_meta->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred); m_meta->setMinimumWidth(1);
+    m_status = new TaskStatusPill; m_status->setObjectName("taskStatus"); m_status->hide();
+    m_tail = new QLabel; m_tail->setObjectName("taskTail"); m_tail->setTextFormat(Qt::RichText); m_tail->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_tail->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_actions = new QWidget; m_actions->setObjectName("taskActions");
     auto *actionsLayout = new QHBoxLayout(m_actions); actionsLayout->setContentsMargins(0, 0, 0, 0); actionsLayout->setSpacing(2);
-    headerLayout->addWidget(m_meta, 1); headerLayout->addWidget(m_actions);
+    headerLayout->addWidget(m_meta); headerLayout->addWidget(m_status); headerLayout->addWidget(m_tail, 1); headerLayout->addWidget(m_actions);
     main->addWidget(header);
     m_text = new QLabel; m_text->setObjectName("taskText"); m_text->setTextFormat(Qt::PlainText);
     m_text->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -104,8 +148,8 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     const QColor stage = colors.stage(task.stage);
     const QString glyph = task.stage == QLatin1String("todo") ? QString::number(task.queue)
         : task.stage == QLatin1String("review") || task.stage == QLatin1String("done") ? QStringLiteral("✓")
-        : task.stage == QLatin1String("active") ? QStringLiteral("•") : QString();
-    m_glyph->setText(glyph);
+        : QString();
+    m_glyph->setText(glyph); m_glyph->setSpinning(task.stage == QLatin1String("active"), stage);
     setAccessibleName(task.id + QStringLiteral(": ") + task.text.section(QLatin1Char('\n'), 0, 0));
     setWorkspaceStyle(m_glyph, QStringLiteral("border:2px solid %1;border-radius:9px;color:%1;font-size:9.5px;font-weight:700;").arg(stage.name()));
     // Meta: ID, the session (or the target), the session's status for In
@@ -122,16 +166,18 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     } else if (!task.sessionName.isEmpty()) {
         meta << who(TaskBoard::sessionLabel(task.sessionHost, task.sessionName));
     }
-    if (task.stage == QLatin1String("active")) {
-        if (!state.sessionStatus.isEmpty()) meta << state.sessionStatus.toHtmlEscaped();
-        meta << age(now - task.stageAt);
-    }
+    const bool active = task.stage == QLatin1String("active");
+    m_status->setVisible(active && !state.sessionStatus.isEmpty());
+    if (m_status->isVisibleTo(this)) m_status->setStatus(state.sessionStatus, state.statusKind, colors.dark);
+    QStringList tail;
+    if (active) tail << age(now - task.stageAt);
     if (task.stage == QLatin1String("done") && now - task.stageAt > TaskBoard::RecentDoneMs)
-        meta << QStringLiteral("accepted ") + QDateTime::fromMSecsSinceEpoch(task.stageAt).toString(QStringLiteral("d MMM"));
+        tail << QStringLiteral("accepted ") + QDateTime::fromMSecsSinceEpoch(task.stageAt).toString(QStringLiteral("d MMM"));
     if (!task.author.isEmpty())
-        meta << QStringLiteral("<span style='color:%1'>filed by %2</span>").arg(colors.violet.name(), TaskBoard::sessionLabel(task.authorHost, task.author).toHtmlEscaped());
+        tail << QStringLiteral("<span style='color:%1'>filed by %2</span>").arg(colors.violet.name(), TaskBoard::sessionLabel(task.authorHost, task.author).toHtmlEscaped());
     m_meta->setText(meta.join(QStringLiteral("&nbsp;&nbsp;")));
-    setWorkspaceStyle(m_meta, QStringLiteral("color:%1;font-size:11px;").arg(colors.muted.name()));
+    m_tail->setText(tail.join(QStringLiteral("&nbsp;&nbsp;")));
+    for (auto *label : {m_meta, m_tail}) setWorkspaceStyle(label, QStringLiteral("color:%1;font-size:11px;").arg(colors.muted.name()));
     const bool quiet = task.stage == QLatin1String("backlog") || task.stage == QLatin1String("done");
     setWorkspaceStyle(m_text, QStringLiteral("color:%1;").arg((quiet ? colors.muted : colors.fg).name()));
     // In review: the agent's latest report, or the cancellation.

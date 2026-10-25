@@ -27,9 +27,10 @@ struct TaskSession {
     QString blocker;      // why it takes no prompt now; empty when it does
     bool running = true;  // whether its agent runs, for the cancel dialog
     bool working = false; // whether its agent is in a turn, for the cancel dialog
+    int kind = 0;         // the status's SessionStatusBadge::Kind, as the session list shows it
     bool operator==(const TaskSession &other) const {
         return host == other.host && name == other.name && status == other.status && blocker == other.blocker
-            && running == other.running && working == other.working;
+            && running == other.running && working == other.working && kind == other.kind;
     }
 };
 

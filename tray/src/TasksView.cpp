@@ -290,7 +290,7 @@ void TasksView::render() {
         }
         row->setObjectName(QStringLiteral("taskRow:") + task.id);
         TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
-        if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.stage == QLatin1String("active")) state.sessionStatus = ran->status;
+        if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
         if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
             if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
         if (!task.writable)

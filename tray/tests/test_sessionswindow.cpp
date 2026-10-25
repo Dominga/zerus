@@ -1351,15 +1351,33 @@ void TestSessionsWindow::accountFilterWarmsAcrossMachinesAndRefreshesOnOpening()
   staged=Path(str(ready)+'.tmp');staged.write_text(json.dumps(data));staged.replace(ready)
   while hold.exists():time.sleep(.01)
  print(json.dumps(data))
-elif c=='account' and a[1:2]==['inspect']:print(USAGE)
+elif c=='account' and a[1:2]==['inspect']:
+ from pathlib import Path
+ import time
+ deadline=time.monotonic()+30
+ while Path(__file__+'.identity-hold').exists():
+  if time.monotonic()>=deadline:raise RuntimeError('Identity fixture gate expired')
+  time.sleep(.01)
+ print(USAGE)
 )PY").replace("CATALOG",FakeCli::pythonString(catalog)).replace("USAGE",FakeCli::pythonString(usage));
     QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
     auto state=fleet();auto local=state.local();local.sessions[0].accountId="shared-profile";local.sessions[0].accountHome="/fixture/shared";
     state.setLocal(local,QDateTime::currentMSecsSinceEpoch());auto remote=*state.peer("mac");remote.sessions[0].cmd="codex";remote.sessions[0].accountId="shared-profile";remote.sessions[0].accountHome="/fixture/shared";state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
+    QFile identityHold(fixture+".identity-hold");QVERIFY(identityHold.open(QIODevice::WriteOnly));identityHold.close();
     SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();
     auto *page=window.findChild<AccountsPage *>();QVERIFY(page);QVERIFY(!page->isVisible());
+    // Select the recorded bindings before asynchronous identity publication so
+    // the public chips can show when Sessions has actually grouped them.
+    auto *startupFilter=window.findChild<AccountFilter *>("accountFilterChips");QVERIFY(startupFilter);
+    const QSet<QString> startupBindings{SessionAccounts::binding({},local.sessions[0]),SessionAccounts::binding("mac",remote.sessions[0])};
+    QVERIFY(startupFilter->selection().isEmpty());startupFilter->setSelection(startupBindings);
+    const auto heldPresentationReady=[&]{const auto chips=startupFilter->findChildren<QPushButton *>("accountFilterChip");return chips.size()==1 && chips.first()->toolTip().contains("shared@example.test");};
+    QVERIFY(!heldPresentationReady());QVERIFY(QFile::remove(fixture+".identity-hold"));
     const auto identitiesReady=[&]{const auto profiles=page->profiles();return profiles.size()==2 && std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &v){return v.toObject()["usage"].toObject()["identity"].toObject()["account_id"]=="shared-account";});};
     QTRY_VERIFY(identitiesReady());
+    const auto startupPresentationReady=[&]{const auto chips=startupFilter->findChildren<QPushButton *>("accountFilterChip");return chips.size()==1 && chips.first()->toolTip().contains("shared@example.test");};
+    QTRY_VERIFY(startupPresentationReady());QCOMPARE(startupFilter->selection(),startupBindings);
+    startupFilter->setSelection({});QVERIFY(startupFilter->selection().isEmpty());QVERIFY(!page->isVisible());
     auto *filter=window.findChild<AccountFilter *>("accountFilterChips");auto *menu=filter->button()->menu();
     const QSet<QString> bindings{SessionAccounts::binding({},local.sessions[0]),SessionAccounts::binding("mac",remote.sessions[0])};
     const auto sharedChoice=[&]() -> QCheckBox * {for(auto *choice:menu->findChildren<QCheckBox *>("accountFilterChoice")){const auto members=choice->property("bindings").toStringList();if(QSet<QString>(members.cbegin(),members.cend())==bindings)return choice;}return nullptr;};
@@ -1389,6 +1407,11 @@ elif c=='account' and a[1:2]==['inspect']:print(USAGE)
     QFile reads(fixture+".reads");QVERIFY(reads.open(QIODevice::ReadOnly));QMap<QString,int> perHost;
     for(const auto &line:reads.readAll().split('\n'))if(!line.isEmpty()){const auto row=QJsonDocument::fromJson(line).array();QCOMPARE(row.size(),2);++perHost[row[0].toString()];}
     const QMap<QString,int> expectedReads{{"local",3},{"mac",3}};QCOMPARE(perHost,expectedReads);
+    // Catalog publication queues the Sessions rebuild. Wait for its visible
+    // presentation before taking a new menu snapshot; the open action stays old.
+    const auto presentationRefreshed=[&]{const auto chips=filter->findChildren<QPushButton *>("accountFilterChip");return chips.size()==1 && chips.first()->toolTip().contains("Renamed shared account");};
+    QTRY_VERIFY(presentationRefreshed());
+    QVERIFY(!sharedChoice()->text().contains("Renamed shared account"));
     // Existing actions keep their snapshot; reopening presents the newly read label.
     menu->hide();menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());QTRY_VERIFY(sharedChoice());QVERIFY(sharedChoice()->text().contains("Renamed shared account"));
 }

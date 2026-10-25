@@ -19,9 +19,9 @@ class TasksPresentationTest {
     private var serial = 0
 
     private fun task(stage: TaskStage, target: TaskTarget = TaskTarget.AnySession, session: SessionRef? = null,
-                     summary: String = "", cancelledAt: Long? = null, reason: String = "") = TaskInfo(
+                     summary: String = "", cancelledAt: Long? = null, reason: String = "", author: TaskActor = TaskActor.Person) = TaskInfo(
         "0b9d6c55-2f5e-4c39-9a51-0d6f3c2a7e%02d".format(++serial), "T-a1b2%02d".format(serial), "project-1", 1, true, 1, 1,
-        TaskActor.Person, stage, target, "V", session, summary, cancelledAt, reason, "Task $serial", emptyList())
+        author, stage, target, "V", session, summary, cancelledAt, reason, "Task $serial", emptyList())
 
     private fun pinned(name: String, machine: String = "node-1") = TaskTarget.Session(SessionRef(machine, name))
     private fun session(name: String, computer: String = "computer-1", raw: String = """{"activity":"idle"}""") =
@@ -70,9 +70,11 @@ class TasksPresentationTest {
         val cancelled = task(TaskStage.REVIEW, session = SessionRef("node-1", "codex/api"), summary = "Started",
             cancelledAt = 5, reason = "Wrong approach")
         val all = listOf(any, reported, cancelled)
-        assertEquals("any session", TasksPresentation.cards(all, TaskTab.TODO, chosen, false, { route(it) }, { route(it) }).single().sessionLabel)
+        // Sessions are named as the session list names them; an Any session task names where it goes now.
+        val todo = TasksPresentation.cards(all, TaskTab.TODO, chosen, false, { route(it) }, { route(it) }).single()
+        assertEquals("any · now api", todo.sessionLabel); assertTrue(todo.anySession)
         val review = TasksPresentation.cards(all, TaskTab.REVIEW, chosen, false, { route(it) }, { route(it) })
-        assertEquals(listOf("codex/api", "codex/api"), review.map { it.sessionLabel })
+        assertEquals(listOf("api", "api"), review.map { it.sessionLabel }); assertFalse(review.first().anySession)
         assertEquals(listOf("Token bucket; 6 tests.", "Cancelled: Wrong approach"), review.map { it.note })
     }
 
@@ -125,6 +127,29 @@ class TasksPresentationTest {
         val active = task(TaskStage.ACTIVE, session = SessionRef("", "codex/old"))
         assertEquals(RouteState.Ready(SendRoute("computer-1", "codex/old", direct = false)),
             TasksPresentation.cancelRoute(active, listOf(old, here), { exchange }))
+    }
+
+    @Test fun aSessionsShortNameIsTheOneTheSessionListShows() {
+        assertEquals(listOf("api", "api", "Night shift", "c/d", "sh"),
+            listOf("claude/orchard/api", "codex/api", "claude/orchard/Night shift", "a/b/c/d", "sh").map(TasksPresentation::shortName))
+    }
+
+    @Test fun cardsNumberTheQueueMarkTheMainActionAndNameWhoFiledThem() {
+        val elsewhere = task(TaskStage.TODO, pinned("codex/web"))
+        val filed = task(TaskStage.TODO, author = TaskActor.Agent(SessionRef("node-1", "claude/orchard/docs")))
+        val later = task(TaskStage.BACKLOG, author = TaskActor.Agent(SessionRef("node-1", "claude/orchard/docs")))
+        val all = listOf(elsewhere, filed, later)
+        val todo = TasksPresentation.cards(all, TaskTab.TODO, chosen, false, { route(it) }, { route(it) })
+        assertEquals(listOf(1, 2), todo.map { it.queue }); assertEquals(listOf("", "docs"), todo.map { it.filedBy })
+        assertEquals(listOf(false, false, false, true), todo.first().actions.map { it.main })
+        // Only this session hides the other session's task; the queue keeps its project-wide numbers.
+        assertEquals(listOf(2), TasksPresentation.cards(all, TaskTab.TODO, chosen, true, { route(it) }, { route(it) }).map { it.queue })
+        val backlog = TasksPresentation.cards(all, TaskTab.BACKLOG, chosen, false, { route(it) }, { route(it) }).single()
+        assertEquals(0, backlog.queue); assertEquals("docs", backlog.filedBy)
+    }
+
+    @Test fun anAgeReadsInMinutesHoursThenDays() {
+        assertEquals(listOf("0 min", "13 min", "3 h", "2 d"), listOf(0L, 13 * 60_000L, 3 * 3_600_000L, 49 * 3_600_000L).map(TasksPresentation::age))
     }
 
     @Test fun chipsShowEachSessionsStatus() {

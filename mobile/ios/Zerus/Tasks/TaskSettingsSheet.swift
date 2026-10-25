@@ -70,7 +70,7 @@ struct TaskSettingsSheet: View {
                                                send: tasks.sendRoute, cancel: tasks.cancelRoute).first?.actions ?? [])
             .filter { $0.action != .edit }
         let sessionLabel: String = switch chosenTarget {
-        case .session(let session): session.session
+        case .session(let session): TasksPresentation.shortName(session.session)
         case .anySession: "Any session"
         }
         return ScrollView {
@@ -192,7 +192,7 @@ struct TaskSessionSheet: View {
                     } label: {
                         HStack(spacing: 8) {
                             StatusDot(dot: chip.dot)
-                            Text(chip.session.name)
+                            Text(TasksPresentation.shortName(chip.session.name))
                         }
                     }
                 }
@@ -227,7 +227,7 @@ struct AllSessionsSheet: View {
                                 } label: {
                                     HStack(spacing: 8) {
                                         StatusDot(dot: chip.dot)
-                                        Text(chip.session.name)
+                                        Text(TasksPresentation.shortName(chip.session.name))
                                     }
                                 }
                             }

@@ -1,7 +1,14 @@
 package app.zerus.mobile
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -25,13 +32,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import app.zerus.mobile.replica.SessionRef
@@ -57,6 +70,21 @@ internal object TasksColors {
     val Attention = Color(0xFFFFCB7D)
     val Muted = Color(0xFF9AACB2)
     val Danger = Color(0xFFE06C75)
+    val Blue = Color(0xFF8EA9F4)
+    val Purple = Color(0xFFC098E6)
+    val SessionChip = Color(0xFF274141)
+    val SessionChipText = Color(0xFF9CD7C7)
+    val NeutralChip = Color(0xFF2B343E)
+    val NeutralChipText = Color(0xFFB6C2D0)
+}
+
+/** A stage's colour, as on the desktop: amber In review, mint In progress, blue To do, muted Backlog, purple Done. */
+private fun stageColor(tab: TaskTab): Color = when (tab) {
+    TaskTab.REVIEW -> TasksColors.Attention
+    TaskTab.ACTIVE -> TasksColors.Accent
+    TaskTab.TODO -> TasksColors.Blue
+    TaskTab.BACKLOG -> TasksColors.Muted
+    TaskTab.DONE -> TasksColors.Purple
 }
 
 private fun stageIcon(tab: TaskTab): ImageVector = when (tab) {
@@ -164,7 +192,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         chips.forEach { chip ->
                             FilterChip(selected = chip.session == chosen, onClick = { model.chooseTaskSession(key, chip.session) },
-                                label = { Text(chip.session.name, maxLines = 1) }, leadingIcon = { StatusDot(chip.dot) })
+                                label = { Text(TasksPresentation.shortName(chip.session.name), maxLines = 1) }, leadingIcon = { StatusDot(chip.dot) })
                         }
                         AssistChip(onClick = { allSessions = true }, label = { Icon(Icons.Default.MoreHoriz, "Sessions of every project", Modifier.size(18.dp)) })
                     }
@@ -209,7 +237,35 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
     val session = ref?.let { r -> model.projectSessions(key).firstOrNull { s ->
         s.target.session == r.session && model.machines.any { it.id == s.target.computerId && it.machineId == r.machine }
     } } ?: return
-    SessionBadge(session, SessionFilters.online(session, model.machines), Modifier.padding(bottom = 4.dp))
+    SessionBadge(session, SessionFilters.online(session, model.machines))
+}
+
+/** The stage circle: the queue number in To do, a check In review and in Done, a turning half ring In progress. */
+@Composable private fun TaskGlyph(card: TaskCard) {
+    val color = stageColor(card.tab)
+    Box(Modifier.size(22.dp).border(2.dp, color, CircleShape), contentAlignment = Alignment.Center) {
+        when (card.tab) {
+            TaskTab.ACTIVE -> {
+                val turn by rememberInfiniteTransition(label = "task").animateFloat(0f, 360f,
+                    infiniteRepeatable(tween(1000, easing = LinearEasing)), label = "turn")
+                Canvas(Modifier.size(9.dp)) { drawArc(color, -135f + turn, 180f, false, style = Stroke(2.dp.toPx())) }
+            }
+            TaskTab.TODO -> if (card.queue > 0) Text("${card.queue}", color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            TaskTab.REVIEW, TaskTab.DONE -> Icon(Icons.Default.Check, null, Modifier.size(13.dp), tint = color)
+            TaskTab.BACKLOG -> {}
+        }
+    }
+}
+
+/** The session a task is pinned to or ran in; an Any session task names where it goes now. */
+@Composable private fun SessionLabel(card: TaskCard) {
+    val back = if (card.anySession) TasksColors.NeutralChip else TasksColors.SessionChip
+    val fore = if (card.anySession) TasksColors.NeutralChipText else TasksColors.SessionChipText
+    Row(Modifier.background(back, RoundedCornerShape(7.dp)).padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (!card.anySession) Icon(Icons.Default.DesktopWindows, null, Modifier.size(13.dp), tint = fore)
+        Text(card.sessionLabel, color = fore, fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 /** The session card style; the header keeps its height, so its icons never move the text. */
@@ -217,25 +273,37 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
     Card(onClick = onOpen, shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = TasksColors.Card),
         border = if (card.highlighted) BorderStroke(1.5.dp, TasksColors.Accent) else null) {
         Column(Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, bottom = 12.dp)) {
-            Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Icon(stageIcon(card.tab), null, Modifier.size(16.dp), tint = TasksColors.Muted)
-                Text(card.id, style = MaterialTheme.typography.labelMedium, color = TasksColors.Muted, maxLines = 1)
-                Text(card.sessionLabel, Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    color = if (card.highlighted) TasksColors.Accent else TasksColors.Muted)
+            Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TaskGlyph(card)
+                Text(card.id, color = TasksColors.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+                Row(Modifier.weight(1f)) { SessionLabel(card) }
                 card.actions.forEach { state ->
                     // A disabled action still answers a tap with its reason.
                     IconButton(onClick = { onAction(state) }, modifier = Modifier.size(40.dp).semantics {
                         if (!state.enabled) stateDescription = "Unavailable: ${state.reason}"
                     }) {
-                        Icon(actionIcon(state.action), state.action.label, Modifier.size(20.dp),
-                            tint = if (state.enabled) MaterialTheme.colorScheme.onSurface else TasksColors.Muted.copy(alpha = .45f))
+                        Icon(actionIcon(state.action), state.action.label, Modifier.size(22.dp),
+                            tint = if (!state.enabled) TasksColors.Muted.copy(alpha = .4f) else if (state.main) TasksColors.Accent else TasksColors.Muted)
                     }
                 }
             }
-            badge?.invoke()
-            Text(card.text, Modifier.padding(end = 10.dp), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
-            if (card.note.isNotBlank()) Text(card.note, Modifier.padding(top = 6.dp, end = 10.dp), maxLines = 3, overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodySmall, color = TasksColors.Muted)
+            val quiet = card.tab == TaskTab.BACKLOG || card.tab == TaskTab.DONE
+            Text(card.text, Modifier.padding(end = 10.dp), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium,
+                color = if (quiet) TasksColors.Muted else MaterialTheme.colorScheme.onSurface)
+            if (badge != null) Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                badge()
+                Text(TasksPresentation.age(System.currentTimeMillis() - card.stageAt), fontSize = 12.sp, color = TasksColors.Muted)
+            }
+            if (card.filedBy.isNotBlank()) Text("filed by ${card.filedBy}", Modifier.padding(top = 6.dp), fontSize = 12.sp, color = TasksColors.Purple)
+            if (card.note.isNotBlank()) Row(Modifier.padding(top = 6.dp, end = 10.dp).height(IntrinsicSize.Min)) {
+                Box(Modifier.width(2.dp).fillMaxHeight().background(stageColor(card.tab)))
+                Text(buildAnnotatedString {
+                    if (card.tab == TaskTab.REVIEW && !card.note.startsWith("Cancelled")) {
+                        withStyle(SpanStyle(color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium)) { append("${card.sessionLabel} reported: ") }
+                    }
+                    append(card.note)
+                }, Modifier.padding(start = 8.dp), maxLines = 3, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, lineHeight = 16.sp, color = TasksColors.Muted)
+            }
         }
     }
 }
@@ -255,8 +323,8 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             Text(if (model.doneTotal > 0) "Nothing done in the last 7 days." else "Nothing done.", Modifier.padding(8.dp), color = TasksColors.Muted)
         }
         items(rows, key = { it.uuid }) { row ->
-            val card = TaskCard(row.uuid, row.id, row.text, TaskTab.DONE, row.session?.session ?: "any session", false, "",
-                listOf(ActionState(TaskAction.BACK_TO_TODO, !model.taskBusy, "Another task action is running")))
+            val card = TaskCard(row.uuid, row.id, row.text, TaskTab.DONE, row.session?.session?.let(TasksPresentation::shortName) ?: "any session", false, "",
+                listOf(ActionState(TaskAction.BACK_TO_TODO, !model.taskBusy, "Another task action is running", main = true)), anySession = row.session == null)
             TaskCardView(card, onOpen = { model.openDoneTask(row, onOpen) }, onAction = { state ->
                 if (!state.enabled) model.taskNotice = state.reason
                 else model.openDoneTask(row) { task -> model.taskAction(task, TaskAction.BACK_TO_TODO) }
@@ -315,7 +383,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             }
             if (editable) OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth(), label = { Text("Prompt") }, minLines = 3, maxLines = 12)
             else SelectionContainer { Text(task.text, style = MaterialTheme.typography.bodyMedium) }
-            val sessionLabel = (target as? TaskTarget.Session)?.session?.session ?: "Any session"
+            val sessionLabel = (target as? TaskTarget.Session)?.session?.session?.let(TasksPresentation::shortName) ?: "Any session"
             if (editable) OutlinedButton(onClick = { choosing = true }, Modifier.fillMaxWidth()) {
                 Text("Session: $sessionLabel", Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Icon(Icons.Default.ArrowDropDown, null)
@@ -363,7 +431,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             ListItem(headlineContent = { Text("Any session") }, modifier = Modifier.clickable { onPick(TaskTarget.AnySession) },
                 colors = ListItemDefaults.colors(containerColor = TasksColors.Sheet))
             model.taskChips(key).filter { it.session.machineId.isNotBlank() }.forEach { chip ->
-                ListItem(headlineContent = { Text(chip.session.name) }, leadingContent = { StatusDot(chip.dot) },
+                ListItem(headlineContent = { Text(TasksPresentation.shortName(chip.session.name)) }, leadingContent = { StatusDot(chip.dot) },
                     modifier = Modifier.clickable { onPick(TaskTarget.Session(SessionRef(chip.session.machineId, chip.session.name))) },
                     colors = ListItemDefaults.colors(containerColor = TasksColors.Sheet))
             }
@@ -384,7 +452,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                             fontWeight = FontWeight.SemiBold, color = TasksColors.Muted)
                     }
                     items(chips, key = { "session:${project.key}:${it.session.computerId}:${it.session.name}" }) { chip ->
-                        ListItem(headlineContent = { Text(chip.session.name) }, leadingContent = { StatusDot(chip.dot) },
+                        ListItem(headlineContent = { Text(TasksPresentation.shortName(chip.session.name)) }, leadingContent = { StatusDot(chip.dot) },
                             modifier = Modifier.clickable { model.chooseTaskSession(project.key, chip.session); onDismiss() },
                             colors = ListItemDefaults.colors(containerColor = TasksColors.Sheet))
                     }

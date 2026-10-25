@@ -1,6 +1,7 @@
 package app.zerus.mobile
 
 import app.zerus.mobile.replica.SessionRef
+import app.zerus.mobile.replica.TaskActor
 import app.zerus.mobile.replica.TaskInfo
 import app.zerus.mobile.replica.TaskStage
 import app.zerus.mobile.replica.TaskTarget
@@ -14,11 +15,15 @@ enum class TaskAction(val label: String) {
     CANCEL("Cancel"), BACK_TO_TODO("Back to To do"), ACCEPT("Accept")
 }
 
-data class ActionState(val action: TaskAction, val enabled: Boolean, val reason: String = "")
+/** `main`: the stage's main action, the last one. */
+data class ActionState(val action: TaskAction, val enabled: Boolean, val reason: String = "", val main: Boolean = false)
 
-/** One card: `note` is the agent's report or the cancellation, In review only. */
+/** One card: `note` is the agent's report or the cancellation, In review only; `queue` is the
+ *  task's place in the project's To do, 0 elsewhere; `filedBy` names the agent that filed a To do
+ *  or Backlog task. */
 data class TaskCard(val uuid: String, val id: String, val text: String, val tab: TaskTab, val sessionLabel: String,
-                    val highlighted: Boolean, val note: String, val actions: List<ActionState>)
+                    val highlighted: Boolean, val note: String, val actions: List<ActionState>,
+                    val anySession: Boolean = false, val queue: Int = 0, val filedBy: String = "", val stageAt: Long = 0)
 
 /** The session Tasks is for: it receives new tasks and Any session tasks are sent to it. */
 data class ChosenSession(val name: String, val computerId: String, val machineId: String)
@@ -72,12 +77,32 @@ object TasksPresentation {
 
     fun defaultTab(counts: Map<TaskTab, Int>) = if ((counts[TaskTab.REVIEW] ?: 0) > 0) TaskTab.REVIEW else TaskTab.TODO
 
-    fun sessionLabel(task: TaskInfo): String {
-        val target = (task.target as? TaskTarget.Session)?.session?.session
-        return when (task.stage) {
-            TaskStage.TODO, TaskStage.BACKLOG -> target ?: "any session"
-            else -> task.session?.session ?: target ?: "any session"
+    /** How long a task has been in its stage, as the desktop row says it. */
+    fun age(ms: Long): String {
+        val minutes = maxOf(0L, ms / 60_000)
+        return when {
+            minutes < 60 -> "$minutes min"
+            minutes < 24 * 60 -> "${minutes / 60} h"
+            else -> "${minutes / (24 * 60)} d"
         }
+    }
+
+    /** A session as the session list names it: its name after the agent and the project. */
+    fun shortName(session: String): String {
+        val parts = session.split('/')
+        return parts.drop(2).joinToString("/").ifBlank { parts.getOrNull(1).orEmpty().ifBlank { session } }
+    }
+
+    private fun anySession(task: TaskInfo) = task.target is TaskTarget.AnySession && task.stage in listOf(TaskStage.TODO, TaskStage.BACKLOG)
+
+    /** The session a task is pinned to or ran in; an Any session task names the chosen session it goes to now. */
+    fun sessionLabel(task: TaskInfo, chosen: ChosenSession? = null): String {
+        val target = (task.target as? TaskTarget.Session)?.session?.session
+        val name = when (task.stage) {
+            TaskStage.TODO, TaskStage.BACKLOG -> target
+            else -> task.session?.session ?: target
+        } ?: return if (chosen != null && anySession(task)) "any · now ${shortName(chosen.name)}" else "any session"
+        return shortName(name)
     }
 
     fun note(task: TaskInfo): String = when {
@@ -89,19 +114,26 @@ object TasksPresentation {
     fun cards(tasks: List<TaskInfo>, tab: TaskTab, chosen: ChosenSession?, onlyThisSession: Boolean,
               send: (TaskInfo) -> RouteState, cancel: (TaskInfo) -> RouteState): List<TaskCard> =
         tasks.filter { tab(it.stage) == tab && visible(it, chosen, onlyThisSession) }.map { task ->
-            val states = actions(tab).map { action ->
+            val stageActions = actions(tab)
+            val states = stageActions.map { action ->
                 val route = when (action) {
                     TaskAction.SEND -> send(task)
                     TaskAction.CANCEL -> cancel(task)
                     else -> null
                 }
+                val main = action == stageActions.last()
                 when {
-                    !task.writable -> ActionState(action, false, "Update Zerus to change this task")
-                    route is RouteState.Blocked -> ActionState(action, false, route.reason)
-                    else -> ActionState(action, true)
+                    !task.writable -> ActionState(action, false, "Update Zerus to change this task", main)
+                    route is RouteState.Blocked -> ActionState(action, false, route.reason, main)
+                    else -> ActionState(action, true, main = main)
                 }
             }
-            TaskCard(task.uuid, task.id, task.text, tab, sessionLabel(task), highlighted(task, chosen), note(task), states)
+            // To do keeps its project-wide numbers whatever the filter hides.
+            val queue = if (task.stage == TaskStage.TODO) tasks.filter { it.stage == TaskStage.TODO }.indexOf(task) + 1 else 0
+            val filer = (task.author as? TaskActor.Agent)?.session?.session
+                ?.takeIf { task.stage in listOf(TaskStage.TODO, TaskStage.BACKLOG) }?.let(::shortName).orEmpty()
+            TaskCard(task.uuid, task.id, task.text, tab, sessionLabel(task, chosen), highlighted(task, chosen), note(task), states,
+                anySession(task), queue, filer, task.stageAt)
         }
 
     /** The computer of `ref` among this connection's machines. */

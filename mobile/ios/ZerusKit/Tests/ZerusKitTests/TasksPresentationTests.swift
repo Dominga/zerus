@@ -12,10 +12,10 @@ final class TasksPresentationTests: XCTestCase {
     private var serial = 0
 
     private func task(_ stage: TaskStage, _ target: TaskTarget = .anySession, session: SessionRef? = nil,
-                      summary: String = "", cancelledAt: Int64? = nil, reason: String = "") -> TaskInfo {
+                      summary: String = "", cancelledAt: Int64? = nil, reason: String = "", author: TaskActor = .person) -> TaskInfo {
         serial += 1
         return TaskInfo(uuid: String(format: "0b9d6c55-2f5e-4c39-9a51-0d6f3c2a7e%02d", serial), id: String(format: "T-a1b2%02d", serial),
-                        project: "project-1", schema: 1, writable: true, createdAt: 1, stageAt: 1, author: .person, stage: stage,
+                        project: "project-1", schema: 1, writable: true, createdAt: 1, stageAt: 1, author: author, stage: stage,
                         target: target, rank: "V", session: session, summary: summary, cancelledAt: cancelledAt,
                         cancelReason: reason, text: "Task \(serial)", log: [])
     }
@@ -74,9 +74,13 @@ final class TasksPresentationTests: XCTestCase {
         let cancelled = task(.review, session: SessionRef(machine: "node-1", session: "codex/api"), summary: "Started",
                              cancelledAt: 5, reason: "Wrong approach")
         let all = [any, reported, cancelled]
-        XCTAssertEqual(cards(all, .todo).map(\.sessionLabel), ["any session"])
+        // Sessions are named as the session list names them; an Any session task names where it goes now.
+        let todo = cards(all, .todo)
+        XCTAssertEqual(todo.map(\.sessionLabel), ["any · now api"])
+        XCTAssertEqual(todo.map(\.anySession), [true])
         let review = cards(all, .review)
-        XCTAssertEqual(review.map(\.sessionLabel), ["codex/api", "codex/api"])
+        XCTAssertEqual(review.map(\.sessionLabel), ["api", "api"])
+        XCTAssertEqual(review.map(\.anySession), [false, false])
         XCTAssertEqual(review.map(\.note), ["Token bucket; 6 tests.", "Cancelled: Wrong approach"])
     }
 
@@ -138,6 +142,29 @@ final class TasksPresentationTests: XCTestCase {
         let active = task(.active, session: SessionRef(machine: "", session: "codex/old"))
         XCTAssertEqual(TasksPresentation.cancelRoute(active, machines: [old, here], operations: { _ in self.exchange }),
                        .ready(SendRoute(computerId: "computer-1", session: "codex/old", direct: false)))
+    }
+
+    func testASessionsShortNameIsTheOneTheSessionListShows() {
+        XCTAssertEqual(["claude/orchard/api", "codex/api", "claude/orchard/Night shift", "a/b/c/d", "sh"].map(TasksPresentation.shortName),
+                       ["api", "api", "Night shift", "c/d", "sh"])
+    }
+
+    func testCardsNumberTheQueueMarkTheMainActionAndNameWhoFiledThem() {
+        let docs = TaskActor.agent(session: SessionRef(machine: "node-1", session: "claude/orchard/docs"))
+        let all = [task(.todo, pinned("codex/web")), task(.todo, author: docs), task(.backlog, author: docs)]
+        let todo = cards(all, .todo)
+        XCTAssertEqual(todo.map(\.queue), [1, 2])
+        XCTAssertEqual(todo.map(\.filedBy), ["", "docs"])
+        XCTAssertEqual(todo.first?.actions.map(\.main), [false, false, false, true])
+        // Only this session hides the other session's task; the queue keeps its project-wide numbers.
+        XCTAssertEqual(cards(all, .todo, only: true).map(\.queue), [2])
+        let backlog = cards(all, .backlog)
+        XCTAssertEqual(backlog.map(\.queue), [0])
+        XCTAssertEqual(backlog.map(\.filedBy), ["docs"])
+    }
+
+    func testAnAgeReadsInMinutesHoursThenDays() {
+        XCTAssertEqual(([0, 13 * 60_000, 3 * 3_600_000, 49 * 3_600_000] as [Int64]).map(TasksPresentation.age), ["0 min", "13 min", "3 h", "2 d"])
     }
 
     func testChipsShowEachSessionsStatus() {

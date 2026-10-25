@@ -34,18 +34,23 @@ public enum TaskAction: Hashable, Sendable {
     }
 }
 
+/// `main`: the stage's main action, the last one.
 public struct ActionState: Hashable, Sendable {
     public let action: TaskAction
     public let enabled: Bool
     public let reason: String
-    public init(_ action: TaskAction, enabled: Bool, reason: String = "") {
+    public let main: Bool
+    public init(_ action: TaskAction, enabled: Bool, reason: String = "", main: Bool = false) {
         self.action = action
         self.enabled = enabled
         self.reason = reason
+        self.main = main
     }
 }
 
-/// One card: `note` is the agent's report or the cancellation, In review only.
+/// One card: `note` is the agent's report or the cancellation, In review only; `queue` is the
+/// task's place in the project's To do, 0 elsewhere; `filedBy` names the agent that filed a To do
+/// or Backlog task.
 public struct TaskCard: Hashable, Sendable {
     public let uuid: String
     public let id: String
@@ -55,8 +60,12 @@ public struct TaskCard: Hashable, Sendable {
     public let highlighted: Bool
     public let note: String
     public let actions: [ActionState]
+    public let anySession: Bool
+    public let queue: Int
+    public let filedBy: String
+    public let stageAt: Int64
     public init(uuid: String, id: String, text: String, tab: TaskTab, sessionLabel: String, highlighted: Bool, note: String,
-                actions: [ActionState]) {
+                actions: [ActionState], anySession: Bool = false, queue: Int = 0, filedBy: String = "", stageAt: Int64 = 0) {
         self.uuid = uuid
         self.id = id
         self.text = text
@@ -64,6 +73,10 @@ public struct TaskCard: Hashable, Sendable {
         self.sessionLabel = sessionLabel
         self.highlighted = highlighted
         self.note = note
+        self.anySession = anySession
+        self.queue = queue
+        self.filedBy = filedBy
+        self.stageAt = stageAt
         self.actions = actions
     }
 }
@@ -158,12 +171,39 @@ public enum TasksPresentation {
 
     public static func defaultTab(_ counts: [TaskTab: Int]) -> TaskTab { (counts[.review] ?? 0) > 0 ? .review : .todo }
 
-    public static func sessionLabel(_ task: TaskInfo) -> String {
+    /// How long a task has been in its stage, as the desktop row says it.
+    public static func age(_ ms: Int64) -> String {
+        let minutes = max(0, ms / 60_000)
+        if minutes < 60 { return "\(minutes) min" }
+        if minutes < 24 * 60 { return "\(minutes / 60) h" }
+        return "\(minutes / (24 * 60)) d"
+    }
+
+    /// A session as the session list names it: its name after the agent and the project.
+    public static func shortName(_ session: String) -> String {
+        let parts = session.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        let tag = parts.dropFirst(2).joined(separator: "/")
+        if !tag.isEmpty { return tag }
+        return parts.count > 1 && !parts[1].isEmpty ? parts[1] : session
+    }
+
+    private static func anySession(_ task: TaskInfo) -> Bool {
+        if case .anySession = task.target { return [.todo, .backlog].contains(task.stage) }
+        return false
+    }
+
+    /// The session a task is pinned to or ran in; an Any session task names the chosen session it goes to now.
+    public static func sessionLabel(_ task: TaskInfo, chosen: ChosenSession? = nil) -> String {
         let target = pinned(task)?.session
-        switch task.stage {
-        case .todo, .backlog: return target ?? "any session"
-        default: return task.session?.session ?? target ?? "any session"
+        let name: String? = switch task.stage {
+        case .todo, .backlog: target
+        default: task.session?.session ?? target
         }
+        guard let name else {
+            if let chosen, anySession(task) { return "any · now \(shortName(chosen.name))" }
+            return "any session"
+        }
+        return shortName(name)
     }
 
     public static func note(_ task: TaskInfo) -> String {
@@ -174,19 +214,26 @@ public enum TasksPresentation {
 
     public static func cards(_ tasks: [TaskInfo], tab: TaskTab, chosen: ChosenSession?, onlyThisSession: Bool,
                              send: (TaskInfo) -> RouteState, cancel: (TaskInfo) -> RouteState) -> [TaskCard] {
-        tasks.filter { self.tab($0.stage) == tab && visible($0, chosen: chosen, onlyThisSession: onlyThisSession) }.map { task in
-            let states = actions(tab).map { action -> ActionState in
+        // To do keeps its project-wide numbers whatever the filter hides.
+        let queue = tasks.filter { $0.stage == .todo }.map(\.uuid)
+        return tasks.filter { self.tab($0.stage) == tab && visible($0, chosen: chosen, onlyThisSession: onlyThisSession) }.map { task in
+            let stageActions = actions(tab)
+            let states = stageActions.map { action -> ActionState in
+                let main = action == stageActions.last
                 let route: RouteState? = switch action {
                 case .send: send(task)
                 case .cancel: cancel(task)
                 default: nil
                 }
-                if !task.writable { return ActionState(action, enabled: false, reason: "Update Zerus to change this task") }
-                if case .blocked(let reason) = route { return ActionState(action, enabled: false, reason: reason) }
-                return ActionState(action, enabled: true)
+                if !task.writable { return ActionState(action, enabled: false, reason: "Update Zerus to change this task", main: main) }
+                if case .blocked(let reason) = route { return ActionState(action, enabled: false, reason: reason, main: main) }
+                return ActionState(action, enabled: true, main: main)
             }
-            return TaskCard(uuid: task.uuid, id: task.id, text: task.text, tab: tab, sessionLabel: sessionLabel(task),
-                            highlighted: highlighted(task, chosen: chosen), note: note(task), actions: states)
+            var filer = ""
+            if case .agent(let session) = task.author, [.todo, .backlog].contains(task.stage) { filer = shortName(session.session) }
+            return TaskCard(uuid: task.uuid, id: task.id, text: task.text, tab: tab, sessionLabel: sessionLabel(task, chosen: chosen),
+                            highlighted: highlighted(task, chosen: chosen), note: note(task), actions: states, anySession: anySession(task),
+                            queue: task.stage == .todo ? (queue.firstIndex(of: task.uuid) ?? -1) + 1 : 0, filedBy: filer, stageAt: task.stageAt)
         }
     }
 

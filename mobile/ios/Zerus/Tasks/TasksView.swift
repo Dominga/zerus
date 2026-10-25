@@ -8,6 +8,69 @@ enum TasksColors {
     static let notice = Color(hex: 0x2A3538)
     static let blocked = Color(hex: 0x2B3B3B)
     static let danger = Color(hex: 0xE06C75)
+    static let blue = Color(hex: 0x8EA9F4)
+    static let purple = Color(hex: 0xC098E6)
+    static let sessionChip = Color(hex: 0x274141)
+    static let sessionChipText = Color(hex: 0x9CD7C7)
+    static let neutralChip = Color(hex: 0x2B343E)
+    static let neutralChipText = Color(hex: 0xB6C2D0)
+}
+
+extension TaskTab {
+    /// A stage's colour, as on the desktop: amber In review, mint In progress, blue To do, muted Backlog, purple Done.
+    var color: Color {
+        switch self {
+        case .review: Theme.amber
+        case .active: Theme.mint
+        case .todo: TasksColors.blue
+        case .backlog: Theme.muted
+        case .done: TasksColors.purple
+        }
+    }
+}
+
+/// The stage circle: the queue number in To do, a check In review and in Done, a turning half ring In progress.
+struct TaskGlyph: View {
+    let card: TaskCard
+    @State private var turning = false
+
+    var body: some View {
+        let color = card.tab.color
+        ZStack {
+            Circle().stroke(color, lineWidth: 2)
+            switch card.tab {
+            case .active:
+                Circle().trim(from: 0, to: 0.5).stroke(color, lineWidth: 2).frame(width: 9, height: 9)
+                    .rotationEffect(.degrees(turning ? 225 : -135))
+                    .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: turning)
+                    .onAppear { turning = true }
+            case .todo:
+                if card.queue > 0 { Text("\(card.queue)").font(.system(size: 11, weight: .bold)).foregroundStyle(color) }
+            case .review, .done:
+                Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(color)
+            case .backlog:
+                EmptyView()
+            }
+        }
+        .frame(width: 22, height: 22)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The session a task is pinned to or ran in; an Any session task names where it goes now.
+struct TaskSessionLabel: View {
+    let card: TaskCard
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if !card.anySession { Image(systemName: "desktopcomputer").font(.system(size: 10)) }
+            Text(card.sessionLabel).font(.system(size: 11, weight: .medium)).lineLimit(1)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .foregroundStyle(card.anySession ? TasksColors.neutralChipText : TasksColors.sessionChipText)
+        .background(card.anySession ? TasksColors.neutralChip : TasksColors.sessionChip, in: RoundedRectangle(cornerRadius: 7))
+    }
 }
 
 extension TaskTab {
@@ -156,7 +219,7 @@ struct TasksView: View {
                     Button { tasks.chooseTaskSession(key, chip.session) } label: {
                         HStack(spacing: 6) {
                             StatusDot(dot: chip.dot)
-                            Text(chip.session.name).font(.caption.weight(.medium)).lineLimit(1)
+                            Text(TasksPresentation.shortName(chip.session.name)).font(.caption.weight(.medium)).lineLimit(1)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -270,30 +333,45 @@ struct TaskCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: card.tab.symbol).font(.caption).foregroundStyle(Theme.muted)
-                Text(card.id).font(.caption.weight(.medium)).foregroundStyle(Theme.muted).lineLimit(1)
-                Text(card.sessionLabel).font(.caption.weight(.medium)).lineLimit(1)
-                    .foregroundStyle(card.highlighted ? Theme.mint : Theme.muted)
+            HStack(spacing: 8) {
+                TaskGlyph(card: card)
+                Text(card.id).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.muted).lineLimit(1)
+                TaskSessionLabel(card: card)
                 Spacer(minLength: 0)
                 ForEach(card.actions, id: \.action) { state in
                     // A disabled action still answers a tap with its reason.
                     Button { onAction(state) } label: {
-                        Image(systemName: state.action.symbol).font(.system(size: 15, weight: .medium)).frame(width: 36, height: 36)
+                        Image(systemName: state.action.symbol).font(.system(size: 17, weight: .medium)).frame(width: 36, height: 36)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(state.enabled ? Theme.onSurface : Theme.muted.opacity(0.45))
+                    .foregroundStyle(!state.enabled ? Theme.muted.opacity(0.4) : state.main ? Theme.mint : Theme.muted)
                     .accessibilityLabel(state.action.label)
                     .accessibilityHint(state.enabled ? "" : "Unavailable: \(state.reason)")
                 }
             }
             .frame(height: 44)
-            if let badge { SessionStatusBadge(session: badge, online: SessionFilters.online(badge, app.machines)).padding(.bottom, 4) }
-            Text(card.text).font(.subheadline).foregroundStyle(Theme.onSurface).lineLimit(2)
+            let quiet = card.tab == .backlog || card.tab == .done
+            Text(card.text).font(.subheadline).foregroundStyle(quiet ? Theme.muted : Theme.onSurface).lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.trailing, 10)
+            if let badge {
+                HStack(spacing: 8) {
+                    SessionStatusBadge(session: badge, online: SessionFilters.online(badge, app.machines))
+                    Text(TasksPresentation.age(Int64(Date().timeIntervalSince1970 * 1000) - card.stageAt)).font(.caption).foregroundStyle(Theme.muted)
+                }
+                .padding(.top, 6)
+            }
+            if !card.filedBy.isEmpty {
+                Text("filed by \(card.filedBy)").font(.caption).foregroundStyle(TasksColors.purple).padding(.top, 6)
+            }
             if !card.note.isEmpty {
-                Text(card.note).font(.footnote).foregroundStyle(Theme.muted).lineLimit(3).padding(.top, 6).padding(.trailing, 10)
+                let reported = card.tab == .review && !card.note.hasPrefix("Cancelled")
+                (Text(reported ? "\(card.sessionLabel) reported: " : "").foregroundStyle(Theme.onSurface).fontWeight(.medium)
+                    + Text(card.note).foregroundStyle(Theme.muted))
+                    .font(.caption).lineLimit(3)
+                    .padding(.leading, 8)
+                    .overlay(alignment: .leading) { Rectangle().fill(card.tab.color).frame(width: 2) }
+                    .padding(.top, 6).padding(.trailing, 10)
             }
         }
         .padding(.leading, 14)
@@ -332,9 +410,11 @@ private struct DoneList: View {
                         .foregroundStyle(Theme.muted).frame(maxWidth: .infinity, alignment: .leading).padding(8)
                 }
                 ForEach(rows, id: \.uuid) { row in
-                    let card = TaskCard(uuid: row.uuid, id: row.id, text: row.text, tab: .done, sessionLabel: row.session?.session ?? "any session",
+                    let card = TaskCard(uuid: row.uuid, id: row.id, text: row.text, tab: .done,
+                                        sessionLabel: row.session.map { TasksPresentation.shortName($0.session) } ?? "any session",
                                         highlighted: false, note: "",
-                                        actions: [ActionState(.backToTodo, enabled: !tasks.taskBusy, reason: "Another task action is running")])
+                                        actions: [ActionState(.backToTodo, enabled: !tasks.taskBusy, reason: "Another task action is running", main: true)],
+                                        anySession: row.session == nil)
                     TaskCardView(card: card, badge: nil, onOpen: { tasks.openDoneTask(row, opened: onOpen) }) { state in
                         if !state.enabled { tasks.taskNotice = state.reason }
                         else { tasks.openDoneTask(row) { tasks.taskAction($0, .backToTodo) } }

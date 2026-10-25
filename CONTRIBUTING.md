@@ -220,7 +220,11 @@ source collaboration. An ignored local database still becomes remote data when
 
 Quick checks run Gitleaks with its default rules on the working tree and all Git
 history of every push and pull request; findings are redacted from the public log
-and `gitleaks:allow` comments do not hide them. For release preparation, also run
+and `gitleaks:allow` comments do not hide them. `.gitleaksignore` exempts only two
+reviewed immutable commit/path/rule/line fingerprints where the generic API-key
+rule crosses adjacent synthetic session-name literals. The workflow security test
+pins that exact list; new commits and all other findings still fail. Do not add
+broad path, rule or value exclusions. For release preparation, also run
 Gitleaks on the candidate source archive and Beads data, and review binary assets
 and dependency notices. The local privacy script catches common accidental machine
 paths and keys; it is not a complete secret scanner.

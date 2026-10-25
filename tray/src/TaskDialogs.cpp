@@ -1,4 +1,5 @@
 #include "TaskDialogs.h"
+#include "MonospaceFont.h"
 #include "ScopeFilterWidgets.h"
 #include "SessionStatusBadge.h"
 #include "TasksView.h"
@@ -6,7 +7,6 @@
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QDateTime>
-#include <QFontDatabase>
 #include <QHash>
 #include <QIcon>
 #include <QPainter>
@@ -254,8 +254,8 @@ TaskSettingsDialog::TaskSettingsDialog(const QString &projectName, const QJsonOb
     setObjectName("taskSettingsDialog"); setWindowTitle(tr("Project tasks · %1").arg(projectName)); resize(620, 560);
     auto *layout = new QVBoxLayout(this); layout->setSpacing(8);
     layout->addWidget(heading(tr("Service prompts"), "taskServicePrompts"));
-    // The templates are code: a fixed-pitch font.
-    QFont code = QFontDatabase::systemFont(QFontDatabase::FixedFont); code.setPixelSize(12);
+    // The templates are code: a fixed-pitch font, as the session list and Activity name it.
+    QFont code(monospaceFamily()); code.setStyleHint(QFont::TypeWriter); code.setPixelSize(12);
     layout->addWidget(section(tr("Task (Send now)")));
     m_task = new QPlainTextEdit(settings.value("task_template").toString()); m_task->setObjectName("taskTemplate"); m_task->setFont(code);
     layout->addWidget(m_task, 1);

@@ -1,4 +1,5 @@
 #include "TaskRow.h"
+#include "MonospaceFont.h"
 #include "SessionStatusBadge.h"
 #include "TaskDrag.h"
 #include "WorkspaceIcons.h"
@@ -158,7 +159,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         return state.mine ? QStringLiteral("<span style='color:%1;font-weight:600'>%2</span>").arg(colors.accent.name(), text.toHtmlEscaped())
                           : text.toHtmlEscaped();
     };
-    QStringList meta{QStringLiteral("<span style='font-family:monospace;font-size:10.5px'>%1</span>").arg(task.id.toHtmlEscaped())};
+    QStringList meta{QStringLiteral("<span style=\"font-family:'%1';font-size:10.5px\">%2</span>").arg(monospaceFamily(), task.id.toHtmlEscaped())};
     if (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog")) {
         meta << (task.targetSession.isEmpty()
             ? QStringLiteral("→ any session") + (state.anyNow.isEmpty() ? QString() : QStringLiteral(" · now ") + state.anyNow.toHtmlEscaped())

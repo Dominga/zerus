@@ -16,6 +16,8 @@ use std::{
 };
 const INPUT_BYTES: usize = 128 * 1024;
 const TEXT_BYTES: usize = 16 * 1024;
+const RECORD_BYTES: usize = 96 * 1024;
+const EVENT_BYTES: usize = 2 * TEXT_BYTES + 4096;
 const LIST_LIMIT: i64 = 256;
 const INBOX_LIMIT: i64 = 128;
 const MODES: &[&str] = &["chatgpt_chat", "chatgpt_work", "codex_chat"];
@@ -158,7 +160,7 @@ fn load(db: &Connection, session: &str) -> anyhow::Result<Value> {
         )
         .optional()?
         .context("External workstream is not registered on this computer")?;
-    ensure!(data.len() <= 64 * 1024, "External record exceeds bound");
+    ensure!(data.len() <= RECORD_BYTES, "External record exceeds bound");
     let value: Value = serde_json::from_str(&data)?;
     ensure!(
         value["schema_version"] == 1 && value["name"] == session,
@@ -175,7 +177,10 @@ fn load(db: &Connection, session: &str) -> anyhow::Result<Value> {
 }
 fn save(db: &Connection, record: &Value) -> anyhow::Result<()> {
     let encoded = record.to_string();
-    ensure!(encoded.len() <= 64 * 1024, "External record exceeds bound");
+    ensure!(
+        encoded.len() <= RECORD_BYTES,
+        "External record exceeds bound"
+    );
     db.execute("INSERT INTO workstreams(id,name,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",params![record["id"].as_str(),record["name"].as_str(),encoded])?;
     Ok(())
 }
@@ -192,6 +197,10 @@ fn event(
     );
     let row = json!({"at":now(),"type":kind,"detail":detail,"source":"external_checkpoint","message_id":request,
         "reply_id":if kind=="AgentMessage"{json!(request)}else{Value::Null},"run_id":record["run_id"],"conversation_id":record["conversation_id"],"external_report":true});
+    ensure!(
+        row.to_string().len() <= EVENT_BYTES,
+        "Encoded external event exceeds its bound"
+    );
     db.execute(
         "INSERT INTO events(stream,run,payload) VALUES(?,?,?)",
         params![
@@ -290,15 +299,11 @@ fn history(db: &Connection, record: &Value, v: &Value) -> anyhow::Result<Value> 
     let mut rows = Vec::new();
     let mut bytes = 0;
     for (seq, payload) in raw.into_iter().take(limit as usize) {
-        ensure!(
-            payload.len() <= TEXT_BYTES + 4096,
-            "Invalid external event size"
-        );
+        ensure!(payload.len() <= EVENT_BYTES, "Invalid external event size");
+        if bytes + payload.len() > 2 * 1024 * 1024 {
+            break;
+        }
         bytes += payload.len();
-        ensure!(
-            bytes <= 2 * 1024 * 1024,
-            "External history response exceeds bound"
-        );
         let mut row: Value = serde_json::from_str(&payload)?;
         row["seq"] = json!(seq);
         row["incoming_seq"] = json!(seq);
@@ -718,7 +723,7 @@ fn inbox(db: &Connection, v: &Value) -> anyhow::Result<Value> {
     let data: Vec<Value> = rows
         .into_iter()
         .map(|(seq, status, data)| {
-            ensure!(data.len() <= TEXT_BYTES + 4096, "Inbox row exceeds bound");
+            ensure!(data.len() <= EVENT_BYTES, "Inbox row exceeds bound");
             let mut v: Value = serde_json::from_str(&data)?;
             v["status"] = json!(status);
             v["sequence"] = json!(seq);
@@ -916,6 +921,41 @@ mod tests {
         older["before"] = json!("00000000-0000-4000-8000-000000000001:1");
         assert!(history(&db, &record, &older).is_err());
     }
+    #[test]
+    fn escaped_maximum_text_remains_readable_and_pages_by_encoded_budget() {
+        let mut db = store();
+        let mut input = request();
+        input["summary"] = json!("\\".repeat(TEXT_BYTES));
+        input["next_steps"] = json!("\n".repeat(TEXT_BYTES));
+        let r = operation(&mut db, "register", &input).unwrap();
+        for _ in 0..70 {
+            let mut v = scope(&r);
+            v["summary"] = json!("\\".repeat(TEXT_BYTES));
+            v["next_steps"] = json!("next");
+            v["state"] = json!("ready");
+            operation(&mut db, "checkpoint", &v).unwrap();
+        }
+        let record = load(&db, "external/project/chat").unwrap();
+        let query = json!({"expected_run_id":r["run_id"],"expected_conversation_id":r["conversation_id"],"limit":100});
+        let page = history(&db, &record, &query).unwrap();
+        assert!(!page["events"].as_array().unwrap().is_empty());
+        assert!(page["events"].as_array().unwrap().len() < 70);
+        assert_eq!(page["has_more_before"], true);
+        assert!(page.to_string().len() < 2 * 1024 * 1024 + 65536);
+        let mut send = scope(&r);
+        send["text"] = json!("\\".repeat(TEXT_BYTES));
+        operation(&mut db, "send", &send).unwrap();
+        let mut read = scope(&r);
+        read.as_object_mut().unwrap().remove("request_id");
+        assert_eq!(
+            inbox(&db, &read).unwrap()["messages"][0]["text"]
+                .as_str()
+                .unwrap()
+                .len(),
+            TEXT_BYTES
+        );
+    }
+
     #[test]
     fn invalid_writes_leave_no_inbox_record() {
         let mut db = store();

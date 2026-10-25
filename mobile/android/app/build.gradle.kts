@@ -1,3 +1,4 @@
+import java.time.LocalDate
 import java.util.Properties
 import java.io.File
 
@@ -37,6 +38,15 @@ if (firebaseEnabled) {
 // Explicit side-by-side build: it does not replace the upstream application.
 val forkBuild = providers.gradleProperty("zerusFork").orNull == "true"
 val forkVersion = rootProject.file("../../FORK_VERSION").readText().trim()
+val forkVersionCode = if(forkBuild) {
+    val pieces = Regex("""(\d{4})\.(\d{1,2})\.(\d{1,2})-([1-9]\d*)""").matchEntire(forkVersion)
+        ?: error("Invalid FORK_VERSION")
+    val date=LocalDate.of(pieces.groupValues[1].toInt(),pieces.groupValues[2].toInt(),pieces.groupValues[3].toInt())
+    val iteration=pieces.groupValues[4].toInt()
+    require(iteration in 1..99) { "Android fork date iteration must be 1..99 or use an explicit reviewed scheme" }
+    (date.year.toLong()*1000000+date.monthValue*10000+date.dayOfMonth*100+iteration).also { require(it<=Int.MAX_VALUE) }.toInt()
+} else 1
+
 android {
     namespace = "app.zerus.mobile"
     compileSdk = 36
@@ -50,7 +60,7 @@ android {
         buildConfigField("boolean", "FORK_BUILD", forkBuild.toString())
         buildConfigField("String", "DEFAULT_RELAY_URL", if(forkBuild) "\"\"" else "\"https://relay.zerus.dev\"")
         manifestPlaceholders["appLabel"] = if(forkBuild) "Zerus Fork" else "Zerus"
-        if(forkBuild) { versionName = "$forkVersion-fork"; versionCode = updateVersionCode ?: 2026102601 }
+        if(forkBuild) { versionName = "$forkVersion-fork"; versionCode = updateVersionCode ?: forkVersionCode }
 
         testInstrumentationRunner = providers.gradleProperty("zerusInstrumentationRunner").orNull ?: "androidx.test.runner.AndroidJUnitRunner"
     }

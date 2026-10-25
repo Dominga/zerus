@@ -95,6 +95,14 @@ class ExternalWorkstreams(unittest.TestCase):
         try:db.execute('pragma user_version=99');db.commit()
         finally:db.close()
         before=database.read_bytes();self.hgs('inspect',row['name'],ok=False);self.assertEqual(database.read_bytes(),before)
+    def test_escaped_maximum_text_is_still_inspectable(self):
+        row=self.register();text='\\'*16384
+        self.external('checkpoint',row,summary=text,next_steps='\n'*16384,state='ready')
+        detail=self.hgs('inspect',row['name']);self.assertEqual(detail['checkpoint']['summary'],text)
+        self.hgs('send',row['name'],'--json',payload=self.scope(row,text=text))
+        read={k:v for k,v in self.scope(row,name=row['name']).items() if k!='request_id'}
+        self.assertEqual(self.hgs('external','inbox','--json',payload=read)['messages'][0]['text'],text)
+
     def test_bad_scope_attachments_and_oversized_text_preserve_inbox(self):
         row=self.register()
         for extra in [{'text':'x'*17000},{'text':'hello','attachments':[{'path':'private'}]},{'text':'hello','expected_run_id':str(uuid.uuid4())}]:

@@ -512,9 +512,24 @@ fn same_definition(before: &Unit, after: &Unit) -> Result<()> {
                 | "InvocationID"
                 | "Result"
                 | "ExecMainStatus"
-        ) && after.get(k) != Some(v)
-        {
-            return Err(refused());
+        ) {
+            let unchanged = if k == "Requires" {
+                // systemd may render the same dependencies in another order
+                // after reload. Membership must stay exact, including the
+                // ordinary application slice admitted by policy above.
+                after.get(k).is_some_and(|next| {
+                    v.split_whitespace()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        == next
+                            .split_whitespace()
+                            .collect::<std::collections::BTreeSet<_>>()
+                })
+            } else {
+                after.get(k) == Some(v)
+            };
+            if !unchanged {
+                return Err(refused());
+            }
         }
     }
     Ok(())
@@ -1348,5 +1363,25 @@ mod tests {
         same_definition(&old, &new).unwrap();
         new.insert("KillMode".into(), "mixed".into());
         assert!(same_definition(&old, &new).is_err());
+    }
+    #[test]
+    fn requires_readback_ignores_order_but_keeps_exact_membership() {
+        let mut before = safe();
+        before.insert("Slice".into(), "app.slice".into());
+        before.insert("Requires".into(), "basic.target app.slice".into());
+        let mut after = before.clone();
+        after.insert("Requires".into(), "app.slice basic.target".into());
+        same_definition(&before, &after).unwrap();
+        for value in [
+            "basic.target",
+            "app.slice",
+            "app.slice basic.target sysinit.target",
+        ] {
+            after.insert("Requires".into(), value.into());
+            assert!(same_definition(&before, &after).is_err(), "{value}");
+        }
+        after = before.clone();
+        after.insert("Slice".into(), "custom.slice".into());
+        assert!(same_definition(&before, &after).is_err());
     }
 }

@@ -44,6 +44,9 @@
 #include <atomic>
 #include <memory>
 #include <QTemporaryDir>
+#include <QLockFile>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QTextBrowser>
 #include <QTextDocument>
 #include <QTextTable>
@@ -340,6 +343,7 @@ private slots:
     void shiftRangeSurvivesFilteringReorderAndDeletedAnchor();
     void compactSessionRowsPersistAndExpandAllIncludesHidden();
     void sessionAttentionMenuPersistsWithoutSelection();
+    void launchLogDistinguishesASecondLaunch();
     void sessionAttentionMenuSurvivesRoutinePoll();
     void activityMarkReadKeepsReadingPosition_data();
     void activityMarkReadKeepsReadingPosition();
@@ -14024,4 +14028,57 @@ void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment()
     fixture.queue("q-match", "❯ Rename the release branch\n❯ " + reference + " (" + instruction + "\n  " + path + ") Check this");
     inspectPush(window, fixture);
     QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
+}
+
+// U3: the launch log separates the launches of one tray from the windows it
+// opens. A launch that finds the tray already running says so and stops; the
+// process that takes the single-instance lock says which lock it holds; and
+// only the tray that really starts writes "started". Two real launches of the
+// built program run here with a temporary home, lock and socket, and offscreen
+// so no desktop or tray is involved.
+void TestSessionsWindow::launchLogDistinguishesASecondLaunch()
+{
+#ifdef Q_OS_WIN
+    QTemporaryDir home, locks;
+    QVERIFY(home.isValid() && locks.isValid());
+    const QString app = QCoreApplication::applicationDirPath() + QStringLiteral("/../hgs-tray.exe");
+    if (!QFileInfo::exists(app)) QSKIP("hgs-tray.exe is not beside the tests; run the GUI build first");
+    const QString logPath = home.filePath(QStringLiteral(".local/state/hgs/zerus.log"));
+    const auto readLog = [&logPath] {
+        QFile file(logPath);
+        return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+    };
+    const auto launch = [&](const QString &lockDir) {
+        QProcess process;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("HGS_TRAY_HOME"), home.path());   // log and single-instance socket
+        env.insert(QStringLiteral("HGS_TRAY_LOCK_DIR"), lockDir);
+        env.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("offscreen"));
+        process.setProcessEnvironment(env);
+        process.start(app, {});
+        if (!process.waitForStarted(20000)) return -1;
+        if (!process.waitForFinished(60000)) { process.kill(); process.waitForFinished(5000); return -2; }
+        return process.exitCode();
+    };
+    // The lock is held by this test, as the running tray holds it: the launch
+    // must not become a second window.
+    QLockFile held(locks.filePath(QStringLiteral("hgs-tray.lock")));
+    QVERIFY(held.tryLock(0));
+    QCOMPARE(launch(locks.path()), 0);
+    auto log = readLog();
+    QVERIFY2(log.contains(QStringLiteral("Zerus launched")), qPrintable(log));
+    QVERIFY2(log.contains(QStringLiteral("Already running")), qPrintable(log));
+    QVERIFY2(!log.contains(QStringLiteral("Single instance")), qPrintable(log));
+    QVERIFY2(!log.contains(QStringLiteral("started")), qPrintable(log));
+    held.unlock();
+    // Nothing holds the lock now: this launch owns the instance. With no system
+    // tray in the test environment it stops before it becomes the window, so it
+    // reports the lock but must not report "started" either.
+    const int before = readLog().size();
+    QCOMPARE(launch(locks.path()), 4);
+    log = readLog().mid(before);
+    QVERIFY2(log.contains(QStringLiteral("Single instance")), qPrintable(log));
+    QVERIFY2(!log.contains(QStringLiteral("Already running")), qPrintable(log));
+    QVERIFY2(!log.contains(QStringLiteral("started")), qPrintable(log));
+#endif
 }

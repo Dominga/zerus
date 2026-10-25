@@ -14,6 +14,7 @@ private slots:
     void openMenuRetainsExactMembersAcrossCatalogUpdates();
     void duplicateCaptionsNameTheSpecificProfile();
     void missingGroupedBindingsKeepOneNamedChoice();
+    void openMenuKeepsPresentationAndBindingsAcrossIdentitySplit();
 private:
     static QJsonObject profile(const QString &host, const QString &id, const QString &identity, const QString &email) {
         return {{"host",host},{"machine",host.isEmpty()?QString("workstation"):host},{"id",id},{"provider","codex"},{"label","Work"},
@@ -105,6 +106,31 @@ void TestAccountFilter::missingGroupedBindingsKeepOneNamedChoice() {
     auto *menu=filter->button()->menu();menu->popup(host.mapToGlobal(QPoint(10,10)));QTRY_VERIFY(menu->isVisible());
     const auto choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),1);
     QVERIFY(choices.first()->text().contains("shared@example.test"));choices.first()->click();QVERIFY(filter->selection().isEmpty());
+}
+void TestAccountFilter::openMenuKeepsPresentationAndBindingsAcrossIdentitySplit() {
+    QWidget host;auto *layout=new QVBoxLayout(&host);auto *filter=new AccountFilter;
+    layout->addWidget(filter->button());layout->addWidget(filter);host.show();
+    SessionAccounts::Catalog catalog;
+    catalog.reset({profile({},"one","shared","shared@example.test"),profile("mac","other","shared","shared@example.test")});
+    filter->setAccounts(catalog.accounts());const auto members=catalog.accounts().first().bindings;
+    auto *menu=filter->button()->menu();menu->popup(host.mapToGlobal(QPoint(10,10)));QTRY_VERIFY(menu->isVisible());
+    auto *choice=menu->findChild<QCheckBox *>("accountFilterChoice");QVERIFY(choice);
+    const auto text=choice->text(), tooltip=choice->toolTip(), accessible=choice->accessibleName();
+    const auto snapshot=choice->property("bindings").toStringList();QCOMPARE(snapshot.size(),2);
+    catalog.reset({profile({},"one","identity-one","one@example.test"),profile("mac","other","identity-two","two@example.test")});
+    QCOMPARE(catalog.accounts().size(),2);filter->setAccounts(catalog.accounts());
+    QCOMPARE(menu->findChild<QCheckBox *>("accountFilterChoice"),choice);
+    QCOMPARE(choice->text(),text);QCOMPARE(choice->toolTip(),tooltip);QCOMPARE(choice->accessibleName(),accessible);
+    QCOMPARE(choice->property("bindings").toStringList(),snapshot);
+    choice->click();QCOMPARE(filter->selection(),members);QVERIFY(menu->isVisible());
+    menu->hide();menu->popup(host.mapToGlobal(QPoint(10,10)));QTRY_VERIFY(menu->isVisible());
+    const auto choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),2);
+    for(auto *current:choices) {
+        const auto binding=current->property("bindings").toStringList();QCOMPARE(binding.size(),1);
+        const auto profileId=QJsonDocument::fromJson(binding.first().toUtf8()).array()[3].toString();
+        QVERIFY(current->toolTip().contains(profileId=="one"?"one@example.test":"two@example.test"));
+        QVERIFY(current->isChecked());
+    }
 }
 QTEST_MAIN(TestAccountFilter)
 #include "test_accountfilter.moc"

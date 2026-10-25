@@ -34,8 +34,8 @@ public:
             const auto identity = group["usage"].toObject()["identity"].toObject();
             const auto email = identity["email"].toString(), organization = identity["organization"].toString();
             if (account.name.isEmpty()) account.name = QObject::tr("Unnamed account");
-            if (!email.isEmpty() && !account.name.contains(email, Qt::CaseInsensitive)) account.name += " · " + email;
-            if (!organization.isEmpty()) account.name += " · " + organization;
+            if (!email.isEmpty() && !account.name.contains(email, Qt::CaseInsensitive)) account.name += " (" + email + ")";
+            if (!organization.isEmpty()) account.name += " (" + organization + ")";
             for (const auto &memberValue : group["members"].toArray()) {
                 const auto member = memberValue.toObject();
                 const auto key = binding(member["host"].toString(), account.provider, member["id"].toString(), member["home"].toString());
@@ -72,7 +72,7 @@ public:
     }
     QString description(const QString &host, const SessionInfo &session) const {
         const auto key = binding(host, session); const auto account = m_accounts.value(m_groups.value(key));
-        return account.name.isEmpty() ? QObject::tr("Account not recorded") : account.name + " · " + IdentityBadges::providerName(account.provider);
+        return account.name.isEmpty() ? QObject::tr("Account not recorded") : account.name + " (" + IdentityBadges::providerName(account.provider) + ")";
     }
 private:
     QHash<QString, Account> m_accounts;

@@ -20,7 +20,7 @@ AccountFilter::AccountFilter(QWidget *parent) : QWidget(parent) {
     rebuildChips();
 }
 QString AccountFilter::caption(const SessionAccounts::Account &account) const {
-    QString text = account.provider.isEmpty() ? account.name : account.name + " · " + IdentityBadges::providerName(account.provider);
+    QString text = account.provider.isEmpty() ? account.name : account.name + " (" + IdentityBadges::providerName(account.provider) + ")";
     const auto rows = choices();
     if (std::any_of(rows.cbegin(), rows.cend(), [&account](const auto &other) {
         return other.id != account.id && other.name == account.name && other.provider == account.provider;
@@ -32,7 +32,7 @@ QString AccountFilter::caption(const SessionAccounts::Account &account) const {
             const auto host = fields[0].toString(), profile = fields[3].toString();
             profiles.append((host.isEmpty() ? tr("This computer") : host) + " / " + (profile.isEmpty() ? tr("Not recorded") : profile));
         }
-        profiles.sort(); text += " · " + profiles.join(", ");
+        profiles.sort(); text += " (" + profiles.join(", ") + ")";
     }
     return text;
 }
@@ -107,6 +107,7 @@ void AccountFilter::rebuildMenu() {
     for (const auto &account : choices()) {
         auto *check = new ScopeFilterWidgets::Choice(caption(account), m_dark); check->setObjectName("accountFilterChoice"); check->setProperty("account", account.id);
         check->setProperty("bindings", QStringList(account.bindings.cbegin(), account.bindings.cend()));
+        check->setProperty("caption", caption(account)); check->setProperty("machines", account.machines);
         check->setIcon(workspaceIcon(account.provider, IdentityBadges::providerColor(account.provider, m_dark))); rows->addWidget(check);
         connect(check, &QCheckBox::clicked, this, [this,account](bool checked) { toggle(account, checked); });
     }
@@ -120,18 +121,17 @@ void AccountFilter::updateMenu() {
     int total = 0; for (auto count : m_counts) total += count;
     if (auto *scope = m_menu->findChild<QLabel *>("accountFilterCountScope")) scope->setText(tr("%1 before account selection and search").arg(m_caption));
     if (auto *all = m_menu->findChild<QPushButton *>("allAccountFilters")) { all->setText(tr("All accounts (%1)").arg(total)); all->setChecked(m_selection.isEmpty()); }
-    const auto rows = choices();
     for (auto *check : m_menu->findChildren<QCheckBox *>("accountFilterChoice")) {
-        // Keep the open menu's bound choices stable until it is opened again.
+        // Keep presentation and actions bound to the same snapshot until reopen,
+        // including when a catalog refresh splits or merges account identities.
         const auto members = check->property("bindings").toStringList(); QSet<QString> bindings(members.cbegin(), members.cend());
-        const auto found = std::find_if(rows.cbegin(), rows.cend(), [&bindings](const auto &account) { return account.bindings.intersects(bindings); });
-        if (found == rows.cend()) continue;
+        const auto text = check->property("caption").toString();
         int count = 0; for (const auto &binding : bindings) count += m_counts.value(binding);
         const bool any = bindings.intersects(m_selection), all = (m_selection & bindings) == bindings;
         const QSignalBlocker blocker(check); check->setTristate(any && !all);
         check->setCheckState(all ? Qt::Checked : any ? Qt::PartiallyChecked : Qt::Unchecked);
-        check->setText(tr("%1 (%2)").arg(check->fontMetrics().elidedText(caption(*found), Qt::ElideMiddle, 360).replace('&', "&&")).arg(count));
-        check->setToolTip(caption(*found) + '\n' + found->machines.join(", ")); check->setProperty("sessionCount", count);
-        check->setAccessibleName(tr("%1, %2 sessions").arg(caption(*found)).arg(count));
+        check->setText(tr("%1 (%2)").arg(check->fontMetrics().elidedText(text, Qt::ElideMiddle, 360).replace('&', "&&")).arg(count));
+        check->setToolTip(text + '\n' + check->property("machines").toStringList().join(", ")); check->setProperty("sessionCount", count);
+        check->setAccessibleName(tr("%1, %2 sessions").arg(text).arg(count));
     }
 }

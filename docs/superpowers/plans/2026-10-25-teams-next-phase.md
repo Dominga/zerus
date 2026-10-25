@@ -163,6 +163,17 @@ answered; a denial cannot carry an explanation.
 - **C11. Not needed is not cancelled.** A conditional fix or retest can be
   closed as "not needed" with a reason; that satisfies hard dependencies
   without a fake Accepted, unlike a plain cancel.
+- **C12. Time budgets for background work (owner).** A member (or its
+  subagents) that starts a long background job - an install, a build, a full
+  test run - declares how long it should take: `hgs team expect --json
+  {request_id, team, label, minutes, red_minutes?}` (red defaults to twice the
+  estimate). Zerus ties the budget to the member's live Background job and
+  shows it on the member card and the task: normal until the estimate, amber
+  after it, red after the red time ("install: 25 min, expected 15 - check it").
+  At red the lead is told once, with the command and its last output lines,
+  so it checks whether the job hangs or died. A Background job without a
+  declared budget gets a default red time (the blocked timeout of #272, 30
+  min). Budgets end when the job ends; they never stop anything themselves.
 - **C6. Unblocking order.** When a member has several ready tasks, the
   dispatcher hands out first the one with the most dependants. Owner: yes, in
   Zerus's dispatcher, no model involved.

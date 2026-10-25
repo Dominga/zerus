@@ -44,6 +44,7 @@ inline QString connectorProgram(const QString &hgs={}) {
 class Panel : public QWidget {
 public:
     std::function<void(bool)> protectionChanged;
+    std::function<void()> connectionChanged;
     explicit Panel(const QString &hgs,QWidget *parent=nullptr)
         :Panel(connectorProgram(hgs),RelaySettings::configPath(),parent){}
     Panel(QString connector,QString configuration,QWidget *parent=nullptr)
@@ -281,9 +282,11 @@ private:
             }else{
                 controls(false);
                 if(action=="status"){
+                    const bool changed=snapshot.value("config_revision")!=result.value("config_revision");
                     snapshot=result;known=true;
                     if(recoveringEnrollment&&(snapshot.value("pending").isObject()||(snapshot.value("state")=="active"&&snapshot.value("config_revision").toString()!=recoveryRevision)))finishEnrollmentUi();
                     render();
+                    if(changed&&connectionChanged)connectionChanged();
                 }
                 else if(done)done(result);
             }

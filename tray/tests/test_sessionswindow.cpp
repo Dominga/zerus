@@ -92,6 +92,7 @@
 #include "AccountUsageStore.h"
 #include "MachinesPage.h"
 #include "WorkspaceColorDialog.h"
+#include "PhonePairing.h"
 #include "PopupMouse.h"
 #include "AccountsPage.h"
 #include "FakeCli.h"
@@ -200,6 +201,8 @@ class TestSessionsWindow : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void phonePairingDialogUsesWorkspaceTheme_data();
+    void phonePairingDialogUsesWorkspaceTheme();
     void nativeSettingsNavigationOnExplicitSpeechHost();
     void copySessionReferencePreservesSelectionAndDraft();
     void sessionIdentifiersRemainInDetailsAcrossNavigation();
@@ -727,6 +730,21 @@ void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside_data()
 {
     QTest::addColumn<QString>("theme");
     QTest::newRow("dark")<<QString("dark");QTest::newRow("light")<<QString("light");
+}
+void TestSessionsWindow::phonePairingDialogUsesWorkspaceTheme_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QString("dark"); QTest::newRow("light") << QString("light");
+}
+void TestSessionsWindow::phonePairingDialogUsesWorkspaceTheme()
+{
+    QFETCH(QString, theme); QSettings().setValue("workspace/theme", theme);
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show();
+    PhonePairing::Dialog dialog(program(), {}, 0, &window); dialog.show();
+    QTRY_COMPARE(dialog.palette().color(QPalette::Window), QColor(theme == "dark" ? "#161b21" : "#f5f7f9"));
+    auto *code = dialog.findChild<QPlainTextEdit *>("phonePairingCodeText"); QVERIFY(code); code->ensurePolished();
+    QTRY_COMPARE(code->palette().color(QPalette::Base), QColor(theme == "dark" ? "#1c2229" : "#ffffff"));
+    QCOMPARE(code->palette().color(QPalette::Text), QColor(theme == "dark" ? "#e8edf4" : "#1a2733"));
 }
 void TestSessionsWindow::colorPickerUsesWorkspaceThemeAndCancelsOutside()
 {

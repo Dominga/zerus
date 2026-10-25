@@ -1825,6 +1825,9 @@ void SessionsWindow::applyTheme()
     setStyleSheet(QString(R"(
         QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QColorDialog#workspaceColorDialog { background:%1; color:%2; }
+        QDialog#phonePairingDialog { background:%1; color:%2; }
+        QDialog#phonePairingDialog QScrollArea { background:transparent; border:0; }
+        QPlainTextEdit#phonePairingCodeText { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:4px; selection-background-color:%10; selection-color:%2; }
         QDialog#savedDraftsDialog { background:%1; color:%2; }
         QWidget#automaticApprovalSettings { background:transparent; color:%2; }
         QPlainTextEdit#approvalJournalDetail { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:10px; selection-background-color:%10; selection-color:%2; }

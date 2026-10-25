@@ -320,6 +320,13 @@ answered; a denial cannot carry an explanation.
   - an existing session may join as a member (today a new member always
     starts its own session), keeping its context.
   Every membership change by the lead needs the owner's confirmation.
+- **F9. Roadmap of draft phases.** The owner wants to see every planned phase
+  from the start, as drafts, and approve each strictly after the previous one
+  ends. Today only one draft phase may exist and `extend` is refused while
+  Planning. Proposal: the lead may queue several draft phases in order (in the
+  plan or by `extend` in any active status); `approve-phase N` is refused
+  until every earlier phase is approved and decided; discarding one draft
+  keeps the later ones. Owner: yes, in phase 1 of the next team.
 
 ## G. GUI
 

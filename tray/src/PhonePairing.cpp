@@ -105,9 +105,11 @@ Dialog::Dialog(const QString &executable, const QList<Target> &targets, int sele
     setObjectName("phonePairingDialog"); setWindowTitle(tr("Pair a phone"));
     auto *layout = new QVBoxLayout(this); layout->setSpacing(12);
     m_scroll = new QScrollArea; m_scroll->setObjectName("phonePairingScroll");
+    m_scroll->setAutoFillBackground(false); m_scroll->viewport()->setAutoFillBackground(false);
     m_scroll->setWidgetResizable(true); m_scroll->setFrameShape(QFrame::NoFrame);
     m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     auto *body = new QWidget;
+    body->setAutoFillBackground(false);
     auto *content = new QVBoxLayout(body); content->setContentsMargins(0, 0, 0, 0); content->setSpacing(12);
     m_scroll->setWidget(body); layout->addWidget(m_scroll, 1);
     if (m_targets.size() > 1) {
@@ -277,7 +279,8 @@ Panel::Panel(const QString &executable, QWidget *parent, std::function<bool(cons
     connect(m_refresh, &QPushButton::clicked, this, [this] { m_notice.clear(); refresh(); });
     connect(m_tree, &QTreeWidget::itemSelectionChanged, this, [this] {
         const auto *item = m_tree->currentItem();
-        m_revoke->setEnabled(!m_revoking && item && item->data(0, KindRole).toString() == QLatin1String("phone"));
+        m_revoke->setEnabled(!m_revoking && !m_pairRequested && !m_machines && m_pending.isEmpty()
+                             && item && item->data(0, KindRole).toString() == QLatin1String("phone"));
     });
     connect(m_client, &HgsClient::machinesReady, this, [this](quint64 request, const QJsonObject &result) {
         if (request != m_machines) return;
@@ -388,7 +391,8 @@ void Panel::render() {
 
 void Panel::revoke() {
     const auto *item = m_tree->currentItem();
-    if (m_revoking || !item || item->data(0, KindRole).toString() != QLatin1String("phone")) return;
+    if (m_revoking || m_pairRequested || m_machines || !m_pending.isEmpty()
+        || !item || item->data(0, KindRole).toString() != QLatin1String("phone")) return;
     const auto phone = item->text(0), workspace = item->data(0, WorkspaceRole).toString();
     const auto id = item->data(0, IdRole).toString(), host = item->data(0, HostRole).toString();
     const auto workspaceId = item->data(0, WorkspaceIdRole).toString(), server = item->data(0, ServerRole).toString();

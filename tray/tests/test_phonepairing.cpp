@@ -177,6 +177,9 @@ else:
         QTimer::singleShot(0, &panel, [&] { panel.findChild<QPushButton *>("pairPhone")->click(); });
         if (changeWhileReading) {
             QTRY_VERIFY(QFileInfo::exists(m_dir.filePath("phone-list-held")));
+            auto *tree = panel.findChild<QTreeWidget *>("linkedPhones");
+            tree->setCurrentItem(tree->topLevelItem(0)->child(0));
+            QVERIFY(!panel.findChild<QPushButton *>("revokePhone")->isEnabled());
             touch("workspace-switched"); panel.refresh(); touch("release-phone-list");
         }
         QTRY_VERIFY(closed);

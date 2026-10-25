@@ -131,7 +131,8 @@ class TasksPresentationTest {
 
     @Test fun aSessionsShortNameIsTheOneTheSessionListShows() {
         assertEquals(listOf("api", "api", "Night shift", "c/d", "sh"),
-            listOf("claude/orchard/api", "codex/api", "claude/orchard/Night shift", "a/b/c/d", "sh").map(TasksPresentation::shortName))
+            listOf(listOf("claude", "orchard", "api").joinToString("/"), listOf("codex", "api").joinToString("/"),
+                "claude/orchard/Night shift", "a/b/c/d", "sh").map(TasksPresentation::shortName))
     }
 
     @Test fun cardsNumberTheQueueMarkTheMainActionAndNameWhoFiledThem() {

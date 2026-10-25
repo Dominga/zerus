@@ -47,6 +47,20 @@ sys.exit(1 if result.get('ok') is False else 0)
         QList<QJsonObject> result;for(const auto &line:file.readAll().split('\n'))if(!line.isEmpty())result.append(QJsonDocument::fromJson(line).object());return result;
     }
 private slots:
+    void confirmedWorkspaceChangesInvalidateThePhoneList() {
+        QTemporaryDir directory; QVERIFY(directory.isValid());
+        const auto fixture=directory.path()+"/connector"; QVERIFY(install(fixture));
+        QVERIFY(reply(directory.path(),{{"status",unconfigured()}}));
+        WorkspaceSettings::Panel panel(FakeCli::program(fixture),directory.path()+"/connector.json");
+        auto *refresh=panel.findChild<QPushButton*>("refreshWorkspaceStatus"); QTRY_VERIFY(refresh->isEnabled());
+        int changes=0; panel.connectionChanged=[&]{++changes;};
+        QVERIFY(reply(directory.path(),{{"status",active()}})); refresh->click();
+        QTRY_COMPARE(changes,1); QTRY_VERIFY(refresh->isEnabled());
+        refresh->click(); QTRY_VERIFY(refresh->isEnabled()); QCOMPARE(changes,1);
+        QVERIFY(reply(directory.path(),{{"status",active(false,QString(64,'c'))}})); refresh->click();
+        QTRY_COMPARE(changes,2); QTRY_VERIFY(refresh->isEnabled());
+        for(const auto &call:calls(directory.path())) QCOMPARE(call.value("argv").toArray().at(1).toString(),QString("status"));
+    }
     void openingIsReadOnlyAndJoinSecretsUseOnlyStdin(){
         QTemporaryDir directory;QVERIFY(directory.isValid());const auto fixture=directory.path()+"/connector";QVERIFY(install(fixture));
         QVERIFY(reply(directory.path(),{{"status",unconfigured()}}));

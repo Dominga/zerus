@@ -14,8 +14,16 @@
 #include <QLocale>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPlainTextEdit>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QStackedWidget>
+#include <QTextOption>
 #include <QTimer>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -68,7 +76,11 @@ QrCodeView::QrCodeView(QWidget *parent) : QWidget(parent) {
     setObjectName("phonePairingCode"); setMinimumSize(200, 200);
     setAccessibleName(tr("Pairing QR code"));
 }
-void QrCodeView::setText(const QString &text) { m_text = text; m_modules = encode(text, &m_size); update(); }
+QSize QrCodeView::sizeHint() const {
+    const int side = qMax(264, (m_size + 2 * QuietZone) * 3);
+    return {side, side};
+}
+void QrCodeView::setText(const QString &text) { m_text = text; m_modules = encode(text, &m_size); updateGeometry(); update(); }
 void QrCodeView::setFaded(bool faded) { m_faded = faded; update(); }
 void QrCodeView::paintEvent(QPaintEvent *) {
     QPainter p(this);
@@ -92,26 +104,55 @@ Dialog::Dialog(const QString &executable, const QList<Target> &targets, int sele
     if (!m_now) m_now = [] { return QDateTime::currentMSecsSinceEpoch() / 1000.0; };
     setObjectName("phonePairingDialog"); setWindowTitle(tr("Pair a phone"));
     auto *layout = new QVBoxLayout(this); layout->setSpacing(12);
+    m_scroll = new QScrollArea; m_scroll->setObjectName("phonePairingScroll");
+    m_scroll->setWidgetResizable(true); m_scroll->setFrameShape(QFrame::NoFrame);
+    m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *body = new QWidget;
+    auto *content = new QVBoxLayout(body); content->setContentsMargins(0, 0, 0, 0); content->setSpacing(12);
+    m_scroll->setWidget(body); layout->addWidget(m_scroll, 1);
     if (m_targets.size() > 1) {
         m_workspace = new QComboBox; m_workspace->setObjectName("phonePairingWorkspace"); m_workspace->setAccessibleName(tr("Workspace"));
-        for (const auto &target : m_targets) m_workspace->addItem(tr("%1 · via %2").arg(target.workspaceName, hostName(target.host)));
+        m_workspace->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); m_workspace->setMinimumContentsLength(20);
+        for (const auto &target : m_targets) m_workspace->addItem(tr("%1 (via %2)").arg(target.workspaceName, hostName(target.host)));
         m_workspace->setCurrentIndex(qBound(0, selected, int(m_targets.size()) - 1));
-        auto *row = new QFormLayout; row->addRow(tr("Workspace"), m_workspace); layout->addLayout(row);
+        auto *row = new QFormLayout; row->addRow(tr("Workspace"), m_workspace); content->addLayout(row);
         connect(m_workspace, &QComboBox::currentIndexChanged, this, [this] { request(); });
     }
-    auto *hint = new QLabel(tr("In Zerus on the phone, open Machines → Pair another workspace and scan this code. "
-                               "A phone that is not paired yet offers pairing when it opens. "
-                               "The code works once, for ten minutes; treat it like a password."));
-    hint->setWordWrap(true); layout->addWidget(hint);
-    m_code = new QrCodeView; layout->addWidget(m_code, 1, Qt::AlignHCenter);
-    auto *form = new QFormLayout;
+    m_qr = new QStackedWidget; m_qr->setObjectName("phonePairingQr");
+    m_code = new QrCodeView; m_qr->addWidget(m_code);
+    m_qrStatus = new QLabel; m_qrStatus->setObjectName("phonePairingQrStatus");
+    m_qrStatus->setAlignment(Qt::AlignCenter); m_qrStatus->setWordWrap(true); m_qrStatus->setTextFormat(Qt::PlainText);
+    m_qrStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_qr->addWidget(m_qrStatus); content->addWidget(m_qr);
+    auto *hint = new QLabel(tr("In Zerus on your phone, open Machines → Pair another workspace and scan this code. "
+                               "It works once, for ten minutes; treat it like a password."));
+    hint->setWordWrap(true); content->addWidget(hint);
     m_server = new QLabel; m_server->setObjectName("phonePairingServer");
-    m_pairCode = new QLabel; m_pairCode->setObjectName("phonePairingCodeText");
+    m_server->setTextFormat(Qt::PlainText); m_server->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_server->setWordWrap(true); m_server->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    auto *serverRow = new QHBoxLayout; serverRow->addWidget(new QLabel(tr("Server"))); serverRow->addWidget(m_server, 1);
+    auto *manual = new QToolButton; manual->setObjectName("showPairingCode");
+    manual->setText(tr("Enter the code manually")); manual->setCheckable(true);
+    manual->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); manual->setArrowType(Qt::RightArrow);
+    serverRow->addWidget(manual); content->addLayout(serverRow);
+    m_pairCode = new QPlainTextEdit; m_pairCode->setObjectName("phonePairingCodeText");
+    m_pairCode->setAccessibleName(tr("Pairing code")); m_pairCode->setReadOnly(true); m_pairCode->setTabChangesFocus(true);
     m_pairCode->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    for (auto *label : {m_server, m_pairCode}) { label->setTextFormat(Qt::PlainText); label->setTextInteractionFlags(Qt::TextSelectableByMouse); label->setWordWrap(true); }
-    form->addRow(tr("Server"), m_server); form->addRow(tr("Code"), m_pairCode); layout->addLayout(form);
+    m_pairCode->setWordWrapMode(QTextOption::WrapAnywhere);
+    m_pairCode->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_pairCode->setFixedHeight(m_pairCode->fontMetrics().lineSpacing() * 3 + 16);
+    m_pairCode->hide(); content->addWidget(m_pairCode);
+    connect(manual, &QToolButton::toggled, this, [this, manual](bool visible) {
+        m_pairCode->setVisible(visible); manual->setArrowType(visible ? Qt::DownArrow : Qt::RightArrow);
+        QTimer::singleShot(0, this, [this, manual] {
+            if (manual->isChecked()) m_scroll->ensureWidgetVisible(m_pairCode);
+            else m_scroll->verticalScrollBar()->setValue(0);
+        });
+    });
+    content->addStretch();
     m_expiry = new QLabel; m_expiry->setObjectName("phonePairingExpiry"); layout->addWidget(m_expiry);
     m_status = new QLabel; m_status->setObjectName("phonePairingStatus"); m_status->setWordWrap(true); m_status->setTextFormat(Qt::PlainText);
+    m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_status->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(m_status);
     auto *buttons = new QHBoxLayout;
     m_copyCode = new QPushButton(tr("Copy code")); m_copyCode->setObjectName("copyPairingCode");
@@ -132,19 +173,41 @@ Dialog::Dialog(const QString &executable, const QList<Target> &targets, int sele
     });
     connect(m_client, &HgsClient::mobileFailed, this, [this](quint64 request, const QString &, const QString &error) {
         if (request != m_request) return;
-        m_request = 0; m_status->setText(error); m_again->setEnabled(true);
+        m_request = 0; m_status->setText(error); m_qrStatus->setText(tr("Pairing code unavailable")); m_again->setEnabled(true);
     });
     // The invitation stays a credential until it is used or expires.
-    connect(this, &QDialog::finished, this, [this] { m_link.clear(); m_codeText.clear(); m_code->setText({}); m_timer->stop(); });
+    connect(this, &QDialog::finished, this, [this] { m_link.clear(); m_codeText.clear(); m_pairCode->clear(); m_code->setText({}); m_timer->stop(); });
+    m_scroll->viewport()->installEventFilter(this);
+    const auto available = screen()->availableGeometry().size() - QSize(48, 48);
+    resize(qMin(640, available.width()), qMin(860, available.height()));
     request();
 }
 
+void Dialog::resizeEvent(QResizeEvent *event) { QDialog::resizeEvent(event); sizeQrCode(); }
+
+bool Dialog::eventFilter(QObject *object, QEvent *event) {
+    if (object == m_scroll->viewport() && event->type() == QEvent::Resize) sizeQrCode();
+    return QDialog::eventFilter(object, event);
+}
+
+void Dialog::sizeQrCode() {
+    // Keep the entire square visible before the scrollable manual details.
+    // Dense encrypted invitations need more pixels than legacy short codes.
+    const int side = qMax(200, std::min({m_code->sizeHint().height(), m_scroll->viewport()->width(), m_scroll->viewport()->height() - m_qr->y()}));
+    m_qr->setFixedHeight(side);
+}
+
 void Dialog::request() {
-    if (m_targets.isEmpty()) return;
+    m_qr->setCurrentWidget(m_qrStatus); m_qrStatus->setText(tr("Requesting a pairing code…"));
+    if (m_targets.isEmpty()) {
+        m_qrStatus->setText(tr("No workspace is available. Close this dialog and refresh Phones."));
+        m_copyCode->setEnabled(false); m_copyLink->setEnabled(false); m_again->setEnabled(false);
+        return;
+    }
     const auto target = m_current = m_targets.value(m_workspace ? m_workspace->currentIndex() : 0);
     m_link.clear(); m_codeText.clear(); m_expires = 0; m_timer->stop();
     m_code->setText({}); m_code->setFaded(false);
-    m_server->setText(target.serverUrl); m_pairCode->setText(QStringLiteral("…")); m_expiry->clear();
+    m_server->setText(target.serverUrl); m_pairCode->clear(); m_expiry->clear();
     m_status->setText(tr("Requesting a pairing code from %1…").arg(hostName(target.host)));
     m_copyCode->setEnabled(false); m_copyLink->setEnabled(false); m_again->setEnabled(false);
     m_request = m_client->requestMobile(target.host, pinned(QStringLiteral("invite"), {}, target.workspaceId, target.serverUrl));
@@ -155,19 +218,23 @@ void Dialog::showInvitation(const QJsonObject &invitation) {
     m_expires = invitation.value("expires_at").toDouble();
     m_again->setEnabled(true);
     if (!m_link.startsWith(QLatin1String("zerus://pair?")) || m_codeText.isEmpty()) {
-        m_link.clear(); m_codeText.clear(); m_status->setText(tr("The relay returned an invalid pairing code.")); return;
+        m_link.clear(); m_codeText.clear(); m_qrStatus->setText(tr("Pairing code unavailable")); m_status->setText(tr("The relay returned an invalid pairing code.")); return;
     }
     if (invitation.value("workspace_id").toString() != m_current.workspaceId
         || origin(invitation.value("server_url").toString()) != origin(m_current.serverUrl)) {
         m_link.clear(); m_codeText.clear();
+        m_qrStatus->setText(tr("Pairing code unavailable"));
         m_status->setText(tr("This pairing code belongs to another workspace or relay than the one listed. Refresh the phone list and try again."));
         return;
     }
     m_code->setText(m_link);
+    sizeQrCode();
+    if (m_code->modules()) m_qr->setCurrentWidget(m_code);
+    else m_qrStatus->setText(tr("This invitation is too large for a QR code. Use Copy code to enter it on your phone."));
     m_server->setText(invitation.value("server_url").toString());
-    m_pairCode->setText(m_codeText);
+    m_pairCode->setPlainText(m_codeText);
     m_status->setText(invitation.value("encrypted").toBool()
-        ? tr("Workspace: %1 · End-to-end encrypted. Keep this computer online until the phone confirms pairing.").arg(invitation.value("workspace_name").toString())
+        ? tr("Workspace: %1\nEnd-to-end encrypted. Keep this computer online until the phone confirms pairing.").arg(invitation.value("workspace_name").toString())
         : tr("Workspace: %1").arg(invitation.value("workspace_name").toString()));
     m_copyCode->setEnabled(true); m_copyLink->setEnabled(true);
     tick(); m_timer->start();
@@ -248,16 +315,18 @@ Panel::Panel(const QString &executable, QWidget *parent, std::function<bool(cons
     });
 }
 
-void Panel::showEvent(QShowEvent *event) { QWidget::showEvent(event); if (!m_loaded) refresh(); }
+void Panel::showEvent(QShowEvent *event) { QWidget::showEvent(event); refresh(); }
 
 void Panel::refresh() {
-    if (m_machines || !m_pending.isEmpty()) return;
-    m_loaded = true; m_lists.clear(); m_problems.clear();
+    if (m_machines || !m_pending.isEmpty()) { m_refreshQueued = true; return; }
+    m_lists.clear(); m_problems.clear();
+    m_pair->setEnabled(false); m_revoke->setEnabled(false);
     m_status->setText(tr("Checking phones…")); m_refresh->setEnabled(false);
     m_machines = m_client->requestMachines({QStringLiteral("ls")});
 }
 
 void Panel::finish() {
+    if (m_refreshQueued) { m_refreshQueued = false; refresh(); return; }
     // This computer first, then peers in Machines order; one route per workspace.
     std::stable_sort(m_lists.begin(), m_lists.end(), [this](const QJsonObject &a, const QJsonObject &b) {
         return m_hostOrder.indexOf(a.value("host").toString()) < m_hostOrder.indexOf(b.value("host").toString());
@@ -273,6 +342,7 @@ void Panel::finish() {
         m_targets << Target{list.value("host").toString(), list.value("workspace_id").toString(),
                             list.value("workspace_name").toString(), list.value("server_url").toString()};
     render();
+    if (m_pairRequested) QTimer::singleShot(0, this, [this] { openPairing(); });
 }
 
 void Panel::render() {
@@ -311,7 +381,7 @@ void Panel::render() {
     else lines << (phones == 1 ? tr("1 phone") : tr("%1 phones").arg(phones));
     for (const auto &problem : std::as_const(m_problems)) lines << problem;
     if (!m_revoking) m_status->setText(lines.join('\n'));
-    m_pair->setEnabled(!m_targets.isEmpty()); m_refresh->setEnabled(true);
+    m_pair->setEnabled(!m_pairRequested && !m_targets.isEmpty()); m_refresh->setEnabled(true);
     const auto *item = m_tree->currentItem();
     m_revoke->setEnabled(!m_revoking && item && item->data(0, KindRole).toString() == QLatin1String("phone"));
 }
@@ -337,9 +407,22 @@ void Panel::revoke() {
 }
 
 void Panel::pair() {
-    if (m_targets.isEmpty()) return;
+    if (m_pairRequested || m_targets.isEmpty()) return;
     const auto *item = m_tree->currentItem();
-    Dialog dialog(m_executable, m_targets, item ? item->data(0, TargetRole).toInt() : 0, this);
+    m_pairTarget = m_targets.value(item ? item->data(0, TargetRole).toInt() : 0);
+    m_pairRequested = true;
+    refresh();
+}
+
+void Panel::openPairing() {
+    if (!m_pairRequested) return;
+    if (m_machines || !m_pending.isEmpty()) return;
+    m_pairRequested = false;
+    if (m_targets.isEmpty()) { render(); return; }
+    int selected = 0;
+    for (int i = 0; i < m_targets.size(); ++i)
+        if (m_targets[i].workspaceId == m_pairTarget.workspaceId && origin(m_targets[i].serverUrl) == origin(m_pairTarget.serverUrl)) { selected = i; break; }
+    Dialog dialog(m_executable, m_targets, selected, this);
     dialog.exec();
     m_notice.clear(); refresh();
 }

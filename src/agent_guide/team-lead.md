@@ -2,23 +2,23 @@ Lead a running team: phases and finish (hgs guide team-lead)
 
 The approved plan is phase 1. Work found later (QA findings, fixes, the next
 wave) goes in a new phase at the end; earlier tasks never change. While the
-team is Running or Paused, the lead or the owner appends one:
+team is Planning, Running or Paused, the lead or the owner appends one:
   {"request_id":"UUID","team":"ID","phase_title":"QA fixes","barrier":true,
    "tasks":[{"id":18,"title":"Fix the login crash","description":"...",
      "criteria":["..."],"assignee":"api","pinned":true,
      "deps":[{"task":12,"kind":"hard"}]}]} | hgs team extend --json
-  -> {"status":"added","phase":2,"tasks":[18],"approval":"review"}
-- ids continue after the highest id ever used (status shows it); deps may
-  name any task or one of the same batch. At most 50 tasks per phase and
-  500 per team; assignees are you or a member that was not removed.
+- ids continue after the highest id ever used; deps may name any task or
+  one of the batch. At most 50 tasks per phase, 500 per team.
 - barrier: no task of the phase starts before every task of the earlier
   phases is accepted, rejected or cancelled. Without it, a task starts as
   soon as its own deps allow.
 - pinned: the task stays with its assignee; Zerus never gives it to a free
   member of the same role (keeps that member's context). plan takes it too.
 - approval "review": the phase waits as Draft until the owner approves or
-  discards it in Zerus (approve-phase, discard-phase); add no other phase
-  meanwhile. "auto": its tasks start at once.
+  discards it (approve-phase, discard-phase). Several drafts may wait in
+  order, also from plan ("phases" and tasks with "phase"); the owner opens
+  each only after the earlier phase ends. "auto": starts at once if no
+  draft is ahead.
 - A member's task message carries the reports and folders of its deps.
 
 Members and their questions:

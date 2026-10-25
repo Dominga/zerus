@@ -67,6 +67,23 @@ fn resolve(record: &Value, input: &Value) -> Result<PathBuf> {
     Ok(cwd.join(path))
 }
 fn snapshot(path: &Path, expected: &str) -> Result<Value> {
+    snapshot_with_empty(path, expected, false)
+}
+
+// An explicit copy, like the existing SFTP download, uses the selected native
+// user's filesystem permissions. It is not evidence for opening an original.
+pub(super) fn download_snapshot(raw: &str) -> Result<Value> {
+    if !(raw.starts_with('/') || raw.starts_with("~/")) {
+        return Err("Choose an absolute native path or an explicit ~/ path".into());
+    }
+    let path = resolve(&Value::Null, &json!({"path":raw}))?;
+    let mut value = snapshot_with_empty(&path, "", true)?;
+    value["schema_version"] = json!(1);
+    value["requested_path"] = json!(raw);
+    Ok(value)
+}
+
+fn snapshot_with_empty(path: &Path, expected: &str, allow_empty: bool) -> Result<Value> {
     let resolved = crate::platform::canonical(path).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => "The file no longer exists on this computer".to_owned(),
         io::ErrorKind::PermissionDenied => {
@@ -83,7 +100,7 @@ fn snapshot(path: &Path, expected: &str) -> Result<Value> {
     if !before.is_file() {
         return Err("This path is not a regular file".into());
     }
-    if before.len() == 0 {
+    if before.len() == 0 && !allow_empty {
         return Err("The file is empty".into());
     }
     if before.len() > MAX_FILE {

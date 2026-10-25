@@ -85,7 +85,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] interrupt <session> --json   interrupt the current turn, keep the session
        hgs [@host] attachment <session> --request ID --index N --conversation ID   read a sent attachment
        hgs [@host] file-read <session> --json   read a document on the conversation computer
-       hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
+       hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a copy through configured SSH or explicit WSL
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
        hgs [@host] notifications <session> --json   shared mute preference (session-notifications-v1)
@@ -502,6 +502,11 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     let args = &args[index + 1..];
     if !target.is_empty() && !config.is_self(&target) {
         if let Some(profile) = crate::wsl::profile(&config, &target) {
+            // Download publishes on this Windows client. Its output path must
+            // never be forwarded as a Linux receiver destination.
+            if command == "download" {
+                return crate::download::dispatch(&config, &target, args, dry);
+            }
             return crate::wsl::run(profile, command, args, dry);
         }
     }
@@ -515,6 +520,8 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             print!("{}", usage_text(cfg!(unix)));
             println!("Encrypted workspace ABI: guarded-local-v1");
             println!("WSL local receiver ABI: wsl-local-v1 (OpenCode existing-only)");
+            #[cfg(target_os = "linux")]
+            println!("WSL file snapshot ABI: wsl-file-snapshot-v1");
             #[cfg(windows)]
             print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);

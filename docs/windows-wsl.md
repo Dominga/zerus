@@ -128,3 +128,26 @@ service and must be an explicit operator action, never a Zerus readiness probe.
 The account page and `account bind-existing native-opencode --json` provide an
 explicit preview/commit workflow for one existing native conversation. See
 [existing conversation identity and continuity](opencode-existing.md).
+
+## Downloading a WSL copy
+
+`hgs @configured-wsl download --path NATIVE_PATH --output WINDOWS_FILE` keeps the
+destination on the Windows client. It probes the exact configured Linux
+receiver for `wsl-file-snapshot-v1`, reads a bounded native snapshot with that
+user's filesystem permissions, verifies the echoed path/size/SHA-256, checks
+that the connection is unchanged, and atomically publishes the local copy.
+Windows output paths are never forwarded to Linux. No SSH/default-distribution
+fallback, agent startup or conversation creation occurs. An older receiver or
+a failed/changed/malformed transfer leaves an existing local destination intact.
+
+This initial WSL copy path accepts regular files up to 10 MiB, including empty
+files. Absolute paths and `~/` are interpreted by the selected Linux user.
+It does not use lexical Windows mappings and can therefore copy files from a
+WSL-native home directory. Larger files need another transfer route; no size-limit
+bypass is attempted. Existing SSH/SFTP download behavior is unchanged.
+
+The desktop's existing Download, Download and open and cache workflows consume
+the same copy receipt. Downloaded copies retain their existing downloaded-file
+marking and runnable-file guard. They do not gain permission to open a Windows
+original: the separate mapped-original workflow still requires exact conversation
+identity, mapping and matching local evidence.

@@ -103,3 +103,30 @@ or refers to the same files. Runtime connection setup must verify its selected
 distribution/user separately. These helpers deliberately perform no I/O or
 automatic persistent-identity migration. A future catalog migration must retain
 stable session IDs and explicitly review collisions before writing anything.
+
+
+## Windows desktop folder pickers
+
+For a configured `wsl-local` machine, **Map Windows path...** in the folder browser
+opens an explicit mapping editor. Enter the source Windows path, the allowed
+Windows workspace root, the configured WSL drive mount root and a workspace
+identity. Distribution and user come from the selected local connection, not the
+default WSL instance. The editor shows the exact Windows, WSL and canonical
+spellings before **Use mapped path** becomes available.
+
+Before accepting, the editor re-reads the local connection and refuses a changed
+distribution, user or receiver. The ordinary target-side folder browser then reads
+the native directory; a lexical preview alone never makes an absent or unreadable
+folder selectable. New-session and project folder selection share this browser.
+No project or session catalog is rewritten, no directory or worktree is created
+by previewing, and no OpenCode service is started.
+
+**Remember this mapping** is a separate, unchecked opt-in. It stores bounded JSON
+in local GUI settings, keyed by the local machine identity and exact WSL
+connection. Another user/distribution does not inherit it. Saved presets do not
+remember a selected path or a previous verification result: every use requires
+a new preview. Mapping changes receive a new mapping identity.
+
+This step maps folder inputs into WSL. Automatic reverse mapping for opening
+remote files in Windows editors remains a separate integration: it must preserve
+file-read authorization and must not silently turn remote paths into local ones.

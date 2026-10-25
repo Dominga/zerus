@@ -211,7 +211,7 @@ add_library(hgs-tray-ui STATIC src/SessionOrganization.cpp src/SessionList.cpp s
     src/RepositoryClone.cpp src/CloneRepositoryDialog.cpp src/NewSessionDialog.cpp src/ProjectsDialog.cpp src/WorktreesDialog.cpp src/SwarmDialog.cpp src/SwarmConflictReview.cpp
     src/ProcessView.cpp src/TrayMenu.cpp src/IconFactory.cpp src/Shortcuts.cpp src/DownloadCacheSettings.cpp src/GoToDialog.cpp
     src/KeyboardSettings.cpp src/ShortcutsDialog.cpp src/AutomaticApprovalSettings.cpp src/PhonePairing.cpp
-    src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp src/OpenCodeExistingDialog.cpp
+    src/OpenCodeModels.cpp src/OpenCodeModelPicker.cpp src/OpenCodeExistingDialog.cpp src/WslPathMappingDialog.cpp
     # WhiteWh fork: agent teams, the inspector's Team tab.
     src/TeamPanel.cpp src/TeamPanelPlan.cpp src/TeamTaskCard.cpp src/TeamNewDialog.cpp src/TeamNewTab.cpp src/TeamCatalogEditor.cpp src/TeamDesignerPanel.cpp src/TeamDesignerPage.cpp src/TeamConversation.cpp src/TeamWorkspace.cpp
     # Tray icon decorator (QuietTrayIcon.h): portable, but wrapped around the icon

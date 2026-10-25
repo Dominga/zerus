@@ -1,4 +1,5 @@
 #include "DirectoryDialog.h"
+#include "WslPathMappingDialog.h"
 #include <QAction>
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -68,6 +69,31 @@ DirectoryDialog::DirectoryDialog(const QString &hgsPath, const QString &host,
     auto *folderActions = new QHBoxLayout;
     m_hidden = new QCheckBox(tr("Show hidden folders")); folderActions->addWidget(m_hidden);
     folderActions->addStretch();
+#ifdef Q_OS_WIN
+    // Explicit action only: normal browsing never probes another connection or
+    // infers that a POSIX-looking path belongs to a Windows drive.
+    if (!m_host.isEmpty()) {
+        auto *map = new QPushButton(tr("Map Windows path…")); map->setObjectName("mapWindowsFolder");
+        auto *mappingActions = new QHBoxLayout; mappingActions->addWidget(map); mappingActions->addStretch(); layout->addLayout(mappingActions);
+        connect(map,&QPushButton::clicked,this,[this,hgsPath,map]{
+            if(m_creating||m_request)return;
+            map->setEnabled(false);
+            auto *lookup=new HgsClient(hgsPath,this);
+            connect(lookup,&HgsClient::machinesReady,this,[this,hgsPath,map,lookup](quint64,const QJsonObject &data){
+                lookup->deleteLater();map->setEnabled(true);
+                QJsonObject connection;
+                for(const auto &value:data["machines"].toArray()){const auto row=value.toObject();if(row["alias"]==m_host)connection=row["connection"].toObject();}
+                if(connection["transport"]!="wsl-local"||connection["wsl"].toObject().isEmpty()){
+                    m_status->setText(tr("This action requires an explicitly configured local WSL connection."));return;
+                }
+                WslPathMappingDialog mapping(hgsPath,m_host,data["local"].toString(),connection["wsl"].toObject(),this);
+                if(mapping.exec()==QDialog::Accepted)navigate(mapping.mappedPath());
+            });
+            connect(lookup,&HgsClient::machinesFailed,this,[this,map,lookup](quint64,const QString &error){lookup->deleteLater();map->setEnabled(true);m_status->setText(error);});
+            lookup->requestMachines();
+        });
+    }
+#endif
     m_newFolder = new QPushButton(tr("New folder")); m_newFolder->setObjectName("newFolder");
     folderActions->addWidget(m_newFolder);
     m_newFolderOptions = new QPushButton(tr("Dialog…")); m_newFolderOptions->setObjectName("newFolderOptions");

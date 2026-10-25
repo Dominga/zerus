@@ -554,6 +554,12 @@ target_link_libraries(test_machinefilter PRIVATE Qt6::Test Qt6::Widgets hgs-tray
 zerus_add_test(machinefilter test_machinefilter)
 set_tests_properties(machinefilter PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_wslpathmapping test_wslpathmapping.cpp)
+target_include_directories(test_wslpathmapping PRIVATE ../src)
+target_link_libraries(test_wslpathmapping PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(wslpathmapping test_wslpathmapping)
+set_tests_properties(wslpathmapping PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_opencodeexisting test_opencodeexisting.cpp)
 target_include_directories(test_opencodeexisting PRIVATE ../src)
 target_link_libraries(test_opencodeexisting PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)

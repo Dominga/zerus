@@ -580,6 +580,24 @@ quint64 HgsClient::requestMobile(const QString &host, const QStringList &argumen
     return request;
 }
 
+quint64 HgsClient::requestPathRef(const QString &operation, const QJsonObject &input)
+{
+    const quint64 request = ++m_pathRefRequest;
+    const auto bytes = QJsonDocument(input).toJson(QJsonDocument::Compact);
+    if (!QStringList{"describe","validate","map"}.contains(operation) || bytes.size() > 64 * 1024) {
+        QTimer::singleShot(0, this, [this, request] { emit pathRefFailed(request, tr("Invalid or oversized path identity request")); });
+        return request;
+    }
+    runHgs(m_hgs, {"path-ref",operation}, 10000, this,
+        [this, request](const QByteArray &bytes) {
+            QJsonParseError error;
+            const auto data = bytes.size() <= 64 * 1024 ? QJsonDocument::fromJson(bytes, &error) : QJsonDocument();
+            if (error.error != QJsonParseError::NoError || !data.isObject()) emit pathRefFailed(request, tr("Invalid path identity response"));
+            else emit pathRefReady(request, data.object());
+        }, [this, request](const QString &, const QString &error) { emit pathRefFailed(request, error); }, bytes);
+    return request;
+}
+
 quint64 HgsClient::requestMachines(const QStringList &arguments)
 {
     const quint64 request = ++m_machineRequest;

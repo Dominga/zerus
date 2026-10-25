@@ -90,6 +90,44 @@ class WslLocal(unittest.TestCase):
         self.assertNotEqual(result.returncode,0)
         self.assertNotIn(b"hgs fixture",result.stdout)
 
+    def test_explicit_mapping_reaches_the_selected_native_directory(self):
+        # The mount root is measured for this disposable fixture, not inferred
+        # by the product from a user's arbitrary POSIX spelling.
+        project = self.root / 'project spaced 世界'
+        project.mkdir()
+        (project / 'child').mkdir()
+        drive = self.root.drive[0].lower()
+        separator = '/' + drive + '/'
+        self.assertIn(separator, self.linux)
+        mount = self.linux.split(separator, 1)[0] or '/'
+        mapping = {'mapping_id': 'fixture-drive', 'workspace_id': 'fixture-workspace',
+                   'machine_id': 'test-controller', 'windows_environment_id': 'windows-native',
+                   'wsl_environment_id': 'wsl:' + DISTRO + ':' + USER, 'distribution': DISTRO,
+                   'user': USER, 'mount_root': mount, 'windows_root': str(self.root)}
+        source = {'machine_id': 'test-controller', 'environment_id': 'windows-native',
+                  'path_flavor': 'windows', 'native_path': str(project), 'workspace_id': 'fixture-workspace'}
+        described = self.hgs('path-ref', 'describe', data=json.dumps({'path': source, 'mapping': mapping}).encode())
+        self.assertEqual(described.returncode, 0, described.stderr.decode(errors='replace'))
+        mapped = self.hgs('path-ref', 'map', data=json.dumps({'path': json.loads(described.stdout), 'mapping': mapping}).encode())
+        self.assertEqual(mapped.returncode, 0, mapped.stderr.decode(errors='replace'))
+        native = json.loads(mapped.stdout)
+        self.assertEqual(native['native_path'], self.linux + '/project spaced 世界')
+        self.assertEqual(native['environment_id'], mapping['wsl_environment_id'])
+        wrapper = self.root / 'directory receiver.py'
+        wrapper.write_text('#!/usr/bin/python3\nimport os,sys\nr=' + repr(self.linux) + '\n'
+            "os.environ.update(HGS_CONFIG_DIR=r+'/directory-config',HGS_STATE_DIR=r+'/directory-state',HGS_SELF='fixture',HGS_PEERS='')\n"
+            'p=' + repr(LINUX_HGS) + '\nos.execv(p,[p]+sys.argv[1:])\n', encoding='utf-8', newline='\n')
+        self.save(self.profile(self.linux + '/directory receiver.py'))
+        result = self.hgs('@linux-tools', 'dirs', native['native_path'])
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        listed = json.loads(result.stdout)
+        self.assertEqual(listed['path'], native['native_path'])
+        self.assertIn('child', [row['name'] for row in listed['directories']])
+        outside = {**source, 'native_path': str(self.root.parent / 'outside-fixture')}
+        refused = self.hgs('path-ref', 'describe', data=json.dumps({'path': outside, 'mapping': mapping}).encode())
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse((self.root.parent / 'outside-fixture').exists())
+
     def test_real_receiver_never_starts_opencode_even_for_explicit_start(self):
         home=self.linux+"/linux-home"
         (self.root/"linux-home/bin").mkdir(parents=True)

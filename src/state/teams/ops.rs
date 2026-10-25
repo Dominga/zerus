@@ -662,6 +662,9 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     asked.answer = body;
     asked.answered_at = Some(now());
     asked.by = label.clone();
+    // The answer reaches the member as a message; the dispatcher sends it once
+    // its session is live (A3).
+    asked.notice = Notice::Pending;
     events.push(Event::new("question_answered", json!({"by":label,"task":task_id,"attempt":n,"question":question})));
     Ok(json!({"status":"answered","question":question}))
 }

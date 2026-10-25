@@ -311,6 +311,11 @@ pub(crate) struct Question {
     /// The lead or you, who answered.
     #[serde(default)]
     pub by: String,
+    /// The answer's message to the member: Pending until it reaches it (A3).
+    #[serde(default, skip_serializing_if = "Notice::is_none")]
+    pub notice: Notice,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notice_id: String,
 }
 
 impl Question {
@@ -706,7 +711,7 @@ mod tests {
                     turn_ended_at: Some(1792939500.0),
                     turn_reply: "r7".into(),
                     questions: vec![
-                        Question { id: "q1".into(), text: "Keep the old field?".into(), at: 1792939100.0, answer: "Yes".into(), answered_at: Some(1792939200.0), by: "Lead".into() },
+                        Question { id: "q1".into(), text: "Keep the old field?".into(), at: 1792939100.0, answer: "Yes".into(), answered_at: Some(1792939200.0), by: "Lead".into(), ..Default::default() },
                         Question { id: "q2".into(), text: "Which JSON?".into(), at: 1792939300.0, ..Default::default() },
                     ],
                     report: Some(Report {

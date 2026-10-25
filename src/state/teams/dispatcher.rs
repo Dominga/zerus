@@ -121,6 +121,10 @@ pub(crate) enum Step {
     StartLate { task: u32 },
     /// Tells the free lead once that a hand-out has not started (A1).
     TellStartLate { task: u32 },
+    /// Tells the free lead about a member's question, with the reply command (A3).
+    LeadQuestion { task: u32, question: String },
+    /// Gives the member the lead's answer as a message (A3).
+    AnswerQuestion { task: u32, question: String },
     TurnEnded { task: u32, at: f64, reply: String },
     /// The member started working again: its recorded turn end is cleared (A2).
     WorkResumed { task: u32 },
@@ -298,6 +302,37 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             {
                 steps.push(Step::TellStartLate { task: task.id });
                 break;
+            }
+        }
+    }
+    // A member's question waits for the lead: one message per question, with
+    // the reply command, once the lead is free (A3).
+    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
+        'questions: for task in &team.tasks {
+            for attempt in &task.attempts {
+                for question in &attempt.questions {
+                    if question.open()
+                        && !attempt.told_lead.iter().any(|kind| kind == &format!("question:{}", question.id))
+                    {
+                        steps.push(Step::LeadQuestion { task: task.id, question: question.id.clone() });
+                        break 'questions;
+                    }
+                }
+            }
+        }
+    }
+    // The lead's answer reaches the member as a message, once its session is
+    // live (A3).
+    'answers: for task in &team.tasks {
+        for attempt in &task.attempts {
+            for question in &attempt.questions {
+                if !question.open() && question.notice == Notice::Pending {
+                    let live = team.member(&attempt.member).and_then(|m| session_of(m, seen)).is_some_and(|s| s.live);
+                    if live {
+                        steps.push(Step::AnswerQuestion { task: task.id, question: question.id.clone() });
+                        break 'answers;
+                    }
+                }
             }
         }
     }
@@ -1069,6 +1104,33 @@ pub(crate) fn start_late_text(team: &Team, task: &Task, attempt: &Attempt, now: 
     )
 }
 
+/// The message that gives the lead a member's question, with the reply
+/// command (A3).
+pub(crate) fn question_to_lead_text(team: &Team, task: &Task, attempt: &Attempt, question: &Question) -> String {
+    let role = team.role_of(&attempt.member);
+    format!(
+        "[Zerus team \u{b7} from: {role} \u{b7} task: #{} \u{b7} question {}]\n\
+         {role} asks about task #{} {}:\n\n{}\n\n\
+         Answer with hgs team reply --json:\n  {}",
+        task.id,
+        question.id,
+        task.id,
+        task.title,
+        question.text,
+        json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"question":question.id,"text":"..."})
+    )
+}
+
+/// The message that gives the member the lead's answer (A3).
+pub(crate) fn answer_to_member_text(task: &Task, question: &Question) -> String {
+    format!(
+        "[Zerus team \u{b7} from: {} \u{b7} task: #{} \u{b7} answer {}]\n\
+         Answer to your question on task #{} {}:\n\n{}\n\n\
+         Continue with the task; report with hgs team report --json (your task and attempt: hgs team current --json).",
+        question.by, task.id, question.id, task.id, task.title, question.answer
+    )
+}
+
 /// One message for the lead: the open tasks Zerus gave to another member
 /// with the same role, and to whom.
 pub(crate) fn rebalanced_text(team: &Team, tasks: &[u32]) -> String {
@@ -1135,6 +1197,85 @@ fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow:
         let found = team.task_mut(task_id).and_then(|t| t.attempts.iter_mut().find(|a| a.id == attempt.id)).context("unknown attempt")?;
         found.told_lead.push("start_late".to_owned());
         events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":"start_late"})));
+        Ok(())
+    })
+}
+
+/// Tells the free lead about a member's open question, once (A3).
+fn tell_lead_question(store: &mut Store, team: &Team, task_id: u32, question_id: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let (attempt, question) = task
+        .attempts
+        .iter()
+        .rev()
+        .find_map(|attempt| {
+            attempt
+                .questions
+                .iter()
+                .find(|question| question.id == question_id && question.open())
+                .map(|question| (attempt, question))
+        })
+        .context("the question is no longer open")?;
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &question_to_lead_text(team, task, attempt, question));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, events| {
+        let role = team
+            .task(task_id)
+            .and_then(|task| {
+                task.attempts.iter().rev().find(|attempt| attempt.questions.iter().any(|question| question.id == question_id))
+            })
+            .map(|attempt| team.role_of(&attempt.member))
+            .unwrap_or_default();
+        let Some(attempt) = team
+            .task_mut(task_id)
+            .and_then(|task| task.attempts.iter_mut().rev().find(|attempt| attempt.questions.iter().any(|question| question.id == question_id)))
+        else {
+            return Ok(());
+        };
+        attempt.told_lead.push(format!("question:{question_id}"));
+        events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":"question","question":question_id})));
+        Ok(())
+    })
+}
+
+/// Gives the member the lead's answer as a message, once (A3).
+fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let (attempt, question) = task
+        .attempts
+        .iter()
+        .rev()
+        .find_map(|attempt| {
+            attempt
+                .questions
+                .iter()
+                .find(|question| question.id == question_id && !question.open() && question.notice == Notice::Pending)
+                .map(|question| (attempt, question))
+        })
+        .context("the answer is no longer waiting")?;
+    let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("the member has no session")?;
+    let notice_id = uuid::Uuid::new_v4().to_string();
+    let outcome = send(&session, &notice_id, &answer_to_member_text(task, question));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, _| {
+        let question = team
+            .task_mut(task_id)
+            .and_then(|task| task.attempts.iter_mut().flat_map(|attempt| attempt.questions.iter_mut()).find(|question| question.id == question_id));
+        if let Some(question) = question {
+            if question.notice == Notice::Pending {
+                question.notice = match outcome {
+                    Sent::Delivered => Notice::Sent,
+                    Sent::Uncertain(_) => Notice::Unconfirmed,
+                    Sent::Refused(_) => Notice::Pending,
+                };
+                question.notice_id = notice_id.clone();
+            }
+        }
         Ok(())
     })
 }
@@ -1378,6 +1519,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }),
         Step::TellStartLate { task } => tell_lead_start_late(store, team, *task),
+        Step::LeadQuestion { task, question } => tell_lead_question(store, team, *task, question),
+        Step::AnswerQuestion { task, question } => send_answer(store, team, *task, question),
         Step::NoReport { task } => {
             // The report timeout passed with the capture gate holding (A2): the
             // member's last reply becomes its report, marked captured so the
@@ -1975,6 +2118,55 @@ mod tests {
             {"type":"Tool","detail":"run"}]});
         assert_eq!(reply_text(&record), "The answer.");
         assert_eq!(reply_text(&json!({})), "");
+    }
+
+    #[test]
+    fn a_question_reaches_the_lead_once_and_its_answer_the_member() {
+        let mut team = team();
+        delivered(&mut team);
+        let mut events = Vec::new();
+        let asked = ops::apply(
+            &mut team,
+            "ask",
+            &json!({"text":"Must I keep the old field?"}),
+            &Actor::Member("dev".into()),
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((asked["question"].as_str(), asked["task"].as_u64()), (Some("q1"), Some(1)));
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", false);
+        let found = steps(&team, &[lead.clone(), dev.clone()], 20.0);
+        assert!(found.contains(&Step::LeadQuestion { task: 1, question: "q1".into() }), "{found:?}");
+        // The lead hears once per question.
+        team.task_mut(1).unwrap().attempts[0].told_lead.push("question:q1".into());
+        assert!(!steps(&team, &[lead.clone(), dev.clone()], 20.0).iter().any(|s| matches!(s, Step::LeadQuestion { .. })));
+        // The message names the task, the asker, the question and the reply command.
+        let task = team.task(1).unwrap();
+        let attempt = &task.attempts[0];
+        let text = question_to_lead_text(&team, task, attempt, &attempt.questions[0]);
+        assert!(text.contains("#1") && text.contains("Backend") && text.contains("Must I keep"), "{text}");
+        assert!(text.contains("hgs team reply --json") && text.contains("\"question\":\"q1\""), "{text}");
+        // The answer closes the question and waits for the live member.
+        ops::apply(&mut team, "reply", &json!({"question":"q1","text":"Yes, keep it."}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        let question = &team.task(1).unwrap().attempts[0].questions[0];
+        assert_eq!((question.answer.as_str(), question.notice), ("Yes, keep it.", Notice::Pending));
+        let found = steps(&team, &[lead.clone(), dev.clone()], 20.0);
+        assert!(found.contains(&Step::AnswerQuestion { task: 1, question: "q1".into() }), "{found:?}");
+        // An offline member is not messaged; a sent answer never repeats.
+        let mut offline = dev.clone();
+        offline.live = false;
+        assert!(!steps(&team, &[lead, offline], 20.0).iter().any(|s| matches!(s, Step::AnswerQuestion { .. })));
+        team.task_mut(1).unwrap().attempts[0].questions[0].notice = Notice::Sent;
+        assert!(!steps(&team, &[session("claude/x/lead", "r0", true), dev], 20.0)
+            .iter()
+            .any(|s| matches!(s, Step::AnswerQuestion { .. })));
+        // The answer message names the question, the answer and the report route.
+        let task = team.task(1).unwrap();
+        let text = answer_to_member_text(task, &task.attempts[0].questions[0]);
+        assert!(text.contains("#1") && text.contains("answer q1") && text.contains("Yes, keep it."), "{text}");
+        assert!(text.contains("hgs team report --json") && text.contains("hgs team current --json"), "{text}");
     }
 
     #[test]

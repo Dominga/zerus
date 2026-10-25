@@ -1,7 +1,7 @@
-name: CI Dev qualification
+name: CI Dev build
 
-# One caller-level slot owns both parallel credential-free branches. Do not
-# release it when checks finish while an unsigned bundle is still building.
+# One build slot spans both credential-free packages. Full regression results
+# belong to a separate workflow and do not admit or block a Dev candidate.
 on:
   workflow_call:
     outputs:
@@ -15,29 +15,24 @@ cache-mode: read
 
 jobs:
   checks:
-    name: Trusted main checks
+    name: Arch Dev package
     if: >-
       !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true'
     cache-mode: write
-    uses: ./.github/workflows/checks.yml
+    uses: ./.github/workflows/dev-arch.yml
     with:
-      ref: ${{ github.sha }}
-      run_linux: true
-      run_arch: true
-      run_macos: true
-      run_windows: false
-      run_ios: false
       save_caches: true
   bundle:
-    name: Parallel unsigned macOS dev bundle
+    name: Unsigned macOS Dev bundle
     if: >-
       !cancelled() && github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' &&
       github.event.repository.private == false && vars.DEV_UPDATES_ENABLED == 'true' && vars.MACOS_CASKS_ENABLED == 'true'
     uses: ./.github/workflows/macos-bundle.yml
     with:
       channel: dev
+      run_tests: false
   gate:
-    name: Dev qualification results
+    name: Dev package results
     needs: [checks, bundle]
     if: always()
     runs-on: ubuntu-24.04
@@ -53,5 +48,5 @@ jobs:
           import os
           expected_bundle = 'success' if os.environ['MACOS'] == 'true' else 'skipped'
           if os.environ['CHECKS'] != 'success' or os.environ['BUNDLE'] != expected_bundle:
-              raise SystemExit('Dev qualification requires successful checks and its selected unsigned bundle.')
+              raise SystemExit('Dev requires its successful Arch package and selected unsigned Mac bundle.')
           PY

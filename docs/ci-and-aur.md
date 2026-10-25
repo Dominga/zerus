@@ -82,26 +82,32 @@ Separate runner setup, dependency restoration and artifact transfer add overhead
 this split does not establish an observed speedup without hosted evidence.
 
 On upstream `main` pushes with the [Dev channel](public-distribution.md#verified-main-dev-channel)
-enabled, `ci-dev-qualification.yml` holds one qualification slot through both
-credential-free checks and the parallel unsigned Mac bundle. The bundle uses pinned
-official Qt, tests the Release GUI, then packages that same tested app; there is no
-second GUI compilation with tests disabled. Its gate requires successful checks and
-the exact run's selected bundle; a disabled Mac bundle must be skipped.
-The qualification caller reuses the former whole-CI concurrency key, so the first
-new run waits for any active old CI run to finish before starting qualification.
+enabled, `ci-dev-qualification.yml` builds the Arch package and parallel unsigned
+Mac bundle. Dev uses explicit build-only modes: no Rust package `check()` or full
+Qt regression run is on this publication path. Package layout, linked libraries,
+source/version identity, installation checks and bundle self-tests still apply.
+The build gate requires the Arch package and selected Mac bundle to succeed; a
+disabled Mac bundle must be skipped. Its independent build lock does not wait for
+an older full regression run.
 
-After the public **CI gate** admits exactly one successful check workflow,
+After the public **CI gate** admits the successful build workflow,
 `ci-dev-tail.yml` holds one separate noncancelling CI slot through Android/Mac
 signing, installation checks, candidate sealing and the monotonic Dev tag. The next
-revision can qualify while this tail runs. Signing remains in the existing protected
+revision can build while this tail runs. Signing remains in the existing protected
 workflows; source/version checks, Developer ID, notarization and disposable cask
-installation remain required. Qualification and delivery retain the same CI run ID,
-number, SHA and artifact namespace. Only trusted checks write caches; PR checks read
+installation remain required. Build and delivery retain the same CI run ID,
+number, SHA and artifact namespace. Only trusted main builds write caches; PR checks read
 them and signing/publication have no cache access.
 
 The existing **Publish Dev** workflow is the third, independently serialized lane.
-It still starts only after the entire source CI run succeeds and validates that
-run's immutable candidate. Active signing and publication are never cancelled by a
+It starts after the build/sign/seal CI run succeeds and validates that run's
+immutable candidate. The separate **CI regression** workflow starts on the same
+completion event, runs the full main test matrix against that exact commit and
+reports its own failures. Regression failures remain visible and become follow-up
+work; they do not block or retract a usable Dev build. It has read-only cache
+access and no signing or publication credentials. PR/manual, Stable and Nightly
+retain their existing test matrices. Internal same-repository PRs need no extra
+manual trust step for Dev integration. Active signing and publication are never cancelled by a
 new main push. All queues retain GitHub's default single pending entry, so newer
 pending work can replace older pending work; every revision is not promised a
 published build. Existing monotonic candidate/catalog checks reject stale delivery.
@@ -110,8 +116,8 @@ The short signed `dev-android.yml` build starts after the CI gate alongside Mac
 signing/installation. It builds `assembleRelease`, seals the APK/source and removes
 private inputs on every outcome, then uploads `zerus-dev-android-a<attempt>`.
 No runner polls the gate and no Actions token reaches this signing job. Its
-credential-free Android unit/lint check is required before signing; the signed
-build uses the same Firebase variant. Publication and the `dev` tag still wait
+credential-free Android unit/lint checks run in the independent regression lane;
+the signed build uses the same Firebase variant. Publication and the `dev` tag still wait
 for all selected candidates. With Mac enabled, the Android build overlaps its
 post-gate delivery work; with Mac disabled it adds its own short build duration.
 

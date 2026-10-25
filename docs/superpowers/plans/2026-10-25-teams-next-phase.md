@@ -335,6 +335,9 @@ answered; a denial cannot carry an explanation.
   task, and only the owner may discard. Proposal: until a draft is approved the
   lead may add, change or remove its tasks, insert a phase before other drafts
   and discard its own drafts; every change shows to the owner as a diff.
+  Owner: yes, urgent (in the fix phase), with a redesign of phase approval
+  (G5): the draft strips move to the top of the members column, compact,
+  collapsible, and the Members block becomes collapsible too.
 
 ## G. GUI
 

@@ -36,6 +36,17 @@ pub(crate) struct Seen {
     pub free: bool,
     pub idle: bool,
     pub reply_at: Option<f64>,
+    /// The last reply's identity, empty when the record has none (A2).
+    pub reply_id: String,
+    /// When its current turn started (A1).
+    pub turn_started: Option<f64>,
+    /// Busy, idle, background or unknown (A1, A2).
+    pub activity: String,
+    /// Idle, working, tool, input, question, approval, ready or unknown (A2).
+    pub phase: String,
+    /// Its own jobs run in the background: work in progress, not a finished
+    /// turn (`process_work.count > 0`, or activity `background`) (A2).
+    pub background: bool,
     /// Waiting on an answer: a question or a permission request.
     pub asking: bool,
     /// Its process or native session runs.
@@ -59,7 +70,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
             // Terminal sessions report their process, DeepSeek ones a state.
             let live = !matches!(field("state"), "paused" | "stopped" | "archived")
                 && (field("state") == "running" || field("process_state") == "running" || field("runtime_state") == "live");
-            let idle = live && field("activity") == "idle";
+            let activity = field("activity").to_owned();
+            let idle = live && activity == "idle";
             // An idle agent whose own jobs run in the background (Background:
             // a watcher, an MCP server, a long check) still takes messages.
             let free = idle
@@ -67,6 +79,10 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 && record["optional_questions"]["count"].as_u64().unwrap_or(0) == 0
                 && record["auth_required"] != true
                 && record["send_available"] != false;
+            // Background work is not a finished turn, whatever the activity
+            // says: a long command, a watcher or a native job still runs (A2).
+            let background = record["process_work"]["count"].as_u64().is_some_and(|count| count > 0)
+                || activity == "background";
             sessions.push(Seen {
                 host: host.clone(),
                 name: field("name").to_owned(),
@@ -76,6 +92,11 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 free,
                 idle,
                 reply_at: record["reply_at"].as_f64(),
+                reply_id: field("reply_id").to_owned(),
+                turn_started: record["turn_started"].as_f64(),
+                activity,
+                phase: field("phase").to_owned(),
+                background,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 live,
                 cwd: field("cwd").to_owned(),
@@ -94,7 +115,15 @@ pub(crate) enum Step {
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
     HandOut { task: u32, member: String },
-    TurnEnded { task: u32, at: f64 },
+    /// The member's first turn after the hand-off began (A1).
+    Started { task: u32 },
+    /// The hand-out did not start in `start_timeout_seconds` (A1).
+    StartLate { task: u32 },
+    /// Tells the free lead once that a hand-out has not started (A1).
+    TellStartLate { task: u32 },
+    TurnEnded { task: u32, at: f64, reply: String },
+    /// The member started working again: its recorded turn end is cleared (A2).
+    WorkResumed { task: u32 },
     NoReport { task: u32 },
     NotifyLead { task: u32 },
     /// The planning brief of a team created from the desktop.
@@ -122,6 +151,21 @@ pub(crate) enum Step {
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
     let session = member.session.as_ref()?;
     seen.iter().find(|s| s.host == session.host && s.name == session.name)
+}
+
+/// A session quiet enough for its ended turn to become the attempt's report
+/// (A2): idle, no question, input or approval, and no Background work.
+fn capture_open(found: &Seen) -> bool {
+    found.live && found.idle && matches!(found.phase.as_str(), "" | "idle" | "ready") && !found.background
+}
+
+/// The reply identity recorded with the turn end is still the session's last
+/// reply (A2): its reply id, or its reply time when no id is reported.
+fn same_turn(attempt: &Attempt, ended: f64, found: &Seen) -> bool {
+    if !attempt.turn_reply.is_empty() && !found.reply_id.is_empty() {
+        return attempt.turn_reply == found.reply_id;
+    }
+    found.reply_at.is_some_and(|at| at == ended)
 }
 
 /// What to do for one team now. Pure, so the rules are tested without
@@ -190,15 +234,46 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         let Some(attempt) = task.attempts.last() else { continue };
         if attempt.state == AttemptState::Delivered {
             let found = team.member(&attempt.member).and_then(|m| session_of(m, seen));
+            let delivered = attempt.delivered_at.unwrap_or(attempt.sent_at);
+            // A1: an attempt that shows the member working really started.
+            if attempt.started_at.is_none() {
+                let working = found.is_some_and(|found| {
+                    found.live
+                        && (!found.idle
+                            || found.turn_started.is_some_and(|at| at > delivered)
+                            || found.reply_at.is_some_and(|at| at > delivered))
+                });
+                if working {
+                    steps.push(Step::Started { task: task.id });
+                } else if !attempt.start_warned
+                    && attempt.open_question().is_none()
+                    && now - delivered >= team.settings.start_timeout_seconds as f64
+                {
+                    // A1: delivered and never started; Zerus re-sends nothing.
+                    steps.push(Step::StartLate { task: task.id });
+                }
+            }
+            // A2: the capture gate. A turn end is recorded only for a quiet
+            // session: idle, no question, input or approval, no Background work
+            // and no open team question.
             match (attempt.turn_ended_at, found) {
-                (None, Some(found)) => {
-                    let delivered = attempt.delivered_at.unwrap_or(attempt.sent_at);
-                    if let Some(at) = found.reply_at.filter(|at| found.idle && *at > delivered) {
-                        steps.push(Step::TurnEnded { task: task.id, at });
+                (None, Some(found)) if capture_open(found) && attempt.open_question().is_none() => {
+                    if let Some(at) = found.reply_at.filter(|at| *at > delivered) {
+                        steps.push(Step::TurnEnded { task: task.id, at, reply: found.reply_id.clone() });
                     }
                 }
-                (Some(ended), _) if !attempt.no_report && now - ended >= team.settings.report_timeout_seconds as f64 => {
-                    steps.push(Step::NoReport { task: task.id });
+                (Some(ended), Some(found)) => {
+                    // The same conditions still hold at capture time, and the
+                    // reply is still the one the turn ended with.
+                    if found.live && (!found.idle || !same_turn(attempt, ended, found)) {
+                        steps.push(Step::WorkResumed { task: task.id });
+                    } else if capture_open(found)
+                        && attempt.open_question().is_none()
+                        && !attempt.no_report
+                        && now - ended >= team.settings.report_timeout_seconds as f64
+                    {
+                        steps.push(Step::NoReport { task: task.id });
+                    }
                 }
                 _ => {}
             }
@@ -209,6 +284,20 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             let lead = team.member(&team.lead).and_then(|m| session_of(m, seen));
             if lead.is_some_and(|lead| lead.free) {
                 steps.push(Step::NotifyLead { task: task.id });
+            }
+        }
+    }
+    // A hand-out that never started: the lead hears once, when free (A1).
+    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
+        for task in &team.tasks {
+            let Some(attempt) = task.open_attempt() else { continue };
+            if attempt.started_at.is_none()
+                && attempt.start_warned
+                && attempt.open_question().is_none()
+                && !attempt.told_lead.iter().any(|kind| kind == "start_late")
+            {
+                steps.push(Step::TellStartLate { task: task.id });
+                break;
             }
         }
     }
@@ -626,11 +715,32 @@ pub(crate) fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Dur
     Ok(output)
 }
 
-/// The last reply of a member's session, for Use last reply as report.
+/// The last reply of a member's session, for Use last reply as report and the
+/// capture of a finished turn (A2).
 pub(crate) fn last_reply(session: &SessionRef) -> anyhow::Result<String> {
+    Ok(last_reply_of(session, "")?.unwrap_or_default())
+}
+
+/// The last reply, but only when it is still the reply whose id is `expected`:
+/// a newer turn started, so this is not that turn's report (A2). `None` means
+/// the session moved on; an error means it has no reply or cannot be read.
+pub(crate) fn last_reply_of(session: &SessionRef, expected: &str) -> anyhow::Result<Option<String>> {
     let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
+    if !expected.is_empty() {
+        let found = record["reply_id"].as_str().unwrap_or_default();
+        if !found.is_empty() && found != expected {
+            return Ok(None);
+        }
+    }
+    let text = reply_text(&record);
+    anyhow::ensure!(!text.is_empty(), "The member's session has no reply yet");
+    Ok(Some(text))
+}
+
+/// The last reply's text in an `hgs inspect` record.
+fn reply_text(record: &Value) -> String {
     let mut text = record["last_message"].as_str().unwrap_or_default().trim().to_owned();
     if text.is_empty() {
         // DeepSeek reports its replies as the main agent's messages.
@@ -639,8 +749,7 @@ pub(crate) fn last_reply(session: &SessionRef) -> anyhow::Result<String> {
                 && !e["detail"].as_str().unwrap_or_default().trim().is_empty())
             .and_then(|e| e["detail"].as_str()).unwrap_or_default().trim().to_owned();
     }
-    anyhow::ensure!(!text.is_empty(), "The member's session has no reply yet");
-    Ok(text)
+    text
 }
 
 /// The result of one `hgs send`.
@@ -946,6 +1055,20 @@ pub(crate) fn stalled_text(team: &Team, task: &Task, attempt: &Attempt, kind: &s
     )
 }
 
+/// The message that tells the lead a hand-out never started (A1). Zerus never
+/// re-sends the hand-out and never presses keys: the input may still be waiting
+/// in the member's terminal.
+pub(crate) fn start_late_text(team: &Team, task: &Task, attempt: &Attempt, now: f64) -> String {
+    let role = team.role_of(&attempt.member);
+    let minutes = (((now - attempt.delivered_at.unwrap_or(attempt.sent_at)) / 60.0).round() as u64).max(1);
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} not started]\n\
+         #{} was delivered to {role} {minutes} min ago and has not started; its input may be waiting in the terminal.\n\
+         Zerus does not re-send a hand-off: check its session, then message it or retry the task (hgs guide team).",
+        task.id, task.id
+    )
+}
+
 /// One message for the lead: the open tasks Zerus gave to another member
 /// with the same role, and to whom.
 pub(crate) fn rebalanced_text(team: &Team, tasks: &[u32]) -> String {
@@ -994,6 +1117,24 @@ fn tell_lead_stalled(store: &mut Store, team: &Team, task_id: u32, kind: &str) -
         let found = team.task_mut(task_id).and_then(|t| t.attempts.iter_mut().find(|a| a.id == attempt.id)).context("unknown attempt")?;
         found.told_lead.push(kind.to_owned());
         events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":kind})));
+        Ok(())
+    })
+}
+
+/// Tells the free lead once that a hand-out has not started (A1).
+fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.open_attempt().context("no open attempt")?.clone();
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &start_late_text(team, task, &attempt, now()));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(&attempt.member);
+        let found = team.task_mut(task_id).and_then(|t| t.attempts.iter_mut().find(|a| a.id == attempt.id)).context("unknown attempt")?;
+        found.told_lead.push("start_late".to_owned());
+        events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":"start_late"})));
         Ok(())
     })
 }
@@ -1101,6 +1242,26 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     })
 }
 
+/// A2: records the member's last reply as the attempt's report and marks it
+/// captured, so the member may replace it while the task is undecided (A6).
+fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str) -> anyhow::Result<()> {
+    change(store, team_id, |team, events| {
+        let task = team.task(task_id).context("unknown task")?;
+        let attempt = task.attempts.last().context("the task has no attempt")?;
+        // The gate was checked at capture time; the attempt may still have been
+        // decided while its session was read.
+        anyhow::ensure!(attempt.state == AttemptState::Delivered, "the attempt is no longer open");
+        let role = team.role_of(&attempt.member);
+        let (attempt_id, member) = (attempt.id.clone(), attempt.member.clone());
+        let input = json!({"task":task_id,"attempt":attempt_id,
+            "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
+        ops::apply(team, "report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
+        let found = team.task_mut(task_id).and_then(|task| task.attempts.last_mut()).context("the captured attempt")?;
+        found.report.as_mut().context("the captured report")?.captured = true;
+        Ok(())
+    })
+}
+
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
     match step {
         Step::Brief => send_brief(store, &team.id),
@@ -1171,32 +1332,82 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::HandOut { task, member } => hand_out(store, &team.id, *task, member, None, host),
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
-        Step::TurnEnded { task, at } => change(store, &team.id, |team, _| {
+        Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
                 if attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none() {
                     attempt.turn_ended_at = Some(*at);
+                    attempt.turn_reply = reply.clone();
                 }
             }
             Ok(())
         }),
+        Step::WorkResumed { task } => change(store, &team.id, |team, _| {
+            // A member that works again is not a finished turn any more (A2).
+            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                if attempt.state == AttemptState::Delivered {
+                    attempt.turn_ended_at = None;
+                    attempt.turn_reply.clear();
+                    attempt.no_report = false;
+                }
+            }
+            Ok(())
+        }),
+        Step::Started { task } => change(store, &team.id, |team, events| {
+            let Some(member) = team.task(*task).and_then(|t| t.attempts.last()).map(|a| a.member.clone()) else {
+                return Ok(());
+            };
+            let role = team.role_of(&member);
+            let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) else { return Ok(()) };
+            // A1: recorded once, the first time the member is seen working.
+            if attempt.state == AttemptState::Delivered && attempt.started_at.is_none() {
+                attempt.started_at = Some(now());
+                events.push(Event::new("started", json!({"task":task,"attempt":attempt.n,"member":role})));
+            }
+            Ok(())
+        }),
+        Step::StartLate { task } => change(store, &team.id, |team, events| {
+            let Some(member) = team.task(*task).and_then(|t| t.attempts.last()).map(|a| a.member.clone()) else {
+                return Ok(());
+            };
+            let role = team.role_of(&member);
+            let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) else { return Ok(()) };
+            if attempt.state == AttemptState::Delivered && attempt.started_at.is_none() && !attempt.start_warned {
+                attempt.start_warned = true;
+                events.push(Event::new("start_late", json!({"task":task,"attempt":attempt.n,"member":role})));
+            }
+            Ok(())
+        }),
+        Step::TellStartLate { task } => tell_lead_start_late(store, team, *task),
         Step::NoReport { task } => {
-            // The member's last reply is its report when it ran no command
-            // (a sandbox may keep it from the team's files); only without a
-            // reply does the task show No report.
+            // The report timeout passed with the capture gate holding (A2): the
+            // member's last reply becomes its report, marked captured so the
+            // member may replace it (A6); only without a reply does the task
+            // show No report.
             let attempt = team.task(*task).and_then(|t| t.attempts.last()).cloned();
             let session = attempt.as_ref().and_then(|a| team.member(&a.member)).and_then(|m| m.session.clone());
             if let (Some(attempt), Some(session)) = (attempt, session) {
-                if let Ok(reply) = last_reply(&session) {
-                    let role = team.role_of(&attempt.member);
-                    let input = json!({"task":task,"attempt":attempt.id,
-                        "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
-                    let member = attempt.member.clone();
-                    let done = change(store, &team.id, |team, events| {
-                        ops::apply(team, "report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events).map(|_| ())
-                    });
-                    if done.is_ok() {
+                match last_reply_of(&session, &attempt.turn_reply) {
+                    Ok(Some(reply)) => {
+                        if capture_report(store, &team.id, *task, &reply).is_ok() {
+                            return Ok(());
+                        }
+                    }
+                    Ok(None) => {
+                        // A newer reply: the turn ended again, so record that one
+                        // (A2). The next tick captures it once its timeout passed.
+                        change(store, &team.id, |team, _| {
+                            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                                if attempt.state == AttemptState::Delivered {
+                                    attempt.turn_ended_at = None;
+                                    attempt.turn_reply.clear();
+                                    attempt.no_report = false;
+                                }
+                            }
+                            Ok(())
+                        })?;
                         return Ok(());
                     }
+                    Err(_) => {}
                 }
             }
             change(store, &team.id, |team, events| {
@@ -1470,10 +1681,146 @@ mod tests {
         task.status = TaskStatus::InProgress;
         let mut idle = session("codex/x/dev", "r1", true);
         idle.reply_at = Some(50.0);
-        assert!(steps(&team, &[idle.clone()], 60.0).contains(&Step::TurnEnded { task: 1, at: 50.0 }));
+        assert!(steps(&team, &[idle.clone()], 60.0).contains(&Step::TurnEnded { task: 1, at: 50.0, reply: "".into() }));
         team.task_mut(1).unwrap().attempts[0].turn_ended_at = Some(50.0);
         assert!(!steps(&team, &[idle.clone()], 100.0).contains(&Step::NoReport { task: 1 }));
         assert!(steps(&team, &[idle], 171.0).contains(&Step::NoReport { task: 1 }));
+    }
+
+    /// A hand-out delivered at 10 to `dev`, with the attempts list one open.
+    fn delivered(team: &mut Team) {
+        let task = team.task_mut(1).unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "00000000-0000-4000-8000-000000000001".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+    }
+
+    #[test]
+    fn a_hand_out_that_never_starts_is_warned_once() {
+        let mut team = team();
+        delivered(&mut team);
+        let timeout = team.settings.start_timeout_seconds as f64;
+        // An idle session whose last reply predates the hand-off has not started.
+        let mut quiet = session("codex/x/dev", "r1", true);
+        quiet.reply_at = Some(5.0);
+        assert!(!steps(&team, &[quiet.clone()], 10.0 + timeout - 1.0).iter().any(|s| matches!(s, Step::StartLate { .. })));
+        assert!(steps(&team, &[quiet.clone()], 10.0 + timeout).contains(&Step::StartLate { task: 1 }));
+        // The warning is set once; Zerus never re-sends or presses keys.
+        team.task_mut(1).unwrap().attempts[0].start_warned = true;
+        let warned = steps(&team, &[quiet.clone()], 300.0);
+        assert!(!warned.iter().any(|s| matches!(s, Step::StartLate { .. } | Step::Started { .. })), "{warned:?}");
+        // Once the lead is free it hears about it, once.
+        let lead = session("claude/x/lead", "r0", true);
+        let mut heard = team.clone();
+        assert!(steps(&heard, &[lead.clone(), quiet.clone()], 300.0).contains(&Step::TellStartLate { task: 1 }));
+        heard.task_mut(1).unwrap().attempts[0].told_lead.push("start_late".into());
+        assert!(!steps(&heard, &[lead, quiet.clone()], 300.0).iter().any(|s| matches!(s, Step::TellStartLate { .. })));
+        // The message names the task, the member and the wait.
+        let task = team.task(1).unwrap();
+        let text = start_late_text(&team, task, &task.attempts[0], 10.0 + timeout);
+        assert!(text.contains("#1") && text.contains("Backend") && text.contains("min ago"), "{text}");
+        assert!(text.contains("has not started"), "{text}");
+        // A custom timeout is respected.
+        let mut earlier = self::team();
+        delivered(&mut earlier);
+        earlier.settings.start_timeout_seconds = 30;
+        assert!(steps(&earlier, &[quiet], 41.0).contains(&Step::StartLate { task: 1 }));
+    }
+
+    #[test]
+    fn a_started_attempt_is_recorded_from_the_session() {
+        let mut team = team();
+        delivered(&mut team);
+        // A busy member started.
+        assert!(steps(&team, &[session("codex/x/dev", "r1", false)], 20.0).contains(&Step::Started { task: 1 }));
+        // A reply newer than the hand-off started it too.
+        let mut replied = session("codex/x/dev", "r1", true);
+        replied.reply_at = Some(15.0);
+        assert!(steps(&team, &[replied], 20.0).contains(&Step::Started { task: 1 }));
+        // A turn that began after the hand-off counts even with no reply yet.
+        let mut turned = session("codex/x/dev", "r1", false);
+        turned.turn_started = Some(12.0);
+        assert!(steps(&team, &[turned], 20.0).contains(&Step::Started { task: 1 }));
+        // A stopped session is not a start.
+        let mut stopped = session("codex/x/dev", "r1", false);
+        stopped.live = false;
+        assert!(!steps(&team, &[stopped], 200.0).iter().any(|s| matches!(s, Step::Started { .. })));
+        // Recorded once, and never warned after a start.
+        team.task_mut(1).unwrap().attempts[0].started_at = Some(12.0);
+        let started = steps(&team, &[session("codex/x/dev", "r1", false)], 500.0);
+        assert!(!started.iter().any(|s| matches!(s, Step::Started { .. } | Step::StartLate { .. })), "{started:?}");
+    }
+
+    #[test]
+    fn a_turn_end_is_recorded_only_for_a_quiet_session() {
+        let mut team = team();
+        delivered(&mut team);
+        let mut idle = session("codex/x/dev", "r1", true);
+        idle.reply_at = Some(50.0);
+        idle.reply_id = "r7".into();
+        // A plain finished turn is recorded with the reply's identity.
+        assert!(steps(&team, &[idle.clone()], 60.0).contains(&Step::TurnEnded { task: 1, at: 50.0, reply: "r7".into() }));
+        // A question, input or approval the member waits on is not a turn end.
+        for phase in ["question", "input", "approval"] {
+            let mut asking = idle.clone();
+            asking.phase = phase.into();
+            assert!(!steps(&team, &[asking], 60.0).iter().any(|s| matches!(s, Step::TurnEnded { .. })), "{phase}");
+        }
+        // Background work is not a finished turn either.
+        let mut background = idle.clone();
+        background.background = true;
+        assert!(!steps(&team, &[background], 60.0).iter().any(|s| matches!(s, Step::TurnEnded { .. })));
+        // Nor is a turn end recorded while the attempt has an open question.
+        team.task_mut(1).unwrap().attempts[0].questions.push(Question { id: "q1".into(), text: "Which?".into(), at: 40.0, ..Default::default() });
+        assert!(!steps(&team, &[idle], 60.0).iter().any(|s| matches!(s, Step::TurnEnded { .. })));
+    }
+
+    #[test]
+    fn the_capture_gate_holds_with_a_question_or_background_work() {
+        let mut team = team();
+        delivered(&mut team);
+        let timeout = team.settings.report_timeout_seconds as f64;
+        {
+            let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+            attempt.turn_ended_at = Some(50.0);
+            attempt.turn_reply = "r7".into();
+        }
+        let mut quiet = session("codex/x/dev", "r1", true);
+        quiet.reply_at = Some(50.0);
+        quiet.reply_id = "r7".into();
+        // A plain finished turn is captured after its timeout.
+        assert!(!steps(&team, &[quiet.clone()], 50.0 + timeout - 1.0).iter().any(|s| matches!(s, Step::NoReport { .. })));
+        assert!(steps(&team, &[quiet.clone()], 50.0 + timeout).contains(&Step::NoReport { task: 1 }));
+        // An open question from the member blocks the capture.
+        for phase in ["question", "input", "approval"] {
+            let mut asking = quiet.clone();
+            asking.phase = phase.into();
+            assert!(!steps(&team, &[asking], 50.0 + timeout).iter().any(|s| matches!(s, Step::NoReport { .. })), "{phase}");
+        }
+        // Background work blocks it.
+        let mut background = quiet.clone();
+        background.background = true;
+        assert!(!steps(&team, &[background], 50.0 + timeout).iter().any(|s| matches!(s, Step::NoReport { .. })));
+        // An open team question on the attempt blocks it, until the lead answers.
+        team.task_mut(1).unwrap().attempts[0].questions.push(Question { id: "q1".into(), text: "Which?".into(), at: 40.0, ..Default::default() });
+        assert!(!steps(&team, &[quiet.clone()], 50.0 + timeout).iter().any(|s| matches!(s, Step::NoReport { .. })));
+        team.task_mut(1).unwrap().attempts[0].questions[0].answer = "The old one".into();
+        assert!(steps(&team, &[quiet.clone()], 50.0 + timeout).contains(&Step::NoReport { task: 1 }));
+        // The member works again: its turn end is cleared, not captured.
+        let mut busy = quiet.clone();
+        busy.idle = false;
+        assert!(steps(&team, &[busy], 50.0 + timeout).contains(&Step::WorkResumed { task: 1 }));
+        let mut newer = quiet;
+        newer.reply_id = "r8".into();
+        newer.reply_at = Some(70.0);
+        assert!(steps(&team, &[newer], 50.0 + timeout).contains(&Step::WorkResumed { task: 1 }));
     }
 
     #[test]
@@ -1500,7 +1847,7 @@ mod tests {
         let listing = json!([
             {"host":"msi","sessions":[
                 {"name":"codex/x/a","runtime_state":"live","process_state":"running","activity":"idle","phase":"idle",
-                 "process_work":{"count":0},"run_id":"r","reply_at":5.0},
+                 "process_work":{"count":0},"run_id":"r","reply_at":5.0,"turn_started":2.0,"reply_id":"r9"},
                 {"name":"dsh/x/b","state":"running","activity":"idle","phase":"idle"},
                 {"name":"codex/x/c","state":"paused","activity":"idle","phase":"idle"},
                 {"name":"codex/x/d","process_state":"running","activity":"idle","phase":"approval"},
@@ -1512,6 +1859,12 @@ mod tests {
         assert_eq!(free, ["codex/x/a", "dsh/x/b", "codex/x/e"]);
         assert_eq!((seen[0].host.as_str(), seen[5].host.as_str(), seen[0].reply_at), ("", "old", Some(5.0)));
         assert!(seen[4].idle && !seen[2].idle);
+        // The capture gate's fields: a background job, a waiting phase, the
+        // turn's identity (A1, A2).
+        assert!(seen[4].background && !seen[0].background);
+        assert!(seen[3].asking && seen[3].phase == "approval");
+        assert_eq!((seen[0].reply_id.as_str(), seen[0].turn_started, seen[0].activity.as_str()), ("r9", Some(2.0), "idle"));
+        assert!(!seen[2].live && !seen[2].background);
     }
 
     #[test]
@@ -1557,6 +1910,71 @@ mod tests {
         let attempt = saved.task(id).unwrap().attempts.last().unwrap();
         assert_eq!((attempt.state, attempt.report.as_ref().map(|r| r.text.as_str())), (AttemptState::Reported, Some("Done and checked")));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_captured_reply_is_marked_as_the_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            turn_ended_at: Some(50.0),
+            turn_reply: "r7".into(),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        capture_report(&mut store, &t.id, id, "Done and checked").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        let report = attempt.report.as_ref().unwrap();
+        assert!(report.captured);
+        assert_eq!(report.text, "(From Backend's last reply; it ran no hgs team report.)\n\nDone and checked");
+        assert_eq!((attempt.state, saved.task(id).unwrap().status), (AttemptState::Reported, TaskStatus::Submitted));
+        assert_eq!(attempt.notice, Notice::Pending);
+        // The member's real report replaces the captured one (A6) and the lead
+        // hears again.
+        let mut loaded = saved.clone();
+        let mut events = Vec::new();
+        let replaced = ops::apply(
+            &mut loaded,
+            "report",
+            &json!({"task":id,"attempt":"A1","text":"Done: 42 tests pass."}),
+            &Actor::Member("dev".into()),
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(replaced["status"], "submitted");
+        assert_eq!(events.last().unwrap().kind, "report_replaced");
+        let attempt = loaded.task(id).unwrap().attempts.last().unwrap();
+        let report = attempt.report.as_ref().unwrap();
+        assert!(!report.captured);
+        assert_eq!(report.text, "Done: 42 tests pass.");
+        assert_eq!(report.replaced[0].text, "(From Backend's last reply; it ran no hgs team report.)\n\nDone and checked");
+    }
+
+    #[test]
+    fn the_captured_reply_text_comes_from_the_inspect_record() {
+        // A terminal session's last message, trimmed.
+        assert_eq!(reply_text(&json!({"last_message":"  Done.  "})), "Done.");
+        // DeepSeek reports its replies as the main agent's AgentMessage events;
+        // a subagent's message is not the member's reply.
+        let record = json!({"events":[
+            {"type":"AgentMessage","agent_id":"child","detail":"Not mine"},
+            {"type":"AgentMessage","agent_id":"","detail":"  The answer.  "},
+            {"type":"Tool","detail":"run"}]});
+        assert_eq!(reply_text(&record), "The answer.");
+        assert_eq!(reply_text(&json!({})), "");
     }
 
     #[test]

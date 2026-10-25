@@ -162,8 +162,8 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     Ok((team, events))
 }
 
-/// Replaces the plan: members besides the lead, tasks and dependencies, and
-/// optionally settings. Only while Planning.
+/// Replaces the plan: members besides the lead, tasks and dependencies, the
+/// roadmap of later phases, and optionally settings. Only while Planning.
 fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(team.status == TeamStatus::Planning, "Only a team in Planning can change its plan");
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you can change the plan");
@@ -176,22 +176,67 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     }
     let mut tasks = Vec::new();
     for value in input["tasks"].as_array().into_iter().flatten() {
-        let task = parse_task(value)?;
+        let mut task = parse_task(value)?;
+        // The plan may queue tasks of later phases; phase 1 stays the default.
+        task.phase = match value["phase"].as_u64() {
+            None => 1,
+            Some(phase) => u32::try_from(phase).ok().filter(|phase| *phase > 0).context("A task phase is a number from 1")?,
+        };
         ensure!(tasks.iter().all(|t: &Task| t.id != task.id), "Task #{} is used twice", task.id);
         tasks.push(task);
     }
     ensure!(tasks.len() <= 200, "A plan has at most 200 tasks");
-    if !input["settings"].is_null() {
-        let settings: Settings = serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?;
-        validate_settings(&settings)?;
+    let settings: Option<Settings> = if input["settings"].is_null() {
+        None
+    } else {
+        Some(serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?)
+    };
+    if let Some(settings) = &settings {
+        validate_settings(settings)?;
+    }
+    // The roadmap (spec section 10): phases 2..N in order, all Draft. The owner
+    // approves each one strictly after the phase before it ended.
+    let approval = settings.as_ref().map(|settings| settings.phase_approval.unwrap_or(settings.approval)).unwrap_or_else(|| phase_approval(team));
+    let by = actor.label(team);
+    let mut phases: Vec<Phase> = Vec::new();
+    for value in input["phases"].as_array().into_iter().flatten() {
+        let n = value["n"]
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n >= 2)
+            .context("A planned phase is numbered from 2")?;
+        ensure!(phases.iter().all(|phase| phase.n != n), "Phase {n} is used twice");
+        let title = clean(value["title"].as_str().unwrap_or_default().trim(), 120, "A phase title")?;
+        phases.push(Phase {
+            n,
+            title,
+            barrier: value["barrier"].as_bool() == Some(true),
+            approval,
+            state: PhaseState::Draft,
+            added_by: by.clone(),
+            added_at: now(),
+            ..Default::default()
+        });
+    }
+    phases.sort_by_key(|phase| phase.n);
+    let listed: BTreeSet<u32> = phases.iter().map(|phase| phase.n).collect();
+    for task in &tasks {
+        ensure!(task.phase == 1 || listed.contains(&task.phase), "Task #{} is in phase {}, which the plan does not list", task.id, task.phase);
+    }
+    for phase in &mut phases {
+        phase.tasks = tasks.iter().filter(|task| task.phase == phase.n).map(|task| task.id).collect();
+        ensure!(!phase.tasks.is_empty(), "Phase {} has no tasks", phase.n);
+    }
+    if let Some(settings) = settings {
         team.settings = settings;
     }
     team.members = members;
     team.tasks = tasks;
+    team.phases = phases;
     let validation = plan::validate(team, &BTreeSet::new());
     events.push(Event::new(
         "planned",
-        json!({"by":actor.label(team),"members":team.members.len(),"tasks":team.tasks.len(),"errors":validation.errors.len()}),
+        json!({"by":by,"members":team.members.len(),"tasks":team.tasks.len(),"phases":team.phases.len(),"errors":validation.errors.len()}),
     ));
     Ok(json!({"status":"planned","validation":validation}))
 }
@@ -210,8 +255,10 @@ fn approve(team: &mut Team, actor: &Actor, offline: &BTreeSet<String>, events: &
     let validation = plan::validate(team, offline);
     ensure!(validation.errors.is_empty(), "Fix {} plan error(s) to run: {}", validation.errors.len(),
         validation.errors.iter().map(|f| f.text.as_str()).collect::<Vec<_>>().join("; "));
+    // Phase 1 opens with the plan; the phases above it stay Draft until the
+    // owner approves each one in order (spec section 10).
     for task in &mut team.tasks {
-        if task.status == TaskStatus::Draft {
+        if task.status == TaskStatus::Draft && task.phase == 1 {
             task.status = TaskStatus::Pending;
         }
     }
@@ -241,25 +288,25 @@ fn errors_text(errors: &[plan::Finding]) -> String {
     errors.iter().map(|finding| finding.text.as_str()).collect::<Vec<_>>().join("; ")
 }
 
-/// Appends a phase to a running or paused team: the lead's or your new work
-/// after the plan. A `review` phase waits for the owner as Draft.
+/// Appends a phase to a planning, running or paused team: the lead's or your
+/// new work after the plan. A phase is a Draft when the plan is still being
+/// drafted, when an earlier phase is a Draft, or when approval is `review`.
 fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you extend the team");
     ensure!(
-        matches!(team.status, TeamStatus::Running | TeamStatus::Paused),
-        "Only a running or paused team takes a new phase{}",
-        if team.status == TeamStatus::Planning { "; use plan while the team is Planning" } else { "" }
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team takes a new phase"
     );
     let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("A phase needs at least one task")?;
     ensure!(values.len() <= 50, "A phase has at most 50 tasks");
     ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
     ensure!(team.phases.len() < 100, "A team has at most 100 phases");
     let approval = phase_approval(team);
-    if approval == Approval::Review {
-        if let Some(draft) = team.phases.iter().find(|phase| phase.state == PhaseState::Draft) {
-            bail!("Phase {} waits for the owner's approval", draft.n);
-        }
-    }
+    // Several drafts may queue, in order; a phase added while an earlier one is
+    // still a Draft is a Draft too, whatever the approval says (F9).
+    let drafting = team.status == TeamStatus::Planning
+        || team.phases.iter().any(|phase| phase.state == PhaseState::Draft)
+        || approval == Approval::Review;
     let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
     let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
     // Ids continue after every id ever used: a discarded phase keeps its ids.
@@ -286,7 +333,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         .context("Phase numbers are exhausted")?;
     for task in &mut tasks {
         task.phase = n;
-        if approval == Approval::Auto {
+        if !drafting {
             task.status = TaskStatus::Pending;
         }
     }
@@ -309,10 +356,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     let barrier = input["barrier"].as_bool() == Some(true);
     let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
     let by = actor.label(team);
-    let state = match approval {
-        Approval::Review => PhaseState::Draft,
-        Approval::Auto => PhaseState::Approved,
-    };
+    let state = if drafting { PhaseState::Draft } else { PhaseState::Approved };
     // Validate the team as the phase would make it, in place; a refusal puts
     // the tasks back (nothing changed) without cloning every stored report.
     let first_new = team.tasks.len();
@@ -342,7 +386,8 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":{"errors":[],"warnings":validation.warnings}}))
 }
 
-/// Approves the one draft phase (owner) or discards it with its tasks.
+/// Approves a draft phase once every earlier phase ended (owner), or discards
+/// it with its tasks.
 fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(
         matches!(actor, Actor::Human),
@@ -362,6 +407,13 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     let ids = team.phases[at].tasks.clone();
     let wanted: BTreeSet<u32> = ids.iter().copied().collect();
     if approve {
+        // The owner approves a phase strictly after the one before it ended:
+        // every lower phase is approved and all its tasks are decided (F9).
+        for earlier in 1..n {
+            let open = team.tasks.iter().any(|task| task.phase == earlier && !task.status.finished());
+            let waiting = team.phases.iter().any(|phase| phase.n == earlier && phase.state == PhaseState::Draft);
+            ensure!(!open && !waiting, "Phase {n} opens after phase {earlier} ends");
+        }
         // An assignee may have been removed since the phase was added.
         let validation = plan::validate(team, offline);
         let errors = phase_errors(&validation, &wanted, false);
@@ -994,46 +1046,63 @@ mod tests {
     }
 
     #[test]
-    fn plan_accepts_pinned_and_keeps_phase_one() {
+    fn plan_queues_the_roadmap_and_keeps_phase_one() {
         let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
         let mut events = Vec::new();
+        // A task in a phase the plan does not list is refused.
+        let error = plan(&mut team, &json!({"tasks":[{"id":1,"title":"A","assignee":"lead","phase":7}]}), &Actor::Human, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Task #1 is in phase 7, which the plan does not list");
+        // The roadmap is listed in order, whatever order it came in.
         plan(
             &mut team,
-            &json!({"tasks":[
-                {"id":1,"title":"A","assignee":"lead","pinned":true,"phase":7},
-                {"id":2,"title":"B","assignee":"lead"}
-            ]}),
+            &json!({"phases":[{"n":3,"title":"Later"},{"n":2,"title":"Next","barrier":true}],
+                "tasks":[
+                    {"id":1,"title":"A","assignee":"lead","pinned":true},
+                    {"id":2,"title":"B","assignee":"lead","phase":2},
+                    {"id":3,"title":"C","assignee":"lead","phase":3}
+                ]}),
             &Actor::Human,
             &mut events,
         )
         .unwrap();
-        let (first, second) = (team.task(1).unwrap(), team.task(2).unwrap());
-        assert!(first.pinned);
-        assert_eq!(first.phase, 1);
-        assert!(!second.pinned);
-        assert_eq!(second.phase, 1);
+        let phases: Vec<(u32, PhaseState, bool, Vec<u32>)> =
+            team.phases.iter().map(|phase| (phase.n, phase.state, phase.barrier, phase.tasks.clone())).collect();
+        assert_eq!(phases, vec![(2, PhaseState::Draft, true, vec![2]), (3, PhaseState::Draft, false, vec![3])]);
+        assert!(team.task(1).unwrap().pinned);
+        assert_eq!((team.task(1).unwrap().phase, team.task(2).unwrap().phase, team.task(3).unwrap().phase), (1, 2, 3));
+        assert_eq!(events.last().unwrap().payload["phases"], 2);
+        // Approving the plan opens phase 1 only; later phases stay Draft.
+        approve(&mut team, &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.task(1).unwrap().status, TaskStatus::Pending);
+        assert_eq!((team.task(2).unwrap().status, team.task(3).unwrap().status), (TaskStatus::Draft, TaskStatus::Draft));
     }
 
     #[test]
-    fn extend_is_for_a_running_team_and_the_lead_or_you() {
-        let (mut planning, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    fn extend_takes_phases_while_planning_too() {
+        let (mut planning, _) = create(
+            "t",
+            &json!({"name":"T","lead":{"id":"lead","agent":"claude"},"members":[{"id":"dev","role":"Backend","agent":"codex"}]}),
+        )
+        .unwrap();
         let mut events = Vec::new();
         let none = BTreeSet::new();
-        let error = extend(
+        // While Planning the new phase joins the roadmap as a Draft.
+        let added = extend(
             &mut planning,
-            &json!({"tasks":[{"id":1,"title":"A","assignee":"lead"}]}),
+            &json!({"phase_title":"Later","tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
             &Actor::Human,
             &none,
             &mut events,
         )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("Only a running or paused team takes a new phase"), "{error}");
-        assert!(error.contains("use plan while the team is Planning"), "{error}");
-        let mut team = running_team();
+        .unwrap();
+        assert_eq!((added["phase"].as_u64(), added["status"].as_str()), (Some(2), Some("added")));
+        assert_eq!(planning.phases[0].state, PhaseState::Draft);
+        assert_eq!(planning.task(1).unwrap().status, TaskStatus::Draft);
         let error = extend(
-            &mut team,
-            &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}),
+            &mut planning,
+            &json!({"tasks":[{"id":2,"title":"B","assignee":"dev"}]}),
             &Actor::Member("dev".into()),
             &none,
             &mut events,
@@ -1041,33 +1110,22 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert_eq!(error, "Only the lead or you extend the team");
+        // A team that is over takes no new phase; a paused one does.
+        let mut team = running_team();
         for status in [TeamStatus::Done, TeamStatus::Stopped, TeamStatus::Archived] {
             team.status = status;
-            let error = extend(
-                &mut team,
-                &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}),
-                &Actor::Human,
-                &none,
-                &mut events,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("Only a running or paused team"), "{status:?}: {error}");
+            let error = extend(&mut team, &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &Actor::Human, &none, &mut events)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, "Only a planning, running or paused team takes a new phase", "{status:?}");
         }
         team.status = TeamStatus::Paused;
-        let added = extend(
-            &mut team,
-            &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}),
-            &Actor::Member("lead".into()),
-            &none,
-            &mut events,
-        )
-        .unwrap();
+        let added = extend(&mut team, &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert_eq!(added["status"], "added");
     }
 
     #[test]
-    fn review_phases_wait_for_the_owner_and_auto_phases_start_at_once() {
+    fn queued_drafts_keep_their_order_and_auto_waits_behind_them() {
         let mut team = running_team();
         let mut events = Vec::new();
         let none = BTreeSet::new();
@@ -1087,51 +1145,106 @@ mod tests {
         assert_eq!(events.last().unwrap().kind, "phase_added");
         assert_eq!(events.last().unwrap().payload["by"], "Lead");
         assert_eq!(events.last().unwrap().payload["tasks"], 2);
-        let phase = &team.phases[0];
-        assert_eq!((phase.n, phase.state, phase.barrier, phase.approval), (2, PhaseState::Draft, true, Approval::Review));
-        assert_eq!(phase.tasks, vec![3, 4]);
-        assert!(team.task(3).unwrap().pinned);
-        assert_eq!((team.task(3).unwrap().status, team.task(3).unwrap().phase), (TaskStatus::Draft, 2));
-        let error = extend(
-            &mut team,
-            &json!({"tasks":[{"id":5,"title":"More","assignee":"dev"}]}),
-            &Actor::Human,
-            &none,
-            &mut events,
-        )
-        .unwrap_err()
-        .to_string();
-        assert_eq!(error, "Phase 2 waits for the owner's approval");
+        // A second phase queues behind the first draft instead of being refused.
+        let added = extend(&mut team, &json!({"tasks":[{"id":5,"title":"More","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(added["phase"], 3);
+        assert_eq!(
+            team.phases.iter().map(|phase| (phase.n, phase.state)).collect::<Vec<_>>(),
+            vec![(2, PhaseState::Draft), (3, PhaseState::Draft)]
+        );
+        assert_eq!((team.task(3).unwrap().status, team.task(5).unwrap().status), (TaskStatus::Draft, TaskStatus::Draft));
+        // With auto, a phase added behind a draft is a draft too.
+        team.settings.phase_approval = Some(Approval::Auto);
+        let added = extend(&mut team, &json!({"tasks":[{"id":6,"title":"After","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((added["phase"].as_u64(), added["approval"].as_str()), (Some(4), Some("auto")));
+        assert_eq!(team.phases.last().unwrap().state, PhaseState::Draft);
+        assert_eq!(team.task(6).unwrap().status, TaskStatus::Draft);
+        // With no draft left, an auto phase starts at once as before.
+        team.phases.retain(|phase| phase.state != PhaseState::Draft);
+        for task in &mut team.tasks {
+            if task.phase > 1 && task.status == TaskStatus::Draft {
+                task.status = TaskStatus::Pending;
+            }
+        }
+        let added = extend(&mut team, &json!({"tasks":[{"id":7,"title":"Fresh","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((added["phase"].as_u64(), added["approval"].as_str()), (Some(5), Some("auto")));
+        assert_eq!(team.task(7).unwrap().status, TaskStatus::Pending);
+        assert_eq!(team.phases.last().unwrap().state, PhaseState::Approved);
+    }
+
+    #[test]
+    fn approve_phase_waits_for_every_earlier_phase() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [3, 4] {
+            extend(&mut team, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
+        // Phase 1 is still open.
+        let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Phase 2 opens after phase 1 ends");
+        // Decide phase 1: phase 2 may open, phase 3 still waits.
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
         let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!(approved["status"], "phase_approved");
-        assert_eq!(approved["tasks"], json!([3, 4]));
-        assert_eq!(team.task(3).unwrap().status, TaskStatus::Pending);
-        assert_eq!(team.task(4).unwrap().status, TaskStatus::Pending);
-        assert_eq!(team.phases[0].state, PhaseState::Approved);
-        assert_eq!((team.phases[0].decided_by.as_str(), team.phases[0].decided_at.is_some()), ("You", true));
-        assert_eq!(events.last().unwrap().kind, "phase_approved");
-        let added = extend(
-            &mut team,
-            &json!({"tasks":[{"id":5,"title":"More","assignee":"dev"}]}),
-            &Actor::Human,
-            &none,
-            &mut events,
-        )
-        .unwrap();
+        let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Phase 3 opens after phase 2 ends");
+        apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([4])));
+    }
+
+    #[test]
+    fn discarding_one_draft_keeps_the_later_ones() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        for id in [3, 4] {
+            extend(&mut team, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
+        let discarded = apply(&mut team, "discard-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(discarded["tasks"], json!([3]));
+        assert_eq!(team.tasks.iter().map(|task| task.id).collect::<Vec<_>>(), vec![1, 2, 4]);
+        assert_eq!(
+            team.phases.iter().map(|phase| (phase.n, phase.state)).collect::<Vec<_>>(),
+            vec![(2, PhaseState::Discarded), (3, PhaseState::Draft)]
+        );
+        // The next draft opens once phase 1 ended; the discarded phase never blocks.
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([4])));
+        // Numbers are never reused: the next phase is 4, its task #5.
+        let added = extend(&mut team, &json!({"tasks":[{"id":5,"title":"New","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(added["phase"], 4);
+    }
+
+    #[test]
+    fn an_old_team_with_one_draft_keeps_working() {
+        // A team stored by the previous build: one Draft phase, its tasks Draft.
+        let old = json!({
+            "id":"t","name":"T","lead":"lead","status":"running",
+            "settings":{"approval":"auto"},
+            "members":[{"id":"lead","role":"Lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}},
+                {"id":"dev","role":"Backend","agent":"codex","session":{"name":"codex/x/dev","run_id":"r1"}}],
+            "tasks":[
+                {"id":1,"title":"API","assignee":"dev","status":"accepted"},
+                {"id":2,"title":"Fix","assignee":"dev","status":"draft","phase":2}],
+            "phases":[{"n":2,"title":"QA fixes","approval":"review","state":"draft","tasks":[2]}]
+        });
+        let mut team: Team = serde_json::from_value(old).unwrap();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // The one draft approves as before, once the phase before it ended.
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([2])));
+        assert_eq!(team.task(2).unwrap().status, TaskStatus::Pending);
+        // Extend still appends after it; nothing needed a new field.
+        let added = extend(&mut team, &json!({"tasks":[{"id":3,"title":"More","assignee":"dev"}]}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!(added["phase"], 3);
-        team.settings.phase_approval = Some(Approval::Auto);
-        let added = extend(
-            &mut team,
-            &json!({"tasks":[{"id":6,"title":"Auto","assignee":"dev"}]}),
-            &Actor::Human,
-            &none,
-            &mut events,
-        )
-        .unwrap();
-        assert_eq!((added["phase"].as_u64(), added["approval"].as_str()), (Some(4), Some("auto")));
-        assert_eq!(team.task(6).unwrap().status, TaskStatus::Pending);
-        let phase = team.phases.last().unwrap();
-        assert_eq!((phase.state, phase.decided_by.as_str(), phase.decided_at), (PhaseState::Approved, "", None));
     }
 
     #[test]
@@ -1354,6 +1467,10 @@ mod tests {
         let mut team = running_team();
         let mut events = Vec::new();
         let none = BTreeSet::new();
+        // Phase 1 ended, so phase 2 is next in line.
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
         extend(
             &mut team,
             &json!({"tasks":[{"id":3,"title":"Fix","assignee":"qa"}]}),

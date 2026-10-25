@@ -1075,10 +1075,15 @@ class WorkflowSecurityTests(unittest.TestCase):
             command = f'"$scan_dir/gitleaks" {target} --no-banner --redact --ignore-gitleaks-allow --exit-code 1 .'
             self.assertIn(command, scan)
             self.assertLess(scan.index(control), scan.index(command))
-        # A target .gitleaks.toml or .gitleaksignore would replace the default rules
-        # or hide findings; adding one is a reviewed change to this test.
-        for name in (".gitleaks.toml", ".gitleaksignore"):
-            self.assertFalse((ROOT / name).exists(), name)
+        # Keep the default rules. Only these reviewed immutable false positives
+        # may be ignored; a new commit at the same path/line must still fail.
+        self.assertFalse((ROOT / ".gitleaks.toml").exists())
+        fingerprints = [line.strip() for line in (ROOT / ".gitleaksignore").read_text().splitlines()
+                        if line.strip() and not line.lstrip().startswith("#")]
+        self.assertEqual(fingerprints, [
+            "54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/ios/ZerusKit/Tests/ZerusKitTests/TasksPresentationTests.swift:generic-api-key:148",
+            "54ece01be80c6dfb552eb9fc31a6455011fda1a2:mobile/android/app/src/test/java/app/zerus/mobile/TasksPresentationTest.kt:generic-api-key:134",
+        ])
 
     def test_cache_directories_stay_outside_uploaded_paths(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()

@@ -133,7 +133,9 @@ public:
         legacy->setEnabled(false);legacy->hide();mobileLayout->addWidget(legacy);
         connect(legacyToggle,&QToolButton::toggled,this,[legacy,legacyToggle](bool show){legacy->setVisible(show);legacyToggle->setArrowType(show?Qt::DownArrow:Qt::RightArrow);});
         workspaceConnection->protectionChanged=[legacy,legacyToggle](bool encrypted){legacy->setEnabled(!encrypted);legacyToggle->setEnabled(!encrypted);if(encrypted){legacyToggle->setChecked(false);legacy->hide();}};
-        mobileLayout->addWidget(new PhonePairing::Panel(executable));mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
+        auto *phones=new PhonePairing::Panel(executable);mobileLayout->addWidget(phones);
+        workspaceConnection->connectionChanged=[phones]{phones->refresh();};
+        mobileDelivery=new MobileDeliverySettings(executable);mobileLayout->addWidget(mobileDelivery);mobileLayout->addStretch();addPage(mobile);
         files=new DownloadCacheSettings;addPage(files);
         worktreeSection=pages->count();nav->insertItem(worktreeSection,tr("Worktrees"));worktrees=new WorktreeSettings(executable);addPage(worktrees);
         approvalSection=pages->count();approvals=new AutomaticApprovalSettings(executable);addPage(approvals);

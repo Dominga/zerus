@@ -24,6 +24,8 @@
 #include <QScrollArea>
 #include <QSplitter>
 #include <QTemporaryDir>
+#include <QTextBlock>
+#include <QTextBrowser>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -166,6 +168,7 @@ void darkPalette()
     p.setColor(QPalette::Window, QColor("#15191f")); p.setColor(QPalette::WindowText, QColor("#e6e8eb"));
     p.setColor(QPalette::Base, QColor("#1b1f26")); p.setColor(QPalette::Button, QColor("#232830"));
     p.setColor(QPalette::ButtonText, QColor("#e6e8eb")); p.setColor(QPalette::Text, QColor("#e6e8eb"));
+    p.setColor(QPalette::PlaceholderText, QColor("#8b98a8"));
     QApplication::setPalette(p);
 }
 }
@@ -187,6 +190,9 @@ private slots:
     void phaseApprovalAndFinishAskTheOwner();
     void pinMarkAndFinishedTeamShowWhoFinished();
     void catalogEditorCarriesNewPhaseApproval();
+    void phaseRetriesReuseTheRequestId();
+    void malformedPhasesFallBack();
+    void lightThemeShots();
     void emptyPanelOffersNewTeamAndDesigner();
     void embeddedNewTeamIsLedByTheSession();
     void workspaceAddsAMember();
@@ -219,6 +225,8 @@ if a[:2]==['team','list']:
 elif a[:2]==['team','status']:sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
+elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
+ print('hgs: Phase 9 is not waiting for approval',file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','create']:print(json.dumps({'status':'created','team':'team-new','request_id':body.get('request_id')}))
 elif a[:2]==['account','ls']:print(json.dumps({'profiles':[{'id':'native-claude','provider':'claude','label':'Default','account_status':{'status':'ok'}},
  {'id':'work','provider':'claude','label':'Claude work','account_status':{'status':'signed_out'}}]}))
@@ -345,6 +353,13 @@ void TestTeamsUi::newTeamStartsTheLeadWithTheTemplate()
     TeamNewDialog dialog(&controller, &client, {{QString(), "this computer", true}, {"msi-old", "msi-old", false}},
                          {{QString(), "claude/checkout/main", "claude"}}, QDir::toNativeSeparators(folder.path()), "Checkout");
     dialog.show();
+    // The isolated dark capture gets the same readable placeholder color the
+    // window palette gives the real dialog.
+    if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) {
+        const QColor placeholder = dialog.findChild<QLineEdit *>("teamNewName")->palette().color(QPalette::PlaceholderText);
+        QVERIFY(placeholder.isValid());
+        QVERIFY(placeholder.lightness() > 90);
+    }
     // Not a Git folder: members share it, no worktrees.
     QTRY_VERIFY(dialog.findChild<QLabel *>("teamNewGitNote")->isVisible());
     QVERIFY(!dialog.findChild<QCheckBox *>("teamNewWorktrees")->isEnabled());
@@ -577,6 +592,20 @@ void TestTeamsUi::workspaceGroupsTasksByPhase()
     clickHeader(2);   // the current phase closes; its tasks go, the others stay
     QTRY_VERIFY(graph()->bands[1].collapsed);
     QTRY_COMPARE(nodeIds(graph()), (QList<int>{1, 2, 5}));
+    // The collapsed phase's summary node opens it too, and its line says a
+    // finished phase is done rather than just "open".
+    const auto clickSummary = [&](int phase) {
+        auto *view = graph(); QVERIFY(view);
+        QVERIFY(!view->summaryRect(phase).isNull());
+        QTest::mouseClick(view, Qt::LeftButton, {}, (view->summaryRect(phase).center() * view->zoom).toPoint());
+    };
+    clickSummary(2);
+    QTRY_VERIFY(!graph()->bands[1].collapsed);
+    QTRY_COMPARE(nodeIds(graph()).size(), 5);
+    QCOMPARE(TeamUi::phaseSummaryText(2, 2), QStringLiteral("2/2 done · click to open"));
+    QCOMPARE(TeamUi::phaseSummaryText(1, 2), QStringLiteral("1/2 · click to open"));
+    clickHeader(2);   // closed again for the board below
+    QTRY_VERIFY(graph()->bands[1].collapsed);
     shot(&workspace, "d3-phases-graph-open");
     const auto showView = [&workspace](const QString &view) {
         for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
@@ -632,28 +661,28 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseHeading")->text(), QStringLiteral("Phase 3 · Polish · 0/1"));
     QVERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
     QVERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceFinish"));   // tasks are still open
     shot(&workspace, "d3-phases-draft");
-    if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) {
-        const QPalette dark = QApplication::palette();
-        QPalette light;
-        light.setColor(QPalette::Window, QColor("#f5f7f9")); light.setColor(QPalette::WindowText, QColor("#1a2733"));
-        light.setColor(QPalette::Base, QColor("#ffffff")); light.setColor(QPalette::Button, QColor("#edf2f5"));
-        light.setColor(QPalette::ButtonText, QColor("#1a2733")); light.setColor(QPalette::Text, QColor("#1a2733"));
-        QApplication::setPalette(light);
-        workspace.setTheme(false); panel.setTheme(false);
-        QTRY_VERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
-        shot(&workspace, "d3-phases-draft-light");
-        workspace.setTheme(true); panel.setTheme(true);
-        QApplication::setPalette(dark);
-        QTRY_VERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
-    }
-    // Approve sends the owner's decision once, with the phase.
-    workspace.findChild<QPushButton *>("teamApprovePhase")->click();
+    // Approve sends the owner's decision once, with the phase. The buttons are
+    // disabled at once, so a second click cannot send it again.
+    auto *approve = workspace.findChild<QPushButton *>("teamApprovePhase");
+    approve->click();
+    QVERIFY(!approve->isEnabled());
+    QVERIFY(!workspace.findChild<QPushButton *>("teamDiscardPhase")->isEnabled());
     QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
     QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 3);
     QCOMPARE(calls(script(), "approve-phase").first()["team"].toString(), QStringLiteral("team-1"));
     QCOMPARE(calls(script(), "approve-phase").first()["by"].toString(), QStringLiteral("human"));
     // Discard asks to confirm first: "Discard phase N and its K tasks?".
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
+    // Cancelling the confirmation sends nothing.
+    QTimer::singleShot(0, &panel, [&panel] {
+        if (auto *box = panel.findChild<QMessageBox *>("teamDiscardPhaseConfirm"))
+            for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Cancel")) { b->click(); break; }
+    });
+    workspace.findChild<QPushButton *>("teamDiscardPhase")->click();
+    QTest::qWait(100);
+    QCOMPARE(calls(script(), "discard-phase").size(), 0);
     QTRY_VERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
     QTimer::singleShot(0, &panel, [&panel] {
         if (auto *box = panel.findChild<QMessageBox *>("teamDiscardPhaseConfirm"))
@@ -681,12 +710,28 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     workspace.findChild<QPushButton *>("teamWorkspaceFinish")->click();
     auto *dialog = panel.findChild<QDialog *>("teamFinishDialog");
     QTRY_VERIFY(dialog);
+    // Cancelling deletes the dialog instead of leaving it hidden under the panel.
+    dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();
+    QTest::qWait(50);
+    QCOMPARE(panel.findChildren<QDialog *>("teamFinishDialog").size(), 0);
+    workspace.findChild<QPushButton *>("teamWorkspaceFinish")->click();
+    dialog = panel.findChild<QDialog *>("teamFinishDialog");
+    QTRY_VERIFY(dialog);
     auto *summary = dialog->findChild<QPlainTextEdit *>("teamFinishSummary");
     auto *finish = dialog->findChild<QPushButton *>("teamFinishConfirm");
     QVERIFY(summary && finish);
     QVERIFY(!finish->isEnabled());   // a summary is required
     summary->setPlainText(QString(4001, QLatin1Char('x')));
     QTRY_VERIFY(!finish->isEnabled());   // and bounded at 4,000 characters
+    // Characters, not UTF-16 units: 4,000 emoji are accepted, 4,001 are not.
+    const QString emoji = QString(QChar(0xD83D)) + QChar(0xDE00);
+    QString many;
+    many.reserve(8000);
+    for (int i = 0; i < 4000; ++i) many += emoji;
+    summary->setPlainText(many);
+    QTRY_VERIFY(finish->isEnabled());
+    summary->setPlainText(many + emoji);
+    QTRY_VERIFY(!finish->isEnabled());
     summary->setPlainText(QStringLiteral("Phases 1–2 are delivered; the retest is #11."));
     QTRY_VERIFY(finish->isEnabled());
     finish->click();
@@ -781,6 +826,98 @@ void TestTeamsUi::catalogEditorCarriesNewPhaseApproval()
         found = true;
     }
     QVERIFY(found);
+}
+
+void TestTeamsUi::phaseRetriesReuseTheRequestId()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.watch("team-1");
+    QFile::remove(script() + ".calls");
+    bool done = false, ok = true;
+    const auto send = [&](int phase) {
+        done = false; ok = false;
+        controller.act("approve-phase", {{"team", "team-1"}, {"phase", phase}}, [&](bool success, const QString &) { done = true; ok = success; });
+        QTRY_VERIFY(done);
+    };
+    send(9); QVERIFY(!ok);   // refused; the id stays for the next try
+    send(9); QVERIFY(!ok);
+    send(2); QVERIFY(ok);    // a success drops it
+    send(2); QVERIFY(ok);    // so a later decision is a new request
+    const auto sent = calls(script(), "approve-phase");
+    QCOMPARE(sent.size(), 4);
+    QCOMPARE(sent[0]["request_id"].toString(), sent[1]["request_id"].toString());
+    QVERIFY(sent[2]["request_id"].toString() != sent[3]["request_id"].toString());
+}
+
+void TestTeamsUi::malformedPhasesFallBack()
+{
+    auto raw = phasedTeam();
+    auto tasks = raw["tasks"].toArray();
+    auto zero = tasks[0].toObject(); zero["phase"] = 0; tasks[0] = zero;
+    auto negative = tasks[1].toObject(); negative["phase"] = -4; tasks[1] = negative;
+    raw["tasks"] = tasks;
+    auto phases = raw["phases"].toArray();
+    phases.append(QJsonObject{{"n", 0}, {"title", "Bad"}, {"state", "approved"}, {"tasks", QJsonArray{}}});
+    raw["phases"] = phases;
+    const auto team = parse(raw);
+    QCOMPARE(team.task(1)->phase, 1);
+    QCOMPARE(team.task(2)->phase, 1);
+    QVERIFY(!team.phase(0));
+    QCOMPARE(team.phases.size(), 2);   // the n=0 record is dropped
+    for (const auto &group : phaseGroups(team)) QVERIFY(group.n >= 1);
+}
+
+void TestTeamsUi::lightThemeShots()
+{
+    if (qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) QSKIP("Set ZERUS_TEAM_SHOTS to render the light shots.");
+    const QPalette dark = QApplication::palette();
+    QPalette light;
+    light.setColor(QPalette::Window, QColor("#f5f7f9")); light.setColor(QPalette::WindowText, QColor("#1a2733"));
+    light.setColor(QPalette::Base, QColor("#ffffff")); light.setColor(QPalette::Button, QColor("#edf2f5"));
+    light.setColor(QPalette::ButtonText, QColor("#1a2733")); light.setColor(QPalette::Text, QColor("#1a2733"));
+    light.setColor(QPalette::PlaceholderText, QColor("#627082"));
+    QApplication::setPalette(light);
+    setTeam(phasedTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setTheme(false); panel.setTheme(false);
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
+    // The coordinator's empty Activity text is light-theme text, not a dark
+    // document left over from before the theme switch.
+    auto *conversation = workspace.findChild<QWidget *>("teamConversationActivity");
+    auto *browser = conversation ? conversation->findChild<QTextBrowser *>() : nullptr;
+    QVERIFY(browser);
+    const auto lightText = [&] {
+        QColor color;
+        for (auto block = browser->document()->begin(); block.isValid(); block = block.next())
+            if (block.text().contains(QStringLiteral("Messages, tools and approvals"))) {
+                QTextCursor cursor(block); cursor.movePosition(QTextCursor::StartOfBlock);
+                cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 1);
+                color = cursor.charFormat().foreground().color();
+            }
+        return color.isValid() && color.lightness() < 150;
+    };
+    QTRY_VERIFY(lightText());
+    shot(&workspace, "d3-phases-draft-light");
+    auto waiting = phasedTeam();
+    auto tasks = waiting["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) { auto task = tasks[i].toObject(); task["status"] = "accepted"; tasks[i] = task; }
+    waiting["tasks"] = tasks;
+    waiting["phases"] = QJsonArray{QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "approved"}, {"tasks", QJsonArray{3, 4}}}};
+    waiting["pending_phase"] = QJsonValue();
+    waiting["waiting_for_lead"] = true;
+    setTeam(waiting);
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QPushButton *>("teamWorkspaceFinish") != nullptr; })());
+    shot(&workspace, "d3-phases-waiting-light");
+    QApplication::setPalette(dark);
 }
 
 void TestTeamsUi::boardColumnsKeepTheirScroll()

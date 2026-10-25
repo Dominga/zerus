@@ -46,6 +46,10 @@ private:
     // phase, and the finished team's own summary once it is Done.
     QWidget *draftPhase(const Teams::Team &team);
     QWidget *finishSummary(const Teams::Team &team);
+    QWidget *errorStrip();
+    // The team as the controller currently has it, by id (a poll may have
+    // replaced the copy a widget was built with).
+    const Teams::Team *currentTeam(const QString &id) const;
     QWidget *answers(const Teams::Team &team);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
@@ -64,6 +68,7 @@ private:
     Teams::LiveLookup m_live;
     QList<Computer> m_computers;
     QString m_team, m_view = QStringLiteral("graph"), m_filter = QStringLiteral("all"), m_focus;
+    QString m_error;
     bool m_dark = true, m_pending = false, m_feedOpen = false, m_fit = true;
     double m_zoom = 1.0;
     int m_drawerTask = 0;

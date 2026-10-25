@@ -46,7 +46,8 @@ public:
     // characters. The dialog confirms; the request goes out once.
     void finishTeam(const Teams::Team &team);
     void reassignMenu(const Teams::Team &team, int task, const QPoint &global);
-    void act(const QString &operation, const QJsonObject &input);
+    void act(const QString &operation, const QJsonObject &input,
+             const std::function<void(bool ok, const QString &message)> &done = {});
     bool confirm(const QString &name, const QString &title, const QString &text, const QString &action);
     // Planning, shared with the team workspace (TeamPanelPlan.cpp): the whole
     // plan once per edit; a task editor (0 = a new task); a dependency.
@@ -85,8 +86,9 @@ private:
     QString m_team, m_filter = QStringLiteral("all"), m_feedMember, m_notice;
     bool m_dark = true, m_showBlockers = false, m_pending = false, m_dirty = false;
     double m_zoom = 1.0;
-    // team id -> phase -> open; at most a handful of teams, never persisted.
+    // team id -> phase -> open; at most a handful of teams, oldest dropped.
     QHash<QString, QHash<int, bool>> m_phaseOpen;
+    QStringList m_phaseOrder;
     QPointer<QWidget> m_finishDialog;
     QScrollArea *m_scroll;
     QStackedWidget *m_stack;

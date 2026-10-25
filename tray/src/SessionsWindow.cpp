@@ -2001,6 +2001,11 @@ void SessionsWindow::applyTheme()
     const QString bg = colors.background;
     const QString hover = colors.hover;
     const QString selected = colors.selected;
+    // Placeholder text is painted from the palette, not from the stylesheet:
+    // in a dark theme a light system palette would leave it near-black.
+    QPalette themedPalette = palette();
+    themedPalette.setColor(QPalette::PlaceholderText, QColor(colors.muted));
+    setPalette(themedPalette);
     // WhiteWh fork: selected text needs a colour apart from the canvas. A skin whose
     // selected rows are a faint tint of it (Compact) selects text in its accent instead.
     QString textSelection = selected;

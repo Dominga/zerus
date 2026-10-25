@@ -1,5 +1,6 @@
 #include "TeamController.h"
 #include "HgsClient.h"
+#include <QJsonDocument>
 #include <QUuid>
 
 namespace {
@@ -81,9 +82,22 @@ void TeamController::act(const QString &operation, QJsonObject input, const Done
 {
     if (!input.contains("team")) input.insert("team", m_watch);
     input.insert("by", "human");
-    input.insert("request_id", QUuid::createUuid().toString(QUuid::WithoutBraces));
+    // A resend after a failure keeps its request_id: the store answers the same
+    // receipt instead of applying the change twice. A success drops the id, so
+    // a later deliberate action gets a fresh one.
+    const QString key = operation + QLatin1Char('\n') + QString::fromUtf8(QJsonDocument(input).toJson(QJsonDocument::Compact));
+    QString requestId = m_retryIds.value(key);
+    if (requestId.isEmpty()) {
+        requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        if (m_retryIds.size() >= 64) m_retryIds.erase(m_retryIds.begin());
+    }
+    m_retryIds.insert(key, requestId);
+    input.insert("request_id", requestId);
     const quint64 request = m_client->requestTeam({}, operation, input);
-    m_actions.insert(request, done);
+    m_actions.insert(request, [this, key, done](bool ok, const QString &message) {
+        if (ok) m_retryIds.remove(key);
+        if (done) done(ok, message);
+    });
 }
 
 void TeamController::approvePhase(int phase, const Done &done)

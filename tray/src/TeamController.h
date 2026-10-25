@@ -1,6 +1,7 @@
 #pragma once
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QHash>
 #include <QMap>
 #include <QObject>
 #include <QTimer>
@@ -75,6 +76,8 @@ private:
     QMap<qint64, QJsonObject> m_feed;   // by seq
     QJsonValue m_feedCursor;
     QMap<quint64, std::function<void(bool, const QString &)>> m_actions;
+    // A failed change keeps its request_id, so a retry is answered idempotently.
+    QHash<QString, QString> m_retryIds;
     QMap<quint64, Reply> m_calls;
     Teams::Catalog m_catalog;
     bool m_catalogReady = false, m_watchCatalog = false, m_watchCatalogPage = false, m_catalogInFlight = false;

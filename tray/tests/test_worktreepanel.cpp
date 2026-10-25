@@ -139,6 +139,38 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         QFile response(dir.filePath("catalog.json"));QVERIFY(response.open(QIODevice::WriteOnly));response.write(QJsonDocument(catalog()).toJson());
         QFile reviewed(dir.filePath("review.json"));QVERIFY(reviewed.open(QIODevice::WriteOnly));reviewed.write(QJsonDocument(review()).toJson());
     }
+    void terminationCleanupRequiresVerifiedGeneratedData_data(){
+        QTest::addColumn<QString>("mode");
+        for(const auto *mode:{"generated","empty","unknown","unmanaged","unmerged","process","dirty","ordinary-review","cancel","missing-reasons","missing-count","blocked","replaced-owner","legacy-owner"})QTest::newRow(mode)<<QString::fromLatin1(mode);
+    }
+    void terminationCleanupRequiresVerifiedGeneratedData(){
+        QFETCH(QString,mode);
+        auto data=review();auto row=data["worktrees"].toArray()[1].toObject();
+        row["zerus_owned"]=true;row["archive_restore_ready"]=true;row["generated_files_only"]=true;
+        row["ownership_id"]=mode=="replaced-owner"?"replacement-owner":"original-owner";
+        row["changes"]=0;row["untracked"]=0;row["disk_complete"]=true;row["ignored_complete"]=true;
+        row["integration"]=QJsonObject{{"kind","ancestor"}};
+        if(mode=="empty"){row["ignored_count"]=0;row["ignored"]=QJsonArray{};row["ignored_bytes"]=0;}
+        if(mode=="unknown")row["generated_files_only"]=false;
+        if(mode=="unmanaged")row["zerus_owned"]=false;
+        if(mode=="unmerged")row["integration"]=QJsonObject{{"kind","remaining"}};
+        if(mode=="dirty"){row["changes"]=1;row["verdict"]="blocked";row["reasons"]=QJsonArray{QJsonObject{{"code","changes"}}};}
+        if(mode=="process"){row["verdict"]="blocked";row["process_fingerprint"]="process-print";row["reasons"]=QJsonArray{QJsonObject{{"code","processes_unavailable"}}};}
+        if(mode=="missing-reasons")row.remove("reasons");
+        if(mode=="missing-count")row.remove("ignored_count");
+        if(mode=="blocked")row["verdict"]="blocked";
+        data["worktrees"]=QJsonArray{row};QFile response(dir.filePath("review.json"));QVERIFY(response.open(QIODevice::WriteOnly));response.write(QJsonDocument(data).toJson());response.close();
+        HgsClient client(FakeCli::program(script()));QSignalSpy reviewed(&client,&HgsClient::worktreeReviewReady);
+        WorktreeBatchCleanupDialog dialog(&client,{QJsonObject{{"host",""},{"machine","fixture"},{"common_dir","/repo/.git"},{"expected_owner_id",mode=="legacy-owner"?"":"original-owner"},{"exit_cleanup",mode!="ordinary-review"},{"row",row}}});dialog.show();
+        if(mode=="cancel")dialog.reject();
+        QTRY_COMPARE(reviewed.size(),1);
+        const bool automatic=mode=="generated" || mode=="empty";
+        if(automatic){
+            QTRY_VERIFY(dialog.changed());QTRY_VERIFY(!dialog.isVisible());
+            QVERIFY(calls().contains("--preserve-archive-restore"));QVERIFY(!calls().contains("--delete-branch"));QVERIFY(!calls().contains("--discard-fingerprint"));
+            QCOMPARE(calls().contains("--ignored-fingerprint ignored-print"),mode=="generated");
+        }else{QTest::qWait(40);QVERIFY(!calls().contains("worktrees remove"));}
+    }
     void overviewCombinesProjectsButKeepsComputerAndSessionIdentity(){
         SessionOrganization projects;const auto first=projects.createGroup("Shared"),second=projects.createGroup("Shared");
         projects.addFolder(first,"arch","/repo");projects.addFolder(second,"arch","/repo/subfolder");projects.addFolder(second,"mac","/repo");
@@ -234,13 +266,38 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
     void overviewContinuesPastNativeReviewLimitAndKeepsCoverage(){
         auto cat=catalog(),initial=review(),full=review();QJsonArray allRows{cat["worktrees"].toArray().first()},firstRows,fullRows;
         for(int i=0;i<67;++i){const auto path=QString("/finished-%1").arg(i,3,10,QChar('0'));auto row=QJsonObject{{"path",path},{"kind","linked"},{"branch",QString("done/%1").arg(i)},{"available",true},{"verdict","ready"},{"merged",true},{"fingerprint",path+"-v1"},{"disk_bytes",i*1024},{"disk_complete",true}};allRows.append(row);fullRows.append(row);if(i<64)firstRows.append(row);}
+        for(int i=64;i<67;++i){auto deferred=fullRows[i].toObject();deferred["fingerprint"]="";deferred["verdict"]="blocked";deferred["reasons"]=QJsonArray{QJsonObject{{"code","status_unavailable"},{"message","Not reviewed: too many worktrees."}}};firstRows.append(deferred);}
         cat["worktrees"]=allRows;initial["worktrees"]=firstRows;initial["partial"]=true;full["worktrees"]=fullRows;
         for(const auto &pair:QList<QPair<QString,QJsonObject>>{{"catalog.json",cat},{"review.json",initial},{"review-full.json",full}}){QFile file(dir.filePath(pair.first));QVERIFY(file.open(QIODevice::WriteOnly));file.write(QJsonDocument(pair.second).toJson());}
         SessionOrganization projects;const auto project=projects.createGroup("Work");projects.addFolder(project,"arch","/repo");HgsClient client(FakeCli::program(script()));WorktreesDialog dialog(&client,projects,fleet(),false);dialog.show();
-        auto *status=dialog.findChild<QLabel *>("worktreeOverviewStatus");QTRY_VERIFY(status->text().contains("67 of 67 worktrees checked"));auto *tree=dialog.findChild<QTreeWidget *>("worktreeOverviewList");QCOMPARE(overviewRows(tree).size(),67);
+        auto *status=dialog.findChild<QLabel *>("worktreeOverviewStatus");bool sawDeferred=false;
+        connect(&client,&HgsClient::worktreeReviewReady,&dialog,[&]{if(!sawDeferred){sawDeferred=true;QVERIFY(status->text().contains("64 of 67 worktrees processed"));QVERIFY(status->text().contains("3 pending"));QVERIFY(status->text().contains("Checking"));}});
+        QTRY_VERIFY(status->text().contains("67 of 67 worktrees processed"));QVERIFY(sawDeferred);auto *tree=dialog.findChild<QTreeWidget *>("worktreeOverviewList");QCOMPARE(overviewRows(tree).size(),67);
         QCOMPARE(calls().count("worktrees review"),4);for(int i=64;i<67;++i)QVERIFY(calls().contains(QString("--worktree /finished-%1").arg(i,3,10,QChar('0')).toUtf8()));
         QCOMPARE(overviewRows(tree).first()->data(0,Qt::UserRole+1).toJsonObject()["path"].toString(),QString("/finished-066"));
         dialog.findChild<QLineEdit *>("worktreeSearch")->setText("finished-064");QCOMPARE(overviewRows(tree).size(),1);dialog.findChild<QPushButton *>("selectCleanupCandidates")->click();QCOMPARE(overviewRows(tree).first()->checkState(0),Qt::Checked);QCOMPARE(dialog.findChild<QPushButton *>("reviewSelectedWorktrees")->text(),QString("Review cleanup (1)…"));
+        QVERIFY(!calls().contains("worktrees remove"));
+    }
+    void overviewCountsIncompleteReviewsWithoutIdleGaps(){
+        auto cat=catalog(),initial=review(),full=review();QJsonArray catalogRows,reviewRows;
+        for(int i=0;i<3;++i){
+            QJsonObject row{{"path",QString("/check-%1").arg(i)},{"kind","linked"},{"available",true},{"verdict","blocked"},
+                {"fingerprint",QString("proof-%1").arg(i)},{"reasons",QJsonArray{QJsonObject{{"code","processes_unavailable"},{"message","Process paths unavailable"}}}}};
+            catalogRows.append(row);reviewRows.append(row);
+        }
+        cat["worktrees"]=catalogRows;initial["worktrees"]=QJsonArray{reviewRows.first()};initial["partial"]=true;full["worktrees"]=reviewRows;
+        for(const auto &pair:QList<QPair<QString,QJsonObject>>{{"catalog.json",cat},{"review.json",initial},{"review-full.json",full}}){QFile file(dir.filePath(pair.first));QVERIFY(file.open(QIODevice::WriteOnly));file.write(QJsonDocument(pair.second).toJson());}
+        SessionOrganization projects;const auto project=projects.createGroup("Work");projects.addFolder(project,"arch","/repo");
+        HgsClient client(FakeCli::program(script()));WorktreesDialog dialog(&client,projects,fleet(),false);
+        auto *status=dialog.findChild<QLabel *>("worktreeOverviewStatus");int intermediate=0;
+        connect(&client,&HgsClient::worktreeReviewReady,&dialog,[&]{
+            if(status->text().startsWith("1 of 3") || status->text().startsWith("2 of 3")){
+                ++intermediate;QVERIFY(status->text().contains("Checking"));QVERIFY(status->text().contains("incomplete"));
+            }
+        });dialog.show();
+        QTRY_VERIFY(status->text().contains("3 of 3 worktrees processed"));
+        QVERIFY(status->text().contains("3 incomplete"));QVERIFY(status->text().contains("0 pending"));
+        QVERIFY(!status->text().contains("Checking"));QCOMPARE(intermediate,2);QCOMPARE(calls().count("worktrees review"),3);
         QVERIFY(!calls().contains("worktrees remove"));
     }
     void overviewRefreshDiscardsChangedSelections(){

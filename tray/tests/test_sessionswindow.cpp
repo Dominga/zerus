@@ -409,6 +409,8 @@ private slots:
     void keptWorktreeReviewUsesOnlyCurrentInspectionOccupancy();
     void keptWorktreeReviewFormatsTheSourceMachinePath();
     void terminatingWorktreeSessionOffersRemainingCleanupAndConsumesExactNativeOutcome();
+    void terminationWorktreeChoiceKeepsItsOriginalFolder_data();
+    void terminationWorktreeChoiceKeepsItsOriginalFolder();
     void nativeCleanupCanSupplyAnUncachedFolderAndArchiveTransitionsExpireOnlyTheirRepository();
     void renameValidationCancelAndSelection();
     void renameValidationKeepsDialogGeometry_data();
@@ -8514,6 +8516,56 @@ void TestSessionsWindow::terminatingWorktreeSessionOffersRemainingCleanupAndCons
     client->worktreeCleanupFinished({},"terminate codex/hgs/dashboard",{{"status","kept"},{"path","/workspace/owned"},{"common_dir","/workspace/project/.git"},{"reason","Uncommitted changes remain"}});
     QVERIFY(offer->isVisible());QVERIFY(offer->toolTip().contains("Uncommitted changes"));
     client->worktreeCleanupFinished({},"terminate codex/hgs/dashboard",{{"status","removed"},{"path","/workspace/owned"},{"common_dir","/workspace/project/.git"}});QVERIFY(!offer->isVisible());
+}
+
+void TestSessionsWindow::terminationWorktreeChoiceKeepsItsOriginalFolder_data()
+{
+    QTest::addColumn<QString>("mode");
+    for(const auto *mode:{"checked","unchecked","cancel","bulk"})QTest::newRow(mode)<<QString::fromLatin1(mode);
+}
+void TestSessionsWindow::terminationWorktreeChoiceKeepsItsOriginalFolder()
+{
+    QFETCH(QString,mode);QSettings().setValue("workspace/removeWorktreeAfterTermination",false);
+    auto state=fleet();auto local=state.local();const int count=mode=="bulk"?2:1;
+    QSet<QString> expected;
+    for(int i=0;i<count;++i){auto &s=local.sessions[i];s.state="running";s.cmd="codex";s.tracked=true;s.runId="cleanup-run-"+QString::number(i);s.worktreeOwnerId="original-owner-"+QString::number(i);s.gitWorktree=true;s.gitRoot="/workspace/owned-"+QString::number(i);s.gitCommonDir="/workspace/project/.git";expected.insert(s.gitRoot);}
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());SessionsWindow window(program());keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},local.sessions[0].name);
+    auto *client=window.findChild<HgsClient *>();QSignalSpy writes(client,&HgsClient::writeDone);
+    bool checkboxSeen=false;QSet<QString> reviewed;QTimer closer;
+    closer.setInterval(10);connect(&closer,&QTimer::timeout,&window,[&]{
+        if(auto *dialog=window.findChild<QDialog *>("worktreeBatchCleanupDialog")){
+            auto *list=dialog->findChild<QTreeWidget *>("batchCleanupList");
+            for(int i=0;i<list->topLevelItemCount();++i){const auto entry=list->topLevelItem(i)->data(0,Qt::UserRole).toJsonObject();const auto path=entry["row"].toObject()["path"].toString();reviewed.insert(path);QCOMPARE(entry["expected_owner_id"].toString(),"original-owner-"+path.section('-',-1));}
+            dialog->reject();
+        }
+    });closer.start();
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());QVERIFY(dialog);
+        auto *choice=dialog->findChild<QCheckBox *>(mode=="bulk"?"removeTerminatedWorktrees":"removeTerminatedWorktree");QVERIFY(choice);checkboxSeen=true;
+        choice->setChecked(mode!="unchecked");
+        if(mode=="cancel"){dialog->done(QMessageBox::Cancel);return;}
+        if(mode=="bulk"){
+            for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}
+        }else dialog->done(QMessageBox::Yes);
+    });
+    if(mode=="bulk"){
+        auto *list=window.findChild<SessionList *>("sessionList");
+        QListWidgetItem *second=nullptr;
+        for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::Key).toString()=="\n"+local.sessions[1].name)second=list->item(i);
+        QVERIFY(second);list->scrollToItem(second);
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::ControlModifier,list->visualItemRect(second).center());
+        QSet<QString> chosen;for(const auto *item:list->selectedItems())chosen.insert(item->data(SessionRoles::Key).toString());
+        QCOMPARE(chosen,(QSet<QString>{"\n"+local.sessions[0].name,"\n"+local.sessions[1].name}));
+        window.findChild<QAction *>("selectionstop")->trigger();
+    }else window.findChild<QAction *>("forgetSessionAction")->trigger();
+    QVERIFY(checkboxSeen);
+    if(mode=="cancel"){QTest::qWait(80);QCOMPARE(writes.size(),0);QVERIFY(reviewed.isEmpty());}
+    else{
+        window.showSession({},local.sessions[2].name);
+        QTRY_COMPARE(writes.size(),count);
+        if(mode=="unchecked"){QTest::qWait(100);QVERIFY(reviewed.isEmpty());}
+        else QTRY_COMPARE(reviewed,expected);
+    }
 }
 
 void TestSessionsWindow::nativeCleanupCanSupplyAnUncachedFolderAndArchiveTransitionsExpireOnlyTheirRepository()

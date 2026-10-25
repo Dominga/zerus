@@ -227,6 +227,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             clear_context::carry_fresh_start(previous, &mut record);
         }
         backend::current().set_run_marker(&name, &token)?;
+        if let Some(owner)=super::worktree_lifecycle::for_folder(std::path::Path::new(string(&record,"launch_dir"))) {
+            record["worktree_owner"]=owner;
+        }
         write(&mut record)?;
         // Keep this exact newly-created binding pinned during optional initial
         // placement. A removal/replacement must not inherit the old folder's

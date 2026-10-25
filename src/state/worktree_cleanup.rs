@@ -25,6 +25,7 @@ struct Reference {
 }
 
 struct Context {
+    common: PathBuf,
     /// (display name, full ref) of the main checkout's branch and origin/HEAD.
     bases: Vec<(String, String)>,
     /// Other processes' current directories, or why they cannot be read.
@@ -165,6 +166,7 @@ fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
     let mut archives=Vec::new();
     let archives_complete=archive::visit_bounded(deadline,|record|{archives.push(reference(&record));Ok(())}).is_ok();
     Context {
+        common: common.to_path_buf(),
         bases,
         processes: crate::platform::worktree_processes(deadline),
         bindings,
@@ -481,6 +483,10 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     let head = string(tree, "head").to_owned();
     let branch = string(tree, "branch").to_owned();
     let mut row = tree.clone();
+    let owner=super::worktree_lifecycle::owned(&context.common, &path);
+    row["zerus_owned"] = json!(owner.is_some());
+    row["ownership_id"] = owner.as_ref().map(|owner|owner["id"].clone()).unwrap_or(Value::Null);
+    row["archive_restore_ready"] = json!(context.archives_complete && owner.as_ref().is_some_and(|owner|owner["branch"]==tree["branch"]));
     for key in ["locked", "prunable", "detached"] {
         row[key] = json!(tree[key] == true);
     }
@@ -604,7 +610,7 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     }
 
     if tree["available"] != true {
-        row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,
+        row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,"owner":row["ownership_id"],
             "locked":row["locked"],"prunable":row["prunable"],"available":false,"sessions":row["sessions"]})));
         return finish(row, reasons, notes);
     }
@@ -812,6 +818,7 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     row["ignored_bytes"] = json!(ignored.iter().map(|(_, bytes, _, _)| bytes).sum::<u64>());
     row["ignored_complete"] = json!(ignored.iter().all(|(_, _, complete, _)| *complete));
     row["ignored_count"] = json!(ignored.len());
+    row["generated_files_only"] = json!(super::worktree_caches::generated_only(&path, &status.ignored, total));
     row["ignored_fingerprint"] = json!(fingerprint(json!(ignored)));
     ignored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     row["ignored"] = json!(ignored
@@ -900,7 +907,7 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
                     .all(|r| matches!(string(r, "code"), "changes" | "untracked"))
         );
     }
-    row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,
+    row["fingerprint"] = json!(fingerprint(json!({"path":path,"head":head,"branch":branch,"owner":row["ownership_id"],
         "locked":row["locked"],"prunable":row["prunable"],"available":true,
         "status":status.entries,"nested":row["nested"],"sessions":row["sessions"],
         "ignored":row["ignored_fingerprint"],"discard":row["discard_fingerprint"]})));
@@ -1029,6 +1036,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     let mut options = BTreeMap::new();
     let mut delete_branch = false;
     let mut automatic = false;
+    let mut preserve_restore = false;
     let mut periodic = false;
     let mut i = 0;
     while i < args.len() {
@@ -1036,6 +1044,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             "--json" => {}
             "--delete-branch" => delete_branch = true,
             "--automatic" => automatic = true,
+            "--preserve-archive-restore" => preserve_restore = true,
             "--periodic" => periodic = true,
             "--dry-run" => return Err("worktree removal does not support --dry-run".into()),
             key @ ("--path"
@@ -1044,6 +1053,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             | "--ignored-fingerprint"
             | "--discard-fingerprint"
             | "--process-fingerprint"
+            | "--owner-id"
             | "--request-id") => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
@@ -1067,6 +1077,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             .ok_or_else(|| format!("{key} is required"))
     };
     let target = Path::new(required("--path")?);
+    if preserve_restore && delete_branch { return Err("Exit cleanup preserves the retained worktree branch".into()); }
     if periodic && !automatic { return Err("Periodic cleanup requires automatic safety checks".into()); }
     let common = Path::new(required("--common-dir")?);
     let expected = required("--fingerprint")?;
@@ -1143,6 +1154,9 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         .cloned()
         .ok_or(changed)?;
     let path = PathBuf::from(string(&row, "path"));
+    if options.get("--owner-id").is_some_and(|expected|row["ownership_id"].as_str()!=Some(*expected)) {
+        return Err("Worktree ownership changed; the replacement checkout was kept for review".into());
+    }
     if row["kind"] != "linked" {
         return Err("Only linked worktrees can be removed; the main checkout stays.".into());
     }
@@ -1228,7 +1242,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         return Err("Review the local files outside Git and explicitly confirm their deletion before removing this worktree.".into());
     }
     let missing = row["verdict"] == "missing";
-    if automatic {
+    if automatic || preserve_restore {
         super::worktree_lifecycle::prepare_removal(&common, &row)?;
         super::worktree_maintenance::reserve(&common, &path)?;
     }
@@ -1279,7 +1293,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     let result = json!({"status":if missing {"forgotten"} else {"removed"},"path":path,"branch":branch,
         "branch_deleted":deleted,"branch_error":branch_error,"common_dir":common,
         "request_id":options.get("--request-id"),"machine":data["machine"]});
-    if automatic {
+    if automatic || preserve_restore {
         super::worktree_maintenance::removed(&path,&result)
             .map_err(|e|format!("Removal could not be confirmed: result could not be saved: {e}"))?;
     }

@@ -415,7 +415,7 @@ answered; a denial cannot carry an explanation.
   server is started by the agent's MCP config), with a fixture per agent.
   CLAUDE.md fixes the Background status contract across desktop, Android,
   shared fixtures and docs: this is the owner's explicit direction to change
-  it; keep all of them aligned.
+  it; keep all of them aligned. Owner: yes, first, with C7 in the nearest phase.
 
 ## H. Operations
 

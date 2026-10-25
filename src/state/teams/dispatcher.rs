@@ -18,9 +18,18 @@ const TICK: Duration = Duration::from_secs(3);
 const IDLE_EXIT: Duration = Duration::from_secs(300);
 /// After a refused hand-off the member gets no new one for this long.
 const REFUSAL_PAUSE: f64 = 30.0;
+/// The worker's session listing is bounded, so a stop request is never far away.
+const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The worker's log keeps at most this much before it starts over.
+const LOG_BYTES: u64 = 64 * 1024;
+
+/// The worker's directory: its lock, pid, heartbeat, stop request and log.
+pub(crate) fn worker_dir() -> PathBuf {
+    root().join("teams")
+}
 
 pub(crate) fn lock_path() -> PathBuf {
-    root().join("teams/worker.lock")
+    worker_dir().join("worker.lock")
 }
 
 /// One member session as `hgs ls --json` showed it in this tick.
@@ -1771,7 +1780,12 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     if teams.is_empty() {
         return Ok(false);
     }
-    let output = hgs("", &["ls", "--json", "--no-archives"], None, Duration::from_secs(60))?;
+    let output = match listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT)) {
+        Some(result) => result?,
+        // The previous session listing may still run: skip this tick, never
+        // overlap two `hgs ls` children (U2).
+        None => return Ok(true),
+    };
     anyhow::ensure!(output.status.success(), "hgs ls failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     let sessions = seen(&serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?);
     for team in &teams {
@@ -1819,37 +1833,252 @@ fn take_dropped_reports(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow
     Ok(())
 }
 
-pub(crate) fn worker() -> Result<i32> {
-    private_dir(&root().join("teams"))?;
-    let file = lock_file(&lock_path())?;
-    if fs2::FileExt::try_lock_exclusive(&file).is_err() {
-        return Ok(0);
+/// The worker's own files: a pid, a heartbeat, a stop request and a log (U2).
+struct WorkerFiles {
+    dir: PathBuf,
+}
+
+/// Why the worker ended, for its log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerExit {
+    StopRequested,
+    Idle,
+    Updated,
+}
+
+impl WorkerExit {
+    fn reason(self) -> &'static str {
+        match self {
+            WorkerExit::StopRequested => "stop requested",
+            WorkerExit::Idle => "no active team",
+            WorkerExit::Updated => "hgs was updated",
+        }
     }
-    let lock = crate::platform::FileLock::held(file);
+}
+
+/// One pass: a stop request ends the worker before the tick (U2).
+#[derive(Debug)]
+enum WorkerPass {
+    Stop,
+    Ticked(anyhow::Result<bool>),
+}
+
+impl WorkerFiles {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+    fn pid_file(&self) -> PathBuf {
+        self.dir.join("worker.pid")
+    }
+    fn heartbeat_file(&self) -> PathBuf {
+        self.dir.join("worker.heartbeat")
+    }
+    fn stop_file(&self) -> PathBuf {
+        self.dir.join("worker.stop")
+    }
+    fn log_file(&self) -> PathBuf {
+        self.dir.join("worker.log")
+    }
+
+    /// Records this process as the worker with its first heartbeat.
+    fn start(&self) {
+        let pid = std::process::id();
+        let _ = fs::write(self.pid_file(), pid.to_string());
+        self.beat(0, "starting");
+        self.log(&format!("start pid={pid}"));
+    }
+
+    fn pid(&self) -> Option<u32> {
+        fs::read_to_string(self.pid_file()).ok()?.trim().parse().ok()
+    }
+
+    /// A stop request that names this process; a request for another pid is
+    /// stale and ignored (U2).
+    fn stop_requested(&self) -> bool {
+        let Ok(bytes) = fs::read(self.stop_file()) else { return false };
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| value["pid"].as_u64())
+            .is_some_and(|pid| pid == u64::from(std::process::id()))
+    }
+
+    fn request_stop(&self, pid: u32) {
+        let _ = fs::write(self.stop_file(), json!({"pid":pid,"at":now()}).to_string());
+    }
+
+    /// A clean stop: no pid or heartbeat is left behind, and the reason stays
+    /// in the bounded log (U2).
+    fn finish(&self, reason: &str) {
+        let _ = fs::remove_file(self.pid_file());
+        let _ = fs::remove_file(self.heartbeat_file());
+        let _ = fs::remove_file(self.stop_file());
+        self.log(&format!("stop: {reason}"));
+    }
+
+    /// The files a dead worker leaves: removed when nothing holds its lock.
+    fn cleanup(&self) {
+        let _ = fs::remove_file(self.pid_file());
+        let _ = fs::remove_file(self.heartbeat_file());
+        let _ = fs::remove_file(self.stop_file());
+    }
+
+    fn beat(&self, teams: usize, reason: &str) {
+        let beat = json!({"pid":std::process::id(),"at":now(),"teams":teams,"reason":reason});
+        let _ = fs::write(self.heartbeat_file(), beat.to_string());
+    }
+
+    /// Appends one line, starting the log over once it is too large so it never
+    /// grows without a bound (U2).
+    fn log(&self, line: &str) {
+        if fs::metadata(self.log_file()).map(|meta| meta.len() > LOG_BYTES).unwrap_or(false) {
+            let _ = fs::remove_file(self.log_file());
+        }
+        let text = format!("{:.0} {line}\n", now());
+        let _ = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.log_file())
+            .and_then(|mut file| std::io::Write::write_all(&mut file, text.as_bytes()));
+    }
+}
+
+/// Runs the worker's session listing unless one may still run: a tick is
+/// skipped rather than overlap two `hgs ls` children (U2).
+fn listing<T>(run: impl FnOnce() -> T) -> Option<T> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+    if RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return None;
+    }
+    let clear = Clear;
+    let out = run();
+    drop(clear);
+    Some(out)
+}
+
+/// The one worker's lock, or None while another worker holds it (U2).
+fn worker_lock(path: &Path) -> anyhow::Result<Option<crate::platform::FileLock>> {
+    let file = lock_file(path).map_err(anyhow::Error::msg)?;
+    if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(crate::platform::FileLock::held(file)))
+}
+
+/// One worker pass: a stop request ends it before the tick (U2).
+fn worker_pass(files: &WorkerFiles, tick: impl FnOnce() -> anyhow::Result<bool>) -> WorkerPass {
+    if files.stop_requested() {
+        return WorkerPass::Stop;
+    }
+    WorkerPass::Ticked(tick())
+}
+
+/// Sleeps a tick in small slices, so a stop request ends the worker promptly.
+fn sleep_or_stop(files: &WorkerFiles, duration: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < duration {
+        if files.stop_requested() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// What keeps the worker alive, for its heartbeat and log (U2).
+fn worker_reason(store: &Store) -> (usize, String) {
+    let active = store.active_teams(200).unwrap_or_default();
+    let running = active.iter().filter(|team| team.status == TeamStatus::Running).count();
+    let paused = active.iter().filter(|team| team.status == TeamStatus::Paused).count();
+    let planning = active.len().saturating_sub(running + paused);
+    (active.len(), format!("{running} running, {paused} paused, {planning} planning"))
+}
+
+pub(crate) fn worker() -> Result<i32> {
+    private_dir(&worker_dir())?;
+    let files = WorkerFiles::new(worker_dir());
+    let Some(lock) = worker_lock(&lock_path()).map_err(|error| error.to_string())? else {
+        return Ok(0);
+    };
+    files.start();
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let started = fs::metadata(&executable).and_then(|m| m.modified()).ok();
     let config = crate::config::Config::load().map_err(|e| e.to_string())?;
     let host = config.host();
     let mut store = Store::open(true).map_err(|e| e.to_string())?;
-    recover(&mut store).map_err(|e| e.to_string())?;
+    if let Err(error) = recover(&mut store) {
+        files.log(&format!("recover failed: {error}"));
+    }
     let mut last_work = Instant::now();
-    loop {
+    let mut last_reason = String::new();
+    let exit = loop {
         if fs::metadata(&executable).and_then(|m| m.modified()).ok() != started {
             // An update replaced hgs: the new one carries on with the teams.
-            drop(lock);
-            if let Err(error) = ensure_worker() {
-                eprintln!("hgs team worker: the updated dispatcher did not start: {error}");
+            break WorkerExit::Updated;
+        }
+        let result = match worker_pass(&files, || tick(&mut store, host)) {
+            WorkerPass::Stop => break WorkerExit::StopRequested,
+            WorkerPass::Ticked(result) => result,
+        };
+        match result {
+            Ok(true) => {
+                last_work = Instant::now();
+                let (teams, reason) = worker_reason(&store);
+                files.beat(teams, &reason);
+                if reason != last_reason {
+                    files.log(&format!("staying: {reason}"));
+                    last_reason = reason;
+                }
             }
-            return Ok(0);
+            Ok(false) => {
+                files.beat(0, "no active team");
+                if last_work.elapsed() >= IDLE_EXIT {
+                    break WorkerExit::Idle;
+                }
+            }
+            Err(error) => files.log(&format!("error: {error}")),
         }
-        match tick(&mut store, host) {
-            Ok(true) => last_work = Instant::now(),
-            Ok(false) if last_work.elapsed() >= IDLE_EXIT => return Ok(0),
-            Ok(false) => {}
-            Err(error) => eprintln!("hgs team worker: {error}"),
+        sleep_or_stop(&files, TICK);
+    };
+    files.finish(exit.reason());
+    drop(lock);
+    if exit == WorkerExit::Updated {
+        if let Err(error) = ensure_worker() {
+            files.log(&format!("the updated dispatcher did not start: {error}"));
         }
-        std::thread::sleep(TICK);
     }
+    Ok(0)
+}
+
+/// `hgs team worker --stop`: asks the running worker to end and waits briefly
+/// (U2). Agents and the session host are never touched.
+pub(crate) fn stop_worker() -> Result<i32> {
+    let files = WorkerFiles::new(worker_dir());
+    if !crate::status::locked(&lock_path()) {
+        files.cleanup();
+        println!("hgs: no team worker runs");
+        return Ok(0);
+    }
+    let Some(pid) = files.pid() else {
+        println!("hgs: the team worker runs an older build and does not take stop requests");
+        return Ok(0);
+    };
+    files.request_stop(pid);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while crate::status::locked(&lock_path()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if crate::status::locked(&lock_path()) {
+        println!("hgs: the team worker was asked to stop; it ends after its current listing");
+    } else {
+        println!("hgs: the team worker stopped");
+    }
+    Ok(0)
 }
 
 /// Starts a detached worker unless one runs. It exits by itself once no team
@@ -2962,5 +3191,51 @@ mod tests {
         assert_eq!(text.matches('γ').count(), 2000);
         assert_eq!(text.matches('δ').count(), 1500);
         assert_eq!(text.matches('ε').count(), 0);
+    }
+
+    #[test]
+    fn one_worker_and_one_listing_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.lock");
+        let first = worker_lock(&path).unwrap().unwrap();
+        assert!(worker_lock(&path).unwrap().is_none());
+        drop(first);
+        assert!(worker_lock(&path).unwrap().is_some());
+        // A tick is skipped while a listing may still run (U2).
+        let first = listing(|| {
+            assert!(listing(|| 1).is_none());
+            2
+        });
+        assert_eq!(first, Some(2));
+        assert!(listing(|| 3).is_some());
+    }
+
+    #[test]
+    fn the_stop_request_ends_the_worker_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = WorkerFiles::new(dir.path().to_path_buf());
+        files.start();
+        assert_eq!(files.pid(), Some(std::process::id()));
+        let beat: Value = serde_json::from_slice(&fs::read(files.heartbeat_file()).unwrap()).unwrap();
+        assert_eq!(beat["pid"].as_u64(), Some(u64::from(std::process::id())));
+        assert_eq!(beat["teams"].as_u64(), Some(0));
+        // A request for another pid is stale and ignored.
+        files.request_stop(1);
+        assert!(!files.stop_requested());
+        // A request for this worker is honoured before the tick runs.
+        files.request_stop(std::process::id());
+        assert!(files.stop_requested());
+        let ran = std::cell::Cell::new(false);
+        let pass = worker_pass(&files, || {
+            ran.set(true);
+            Ok(true)
+        });
+        assert!(matches!(pass, WorkerPass::Stop), "{pass:?}");
+        assert!(!ran.get());
+        // A clean exit clears its files and logs the reason (U2).
+        files.finish("stop requested");
+        assert!(!files.pid_file().exists() && !files.heartbeat_file().exists() && !files.stop_file().exists());
+        let log = fs::read_to_string(files.log_file()).unwrap();
+        assert!(log.contains("start pid=") && log.contains("stop: stop requested"), "{log}");
     }
 }

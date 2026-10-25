@@ -142,7 +142,8 @@ class Maintenance(Repository, unittest.TestCase):
             child.wait(timeout=5)
 
     def test_executable_running_from_checkout_protects_it_with_another_cwd(self):
-        compiler=shutil.which('cc');self.assertIsNotNone(compiler,'a native C fixture compiler is required')
+        compiler=os.environ.get('HGS_TEST_WORKTREE_CC') or shutil.which('cc')
+        self.assertIsNotNone(compiler,'a native C fixture compiler is required')
         # A copied system Mach-O can be killed by macOS platform-signature
         # policy. Compile our own inert child and prove it is actually live.
         tree=self.managed();image=tree/'fixture-sleep'

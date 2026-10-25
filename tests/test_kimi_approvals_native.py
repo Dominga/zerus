@@ -835,7 +835,10 @@ class NativeKimiApprovals(ApprovalCases, GoalCases, PlanCases, lifecycle.Harness
     def decide(self, card, **choice):
         receipt = self.call('answer', self.payload(card, **choice))
         self.assertEqual(receipt['status'], 'answered')
-        self.until(lambda: 'Fixture complete.' in self.screen())
+        # Approval acknowledgement and the TUI are not a wire-write barrier.
+        # Keep the same wait deadline, but require the native goal event too.
+        self.until(lambda: 'Fixture complete.' in self.screen()
+                   and (not self.goal_mode or self.wire_events('goal.create')))
         return self.resolved()
 
     def tool_results(self):
@@ -846,6 +849,52 @@ class NativeKimiApprovals(ApprovalCases, GoalCases, PlanCases, lifecycle.Harness
 
 class FixtureControls(unittest.TestCase):
     """The fixture's own guards, without hgs, tmux or Kimi."""
+
+    def goal_observation_case(self, events, mode='manual'):
+        case = NativeKimiApprovals('test_goal_manual_starts_in_manual')
+        case.goal_mode = mode
+        case.screen = mock.Mock(return_value='Fixture complete.')
+        case.payload = mock.Mock(return_value={'fixture': 'answer'})
+        case.call = mock.Mock(return_value={'status': 'answered'})
+        case.wire_events = mock.Mock(side_effect=events)
+        case.resolved = mock.Mock(return_value={'decision': 'approved', 'selectedLabel': mode})
+        return case
+
+    def test_goal_completion_waits_for_native_wire_after_tui_completion(self):
+        event = dict(type='goal.create', objective=GOAL_OBJECTIVE, completionCriterion=GOAL_CRITERION)
+        case = self.goal_observation_case([[], [event]])
+        with mock.patch.object(time, 'monotonic', side_effect=[0, 0, .2]), \
+                mock.patch.object(time, 'sleep') as pause:
+            self.assertEqual(case.decide({}, option='manual'),
+                             {'decision': 'approved', 'selectedLabel': 'manual'})
+        self.assertEqual(case.wire_events.call_args_list,
+                         [mock.call('goal.create'), mock.call('goal.create')])
+        pause.assert_called_once_with(.2)
+        case.call.assert_called_once()
+
+    def test_tui_completion_without_goal_wire_still_times_out(self):
+        case = self.goal_observation_case([[]])
+        with mock.patch.object(time, 'monotonic', side_effect=[0, 0, 60]), \
+                mock.patch.object(time, 'sleep'), \
+                self.assertRaisesRegex(AssertionError, 'Native Kimi timed out'):
+            case.decide({}, option='manual')
+        case.call.assert_called_once()
+        case.resolved.assert_not_called()
+
+    def test_goal_wire_wait_preserves_duplicate_creation_rejection(self):
+        event = dict(type='goal.create', objective=GOAL_OBJECTIVE, completionCriterion=GOAL_CRITERION)
+        case = self.goal_observation_case([[event, event], [event, event]])
+        with mock.patch.object(time, 'monotonic', side_effect=[0, 0]):
+            case.decide({}, option='manual')
+        with self.assertRaisesRegex(AssertionError, '2 != 1'):
+            case.assert_goal_created()
+
+    def test_other_approvals_do_not_wait_for_a_goal_event(self):
+        case = self.goal_observation_case([], mode=None)
+        with mock.patch.object(time, 'monotonic', side_effect=[0, 0]):
+            case.decide({}, option='1')
+        case.wire_events.assert_not_called()
+        case.call.assert_called_once()
 
     def test_the_private_environment_inherits_nothing(self):
         with tempfile.TemporaryDirectory() as folder, mock.patch.dict(

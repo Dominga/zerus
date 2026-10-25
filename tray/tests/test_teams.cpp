@@ -832,6 +832,16 @@ void TestTeams::feedLinesSpeakOfPhasesAndTheEndOfThePlan()
              QStringLiteral("Added phase 3 · 2 tasks"));
     QCOMPARE(line("phase_approved", QJsonObject{{"by", "You"}, {"phase", 2}, {"tasks", 4}}).text, QStringLiteral("Approved phase 2 · 4 tasks"));
     QCOMPARE(line("phase_discarded", QJsonObject{{"by", "You"}, {"phase", 2}, {"tasks", 4}}).text, QStringLiteral("Discarded phase 2 · 4 tasks"));
+    // The shapes hgs writes now: a discarded draft lists its tasks' titles, a
+    // move names the phase, and the drafts after it are renumbered.
+    QCOMPARE(line("phase_discarded", QJsonObject{{"by", "Lead"}, {"phase", 3},
+                  {"tasks", QJsonArray{QJsonObject{{"id", 9}, {"title", "A"}}, QJsonObject{{"id", 10}, {"title", "B"}}}}}).text,
+             QStringLiteral("Discarded phase 3 · 2 tasks"));
+    QCOMPARE(line("phase_moved", QJsonObject{{"by", "Lead"}, {"phase", 4}, {"to", 1}, {"renumbered", true}}).text,
+             QStringLiteral("Moved phase 4 to position 1 · drafts renumbered"));
+    QCOMPARE(line("phase_renumbered", QJsonObject{{"phases", QJsonArray{QJsonObject{{"from", 4}, {"to", 3}}, QJsonObject{{"from", 5}, {"to", 4}}}},
+                                                  {"tasks", QJsonArray{}}}).text,
+             QStringLiteral("Drafts renumbered: phases 4→3, 5→4"));
     QCOMPARE(line("all_decided", QJsonObject{{"accepted", 7}, {"rejected", 1}, {"cancelled", 0}, {"tasks", 8}}).text,
              QStringLiteral("All tasks decided · waiting for the lead"));
     const auto finished = line("finished", QJsonObject{{"by", "Lead"}, {"accepted", 8}, {"tasks", 8}, {"summary_chars", 120}});

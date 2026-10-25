@@ -783,10 +783,25 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "phase_moved") {
         // F10: the drafts are numbered live; a move renumbers them, and the
         // feed says where the phase went.
-        t = d.value("renumbered").toBool() ? tr("Moved phase %1 to position %2 · drafts renumbered").arg(d.value("from").toInt()).arg(d.value("to").toInt())
-                                           : tr("Moved phase %1 to position %2").arg(d.value("from").toInt()).arg(d.value("to").toInt());
+        // hgs names the moved phase "phase"; "from" is the older test shape.
+        const int moved = d.contains("phase") ? d.value("phase").toInt() : d.value("from").toInt();
+        t = d.value("renumbered").toBool() ? tr("Moved phase %1 to position %2 · drafts renumbered").arg(moved).arg(d.value("to").toInt())
+                                           : tr("Moved phase %1 to position %2").arg(moved).arg(d.value("to").toInt());
     }
-    else if (k == "phase_discarded") { t = tr("Discarded phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Muted; }
+    else if (k == "phase_discarded") {
+        // A discarded draft lists its tasks' titles; older events counted them.
+        const QJsonValue tasks = d.value("tasks");
+        t = tr("Discarded phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(tasks.isArray() ? tasks.toArray().size() : tasks.toInt());
+        line.tone = Tone::Muted;
+    }
+    else if (k == "phase_renumbered") {
+        // A discard or move closes the gap: the drafts after it take new numbers.
+        QStringList moves;
+        for (const auto &value : d.value("phases").toArray())
+            moves << QStringLiteral("%1→%2").arg(value.toObject().value("from").toInt()).arg(value.toObject().value("to").toInt());
+        t = moves.isEmpty() ? tr("Drafts renumbered") : tr("Drafts renumbered: phases %1").arg(moves.join(QStringLiteral(", ")));
+        line.tone = Tone::Muted;
+    }
     else if (k == "all_decided") { t = tr("All tasks decided · waiting for the lead"); line.tone = Tone::Active; }
     else if (k == "finished") { t = tr("Finished · %1 of %2 tasks accepted").arg(d.value("accepted").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Done; }
     else if (k == "lead_told" && d.value("kind").toString() == "all_decided") t = tr("Told the Lead that all tasks are decided");

@@ -2344,7 +2344,11 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                     if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
                     catalogRefresh=catalogRefresh.stage(operation.id,connection.id,CatalogRefreshStage.Reports)
                     val computers = api.computers(connection)
-                    if(connection.protocolVersion==2) pendingEncryptedPairings-=connection.id
+                    if (!catalogGate.owns(operation.id) || connections != originalConnections) return@launch
+                    if(connection.protocolVersion==2) {
+                        pendingEncryptedPairings-=connection.id
+                        AppTelemetry.encryptedWorkspaceReady(getApplication(),connection)
+                    }
                     val retained=catalogSessions;val actions=messageState.sessionActions
                     val previousMachines=machines;val previousProjects=projects;val previousAccounts=accountCatalogs
                     val prepared = withContext(Dispatchers.Default) {

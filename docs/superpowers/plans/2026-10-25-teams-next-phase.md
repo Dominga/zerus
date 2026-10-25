@@ -145,10 +145,14 @@ answered; a denial cannot carry an explanation.
     #401 <- #507 <- ...");
   - shown as plan warnings in validation, in status (a plan-health block) and
     as one message to the lead; the owner sees the same numbers in the GUI.
-- **C8. Running-plan revisions.** Beyond drafts (F10): not-started tasks of an
-  approved phase can be changed (deps, text, assignee) by a revision with a
-  preview diff, a cycle check and kept reports; accepted work never changes;
-  the owner confirms revisions that touch approved scope.
+  Owner: yes, first, into the nearest phase (Permissions, with F10 once the
+  fix-phase build is installed).
+- **C8. Running-plan revisions, a last resort.** A good plan never needs it:
+  C7 must catch the problem while planning. If a running plan is stuck anyway,
+  the lead may propose a revision of not-started tasks of an approved phase
+  (deps, text, assignee) with a preview diff, a cycle check and kept reports;
+  it applies only after the owner explicitly approves it, every time; accepted
+  work never changes. Zerus shows it to the owner as an exceptional step.
 - **C9. Owner constraints in the graph.** An ordering rule of the owner
   ("publish only after local acceptance") is written as a dependency or gate,
   never only as text, so the cycle check catches it (the incident's cycle

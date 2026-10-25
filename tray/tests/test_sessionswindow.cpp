@@ -1069,6 +1069,11 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     QFile calls(fixture + ".tasks"); QVERIFY(calls.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(calls.readLine()).array(), QJsonArray({"task", "list", "--project", work}));
     tabs->setCurrentWidget(view); QTRY_VERIFY(view->isVisible());
+    // The tab keeps Activity's column: the task input lines up with the message input.
+    auto *messages = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(messages);
+    QTRY_COMPARE(view->composer()->mapTo(&window, QPoint()).x(), messages->mapTo(&window, QPoint()).x());
+    QCOMPARE(view->composer()->width(), messages->width());
+    QCOMPARE(view->findChild<QWidget *>("taskTile:review")->mapTo(&window, QPoint()).x(), messages->mapTo(&window, QPoint()).x());
     QCOMPARE(view->composer()->sessionKey(), QString("task-draft\n\ncodex/hgs/dashboard"));
     // The project's other session exists, so its pinned task can be sent.
     view->findChild<QAbstractButton *>("taskTile:todo")->click();
@@ -1182,6 +1187,8 @@ void TestSessionsWindow::tasksPreview()
         for (const auto &name : {"review", "active", "todo", "backlog", "done"}) { stage(name); save(&window, QStringLiteral("real-%1-%2").arg(name, theme)); }
     }
     themeChoice->setCurrentIndex(themeChoice->findData("dark")); QTest::qWait(100);
+    // Activity beside it: the Tasks tab keeps its column.
+    tabs->setCurrentIndex(0); QTest::qWait(80); save(&window, "real-activity"); tabs->setCurrentWidget(view); QTest::qWait(80);
     stage("todo"); hover("T-dn44wk"); save(&window, "real-todo-hover");
     view->findChild<QToolButton *>("taskOnlySession")->click(); QTest::qWait(80); save(&window, "real-todo-only");
     view->findChild<QToolButton *>("taskOnlySession")->click(); QTest::qWait(80);

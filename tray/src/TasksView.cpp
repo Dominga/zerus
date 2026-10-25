@@ -105,7 +105,7 @@ void TaskTabBadge::paintEvent(QPaintEvent *) {
 
 TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_client(client) {
     setObjectName("tasksView");
-    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(16, 12, 16, 0); layout->setSpacing(0);
+    auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 12, 0, 0); layout->setSpacing(0);
     auto *tiles = new QHBoxLayout; tiles->setSpacing(8);
     for (const auto &stage : TaskBoard::stages()) {
         auto *tile = new TaskTile(stage, this); m_tiles.insert(stage, tile); tiles->addWidget(tile, 1);

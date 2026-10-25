@@ -193,6 +193,10 @@ void TestTasksView::theInputFilesATaskForTheOpenSession() {
     QCOMPARE(status->textFormat(), Qt::RichText);
     QVERIFY2(status->text().contains(">api</b>") && status->text().contains(">To do</b>"), qPrintable(status->text()));
     QCOMPARE(status->accessibleName(), QString("Task for api · Enter adds to To do · Shift+Enter for a new line"));
+    // The emphasis is drawn, not printed as markup.
+    const QImage drawn = status->grab().toImage(); status->setTextFormat(Qt::PlainText);
+    const QImage printed = status->grab().toImage(); status->setTextFormat(Qt::RichText);
+    QVERIFY(drawn != printed);
     composer->editor()->setFocus(); QTest::keyClicks(composer->editor(), "Add rate limiting");
     QTest::keyClick(composer->editor(), Qt::Key_Return);
     QTRY_COMPARE(tile(view, "todo")->property("count").toInt(), 1);

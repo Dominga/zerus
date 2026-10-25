@@ -27,6 +27,7 @@
 #endif
 #ifdef Q_OS_MACOS
 #include "MacAppVisibility.h"
+#include "MacSystemPower.h"
 #include "MessageBoxIcons.h"
 #include "speech/SpeechRecorder.h"
 #include <pthread/qos.h>
@@ -410,6 +411,12 @@ int main(int argc, char *argv[])
         std::fflush(stderr);
         std::abort();
     });
+#ifdef Q_OS_MACOS
+    // macOS does not schedule the main thread while it goes to sleep or in a dark
+    // wake on battery; the watchdog holds its check around those (MainThreadWatchdog.h).
+    MacSystemPower systemPower([&watchdog]() { watchdog.systemWillSleep(); },
+                               [&watchdog]() { watchdog.systemPoweredOn(); });
+#endif
     const auto takeActivation = [&server, &agent]() {
         QLocalSocket *c = server.nextPendingConnection();
         QObject::connect(c, &QLocalSocket::disconnected, c, &QLocalSocket::deleteLater);

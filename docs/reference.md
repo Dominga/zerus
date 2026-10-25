@@ -3146,6 +3146,10 @@ user-interactive QoS, as for an app started from Finder. Without that key launch
 starts a daemon and clamps all its threads below ordinary CPU load, niced load
 included: a busy machine then starves the whole window until the main-thread
 watchdog aborts it, and no QoS request from inside the process lifts the clamp.
+The watchdog counts only time the Mac is awake and holds its check from the
+system's sleep notification until the GUI thread runs again after the wake, for at
+most ten minutes: macOS does not schedule that thread during the transition into
+sleep or in a dark wake on battery.
 `launchctl print "gui/$(id -u)/com.hgdev.hgs-tray"` shows `spawn type = interactive`.
 At startup the GUI reads the highest priority its main thread may reach: a login item
 (`XPC_SERVICE_NAME` `com.hgdev.hgs-tray`) limited below 31 offers **Fix login item**,

@@ -120,24 +120,35 @@ fn member_queue(team: &Team, member: &str) -> Vec<Value> {
 }
 
 /// The members of a finished team whose sessions still run, from the live
-/// listing (F7). Zerus never stops them.
-fn left_running(team: &Team, sessions: &[super::dispatcher::Seen]) -> Vec<Value> {
+/// listing (F7). The team's lead and any session that is the lead or a member
+/// of a team still active are left out, so the owner cannot stop a working
+/// session by mistake. Zerus never stops them.
+fn left_running(team: &Team, teams: &[Team], sessions: &[super::dispatcher::Seen]) -> Vec<Value> {
     if !matches!(team.status, TeamStatus::Done | TeamStatus::Stopped) {
         return Vec::new();
     }
+    let busy = |session: &SessionRef| {
+        teams.iter().filter(|other| matches!(other.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)).any(|other| {
+            let same = |other: &SessionRef| other.host == session.host && other.name == session.name;
+            other.member(&other.lead).and_then(|lead| lead.session.as_ref()).is_some_and(same)
+                || other.members.iter().any(|member| {
+                    member.state != MemberState::Removed && member.session.as_ref().is_some_and(same)
+                })
+        })
+    };
     team.members
         .iter()
-        .filter(|member| member.state != MemberState::Removed)
+        .filter(|member| member.state != MemberState::Removed && member.id != team.lead)
         .filter_map(|member| {
             let session = member.session.as_ref()?;
             let found = sessions.iter().find(|seen| seen.host == session.host && seen.name == session.name)?;
-            found.live.then(|| json!({"member":member.id,"role":team.role_of(&member.id),"session":session}))
+            (found.live && !busy(session)).then(|| json!({"member":member.id,"role":team.role_of(&member.id),"session":session}))
         })
         .collect()
 }
 
 /// The team with its live members when the caller listed sessions (F7).
-fn view_with(team: &Team, sessions: Option<&[super::dispatcher::Seen]>) -> Value {
+fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
     let mut value = serde_json::to_value(team).unwrap_or_default();
     value["validation"] = json!(plan::validate(team, &BTreeSet::new()));
     value["layers"] = json!(plan::layers(&team.tasks));
@@ -166,7 +177,7 @@ fn view_with(team: &Team, sessions: Option<&[super::dispatcher::Seen]>) -> Value
     // Done and Stopped teams say which of their members still run (F7).
     if let Some(sessions) = sessions {
         if matches!(team.status, TeamStatus::Done | TeamStatus::Stopped) {
-            value["left_running"] = json!(left_running(team, sessions));
+            value["left_running"] = json!(left_running(team, teams, sessions));
         }
     }
     value
@@ -174,7 +185,7 @@ fn view_with(team: &Team, sessions: Option<&[super::dispatcher::Seen]>) -> Value
 
 /// A team as the session list shows it: members with their sessions and each
 /// task's state, without descriptions, reports or the feed.
-fn summary_with(team: &Team, sessions: Option<&[super::dispatcher::Seen]>) -> Value {
+fn summary_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
     let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
     let members: Vec<Value> = team
         .members
@@ -205,7 +216,7 @@ fn summary_with(team: &Team, sessions: Option<&[super::dispatcher::Seen]>) -> Va
     // Done and Stopped teams say which of their members still run (F7).
     if let Some(sessions) = sessions {
         if matches!(team.status, TeamStatus::Done | TeamStatus::Stopped) {
-            value["left_running"] = json!(left_running(team, sessions));
+            value["left_running"] = json!(left_running(team, teams, sessions));
         }
     }
     value
@@ -532,13 +543,17 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 .any(|team| matches!(team.status, TeamStatus::Done | TeamStatus::Stopped))
                 .then(live_sessions)
                 .and_then(|sessions| sessions.ok());
-            Ok(json!({"items":teams.iter().map(|team| summary_with(team, sessions.as_deref())).collect::<Vec<_>>()}))
+            Ok(json!({"items":teams.iter().map(|team| summary_with(team, &teams, sessions.as_deref())).collect::<Vec<_>>()}))
         }
         "status" => {
-            let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            let store = Store::open(false)?;
+            let team = store.load(text(input, "team"))?.context("Unknown team")?;
+            let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
             // From the live listing; a failure leaves the members out (F7).
-            let sessions = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped).then(live_sessions).and_then(|sessions| sessions.ok());
-            Ok(view_with(&team, sessions.as_deref()))
+            let sessions = finished.then(live_sessions).and_then(|sessions| sessions.ok());
+            // The sessions of every active team are left out of left_running.
+            let teams = if finished { store.teams(false, 10_000)? } else { Vec::new() };
+            Ok(view_with(&team, &teams, sessions.as_deref()))
         }
         "events" => {
             let before = match &input["before"] {
@@ -684,20 +699,20 @@ mod tests {
             phases: vec![Phase { n: 2, state: PhaseState::Draft, ..Default::default() }],
             ..Default::default()
         };
-        let value = view_with(&team, None);
+        let value = view_with(&team, &[], None);
         assert_eq!(value["waiting_for_lead"], true);
         assert_eq!(value["pending_phase"], 2);
         // A paused team with every task decided is Paused, not waiting.
         let mut paused = team.clone();
         paused.status = TeamStatus::Paused;
-        assert_eq!(view_with(&paused, None)["waiting_for_lead"], false);
+        assert_eq!(view_with(&paused, &[], None)["waiting_for_lead"], false);
         // The session list carries both too.
-        let listed = summary_with(&paused, None);
+        let listed = summary_with(&paused, &[], None);
         assert_eq!((listed["waiting_for_lead"].as_bool(), listed["pending_phase"].as_u64()), (Some(false), Some(2)));
         // A team that is over shows no pending phase, even with a stale record.
         let mut done = team.clone();
         done.status = TeamStatus::Done;
-        assert!(view_with(&done, None)["pending_phase"].is_null());
+        assert!(view_with(&done, &[], None)["pending_phase"].is_null());
         assert_eq!(pending_phase(&done), None);
     }
 
@@ -763,15 +778,15 @@ mod tests {
         assert_eq!((asked["status"].as_str(), asked["question"].as_str()), (Some("asked"), Some("q1")));
         // The attempt stays open and status shows it waiting for an answer.
         assert!(team.task(1).unwrap().open_attempt().is_some());
-        let value = view_with(&team, None);
+        let value = view_with(&team, &[], None);
         assert_eq!(value["tasks"][0]["attempts"][0]["phase"], "asking");
         assert_eq!(value["tasks"][0]["attempts"][0]["questions"][0]["text"], "Must I keep the old field?");
         assert_eq!(value["tasks"][0]["attempts"][0]["questions"][0]["answer"], "");
         // The lead's answer closes it; the attempt is still open and working.
         ops::apply(&mut team, "reply", &json!({"question":"q1","text":"Yes"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         assert!(team.task(1).unwrap().open_attempt().is_some());
-        assert_eq!(view_with(&team, None)["tasks"][0]["attempts"][0]["phase"], "working");
-        assert_eq!(view_with(&team, None)["tasks"][0]["attempts"][0]["questions"][0]["answer"], "Yes");
+        assert_eq!(view_with(&team, &[], None)["tasks"][0]["attempts"][0]["phase"], "working");
+        assert_eq!(view_with(&team, &[], None)["tasks"][0]["attempts"][0]["questions"][0]["answer"], "Yes");
     }
 
     #[test]
@@ -889,12 +904,12 @@ mod tests {
             ..Default::default()
         });
         let expected = json!([{"task":1,"phase":"working"},{"task":2,"phase":"held"}]);
-        let value = view_with(&team, None);
+        let value = view_with(&team, &[], None);
         let members = value["members"].as_array().unwrap();
         assert_eq!(members.iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
         assert_eq!(members.iter().find(|member| member["id"] == "lead").unwrap()["queue"], json!([]));
         // The session list carries the same queue.
-        let listed = summary_with(&team, None);
+        let listed = summary_with(&team, &[], None);
         assert_eq!(listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
     }
 
@@ -972,28 +987,63 @@ mod tests {
         assert!(adopted_session(&team, &existing_member(), &[team.clone(), other], &sessions).is_ok());
     }
 
+    fn live_session(session: &SessionRef) -> Seen {
+        Seen {
+            host: session.host.clone(),
+            name: session.name.clone(),
+            run_id: session.run_id.clone(),
+            conversation_id: session.conversation_id.clone(),
+            live: true,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn a_finished_team_lists_the_members_whose_sessions_still_run() {
         let mut team = running_team();
         team.status = TeamStatus::Done;
         let dev = team.member("dev").unwrap().session.clone().unwrap();
-        let sessions = vec![Seen {
-            host: dev.host.clone(),
-            name: dev.name.clone(),
-            run_id: dev.run_id.clone(),
-            conversation_id: dev.conversation_id.clone(),
-            live: true,
-            ..Default::default()
-        }];
-        let value = view_with(&team, Some(&sessions));
+        let lead = team.member("lead").unwrap().session.clone().unwrap();
+        // Even the lead's live session is not left running: the owner must not
+        // stop a working lead from this list.
+        let sessions = vec![live_session(&dev), live_session(&lead)];
+        let value = view_with(&team, &[], Some(&sessions));
         assert_eq!(value["left_running"], json!([{"member":"dev","role":"Backend","session":dev}]));
         // A running team has none, and no live session is an empty list.
         team.status = TeamStatus::Running;
-        assert!(view_with(&team, Some(&sessions)).get("left_running").is_none());
+        assert!(view_with(&team, &[], Some(&sessions)).get("left_running").is_none());
         team.status = TeamStatus::Done;
-        assert_eq!(view_with(&team, Some(&[]))["left_running"], json!([]));
+        assert_eq!(view_with(&team, &[], Some(&[]))["left_running"], json!([]));
         // The session list says the same.
-        assert_eq!(summary_with(&team, Some(&sessions))["left_running"], value["left_running"]);
+        assert_eq!(summary_with(&team, &[], Some(&sessions))["left_running"], value["left_running"]);
+    }
+
+    #[test]
+    fn left_running_leaves_out_sessions_of_active_teams() {
+        let mut done = running_team();
+        done.status = TeamStatus::Done;
+        let dev = done.member("dev").unwrap().session.clone().unwrap();
+        let sessions = vec![live_session(&dev)];
+        // The session still runs, but now leads another active team.
+        let mut working = running_team();
+        working.id = "working".into();
+        working.name = "Working".into();
+        working.members.iter_mut().find(|member| member.id == "lead").unwrap().session = Some(dev.clone());
+        let value = view_with(&done, &[working.clone()], Some(&sessions));
+        assert_eq!(value["left_running"], json!([]));
+        // The same as a member of an active team.
+        working.members.iter_mut().find(|member| member.id == "lead").unwrap().session =
+            Some(SessionRef { name: "claude/x/other".into(), ..Default::default() });
+        working.members.iter_mut().find(|member| member.id == "dev").unwrap().session = Some(dev.clone());
+        let value = view_with(&done, &[working.clone()], Some(&sessions));
+        assert_eq!(value["left_running"], json!([]));
+        // The list agrees, and a paused team keeps the session out too.
+        assert_eq!(summary_with(&done, &[working.clone()], Some(&sessions))["left_running"], json!([]));
+        working.status = TeamStatus::Paused;
+        assert_eq!(view_with(&done, &[working.clone()], Some(&sessions))["left_running"], json!([]));
+        // Once that team is over, the session is left running again.
+        working.status = TeamStatus::Done;
+        assert_eq!(view_with(&done, &[working], Some(&sessions))["left_running"], json!([{"member":"dev","role":"Backend","session":dev}]));
     }
 
     #[test]

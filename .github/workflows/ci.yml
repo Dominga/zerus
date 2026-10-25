@@ -93,7 +93,7 @@ jobs:
       run_linux: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_linux }}
       run_arch: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_arch }}
       run_macos: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_macos }}
-      run_windows: ${{ inputs.run_windows || false }}
+      run_windows: ${{ inputs.run_windows || (github.repository == 'romanilyin/zerus' && github.event_name == 'push') }}
       run_ios: ${{ inputs.run_ios || false }}
       filter_pr_platforms: ${{ github.event_name == 'pull_request' }}
   qualification:

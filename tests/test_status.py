@@ -112,7 +112,8 @@ class Status(unittest.TestCase):
         self.assertEqual(status['executable'], str(HGS))
         self.assertEqual(status['sessions']['live'], 0)
         self.assertEqual(status['services'], {'desktop': 'running', 'swarm_worker': 'stopped',
-                                              'recovery_worker': 'running', 'mobile_connector': 'running'})
+                                              'recovery_worker': 'running', 'mobile_connector': 'running',
+                                              'team_worker': None})
         self.assertEqual((self.root / 'pgrep-args').read_text().split(),
                          ['-x', '-u', str(os.getuid()), 'hgs-tray'])
         (self.root / 'desktop').write_text('1')
@@ -124,6 +125,23 @@ class Status(unittest.TestCase):
         (self.config / 'mobile/connector.json').unlink()
         self.assertEqual(json.loads(self.hgs('status', '--local', '--json'))['services']['mobile_connector'],
                          'not_configured')
+
+    def test_team_worker_status_distinguishes_unused_stopped_and_running(self):
+        def status():
+            return json.loads(self.hgs('status','--local','--json'))['services']['team_worker']
+        self.assertIsNone(status())
+        teams=self.state/'teams';self.assertFalse(teams.exists())
+        teams.mkdir(parents=True)
+        # The status probe checks existence and ownership of the separate worker
+        # lock, not the contents of a database or a worker process launch.
+        database=teams/'teams.sqlite3';database.write_bytes(b'unchanged synthetic marker')
+        before=database.read_bytes()
+        self.assertEqual(status(),'stopped')
+        worker=self.hold(teams/'worker.lock')
+        self.assertEqual(status(),'running')
+        worker.close()
+        self.assertEqual(status(),'stopped')
+        self.assertEqual(database.read_bytes(),before)
 
     def test_fleet_status_names_each_peer_and_never_launches_an_agent(self):
         text = self.hgs('status')

@@ -51,3 +51,20 @@ See [Windows and local WSL](windows-wsl.md) for connection setup, shell policy
 and isolated checks, and [explicit path identity](path-identity.md) for the
 versioned PathRef CLI. These are development interfaces; no automatic catalog
 migration or stable release is implied.
+
+## Fork CI coverage
+
+Every push to this fork selects Windows qualification in addition to the
+inherited Linux, Arch, macOS and shared checks. Manual platform selection and
+PR path selection remain available. The extra coverage uses the existing
+credential-free Windows jobs, read-only caches and pinned dependencies; it does
+not enable publishing, signing or an automatic update feed. Local Windows-to-WSL
+acceptance stays a separate explicit opt-in because hosted runners are not the
+operator-selected distribution and user.
+
+Integration tests preserve the deliberate WhiteWh differences: drive folder
+descriptions can synchronize with exact machine identity while local UNC shares
+stay private; an expired quota token is distinct from native sign-in; team
+worker status is additive; DeepSeek reads bounded session rows, with a read-only
+fallback for older adapters. These checks do not authorize native writes or
+service management during inspection.

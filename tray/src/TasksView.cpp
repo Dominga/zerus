@@ -27,7 +27,6 @@ QColor mix(const QColor &color, double share, const QColor &base) {
                             base.blueF() + (color.blueF() - base.blueF()) * share);
 }
 QColor alpha(QColor color, double a) { color.setAlphaF(a); return color; }
-QString sessionLabel(const QString &host, const QString &name) { return host.isEmpty() ? name : name + QStringLiteral(" @") + host; }
 }
 
 // A stage tile: its icon on a tinted circle, its name and its count.
@@ -255,10 +254,10 @@ QString TasksView::sendBlocker(const TaskItem &task) const {
     const bool any = task.targetSession.isEmpty();
     const QString host = any ? m_host : task.targetHost, name = any ? m_session : task.targetSession;
     if (name.isEmpty()) return tr("Open the session to send this task to");
-    if (!any && !task.targetKnown) return tr("%1 is on a computer this one has not verified").arg(name);
+    if (!any && !task.targetKnown) return tr("%1 is on a computer this one has not verified").arg(TaskBoard::sessionLabel(host, name));
     // A session on another computer takes the task there; hgs refuses when it cannot be reached.
     const auto *found = session(host, name);
-    if (!found) return tr("%1 no longer exists — choose another session").arg(name);
+    if (!found) return tr("%1 no longer exists — choose another session").arg(TaskBoard::sessionLabel(host, name));
     return found->blocker;
 }
 
@@ -290,7 +289,7 @@ void TasksView::render() {
             connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { startDrag(row, hotSpot); });
         }
         row->setObjectName(QStringLiteral("taskRow:") + task.id);
-        TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session); state.anyNow = sessionLabel(m_host, m_session);
+        TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
         if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.stage == QLatin1String("active")) state.sessionStatus = ran->status;
         if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
             if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
@@ -305,7 +304,7 @@ void TasksView::render() {
         retire(it.value()); it = m_rows.erase(it);
     }
     const int hidden = m_board.rows(m_stage, {m_host, m_session, false, v.now}).size() - m_board.rows(m_stage, v).size();
-    const QString empty = v.only && hidden > 0 ? tr("No tasks of %1 here").arg(sessionLabel(m_host, m_session))
+    const QString empty = v.only && hidden > 0 ? tr("No tasks of %1 here").arg(TaskBoard::sessionLabel(m_host, m_session))
         : m_stage == QLatin1String("review") ? tr("Nothing to review") : m_stage == QLatin1String("active") ? tr("No session is running a task")
         : m_stage == QLatin1String("todo") ? tr("Empty — write a prompt in the input below") : m_stage == QLatin1String("backlog") ? tr("Empty")
         : tr("Nothing yet");
@@ -313,7 +312,7 @@ void TasksView::render() {
     m_empty->setVisible(rows.isEmpty() && m_error.isEmpty() && (!m_projectId.isEmpty() || !m_session.isEmpty()));
     m_older->setText(m_showOlder ? tr("Hide older") : tr("Show older (%1)").arg(older.size())); m_older->setVisible(!older.isEmpty());
     m_only->setToolTip(m_only->isChecked() ? tr("Show the tasks of every session of %1").arg(m_projectName)
-                                           : tr("Show only the tasks of %1").arg(sessionLabel(m_host, m_session)));
+                                           : tr("Show only the tasks of %1").arg(TaskBoard::sessionLabel(m_host, m_session)));
     m_only->setAccessibleName(m_only->toolTip());
     m_settings->setToolTip(tr("Task settings for %1").arg(m_projectName)); m_settings->setAccessibleName(m_settings->toolTip());
     updateComposer();
@@ -326,11 +325,16 @@ void TasksView::render() {
 
 void TasksView::updateComposer() {
     const QString target = m_stage == QLatin1String("backlog") ? tr("Backlog") : tr("To do");
-    const QString session = sessionLabel(m_host, m_session);
+    const QString session = TaskBoard::sessionLabel(m_host, m_session);
     m_composer->setSendLabel(target);
     m_composer->setPlaceholder(m_session.isEmpty() ? tr("Task prompt…") : tr("Task prompt for %1 / %2…").arg(m_projectName, session));
-    m_composer->setSessionStatus(m_session.isEmpty() || m_projectId.isEmpty() ? QString()
-        : tr("Task for %1 · Enter adds to %2 · Shift+Enter for a new line").arg(session, target));
+    if (m_session.isEmpty() || m_projectId.isEmpty()) return m_composer->setSessionStatus({});
+    // The session and the stage stand out in the foreground colour.
+    const auto strong = [fg = TaskColors::of(m_dark).fg.name()](const QString &text) {
+        return QStringLiteral("<b style='color:%1;font-weight:600'>%2</b>").arg(fg, text.toHtmlEscaped());
+    };
+    const QString hint = tr("Task for %1 · Enter adds to %2 · Shift+Enter for a new line");
+    m_composer->setSessionStatus(hint.arg(session, target), false, false, hint.toHtmlEscaped().arg(strong(session), strong(target)));
 }
 
 QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action) const {

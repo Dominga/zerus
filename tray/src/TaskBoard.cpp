@@ -25,7 +25,9 @@ TaskItem TaskBoard::item(const QJsonObject &t) {
     if (target.value("kind").toString() == QLatin1String("session")) session(target, item.targetHost, item.targetSession, item.targetKnown);
     if (t.value("session").isObject()) session(t.value("session"), item.sessionHost, item.sessionName, item.sessionKnown);
     const auto author = t.value("author").toObject();
-    if (author.value("kind").toString() == QLatin1String("agent")) item.author = author.value("session").toString();
+    if (author.value("kind").toString() == QLatin1String("agent")) {
+        item.author = author.value("session").toString(); item.authorHost = author.value("host").toString();
+    }
     return item;
 }
 
@@ -68,6 +70,13 @@ QList<TaskItem> TaskBoard::rows(const QString &stage, const View &view, bool old
 const QStringList &TaskBoard::stages() {
     static const QStringList order{"review", "active", "todo", "backlog", "done"};
     return order;
+}
+
+QString TaskBoard::sessionLabel(const QString &host, const QString &name) {
+    QString label = name.section(QLatin1Char('/'), 2);
+    if (label.isEmpty()) label = name.section(QLatin1Char('/'), 1, 1);
+    if (label.isEmpty()) label = name;
+    return host.isEmpty() ? label : label + QStringLiteral(" @") + host;
 }
 
 QString TaskBoard::stageLabel(const QString &stage) {

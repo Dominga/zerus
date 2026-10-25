@@ -34,7 +34,8 @@ public:
     void setSessionKey(const QString &key);
     void setAvailability(bool available, const QString &reason = {});
     // Session feedback uses the existing action row and never replaces a draft.
-    void setSessionStatus(const QString &text, bool error = false, bool blockInput = false);
+    // html: the same status with emphasis, shown while nothing else takes its place.
+    void setSessionStatus(const QString &text, bool error = false, bool blockInput = false, const QString &html = {});
     // Independent of delivery/loading locks; keeps the existing draft selectable.
     void setRecording(bool recording);
     void setAttachmentAvailability(bool available, const QString &reason = {});
@@ -190,7 +191,7 @@ private:
     QSet<QString> m_savingKeys;
     QSet<QString> m_failedSaves;
     QString m_key, m_unavailableReason;
-    QString m_sessionStatus;
+    QString m_sessionStatus, m_sessionStatusHtml;
     bool m_sessionStatusError = false, m_sessionStatusBlocksInput = false;
     bool m_available = false, m_loading = false, m_dark = true, m_recording = false, m_attachmentsAvailable = true;
     QString m_attachmentsReason;

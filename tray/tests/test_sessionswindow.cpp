@@ -1074,7 +1074,7 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     view->findChild<QAbstractButton *>("taskTile:todo")->click();
     auto *row = view->findChild<QWidget *>("taskRow:T-000002"); QVERIFY(row);
     QVERIFY(row->findChild<QToolButton *>("taskAction:sendNow")->isEnabled());
-    QVERIFY(row->findChild<QLabel *>("taskMeta")->text().contains("kimi/docs/research"));
+    QVERIFY(row->findChild<QLabel *>("taskMeta")->text().contains("→ research"));
     // The side panel's first tab is the agent's own plan, not the project's tasks.
     QCOMPARE(window.findChild<QTabWidget *>("sessionInspector")->tabText(0), QString("Plan && agents"));
     // A session in no project explains where tasks live.

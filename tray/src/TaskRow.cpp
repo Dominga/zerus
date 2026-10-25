@@ -31,9 +31,6 @@ QColor TaskColors::stage(const QString &stage) const {
 }
 
 namespace {
-QString sessionLabel(const QString &host, const QString &name) {
-    return host.isEmpty() ? name : name + QStringLiteral(" @") + host;
-}
 QString age(qint64 ms) {
     const qint64 minutes = qMax<qint64>(0, ms / 60000);
     if (minutes < 60) return QStringLiteral("%1 min").arg(minutes);
@@ -121,9 +118,9 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     if (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog")) {
         meta << (task.targetSession.isEmpty()
             ? QStringLiteral("→ any session") + (state.anyNow.isEmpty() ? QString() : QStringLiteral(" · now ") + state.anyNow.toHtmlEscaped())
-            : who(QStringLiteral("→ ") + sessionLabel(task.targetHost, task.targetSession)));
+            : who(QStringLiteral("→ ") + TaskBoard::sessionLabel(task.targetHost, task.targetSession)));
     } else if (!task.sessionName.isEmpty()) {
-        meta << who(sessionLabel(task.sessionHost, task.sessionName));
+        meta << who(TaskBoard::sessionLabel(task.sessionHost, task.sessionName));
     }
     if (task.stage == QLatin1String("active")) {
         if (!state.sessionStatus.isEmpty()) meta << state.sessionStatus.toHtmlEscaped();
@@ -132,7 +129,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     if (task.stage == QLatin1String("done") && now - task.stageAt > TaskBoard::RecentDoneMs)
         meta << QStringLiteral("accepted ") + QDateTime::fromMSecsSinceEpoch(task.stageAt).toString(QStringLiteral("d MMM"));
     if (!task.author.isEmpty())
-        meta << QStringLiteral("<span style='color:%1'>filed by %2</span>").arg(colors.violet.name(), task.author.toHtmlEscaped());
+        meta << QStringLiteral("<span style='color:%1'>filed by %2</span>").arg(colors.violet.name(), TaskBoard::sessionLabel(task.authorHost, task.author).toHtmlEscaped());
     m_meta->setText(meta.join(QStringLiteral("&nbsp;&nbsp;")));
     setWorkspaceStyle(m_meta, QStringLiteral("color:%1;font-size:11px;").arg(colors.muted.name()));
     const bool quiet = task.stage == QLatin1String("backlog") || task.stage == QLatin1String("done");
@@ -144,7 +141,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
             summary = QStringLiteral("<b>Cancelled at %1%2</b> %3").arg(QDateTime::fromMSecsSinceEpoch(task.cancelledAt).toString(QStringLiteral("HH:mm")),
                 task.cancelReason.isEmpty() ? QString() : QStringLiteral(":"), task.cancelReason.toHtmlEscaped());
         else if (!task.summary.isEmpty())
-            summary = QStringLiteral("<b>%1 reported:</b> %2").arg(sessionLabel(task.sessionHost, task.sessionName).toHtmlEscaped(), task.summary.toHtmlEscaped());
+            summary = QStringLiteral("<b>%1 reported:</b> %2").arg(TaskBoard::sessionLabel(task.sessionHost, task.sessionName).toHtmlEscaped(), task.summary.toHtmlEscaped());
     }
     m_summary->setText(summary); m_summary->setVisible(!summary.isEmpty());
     setWorkspaceStyle(m_summary, QStringLiteral("color:%1;border-left:2px solid %2;padding:1px 0 1px 10px;").arg(colors.muted.name(), stage.name()));

@@ -375,7 +375,7 @@ void MessageComposer::setSessionKey(const QString &key)
     if (key == m_key) return;
     ++m_navigationRevision;
     setFileReferenceTarget({}, {}, {});
-    m_sessionStatus.clear(); m_sessionStatusError = false; m_sessionStatusBlocksInput = false;
+    m_sessionStatus.clear(); m_sessionStatusHtml.clear(); m_sessionStatusError = false; m_sessionStatusBlocksInput = false;
     m_settingsPopup->hide();
     // Another session or none: the OpenCode picker's context ends here, also when the same one returns.
     m_openCodeContext.clear(); resetOpenCodeModels();
@@ -488,11 +488,11 @@ void MessageComposer::setAvailability(bool available, const QString &reason)
     m_available = available; m_unavailableReason = reason; updateControls();
 }
 
-void MessageComposer::setSessionStatus(const QString &text, bool error, bool blockInput)
+void MessageComposer::setSessionStatus(const QString &text, bool error, bool blockInput, const QString &html)
 {
     blockInput = blockInput && !text.isEmpty();
-    if (m_sessionStatus == text && m_sessionStatusError == error && m_sessionStatusBlocksInput == blockInput) return;
-    m_sessionStatus = text; m_sessionStatusError = error; m_sessionStatusBlocksInput = blockInput;
+    if (m_sessionStatus == text && m_sessionStatusError == error && m_sessionStatusBlocksInput == blockInput && m_sessionStatusHtml == html) return;
+    m_sessionStatus = text; m_sessionStatusError = error; m_sessionStatusBlocksInput = blockInput; m_sessionStatusHtml = html;
     updateControls();
 }
 
@@ -1046,7 +1046,9 @@ void MessageComposer::updateControls()
     if (status.isEmpty() && !draft.attachments.isEmpty() && !m_attachmentsAvailable) status=m_attachmentsReason;
     if (status.isEmpty()) status = tooLong ? tr("Message exceeds 64 KiB.") : !m_sessionStatus.isEmpty() ? m_sessionStatus : m_unavailableReason;
     const auto detail = !m_sessionStatus.isEmpty() && m_sessionStatus != status ? status + '\n' + m_sessionStatus : status;
-    m_status->setText(status); m_status->setToolTip(Qt::convertFromPlainText(detail)); m_status->setAccessibleName(status);
+    const bool rich = status == m_sessionStatus && !m_sessionStatusHtml.isEmpty();
+    m_status->setTextFormat(rich ? Qt::RichText : Qt::PlainText); m_status->setText(rich ? m_sessionStatusHtml : status);
+    m_status->setToolTip(Qt::convertFromPlainText(detail)); m_status->setAccessibleName(status);
     m_status->setAccessibleDescription(detail);
     m_refreshStatus->setToolTip(Qt::convertFromPlainText(tr("Refresh this session") + '\n' + m_sessionStatus));
     m_refreshStatus->setAccessibleDescription(m_sessionStatus);

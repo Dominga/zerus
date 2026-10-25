@@ -15,8 +15,8 @@ struct TaskItem {
     // The session the task was last sent to; empty when it was never sent.
     QString sessionHost, sessionName;
     bool sessionKnown = true;
-    // Who filed it: empty for the person, otherwise the agent's session name.
-    QString author;
+    // Who filed it: empty for the person, otherwise the agent's session and its computer.
+    QString author, authorHost;
     qint64 createdAt = 0, stageAt = 0, cancelledAt = 0;
     bool writable = true;
     int queue = 0;   // position in the project's To do, from 1
@@ -48,6 +48,8 @@ public:
 
     static const QStringList &stages();   // the tiles' order
     static QString stageLabel(const QString &stage);
+    // A session as the session list names it, then the computer it runs on.
+    static QString sessionLabel(const QString &host, const QString &name);
     static QString stageIcon(const QString &stage);
     // The same actions in the same order on every surface; the main one is last.
     static QList<TaskAction> actions(const QString &stage);

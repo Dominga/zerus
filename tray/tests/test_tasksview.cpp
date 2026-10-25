@@ -98,12 +98,13 @@ void TestTasksView::rowsShowTheQueueAndTheOpenSessionsTasks() {
     // The open session's own task is highlighted; the others are not.
     QVERIFY(row(view, 2)->property("mine").toBool()); QVERIFY(!row(view, 1)->property("mine").toBool());
     QVERIFY(row(view, 2)->findChild<QLabel *>("taskText")->text().startsWith("Add rate limiting"));
-    QVERIFY(row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("codex/web"));
+    // A session is named as the session list names it.
+    QVERIFY(row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("web") && !row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("codex/web"));
     QVERIFY(row(view, 3)->findChild<QLabel *>("taskMeta")->text().contains("any session"));
     for (const char *name : {"edit", "toBacklog", "top", "sendNow"}) QVERIFY2(action(row(view, 1), name), name);
     tile(view, "active")->click();
     const auto meta = row(view, 4)->findChild<QLabel *>("taskMeta")->text();
-    QVERIFY2(meta.contains("Working") && meta.contains("filed by codex/web"), qPrintable(meta));
+    QVERIFY2(meta.contains("Working") && meta.contains("filed by web"), qPrintable(meta));
     QVERIFY(action(row(view, 4), "cancel"));
 }
 
@@ -144,7 +145,7 @@ void TestTasksView::sendNowNamesWhyASessionCannotTakeIt() {
     view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
     QTRY_VERIFY(row(view, 5)); tile(view, "todo")->click();
     const auto blocked = [&](int n) { return action(row(view, n), "sendNow")->property("blockedReason").toString(); };
-    QCOMPARE(blocked(1), QString("codex/gone no longer exists — choose another session"));
+    QCOMPARE(blocked(1), QString("gone no longer exists — choose another session"));
     QCOMPARE(blocked(2), QString("The agent is not running. Resume it before sending."));
     QCOMPARE(action(row(view, 2), "sendNow")->toolTip(), blocked(2));
     QCOMPARE(blocked(4), QString());
@@ -176,6 +177,12 @@ void TestTasksView::theInputFilesATaskForTheOpenSession() {
     auto *composer = view.composer(); auto *send = composer->findChild<QPushButton *>("sendMessage");
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
     QCOMPARE(composer->sessionKey(), QString("task-draft\n\ncodex/api")); QCOMPARE(send->text(), QString("To do"));
+    // The input names the session as the session list does; the session and the stage stand out.
+    auto *status = composer->findChild<QLabel *>("messageStatus");
+    QCOMPARE(composer->editor()->placeholderText(), QString("Task prompt for orchard / api…"));
+    QCOMPARE(status->textFormat(), Qt::RichText);
+    QVERIFY2(status->text().contains(">api</b>") && status->text().contains(">To do</b>"), qPrintable(status->text()));
+    QCOMPARE(status->accessibleName(), QString("Task for api · Enter adds to To do · Shift+Enter for a new line"));
     composer->editor()->setFocus(); QTest::keyClicks(composer->editor(), "Add rate limiting");
     QTest::keyClick(composer->editor(), Qt::Key_Return);
     QTRY_COMPARE(tile(view, "todo")->property("count").toInt(), 1);

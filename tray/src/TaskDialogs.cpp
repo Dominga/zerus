@@ -17,7 +17,6 @@
 #include <QVBoxLayout>
 
 namespace {
-QString sessionLabel(const QString &host, const QString &name) { return host.isEmpty() ? name : name + QStringLiteral(" @") + host; }
 QLabel *section(const QString &text) {
     auto *label = new QLabel(text); label->setProperty("taskSection", true);
     QFont font = label->font(); font.setPixelSize(11); font.setWeight(QFont::DemiBold); label->setFont(font);
@@ -29,7 +28,7 @@ QLabel *errorLabel(const QString &name) {
 }
 QString time(qint64 ms) { return QDateTime::fromMSecsSinceEpoch(ms).toString(QStringLiteral("d MMM HH:mm")); }
 QString actor(const QJsonObject &actor) {
-    return actor.value("kind").toString() == QLatin1String("agent") ? sessionLabel(actor.value("host").toString(), actor.value("session").toString())
+    return actor.value("kind").toString() == QLatin1String("agent") ? TaskBoard::sessionLabel(actor.value("host").toString(), actor.value("session").toString())
                                                                     : QObject::tr("You");
 }
 // One history line: who, when and what happened.
@@ -42,7 +41,7 @@ QString historyLine(const QJsonObject &entry) {
     else if (kind == QLatin1String("target")) what = QObject::tr("changed the session: %1").arg(text);
     else if (kind == QLatin1String("sent")) {
         const auto session = entry.value("session").toObject();
-        what = QObject::tr("sent it to %1").arg(sessionLabel(session.value("host").toString(), session.value("session").toString()));
+        what = QObject::tr("sent it to %1").arg(TaskBoard::sessionLabel(session.value("host").toString(), session.value("session").toString()));
     } else if (kind == QLatin1String("report")) what = QObject::tr("reported: %1").arg(text);
     else if (kind == QLatin1String("cancelled")) what = QObject::tr("cancelled it");
     else if (kind == QLatin1String("comment")) what = QObject::tr("commented: %1").arg(text);
@@ -65,14 +64,14 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
     stage->setStyleSheet(QStringLiteral("color:%1;border:1px solid %1;border-radius:9px;padding:1px 8px;font-size:11px;font-weight:600;")
         .arg(colors.stage(m_task.stage).name()));
     auto *title = new QLabel(QStringLiteral("<b>%1</b>").arg(m_task.id.toHtmlEscaped()));
-    auto *meta = new QLabel((m_task.author.isEmpty() ? tr("You") : m_task.author) + QStringLiteral(" · ") + time(m_task.createdAt));
+    auto *meta = new QLabel((m_task.author.isEmpty() ? tr("You") : TaskBoard::sessionLabel(m_task.authorHost, m_task.author)) + QStringLiteral(" · ") + time(m_task.createdAt));
     meta->setStyleSheet(QStringLiteral("color:%1;font-size:11px;").arg(colors.muted.name()));
     header->addWidget(stage); header->addWidget(title); header->addWidget(meta); header->addStretch(); layout->addLayout(header);
     layout->addWidget(section(tr("Prompt")));
     m_prompt = new QPlainTextEdit(m_task.text); m_prompt->setObjectName("taskPrompt"); m_prompt->setReadOnly(!m_editable);
     m_prompt->setAccessibleName(tr("Task prompt")); layout->addWidget(m_prompt, 2);
     if (m_task.stage == QLatin1String("review") && !m_task.summary.isEmpty()) {
-        auto *summary = new QLabel(QStringLiteral("<b>%1 reported:</b> %2").arg(sessionLabel(m_task.sessionHost, m_task.sessionName).toHtmlEscaped(),
+        auto *summary = new QLabel(QStringLiteral("<b>%1 reported:</b> %2").arg(TaskBoard::sessionLabel(m_task.sessionHost, m_task.sessionName).toHtmlEscaped(),
             m_task.summary.toHtmlEscaped()));
         summary->setObjectName("taskDialogSummary"); summary->setWordWrap(true);
         summary->setStyleSheet(QStringLiteral("border-left:2px solid %1;padding:1px 0 1px 10px;").arg(colors.warn.name()));
@@ -90,7 +89,7 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
         if (!m_target.any && !m_choices.contains(m_target)) m_choices << m_target;
         for (int i = 0; i < m_choices.size(); ++i) {
             const auto &choice = m_choices.at(i);
-            auto *chip = new QPushButton(choice.any ? tr("Any session") : sessionLabel(choice.host, choice.session));
+            auto *chip = new QPushButton(choice.any ? tr("Any session") : TaskBoard::sessionLabel(choice.host, choice.session));
             chip->setObjectName(QStringLiteral("taskSession:") + (choice.any ? QStringLiteral("any") : choice.host + QLatin1Char('/') + choice.session));
             chip->setCheckable(true); chip->setChecked(choice == m_target); m_sessions->addButton(chip, i); chips->addWidget(chip);
             for (const auto &session : sessions)
@@ -100,7 +99,7 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
         connect(m_sessions, &QButtonGroup::idClicked, this, &TaskDialog::refreshButtons);
     } else {
         auto *fixed = new QLabel(m_task.sessionName.isEmpty() ? (m_task.targetSession.isEmpty() ? tr("Any session")
-            : sessionLabel(m_task.targetHost, m_task.targetSession)) : sessionLabel(m_task.sessionHost, m_task.sessionName));
+            : TaskBoard::sessionLabel(m_task.targetHost, m_task.targetSession)) : TaskBoard::sessionLabel(m_task.sessionHost, m_task.sessionName));
         fixed->setObjectName("taskDialogSession"); layout->addWidget(fixed);
     }
     layout->addWidget(section(tr("History")));
@@ -191,7 +190,7 @@ TaskCancelDialog::TaskCancelDialog(const TaskItem &task, bool running, bool work
     auto *title = new QLabel(QStringLiteral("<b>%1</b>").arg(tr("Cancel %1?").arg(task.id).toHtmlEscaped())); layout->addWidget(title);
     auto *text = new QLabel(task.text); text->setObjectName("taskCancelText"); text->setWordWrap(true); text->setTextFormat(Qt::PlainText);
     text->setMaximumHeight(text->fontMetrics().lineSpacing() * 4 + 4); layout->addWidget(text);
-    const QString session = sessionLabel(task.sessionHost, task.sessionName);
+    const QString session = TaskBoard::sessionLabel(task.sessionHost, task.sessionName);
     QString what = tr("%1 moves to In review, and %2 gets the cancel message.").arg(task.id, session);
     if (!running) what += QLatin1Char(' ') + tr("The agent is not running, so hgs will refuse the message; the task is cancelled all the same.");
     else if (working) what += QLatin1Char(' ') + tr("%1 is working; it reads the message when its turn ends.").arg(session);

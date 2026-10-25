@@ -341,6 +341,14 @@ answered; a denial cannot carry an explanation.
   it) goes to the bottom of its column, below tasks whose chains continue,
   so the edges of the chain stay short and the eye follows the path.
   Owner: yes, in phase 2.
+- **G4. Bug: layer stripes vanish once a team has phases.** With any second
+  phase (a draft is enough) the graph is drawn in phase bands, and banded
+  mode paints only one background per phase: the alternating layer stripes
+  and the "LAYER n - count" labels of the unbanded graph disappear inside
+  phase 1 (`tray/src/TeamWidgets.h`, paint: `if (banded()) { ... } else if
+  (m_mode == Wide) { layer stripes }`). Fix: inside each band, keep the
+  alternating stripes per layer (and a small layer label). Owner: report,
+  goes into the fix phase after phase 1.
 
 ## H. Operations
 

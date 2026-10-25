@@ -5048,11 +5048,15 @@ void SessionsWindow::clearContext()
     dialog.exec();
     if(dialog.clickedButton()!=confirm)return;
     entry=selected();
+    // U1: the fleet polls while the dialog is open; a changed session finishes
+    // this action as failed where the owner sees it instead of doing nothing.
     if(!entry || !entry->online || m_selectedKey!=key || entry->host!=host || entry->session.name!=name
         || m_details.value("run_id")!=run || m_details.value("conversation_id")!=conversation
         || m_clearRequest || m_composer->isSending(key) || !m_inspectError.isEmpty()
         || m_details.value("clear_context_supported").toBool()==dismiss
-        || (dismiss && !m_details.value("clear_context_dismiss").toBool()))return;
+        || (dismiss && !m_details.value("clear_context_dismiss").toBool())) {
+        showNotice(tr("The session changed. Open its context actions again."), true); return;
+    }
     m_clearKey=key;
     if(m_detailTabs->currentIndex()==0)m_composer->editor()->setFocus(Qt::OtherFocusReason);
     m_clearRequest=m_client.requestClearContext(host,name,run,conversation,dismiss);
@@ -5062,8 +5066,10 @@ void SessionsWindow::clearContext()
 bool SessionsWindow::canStartStopped(const Entry &entry) const
 {
     const auto &s = entry.session;
+    // U1: a stopped dsh session gets the same one-click start-and-send as the
+    // agents that own a resumable conversation.
     return entry.online && (s.state == "paused" || s.state == "stopped") && s.tracked
-        && QStringList{"codex", "claude", "kimi"}.contains(s.cmd) && !isTerminating(entry)
+        && QStringList{"codex", "claude", "kimi", "dsh"}.contains(s.cmd) && !isTerminating(entry)
         && !m_pending && !m_settingsRequest && m_renameKey.isEmpty() && m_startSend.key.isEmpty()
         && !m_compacts.contains(entry.key) && !m_composer->isSending(entry.key);
 }
@@ -5199,8 +5205,8 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
     if (retryId.isEmpty() && compactionId.isEmpty() && !contextChosen && canStartStopped(*entry)) { startToSend(key, text, attachments); return; }
     const auto reason = messageBlockReason(*entry);
     if (!reason.isEmpty()) { m_composer->deliveryFinished(key, false, reason); return; }
-    const QString runId = m_details.value("run_id").toString();
-    const QString conversationId = m_details.value("conversation_id").toString();
+    QString runId = m_details.value("run_id").toString();
+    QString conversationId = m_details.value("conversation_id").toString();
     bool fullContextConsent = contextChosen || !compactionId.isEmpty();
     // Resume and send already chose the full saved context.
     if(compactionId.isEmpty() && !contextChosen && CacheStatus::expired(m_details)) {
@@ -5228,8 +5234,26 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
         if(!unavailable.isEmpty()){dialog.setInformativeText(unavailable.join('\n'));dialog.setTextFormat(Qt::PlainText);}
         auto *cancel=dialog.addButton(QMessageBox::Cancel);dialog.setDefaultButton(cancel);dialog.setEscapeButton(cancel);dialog.exec();
         if(dialog.clickedButton()!=proceed && dialog.clickedButton()!=clear && dialog.clickedButton()!=compact)return;
+        // The fleet polls while the modal runs. Re-read the selection and the
+        // identity; a session that was still starting may gain the ids the
+        // dialog opened with empty, and that is the same session: send with the
+        // new identity. Anything else finishes the delivery as failed where the
+        // owner sees it, never as a silent no-op (U1).
         entry=selected();
-        if(!entry||m_selectedKey!=key||entry->host!=host||entry->session.name!=name||m_details.value("run_id")!=runId||m_details.value("conversation_id")!=conversationId)return;
+        if(!entry||m_selectedKey!=key||entry->host!=host||entry->session.name!=name){
+            m_composer->deliveryFinished(key,false,tr("The session changed while the dialog was open. Your draft was kept without sending."));
+            return;
+        }
+        const QString freshRun=m_details.value("run_id").toString(), freshConversation=m_details.value("conversation_id").toString();
+        if(freshRun!=runId||freshConversation!=conversationId){
+            const bool filledRun=runId.isEmpty()&&!freshRun.isEmpty();
+            const bool filledConversation=conversationId.isEmpty()&&!freshConversation.isEmpty();
+            if((freshRun!=runId&&!filledRun)||(freshConversation!=conversationId&&!filledConversation)){
+                m_composer->deliveryFinished(key,false,tr("The session's identity changed while the dialog was open. Your draft was kept without sending; refresh and send again."));
+                return;
+            }
+            runId=freshRun; conversationId=freshConversation;
+        }
         if(dialog.clickedButton()==clear){clearContext();return;}
         if(dialog.clickedButton()==compact) {
             if (!m_composer->draftMatches(key, text, attachments)) { showNotice(tr("Draft changed. Send it when you are ready.")); return; }
@@ -5237,7 +5261,8 @@ void SessionsWindow::sendMessage(const QString &key, const QString &text, const 
             renderDetails(); return;
         }
         fullContextConsent = true;
-        const auto currentProblem=messageBlockReason(*entry);if(!currentProblem.isEmpty()){showNotice(currentProblem,true);return;}
+        const auto currentProblem=messageBlockReason(*entry);
+        if(!currentProblem.isEmpty()){m_composer->deliveryFinished(key,false,currentProblem);showNotice(currentProblem,true);return;}
     }
     deliverMessage(key,entry->host,entry->session.name,runId,conversationId,text,attachments,retryId,compactionId,fullContextConsent);
 }
@@ -6067,7 +6092,10 @@ void SessionsWindow::forkSession()
     });
     validate(); name->selectAll(); name->setFocus();
     if (dialog.exec() != QDialog::Accepted || !SessionTag::problem(name->text()).isEmpty() || occupied(name->text())) return;
-    if (!selectSessionEntry(original) || !m_forkAction->isEnabled()) return;
+    // U1: the fleet polls while the dialog is open; say why nothing happens.
+    if (!selectSessionEntry(original) || !m_forkAction->isEnabled()) {
+        showNotice(tr("The session changed. Open its actions again."), true); return;
+    }
     m_forkKey = original.host + '\n' + prefix + name->text(); m_forkGroup = m_organization.groupFor(original.identity);
     if (const auto *group = m_organization.group(m_forkGroup)) {
         const int index = group->sessions.indexOf(original.identity); if (index >= 0 && index + 1 < group->sessions.size()) m_forkBefore = group->sessions[index + 1];
@@ -6129,7 +6157,10 @@ void SessionsWindow::renameSession()
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     validate(); name->selectAll(); name->setFocus();
     if (dialog.exec() != QDialog::Accepted || name->text() == oldTag || !problem(name->text()).isEmpty()) return;
-    if (!selectSessionEntry(original) || !selected()->online || m_pending || !m_renameAction->isEnabled()) return;
+    // U1: the fleet polls while the dialog is open; say why nothing happens.
+    if (!selectSessionEntry(original) || !selected()->online || m_pending || !m_renameAction->isEnabled()) {
+        showNotice(tr("The session changed. Open its actions again."), true); return;
+    }
     const QString newName = prefix + name->text();
     m_pending = true; m_restoreKey.clear(); m_renameArchived = archived;
     m_renameKey = original.host + '\n' + newName + (archived ? '\n' + original.session.archiveId : QString());
@@ -6190,7 +6221,9 @@ void SessionsWindow::terminateSession()
     confirm.button(QMessageBox::Yes)->setText(live ? (keepArchive ? tr("Stop and archive") : tr("Terminate session"))
         : archived ? tr("Forget archived session") : tr("Forget saved session"));
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
-    if (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original)) return;
+    if (confirm.exec() != QMessageBox::Yes) return;
+    // U1: the fleet polls while the dialog is open; a lost selection says so.
+    if (!selectSessionEntry(original)) { showNotice(tr("The session changed. Open its actions again."), true); return; }
     const auto *current = selected();
     if (!current || !current->online || isTerminating(*current) || m_pending || !m_renameKey.isEmpty() || m_forgetBindingRequest) return;
     const bool currentBindingOnly = !archived && NativeSessionCapabilities::forgetsBindingOnly(current->session,m_details);

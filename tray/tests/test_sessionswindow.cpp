@@ -321,6 +321,8 @@ private slots:
     void durableSubmissionKeepsGuiResponsive_data();
     void durableSubmissionKeepsGuiResponsive();
     void coldCacheConfirmationPreservesDraftAndPinsConversation();
+    void coldCacheDialogRefreshedIdentityStillSends();
+    void stoppedDshSessionStartsAndSends();
     void nativeColdCacheChoiceKeepsExactAnswer_data();
     void nativeColdCacheChoiceKeepsExactAnswer();
     void coldCacheClearKeepsDraftAndPinsIdentity();
@@ -3417,12 +3419,104 @@ void TestSessionsWindow::coldCacheConfirmationPreservesDraftAndPinsConversation(
     qsizetype injected=-1;
     shown=false;onConfirm([&](QMessageBox *dialog){shown=true;details["conversation_id"]="conversation-new";writeDetails();client->inspectionReady({},"codex/hgs/dashboard",details);injected=replies.size();accept(dialog);});
     send->click();QVERIFY(shown);QVERIFY(!composer->isSending(key));QVERIFY(!QFileInfo::exists(capture));QCOMPARE(composer->editor()->toPlainText(),QString("Preserve this draft"));
+    // U1: the failure is shown where the owner looks, not swallowed silently.
+    auto *status=composer->findChild<QLabel *>("messageStatus");
+    QVERIFY(status);
+    QTRY_VERIFY(status->text().contains(QStringLiteral("identity changed")));
     // Wait for that reply, so none is pending when the next confirmation opens.
     QTRY_VERIFY_WITH_TIMEOUT(std::any_of(replies.cbegin()+injected,replies.cend(),[](const QList<QVariant> &reply){
         return reply.at(2).toJsonObject().value("conversation_id")==QStringLiteral("conversation-new");}),10000);
     shown=false;onConfirm([&](QMessageBox *dialog){shown=true;accept(dialog);});
     send->click();QVERIFY(shown);QTRY_VERIFY(QFileInfo::exists(capture));QFile sent(capture);QVERIFY(sent.open(QIODevice::ReadOnly));
     const auto payload=QJsonDocument::fromJson(sent.readAll()).object();QCOMPARE(payload["expected_conversation_id"].toString(),QString("conversation-new"));QCOMPARE(payload["text"].toString(),QString("Preserve this draft"));
+}
+
+// U1: a stopped dsh session has the same one-click start-and-send as
+// claude/codex/kimi: Send stays enabled, says how it starts, and asks the same
+// Resume-and-send question before the message waits for the new run.
+void TestSessionsWindow::stoppedDshSessionStartsAndSends()
+{
+    QTemporaryDir temp;const auto program=temp.filePath("hgs");
+    QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write("#!/usr/bin/env python3\nimport sys,json,pathlib\nroot=pathlib.Path(__file__).parent\na=sys.argv[1:]\nif a[0].startswith('@'):a=a[1:]\nif a[0] in ('resume','fresh'):\n (root/'resume.log').open('a').write(json.dumps(sys.argv[1:])+'\\n')\n print(json.dumps(dict(status='started',request_id='r')))\nelif a[0]=='inspect':print((root/'details.json').read_text() if (root/'details.json').exists() else '{}')\nelse:print('{}')\n");
+    fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    const QString name="codex/website/navigation";
+    auto state=fleet();auto box=state.local();
+    for(auto &session:box.sessions)if(session.name==name){session.cmd="dsh";session.state="stopped";session.tracked=true;
+        session.runId="run-dsh";session.conversationId="conversation-dsh";session.processState="exited";session.activity="idle";session.phase="idle";}
+    state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    {QFile details(temp.filePath("details.json"));QVERIFY(details.open(QIODevice::WriteOnly));
+     details.write(QJsonDocument(QJsonObject{{"tracked",true},{"run_id","run-dsh"},{"conversation_id","conversation-dsh"},
+                                             {"runtime_state","saved"},{"process_state","exited"}}).toJson());}
+    SessionsWindow window(FakeCli::program(program));window.setFleet(state);window.show();window.showSession({},name);QTest::qWait(100);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *send=composer->findChild<QPushButton *>("sendMessage");
+    auto *status=composer->findChild<QLabel *>("messageStatus");
+    setComposerText(composer,"Continue the dsh session");
+    // canStartStopped: the click that used to be refused now leads somewhere.
+    QTRY_VERIFY(send->isEnabled());
+    QVERIFY(status->text().contains(QStringLiteral("resume it or start fresh")));
+    QTimer::singleShot(0,&window,[&]{auto *dialog=window.findChild<QMessageBox *>("startToSendConfirm");QVERIFY(dialog);
+        auto *resume=dialog->findChild<QPushButton *>("resumeAndSend");QVERIFY(resume);QVERIFY(resume->isEnabled());resume->click();});
+    send->click();
+    const auto log=temp.filePath("resume.log");
+    QTRY_VERIFY(QFileInfo::exists(log));
+    QFile started(log);QVERIFY(started.open(QIODevice::ReadOnly));
+    const auto command=QString::fromUtf8(started.readAll());
+    QVERIFY(command.contains(QStringLiteral("resume")));
+    QVERIFY(command.contains(name));
+    // The draft now waits for that run instead of being dropped.
+    QTRY_VERIFY(send->text().contains(QStringLiteral("Waiting")));
+    QVERIFY(status->text().contains(QStringLiteral("Waiting for the session to start")));
+}
+
+
+// U1: a session that was still starting when the cold-cache dialog opened gains
+// its conversation id while the dialog is up. That is the same session, so the
+// message must still go out, with the new identity, instead of vanishing.
+void TestSessionsWindow::coldCacheDialogRefreshedIdentityStillSends()
+{
+    const auto program=m_dir->filePath("cache-retry-hgs"),capture=m_dir->filePath("cache-retry-send.json"),inspected=m_dir->filePath("cache-retry-inspect.json");
+    QJsonObject details{{"tracked",true},{"run_id","run-retry"},{"conversation_id",""},{"first_message_can_send",true},
+        {"runtime_state","live"},{"process_state","running"},{"activity","idle"},{"phase","idle"},
+        {"cache_hint",QJsonObject{{"status","cold"},{"tokens",756000}}}};
+    const auto writeDetails=[&]{QVERIFY(FakeCli::replace(inspected,QJsonDocument(details).toJson()));};
+    writeDetails();
+    QFile fixture(program);QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write("#!/usr/bin/env python3\nimport sys,json,pathlib\na=sys.argv[1:]\nif a[0].startswith('@'):a=a[1:]\nif a[0]=='send':\n p=json.load(sys.stdin);target=pathlib.Path("+QJsonDocument(QJsonArray{capture}).toJson(QJsonDocument::Compact)+"[0])\n staged=target.with_name(target.name+'.tmp');staged.write_text(json.dumps(p));staged.replace(target)\n print(json.dumps(dict(status='submitted',request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'])))\nelif a[0]=='inspect':print(open("+QJsonDocument(QJsonArray{inspected}).toJson(QJsonDocument::Compact)+"[0]).read())\nelse:print('{}')\n");
+    fixture.close();QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    SessionsWindow window(FakeCli::program(program));window.setFleet(fleet());
+    window.setDetailsPollForTests(500,24*60*60*1000);window.show();window.showSession({},"codex/hgs/dashboard");
+    auto *client=window.findChild<HgsClient *>();QSignalSpy replies(client,&HgsClient::inspectionReady);
+    qsizetype issued=-1;
+    QTRY_VERIFY_WITH_TIMEOUT(issued>=0||(client->requestInspection({},"codex/hgs/dashboard")&&(issued=replies.size(),true)),15000);
+    QTRY_VERIFY_WITH_TIMEOUT(std::any_of(replies.cbegin()+issued,replies.cend(),[](const QList<QVariant> &reply){return reply.at(1).toString()=="codex/hgs/dashboard";}),15000);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *send=composer->findChild<QPushButton *>("sendMessage");
+    setComposerText(composer, "Send after the start");QVERIFY(send->isEnabled());
+    const auto onConfirm=[&](std::function<void(QMessageBox *)> act){
+        auto *poll=new QTimer(&window);poll->setInterval(5);QElapsedTimer age;age.start();
+        QObject::connect(poll,&QTimer::timeout,&window,[poll,act,age,&window]{
+            auto *dialog=window.findChild<QMessageBox *>("coldCacheConfirm");
+            if(!(dialog&&dialog->isVisible())&&age.elapsed()<5000)return;
+            poll->stop();poll->deleteLater();if(dialog&&dialog->isVisible())act(dialog);});
+        poll->start();};
+    const auto accept=[](QMessageBox *dialog){for(auto *b:dialog->buttons())if(dialog->buttonRole(b)==QMessageBox::AcceptRole)b->click();};
+    bool shown=false;
+    onConfirm([&](QMessageBox *dialog){
+        shown=true;
+        // A poll during the modal loop fills the id the dialog opened without.
+        details["conversation_id"]="conversation-started";writeDetails();
+        client->inspectionReady({},"codex/hgs/dashboard",details);
+        accept(dialog);
+    });
+    send->click();
+    QVERIFY(shown);
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(capture),15000);
+    QFile sent(capture);QVERIFY(sent.open(QIODevice::ReadOnly));
+    const auto payload=QJsonDocument::fromJson(sent.readAll()).object();
+    QCOMPARE(payload["expected_conversation_id"].toString(),QString("conversation-started"));
+    QCOMPARE(payload["text"].toString(),QString("Send after the start"));
+    // The receipt clears the sending state a moment after the fixture writes.
+    QTRY_VERIFY(!composer->isSending(composer->sessionKey()));
 }
 
 void TestSessionsWindow::clearInspectionUpdatesActivityAndCountersImmediately()

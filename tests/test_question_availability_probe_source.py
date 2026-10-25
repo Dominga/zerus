@@ -14,7 +14,7 @@ original_review_fixture = _focus_projection.original_review_fixture
 # Fixture pin includes one-time post-resume live-label preparation; the approval harness retains exact 95ef by reverse projection.
 MAIN = ROOT / "mobile/android/app/src/main/java/app/zerus/mobile"
 # Keep the reviewed 9b217ddd/b9c1e29c reconstruction pins unchanged. The exact
-# fixtures first reverse the composed 3d33de39 workspace changes to ac601e36,
+# fixtures first reverse the composed workspace and push-registration changes to ac601e36,
 # then the 962699e6 read-catalog/badge update and c1eebe96 mobile checkout
 # additions. None changes question eligibility or the ten verification writes.
 # No Git history or Android SDK is needed at run time.
@@ -23,7 +23,7 @@ MAIN_SHA = "7c676d33a2218da83511697f5a597c4876b946e1c130d601c265e855b7259f4b"
 UPDATES = ROOT / "tests/fixtures/question-availability-reviewed-updates.patch"
 UPDATES_SHA = "5088def68877668c9a7e261851d552cd30b0fee1806aa072a911172f6ff4f60a"
 WORKSPACE_UPDATES = ROOT / "tests/fixtures/question-availability-workspace-updates.patch"
-WORKSPACE_UPDATES_SHA = "02c52292e8713aa238f159054907c41a8bc9f605860dde2d38575dd379ca06fd"
+WORKSPACE_UPDATES_SHA = "ff2e0ae7ccf5f14a49be075a38978757f453e59f2461fda329d3d8b51a9d0443"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",
@@ -146,6 +146,7 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
                 "    private val api = RelayApi(workspace = store.workspaceJournal)\n",
                 "    var pendingEncryptedPairings by mutableStateOf<Set<String>>(emptySet());private set\n",
                 "    fun resumeEncryptedPair(connection:Connection)=viewModelScope.launch {\n",
+                "                        AppTelemetry.encryptedWorkspaceReady(getApplication(),connection)\n",
                 "                        WorkspaceCatalogCache.preserve(connection,computers,\n",
                 "                sessions = preparedSessions; machines = newMachines.map { MachineNames.apply(it,messageState.machineAliases) }; machineOperations = newOperations; machineFeatures = newFeatures\n"):
             for changed in (addition.rstrip("\n") + " // changed reviewed addition\n", "", addition + addition):

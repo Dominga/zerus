@@ -554,6 +554,12 @@ target_link_libraries(test_machinefilter PRIVATE Qt6::Test Qt6::Widgets hgs-tray
 zerus_add_test(machinefilter test_machinefilter)
 set_tests_properties(machinefilter PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+add_executable(test_opencodeexisting test_opencodeexisting.cpp)
+target_include_directories(test_opencodeexisting PRIVATE ../src)
+target_link_libraries(test_opencodeexisting PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+zerus_add_test(opencodeexisting test_opencodeexisting)
+set_tests_properties(opencodeexisting PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_executable(test_accountspage test_accountspage.cpp)
 target_include_directories(test_accountspage PRIVATE ../src)
 target_link_libraries(test_accountspage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)

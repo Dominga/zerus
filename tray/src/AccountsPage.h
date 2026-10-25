@@ -63,7 +63,7 @@ private:
     bool m_hasSnapshot = false;
     IdentityBadge *m_providerBadge;
     QLabel *m_summary, *m_title, *m_detail, *m_identity, *m_permissionState;
-    QPushButton *m_add, *m_login, *m_copy, *m_remove, *m_rename, *m_install, *m_permissions, *m_default, *m_startOpenCode;
+    QPushButton *m_add, *m_login, *m_copy, *m_remove, *m_rename, *m_install, *m_permissions, *m_default, *m_startOpenCode, *m_bindOpenCode;
     // OpenCode's connected providers and their notes, read-only text from that machine's catalog.
     QTreeWidget *m_openCodeProviders;
     QLabel *m_openCodeProvidersNote;

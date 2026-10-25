@@ -7,6 +7,7 @@
 #include "LocalSessionHost.h"
 #include "MachinePlatform.h"
 #include "OpenCodeModels.h"
+#include "OpenCodeExistingDialog.h"
 #include "WorkspaceIcons.h"
 #include "WorkspacePageHeader.h"
 #include "WorkspaceList.h"
@@ -245,6 +246,17 @@ AccountsPage::AccountsPage(const QString &hgsPath, QWidget *parent, AccountUsage
     // Explicit only: inspecting accounts never starts OpenCode's shared service.
     m_startOpenCode = new QPushButton; m_startOpenCode->setObjectName("startOpenCode"); actions->addWidget(m_startOpenCode);
     m_startOpenCode->setToolTip(tr("Start the shared OpenCode service on this machine. Zerus never stops it.")); m_startOpenCode->hide();
+    m_bindOpenCode = new QPushButton(tr("Bind existing conversation…")); m_bindOpenCode->setObjectName("bindOpenCodeConversation");
+    actions->addWidget(m_bindOpenCode); m_bindOpenCode->hide();
+    connect(m_bindOpenCode, &QPushButton::clicked, this, [this, hgsPath] {
+        const auto p = selected();
+        if (changing() || p["id"] != "native-opencode" || !online(p["host"].toString()) || p["home"].toString().isEmpty()) return;
+        OpenCodeExistingDialog dialog(hgsPath, p["host"].toString(), p["home"].toString(), this);
+        if (dialog.exec() == QDialog::Accepted) {
+            emit accountsChanged();
+            emit notice(tr("Existing OpenCode conversation is bound as %1. Native history was preserved.").arg(dialog.bound()["name"].toString()));
+        }
+    });
     m_copy = new QPushButton(tr("Add to machine…"), this); m_copy->setObjectName("copyAccount"); m_copy->hide();
     actions->addStretch();machineLayout->addLayout(actions);
     // OpenCode's connected providers: plain, read-only text from that machine's
@@ -581,6 +593,8 @@ void AccountsPage::selectionChanged()
     updateRefreshState();
     m_install->setVisible(has && !p["installed"].toBool()); m_install->setEnabled(has && idle && online(p["host"].toString()) && !nativeConfig);
     m_startOpenCode->setVisible(false);
+    m_bindOpenCode->setVisible(nativeConfig);
+    m_bindOpenCode->setEnabled(nativeConfig && idle && online(p["host"].toString()) && p["installed"].toBool() && p["catalog_state"] == "ready" && !p["home"].toString().isEmpty());
     if(!nativeConfig){m_openCodeProviders->hide();m_openCodeProvidersNote->hide();}
     m_remove->setText(has ? tr("Remove from %1…").arg(p["machine"].toString()) : tr("Remove…"));
     m_login->setText(tr("Sign in…")); m_login->setToolTip({});

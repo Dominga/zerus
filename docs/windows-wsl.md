@@ -122,3 +122,9 @@ all clients discover the same registration. Its service configuration can select
 a loopback hostname and port before startup; do not synthesize the registration
 from a separate `serve` process. Changing service configuration may stop the
 service and must be an explicit operator action, never a Zerus readiness probe.
+
+## Selected existing conversations
+
+The account page and `account bind-existing native-opencode --json` provide an
+explicit preview/commit workflow for one existing native conversation. See
+[existing conversation identity and continuity](opencode-existing.md).

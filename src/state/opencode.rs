@@ -5,6 +5,10 @@ use super::*;
 mod catalog;
 #[cfg_attr(not(unix), allow(dead_code))]
 mod favorites;
+#[cfg_attr(not(unix), allow(dead_code))]
+mod existing;
+#[cfg(unix)]
+pub(crate) use existing::bind_existing;
 mod forms;
 mod history;
 #[cfg_attr(not(unix), allow(dead_code))]

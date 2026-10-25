@@ -1157,12 +1157,37 @@ class ApprovalHarnessTests(unittest.TestCase):
             self.assertIn("github.event_name == 'pull_request' && '" + value + "' || inputs." + manual, workflow)
         for path in (".github/workflows/ios-approval-ui.yml", "mobile/ios/ApprovalUIFixture/**", "scripts/ci/ios-approval-ui*.py",
                      "tests/test_approval_ui_harness.py", "mobile/ios/Zerus/Conversation/QuestionCard.swift", "mobile/ios/Zerus/App/Theme.swift",
-                     "mobile/ios/Zerus/Common/MarkdownView.swift", "mobile/ios/ZerusKit/**"):
+                     "mobile/ios/Zerus/Common/MarkdownView.swift", "mobile/ios/ZerusKit/**",
+                     "mobile/ios/scripts/build-replica.sh", "crates/replica/**", "crates/replica-ffi/**"):
             self.assertIn("      - '" + path + "'", workflow)
         self.assertIn("permissions:\n  contents: read", workflow)
         self.assertIn("cache-mode: none", workflow)
         self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', workflow)
         self.assertNotIn("secrets.", workflow)
+
+    def test_ios_native_fixture_builds_the_local_replica_before_xcode(self):
+        workflow = (ROOT / ".github/workflows/ios-approval-ui.yml").read_text()
+        steps = re.split(r"(?m)^(?=      - )", workflow.split("\n    steps:\n", 1)[1])[1:]
+        install = next(step for step in steps if "run: rustup toolchain install" in step)
+        build = next(step for step in steps if "bash mobile/ios/scripts/build-replica.sh" in step)
+        campaign = next(step for step in steps if "run: python3 -I -B scripts/ci/ios-approval-ui.py" in step)
+        self.assertLess(steps.index(install), steps.index(build))
+        self.assertLess(steps.index(build), steps.index(campaign))
+        targets = "aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios,aarch64-apple-darwin,x86_64-apple-darwin"
+        self.assertIn("rustup toolchain install 1.99.1 --profile minimal --target " + targets, install)
+        replica = (ROOT / "mobile/ios/scripts/build-replica.sh").read_text()
+        self.assertEqual(re.search(r"^targets=\(([^\n]+)\)$", replica, re.M)[1].split(), targets.split(","))
+        self.assertIn('CARGO_BUILD_JOBS: "2"', build)
+        self.assertIn('CARGO_PROFILE_RELEASE_LTO: "false"', build)
+        self.assertIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', build)
+        self.assertIn("run: RUSTUP_TOOLCHAIN=1.99.1 bash mobile/ios/scripts/build-replica.sh\n", build)
+        # Preparation does not renew or enlarge the owned simulator campaign's limits.
+        self.assertIn("    timeout-minutes: 25\n", workflow)
+        self.assertIn("        timeout-minutes: 3\n", install)
+        self.assertIn("        timeout-minutes: 10\n", build)
+        for step in (install, build):
+            for forbidden in ("continue-on-error", "if:", "secrets.", "--bindings-only", "cache", "DEVELOPER_DIR"):
+                self.assertNotIn(forbidden, step)
 
     def test_non_arm64_process_refuses_before_allocation_or_tool_execution(self):
         ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")

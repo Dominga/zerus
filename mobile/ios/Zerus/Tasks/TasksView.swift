@@ -388,7 +388,7 @@ struct TaskCardView: View {
 /// Done from a computer: the last 7 days, then "Show older (N)". A tap fetches the task, then opens it.
 private struct DoneList: View {
     @Environment(AppModel.self) private var app
-    let onOpen: (TaskInfo) -> Void
+    let onOpen: @MainActor @Sendable (TaskInfo) -> Void
 
     var body: some View {
         let tasks = app.tasks!

@@ -338,6 +338,9 @@ answered; a denial cannot carry an explanation.
   Owner: yes, urgent (in the fix phase), with a redesign of phase approval
   (G5): the draft strips move to the top of the members column, compact,
   collapsible, and the Members block becomes collapsible too.
+  Numbers: a draft that was never approved burns no phase number or task id;
+  discarding or moving drafts renumbers the drafts after it, and a stored
+  team with discarded drafts is compacted once. Owner: yes, urgent.
 
 ## G. GUI
 

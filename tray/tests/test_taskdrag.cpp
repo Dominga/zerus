@@ -297,7 +297,7 @@ void TestTaskDrag::aDroppedSessionRepinsTheTask() {
     view.retarget(todo(1), "", "codex/web");
     QTRY_VERIFY(called(dir.path(), {"task", "target", "uuid-1", "codex/web", "--project", "project-1"}));
     // The row names its new session once hgs took it.
-    QTRY_VERIFY(row(view, 1) && row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("codex/web"));
+    QTRY_VERIFY(row(view, 1) && row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("→ web"));
 }
 
 void TestTaskDrag::aRowAListingDropsLivesUntilItsDragEnds() {

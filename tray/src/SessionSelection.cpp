@@ -6,6 +6,7 @@
 #include "MessageComposer.h"
 #include "WorkspaceIcons.h"
 #include <QAction>
+#include <QCheckBox>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QJsonDocument>
@@ -250,6 +251,7 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
     QList<Entry> targets;
     for (const auto &entry : entries) if (selectionActionApplies(entry, action)) targets << entry;
     if (targets.isEmpty()) return;
+    bool removeWorktrees=false;
     if (action == SelectionAction::Forget || action == SelectionAction::Terminate) {
         QStringList names; for (const auto &entry : targets) names << entry.machine + " / " + entry.session.name;
         QString text = clearArchive ? (m_archiveBrowser->paged()?tr("Remove %1 loaded archived sessions in the current date and machine scope? Unloaded entries are kept."):tr("Remove %1 archived sessions from HGS on the selected machines?")).arg(targets.size())
@@ -265,9 +267,18 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         if (entries.size() != targets.size()) text += tr("\n\n%1 unavailable or inapplicable sessions will be left as they are.").arg(entries.size() - targets.size());
         QMessageBox dialog(QMessageBox::Question, clearArchive ? tr("Clear archive") : selectionActionText(action), text, QMessageBox::Cancel, this);
         dialog.setObjectName("confirmSelectionAction"); dialog.setTextFormat(Qt::PlainText); dialog.setDetailedText(names.join('\n'));
+        QCheckBox *cleanup=nullptr;
+        if(action==SelectionAction::Terminate && std::any_of(targets.cbegin(),targets.cend(),[](const Entry &entry){return entry.session.gitWorktree;})) {
+            cleanup=new QCheckBox(tr("Remove unused worktrees after stopping"),&dialog);cleanup->setObjectName("removeTerminatedWorktrees");
+            cleanup->setChecked(QSettings().value("workspace/removeWorktreeAfterTermination",false).toBool());
+            cleanup->setToolTip(tr("Keep branches and history. Generated caches can be removed; other local files and uncertain folders require review."));
+            dialog.setCheckBox(cleanup);
+        }
         auto *confirm = dialog.addButton(clearArchive ? tr("Clear archive") : tr("%1 %2 sessions").arg(selectionActionText(action)).arg(targets.size()), QMessageBox::DestructiveRole);
         dialog.setDefaultButton(QMessageBox::Cancel); dialog.setEscapeButton(QMessageBox::Cancel); dialog.exec();
         if (dialog.clickedButton() != confirm) return;
+        removeWorktrees=cleanup && cleanup->isChecked();
+        if(cleanup)QSettings().setValue("workspace/removeWorktreeAfterTermination",cleanup->isChecked());
     }
     // Spec D5: one question before resuming or restoring sessions of this computer.
     if (action == SelectionAction::Resume
@@ -288,6 +299,7 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         showNotice(tr("%1: %2 of %3 sessions updated.").arg(selectionActionText(action)).arg(changed).arg(targets.size()), changed != targets.size()); return;
     }
     m_selectionOperation = action; m_selectionQueue = targets; m_selectionTotal = targets.size();
+    m_selectionRemoveWorktrees=removeWorktrees;m_selectionCleanupOffers.clear();m_selectionCleanupTarget.clear();m_selectionCleanupOverflow=0;
     m_selectionDone = 0; m_selectionFailed = 0; m_selectionErrors.clear(); m_selectionRunning = true; m_pending = true;
     m_restoreKey.clear(); updateSelectionActions(); renderDetails(); runNextSelectionAction();
 }
@@ -301,6 +313,7 @@ void SessionsWindow::runNextSelectionAction()
             ++m_selectionFailed; m_selectionErrors << tr("%1 / %2: session changed or is unavailable").arg(original.machine, original.session.name); continue;
         }
         const auto entry = *found; const auto &s = entry.session;
+        m_selectionCleanupTarget.clear();
         if (m_selectionOperation == SelectionAction::Archive || m_selectionOperation == SelectionAction::Terminate) {
             m_worktreeCleanup->hide();
             m_archivedWorktree = {entry.host,s.name,s.gitWorktree ? s.gitRoot : QString(),s.gitWorktree ? s.gitCommonDir : QString()};
@@ -334,6 +347,8 @@ void SessionsWindow::runNextSelectionAction()
             if (s.state == "archived") m_client.forgetArchive(entry.host, s.name, s.archiveId); else m_client.killSession(entry.host, s.name); return;
         case SelectionAction::Terminate: {
             const bool keepArchive = s.tracked && QStringList{"codex", "claude", "kimi"}.contains(s.cmd);
+            if(m_selectionRemoveWorktrees && keepArchive && s.gitWorktree && !s.gitRoot.isEmpty() && !s.gitCommonDir.isEmpty())
+                m_selectionCleanupTarget={entry.host,s.name,s.gitRoot,s.gitCommonDir,s.worktreeOwnerId};
             m_selectionCommand = (keepArchive ? "terminate " : "kill ") + s.name;
             if (keepArchive) m_client.terminateSession(entry.host, s.name, s.runId); else m_client.killSession(entry.host, s.name); return;
         }
@@ -344,6 +359,9 @@ void SessionsWindow::runNextSelectionAction()
     QString result = tr("%1: %2 of %3 completed.").arg(selectionActionText(m_selectionOperation)).arg(m_selectionDone).arg(m_selectionTotal);
     if (m_selectionFailed) result += tr(" %1 failed or changed; refresh before retrying.").arg(m_selectionFailed) + "\n" + m_selectionErrors.mid(0, 3).join('\n');
     showNotice(result, m_selectionFailed > 0); updateSelectionActions(); renderDetails(); emit refreshRequested();
+    const auto offers=m_selectionCleanupOffers;m_selectionCleanupOffers.clear();m_selectionCleanupTarget.clear();
+    if(m_selectionCleanupOverflow)showNotice(tr("%1 additional worktrees need review in Projects > Worktrees.").arg(m_selectionCleanupOverflow));
+    if(!offers.isEmpty())QTimer::singleShot(0,this,[this,offers]{reviewTerminatedWorktrees(offers);});
 }
 
 bool SessionsWindow::finishSelectionAction(const QString &operation, bool ok, const QString &detail)
@@ -360,6 +378,12 @@ bool SessionsWindow::finishSelectionAction(const QString &operation, bool ok, co
     }
     if (ok) ++m_selectionDone;
     else { ++m_selectionFailed; m_selectionErrors << operation + ": " + detail; }
+    if(ok && !m_selectionCleanupTarget.isEmpty()) {
+        const auto target=m_selectionCleanupTarget;
+        const bool duplicate=std::any_of(m_selectionCleanupOffers.cbegin(),m_selectionCleanupOffers.cend(),[&](const QStringList &offer){return offer[0]==target[0] && offer[2]==target[2];});
+        if(!duplicate){if(m_selectionCleanupOffers.size()<64)m_selectionCleanupOffers.append(target);else ++m_selectionCleanupOverflow;}
+    }
+    m_selectionCleanupTarget.clear();
     m_selectionCommand.clear();
     // Leave the process callback before starting the next machine operation.
     QTimer::singleShot(0, this, &SessionsWindow::runNextSelectionAction); return true;

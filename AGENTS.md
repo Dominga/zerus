@@ -85,6 +85,15 @@ default cleanup rules.
 Use bounded indexed queue reads and bounded archive metadata checks; see
 the worktree cleanup section in `docs/reference.md`.
 
+Explicit desktop termination cleanup may remove verified generated caches only
+after its Remove worktree choice and exact successful termination. Keep branch
+and archive-restore identity. Bind cleanup to the checkout ownership recorded
+at session launch and bind removal fingerprints to that nonce. Missing or
+replaced ownership, unknown local data, source changes, other occupants and
+uncertain process use require fresh manual review. Background
+maintenance continues to preserve all ignored data. Never stop unrelated system
+services to make a worktree removable; uncertain removals are never replayed.
+
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
 remains in Active and accepts new messages. Native work and explicit attention
 take precedence. A native Stop ends a turn; it does not prove those jobs finished.

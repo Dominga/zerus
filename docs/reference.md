@@ -2311,6 +2311,25 @@ recreate an automatically removed checkout on explicit **Restore**; a changed
 branch or occupied destination is refused. Browsing and dry runs never recreate
 a folder. Plain Pause never cleans up.
 
+Desktop **Terminate** also offers **Remove the unused worktree after stopping**,
+including for a selection of sessions. The choice is remembered on this desktop.
+The choice is bound to the checkout ownership recorded at that session's launch.
+A replacement checkout at the same path or branch is kept for manual review;
+older sessions without a launch ownership record also require review. Fresh
+removal fingerprints include the ownership nonce, so replacing a checkout after
+review cannot inherit its removal consent.
+It runs only after the exact termination succeeds and checks the original folder
+on its owning computer. A verified Zerus-created, clean, integrated checkout can
+be removed with tool-declared generated caches without another confirmation.
+Supported cache proofs include Cargo's cache-directory tag, source-backed Python
+bytecode, package-manager metadata, Gradle build metadata and a CMake build bound
+to this checkout. A directory name alone does not establish disposable data.
+Other local files, source changes, external checkouts and uncertain process use
+open the ordinary cleanup review. The branch and conversation are retained, and
+managed archive restoration records the exact retained head before removal.
+Cancellation, failed termination and unconfirmed removal never trigger a retry.
+Background maintenance keeps its existing policy and preserves all ignored data.
+
 The cleanup review always shows integration evidence, even when local files
 remain. Git integration uses local refs, not a fresh remote check. The selected
 folder explains unsaved changes, local data loss and why automatic cleanup kept
@@ -2323,7 +2342,8 @@ default; restoring an archive may require recreating its working folder.
 The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
 --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH]
-[--discard-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch]
+[--discard-fingerprint HASH] [--process-fingerprint HASH]
+[--preserve-archive-restore] [--delete-branch]
 --json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
 --common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.

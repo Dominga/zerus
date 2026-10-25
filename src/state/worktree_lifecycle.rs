@@ -72,6 +72,19 @@ pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {
         .then_some(value)
 }
 
+/// Bind a session to the checkout it actually launches in. A later checkout
+/// at the same path has a different nonce and is never that session's cleanup.
+pub(super) fn for_folder(folder: &Path) -> Option<Value> {
+    let info = git(folder,
+        &["rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir"],
+        Instant::now() + Duration::from_secs(1)).ok()?;
+    let info = String::from_utf8(info).ok()?;
+    let mut lines = info.lines();
+    let path = crate::platform::canonical(lines.next()?).ok()?;
+    let common = crate::platform::canonical(lines.next()?).ok()?;
+    owned(&common, &path)
+}
+
 /// Called while the repository and state locks are held, before deletion. The
 /// durable intent lets explicit Restore recreate the exact retained branch even
 /// if the process exits between Git removal and its success receipt.
@@ -86,6 +99,9 @@ pub(super) fn prepare_removal(common: &Path, row: &Value) -> Result<()> {
             .iter()
             .any(|key| Path::new(string(&record, key)).starts_with(path));
         if !refers {
+            return Ok(());
+        }
+        if !record["worktree_owner"].is_null() && record["worktree_owner"]["id"]!=ownership["id"] {
             return Ok(());
         }
         record["worktree_cleanup"] = json!({"owner":ownership,"head":row["head"],"branch":row["branch"],"status":"removal_pending"});
@@ -242,6 +258,11 @@ pub(super) fn after_archive(record: &Value) {
             if path.join(".git").is_dir() {
                 return Ok(Value::Null);
             }
+            let original=&record["worktree_owner"];
+            let expected=string(original,"id");
+            if expected.is_empty() || original["path"]!=json!(path) || original["common_dir"]!=json!(common) {
+                return Err("Not a verified Zerus-created checkout at session launch; review the folder manually".into());
+            }
             let args = vec![
                 "--path".into(),
                 path.to_string_lossy().into_owned(),
@@ -250,6 +271,7 @@ pub(super) fn after_archive(record: &Value) {
                 "--fingerprint".into(),
                 "automatic".into(),
                 "--automatic".into(),
+                "--owner-id".into(),expected.into(),
             ];
             super::worktree_cleanup::remove_command(&args)
         })();

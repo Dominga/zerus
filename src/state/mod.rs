@@ -84,6 +84,7 @@ mod git_status;
 mod repositories;
 mod worktrees;
 mod worktree_cleanup;
+mod worktree_caches;
 mod worktree_inspection;
 mod worktree_lifecycle;
 mod worktree_maintenance;

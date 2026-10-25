@@ -447,7 +447,7 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         .as_object_mut()
         .unwrap()
         .extend(telemetry.as_object().unwrap().clone());
-    output.as_object_mut().unwrap().extend(json!({"tracked": true, "run_id":record["run_id"], "model": string(record, "model"),
+    output.as_object_mut().unwrap().extend(json!({"tracked": true, "run_id":record["run_id"], "worktree_owner_id":record["worktree_owner"]["id"], "model": string(record, "model"),
         "cwd":record["cwd"].as_str().unwrap_or_else(||string(record,"launch_dir")), "cwd_source":if live_pane {"hook"} else {"saved"},
         "prompt": clipped(user_prompt(record), 240), "last_event_at": record.get("last_event_at").unwrap_or(&json!(0)),
         "turn_started": record.get("turn_started").unwrap_or(&json!(0)),

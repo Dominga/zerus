@@ -1679,7 +1679,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (finishSelectionAction(operation, ok, detail)) {if(!m_selectionRunning)m_archiveBrowser->refresh();return;}
         if(ok&&(operation.startsWith("archive ")||operation.startsWith("restore ")||operation.startsWith("forget archive ")||operation.startsWith("rename ")))m_archiveBrowser->refresh();
         if (m_archivedWorktree.size() == 4 && (operation == QStringLiteral("archive %1").arg(m_archivedWorktree[1]) || operation == QStringLiteral("terminate %1").arg(m_archivedWorktree[1]))) {
-            if (ok) offerWorktreeCleanup(); else m_archivedWorktree.clear();
+            const auto offer=m_archivedWorktree;const auto cleanupOffer=offer+QStringList{m_archivedWorktreeOwnerId};
+            const bool requested=m_removeTerminatedWorktree && operation==QStringLiteral("terminate %1").arg(offer[1]);
+            m_removeTerminatedWorktree=false;
+            if (ok) {
+                if(!m_worktreeCleanupOffered)offerWorktreeCleanup();
+                if(requested && !offer[2].isEmpty() && !offer[3].isEmpty())
+                    QTimer::singleShot(0,this,[this,cleanupOffer]{reviewTerminatedWorktrees({cleanupOffer});});
+            } else m_archivedWorktree.clear();
         }
         if (!ok && (operation == QStringLiteral("resume %1").arg(m_startSend.name) || operation == QStringLiteral("fresh %1").arg(m_startSend.name)))
             cancelStartContinuation(detail);
@@ -1731,6 +1738,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             || (operation != "archive " + m_archivedWorktree[1] && operation != "terminate " + m_archivedWorktree[1])) return;
         m_archivedWorktree[2] = result["path"].toString(); m_archivedWorktree[3] = result["common_dir"].toString();
         if (result["status"] == "removed") {
+            m_removeTerminatedWorktree=false;
+            if(m_selectionCleanupTarget.size()>=4 && m_selectionCleanupTarget[0]==host && m_selectionCleanupTarget[2]==result["path"].toString())m_selectionCleanupTarget.clear();
             m_worktreeCleanupOffered = false; m_worktreeCleanup->hide(); m_archivedWorktree.clear();
             showNotice(tr("Worktree removed automatically. The branch and archived conversation are kept.")); updateWorktrees();
         } else {
@@ -5367,6 +5376,7 @@ void SessionsWindow::archiveSession()
     const auto *e = selected();
     if (!e || !e->online || m_pending || !m_renameKey.isEmpty() || (e->session.state != "paused" && e->session.state != "stopped")) return;
     const QString host = e->host, name = e->session.name;
+    m_removeTerminatedWorktree=false;
     ++m_worktreeCleanupRevision; m_worktreeCleanupOffered = false; m_worktreeCleanup->hide();
     m_archivedWorktreeRun = e->session.runId;
     const bool inspected = m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
@@ -5437,6 +5447,25 @@ void SessionsWindow::cleanUpArchivedWorktree()
         {"row",QJsonObject{{"path",offer[2]}, {"kind","linked"}}}}}, this);
     dialog.exec();
     if (dialog.changed()) { emit refreshRequested(); updateWorktrees(); }
+}
+
+void SessionsWindow::reviewTerminatedWorktrees(const QList<QStringList> &offers)
+{
+    QList<QJsonObject> entries;
+    for(const auto &offer:offers) {
+        if(offer.size()<4 || offer[2].isEmpty() || offer[3].isEmpty())continue;
+        entries << QJsonObject{{"host",offer[0]},{"machine",offer[0].isEmpty()?m_fleet.local().host:offer[0]},
+            {"common_dir",offer[3]},{"exit_cleanup",true},{"expected_owner_id",offer.value(4)},{"row",QJsonObject{{"path",offer[2]},{"kind","linked"}}}};
+    }
+    if(entries.isEmpty())return;
+    WorktreeBatchCleanupDialog dialog(&m_client,entries,this);
+    dialog.exec();
+    if(dialog.changed()) {
+        for(const auto &entry:dialog.removedEntries())
+            if(m_archivedWorktree.size()==4 && entry["host"]==m_archivedWorktree[0] && entry["row"].toObject()["path"]==m_archivedWorktree[2])
+                {m_archivedWorktree.clear();m_worktreeCleanupOffered=false;m_worktreeCleanup->hide();}
+        showNotice(dialog.summary());emit refreshRequested();updateWorktrees();
+    }
 }
 
 void SessionsWindow::forkSession()
@@ -5557,6 +5586,17 @@ void SessionsWindow::terminateSession()
              : tr("Remove %1 from HGS? The agent’s native conversation history is kept.").arg(name), QMessageBox::Yes | QMessageBox::Cancel, this);
     confirm.setObjectName("terminateSessionConfirm"); confirm.setTextFormat(Qt::PlainText);
     confirm.setInformativeText(tr("Computer: %1").arg(original.machine));
+    QCheckBox *removeWorktree=nullptr;
+    const bool exactInspection=m_details.value("run_id").toString()==run
+        && m_details.value("conversation_id").toString()==conversation;
+    const bool linked=original.session.gitWorktree || (exactInspection && m_details.value("git_worktree").toBool());
+    if(live && keepArchive && linked) {
+        removeWorktree=new QCheckBox(tr("Remove the unused worktree after stopping"),&confirm);
+        removeWorktree->setObjectName("removeTerminatedWorktree");
+        removeWorktree->setChecked(QSettings().value("workspace/removeWorktreeAfterTermination",false).toBool());
+        removeWorktree->setToolTip(tr("Keep branches and conversation history. Verified generated caches can be removed; unsaved work and other local files require review."));
+        confirm.setCheckBox(removeWorktree);
+    }
     confirm.button(QMessageBox::Yes)->setText(live ? (keepArchive ? tr("Stop and archive") : tr("Terminate session"))
         : archived ? tr("Forget archived session") : tr("Forget saved session"));
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
@@ -5575,11 +5615,14 @@ void SessionsWindow::terminateSession()
         m_forgetBindingRequest = m_client.requestForgetBinding(host, name, run, conversation);
         renderDetails(); return;
     }
+    m_removeTerminatedWorktree=removeWorktree && removeWorktree->isChecked();
+    m_archivedWorktreeOwnerId=original.session.worktreeOwnerId;
+    if(removeWorktree)QSettings().setValue("workspace/removeWorktreeAfterTermination",removeWorktree->isChecked());
     m_pending = true; m_restoreKey.clear();
     if(live){
         ++m_worktreeCleanupRevision; m_worktreeCleanupOffered = false; m_worktreeCleanup->hide();
         m_archivedWorktreeRun = original.session.runId;
-        const bool inspected=m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
+        const bool inspected=exactInspection && m_details.value("git_worktree").toBool() && !m_details.value("git_root").toString().isEmpty();
         m_archivedWorktree = keepArchive ? QStringList{host,name,inspected ? m_details.value("git_root").toString() : original.session.gitWorktree ? original.session.gitRoot : QString(),
             inspected ? m_details.value("git_common_dir").toString() : original.session.gitWorktree ? original.session.gitCommonDir : QString()} : QStringList{};
         m_terminationFinished.remove(original.key);m_terminating.insert(original.key,original);m_terminationCommand=original.key;

@@ -919,12 +919,12 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             Ok(json!({"status":if pause {"paused"} else {"resumed"},"member":id}))
         }
         "add-member" => {
-            // A running team grows: the new member starts with its first task.
+            // A running team grows: the new member starts with its first task,
+            // or adopts the existing session the lead named (F8).
             ensure!(human_or_lead, "Only the lead or you add a member");
             ensure!(matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
                 "Only a planning, running or paused team takes new members");
             let member = parse_member(&input["member"])?;
-            ensure!(member.session.is_none(), "A new member starts its own session");
             ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
             let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
             ensure!(active < team.settings.max_members, "The team already has its {} members", team.settings.max_members);
@@ -1688,6 +1688,32 @@ mod tests {
         check(&mut team, &json!({"task":1,"outcome":"not_delivered"}), &Actor::Human, &mut events).unwrap();
         let task = team.task(1).unwrap();
         assert_eq!((task.status, task.attempts[0].state), (TaskStatus::Pending, AttemptState::Refused));
+    }
+
+    #[test]
+    fn a_member_may_adopt_an_existing_session() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let added = apply(
+            &mut team,
+            "add-member",
+            &json!({"member":{"id":"dev2","role":"Backend","agent":"dsh",
+                "session":{"name":"dsh/x/dev2","run_id":"r9","conversation_id":"c9"},
+                "directory":"D:/w","folder":"shared"}}),
+            &Actor::Member("lead".into()),
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(added["status"], "added");
+        let member = team.member("dev2").unwrap();
+        assert_eq!(member.state, MemberState::Active);
+        assert_eq!(member.session.as_ref().map(|s| (s.name.as_str(), s.run_id.as_str())), Some(("dsh/x/dev2", "r9")));
+        assert_eq!((member.directory.as_str(), member.folder), ("D:/w", MemberFolder::Shared));
+        // A member without a session still starts its own.
+        apply(&mut team, "add-member", &json!({"member":{"id":"dev3","role":"Backend","agent":"dsh"}}), &Actor::Human, &BTreeSet::new(), &mut events)
+            .unwrap();
+        assert_eq!(team.member("dev3").unwrap().state, MemberState::NotCreated);
     }
 
     #[test]

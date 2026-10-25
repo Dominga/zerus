@@ -1762,6 +1762,18 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_session_gets_the_first_task_without_a_launch() {
+        let mut team = team();
+        // The lead adopted an existing dsh session for dev before the plan (F8).
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r9".into(), conversation_id: "c9".into(), ..Default::default() });
+        let seen = vec![session("claude/x/lead", "r0", true), session("dsh/x/dev", "r9", true)];
+        let found = steps(&team, &seen, 100.0);
+        assert!(found.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::Launch { .. })), "{found:?}");
+    }
+
+    #[test]
     fn a_busy_or_refused_member_gets_nothing() {
         let mut team = team();
         assert!(!steps(&team, &[session("codex/x/dev", "r1", false)], 100.0).iter().any(|s| matches!(s, Step::HandOut { .. })));

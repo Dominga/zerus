@@ -67,8 +67,9 @@ elif args == ['mobile', 'phones', '--json']:
                           'workspace_name': 'Example workspace', 'devices': devices}))
 elif args[:2] == ['mobile', 'invite'] and args[2:] in (['--json'], ['--workspace', 'w1', '--server', 'https://relay.example.test', '--json'], ['--workspace', 'w2', '--server', 'https://relay.example.test', '--json']):
     if (root / 'fail-invite').exists(): print('hgs: The relay is temporarily unavailable', file=sys.stderr); sys.exit(1)
-    code = 'ze1.' + ('synthetic-invitation-' * 90) if (root / 'long-code').exists() else 'synthetic_pair-code_0123456789'
-    if (root / 'too-large-code').exists(): code = 'ze1.' + ('synthetic-invitation-' * 160)
+    # Encoded JSON invitations have long unbroken base64url spans.
+    code = 'ze1.' + ('aZ093b' * 300) if (root / 'long-code').exists() else 'synthetic_pair-code_0123456789'
+    if (root / 'too-large-code').exists(): code = 'ze1.' + ('aZ093b' * 530)
     print(json.dumps({'workspace_id': 'w2' if (root / 'other-workspace').exists() or (root / 'workspace-switched').exists() else 'w1', 'workspace_name': 'Example workspace', 'pair_code': code,
                       'encrypted': (root / 'long-code').exists() or (root / 'workspace-switched').exists() or (root / 'too-large-code').exists(),
                       'expires_at': float((root / 'expires').read_text()), 'server_url': 'https://relay.example.test',
@@ -117,7 +118,7 @@ else:
         auto *manual = dialog.findChild<QToolButton *>("showPairingCode"); QVERIFY(manual);
         auto *text = dialog.findChild<QPlainTextEdit *>("phonePairingCodeText"); QVERIFY(text);
         QVERIFY(!text->isVisible()); manual->click(); QTRY_VERIFY(text->isVisible());
-        const QString expected = "ze1." + QString("synthetic-invitation-").repeated(90);
+        const QString expected = "ze1." + QString("aZ093b").repeated(300);
         QCOMPARE(text->toPlainText(), expected);
         copy->click(); QCOMPARE(QApplication::clipboard()->text(), expected);
         QCOMPARE(text->horizontalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);

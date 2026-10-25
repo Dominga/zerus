@@ -2335,7 +2335,8 @@ server and code for manual entry; it expires after ten minutes and closing the
 dialog discards it. Opening **Pair a phone…** refreshes the available workspaces
 before requesting one invitation, including immediately after connecting a workspace.
 The QR code grows for longer encrypted invitations; **Enter the code manually**
-reveals the full selectable code in a bounded field. Scan it in Zerus on the phone through Machines → Pair another
+reveals the full selectable code in a bounded field. Scan it in Zerus on the phone
+through Machines → Pair another
 workspace. **Revoke…** asks for confirmation, then removes that phone's
 credential, queued requests and push registration; the phone loses every computer
 of the workspace at once. A computer whose hgs predates phone management is named

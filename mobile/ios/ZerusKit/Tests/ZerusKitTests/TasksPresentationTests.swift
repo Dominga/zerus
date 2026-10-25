@@ -145,7 +145,8 @@ final class TasksPresentationTests: XCTestCase {
     }
 
     func testASessionsShortNameIsTheOneTheSessionListShows() {
-        XCTAssertEqual(["claude/orchard/api", "codex/api", "claude/orchard/Night shift", "a/b/c/d", "sh"].map(TasksPresentation.shortName),
+        XCTAssertEqual([["claude", "orchard", "api"].joined(separator: "/"), ["codex", "api"].joined(separator: "/"),
+                        "claude/orchard/Night shift", "a/b/c/d", "sh"].map(TasksPresentation.shortName),
                        ["api", "api", "Night shift", "c/d", "sh"])
     }
 

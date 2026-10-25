@@ -17,6 +17,9 @@ private slots:
     void firesOnceWhenTheMainThreadStopsPumpingEvents();
     void staysQuietWhileEventsFlow();
     void stopsWatchingWhenDestroyed();
+    void holdsWhileTheSystemGoesToSleep();
+    void holdsAfterAWakeUntilTheMainThreadRuns();
+    void firesWhenTheMainThreadStaysSilentPastTheWakeGrace();
 };
 
 void TestMainThreadWatchdog::firesOnceWhenTheMainThreadStopsPumpingEvents()
@@ -45,6 +48,42 @@ void TestMainThreadWatchdog::stopsWatchingWhenDestroyed()
     }
     QThread::msleep(800);
     QCOMPARE(fired.load(), 0);
+}
+
+// The transition into sleep: the main thread stops while the process still runs.
+// Beats in between do not end the hold; only a power-on does.
+void TestMainThreadWatchdog::holdsWhileTheSystemGoesToSleep()
+{
+    std::atomic<int> fired{0};
+    MainThreadWatchdog dog(300, [&fired]() { ++fired; });
+    dog.systemWillSleep();
+    QTest::qWait(200);
+    QThread::msleep(1000);
+    QCOMPARE(fired.load(), 0);
+}
+
+// A dark wake: silent until the main thread first runs, then watched as usual.
+void TestMainThreadWatchdog::holdsAfterAWakeUntilTheMainThreadRuns()
+{
+    std::atomic<int> fired{0};
+    MainThreadWatchdog dog(300, [&fired]() { ++fired; });
+    dog.systemWillSleep();
+    dog.systemPoweredOn();
+    QThread::msleep(1000);
+    QCOMPARE(fired.load(), 0);
+    QTest::qWait(200);
+    QThread::msleep(1000);
+    QCOMPARE(fired.load(), 1);
+}
+
+// A main thread that never runs again after a wake is still a hang.
+void TestMainThreadWatchdog::firesWhenTheMainThreadStaysSilentPastTheWakeGrace()
+{
+    std::atomic<int> fired{0};
+    MainThreadWatchdog dog(300, [&fired]() { ++fired; }, 600);
+    dog.systemPoweredOn();
+    QThread::msleep(1500);
+    QCOMPARE(fired.load(), 1);
 }
 
 QTEST_GUILESS_MAIN(TestMainThreadWatchdog)

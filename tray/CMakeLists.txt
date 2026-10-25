@@ -257,10 +257,12 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD 17)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
     add_library(hgs-tray-mac STATIC src/MacBackend.cpp src/QtTrayIcon.cpp src/MacTrayMenu.mm
-        src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm src/MacPresenceSource.cpp)
+        src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm src/MacPresenceSource.cpp
+        src/MacSystemPower.cpp)
     set_source_files_properties(src/MacAttentionNotifier.mm src/MacAppVisibility.mm src/MacApplicationBadge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(hgs-tray-mac PUBLIC hgs-tray-core Qt6::Widgets
-        PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics")
+        PRIVATE "-framework AppKit" "-framework UserNotifications" "-framework CoreGraphics"
+        "-framework IOKit")
 endif()
 
 # Qt finalization imports macOS permission plugins selected by our Info.plist.

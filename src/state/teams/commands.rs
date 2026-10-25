@@ -114,11 +114,22 @@ fn starts_worker(op: &str) -> bool {
     matches!(op, "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release")
 }
 
+/// Whether the attempt's member was last seen stopped: the dispatcher records
+/// it every time the live listing changes (L3).
+fn stopped(team: &Team, task: &Task) -> bool {
+    task.attempts
+        .last()
+        .and_then(|attempt| team.member(&attempt.member))
+        .and_then(|member| member.seen)
+        .is_some_and(|seen| !seen.live)
+}
+
 /// A member's queue (A5, spec section 6): its open task first, then the tasks
 /// the lead returned to it (they have attempts, are not finished and are Pending,
 /// held or not). Nothing else.
 fn member_queue(team: &Team, member: &str) -> Vec<Value> {
-    let entry = |task: &Task| json!({"task": task.id, "phase": ops::attempt_phase(task, false)});
+    let stopped = team.member(member).and_then(|member| member.seen).is_some_and(|seen| !seen.live);
+    let entry = |task: &Task| json!({"task": task.id, "phase": ops::attempt_phase(task, stopped)});
     let mut open: Vec<u32> = team
         .tasks
         .iter()
@@ -176,18 +187,12 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     value["ready"] = json!(plan::ready(team));
     value["waiting_for_lead"] = json!(waiting_for_lead(team));
     value["pending_phase"] = json!(pending_phase(team));
-    // Each task's last attempt carries its derived phase (spec section 2). When
-    // the caller listed sessions, a stopped one makes `stopped` the truth (L3);
-    // a member without a listing stays derived from the record.
-    let stopped = |attempt: &Attempt| {
-        let Some(sessions) = sessions else { return false };
-        let Some(session) = team.member(&attempt.member).and_then(|member| member.session.as_ref()) else { return false };
-        sessions.iter().find(|seen| seen.host == session.host && seen.name == session.name).is_some_and(|seen| !seen.live)
-    };
+    // Each task's last attempt carries its derived phase (spec section 2). The
+    // dispatcher records each member's last seen liveness, so `stopped` is
+    // derived here without a listing of status's own (L3).
     if let Some(tasks) = value["tasks"].as_array_mut() {
         for (task, value) in team.tasks.iter().zip(tasks) {
-            let stopped = task.attempts.last().is_some_and(stopped);
-            if let Some(phase) = ops::attempt_phase(task, stopped) {
+            if let Some(phase) = ops::attempt_phase(task, stopped(team, task)) {
                 if let Some(attempt) = value["attempts"].as_array_mut().and_then(|attempts| attempts.last_mut()) {
                     attempt["phase"] = json!(phase);
                 }
@@ -231,7 +236,7 @@ fn summary(team: &Team) -> Value {
             let attempt = t.attempts.last();
             json!({"id":t.id,"title":t.title,"status":t.status,"assignee":t.assignee,
                 "attempt":attempt.map(|a| json!({"n":a.n,"state":a.state,"no_report":a.no_report,
-                    "phase":ops::attempt_phase(t, false)}))})
+                    "phase":ops::attempt_phase(t, stopped(team, t))}))})
         })
         .collect();
     json!({
@@ -418,6 +423,13 @@ fn current(input: &Value) -> anyhow::Result<Value> {
         None => dsh_member(team, &conversation),
     })?;
     current_view(team, &member)
+}
+
+/// Whether a status request reads the live listing: only a finished team, for
+/// the members it left running (F7). The desktop polls the watched team's
+/// status every 3 s, so a running team's status never lists sessions (C1, L3).
+fn status_lists_sessions(status: TeamStatus) -> bool {
+    matches!(status, TeamStatus::Done | TeamStatus::Stopped)
 }
 
 /// The live sessions of this computer and its peers, as the dispatcher reads
@@ -636,10 +648,10 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             let store = Store::open(false)?;
             let team = store.load(text(input, "team"))?.context("Unknown team")?;
             let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
-            // The live listing tells a stopped phase from a working one (L3),
-            // and a finished team's members left running (F7); a failure leaves
-            // both out.
-            let sessions = live_sessions().ok();
+            // Only a finished team reads the live listing, for its members left
+            // running (F7); a watched running team is polled often and must not
+            // spawn one (C1, L3).
+            let sessions = if status_lists_sessions(team.status) { live_sessions().ok() } else { None };
             // Only the teams that still run, from the indexed query, so a
             // finished team's status never reads every team (C1).
             let teams = if finished { active_team_records(&store)? } else { Vec::new() };
@@ -929,19 +941,29 @@ mod tests {
     }
 
     #[test]
-    fn a_listed_stopped_session_makes_the_phase_stopped() {
-        let team = running_team();
-        let seen = |live: bool| super::super::dispatcher::Seen {
-            name: "codex/x/dev".into(),
-            run_id: "r1".into(),
-            live,
-            ..Default::default()
-        };
-        assert_eq!(view_with(&team, &[], Some(&[seen(true)]))["tasks"][0]["attempts"][0]["phase"], "working");
-        // A listed session that stopped is the truth (L3).
-        assert_eq!(view_with(&team, &[], Some(&[seen(false)]))["tasks"][0]["attempts"][0]["phase"], "stopped");
-        // Without a listing the record keeps its derived phase.
+    fn a_recorded_stopped_session_makes_the_phase_stopped() {
+        let mut team = running_team();
         assert_eq!(view_with(&team, &[], None)["tasks"][0]["attempts"][0]["phase"], "working");
+        // The dispatcher saw the session stop: status derives the phase from
+        // the record, without a listing of its own (L3).
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 30.0, live: false });
+        assert_eq!(view_with(&team, &[], None)["tasks"][0]["attempts"][0]["phase"], "stopped");
+        assert_eq!(view_with(&team, &[], None)["members"][1]["queue"][0]["phase"], json!("stopped"));
+        // Seen live again: working.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 40.0, live: true });
+        assert_eq!(view_with(&team, &[], None)["tasks"][0]["attempts"][0]["phase"], "working");
+    }
+
+    #[test]
+    fn status_of_a_running_team_reads_no_live_listing() {
+        // The desktop polls the watched team's status every 3 s; a listing
+        // there is the C1 load and process churn again (L3 regression).
+        for status in [TeamStatus::Planning, TeamStatus::Running, TeamStatus::Paused] {
+            assert!(!status_lists_sessions(status), "{status:?}");
+        }
+        for status in [TeamStatus::Done, TeamStatus::Stopped] {
+            assert!(status_lists_sessions(status), "{status:?}");
+        }
     }
 
     #[test]

@@ -144,6 +144,9 @@ pub(crate) enum Step {
     BlockedLate { task: u32 },
     /// The member started working again: its recorded turn end is cleared (A2).
     WorkResumed { task: u32 },
+    /// The dispatcher saw a member's session live or stopped; status derives
+    /// `stopped` from it without a listing of its own (L3).
+    Liveness { member: String, live: bool },
     NoReport { task: u32 },
     NotifyLead { task: u32 },
     /// The planning brief of a team created from the desktop.
@@ -321,6 +324,15 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             if lead.is_some_and(|lead| lead.free) {
                 steps.push(Step::NotifyLead { task: task.id });
             }
+        }
+    }
+    // Each tick lists the sessions: a member's liveness is recorded when it
+    // changes, so status derives `stopped` without a listing of its own (L3).
+    for member in &team.members {
+        let Some(session) = member.session.as_ref() else { continue };
+        let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
+        if member.seen.is_none_or(|recorded| recorded.live != found.live) {
+            steps.push(Step::Liveness { member: member.id.clone(), live: found.live });
         }
     }
     // A hand-out that never started: the lead hears once, when free (A1).
@@ -1653,6 +1665,13 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                     attempt.blocked_since = None;
                 }
             }
+            Ok(())
+        }),
+        Step::Liveness { member, live } => change(store, &team.id, |team, _| {
+            // The dispatcher sees the live sessions: one recorded liveness per
+            // change lets status derive `stopped` by itself (L3).
+            let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
+            found.seen = Some(MemberSeen { at: now(), live: *live });
             Ok(())
         }),
         Step::Started { task } => change(store, &team.id, |team, events| {
@@ -3195,6 +3214,23 @@ mod tests {
         assert_eq!(text.matches('γ').count(), 2000);
         assert_eq!(text.matches('δ').count(), 1500);
         assert_eq!(text.matches('ε').count(), 0);
+    }
+
+    #[test]
+    fn a_members_liveness_is_recorded_only_when_it_changes() {
+        let mut team = team();
+        let live = session("codex/x/dev", "r1", true);
+        // The first listing records the member as live; it is not rewritten
+        // every tick once recorded (L3).
+        assert!(steps(&team, std::slice::from_ref(&live), 20.0).contains(&Step::Liveness { member: "dev".into(), live: true }));
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 20.0, live: true });
+        assert!(!steps(&team, &[live], 20.0).iter().any(|step| matches!(step, Step::Liveness { .. })));
+        // A session that stopped changes it once.
+        let mut stopped = session("codex/x/dev", "r1", true);
+        stopped.live = false;
+        assert!(steps(&team, &[stopped], 20.0).contains(&Step::Liveness { member: "dev".into(), live: false }));
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 20.0, live: false });
+        assert!(steps(&team, &[session("codex/x/dev", "r1", true)], 20.0).contains(&Step::Liveness { member: "dev".into(), live: true }));
     }
 
     #[test]

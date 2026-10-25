@@ -177,6 +177,17 @@ pub(crate) struct Member {
     /// per conversation; the owner may unmute it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub quieted: String,
+    /// The last liveness the dispatcher saw for this member's session: status
+    /// derives `stopped` from it without a listing of its own (L3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<MemberSeen>,
+}
+
+/// A member's session as the dispatcher last saw it in the live listing.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberSeen {
+    pub at: f64,
+    pub live: bool,
 }
 
 impl Member {

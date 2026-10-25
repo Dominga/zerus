@@ -642,12 +642,28 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<s
         if bytes.len()>65536 { return Err(std::io::Error::other("process metadata exceeds its bound")); }
         String::from_utf8(bytes).map_err(std::io::Error::other)
     }
-    fn identity(path: &Path) -> std::io::Result<(String,bool)> {
+    fn identity(path: &Path) -> std::io::Result<(String,bool,u32)> {
         let raw=read(&path.join("stat"))?;
         let fields:Vec<_>=raw.rsplit_once(") ").ok_or_else(||std::io::Error::other("invalid process identity"))?.1.split_whitespace().collect();
         let start=fields.get(19).ok_or_else(||std::io::Error::other("invalid process start"))?;
-        Ok(((*start).to_owned(),matches!(fields.first(),Some(&"Z"|&"X"))))
+        let parent=fields.get(1).ok_or_else(||std::io::Error::other("invalid process parent"))?
+            .parse().map_err(std::io::Error::other)?;
+        Ok(((*start).to_owned(),matches!(fields.first(),Some(&"Z"|&"X")),parent))
     }
+    fn ancestors(deadline: std::time::Instant) -> std::io::Result<std::collections::BTreeMap<u32,String>> {
+        let mut rows=std::collections::BTreeMap::new();
+        let mut pid=std::process::id();
+        while pid!=0 {
+            if rows.len()>=128 || std::time::Instant::now()>=deadline || rows.contains_key(&pid) {
+                return Err(std::io::Error::other("incomplete invocation ancestry"));
+            }
+            let (start,exited,parent)=identity(&PathBuf::from(format!("/proc/{pid}")))?;
+            if exited {return Err(std::io::Error::other("exited invocation ancestor"));}
+            rows.insert(pid,start);pid=parent;
+        }
+        Ok(rows)
+    }
+    let invocation=ancestors(deadline).map_err(|_|error())?;
     let entries=fs::read_dir("/proc").map_err(|_|error())?;
     let boot=read(Path::new("/proc/sys/kernel/random/boot_id")).map_err(|_|error())?;
     let mut rows=super::WorktreeProcesses::default();
@@ -691,12 +707,13 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<s
             rows.unreadable.push(super::UnreadableWorktreeProcess {
                 pid, identity:format!("{}:{}",boot.trim(),before.0), command:name.clone(),
                 cwd:cwd_denied, executable:image_denied,
+                invocation_ancestor:invocation.get(&pid)==Some(&before.0),
             });
         }
         if let Ok(cwd)=cwd { rows.paths.push((pid,cwd,name.clone())); }
         if let Ok(image)=image { rows.paths.push((pid,image,name)); }
     }
-    if std::time::Instant::now()>=deadline {return Err(error());}
+    if std::time::Instant::now()>=deadline || ancestors(deadline).map_err(|_|error())?!=invocation {return Err(error());}
     rows.unreadable.sort_by_key(|row|row.pid);
     Ok(rows)
 }

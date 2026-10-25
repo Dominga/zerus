@@ -280,6 +280,41 @@ class Cleanup(Repository,unittest.TestCase):
         self.assertEqual(allowed.returncode,0,allowed.stderr);self.assertFalse(tree.exists())
         self.assertIn('feature/manual',self.git('-C',str(self.repo),'branch','--list','feature/manual'))
 
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux protected launch ancestors')
+    def test_manual_process_confirmation_survives_separate_protected_launchers(self):
+        tree=self.linked('remote manual');self.age(tree)
+        wrapper='''import ctypes,json,os,subprocess,sys
+assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0
+p=subprocess.run(sys.argv[1:],capture_output=True,text=True,timeout=25)
+print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.stderr)))
+'''
+        def invocation(args,cwd=None):
+            p=subprocess.run([sys.executable,'-I','-c',wrapper,str(HGS),'worktrees',*args,'--json'],
+                cwd=cwd or self.root,env=self.env,capture_output=True,text=True,timeout=30)
+            self.assertEqual(p.returncode,0,p.stderr);return json.loads(p.stdout)
+        def review():
+            p=invocation(['review','--path',str(self.repo),'--worktree',str(tree)])
+            self.assertEqual(p['rc'],0,p['stderr']);row=json.loads(p['stdout'])['worktrees'][0]
+            self.assertEqual(codes(row['reasons']),['processes_unavailable'])
+            own=next(r for r in row['unreadable_processes'] if r['pid']==p['pid'])
+            self.assertTrue(own['identity'])
+            return p['pid'],row
+        first,row=review();second,current=review()
+        self.assertNotEqual(first,second)
+        self.assertEqual(row['fingerprint'],current['fingerprint'])
+        self.assertEqual(row['process_fingerprint'],current['process_fingerprint'])
+        self.assertTrue(next(r for r in current['unreadable_processes'] if r['pid']==second)['invocation_ancestor'])
+        args=['remove','--path',str(tree),'--common-dir',str(self.repo/'.git'),
+            '--fingerprint',row['fingerprint'],'--process-fingerprint',row['process_fingerprint']]
+        automatic=invocation([*args,'--automatic'])
+        self.assertNotEqual(automatic['rc'],0);self.assertTrue(tree.exists())
+        # Readable use by an ancestor/this invocation remains a hard blocker.
+        busy=invocation(args,cwd=tree)
+        self.assertNotEqual(busy['rc'],0);self.assertTrue(tree.exists())
+        result=invocation(args)
+        self.assertEqual(result['rc'],0,result['stderr']);self.assertFalse(tree.exists())
+        self.assertIn('feature/remote-manual',self.git('-C',str(self.repo),'branch','--list','feature/remote-manual'))
+
     def test_remove_rechecks_fingerprint_and_keeps_branch(self):
         tree=self.linked('task');self.age(tree);before=self.row(tree);self.catalog()
         self.commit(tree,'late work')

@@ -909,8 +909,16 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     if context.processes.as_ref().is_ok_and(|p| !p.unreadable.is_empty())
         && reasons.len() == 1 && reasons[0]["code"] == "processes_unavailable"
     {
+        // Separate SSH requests have different protected launch PIDs. Only
+        // ancestors verified from /proc before AND after the roster use a role
+        // identity. Every other unknown process keeps its exact PID/boot/start.
+        // Retain command, denied-path shape and multiplicity, and keep all
+        // readable paths as blockers even for invocation ancestors.
+        let mut unreadable:Vec<_>=context.processes.as_ref().unwrap().unreadable.iter()
+            .map(crate::platform::UnreadableWorktreeProcess::confirmation_identity).collect();
+        unreadable.sort_by_cached_key(Value::to_string);
         row["process_fingerprint"] = json!(fingerprint(json!({
-            "worktree":row["fingerprint"], "unreadable":row["unreadable_processes"]
+            "worktree":row["fingerprint"], "unreadable":unreadable
         })));
     }
     finish(row, reasons, notes)

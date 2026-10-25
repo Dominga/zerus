@@ -123,7 +123,13 @@ Linux manual cleanup has one explicit process-coverage exception: when the
 entire bounded roster was inspected and only cwd/executable access denials on
 stable live processes remain, the blocked row may carry `process_fingerprint`.
 It hashes the worktree fingerprint and sorted unreadable PID/boot/start/path
-identities. Readable paths continue to protect their folders. The unchecked
+identities. A kernel-verified ancestor of the current CLI invocation instead
+binds its invocation role, boot ID, command and denied-path shape, preserving multiplicity;
+otherwise a new protected SSH launcher would invalidate every remote removal.
+The bounded full ancestry is read before and after the roster; changed ancestry
+or missing/unstable identity refuses the proof. This uses no program-name whitelist.
+All non-ancestor identities remain exact. Readable paths, including ancestors',
+continue to protect their folders. The unchecked
 manual confirmation passes `--process-fingerprint HASH`; removal rechecks this
 proof and refuses every other blocker or automatic request. No timeout, roster,
 identity, unsupported-platform or other IO failure produces this proof. This is

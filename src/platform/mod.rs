@@ -40,6 +40,21 @@ pub struct UnreadableWorktreeProcess {
     pub command: String,
     pub cwd: bool,
     pub executable: bool,
+    /// Kernel-verified ancestor of this CLI invocation. Remote commands create
+    /// fresh launch ancestors; their role, rather than PID, binds manual consent.
+    pub invocation_ancestor: bool,
+}
+
+impl UnreadableWorktreeProcess {
+    pub fn confirmation_identity(&self) -> serde_json::Value {
+        if self.invocation_ancestor {
+            serde_json::json!({"invocation_ancestor":true,
+                "boot":self.identity.split_once(':').map(|(boot,_)|boot),
+                "command":self.command,"cwd":self.cwd,"executable":self.executable})
+        } else {
+            serde_json::json!(self)
+        }
+    }
 }
 
 impl From<Vec<(u32, PathBuf, String)>> for WorktreeProcesses {
@@ -530,6 +545,26 @@ pub fn restore_terminal() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn protected_process_confirmation_retains_boot_and_nonancestor_identity() {
+        let mut row = super::UnreadableWorktreeProcess {
+            pid:10, identity:"boot-a:100".into(), command:"fixture-launcher".into(),
+            cwd:true, executable:true, invocation_ancestor:true,
+        };
+        let first=row.confirmation_identity();
+        row.pid=11;row.identity="boot-a:200".into();
+        assert_eq!(first,row.confirmation_identity(),"Separate launch PIDs in the same boot share their verified role");
+        row.identity="boot-b:200".into();
+        assert_ne!(first,row.confirmation_identity(),"Reboot invalidates consent even if every unreadable process is an ancestor");
+        row.identity="boot-a:200".into();row.executable=false;
+        assert_ne!(first,row.confirmation_identity(),"Changed hidden-path shape needs a new review");
+        row.executable=true;row.invocation_ancestor=false;
+        let unrelated=row.confirmation_identity();
+        row.pid=12;
+        assert_ne!(unrelated,row.confirmation_identity(),"Unrelated protected processes retain exact PID identity");
+        row.pid=11;row.identity="boot-a:201".into();
+        assert_ne!(unrelated,row.confirmation_identity(),"Unrelated PID reuse retains exact start identity");
+    }
     use super::*;
 
     #[test]

@@ -2227,7 +2227,11 @@ stays protected until you explicitly confirm **I checked these folders are not
 in use; remove them anyway**. This accepts the uncertainty about those programs;
 it does not establish that the folder is unused. The confirmation is bound to
 the exact folder review and unreadable process identities and is checked again
-before removal. A known program or session using the folder, another blocker,
+before removal. A protected ancestor that launches the current CLI request
+(including a fresh SSH session) is matched by its verified invocation role,
+program name, hidden-path shape and computer boot rather than its temporary PID. Other
+protected processes retain exact PID and start identities. Readable ancestor
+paths still protect their folders. A known program or session using the folder, another blocker,
 an incomplete inventory, or changed process identities still prevents removal.
 Automatic cleanup never uses this exception. Older owning CLIs without this
 proof keep the folder; update that computer before trying manual cleanup again.

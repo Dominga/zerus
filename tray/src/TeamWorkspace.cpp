@@ -1,4 +1,6 @@
 #include "TeamWorkspace.h"
+
+#include <QPointer>
 #include "HgsClient.h"
 #include "TeamController.h"
 #include "TeamConversation.h"
@@ -332,8 +334,13 @@ QWidget *TeamWorkspace::draftPhase(const Team &team, int phase)
     discard->setProperty("phase", phase);
     discard->setProperty("danger", true);
     // Both decisions go out once: the buttons stay disabled until the answer.
-    const auto decide = [this, id = team.id, phase, approve, discard](const QString &operation) {
-        approve->setEnabled(false); discard->setEnabled(false); m_error.clear();
+    // The confirmation runs its own event loop, and a poll may rebuild this
+    // strip meanwhile: the buttons are only touched while they still exist.
+    const auto decide = [this, id = team.id, phase, approve = QPointer<QPushButton>(approve),
+                         discard = QPointer<QPushButton>(discard)](const QString &operation) {
+        if (approve) approve->setEnabled(false);
+        if (discard) discard->setEnabled(false);
+        m_error.clear();
         m_panel->act(operation, {{"team", id}, {"phase", phase}}, [this](bool ok, const QString &message) {
             if (!ok) m_error = message;
             scheduleRender();

@@ -32,6 +32,7 @@ def durable(path,value):
 if a[1]=='daemon-reload':
  p=r/'systemd/zerus-mobile-connector.service.d/70-zerus-workspace-connector.conf'
  q['loaded']=[l[len('ExecStart='):].split(' --config ')[0] for l in p.read_text().splitlines() if l.startswith('ExecStart=') and l!='ExecStart='][-1] if p.exists() else str(r/'old/zerus-mobile-connector')
+ if q.get('reorder_requires'):q['properties']['Requires']=' '.join(reversed(q['properties']['Requires'].split()))
  s.write_text(json.dumps(q))
 elif a[1]=='start':
  assert a[2]=='zerus-mobile-connector.service'
@@ -592,7 +593,8 @@ impl Drop for OwnedChild {
 async fn one_signal_drains_native_and_resumed_check_keeps_the_exact_outcome() {
     let mut f = Fixture::new().await;
     f.mutate(|v| {
-        v["properties"] = json!({"Slice":"app.slice","Requires":"basic.target app.slice"})
+        v["properties"] = json!({"Slice":"app.slice","Requires":"basic.target app.slice"});
+        v["reorder_requires"] = json!(true)
     });
     let cfg = std::fs::read(&f.config).unwrap();
     assert_eq!(f.drain().await.unwrap()["phase"], "draining");

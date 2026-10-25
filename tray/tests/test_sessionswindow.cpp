@@ -1337,7 +1337,22 @@ void TestSessionsWindow::accountFilterWarmsAcrossMachinesAndRefreshesOnOpening()
     const auto usage=QString::fromUtf8(QJsonDocument(QJsonObject{{"id","shared-profile"},{"provider","codex"},{"home","/fixture/shared"},{"status","ok"},
         {"identity",QJsonObject{{"account_id","shared-account"},{"email","shared@example.test"}}}}).toJson(QJsonDocument::Compact));
     const auto fixture=m_dir->filePath("filter-warm");
-    const QByteArray answer="elif c=='account' and a[1:2]==['ls']:\n from pathlib import Path\n data=json.loads("+FakeCli::pythonString(catalog)+")\n label=Path(__file__+'.label')\n if label.exists():data['profiles'][0]['label']=label.read_text()\n print(json.dumps(data))\nelif c=='account' and a[1:2]==['inspect']:print("+FakeCli::pythonString(usage)+")\n";
+    const auto answer=QByteArray(R"PY(elif c=='account' and a[1:2]==['ls']:
+ from pathlib import Path
+ import time
+ data=json.loads(CATALOG)
+ label=Path(__file__+'.label')
+ if label.exists():data['profiles'][0]['label']=label.read_text()
+ host=sys.argv[1][1:] if sys.argv[1].startswith('@') else 'local'
+ with Path(__file__+'.reads').open('a') as reads:reads.write(json.dumps([host,data['profiles'][0]['label']])+'\n')
+ hold=Path(__file__+'.hold-'+host)
+ if hold.exists():
+  ready=Path(__file__+'.ready-'+host)
+  staged=Path(str(ready)+'.tmp');staged.write_text(json.dumps(data));staged.replace(ready)
+  while hold.exists():time.sleep(.01)
+ print(json.dumps(data))
+elif c=='account' and a[1:2]==['inspect']:print(USAGE)
+)PY").replace("CATALOG",FakeCli::pythonString(catalog)).replace("USAGE",FakeCli::pythonString(usage));
     QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
     auto state=fleet();auto local=state.local();local.sessions[0].accountId="shared-profile";local.sessions[0].accountHome="/fixture/shared";
     state.setLocal(local,QDateTime::currentMSecsSinceEpoch());auto remote=*state.peer("mac");remote.sessions[0].cmd="codex";remote.sessions[0].accountId="shared-profile";remote.sessions[0].accountHome="/fixture/shared";state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
@@ -1348,14 +1363,32 @@ void TestSessionsWindow::accountFilterWarmsAcrossMachinesAndRefreshesOnOpening()
     auto *filter=window.findChild<AccountFilter *>("accountFilterChips");auto *menu=filter->button()->menu();
     const QSet<QString> bindings{SessionAccounts::binding({},local.sessions[0]),SessionAccounts::binding("mac",remote.sessions[0])};
     const auto sharedChoice=[&]() -> QCheckBox * {for(auto *choice:menu->findChildren<QCheckBox *>("accountFilterChoice")){const auto members=choice->property("bindings").toStringList();if(QSet<QString>(members.cbegin(),members.cend())==bindings)return choice;}return nullptr;};
+    const QStringList hosts{"local","mac"};
+    for(const auto &host:hosts){QFile hold(fixture+".hold-"+host);QVERIFY(hold.open(QIODevice::WriteOnly));}
+    QElapsedTimer refreshWindow;refreshWindow.start();
     menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());QTRY_VERIFY(sharedChoice());
+    // The first open has already captured an old snapshot on BOTH machines,
+    // but neither read can finish before the next explicit open requests it.
+    for(const auto &host:hosts){
+        const auto ready=fixture+".ready-"+host;QTRY_VERIFY(QFile::exists(ready));
+        QFile snapshot(ready);QVERIFY(snapshot.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(snapshot.readAll()).object()["profiles"].toArray().first().toObject()["label"].toString(),QString("Shared"));
+    }
     QVERIFY(sharedChoice()->text().contains("shared@example.test"));sharedChoice()->click();QCOMPARE(filter->selection(),bindings);menu->hide();
     auto *list=window.findChild<SessionList *>("sessionList");const auto count=[&]{int n=0;for(int i=0;i<list->count();++i)if(!list->item(i)->data(SessionRoles::Header).toBool())++n;return n;};
     QCOMPARE(count(),2);auto *machines=window.findChild<MachineFilter *>("machineFilterChips");machines->setSelection({"mac"});QCOMPARE(count(),1);QCOMPARE(filter->selection(),bindings);
     QFile label(fixture+".label");QVERIFY(label.open(QIODevice::WriteOnly));label.write("Renamed shared account");label.close();
     menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());
+    // Multiple opens while the same reads are pending must coalesce once per
+    // machine. Releasing the old result must honor that explicit fresh read.
+    menu->hide();menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());
+    for(const auto &host:hosts)QVERIFY(QFile::remove(fixture+".hold-"+host));
     const auto refreshed=[&]{const auto profiles=page->profiles();return profiles.size()==2 && std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &v){return v.toObject()["label"]=="Renamed shared account";});};
     QTRY_VERIFY(refreshed());QVERIFY(!page->isVisible());QCOMPARE(filter->selection(),bindings);
+    QVERIFY(refreshWindow.elapsed()<30000);
+    QFile reads(fixture+".reads");QVERIFY(reads.open(QIODevice::ReadOnly));QMap<QString,int> perHost;
+    for(const auto &line:reads.readAll().split('\n'))if(!line.isEmpty()){const auto row=QJsonDocument::fromJson(line).array();QCOMPARE(row.size(),2);++perHost[row[0].toString()];}
+    const QMap<QString,int> expectedReads{{"local",3},{"mac",3}};QCOMPARE(perHost,expectedReads);
     // Existing actions keep their snapshot; reopening presents the newly read label.
     menu->hide();menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());QTRY_VERIFY(sharedChoice());QVERIFY(sharedChoice()->text().contains("Renamed shared account"));
 }

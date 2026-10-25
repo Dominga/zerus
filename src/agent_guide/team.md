@@ -21,10 +21,10 @@ Lead, from your own session:
     keeps it back: {"team":"ID","task":N} | hgs team release --json gives
     it out; hgs team hold --json keeps a pending task back.
   reassign, retry, cancel take the same fields; a free peer of the same
-  role may get a task; reassign pins it. Members ask you with hgs team ask
-  --json; answer with hgs team reply --json. Allow only what the task needs
-  in the team's folder; ask the owner when in doubt. Zerus says when a
-  member stops on its task: message it, retry, reassign or ask the owner.
+  role may get a task; reassign pins it. Members ask with hgs team ask;
+  answer with hgs team reply. Allow only what the task needs in the team's
+  folder; ask the owner when in doubt. Zerus says when a member stops on
+  its task: message it, retry, reassign or ask the owner.
   Owner decisions are final. Phases, extend, finish: hgs guide team-lead
 
 Member: the task message begins with [Zerus team and names your task and

@@ -21,6 +21,16 @@ team is Running or Paused, the lead or the owner appends one:
   meanwhile. "auto": its tasks start at once.
 - A member's task message carries the reports and folders of its deps.
 
+Members and their questions:
+- A question (hgs team ask) waits for your reply; it is not a report:
+    {"request_id":"UUID","team":"ID","question":"q3","text":"..."} |
+    hgs team reply --json
+- reject with "hold":true, or hold a pending task: Zerus keeps it from its
+  member until release ({"request_id","team","task"}).
+- A report Zerus took from a member's last reply may be replaced by its own.
+- A missing skill: add-member {"member":{"id","role","agent"}}, then
+  reassign a task to it.
+
 When every task is decided the team does not close: it waits for you, and
 Zerus tells you once. Extend it, or finish it with a summary (at most 4000
 characters) once nothing is open:

@@ -2220,6 +2220,18 @@ confirmation in the manager. That consent is bound to the exact file contents
 and staged Git blobs (bounded to 64 MiB and two seconds), and does not override
 any other protection. A changed or incomplete proof requires a new review.
 
+Linux can deny access to a protected process's current folder or executable,
+including desktop services. A completed process inventory with only those
+access denials offers **Check running programs** in manual cleanup. The folder
+stays protected until you explicitly confirm **I checked these folders are not
+in use; remove them anyway**. This accepts the uncertainty about those programs;
+it does not establish that the folder is unused. The confirmation is bound to
+the exact folder review and unreadable process identities and is checked again
+before removal. A known program or session using the folder, another blocker,
+an incomplete inventory, or changed process identities still prevents removal.
+Automatic cleanup never uses this exception. Older owning CLIs without this
+proof keep the folder; update that computer before trying manual cleanup again.
+
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
 review under the repository lock used by creation, compares the reviewed
@@ -2307,7 +2319,7 @@ default; restoring an archive may require recreating its working folder.
 The CLI is `hgs [@host] worktrees review --path PATH
 [--worktree WORKTREE] --json` and `hgs [@host] worktrees remove --path WORKTREE
 --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH]
-[--discard-fingerprint HASH] [--delete-branch]
+[--discard-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch]
 --json`. Explicit inspection is `hgs [@host] worktrees inspect --path WORKTREE
 --common-dir DIR [--file RELATIVE_PATH [--offset N]] --json`. Machines with an
 older `hgs` must be updated before cleanup is available there.

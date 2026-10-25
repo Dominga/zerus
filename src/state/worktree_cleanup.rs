@@ -1,7 +1,8 @@
 //! Review and guarded removal of linked worktrees. Removal repeats every check
 //! under the repository lock used by creation, compares the fingerprint the
 //! person reviewed. Force is limited to explicitly confirmed, content-fingerprinted
-//! uncommitted files; active/locked/nested/unknown worktrees remain protected.
+//! uncommitted files. A separate manual process confirmation accepts only stable
+//! access-denied paths; active/locked/nested and other unknowns stay protected.
 use super::worktrees::{cache_file, canonical, error, git, list, GitError};
 use super::*;
 use fs2::FileExt;
@@ -27,7 +28,7 @@ struct Context {
     /// (display name, full ref) of the main checkout's branch and origin/HEAD.
     bases: Vec<(String, String)>,
     /// Other processes' current directories, or why they cannot be read.
-    processes: std::result::Result<Vec<(u32, PathBuf, String)>, String>,
+    processes: std::result::Result<crate::platform::WorktreeProcesses, String>,
     bindings: Vec<Reference>,
     bindings_complete: bool,
     archives: Vec<Reference>,
@@ -533,10 +534,18 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
 
     // Without the running processes' folders, nothing may count as unused.
     let mut samples: Vec<_> = match &context.processes {
-        Ok(processes) => processes
-            .iter()
-            .filter(|(_, cwd, _)| inside(cwd, &path))
-            .collect(),
+        Ok(processes) => {
+            if !processes.unreadable.is_empty() {
+                reasons.push(reason("processes_unavailable", format!(
+                    "The OS hides folder or executable paths for {}. Check that no program uses this folder before confirming manual removal.",
+                    plural(processes.unreadable.len(), "process")
+                )));
+                row["unreadable_processes"] = json!(processes.unreadable);
+            }
+            processes.paths.iter()
+                .filter(|(_, cwd, _)| inside(cwd, &path))
+                .collect()
+        }
         Err(error) => {
             reasons.push(reason(
                 "processes_unavailable",
@@ -895,6 +904,15 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         "locked":row["locked"],"prunable":row["prunable"],"available":true,
         "status":status.entries,"nested":row["nested"],"sessions":row["sessions"],
         "ignored":row["ignored_fingerprint"],"discard":row["discard_fingerprint"]})));
+    // A complete roster with only stable access-denied paths permits a narrow
+    // manual exception. All other blockers (including any readable use) win.
+    if context.processes.as_ref().is_ok_and(|p| !p.unreadable.is_empty())
+        && reasons.len() == 1 && reasons[0]["code"] == "processes_unavailable"
+    {
+        row["process_fingerprint"] = json!(fingerprint(json!({
+            "worktree":row["fingerprint"], "unreadable":row["unreadable_processes"]
+        })));
+    }
     finish(row, reasons, notes)
 }
 
@@ -999,7 +1017,7 @@ pub(super) fn review_command(args: &[String]) -> Result<Value> {
 }
 
 pub(super) fn remove_command(args: &[String]) -> Result<Value> {
-    const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
+    const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut delete_branch = false;
     let mut automatic = false;
@@ -1017,6 +1035,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
             | "--fingerprint"
             | "--ignored-fingerprint"
             | "--discard-fingerprint"
+            | "--process-fingerprint"
             | "--request-id") => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
@@ -1128,7 +1147,14 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
                 .into(),
         );
     }
-    if row["verdict"] == "blocked" && discard.is_none() {
+    let process_consent = options.get("--process-fingerprint").copied();
+    if process_consent.is_some()
+        && (automatic || process_consent != row["process_fingerprint"].as_str()
+            || string(&row, "process_fingerprint").is_empty())
+    {
+        return Err("Process confirmation is stale or this worktree is still protected. Review it again.".into());
+    }
+    if row["verdict"] == "blocked" && discard.is_none() && process_consent.is_none() {
         let reasons: Vec<_> = row["reasons"]
             .as_array()
             .into_iter()

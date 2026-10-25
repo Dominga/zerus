@@ -282,6 +282,29 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         const auto raster=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");if(!raster.isEmpty())QVERIFY(dialog.grab().save(raster+"/cleanup-decision.png"));
         dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Cancel)->click();QVERIFY(!calls().contains("worktrees remove"));
     }
+    void batchIncompleteProcessCheckRequiresExplicitScopedConfirmation(){
+        auto data=review();auto rows=data["worktrees"].toArray();auto row=rows.last().toObject();
+        row["available"]=true;row["verdict"]="blocked";row["changes"]=0;row["untracked"]=0;
+        row["reasons"]=QJsonArray{QJsonObject{{"code","processes_unavailable"},{"message","The OS hides process paths"}}};
+        row["process_fingerprint"]="process-print";
+        row["unreadable_processes"]=QJsonArray{QJsonObject{{"pid",42},{"command","protected fixture"}}};
+        QVERIFY(WorktreeReviewUi::processReviewable(row));QVERIFY(!WorktreeReviewUi::removable(row));
+        auto blocked=row;blocked["reasons"]=QJsonArray{row["reasons"].toArray()[0],QJsonObject{{"code","processes"}}};
+        QVERIFY(!WorktreeReviewUi::processReviewable(blocked));
+        auto old=row;old.remove("process_fingerprint");QVERIFY(!WorktreeReviewUi::processReviewable(old));
+        rows.replace(rows.size()-1,row);data["worktrees"]=rows;
+        QFile file(dir.filePath("review.json"));QVERIFY(file.open(QIODevice::WriteOnly));file.write(QJsonDocument(data).toJson());file.close();
+        HgsClient client(FakeCli::program(script()));WorktreeBatchCleanupDialog dialog(&client,{{{"host","arch"},{"machine","arch"},{"common_dir","/repo/.git"},{"row",row}}});dialog.show();
+        auto *consent=dialog.findChild<QCheckBox *>("confirmUncheckedWorktreeProcesses");
+        auto *remove=dialog.findChild<QPushButton *>("confirmBatchWorktreeRemoval");
+        QTRY_VERIFY(consent->isVisible());QVERIFY(!consent->isChecked());QVERIFY(!remove->isEnabled());
+        QVERIFY(dialog.findChild<QPlainTextEdit *>("worktreeCleanupDecision")->toPlainText().contains("protected fixture (PID 42)"));
+        QVERIFY(!calls().contains("worktrees remove"));consent->setChecked(true);QVERIFY(remove->isEnabled());
+        consent->setChecked(false);QVERIFY(!remove->isEnabled());consent->setChecked(true);remove->click();
+        QTRY_VERIFY(dialog.changed());QCOMPARE(calls().count("worktrees remove"),1);
+        QVERIFY(calls().contains("@arch worktrees remove --path /missing --common-dir /repo/.git"));
+        QVERIFY(calls().contains("--process-fingerprint process-print"));QVERIFY(!calls().contains("--delete-branch"));
+    }
     void batchCleanupKeepsExactComputerScopesAndNeverRetriesFailure(){
         const auto row=review()["worktrees"].toArray().last().toObject();QFile fail(dir.filePath("fail-remove"));QVERIFY(fail.open(QIODevice::WriteOnly));fail.write("/missing\n");fail.close();
         HgsClient client(FakeCli::program(script()));WorktreeBatchCleanupDialog dialog(&client,{{{"host",""},{"machine","arch"},{"common_dir","/repo/.git"},{"row",row}},{{"host","mac"},{"machine","mac"},{"common_dir","/other/.git"},{"row",row}}});dialog.show();

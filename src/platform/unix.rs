@@ -631,7 +631,7 @@ pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>,
 /// Automatic cleanup needs a complete bounded sample of this user's live
 /// processes. A failed cwd/executable read is unknown, never evidence of disuse.
 #[cfg(target_os = "linux")]
-pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<super::WorktreeProcesses, String> {
     use std::io::Read;
     let deadline = deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2));
     let uid = unsafe { libc::getuid() };
@@ -649,7 +649,8 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
         Ok(((*start).to_owned(),matches!(fields.first(),Some(&"Z"|&"X"))))
     }
     let entries=fs::read_dir("/proc").map_err(|_|error())?;
-    let mut rows=Vec::new();
+    let boot=read(Path::new("/proc/sys/kernel/random/boot_id")).map_err(|_|error())?;
+    let mut rows=super::WorktreeProcesses::default();
     for (count,entry) in entries.enumerate() {
         if count>=32768 || std::time::Instant::now()>=deadline { return Err(error()); }
         let entry=entry.map_err(|_|error())?;
@@ -679,16 +680,29 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
         };
         if after.1 {continue;}
         if before!=after {return Err(error());}
-        let (cwd,image)=(cwd.map_err(|_|error())?,image.map_err(|_|error())?);
         let name=read(&path.join("comm")).map(|s|s.trim().to_owned()).unwrap_or_default();
-        rows.push((pid,cwd,name.clone()));rows.push((pid,image,name));
+        // Only access denials on stable, live, fully identified processes are
+        // reviewable. Timeouts, roster/identity errors and other IO errors stay
+        // hard failures. A readable half still protects its actual worktree.
+        let denied = |value: &std::io::Result<PathBuf>| value.as_ref().is_err_and(|e| e.kind()==std::io::ErrorKind::PermissionDenied);
+        let (cwd_denied,image_denied)=(denied(&cwd),denied(&image));
+        if (cwd.is_err() && !cwd_denied) || (image.is_err() && !image_denied) { return Err(error()); }
+        if cwd_denied || image_denied {
+            rows.unreadable.push(super::UnreadableWorktreeProcess {
+                pid, identity:format!("{}:{}",boot.trim(),before.0), command:name.clone(),
+                cwd:cwd_denied, executable:image_denied,
+            });
+        }
+        if let Ok(cwd)=cwd { rows.paths.push((pid,cwd,name.clone())); }
+        if let Ok(image)=image { rows.paths.push((pid,image,name)); }
     }
     if std::time::Instant::now()>=deadline {return Err(error());}
+    rows.unreadable.sort_by_key(|row|row.pid);
     Ok(rows)
 }
 
 #[cfg(target_os = "macos")]
-pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
+pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<super::WorktreeProcesses, String> {
     use std::os::unix::ffi::OsStrExt;
     let deadline=deadline.min(std::time::Instant::now()+std::time::Duration::from_secs(2));
     let uid=unsafe {libc::getuid()};
@@ -762,11 +776,11 @@ pub fn worktree_processes(deadline: std::time::Instant) -> std::result::Result<V
         rows.push((pid as u32,cwd,name.clone()));rows.push((pid as u32,image,name));
     }
     if std::time::Instant::now()>=deadline {return Err(error("the process check reached its time limit"));}
-    Ok(rows)
+    Ok(rows.into())
 }
 
 #[cfg(not(any(target_os = "linux",target_os = "macos")))]
-pub fn worktree_processes(_deadline:std::time::Instant)->std::result::Result<Vec<(u32,PathBuf,String)>,String> {
+pub fn worktree_processes(_deadline:std::time::Instant)->std::result::Result<super::WorktreeProcesses,String> {
     Err("Running processes cannot be inspected on this computer".into())
 }
 

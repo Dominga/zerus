@@ -122,12 +122,13 @@ private:
             const auto branch=row["branch"].toString().isEmpty()?tr("detached %1").arg(row["head"].toString().left(8)):row["branch"].toString();
             auto *item=new QTreeWidgetItem(m_list,{QFileInfo(path).fileName()+" · "+branch,state(verdict),summary(row)});
             item->setData(0,Qt::UserRole,path);item->setData(0,Qt::UserRole+1,row);item->setToolTip(0,path);item->setToolTip(2,details(row));
-            if(!WorktreeReviewUi::removable(row)){if(WorktreeReviewUi::localData(row)&&row["ignored_fingerprint"].toString().isEmpty())item->setText(2,tr("Update Zerus on this computer to review local files."));++blocked;item->setFlags(Qt::ItemIsEnabled|Qt::ItemIsSelectable);for(int column=0;column<3;++column)item->setForeground(column,muted);continue;}
+            if(!WorktreeReviewUi::removable(row)&&!WorktreeReviewUi::processReviewable(row)){if(WorktreeReviewUi::localData(row)&&row["ignored_fingerprint"].toString().isEmpty())item->setText(2,tr("Update Zerus on this computer to review local files."));++blocked;item->setFlags(Qt::ItemIsEnabled|Qt::ItemIsSelectable);for(int column=0;column<3;++column)item->setForeground(column,muted);continue;}
             (verdict=="ready"?ready:verdict=="missing"?missing:review)++;
+            if(WorktreeReviewUi::processReviewable(row))item->setText(1,tr("Check running programs"));
             item->setFlags(Qt::ItemIsEnabled|Qt::ItemIsSelectable|Qt::ItemIsUserCheckable);
             // Only verdicts without attention notes start selected, unless this
             // dialog was opened for exactly this worktree.
-            item->setCheckState(0,!WorktreeReviewUi::localData(row)&&(verdict!="review"||!m_focus.isEmpty())?Qt::Checked:Qt::Unchecked);
+            item->setCheckState(0,!WorktreeReviewUi::processReviewable(row)&&!WorktreeReviewUi::localData(row)&&(verdict!="review"||!m_focus.isEmpty())?Qt::Checked:Qt::Unchecked);
         }
         QString status;const auto catalog=m_data["state"].toString();
         if(!m_error.isEmpty())status=tr("Review failed: %1").arg(m_error);
@@ -158,22 +159,26 @@ private:
     }
     void confirm() {
         const auto rows=selected();if(rows.isEmpty()||busy()||m_request)return;
-        qint64 ignored=0;QStringList names,branches;int missing=0;bool localData=false;
+        qint64 ignored=0;QStringList names,branches;int missing=0;bool localData=false,processReview=false;
         for(const auto &row:rows){
             names<<QFileInfo(row["path"].toString()).fileName();ignored+=qint64(row["ignored_bytes"].toDouble());missing+=row["verdict"]=="missing";
-            localData|=WorktreeReviewUi::localData(row);
+            localData|=WorktreeReviewUi::localData(row);processReview|=WorktreeReviewUi::processReviewable(row);
             if(m_branches->isChecked()&&row["merged"]==true&&!row["branch"].toString().isEmpty())branches<<row["branch"].toString();
         }
         QStringList lines{names.join(", ")};
         if(ignored>0)lines<<tr("Ignored files deleted with them: %1.").arg(size(ignored));
         if(missing)lines<<tr("Missing folders: only Git's record is removed.");
         lines<<(branches.isEmpty()?tr("All branches are kept."):tr("Merged branches deleted: %1.").arg(branches.join(", ")));
+        if(processReview)lines<<tr("The OS hides some programs’ folder paths. Confirm only after checking that these folders are not in use.");
         lines<<tr("Each worktree is checked again before removal. This cannot be undone.");
         QMessageBox box(QMessageBox::Warning,windowTitle(),rows.size()==1?tr("Remove 1 worktree on %1?").arg(m_machine):tr("Remove %1 worktrees on %2?").arg(rows.size()).arg(m_machine),QMessageBox::Cancel,this);
         box.setObjectName("confirmWorktreeCleanup");box.setInformativeText(lines.join('\n'));
         auto *accept=box.addButton(rows.size()==1?tr("Remove worktree"):tr("Remove %1 worktrees").arg(rows.size()),QMessageBox::DestructiveRole);accept->setObjectName("confirmRemoveWorktrees");
-        if(localData){
-            auto *consent=new QCheckBox(tr("I reviewed the local files outside Git and want to delete them too"),&box);consent->setObjectName("confirmIgnoredWorktreeFiles");box.setCheckBox(consent);
+        if(localData||processReview){
+            QString text = tr("I reviewed the local files outside Git and want to delete them too");
+            if(processReview)text = tr("I checked these folders are not in use; remove them anyway");
+            if(processReview&&localData)text += tr(". Delete the reviewed local files outside Git too.");
+            auto *consent=new QCheckBox(text,&box);consent->setObjectName(processReview?"confirmUncheckedWorktreeProcesses":"confirmIgnoredWorktreeFiles");box.setCheckBox(consent);
             accept->setEnabled(false);connect(consent,&QCheckBox::toggled,accept,&QPushButton::setEnabled);
         }
         box.setDefaultButton(QMessageBox::Cancel);box.setEscapeButton(QMessageBox::Cancel);box.exec();if(box.clickedButton()!=accept)return;
@@ -189,7 +194,7 @@ private:
         }
         m_current=m_queue.takeFirst();setRowState(m_current["path"].toString(),tr("Removing…"));
         m_removal=m_client->removeWorktree(m_host,m_current["path"].toString(),m_data["common_dir"].toString(),m_current["fingerprint"].toString(),
-            m_branches->isChecked()&&m_current["merged"]==true,m_current["ignored_fingerprint"].toString());
+            m_branches->isChecked()&&m_current["merged"]==true,m_current["ignored_fingerprint"].toString(),{},WorktreeReviewUi::processReviewable(m_current)?m_current["process_fingerprint"].toString():QString());
         m_status->setText(tr("Removing %1…").arg(m_current["path"].toString()));updateActions();
     }
     void removed(bool ok,const QJsonObject &result,const QString &error) {

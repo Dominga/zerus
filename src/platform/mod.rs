@@ -24,6 +24,33 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+/// A completed process roster may still contain protected Linux processes whose
+/// paths the OS refuses to disclose. Keep these separate from readable paths:
+/// they require personal confirmation, never automatic cleanup authority.
+#[derive(Default)]
+pub struct WorktreeProcesses {
+    pub paths: Vec<(u32, PathBuf, String)>,
+    pub unreadable: Vec<UnreadableWorktreeProcess>,
+}
+
+#[derive(serde::Serialize)]
+pub struct UnreadableWorktreeProcess {
+    pub pid: u32,
+    pub identity: String,
+    pub command: String,
+    pub cwd: bool,
+    pub executable: bool,
+}
+
+impl From<Vec<(u32, PathBuf, String)>> for WorktreeProcesses {
+    fn from(paths: Vec<(u32, PathBuf, String)>) -> Self {
+        Self {
+            paths,
+            unreadable: Vec::new(),
+        }
+    }
+}
+
 /// What a local session command reports where `local_sessions()` is false: a
 /// Windows computer whose local sessions are not enabled (spec D2). It exits with
 /// code 2.

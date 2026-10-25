@@ -50,6 +50,8 @@ public:
         m_local = new QCheckBox(tr("I no longer need the local files outside Git; delete them too")); m_local->setObjectName("confirmIgnoredWorktreeFiles");
         m_local->hide(); layout->addWidget(m_local);
         m_discard = new QCheckBox(tr("Permanently discard uncommitted and untracked files")); m_discard->setObjectName("confirmDiscardWorktreeChanges"); m_discard->hide(); layout->addWidget(m_discard);
+        m_processes = new QCheckBox(tr("I checked these folders are not in use; remove them anyway"));
+        m_processes->setObjectName("confirmUncheckedWorktreeProcesses"); m_processes->hide(); layout->addWidget(m_processes);
         m_branches = new QCheckBox(tr("Also delete branches proven merged by Git")); m_branches->setObjectName("batchDeleteMergedBranches"); layout->addWidget(m_branches);
         m_status = new QLabel; m_status->setTextFormat(Qt::PlainText);m_status->setObjectName("batchCleanupStatus"); m_status->setWordWrap(true); layout->addWidget(m_status);
         auto *buttons = new QDialogButtonBox;
@@ -61,10 +63,11 @@ public:
         });
         connect(m_local, &QCheckBox::toggled, this, [this] { updateAction(); });
         connect(m_discard, &QCheckBox::toggled, this, [this] { updateAction(); });
+        connect(m_processes, &QCheckBox::toggled, this, [this] { updateAction(); });
         connect(m_list, &QTreeWidget::currentItemChanged, this, [this] { details(); });
         connect(m_remove, &QPushButton::clicked, this, [this] {
             if (!m_remove->isEnabled()) return;
-            m_started = true; m_inspect->setEnabled(false); m_local->setEnabled(false); m_discard->setEnabled(false); m_branches->setEnabled(false); m_cancel->setText(tr("Stop after this folder")); updateAction(); next();
+            m_started = true; m_inspect->setEnabled(false); m_local->setEnabled(false); m_discard->setEnabled(false); m_processes->setEnabled(false); m_branches->setEnabled(false); m_cancel->setText(tr("Stop after this folder")); updateAction(); next();
         });
         connect(client, &HgsClient::worktreeRemoved, this, [this](quint64 request, bool ok, const QJsonObject &result, const QString &error) {
             if (request != m_request) return; m_request = 0;
@@ -96,16 +99,17 @@ public:
     QString summary() const { return tr("%1 removed · %2 unconfirmed").arg(m_removed).arg(m_failed) + (m_skipped ? tr(" · %1 kept").arg(m_skipped) : QString()); }
     void reject() override { if (!m_request && (!m_started || m_index == m_entries.size())) QDialog::reject(); }
 private:
-    bool eligible(const QJsonObject &entry) const { return entry["verified"] == true && (WorktreeReviewUi::removable(entry["row"].toObject()) || discardable(entry["row"].toObject())); }
+    bool eligible(const QJsonObject &entry) const { return entry["verified"] == true && (WorktreeReviewUi::removable(entry["row"].toObject()) || discardable(entry["row"].toObject()) || WorktreeReviewUi::processReviewable(entry["row"].toObject())); }
     static bool discardable(const QJsonObject &row) { return row["discardable"] == true && !row["discard_fingerprint"].toString().isEmpty(); }
     void updateAction() {
-        int count = 0; m_requiresLocal = false; m_requiresDiscard = false;
-        for (const auto &entry : m_entries) if (eligible(entry)) { ++count; const auto row=entry["row"].toObject(); m_requiresLocal |= WorktreeReviewUi::localData(row); m_requiresDiscard |= discardable(row); }
-        m_local->setVisible(m_requiresLocal); m_discard->setVisible(m_requiresDiscard);
+        int count = 0; m_requiresLocal = false; m_requiresDiscard = false; m_requiresProcesses = false;
+        for (const auto &entry : m_entries) if (eligible(entry)) { ++count; const auto row=entry["row"].toObject(); m_requiresLocal |= WorktreeReviewUi::localData(row); m_requiresDiscard |= discardable(row); m_requiresProcesses |= WorktreeReviewUi::processReviewable(row); }
+        m_local->setVisible(m_requiresLocal); m_discard->setVisible(m_requiresDiscard); m_processes->setVisible(m_requiresProcesses);
         m_remove->setText(tr("Remove %1 worktrees").arg(count));
-        m_remove->setEnabled(!m_started && m_reviewIndex == m_entries.size() && count > 0 && (!m_requiresLocal || m_local->isChecked()) && (!m_requiresDiscard || m_discard->isChecked()));
+        m_remove->setEnabled(!m_started && m_reviewIndex == m_entries.size() && count > 0 && (!m_requiresLocal || m_local->isChecked()) && (!m_requiresDiscard || m_discard->isChecked()) && (!m_requiresProcesses || m_processes->isChecked()));
         if (!m_started && m_reviewIndex == m_entries.size())
             m_status->setText(!count ? tr("These folders will be kept. See the selected folder for the reason.")
+                : m_requiresProcesses && !m_processes->isChecked() ? tr("Removal is paused: some programs could not be checked. Confirm only after checking that these folders are not in use.")
                 : m_requiresDiscard && !m_discard->isChecked() ? tr("Removal is paused: confirm discarding unsaved work, or keep the folders.")
                 : m_requiresLocal && !m_local->isChecked() ? tr("Removal is paused: inspect the local files, then confirm they are no longer needed.")
                 : tr("Removing the working folders keeps conversations and, unless selected above, branches. Local files will be permanently deleted."));
@@ -125,7 +129,7 @@ private:
         m_reviewRequest = 0; const auto entry = m_entries[m_reviewIndex], row = entry["row"].toObject(); auto *item = m_list->topLevelItem(m_reviewIndex);
         item->setText(0, QFileInfo(row["path"].toString()).fileName() + " · " + row["branch"].toString());
         item->setData(0, Qt::UserRole, entry); item->setText(2, WorktreeReviewUi::size(row));
-        item->setText(3, eligible(entry) ? (discardable(row) ? tr("Unsaved work") : WorktreeReviewUi::localData(row) ? tr("Review local files") : row["verdict"] == "missing" ? tr("Forget missing folder") : row["merged"] == true ? tr("Can remove folder") : tr("Review code first")) : tr("Kept"));
+        item->setText(3, eligible(entry) ? (WorktreeReviewUi::processReviewable(row) ? tr("Check running programs") : discardable(row) ? tr("Unsaved work") : WorktreeReviewUi::localData(row) ? tr("Review local files") : row["verdict"] == "missing" ? tr("Forget missing folder") : row["merged"] == true ? tr("Can remove folder") : tr("Review code first")) : tr("Kept"));
         item->setToolTip(3, entry["review_error"].toString(WorktreeReviewUi::summary(row))); ++m_reviewIndex; details(); reviewNext();
     }
     void details() {
@@ -156,10 +160,11 @@ private:
         m_status->setText(tr("%1 of %2 · %3").arg(m_index + 1).arg(m_entries.size()).arg(entry["machine"].toString()));
         m_request = m_client->removeWorktree(entry["host"].toString(), row["path"].toString(), entry["common_dir"].toString(), row["fingerprint"].toString(),
             m_branches->isChecked() && row["merged"] == true, m_requiresLocal && m_local->isChecked() ? row["ignored_fingerprint"].toString() : QString(),
-            m_requiresDiscard && m_discard->isChecked() ? row["discard_fingerprint"].toString() : QString());
+            m_requiresDiscard && m_discard->isChecked() ? row["discard_fingerprint"].toString() : QString(),
+            m_processes->isChecked() && WorktreeReviewUi::processReviewable(row) ? row["process_fingerprint"].toString() : QString());
     }
     HgsClient *m_client; QList<QJsonObject> m_entries; QTreeWidget *m_list; QPlainTextEdit *m_details;
-    QCheckBox *m_local, *m_discard, *m_branches; QLabel *m_status; QPushButton *m_cancel, *m_remove, *m_inspect;
+    QCheckBox *m_local, *m_discard, *m_processes, *m_branches; QLabel *m_status; QPushButton *m_cancel, *m_remove, *m_inspect;
     QStringList m_errors; quint64 m_request = 0, m_reviewRequest = 0; int m_reviewIndex = 0, m_index = 0, m_removed = 0, m_failed = 0, m_skipped = 0;
-    bool m_started = false, m_changed = false, m_requiresLocal = false, m_requiresDiscard = false, m_stop = false;
+    bool m_started = false, m_changed = false, m_requiresLocal = false, m_requiresDiscard = false, m_requiresProcesses = false, m_stop = false;
 };

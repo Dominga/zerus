@@ -572,11 +572,17 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
         text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
     }
     let at = if member_host.is_empty() { String::new() } else { format!("@{report_host} ") };
+    // H5: every hand-out names the question route, the current-attempt route
+    // and the report command.
     text += &format!(
-        "\nWhen you finish, report once (hgs guide team) with JSON on stdin:\n  hgs {at}team report --json\n  {}\n\
+        "\nQuestions for the lead: {ask} | hgs {at}team ask --json\n\
+         Your task and attempt again: {{}} | hgs {at}team current --json\n\
+         Report once at the end: hgs {at}team report --json, with JSON on stdin:\n  {report}\n\
+         A progress line is not a report; a question is not a report.\n\
          Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
          the report as your last message: Zerus gives it to the lead. A blocker goes to the lead too: ask it, not the owner.",
-        json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
+        ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"text":"..."}),
+        report = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
     );
     text
 }
@@ -616,7 +622,9 @@ pub(crate) fn brief_text(team: &Team) -> String {
         "\nPlan the work as tasks with acceptance criteria and dependencies (hard: waits for Accepted; soft: may start \
          once the dependency is In progress), then send the whole plan once with hgs team plan --json (hgs guide team). \
          Keep these members unless the goal needs others; nothing runs until the owner approves. \
-         Once it runs, new work goes in a new phase and you finish the team (hgs guide team-lead).\n\
+         Once it runs, answer a member's question with hgs team reply --json, keep a returned task back with \
+         hgs team hold --json and give it out again with hgs team release --json; new work goes in a new phase and \
+         you finish the team (hgs guide team-lead).\n\
          {{\"request_id\":\"{}\",\"team\":\"{}\",\"members\":{},\"tasks\":{}}}",
         uuid::Uuid::new_v4(),
         team.id,
@@ -1782,8 +1790,32 @@ mod tests {
         assert!(brief.contains("Ship it") && brief.contains("Your role: Plan well") && brief.contains("\"assignee\":\"dev\""));
         assert!(brief.contains("Team protocol:\nRun the waves in order"));
         assert!(brief.contains("(hgs guide team-lead)"));
+        // The brief names the reply, hold and release routes (H5).
+        assert!(brief.contains("hgs team reply --json"), "{brief}");
+        assert!(brief.contains("hgs team hold --json") && brief.contains("hgs team release --json"), "{brief}");
         team.brief = Notice::Sent;
         assert!(steps(&team, &[session("claude/x/lead", "r0", true)], 1.0).is_empty());
+    }
+
+    #[test]
+    fn a_held_task_is_not_handed_out_until_it_is_released() {
+        let mut team = team();
+        // Task 2 is the next ready task; the lead keeps it back (A5).
+        ops::apply(&mut team, "cancel", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        ops::apply(&mut team, "hold", &json!({"task":2,"reason":"The member is busy"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new())
+            .unwrap();
+        assert_eq!(team.task(2).unwrap().hold.as_ref().map(|hold| hold.by.as_str()), Some("Lead"));
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", true);
+        assert!(!plan::ready(&team).contains(&2));
+        let found = steps(&team, &[lead.clone(), dev.clone()], 100.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. })), "{found:?}");
+        // Release gives it out again.
+        ops::apply(&mut team, "release", &json!({"task":2}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        assert!(team.task(2).unwrap().hold.is_none());
+        assert!(plan::ready(&team).contains(&2));
+        let found = steps(&team, &[lead, dev], 100.0);
+        assert!(found.contains(&Step::HandOut { task: 2, member: "dev".into() }), "{found:?}");
     }
 
     #[test]
@@ -2447,7 +2479,14 @@ mod tests {
         let text = hand_off_text(&team, task, &attempt, "msi", "msi-old");
         assert!(text.starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #1 \u{b7} attempt: 2]"));
         assert!(text.contains("hgs @msi team report --json") && text.contains("\"attempt\":\"A-ID\""));
-        assert!(hand_off_text(&team, task, &attempt, "msi", "").contains("hgs team report --json"));
+        // H5: the hand-out names ask, current and the report command.
+        assert!(text.contains("hgs @msi team ask --json") && text.contains("\"team\":\"t\""), "{text}");
+        assert!(text.contains("Your task and attempt again: {} | hgs @msi team current --json"), "{text}");
+        assert!(text.contains("Report once at the end: hgs @msi team report --json"), "{text}");
+        assert!(text.contains("A progress line is not a report; a question is not a report."), "{text}");
+        let local = hand_off_text(&team, task, &attempt, "msi", "");
+        assert!(local.contains("hgs team report --json"));
+        assert!(local.contains("hgs team ask --json") && local.contains("hgs team current --json"), "{local}");
     }
 
     fn attempt_with_report(member: &str, text: &str, state: AttemptState) -> Attempt {

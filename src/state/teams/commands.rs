@@ -10,12 +10,12 @@ use super::store::{self, canonical_uuid, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|approve-phase|discard-phase|finish|approve|answer|discard|pause|resume|stop|archive|status|list|events|current|report|ask|reply|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|approve-phase|discard-phase|finish|approve|answer|discard|pause|resume|stop|archive|status|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "approve-phase", "discard-phase", "finish", "approve", "discard", "pause", "resume", "stop",
-    "archive", "report", "ask", "reply", "accept", "reject", "reassign", "take-over", "cancel", "retry", "check",
-    "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
+    "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
+    "retry", "check", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -91,7 +91,32 @@ fn pending_phase(team: &Team) -> Option<u32> {
 /// Operations after which new work may be ready for the dispatcher, or a
 /// question or answer waits to be delivered.
 fn starts_worker(op: &str) -> bool {
-    matches!(op, "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply")
+    matches!(op, "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release")
+}
+
+/// A member's queue (A5, spec section 6): its open task first, then the tasks
+/// the lead returned to it (they have attempts, are not finished and are Pending,
+/// held or not). Nothing else.
+fn member_queue(team: &Team, member: &str) -> Vec<Value> {
+    let entry = |task: &Task| json!({"task": task.id, "phase": ops::attempt_phase(task, false)});
+    let mut open: Vec<u32> = team
+        .tasks
+        .iter()
+        .filter(|task| task.open_attempt().is_some_and(|attempt| attempt.member == member))
+        .map(|task| task.id)
+        .collect();
+    open.sort_unstable();
+    let mut queue: Vec<Value> = open.iter().filter_map(|id| team.task(*id)).map(entry).collect();
+    let mut returned: Vec<&Task> = team
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.assignee == member && !task.status.finished() && task.status == TaskStatus::Pending && !task.attempts.is_empty()
+        })
+        .collect();
+    returned.sort_by_key(|task| task.id);
+    queue.extend(returned.into_iter().map(entry));
+    queue
 }
 
 /// The team with what Zerus derives from it: plan findings, layers and the
@@ -115,6 +140,13 @@ pub(crate) fn view(team: &Team) -> Value {
             }
         }
     }
+    // Each member's queue: its open task first, then the tasks returned to it
+    // (A5, spec section 6).
+    if let Some(members) = value["members"].as_array_mut() {
+        for (member, value) in team.members.iter().zip(members) {
+            value["queue"] = json!(member_queue(team, &member.id));
+        }
+    }
     value
 }
 
@@ -128,7 +160,7 @@ fn summary(team: &Team) -> Value {
         .filter(|m| m.state != MemberState::Removed)
         .map(|m| {
             json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
-                "session":m.session,"state":m.state,"error":m.error})
+                "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id)})
         })
         .collect();
     let tasks: Vec<Value> = team
@@ -485,8 +517,8 @@ mod tests {
     }
 
     #[test]
-    fn ask_and_reply_are_mutations_and_current_is_a_read_named_in_the_usage() {
-        for op in ["ask", "reply"] {
+    fn ask_reply_hold_and_release_are_mutations_and_current_is_a_read_in_the_usage() {
+        for op in ["ask", "reply", "hold", "release"] {
             assert!(MUTATIONS.contains(&op), "{op} is not a mutation");
             assert!(USAGE.contains(op), "{op} is not in the usage");
         }
@@ -649,11 +681,44 @@ mod tests {
     }
 
     #[test]
+    fn status_shows_each_member_queue() {
+        let mut team = running_team();
+        // Task 2 came back to dev and the lead holds it.
+        team.tasks.push(Task {
+            id: 2,
+            title: "Retry".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::Pending,
+            hold: Some(Hold { by: "Lead".into(), at: 12.0, reason: "Later".into() }),
+            attempts: vec![Attempt { n: 1, id: "A2".into(), member: "dev".into(), state: AttemptState::Rejected, ..Default::default() }],
+            ..Default::default()
+        });
+        // Assigned but never handed out, and a finished task: neither is queued.
+        team.tasks.push(Task { id: 3, title: "Later".into(), assignee: "dev".into(), status: TaskStatus::Pending, ..Default::default() });
+        team.tasks.push(Task {
+            id: 4,
+            title: "Done".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::Accepted,
+            attempts: vec![Attempt { n: 1, id: "A4".into(), member: "dev".into(), state: AttemptState::Reported, ..Default::default() }],
+            ..Default::default()
+        });
+        let expected = json!([{"task":1,"phase":"working"},{"task":2,"phase":"held"}]);
+        let value = view(&team);
+        let members = value["members"].as_array().unwrap();
+        assert_eq!(members.iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
+        assert_eq!(members.iter().find(|member| member["id"] == "lead").unwrap()["queue"], json!([]));
+        // The session list carries the same queue.
+        let listed = summary(&team);
+        assert_eq!(listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap()["queue"], expected);
+    }
+
+    #[test]
     fn the_commands_that_create_work_start_the_worker() {
-        for op in ["approve", "resume", "extend", "approve-phase", "ask", "reply"] {
+        for op in ["approve", "resume", "extend", "approve-phase", "ask", "reply", "release"] {
             assert!(starts_worker(op), "{op}");
         }
-        for op in ["report", "cancel", "finish", "discard-phase"] {
+        for op in ["report", "cancel", "finish", "discard-phase", "hold"] {
             assert!(!starts_worker(op), "{op}");
         }
     }

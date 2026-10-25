@@ -56,9 +56,9 @@ fn dsh_member(team: &Team, conversation: &str) -> Option<String> {
 }
 
 /// Who asks. A team session is proven by ancestry; a dsh session by the
-/// conversation its harness exports; a report from elsewhere (a member on
-/// another computer) is authorized by its attempt id; anything else must say
-/// it is you.
+/// conversation its harness exports; a report, question or `current` from
+/// elsewhere (a member on another computer) is authorized by its attempt id;
+/// anything else must say it is you.
 fn actor(team: &Team, op: &str, input: &Value) -> anyhow::Result<Actor> {
     if let Some(record) = caller_record() {
         let member = calling_member(team, &record).with_context(|| format!("This session is not a member of team {}", team.name))?;
@@ -68,13 +68,29 @@ fn actor(team: &Team, op: &str, input: &Value) -> anyhow::Result<Actor> {
     if let Some(member) = dsh_member(team, nonempty_env("DSH_SESSION_ID").unwrap_or_default().as_str()) {
         return Ok(Actor::Member(member));
     }
-    if matches!(op, "report") && text(input, "by") != "human" {
+    if matches!(op, "report" | "ask") && text(input, "by") != "human" {
         let attempt = text(input, "attempt");
-        let member = team.tasks.iter().flat_map(|task| &task.attempts).find(|a| !attempt.is_empty() && a.id == attempt);
-        return Ok(Actor::Member(member.map(|a| a.member.clone()).unwrap_or_default()));
+        if let Some(member) = attempt_member(team, attempt) {
+            return Ok(Actor::Member(member));
+        }
+        // A report keeps the old empty-member path for a stale id; a question
+        // names the attempt it belongs to.
+        if op == "report" {
+            return Ok(Actor::Member(String::new()));
+        }
+        bail!("The attempt is not in this team");
     }
     ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
     Ok(Actor::Human)
+}
+
+/// The member whose attempt id the request names, for a session with no local
+/// identity of its own (N2).
+fn attempt_member(team: &Team, attempt: &str) -> Option<String> {
+    if attempt.is_empty() {
+        return None;
+    }
+    team.tasks.iter().flat_map(|task| &task.attempts).find(|found| found.id == attempt).map(|found| found.member.clone())
 }
 
 /// A running team whose every task is decided waits for the lead to extend it
@@ -160,11 +176,18 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     value["ready"] = json!(plan::ready(team));
     value["waiting_for_lead"] = json!(waiting_for_lead(team));
     value["pending_phase"] = json!(pending_phase(team));
-    // Each task's last attempt carries its derived phase (spec section 2). The
-    // stored record knows no live session, so `stopped` stays to the dispatcher.
+    // Each task's last attempt carries its derived phase (spec section 2). When
+    // the caller listed sessions, a stopped one makes `stopped` the truth (L3);
+    // a member without a listing stays derived from the record.
+    let stopped = |attempt: &Attempt| {
+        let Some(sessions) = sessions else { return false };
+        let Some(session) = team.member(&attempt.member).and_then(|member| member.session.as_ref()) else { return false };
+        sessions.iter().find(|seen| seen.host == session.host && seen.name == session.name).is_some_and(|seen| !seen.live)
+    };
     if let Some(tasks) = value["tasks"].as_array_mut() {
         for (task, value) in team.tasks.iter().zip(tasks) {
-            if let Some(phase) = ops::attempt_phase(task, false) {
+            let stopped = task.attempts.last().is_some_and(stopped);
+            if let Some(phase) = ops::attempt_phase(task, stopped) {
                 if let Some(attempt) = value["attempts"].as_array_mut().and_then(|attempts| attempts.last_mut()) {
                     attempt["phase"] = json!(phase);
                 }
@@ -361,12 +384,33 @@ fn current_team<'a>(teams: &'a [Team], named: &str, mut member_of: impl FnMut(&T
 /// The member's live attempt from its own session; `team` is optional when the
 /// session belongs to one team (spec section 5). Read only.
 fn current(input: &Value) -> anyhow::Result<Value> {
+    let named = text(input, "team");
+    // A member on another computer has no local identity: its attempt id names
+    // it, as report does (N2).
+    let attempt = text(input, "attempt");
+    if !attempt.is_empty() {
+        let teams = Store::open(false)?.active_teams(ACTIVE_TEAMS)?;
+        let found = teams.iter().find_map(|team| {
+            if !named.is_empty() && team.id != named {
+                return None;
+            }
+            if !matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused) {
+                return None;
+            }
+            team.tasks
+                .iter()
+                .flat_map(|task| &task.attempts)
+                .find(|found| found.id == attempt)
+                .map(|found| (team, found.member.clone()))
+        });
+        let (team, member) = found.with_context(|| format!("No attempt {attempt} runs in a team"))?;
+        return current_view(team, &member);
+    }
     let record = caller_record();
     let conversation = nonempty_env("DSH_SESSION_ID").unwrap_or_default();
     if record.is_none() {
         ensure!(!conversation.is_empty(), "hgs team current runs in a member's session");
     }
-    let named = text(input, "team");
     // Only the teams that still run, from the indexed query (N3, C1).
     let teams = Store::open(false)?.active_teams(ACTIVE_TEAMS)?;
     let (team, member) = current_team(&teams, named, |team| match &record {
@@ -592,8 +636,10 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             let store = Store::open(false)?;
             let team = store.load(text(input, "team"))?.context("Unknown team")?;
             let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
-            // From the live listing; a failure leaves the members out (F7).
-            let sessions = finished.then(live_sessions).and_then(|sessions| sessions.ok());
+            // The live listing tells a stopped phase from a working one (L3),
+            // and a finished team's members left running (F7); a failure leaves
+            // both out.
+            let sessions = live_sessions().ok();
             // Only the teams that still run, from the indexed query, so a
             // finished team's status never reads every team (C1).
             let teams = if finished { active_team_records(&store)? } else { Vec::new() };
@@ -870,6 +916,32 @@ mod tests {
         }
         reported.task_mut(1).unwrap().status = TaskStatus::Submitted;
         assert_eq!(current_view(&reported, "dev").unwrap_err().to_string(), "#1 has a report waiting for the lead's decision");
+    }
+
+    #[test]
+    fn an_attempt_id_names_a_member_away_from_its_computer() {
+        let team = running_team();
+        let id = team.task(1).unwrap().attempts[0].id.clone();
+        // ask and current accept the attempt id where report already does (N2).
+        assert_eq!(attempt_member(&team, &id).as_deref(), Some("dev"));
+        assert_eq!(attempt_member(&team, "unknown"), None);
+        assert_eq!(attempt_member(&team, ""), None);
+    }
+
+    #[test]
+    fn a_listed_stopped_session_makes_the_phase_stopped() {
+        let team = running_team();
+        let seen = |live: bool| super::super::dispatcher::Seen {
+            name: "codex/x/dev".into(),
+            run_id: "r1".into(),
+            live,
+            ..Default::default()
+        };
+        assert_eq!(view_with(&team, &[], Some(&[seen(true)]))["tasks"][0]["attempts"][0]["phase"], "working");
+        // A listed session that stopped is the truth (L3).
+        assert_eq!(view_with(&team, &[], Some(&[seen(false)]))["tasks"][0]["attempts"][0]["phase"], "stopped");
+        // Without a listing the record keeps its derived phase.
+        assert_eq!(view_with(&team, &[], None)["tasks"][0]["attempts"][0]["phase"], "working");
     }
 
     #[test]

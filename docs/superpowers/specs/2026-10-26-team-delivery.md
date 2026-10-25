@@ -170,9 +170,11 @@ The lead's brief names `hgs team reply`, `hold`/`release` and
 - Any number of draft phases, in order. A phase added while an earlier phase is
   a draft is a draft, whatever `phase_approval` says.
 - `approve-phase N` is refused unless every phase below N is approved and all
-  its tasks are decided ("Phase 2 opens after phase 1 ends"). `discard-phase N`
+  its tasks are decided ("Phase 2 opens after phase 1 ends"). The owner's rule
+  holds for every team, old or new: approved phases run in order, so a team
+  stored with one draft approves it only after the phase before it ended. The
+  earlier "at most one draft" compatibility exception is gone (N6). `discard-phase N`
   discards N only; numbers are never reused.
-- Old teams (at most one draft) behave as before.
 
 ## 11. Desktop
 

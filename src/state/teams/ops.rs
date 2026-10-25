@@ -234,10 +234,24 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     if let Some(settings) = settings {
         team.settings = settings;
     }
+    // F8: a member with an existing session is adopted, not launched; record
+    // it once, when the session first appears or changes (L2).
+    let adopted: Vec<(String, String)> = members
+        .iter()
+        .filter(|member| member.id != team.lead)
+        .filter_map(|member| {
+            let session = member.session.as_ref()?;
+            let old = team.member(&member.id).and_then(|old| old.session.as_ref());
+            (old != Some(session)).then(|| (member.id.clone(), session.name.clone()))
+        })
+        .collect();
     team.members = members;
     team.tasks = tasks;
     team.phases = phases;
     let validation = plan::validate(team, &BTreeSet::new());
+    for (id, session) in adopted {
+        events.push(Event::new("member_adopted", json!({"member":team.role_of(&id),"session":session})));
+    }
     events.push(Event::new(
         "planned",
         json!({"by":by,"members":team.members.len(),"tasks":team.tasks.len(),"phases":team.phases.len(),"errors":validation.errors.len()}),
@@ -754,6 +768,11 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
 /// A5: keeps a pending task back from the dispatcher until `release`.
 fn hold(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you hold a task");
+    // A finished team keeps its tasks as they are (L1).
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team holds tasks"
+    );
     let id = task_id(input)?;
     let reason = clean(text(input, "reason").trim(), 4000, "A reason")?;
     let label = actor.label(team);
@@ -769,6 +788,11 @@ fn hold(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
 /// A5: clears a hold; the task is handed out again when it is ready.
 fn release(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you release a task");
+    // A finished team keeps its tasks as they are (L1).
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team releases tasks"
+    );
     let id = task_id(input)?;
     let label = actor.label(team);
     let task = team.task_mut(id).context("Unknown task")?;
@@ -1014,8 +1038,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(active < team.settings.max_members, "The team already has its {} members", team.settings.max_members);
             let id = member.id.clone();
             let role = member.role.clone();
+            let adopted = member.session.as_ref().map(|session| session.name.clone());
             team.members.push(member);
             events.push(Event::new("member_added", json!({"by":actor.label(team),"member":role})));
+            // F8: the existing session is adopted, not launched (L2).
+            if let Some(session) = adopted {
+                events.push(Event::new("member_adopted", json!({"member":role,"session":session})));
+            }
             Ok(json!({"status":"added","member":id}))
         }
         "remove-member" => {
@@ -2276,5 +2305,50 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "Task #1 is decided; its question q1 is closed");
+    }
+
+    #[test]
+    fn a_finished_team_holds_and_releases_nothing() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        team.status = TeamStatus::Done;
+        let error = apply(&mut team, "hold", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Only a planning, running or paused team holds tasks");
+        let error = apply(&mut team, "release", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Only a planning, running or paused team releases tasks");
+        // A paused team still holds and releases (L1).
+        team.status = TeamStatus::Paused;
+        apply(&mut team, "hold", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap();
+        apply(&mut team, "release", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap();
+    }
+
+    #[test]
+    fn adopting_an_existing_session_is_an_event() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        let plan_with_session = json!({"members":[{"id":"dev","role":"Backend","agent":"codex",
+                "session":{"name":"codex/x/dev","run_id":"r1","conversation_id":"c1"}}],
+            "tasks":[{"id":1,"title":"API","assignee":"dev"}]});
+        plan(&mut team, &plan_with_session, &Actor::Human, &mut events).unwrap();
+        let adopted: Vec<_> = events.iter().filter(|event| event.kind == "member_adopted").collect();
+        assert_eq!(adopted.len(), 1, "{events:?}");
+        assert_eq!((adopted[0].payload["member"].as_str(), adopted[0].payload["session"].as_str()), (Some("Backend"), Some("codex/x/dev")));
+        // Planning the same session again does not adopt it twice (L2).
+        events.clear();
+        plan(&mut team, &plan_with_session, &Actor::Human, &mut events).unwrap();
+        assert!(!events.iter().any(|event| event.kind == "member_adopted"), "{events:?}");
+        // A new member with a session is adopted.
+        events.clear();
+        apply(
+            &mut team,
+            "add-member",
+            &json!({"member":{"id":"qa","role":"Tester","agent":"kimi","session":{"name":"kimi/x/qa","run_id":"r2"}}}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| event.kind == "member_adopted" && event.payload["member"] == "Tester"), "{events:?}");
     }
 }

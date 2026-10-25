@@ -654,12 +654,13 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     // and the report command.
     text += &format!(
         "\nQuestions for the lead: {ask} | hgs {at}team ask --json\n\
-         Your task and attempt again: {{}} | hgs {at}team current --json\n\
+         Your task and attempt again: {current} | hgs {at}team current --json\n\
          Report once at the end: hgs {at}team report --json, with JSON on stdin:\n  {report}\n\
          A progress line is not a report; a question is not a report.\n\
          Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
          the report as your last message: Zerus gives it to the lead. A blocker goes to the lead too: ask it, not the owner.",
-        ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"text":"..."}),
+        ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."}),
+        current = json!({"attempt":attempt.id}),
         report = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
     );
     text
@@ -3037,14 +3038,17 @@ mod tests {
         let text = hand_off_text(&team, task, &attempt, "msi", "msi-old");
         assert!(text.starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #1 \u{b7} attempt: 2]"));
         assert!(text.contains("hgs @msi team report --json") && text.contains("\"attempt\":\"A-ID\""));
-        // H5: the hand-out names ask, current and the report command.
+        // H5: the hand-out names ask, current and the report command; the
+        // attempt id authorizes a member on another computer (N2).
         assert!(text.contains("hgs @msi team ask --json") && text.contains("\"team\":\"t\""), "{text}");
-        assert!(text.contains("Your task and attempt again: {} | hgs @msi team current --json"), "{text}");
+        assert!(text.contains("\"attempt\":\"A-ID\""), "{text}");
+        assert!(text.contains("Your task and attempt again: {\"attempt\":\"A-ID\"} | hgs @msi team current --json"), "{text}");
         assert!(text.contains("Report once at the end: hgs @msi team report --json"), "{text}");
         assert!(text.contains("A progress line is not a report; a question is not a report."), "{text}");
         let local = hand_off_text(&team, task, &attempt, "msi", "");
         assert!(local.contains("hgs team report --json"));
         assert!(local.contains("hgs team ask --json") && local.contains("hgs team current --json"), "{local}");
+        assert!(local.contains("{\"attempt\":\"A-ID\"} | hgs team current --json"), "{local}");
     }
 
     fn attempt_with_report(member: &str, text: &str, state: AttemptState) -> Attempt {

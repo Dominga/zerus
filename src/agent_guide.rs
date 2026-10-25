@@ -44,6 +44,11 @@ mod tests {
         for (name, text) in pages() {
             // About four bytes a token: a page costs an agent at most ~600.
             assert!(text.len() <= 2400, "{name} has {} bytes", text.len());
+            // A CRLF checkout adds one byte for each LF that has none: the
+            // page must still fit (N8).
+            let bare = text.matches('\n').count() - text.matches("\r\n").count();
+            let crlf = text.len() + bare;
+            assert!(crlf <= 2400, "{name} has {crlf} bytes in a CRLF checkout");
             assert!(text.is_ascii(), "{name} is not ASCII");
             assert!(text.ends_with('\n') && !text.contains('\t'), "{name}");
             assert!(text.lines().all(|line| line.len() <= 100), "{name} has a long line");

@@ -3128,7 +3128,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(added["validation"]["health"]["tasks"], 3);
-        assert_eq!(added["validation"]["health"]["critical_path"], 2);
+        // Every task is one member's work: the chain and the extra task take
+        // three scheduling steps.
+        assert_eq!(added["validation"]["health"]["critical_path"], 3);
+        assert_eq!(added["validation"]["health"]["chain"], 2);
     }
 
     #[test]

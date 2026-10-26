@@ -256,6 +256,9 @@ pub(crate) struct Validation {
     pub warnings: Vec<Finding>,
     /// The plan's shape while it is being drawn and while it runs (C7).
     pub health: Health,
+    /// C7 refinement: each non-discarded phase's own health, keyed by number.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub phases_health: BTreeMap<String, Health>,
 }
 
 /// What a member carries of the plan (C7).
@@ -287,42 +290,28 @@ pub(crate) struct Starved {
 /// owner sees in the GUI (C7).
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct Health {
+    /// Tasks not yet decided in this scope (the plan, or one phase).
     pub tasks: usize,
+    /// The longest hard-dependency chain (the old critical_path meaning).
+    pub chain: usize,
+    /// The schedule length when every member does one task at a time.
     pub critical_path: usize,
     pub parallelism: f64,
     pub per_member: BTreeMap<String, MemberLoad>,
     pub widest_ready: usize,
     pub fan_in: Vec<FanIn>,
     pub warnings: Vec<String>,
+    /// The scope's task count and how many are decided.
+    pub totals: Totals,
     /// Filled by status while the team runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starved: Vec<Starved>,
 }
 
-/// The longest path to a task with no dependent, cutting cycle back edges
-/// (C7): the height of a node in the dependency DAG.
-fn heights(tasks: &[Task]) -> BTreeMap<u32, u32> {
-    fn height(tasks: &[Task], id: u32, memo: &mut BTreeMap<u32, u32>, visiting: &mut BTreeSet<u32>) -> u32 {
-        if let Some(&found) = memo.get(&id) {
-            return found;
-        }
-        if !visiting.insert(id) {
-            return 0;
-        }
-        let found = dependents(tasks, id)
-            .into_iter()
-            .map(|dependent| height(tasks, dependent, memo, visiting).saturating_add(1))
-            .max()
-            .unwrap_or(0);
-        visiting.remove(&id);
-        memo.insert(id, found);
-        found
-    }
-    let mut memo = BTreeMap::new();
-    for task in tasks {
-        height(tasks, task.id, &mut memo, &mut BTreeSet::new());
-    }
-    memo
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct Totals {
+    pub tasks: usize,
+    pub decided: usize,
 }
 
 /// A review, QA or acceptance task, by the role of its assignee and then its
@@ -343,42 +332,128 @@ fn review_kind(role: &str, title: &str) -> Option<&'static str> {
     classify(role).or_else(|| classify(title))
 }
 
-/// The plan-health block (C7): the critical path, expected parallelism, each
-/// member's share, the widest ready layer, fan-in barriers and the warnings a
-/// planning lead must read before asking for approval.
+/// The plan-health block (C7): the plan covers every task not yet decided,
+/// across phases, with decided work only in the totals.
 pub(crate) fn health(team: &Team) -> Health {
-    let tasks = &team.tasks;
-    let mut health = Health { tasks: tasks.len(), ..Default::default() };
-    if tasks.is_empty() {
+    health_of(team, &team.tasks)
+}
+
+/// One phase's health (C7 refinement): only its own tasks; a dependency on an
+/// earlier phase counts as met.
+pub(crate) fn phase_health(team: &Team, phase: u32) -> Health {
+    let tasks: Vec<Task> = team.tasks.iter().filter(|task| task.phase == phase).cloned().collect();
+    health_of(team, &tasks)
+}
+
+/// The health of every non-discarded phase, phase 1 included, keyed by number.
+pub(crate) fn phases_health(team: &Team) -> BTreeMap<String, Health> {
+    let mut phases: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).collect();
+    phases.extend(team.phases.iter().filter(|phase| phase.state != PhaseState::Discarded).map(|phase| phase.n));
+    phases
+        .into_iter()
+        .map(|phase| (phase.to_string(), phase_health(team, phase)))
+        .collect()
+}
+
+fn hard_deps(task: &Task, all_hard: bool) -> Vec<u32> {
+    task.deps
+        .iter()
+        .filter(|dep| all_hard || dep.kind == DependencyKind::Hard)
+        .map(|dep| dep.task)
+        .collect()
+}
+
+fn health_of(team: &Team, scope: &[Task]) -> Health {
+    let open: Vec<Task> = scope.iter().filter(|task| !task.status.finished()).cloned().collect();
+    let mut health = Health {
+        tasks: open.len(),
+        totals: Totals { tasks: scope.len(), decided: scope.len() - open.len() },
+        ..Default::default()
+    };
+    if open.is_empty() {
         return health;
     }
-    let depth = layers(tasks);
-    let height = heights(tasks);
-    let longest: BTreeMap<u32, u32> = tasks
-        .iter()
-        .map(|task| (task.id, depth.get(&task.id).copied().unwrap_or(0) + height.get(&task.id).copied().unwrap_or(0) + 1))
-        .collect();
-    health.critical_path = longest.values().copied().max().unwrap_or(0) as usize;
-    health.parallelism = if health.critical_path == 0 { 0.0 } else { tasks.len() as f64 / health.critical_path as f64 };
-    health.widest_ready = depth.values().fold(BTreeMap::<u32, usize>::new(), |mut layers, layer| {
-        *layers.entry(*layer).or_default() += 1;
-        layers
-    }).values().copied().max().unwrap_or(0);
-    for task in tasks {
+    let all_hard = team.settings.all_hard;
+    let ids: BTreeSet<u32> = open.iter().map(|task| task.id).collect();
+    let by_id: BTreeMap<u32, &Task> = open.iter().map(|task| (task.id, task)).collect();
+    // The longest hard chain among the open tasks.
+    fn chain(id: u32, by_id: &BTreeMap<u32, &Task>, all_hard: bool, memo: &mut BTreeMap<u32, usize>, visiting: &mut BTreeSet<u32>) -> usize {
+        if let Some(found) = memo.get(&id) {
+            return *found;
+        }
+        if !visiting.insert(id) {
+            return 0;
+        }
+        let found = by_id
+            .get(&id)
+            .map(|task| {
+                hard_deps(task, all_hard)
+                    .into_iter()
+                    .filter(|dep| by_id.contains_key(dep))
+                    .map(|dep| chain(dep, by_id, all_hard, memo, visiting))
+                    .max()
+                    .unwrap_or(0)
+                    + 1
+            })
+            .unwrap_or(0);
+        visiting.remove(&id);
+        memo.insert(id, found);
+        found
+    }
+    let mut memo = BTreeMap::new();
+    let mut chain_of = BTreeMap::new();
+    for id in &ids {
+        chain_of.insert(*id, chain(*id, &by_id, all_hard, &mut memo, &mut BTreeSet::new()));
+    }
+    health.chain = chain_of.values().copied().max().unwrap_or(0);
+    // Schedule one task per member at a time; ready tasks in id order. A hard
+    // dependency outside the open set (decided, or an earlier phase) is met.
+    let mut scheduled: BTreeSet<u32> = BTreeSet::new();
+    let mut steps = 0usize;
+    while scheduled.len() < open.len() {
+        steps += 1;
+        let ready: Vec<&Task> = open
+            .iter()
+            .filter(|task| {
+                !scheduled.contains(&task.id)
+                    && hard_deps(task, all_hard)
+                        .into_iter()
+                        .filter(|dep| ids.contains(dep))
+                        .all(|dep| scheduled.contains(&dep))
+            })
+            .collect();
+        health.widest_ready = health.widest_ready.max(ready.len());
+        let mut busy: BTreeSet<String> = BTreeSet::new();
+        let mut progress = false;
+        for task in ready {
+            if busy.contains(&task.assignee) {
+                continue;
+            }
+            busy.insert(task.assignee.clone());
+            scheduled.insert(task.id);
+            progress = true;
+        }
+        if !progress {
+            break;
+        }
+    }
+    health.critical_path = steps.max(1);
+    health.parallelism = health.tasks as f64 / health.critical_path as f64;
+    for task in &open {
         let load = health.per_member.entry(task.assignee.clone()).or_default();
         load.tasks += 1;
-        if longest.get(&task.id).copied().unwrap_or(0) as usize == health.critical_path {
+        if chain_of.get(&task.id).copied().unwrap_or(0) == health.chain {
             load.on_critical_path += 1;
         }
     }
-    for task in tasks {
+    for task in &open {
         let mut waits_for = Vec::new();
         let mut kind = None;
-        for dep in task.deps.iter().filter(|dep| dep.kind == DependencyKind::Hard || team.settings.all_hard) {
-            let Some(found) = team.task(dep.task) else { continue };
+        for dep in hard_deps(task, all_hard) {
+            let Some(found) = by_id.get(&dep) else { continue };
             let role = team.member(&found.assignee).map(|member| member.role.as_str()).unwrap_or_default();
             if let Some(found_kind) = review_kind(role, &found.title) {
-                waits_for.push(dep.task);
+                waits_for.push(dep);
                 kind.get_or_insert(found_kind);
             }
         }
@@ -400,12 +475,12 @@ pub(crate) fn health(team: &Team) -> Health {
         ));
     }
     for (member, load) in &health.per_member {
-        if health.critical_path > 1 && load.on_critical_path * 2 > health.critical_path {
+        if health.chain > 1 && load.on_critical_path * 2 > health.chain {
             health.warnings.push(format!(
                 "{} holds {} of the {} critical-path tasks",
                 team.role_of(member),
                 load.on_critical_path,
-                health.critical_path
+                health.chain
             ));
         }
     }
@@ -598,6 +673,7 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
         }
     }
     found.health = health(team);
+    found.phases_health = phases_health(team);
     found
 }
 
@@ -677,6 +753,52 @@ mod tests {
         // A soft dependency still waiting does not let its dependent start.
         let t = team(vec![task(1, &[], Pending), task(2, &[(1, Soft)], Pending)]);
         assert_eq!(ready(&t), vec![1]);
+    }
+
+    #[test]
+    fn each_phase_health_matches_a_hand_count() {
+        let mut t = team(vec![
+            task(1, &[], Accepted),
+            task(2, &[], Accepted),
+            task(3, &[(1, Hard)], Draft),
+            task(4, &[(1, Soft)], Draft),
+            task(5, &[(3, Hard)], Draft),
+            task(6, &[(3, Hard)], Draft),
+        ]);
+        t.tasks[0].phase = 1;
+        t.tasks[1].phase = 1;
+        t.tasks[2].phase = 2;
+        t.tasks[3].phase = 2;
+        t.tasks[4].phase = 2;
+        t.tasks[5].phase = 3;
+        t.tasks[2].assignee = "dev".into();
+        t.tasks[3].assignee = "qa".into();
+        t.tasks[4].assignee = "dev".into();
+        t.tasks[5].assignee = "dev".into();
+        t.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        t.phases.push(Phase { n: 2, title: "Next".into(), state: PhaseState::Draft, tasks: vec![3, 4, 5], ..Default::default() });
+        t.phases.push(Phase { n: 3, title: "Later".into(), state: PhaseState::Draft, tasks: vec![6], ..Default::default() });
+        let found = validate(&t, &BTreeSet::new());
+        // Phase 2 has three open tasks: chain 3 -> 5, two ready at once, and
+        // dev serializes its two tasks (two steps).
+        let phase2 = &found.phases_health["2"];
+        assert_eq!((phase2.tasks, phase2.chain, phase2.critical_path), (3, 2, 2));
+        assert_eq!((phase2.widest_ready, phase2.totals.tasks), (2, 3));
+        assert!((phase2.parallelism - 1.5).abs() < 1e-9);
+        assert_eq!(phase2.per_member["dev"], MemberLoad { tasks: 2, on_critical_path: 1 });
+        // Phase 3's only task waits on a task of an earlier phase: met.
+        let phase3 = &found.phases_health["3"];
+        assert_eq!((phase3.tasks, phase3.chain, phase3.critical_path), (1, 1, 1));
+        // Phase 1 is history: decided work is only in the totals.
+        let phase1 = &found.phases_health["1"];
+        assert_eq!((phase1.tasks, phase1.critical_path), (0, 0));
+        assert_eq!(phase1.totals, Totals { tasks: 2, decided: 2 });
+        // The plan counts the four open tasks across phases and schedules them
+        // in three steps.
+        assert_eq!((found.health.tasks, found.health.chain, found.health.critical_path), (4, 2, 3));
+        assert_eq!(found.health.totals, Totals { tasks: 6, decided: 2 });
+        assert!((found.health.parallelism - 4.0 / 3.0).abs() < 1e-9);
+        assert_eq!(found.health.per_member["dev"].tasks, 3);
     }
 
     #[test]
@@ -801,24 +923,30 @@ mod tests {
         t.tasks[4].assignee = "qa".into();
         t.tasks[4].title = "QA review".into();
         t.tasks[2].deps.push(Dependency { task: 5, kind: Hard });
+        for task in &mut t.tasks {
+            task.phase = 1;
+        }
         let found = validate(&t, &BTreeSet::new());
         let health = &found.health;
-        // The chain 1 -> 2 -> 3 is the critical path; the widest layer is the
-        // three independent tasks at depth 0.
-        assert_eq!((health.tasks, health.critical_path), (5, 3));
-        assert!((health.parallelism - 5.0 / 3.0).abs() < 1e-9);
+        // C7 refinement: the chain is 1 -> 2 -> 3; with one member per task the
+        // schedule takes four steps (dev does 1, 2, 3, 4 in order).
+        assert_eq!((health.tasks, health.chain, health.critical_path), (5, 3, 4));
+        assert!((health.parallelism - 5.0 / 4.0).abs() < 1e-9);
         assert_eq!(health.widest_ready, 3);
-        assert_eq!(health.per_member["dev"], MemberLoad { tasks: 4, on_critical_path: 3 });
+        assert_eq!(health.totals, Totals { tasks: 5, decided: 0 });
+        assert_eq!(health.per_member["dev"], MemberLoad { tasks: 4, on_critical_path: 1 });
         assert_eq!(health.per_member["qa"], MemberLoad { tasks: 1, on_critical_path: 0 });
         // A hard dependency on the QA task is a fan-in barrier.
         assert_eq!(health.fan_in, vec![FanIn { task: 3, waits_for: vec![5], kind: "qa".into() }]);
         assert!(health.warnings.iter().any(|warning| warning.contains("#3 waits for the qa task #5")), "{:?}", health.warnings);
-        // One member holding more than half the critical path is a warning.
-        assert!(health.warnings.iter().any(|warning| warning.contains("Backend holds 3 of the 3")), "{:?}", health.warnings);
-        // Status carries the same block.
+        // Five tasks over four steps with three members is a warning.
+        assert!(health.warnings.iter().any(|warning| warning.contains("parallelism 1.2")), "{:?}", health.warnings);
+        // Status carries the same block, and each phase has its own.
         let value = serde_json::to_value(&found).unwrap();
-        assert_eq!(value["health"]["critical_path"], 3);
-        assert_eq!(value["health"]["per_member"]["dev"]["on_critical_path"], 3);
+        assert_eq!(value["health"]["critical_path"], 4);
+        assert_eq!(value["health"]["chain"], 3);
+        assert_eq!(value["health"]["per_member"]["dev"]["on_critical_path"], 1);
+        assert_eq!(value["phases_health"]["1"]["tasks"], 5);
     }
 
     #[test]

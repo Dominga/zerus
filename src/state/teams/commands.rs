@@ -248,6 +248,15 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     }
     value["validation"] = json!(&validation);
     value["health"] = json!(&validation.health);
+    // C7 refinement: each phase's own health, at the top and on the phase.
+    value["phases_health"] = json!(&validation.phases_health);
+    if let Some(phases) = value["phases"].as_array_mut() {
+        for (phase, value) in team.phases.iter().zip(phases) {
+            if let Some(health) = validation.phases_health.get(&phase.n.to_string()) {
+                value["health"] = json!(health);
+            }
+        }
+    }
     value["layers"] = json!(plan::layers(&team.tasks));
     value["cycle"] = json!(plan::cycle_tasks(&team.tasks));
     value["ready"] = json!(plan::ready(team));
@@ -1720,6 +1729,22 @@ mod tests {
         }
         let parent = store.load("p").unwrap().unwrap();
         ensure_children_closed(&store, &parent).unwrap();
+    }
+
+    #[test]
+    fn status_carries_each_phases_health() {
+        let mut team = running_team();
+        team.tasks.push(Task { id: 2, title: "Next".into(), assignee: "dev".into(), phase: 2, status: TaskStatus::Draft, ..Default::default() });
+        team.phases.push(Phase { n: 2, title: "Next".into(), state: PhaseState::Draft, tasks: vec![2], ..Default::default() });
+        let value = view_with(&team, &[], None);
+        // C7: the plan block, the phase map and each phase's own health.
+        assert_eq!(value["phases_health"]["1"]["tasks"], 1);
+        assert_eq!(value["phases_health"]["2"]["tasks"], 1);
+        let phase = value["phases"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap();
+        assert_eq!(phase["health"]["tasks"], 1);
+        // Old fields stay: the plan health still names tasks and a path.
+        assert_eq!(value["health"]["tasks"], 2);
+        assert!(value["health"].get("critical_path").is_some());
     }
 
     #[test]

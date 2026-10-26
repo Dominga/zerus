@@ -703,6 +703,21 @@ answered; a denial cannot carry an explanation.
   dsh sessions with it off, verifies it and marks a session that still
   uploads. Owner: yes, in the fixes phase.
 
+- **U23. Stop the trial-and-error loops (owner, 2026-10-27).** DeepSeek flash
+  members spent hours in build-run-edit cycles (QA on #356 fixed its tests
+  around a bug in its own widget code; frontend on #343 ran out of context), and
+  the lead approved each cycle without seeing that the task stood still.
+  (1) Loop detection: Zerus notices the same failing test or the same build
+  error across N runs (template runs or escalations) of one attempt and tells
+  the lead once with the repeated failure, so the lead looks at the cause or
+  hands the task to the Expert (U13). (2) Role guard: plan validation warns
+  when a QA or Reviewer member gets an implementation task, and when one member
+  both implements a task and reviews or tests it; the lead's reassign shows
+  the same warning. (3) Model routing: the designer and the lead protocol give
+  GUI work and hard debugging to stronger models and keep the light DeepSeek
+  model for well-specified backend work; templates carry that default.
+  Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

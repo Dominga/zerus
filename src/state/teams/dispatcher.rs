@@ -808,12 +808,15 @@ fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
 /// The message that gives a member its task.
 pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_host: &str, member_host: &str) -> String {
     let mut text = format!(
-        "[Zerus team \u{b7} from: Lead \u{b7} task: #{} \u{b7} attempt: {}]\nTeam: {}. Your role: {}.\n",
-        task.id,
+        "[Zerus team \u{b7} from: Lead \u{b7} task: #{} \u{b7} attempt: {}]\nTeam: {}. Your role: {}.\n",        task.id,
         attempt.n,
         team.name,
         team.role_of(&attempt.member)
     );
+    // D2: a reopened task starts with its finding and the lead's note.
+    if !task.reopen_note.trim().is_empty() {
+        text = format!("[Zerus team \u{b7} finding]\n{}\n\n{text}", task.reopen_note.trim());
+    }
     if !team.goal.is_empty() {
         text += &format!("Team goal: {}\n", team.goal);
     }
@@ -1525,6 +1528,12 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
         task.status = TaskStatus::Assigned;
         let task = team.task(task_id).unwrap();
         message = Some((session, hand_off_text(team, task, task.attempts.last().unwrap(), host, &member_host)));
+        // D2: the finding goes with this one hand-out only.
+        if !task.reopen_note.is_empty() {
+            if let Some(task) = team.task_mut(task_id) {
+                task.reopen_note.clear();
+            }
+        }
         events.push(Event::new("handed_out", json!({"by":"Lead","task":task_id,"to":team.role_of(member_id),"attempt":n})));
         Ok(())
     })?;
@@ -4531,6 +4540,20 @@ mod tests {
         let mode = args.iter().position(|arg| arg == "--permission-mode").unwrap();
         assert!(mode > separator, "{args:?}");
         assert_eq!(args[mode + 1], "acceptEdits");
+    }
+
+    #[test]
+    fn a_reopened_task_hands_out_its_finding_first() {
+        use crate::state::teams::model::{Attempt, Member, Task, Team};
+        let mut team = Team { name: "T".into(), ..Default::default() };
+        team.members.push(Member { id: "dev".into(), role: "Backend".into(), ..Default::default() });
+        let mut task = Task { id: 1, title: "A".into(), assignee: "dev".into(), ..Default::default() };
+        task.reopen_note = "Finding f1 (critical): Lost write\nsrc/save.rs:42\nScenario: two saves at once\nLead's note: fix today".into();
+        let attempt = Attempt { n: 1, member: "dev".into(), ..Default::default() };
+        let text = hand_off_text(&team, &task, &attempt, "", "");
+        assert!(text.starts_with("[Zerus team \u{b7} finding]"), "{text}");
+        assert!(text.contains("Lost write") && text.contains("src/save.rs:42") && text.contains("Lead's note: fix today"), "{text}");
+        assert!(text.contains("Task #1"), "{text}");
     }
 
     #[test]

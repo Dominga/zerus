@@ -395,6 +395,15 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
             })
         })
         .collect();
+    // D2: deferred findings reach the owner here, not only in the feed: one
+    // item naming how many wait for a fix.
+    let deferred: Vec<&crate::state::teams::model::Finding> =
+        team.findings.iter().filter(|finding| finding.state == "deferred").collect();
+    if !deferred.is_empty() {
+        let latest = deferred.iter().map(|finding| finding.at).fold(0.0_f64, f64::max);
+        out.push(json!({"kind":"findings","count":deferred.len(),"since":latest,
+            "summary":format!("{} findings deferred", deferred.len())}));
+    }
     out.sort_by(|a, b| a["since"].as_f64().unwrap_or_default().total_cmp(&b["since"].as_f64().unwrap_or_default()));
     out
 }
@@ -423,6 +432,26 @@ mod tests {
         .unwrap();
         ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
         team
+    }
+
+    #[test]
+    fn deferred_findings_reach_the_owners_attention_list() {
+        use crate::state::teams::model::Finding;
+        let mut team = team();
+        team.settings.remind_owner_minutes = 10;
+        team.findings.push(Finding {
+            id: "f1".into(),
+            severity: "later".into(),
+            title: "Polish".into(),
+            scenario: "s".into(),
+            state: "deferred".into(),
+            at: 10.0,
+            ..Default::default()
+        });
+        let items = attention(&team, 1000.0);
+        let found = items.iter().find(|item| item["kind"] == "findings").unwrap();
+        assert_eq!(found["count"], 1);
+        assert!(found["summary"].as_str().unwrap_or_default().contains("1 findings deferred"));
     }
 
     #[test]

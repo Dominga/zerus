@@ -1124,7 +1124,20 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         "finished",
         json!({"by":by,"accepted":accepted,"tasks":team.tasks.len(),"summary_chars":summary_chars}),
     ));
-    Ok(json!({"status":"finished"}))
+    // D2: the result lists every open and deferred finding, at most 100 with a
+    // count of the rest, so the owner sees what remains.
+    let open_findings: Vec<&Finding> = team
+        .findings
+        .iter()
+        .filter(|finding| matches!(finding.state.as_str(), "open" | "reopened" | "urgent" | "deferred"))
+        .collect();
+    let listed: Vec<Value> = open_findings
+        .iter()
+        .take(100)
+        .map(|finding| json!({"id":finding.id,"severity":finding.severity,"title":finding.title,"state":finding.state}))
+        .collect();
+    let more = open_findings.len().saturating_sub(listed.len());
+    Ok(json!({"status":"finished","findings":listed,"findings_more":more}))
 }
 
 /// The phase of a task's last attempt as `status`, `current` and the desktop
@@ -1624,10 +1637,18 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
     let state = match action.as_str() {
         "reopen" => {
             let task_id = input["task"].as_u64().map(|n| n as u32).or(team.findings[at].task).context("A reopen names its task")?;
-            let text = format!(
-                "Finding {} ({}): {}\n{}",
-                team.findings[at].id, severity, team.findings[at].title, team.findings[at].scenario
+            let location = if team.findings[at].file.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}:{}", team.findings[at].file, team.findings[at].line.unwrap_or(0))
+            };
+            let mut text = format!(
+                "Finding {} ({}): {}{}\nScenario: {}",
+                team.findings[at].id, severity, team.findings[at].title, location, team.findings[at].scenario
             );
+            if !note.is_empty() {
+                text.push_str(&format!("\nLead's note: {note}"));
+            }
             let task = team.task_mut(task_id).context("Unknown task")?;
             ensure!(task.status == TaskStatus::Accepted, "A reopen needs an accepted task");
             task.history.push(json!({"decided_by":task.decided_by,"reason":task.decision_reason,"at":now()}));
@@ -3887,8 +3908,12 @@ mod tests {
         });
         let error = apply(&mut team, "finish", &json!({"summary":"Done"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
         assert!(error.contains("critical finding"), "{error}");
-        apply(&mut team, "finish", &json!({"summary":"Done","force":true}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let finished = apply(&mut team, "finish", &json!({"summary":"Done","force":true}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         assert_eq!(team.status, TeamStatus::Done);
+        // D2: the result lists the open findings and how many were cut.
+        assert_eq!(finished["findings"][0]["id"], "f1");
+        assert_eq!(finished["findings"][0]["state"], "open");
+        assert_eq!(finished["findings_more"], 0);
     }
 
     #[test]

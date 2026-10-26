@@ -367,8 +367,23 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     };
     let deferred = team.findings.iter().filter(|finding| finding.state == "deferred").count();
     value["findings_summary"] = json!({"open":{"critical":open("critical"),"normal":open("normal"),"later":open("later")},"deferred":deferred});
-    value["findings"] = json!(team.findings.iter().rev().take(50).collect::<Vec<_>>());
+    value["findings"] = findings_page(team, None);
     value
+}
+
+/// D2: one page of findings, newest first, with a stable cursor: `before` is a
+/// finding number and the page holds the 50 newest older than it.
+fn findings_page(team: &Team, before: Option<u64>) -> Value {
+    let number = |id: &str| id.trim_start_matches('f').parse::<u64>().unwrap_or(0);
+    let items: Vec<&super::model::Finding> = team
+        .findings
+        .iter()
+        .filter(|finding| before.is_none_or(|before| number(&finding.id) < before))
+        .rev()
+        .take(50)
+        .collect();
+    let next_cursor = (items.len() == 50).then(|| items.last().map(|finding| number(&finding.id))).flatten();
+    json!({"items":items,"next_cursor":next_cursor})
 }
 
 /// A team as the session list shows it: members with their sessions and each
@@ -975,7 +990,10 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             // Only the teams that still run, from the indexed query, so a
             // finished team's status never reads every team (C1).
             let teams = if finished { active_team_records(&store)? } else { Vec::new() };
-            Ok(view_with(&team, &teams, sessions.as_deref()))
+            let mut value = view_with(&team, &teams, sessions.as_deref());
+            // D2: the findings page takes a before cursor.
+            value["findings"] = findings_page(&team, input["before"].as_u64());
+            Ok(value)
         }
         "inbox" => {
             let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
@@ -1140,6 +1158,29 @@ mod tests {
         team.members[1].directory.clear();
         assert_eq!(super::view_with(&team, &[], None)["members"][1]["outside_project"], true);
         std::env::remove_var("GIT_CEILING_DIRECTORIES");
+    }
+
+    #[test]
+    fn findings_pages_are_stable_with_a_before_cursor() {
+        use crate::state::teams::model::{Finding, Team};
+        let mut team = Team { ..Default::default() };
+        for n in 1..=120 {
+            team.findings.push(Finding { id: format!("f{n}"), severity: "normal".into(), title: format!("F{n}"), scenario: "s".into(), state: "open".into(), ..Default::default() });
+        }
+        let first = super::findings_page(&team, None);
+        assert_eq!(first["items"].as_array().unwrap().len(), 50);
+        assert_eq!(first["items"][0]["id"], "f120");
+        assert_eq!(first["next_cursor"], 71);
+        let second = super::findings_page(&team, Some(71));
+        assert_eq!(second["items"].as_array().unwrap().len(), 50);
+        assert_eq!(second["items"][0]["id"], "f70");
+        assert_eq!(second["next_cursor"], 21);
+        let third = super::findings_page(&team, Some(21));
+        assert_eq!(third["items"].as_array().unwrap().len(), 20);
+        assert_eq!(third["next_cursor"], serde_json::Value::Null);
+        // A new finding does not shift the second page.
+        team.findings.push(Finding { id: "f121".into(), severity: "normal".into(), title: "New".into(), scenario: "s".into(), state: "open".into(), ..Default::default() });
+        assert_eq!(super::findings_page(&team, Some(71))["items"][0]["id"], "f70");
     }
 
     #[test]

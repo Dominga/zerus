@@ -372,6 +372,10 @@ answered; a denial cannot carry an explanation.
   plan or by `extend` in any active status); `approve-phase N` is refused
   until every earlier phase is approved and decided; discarding one draft
   keeps the later ones. Owner: yes, in phase 1 of the next team.
+- **F11. Deferred from the phase-1 re-review.** (1) A guard against stale
+  draft task ids after a renumber: draft-task operations carry the team
+  revision they read, refused when a phase_renumbered came after it. (2) L9
+  rest: a Paused team's lead messages are coalesced too.
 - **F10. Editable drafts.** Seen in use: an urgent fix could not be put before
   the queued drafts (a new phase always goes last), a draft cannot take one more
   task, and only the owner may discard. Proposal: until a draft is approved the

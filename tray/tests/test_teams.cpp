@@ -142,6 +142,7 @@ private slots:
     void permissionRequestsCarryTheCommandAndTheAnswer();
     void listSummaryCarriesTaskPhasesAndPhaseRecords();
     void leadLoadViewsCarryTheirNumbers();
+    void permissionRequestFromTheMemberAndItsAnswer();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
@@ -357,6 +358,58 @@ void TestTeams::leftRunningMembersOfAFinishedTeam()
 // tasks bar and 2/5 phases.
 // C1-C4, C5, C7, C12, G7, F12, F13: the lead-load and services fields the
 // desktop reads, from a status shaped like the spec's.
+// C4: the permission comes from members[].question as hgs sends it, with the
+// answers from members[].permission_answers; N6: the check result comes from
+// attempts[].check.
+void TestTeams::permissionRequestFromTheMemberAndItsAnswer()
+{
+    auto team = phasedTeam();
+    team["status"] = "running";
+    auto members = team["members"].toArray();
+    auto backend = members[1].toObject();
+    backend["question"] = QJsonObject{{"question_id", "toolu_1"}, {"tool", "Bash"},
+        {"command", "npm run migrate --force"}, {"command_source", "tool_input"},
+        {"reason", "the migration is not reversible"}, {"asked_at", 1792868400.0},
+        {"question_hash", "h1"}};
+    backend["permission_answers"] = QJsonArray{
+        QJsonObject{{"question_id", "q0"}, {"decision", "deny"}, {"by", "lead"}, {"at", 1792868300.0}, {"reason", "not now"}}};
+    members[1] = backend; team["members"] = members;
+    auto tasks = team["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 4) continue;
+        task["kind"] = "check";
+        task["check"] = QJsonObject{{"command", "cargo test --locked --bin hgs teams"}, {"expect_exit", 0}, {"timeout_minutes", 30}};
+        auto attempts = task["attempts"].toArray();
+        if (attempts.isEmpty()) attempts.append(QJsonObject{});
+        auto attempt = attempts[0].toObject();
+        attempt["check"] = QJsonObject{{"exit", 0}, {"tail", "120 passed"}, {"at", 1792868400.0}};
+        attempts[0] = attempt; task["attempts"] = attempts;
+        tasks[i] = task;
+    }
+    team["tasks"] = tasks;
+    const auto parsed = parse(team);
+    const auto *member = parsed.member("backend");
+    QVERIFY(member);
+    QVERIFY(member->permission.permission());
+    QCOMPARE(member->permission.id, QStringLiteral("toolu_1"));
+    QCOMPARE(member->permission.tool, QStringLiteral("Bash"));
+    QCOMPARE(member->permission.command, QStringLiteral("npm run migrate --force"));
+    QCOMPARE(member->permission.commandSource, QStringLiteral("tool_input"));
+    QCOMPARE(member->permission.hash, QStringLiteral("h1"));
+    QCOMPARE(member->permissionAnswers.size(), 1);
+    QVERIFY(member->permissionAnswers[0].denied());
+    QCOMPARE(member->permissionAnswers[0].by, QStringLiteral("lead"));
+    QCOMPARE(member->permissionAnswers[0].reason, QStringLiteral("not now"));
+    const auto *check = parsed.task(4);
+    QVERIFY(check && check->isCheck());
+    QCOMPARE(check->check.command, QStringLiteral("cargo test --locked --bin hgs teams"));
+    QVERIFY(!check->attempts.isEmpty());
+    QVERIFY(check->attempts[0].checkResult.known);
+    QCOMPARE(check->attempts[0].checkResult.exit, 0);
+    QCOMPARE(check->attempts[0].checkResult.tail, QStringLiteral("120 passed"));
+}
+
 void TestTeams::leadLoadViewsCarryTheirNumbers()
 {
     auto team = phasedTeam();

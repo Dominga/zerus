@@ -164,6 +164,9 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
     m_folderPolicy->addItem(tr("Shared folder"), QStringLiteral("shared"));
     m_folderPolicy->addItem(tr("Worktree per member"), QStringLiteral("worktree"));
     m_folderPolicy->setToolTip(tr("Auto lets the lead choose the folder each member works in"));
+    // N10: typing a path keeps auto; a finished non-Git path forces shared.
+    QObject::connect(m_folder, &QLineEdit::editingFinished, this, [this] { m_folderCommitted = true; validate(); });
+    QObject::connect(m_folder, &QLineEdit::textChanged, this, [this] { m_folderCommitted = false; });
     QObject::connect(m_folderPolicy, &QComboBox::currentIndexChanged, this, [this] {
         m_worktrees->setChecked(m_folderPolicy->currentData().toString() != QStringLiteral("shared"));
         validate();
@@ -603,8 +606,8 @@ void TeamNewTab::validate()
     const bool git = !folder.isEmpty() && QDir(folder).exists(QStringLiteral(".git"));
     m_worktrees->setEnabled(git);
     if (!git && m_worktrees->isChecked()) { const QSignalBlocker block(m_worktrees); m_worktrees->setChecked(false); }
-    // B6: without a Git folder only a shared folder makes sense.
-    if (m_folderPolicy && !git && m_folderPolicy->currentData().toString() != "shared") {
+    // B6/N10: typing a path keeps auto; a finished non-Git path forces shared.
+    if (m_folderPolicy && !git && m_folderCommitted && m_folderPolicy->currentData().toString() != "shared") {
         // No signals: currentIndexChanged would call validate() again inside this one.
         const QSignalBlocker block(m_folderPolicy);
         m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));

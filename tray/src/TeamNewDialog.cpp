@@ -84,6 +84,9 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     m_folderPolicy->addItem(tr("Shared folder"), QStringLiteral("shared"));
     m_folderPolicy->addItem(tr("Worktree per member"), QStringLiteral("worktree"));
     m_folderPolicy->setToolTip(tr("Auto lets the lead choose the folder each member works in"));
+    // N10: typing a path keeps auto; a finished non-Git path forces shared.
+    QObject::connect(m_folder, &QLineEdit::editingFinished, this, [this] { m_folderCommitted = true; validate(); });
+    QObject::connect(m_folder, &QLineEdit::textChanged, this, [this] { m_folderCommitted = false; });
     connect(m_folderPolicy, &QComboBox::currentIndexChanged, this, [this] {
         m_worktrees->setChecked(m_folderPolicy->currentData().toString() != QStringLiteral("shared"));
         validate();
@@ -291,7 +294,7 @@ void TeamNewDialog::validate()
         if (auto *model = qobject_cast<QStandardItemModel *>(m_folderPolicy->model()))
             if (auto *item = model->item(m_folderPolicy->findData(QStringLiteral("worktree"))))
                 item->setEnabled(git);
-        if (!git && m_folderPolicy->currentData().toString() != "shared") {
+        if (!git && m_folderCommitted && m_folderPolicy->currentData().toString() != "shared") {
             // No signals: currentIndexChanged would call validate() again in the
             // middle of this one (the crash seen in newTeamStartsTheLeadWithTheTemplate).
             const QSignalBlocker block(m_folderPolicy);

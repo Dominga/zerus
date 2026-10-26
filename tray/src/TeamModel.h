@@ -22,6 +22,27 @@ inline QStringList knownModels(const QString &agent)
     return known.value(agent);
 }
 
+// A member's question to the lead (A3), open until the lead answers it. B1/C4:
+// a permission request carries the exact command, its source ("tool_input",
+// "process" or "unknown"), the agent's reason and the question hash hgs team
+// answer expects.
+struct Question {
+    QString id, text, answer, by;
+    double at = 0, answeredAt = 0;
+    QString tool, command, commandSource, reason, decision;
+    QString hash;
+    bool answered() const { return answeredAt > 0 || !answer.isEmpty(); }
+    bool permission() const { return !tool.isEmpty() || !command.isEmpty() || !reason.isEmpty(); }
+};
+
+// C4: one answered permission request (members[].permission_answers keeps the
+// last 20): what was decided, who decided it and the deny text.
+struct PermissionAnswer {
+    QString questionId, decision, by, reason;
+    double at = 0;
+    bool denied() const { return decision == "deny"; }
+};
+
 struct Member {
     QString id, role, agent, model, computer, state, error;
     QString account, effort, permissions, folder, directory, prompt;
@@ -49,6 +70,10 @@ struct Member {
         bool known = false;
     };
     Budget budget;
+    // C4: the member's pending permission request and the answers so far, as
+    // `team status` sends them in members[].question and permission_answers.
+    Question permission;
+    QList<PermissionAnswer> permissionAnswers;
     QJsonObject json() const;
 };
 
@@ -59,31 +84,10 @@ struct SessionChoice {
     QString host, name, runId, conversationId, agent, directory;
 };
 
-// A member's question to the lead (A3); open until the lead answers it. B1: a
-// permission request also carries the exact command the agent asked about,
-// where it came from ("tool_input", "process" or "unknown"), the agent's
-// reason, and on the answer the decision, who made it (lead, owner, rule,
-// timeout, unknown) and the deny text.
-struct Question {
-    QString id, text, answer, by;
-    double at = 0, answeredAt = 0;
-    QString tool, command, commandSource, reason, decision;
-    bool answered() const { return answeredAt > 0 || !answer.isEmpty(); }
-    bool permission() const { return !tool.isEmpty() || !command.isEmpty() || !reason.isEmpty(); }
-};
-
 // A report that replaced the reply captured for an attempt (A6).
 struct ReplacedReport {
     QString text;
     double at = 0;
-};
-
-// B1: one answered permission request on an attempt (the store keeps the last
-// 20): what was decided, who decided it and the deny text.
-struct PermissionAnswer {
-    QString questionId, decision, by, reason;
-    double at = 0;
-    bool denied() const { return decision == "deny"; }
 };
 
 struct Attempt {
@@ -106,6 +110,9 @@ struct Attempt {
     bool phaseKnown = false;
     QList<Question> questions;          // oldest first
     QList<PermissionAnswer> permissions; // B1: answered requests, oldest first
+    // N6: the check this attempt ran (attempts[].check): exit and last lines.
+    struct CheckResult { int exit = 0; QString tail; bool known = false; };
+    CheckResult checkResult;
     const Question *openQuestion() const
     {
         for (const auto &question : questions) if (!question.answered()) return &question;

@@ -57,6 +57,9 @@ private:
     // B6: how members get their folders - auto (the lead picks), shared or a
     // worktree each. A folder that is not a Git repository allows only shared.
     QComboBox *m_folderPolicy = nullptr;
+    // N10: set when the folder path is finished (focus out or Enter), so typing
+    // keeps auto and only a finished non-Git path forces shared.
+    bool m_folderCommitted = true;
     QComboBox *m_planning;
     QSpinBox *m_maxMembers;
     QPlainTextEdit *m_goal;

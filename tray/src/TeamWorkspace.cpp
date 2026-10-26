@@ -374,8 +374,13 @@ QWidget *TeamWorkspace::draftPhase(const Team &team, int phase)
     if (!blocked.isEmpty() || predecessorNotReady) {
         QString text = approveBlockedShort(team, phase);
         if (predecessorNotReady) text = record->waiting.text;
-        auto *reason = label(text, c.warn, 10, false, "teamDraftPhaseReason");
+        // QA: the whole "Waiting for the previous phase to be ready" stays in
+        // the row's text; on a narrow column it paints elided with an ellipsis.
+        auto *reason = new ElidingLabel(text);
         reason->setObjectName("teamDraftPhaseReason");
+        reason->setPalette([&] { QPalette pal = reason->palette(); pal.setColor(QPalette::WindowText, c.warn); return pal; }());
+        reason->setFont([&] { QFont f = reason->font(); f.setPixelSize(10); return f; }());
+        reason->setToolTip(text);
         QString tip = blocked;
         if (predecessorNotReady) {
             QStringList open; for (int id : record->waiting.open) open << QStringLiteral("#%1").arg(id);
@@ -1031,6 +1036,71 @@ QWidget *TeamWorkspace::members(const Team &team)
             }
             extra->addStretch();
             col->addLayout(extra);
+        }
+        // C4: the member's pending permission request (members[].question): the
+        // exact command, its source and the agent's reason. Allow/Deny sends
+        // hgs team answer with the member, the question id, its hash and the
+        // native answers array; a deny's reason travels as the answer text.
+        if (m.permission.permission()) {
+            auto *box = new QFrame; box->setObjectName("teamMemberPermission"); box->setProperty("member", m.id);
+            box->setStyleSheet(QStringLiteral("QFrame#teamMemberPermission{background:%1;border:1px solid %2;border-radius:7px;}")
+                                   .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
+            auto *pv = new QVBoxLayout(box); pv->setContentsMargins(8, 5, 8, 6); pv->setSpacing(3);
+            auto *head = row(6);
+            if (!m.permission.tool.isEmpty()) head->addWidget(new Pill(m.permission.tool, c.warn));
+            head->addWidget(label(m.permission.commandSource == "process" ? tr("command from the running process")
+                              : m.permission.commandSource == "tool_input" ? tr("command from the tool input")
+                              : tr("the agent did not show the command"), c.text3, 10), 1);
+            pv->addLayout(head);
+            if (!m.permission.command.isEmpty()) {
+                auto *command = label(m.permission.command, c.fg, 11, false, "teamMemberPermissionCommand");
+                command->setFont(NewSessionDense::mono(11));
+                command->setWordWrap(true);
+                command->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                command->setToolTip(m.permission.command);
+                pv->addWidget(command);
+            }
+            if (!m.permission.reason.isEmpty()) {
+                auto *reason = label(tr("Agent: %1").arg(m.permission.reason), c.text2, 11, false, "teamMemberPermissionReason");
+                reason->setWordWrap(true);
+                pv->addWidget(reason);
+            }
+            auto *answerRow = row(6);
+            auto *reasonEdit = new QLineEdit; reasonEdit->setObjectName("teamMemberPermissionDenyReason");
+            reasonEdit->setPlaceholderText(tr("Why deny? The member receives this"));
+            answerRow->addWidget(reasonEdit, 1);
+            auto *deny = button(tr("Deny"), "teamMemberPermissionDeny"); deny->setProperty("danger", true);
+            auto *allow = button(tr("Allow"), "teamMemberPermissionAllow", true);
+            const bool answerable = !m.permission.id.isEmpty() && !m.permission.hash.isEmpty();
+            allow->setEnabled(answerable); deny->setEnabled(answerable);
+            if (!answerable) {
+                const auto tip = tr("This hgs sends no question hash in status; answer it in the session.");
+                allow->setToolTip(tip); deny->setToolTip(tip); reasonEdit->setToolTip(tip);
+            }
+            const auto decide = [this, member = m.id, question = m.permission.id, hash = m.permission.hash](const QString &decision, const QString &text) {
+                m_panel->act("answer", {{"member", member}, {"question_id", question}, {"expected_question_hash", hash},
+                                        {"answers", QJsonArray{QJsonObject{{"question_id", "decision"},
+                                                                           {"selected_option_ids", QJsonArray{decision}},
+                                                                           {"text", text}}}}});
+            };
+            QObject::connect(deny, &QPushButton::clicked, this, [reasonEdit, decide] {
+                decide(QStringLiteral("deny"), reasonEdit->text().trimmed());
+            });
+            QObject::connect(allow, &QPushButton::clicked, this, [decide] { decide(QStringLiteral("allow"), QString()); });
+            answerRow->addWidget(deny); answerRow->addWidget(allow);
+            pv->addLayout(answerRow);
+            col->addWidget(box);
+        }
+        // The answers so far: who answered, and the deny reason.
+        for (const auto &answer : m.permissionAnswers) {
+            const QString by = answer.by == "owner" ? tr("you") : answer.by == "lead" ? tr("the lead")
+                             : answer.by == "rule" ? tr("a rule") : answer.by == "timeout" ? tr("a timeout") : tr("unknown");
+            QString line = answer.denied() ? tr("Denied by %1").arg(by) : tr("Allowed by %1").arg(by);
+            if (answer.denied() && !answer.reason.isEmpty()) line += QStringLiteral(": ") + answer.reason;
+            auto *mark = label(line, answer.denied() ? c.warn : c.accent, 10, false, "teamMemberPermissionAnswered");
+            mark->setWordWrap(true);
+            mark->setProperty("decision", answer.decision);
+            col->addWidget(mark);
         }
         bh->addLayout(col, 1);
         auto *right = new QVBoxLayout; right->setSpacing(3);

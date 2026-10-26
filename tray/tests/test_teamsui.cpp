@@ -297,6 +297,7 @@ private slots:
     void permissionCardsAndGraphOrder();
     void preflightWarningsShowInThePlanCard();
     void leadLoadViewsShowInTheDesktop();
+    void followUpsShowThePermissionAnswerAndPlanFixes();
     void severalDraftPhasesRenderAndApproveInOrder();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
@@ -1444,6 +1445,97 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
 // C1-C4, C5, C7, C12, G7, F12, F13: the lead-load views in the desktop - the
 // card's waits and check, the plan health and the owner's word, the attention
 // strip, the member's services and budget, and the F12 draft wording.
+// C4: the permission card reads members[].question and answers with the exact
+// hgs team answer payload; N6: the check result comes from attempts[].check;
+// N8: the plan footer's Approve asks for the widening confirmation; N9: a
+// phase approved on the owner's word shows the quote; QA: the plan approval
+// view lists every check command.
+void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
+{
+    auto team = phasedTeam();
+    team["status"] = "planning";
+    auto tasks = team["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 4) continue;
+        task["kind"] = "check";
+        task["check"] = QJsonObject{{"command", "cargo test --locked --bin hgs teams"}, {"expect_exit", 0}, {"timeout_minutes", 30}};
+        auto attempts = task["attempts"].toArray();
+        if (attempts.isEmpty()) attempts.append(QJsonObject{});
+        auto attempt = attempts[0].toObject();
+        attempt["check"] = QJsonObject{{"exit", 0}, {"tail", "120 passed"}, {"at", 1792868400.0}};
+        attempts[0] = attempt; task["attempts"] = attempts; tasks[i] = task;
+    }
+    team["tasks"] = tasks;
+    auto members = team["members"].toArray();
+    auto backend = members[1].toObject();
+    backend["profile_widening"] = QJsonObject{{"member", "backend"}, {"from", "read"}, {"to", "build"}};
+    members[1] = backend; team["members"] = members;
+    auto phases = team["phases"].toArray();
+    if (phases.size() > 1) { auto draft = phases[1].toObject(); draft["owner_word"] = QJsonObject{{"text", "план принят"}, {"at", 1792868400.0}}; phases[1] = draft; team["phases"] = phases; }
+    setTeam(team);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 900); workspace.show();
+    panel.resize(460, 900); panel.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    // N6: the card shows the attempt's check result.
+    TeamTaskCard card; card.resize(440, 1000); card.show();
+    card.setTask(Teams::parse(team), 4, live, true);
+    QTRY_VERIFY(card.findChild<QLabel *>("teamCheckResult"));
+    QCOMPARE(card.findChild<QLabel *>("teamCheckResult")->text(), QStringLiteral("exit 0"));
+    QVERIFY(card.findChild<QLabel *>("teamCheckTail"));
+    // QA/N9: the approval footer lists the check command and the phase word.
+    QTRY_VERIFY(panel.findChild<QWidget *>("teamPlanFooter"));
+    QVERIFY(panel.findChild<QLabel *>("teamPlanCheck"));
+    QVERIFY(panel.findChild<QLabel *>("teamPlanCheck")->text().contains(QStringLiteral("cargo test --locked --bin hgs teams")));
+    QVERIFY(panel.findChild<QLabel *>("teamPhaseOwnerWord"));
+    QVERIFY(panel.findChild<QLabel *>("teamPhaseOwnerWord")->text().contains(QStringLiteral("план принят")));
+    shot(&panel, "permission-answer-plan-checks");
+    // N8: the footer's Approve asks for the widening confirmation.
+    auto *approve = panel.findChild<QPushButton *>("teamApprove");
+    QVERIFY(approve);
+    QTimer::singleShot(0, &panel, [&panel] { if (auto *box = panel.findChild<QMessageBox *>("teamWideningConfirm")) box->button(QMessageBox::Cancel)->click(); });
+    approve->click();
+    QTest::qWait(150);
+    QCOMPARE(calls(script(), "approve").size(), 0);
+    QTimer::singleShot(0, &panel, [&panel] {
+        if (auto *box = panel.findChild<QMessageBox *>("teamWideningConfirm"))
+            for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Confirm and approve")) { b->click(); break; }
+    });
+    panel.findChild<QPushButton *>("teamApprove")->click();
+    QTRY_VERIFY(calls(script(), "approve").size() >= 1);
+    QCOMPARE(calls(script(), "approve").last()["confirm_widening"].toBool(), true);
+    // C4: a member's question becomes a permission card; Allow sends the exact
+    // hgs team answer payload.
+    members = team["members"].toArray(); backend = members[1].toObject();
+    backend["question"] = QJsonObject{{"question_id", "toolu_1"}, {"tool", "Bash"}, {"command", "npm run migrate --force"},
+        {"command_source", "tool_input"}, {"reason", "the migration is not reversible"}, {"asked_at", 1792868400.0}, {"question_hash", "h1"}};
+    backend["permission_answers"] = QJsonArray{QJsonObject{{"question_id", "q0"}, {"decision", "deny"}, {"by", "lead"},
+        {"at", 1792868300.0}, {"reason", "not now"}}};
+    members[1] = backend; team["members"] = members;
+    setTeam(team); workspace.showTeam("team-1");
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QLabel *>("teamMemberPermissionCommand") != nullptr; })());
+    QCOMPARE(workspace.findChild<QLabel *>("teamMemberPermissionCommand")->text(), QStringLiteral("npm run migrate --force"));
+    QVERIFY(workspace.findChild<QLabel *>("teamMemberPermissionReason"));
+    auto *allow = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
+    QVERIFY(allow);
+    allow->click();
+    QTRY_COMPARE(calls(script(), "answer").size(), 1);
+    const auto answer = calls(script(), "answer").last();
+    QCOMPARE(answer["member"].toString(), QStringLiteral("backend"));
+    QCOMPARE(answer["question_id"].toString(), QStringLiteral("toolu_1"));
+    QCOMPARE(answer["expected_question_hash"].toString(), QStringLiteral("h1"));
+    const auto native = answer["answers"].toArray()[0].toObject();
+    QCOMPARE(native["question_id"].toString(), QStringLiteral("decision"));
+    QCOMPARE(native["selected_option_ids"].toArray()[0].toString(), QStringLiteral("allow"));
+    QVERIFY(workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
+    shot(&workspace, "permission-answer");
+}
+
 void TestTeamsUi::leadLoadViewsShowInTheDesktop()
 {
     auto load = phasedTeam();

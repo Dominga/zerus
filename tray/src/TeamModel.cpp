@@ -194,7 +194,25 @@ Team parse(const QJsonObject &v)
             entry.since = service.value("since").toDouble();
             if (!entry.name.isEmpty()) member.services.append(entry);
         }
-        // C12: the declared budget, its state and the job it is tied to.
+        // C4: the member's pending permission request and its answers, as hgs
+        // sends them (members[].question, members[].permission_answers).
+        if (m.value("question").isObject()) {
+            const auto q = m.value("question").toObject();
+            member.permission.id = str(q, "question_id");
+            member.permission.tool = str(q, "tool");
+            member.permission.command = str(q, "command");
+            member.permission.commandSource = str(q, "command_source");
+            member.permission.reason = str(q, "reason");
+            member.permission.at = q.value("asked_at").toDouble();
+            member.permission.hash = q.value("question_hash").toString(q.value("expected_question_hash").toString());
+        }
+        for (const auto &value : m.value("permission_answers").toArray()) {
+            const auto a = value.toObject();
+            PermissionAnswer answer;
+            answer.questionId = str(a, "question_id"); answer.decision = str(a, "decision");
+            answer.by = str(a, "by"); answer.reason = str(a, "reason"); answer.at = a.value("at").toDouble();
+            if (!answer.decision.isEmpty()) member.permissionAnswers.append(answer);
+        }
         if (m.value("budget").isObject()) {
             const auto budget = m.value("budget").toObject();
             member.budget.known = true;
@@ -273,6 +291,13 @@ Team parse(const QJsonObject &v)
             attempt.n = a.value("n").toInt(); attempt.id = str(a, "id"); attempt.member = str(a, "member");
             attempt.state = str(a, "state"); attempt.error = str(a, "error"); attempt.notice = str(a, "notice");
             attempt.noReport = a.value("no_report").toBool(); attempt.sentAt = a.value("sent_at").toDouble();
+            // N6: the check this attempt ran, from attempts[].check.
+            if (a.value("check").isObject()) {
+                const auto c = a.value("check").toObject();
+                attempt.checkResult.known = true;
+                attempt.checkResult.exit = c.value("exit").toInt();
+                attempt.checkResult.tail = str(c, "tail");
+            }
             // A1/A2: when it was delivered and started, and the turn that ended.
             attempt.deliveredAt = a.value("delivered_at").toDouble(); attempt.startedAt = a.value("started_at").toDouble();
             attempt.startWarned = a.value("start_warned").toBool();
@@ -303,6 +328,7 @@ Team parse(const QJsonObject &v)
                 entry.commandSource = str(item, "command_source");
                 entry.reason = str(item, "reason");
                 entry.decision = str(item, "decision");
+                entry.hash = item.value("question_hash").toString(item.value("expected_question_hash").toString());
                 attempt.questions.append(entry);
             }
             // B1: the permission answers kept on the attempt.

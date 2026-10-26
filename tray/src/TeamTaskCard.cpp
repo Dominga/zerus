@@ -246,12 +246,18 @@ void TeamTaskCard::rebuild()
         auto *expect = label(tr("expect exit %1 · timeout %2 min").arg(task->check.expectExit).arg(task->check.timeoutMinutes),
                              c.muted, 10, false, "teamCheckExpect");
         v->addWidget(expect);
-        if (task->checkResult.known) {
-            const bool passed = task->checkResult.exit == task->check.expectExit;
-            auto *result = label(tr("exit %1").arg(task->checkResult.exit), passed ? c.accent : c.danger, 11, true, "teamCheckResult");
-            v->addWidget(result);
-            if (!task->checkResult.tail.isEmpty()) {
-                auto *tail = label(task->checkResult.tail, c.text2, 10, false, "teamCheckTail");
+        // N6: the result comes from the attempt that ran the check
+        // (attempts[].check); an older team file keeps it on the task.
+        auto result = task->checkResult;
+        bool resultKnown = result.known;
+        for (auto it = task->attempts.crbegin(); it != task->attempts.crend(); ++it)
+            if (it->checkResult.known) { result.exit = it->checkResult.exit; result.tail = it->checkResult.tail; resultKnown = true; break; }
+        if (resultKnown) {
+            const bool passed = result.exit == task->check.expectExit;
+            auto *resultLabel = label(tr("exit %1").arg(result.exit), passed ? c.accent : c.danger, 11, true, "teamCheckResult");
+            v->addWidget(resultLabel);
+            if (!result.tail.isEmpty()) {
+                auto *tail = label(result.tail, c.text2, 10, false, "teamCheckTail");
                 tail->setFont(NewSessionDense::mono(10));
                 tail->setWordWrap(true);
                 v->addWidget(tail);

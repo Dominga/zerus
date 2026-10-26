@@ -976,12 +976,47 @@ const PERMISSION_COMMAND_CHARS: usize = 4000;
 
 /// B1: the request status shows: its tool, the command and the source of that
 /// command, and the question hash `hgs team answer` needs to answer it.
+/// C4: `answer` carries the card's own question id and the allow/deny option
+/// ids, so the desktop sends the native ids back.
 pub(crate) fn permission_record(pending: &PendingQuestion) -> Value {
     let tool = pending.card["questions"][0]["header"].as_str().or_else(|| pending.card["tool"].as_str()).unwrap_or_default();
     let (command, source) = permission_command(&pending.card);
     let reason: String = pending.card["questions"][0]["body"].as_str().unwrap_or_default().chars().take(2000).collect();
-    json!({"question_id":pending.question_id,"question_hash":pending.question_hash,"tool":tool,"command":command,
-        "command_source":source,"reason":reason,"asked_at":pending.at})
+    let answer = permission_answer(&pending.card);
+    let mut record = json!({"question_id":pending.question_id,"question_hash":pending.question_hash,"tool":tool,"command":command,
+        "command_source":source,"reason":reason,"asked_at":pending.at});
+    if let Some(answer) = answer {
+        record["answer"] = answer;
+    }
+    record
+}
+
+/// C4: the native answer shape of a permission card: the card question's own
+/// id and the option ids that allow and deny, picked by their labels the way
+/// `hgs team answer` classifies a denial. Claude's approval card answers
+/// `{"question_id":"approval","allow":"1","deny":"2"}`, DeepSeek's
+/// `{"question_id":"decision","allow":"allow","deny":"deny"}`.
+pub(crate) fn permission_answer(card: &Value) -> Option<Value> {
+    let question = card["questions"].as_array()?.first()?;
+    let question_id = question["id"].as_str().filter(|id| !id.is_empty())?;
+    let options = question["options"].as_array()?;
+    let mut answer = json!({"question_id":question_id});
+    let by_label = |deny: bool| {
+        options.iter().find_map(|option| {
+            let label = option["label"].as_str()?;
+            if super::commands::denies(label) != deny {
+                return None;
+            }
+            option["id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned)
+        })
+    };
+    if let Some(allow) = by_label(false) {
+        answer["allow"] = json!(allow);
+    }
+    if let Some(deny) = by_label(true) {
+        answer["deny"] = json!(deny);
+    }
+    (answer.get("allow").is_some() || answer.get("deny").is_some()).then_some(answer)
 }
 
 /// N5: what Zerus records when a pending question vanished without an hgs team
@@ -3900,6 +3935,79 @@ mod tests {
             {"name":"codex/x/c","process_state":"running","activity":"idle","phase":"approval"}]}]);
         let asked: Vec<bool> = seen(&listing).iter().map(|s| s.asking).collect();
         assert_eq!(asked, [true, true, true]);
+    }
+
+    #[test]
+    fn a_permission_record_carries_the_native_answer_ids() {
+        // C4: Claude's approval card: question id "approval", numbered options;
+        // the deny label starts with "No" (the same rule as commands::denies).
+        let claude = json!({"question_id":"claude-approval:h","question_hash":"h","approval":true,
+            "questions":[{"id":"approval","header":"Bash","question":"Bash command","body":"npm test","allow_other":false,
+                "options":[{"id":"1","label":"Yes"},{"id":"2","label":"No, and tell Claude what to do differently (esc)"}]}]});
+        let pending = PendingQuestion {
+            question_id: "claude-approval:h".into(),
+            question_hash: "h".into(),
+            approval: true,
+            at: 10.0,
+            card: claude.clone(),
+        };
+        let record = permission_record(&pending);
+        assert_eq!(record["answer"], json!({"question_id":"approval","allow":"1","deny":"2"}), "{record}");
+        // hgs team answer forwards these exact ids to the native answer.
+        assert_eq!(record["answer"]["question_id"], claude["questions"][0]["id"]);
+        for key in ["allow", "deny"] {
+            let id = record["answer"][key].as_str().unwrap();
+            assert!(
+                claude["questions"][0]["options"].as_array().unwrap().iter().any(|option| option["id"] == id),
+                "{key} {id}"
+            );
+        }
+        // The answers hgs team answer forwards name the card question and an
+        // option of that question, so the native answer accepts them.
+        let answers = json!([{"question_id":record["answer"]["question_id"],
+            "selected_option_ids":[record["answer"]["allow"]]}]);
+        assert_eq!(answers[0]["question_id"], claude["questions"][0]["id"]);
+        assert!(answers[0]["selected_option_ids"][0].is_string());
+        // DeepSeek's card uses its own ids: the native host names them allow/deny.
+        let deepseek = json!({"question_id":"q9","question_hash":"h9","approval":true,
+            "questions":[{"id":"decision","header":"Permission","question":"Allow the command?",
+                "options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}]}]});
+        let pending = PendingQuestion {
+            question_id: "q9".into(),
+            question_hash: "h9".into(),
+            approval: true,
+            at: 20.0,
+            card: deepseek,
+        };
+        assert_eq!(permission_record(&pending)["answer"], json!({"question_id":"decision","allow":"allow","deny":"deny"}));
+        // A card without options has no answer shape to offer.
+        let pending = PendingQuestion {
+            question_id: "q0".into(),
+            question_hash: "h0".into(),
+            approval: false,
+            at: 30.0,
+            card: json!({"questions":[{"id":"0","header":"Access","question":"How should I proceed?"}]}),
+        };
+        assert!(permission_record(&pending).get("answer").is_none());
+    }
+
+    #[test]
+    fn the_desktop_fixture_is_a_real_status_question_with_the_native_answer() {
+        // Saved from a real `hgs team status --json` call (the member question
+        // of a pending Claude Bash approval), for the desktop test.
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tray/tests/fixtures/hgs-team-member-question.json"
+        ))
+        .expect("the desktop fixture parses");
+        assert_eq!(fixture["tool"], "Bash");
+        assert_eq!(fixture["command"], "cargo test --locked");
+        assert_eq!(fixture["command_source"], "tool_input");
+        assert_eq!(fixture["answer"], json!({"question_id":"approval","allow":"1","deny":"2"}));
+        // The same native card produces exactly that answer shape.
+        let card = json!({"tool_input":{"command":"cargo test --locked"},
+            "questions":[{"id":"approval","header":"Bash","body":"cargo test --locked",
+                "options":[{"id":"1","label":"Yes"},{"id":"2","label":"No, and tell Claude what to do differently (esc)"}]}]});
+        assert_eq!(permission_answer(&card), Some(fixture["answer"].clone()));
     }
 
     #[test]

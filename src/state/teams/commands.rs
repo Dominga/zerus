@@ -390,8 +390,9 @@ fn create(input: &Value) -> anyhow::Result<Value> {
 
 /// The lead (or you) answers a member's question or permission request in the
 /// member's session, by its exact id and hash.
-/// Whether a native option label is the deny answer (B2).
-fn denies(label: &str) -> bool {
+/// Whether a native option label is the deny answer (B2). The permission
+/// record's `answer` picks its deny option with the same rule (C4).
+pub(crate) fn denies(label: &str) -> bool {
     let label = label.trim().to_lowercase();
     label.starts_with("deny") || label.starts_with("no") || label == "reject"
 }

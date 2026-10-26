@@ -83,6 +83,10 @@ pub(crate) struct Settings {
     /// the shared or their own existing folder only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worktrees_forbidden: bool,
+    /// H1: resume a member's session after a usage-limit reset, even when the
+    /// shared automatic-recovery policy is off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resume_after_limits: bool,
 }
 
 fn default_max_members() -> usize {
@@ -129,6 +133,7 @@ impl Default for Settings {
             remind_owner_minutes: default_remind_owner(),
             background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
+            resume_after_limits: false,
         }
     }
 }
@@ -263,6 +268,15 @@ pub(crate) struct Member {
     /// command, where it came from and the agent's reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<serde_json::Value>,
+    /// H1: the member's session is stopped by a usage limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limited: Option<MemberLimit>,
+    /// H1: Zerus asked the recovery service to wait for this member's reset.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub limit_resume: bool,
+    /// H6: a swapped member's new session starts even before its next task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub launch_after_swap: bool,
 }
 
 /// One commit Zerus made for an attempt (B4).
@@ -315,6 +329,30 @@ pub(crate) struct MemberService {
     pub command: String,
     #[serde(default)]
     pub since: f64,
+}
+
+/// A member's session stopped by a usage limit (H1); `resets_at` is present
+/// only when the session reports a reset time.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberLimit {
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<f64>,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// What a swapped member's next attempt needs to continue the work (H6): the
+/// previous attempt, when it began, its partial report and its open questions.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Continuation {
+    pub attempt: String,
+    pub n: u32,
+    pub since: f64,
+    #[serde(default)]
+    pub report: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<String>,
 }
 
 /// A member's pending native question as Zerus read it (C2): the lead answers
@@ -710,6 +748,10 @@ pub(crate) struct Task {
     pub decided_by: Option<Decider>,
     #[serde(default)]
     pub decision_reason: String,
+    /// H6: the hand-out after a swap carries the previous attempt's partial
+    /// report and open questions; cleared once the new attempt is delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Continuation>,
 }
 
 impl Task {
@@ -849,6 +891,10 @@ pub(crate) struct Team {
     /// lead with the planning brief.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lead_protocol: String,
+    /// H6: the sessions members were swapped away from, oldest first, at most
+    /// 20: {member, old, at, by}. The old session keeps running for the owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub swapped: Vec<serde_json::Value>,
 }
 
 impl Team {
@@ -902,8 +948,35 @@ mod tests {
         assert!(value["tasks"].as_array().unwrap().iter().all(|task| task["phase"] == json!(1) && task.get("pinned").is_none()));
         assert_eq!(value["settings"]["approval"], "auto");
         assert_eq!(value["tasks"][1]["deps"][0], json!({"task":1,"kind":"hard"}));
+        // H1/H6: the new optional fields stay out of an old team's file.
+        assert!(value["settings"].get("resume_after_limits").is_none());
+        assert!(value.get("swapped").is_none());
         let back: Team = serde_json::from_value(value).unwrap();
         assert_eq!(back, team);
+    }
+
+    #[test]
+    fn the_limit_setting_and_member_episode_round_trip() {
+        let mut team: Team = serde_json::from_value(old_team()).unwrap();
+        assert!(!team.settings.resume_after_limits);
+        team.settings.resume_after_limits = true;
+        team.members[0].limited = Some(MemberLimit {
+            at: 100.0,
+            resets_at: Some(200.0),
+            detail: "You've hit your session limit".into(),
+        });
+        team.members[0].limit_resume = true;
+        let value = serde_json::to_value(&team).unwrap();
+        assert_eq!(value["settings"]["resume_after_limits"], true);
+        assert_eq!(value["members"][0]["limited"]["resets_at"], 200.0);
+        let back: Team = serde_json::from_value(value).unwrap();
+        assert!(back.settings.resume_after_limits && back.members[0].limit_resume);
+        assert_eq!(back.members[0].limited.as_ref().and_then(|limit| limit.resets_at), Some(200.0));
+        // An unknown reset time is optional.
+        let limit: MemberLimit = serde_json::from_value(json!({"at":10.0})).unwrap();
+        assert_eq!((limit.resets_at, limit.detail.as_str()), (None, ""));
+        // H6: a task's continuation is optional.
+        assert!(team.tasks.iter().all(|task| task.continuation.is_none()));
     }
 
     fn phased_team() -> Team {

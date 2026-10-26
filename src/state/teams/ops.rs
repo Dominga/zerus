@@ -1267,6 +1267,96 @@ fn expect(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     Ok(json!({"status":"expected","label":label,"minutes":minutes,"red_minutes":red_minutes}))
 }
 
+/// H6: the owner swaps a member's session, agent, model, effort or account
+/// (the lead included). The member keeps its id, role, tasks, folder and
+/// branch; the old session keeps running and is listed for the owner. An open
+/// attempt is revoked (`swapped`) and handed again to the new session with the
+/// previous attempt's report and open questions as a continuation.
+fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human), "Only you swap a member");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team swaps a member"
+    );
+    let id = text(input, "member").to_owned();
+    ensure!(!id.is_empty(), "A member id is required");
+    ensure!(team.member(&id).is_some(), "Unknown member {id}");
+    let session: Option<SessionRef> = match input.get("session") {
+        Some(value) if value.is_object() => Some(serde_json::from_value(value.clone()).context("Invalid session")?),
+        _ => None,
+    };
+    let role = team.role_of(&id);
+    let lead = id == team.lead;
+    let at = now();
+    let mut handed = Vec::new();
+    for task in &mut team.tasks {
+        let Some(attempt) = task.open_attempt() else { continue };
+        if attempt.member != id {
+            continue;
+        }
+        if !lead {
+            let report = attempt.report.as_ref().map(|report| report.text.chars().take(2000).collect()).unwrap_or_default();
+            let questions: Vec<String> = attempt
+                .questions
+                .iter()
+                .filter(|question| question.open())
+                .map(|question| question.text.chars().take(500).collect())
+                .collect();
+            task.continuation = Some(Continuation { attempt: attempt.id.clone(), n: attempt.n, since: attempt.sent_at, report, questions });
+        }
+        if let Some(open) = task.attempts.iter_mut().rev().find(|attempt| attempt.state.open()) {
+            open.state = AttemptState::Revoked;
+            open.error = "swapped".to_owned();
+        }
+        task.status = TaskStatus::Pending;
+        task.decided_by = None;
+        handed.push(task.id);
+    }
+    let mut from = String::new();
+    let mut changed = Vec::new();
+    {
+        let member = team.members.iter_mut().find(|member| member.id == id).unwrap();
+        if let Some(old) = member.session.take() {
+            from = old.name;
+        }
+        let fields =
+            [("agent", &mut member.agent), ("model", &mut member.model), ("effort", &mut member.effort), ("account", &mut member.account)];
+        for (key, field) in fields {
+            if let Some(value) = input[key].as_str().map(str::trim).filter(|value| !value.is_empty()) {
+                *field = value.to_owned();
+                changed.push(key);
+            }
+        }
+        member.session = session;
+        member.launch_after_swap = member.session.is_none();
+        member.state = if member.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
+        member.launch_id.clear();
+        member.error.clear();
+        member.seen = None;
+        member.settings_applied = false;
+        member.pending = None;
+        member.permission = None;
+        member.limited = None;
+        member.limit_resume = false;
+    }
+    let agent = team.member(&id).map(|member| member.agent.clone()).unwrap_or_default();
+    let to = team.member(&id).and_then(|member| member.session.as_ref()).map(|session| session.name.clone()).unwrap_or_default();
+    team.swapped.push(json!({"member":role,"old":from,"at":at,"by":"You"}));
+    let excess = team.swapped.len().saturating_sub(20);
+    team.swapped.drain(..excess);
+    // The lead's open task stays in its inbox and the new lead session gets
+    // the one brief that names the team and `hgs team inbox` (H6, U8).
+    if lead {
+        team.brief = Notice::Pending;
+        team.brief_id.clear();
+    }
+    events.push(Event::new(
+        "member_swapped",
+        json!({"member":role,"from":from,"to":to,"by":"You","agent":agent,"changed":changed,"lead":lead}),
+    ));
+    Ok(json!({"status":"swapped","member":id,"from":from,"to":to,"agent":agent,"tasks":handed,"lead":lead}))
+}
+
 /// The id of the next question of a team: `q1`, `q2`, ... Questions are never
 /// removed, so an id names one question for the whole team (A3), which lets a
 /// reply name it without a task.
@@ -1626,6 +1716,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "cancel" => cancel(team, input, actor, events),
         "check" => check(team, input, actor, events),
         "expect" => expect(team, input, actor, events),
+        "swap-member" => swap_member(team, input, actor, events),
         "relaunch" => {
             ensure!(matches!(actor, Actor::Human), "Only you relaunch a member");
             let id = text(input, "member").to_owned();
@@ -3625,5 +3716,127 @@ mod tests {
         assert_eq!(discarded["status"], "phase_discarded");
         let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
         assert_eq!(error, "The lead approves a phase only on the owner's word: pass \"owner_word\"");
+    }
+
+    #[test]
+    fn swapping_a_member_keeps_its_work_and_continues_the_open_attempt() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // The member works on #1 with half a report and an open question.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session = Some(SessionRef {
+            host: String::new(),
+            name: "codex/x/dev".into(),
+            run_id: "r1".into(),
+            conversation_id: "c1".into(),
+        });
+        let task = team.task_mut(1).unwrap();
+        task.status = TaskStatus::InProgress;
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "a1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 5.0,
+            delivered_at: Some(6.0),
+            report: Some(Report { text: "Half done: the API is next.".into(), at: 10.0, ..Default::default() }),
+            questions: vec![Question { id: "q1".into(), text: "Which database?".into(), at: 11.0, ..Default::default() }],
+            ..Default::default()
+        });
+        let role = team.member("dev").unwrap().role.clone();
+        let new_session = json!({"name":"codex/x/new","run_id":"r2","conversation_id":"c2"});
+        let result = apply(
+            &mut team,
+            "swap-member",
+            &json!({"member":"dev","session":new_session}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((result["status"].as_str(), result["to"].as_str()), (Some("swapped"), Some("codex/x/new")));
+        // H6: the member keeps its id, role, tasks and folder; the old session
+        // is listed for the owner, which keeps running.
+        let member = team.member("dev").unwrap();
+        assert_eq!((member.id.as_str(), member.role.as_str()), ("dev", role.as_str()));
+        assert_eq!(member.session.as_ref().map(|session| session.name.as_str()), Some("codex/x/new"));
+        assert!(!member.launch_after_swap);
+        assert_eq!(team.swapped.last().unwrap()["old"], "codex/x/dev");
+        assert_eq!(team.swapped.last().unwrap()["member"], role.as_str());
+        assert_eq!(team.members.len(), 3);
+        // The open attempt is revoked as swapped and the task waits again with
+        // what the new session needs to continue.
+        let task = team.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::Pending);
+        let old = task.attempts.iter().find(|attempt| attempt.member == "dev").unwrap();
+        assert_eq!((old.state, old.error.as_str()), (AttemptState::Revoked, "swapped"));
+        let continuation = task.continuation.as_ref().unwrap();
+        assert_eq!(continuation.report, "Half done: the API is next.");
+        assert_eq!(continuation.questions, vec!["Which database?".to_owned()]);
+        assert_eq!(continuation.since, old.sent_at);
+        assert!(events.iter().any(|event| event.kind == "member_swapped" && event.payload["from"] == "codex/x/dev"));
+        // Without a session the member is launched again with the new agent;
+        // it does not count twice against max_members.
+        let result = apply(
+            &mut team,
+            "swap-member",
+            &json!({"member":"dev","agent":"kimi","model":"k2"}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(result["to"], "");
+        let member = team.member("dev").unwrap();
+        assert_eq!((member.agent.as_str(), member.model.as_str()), ("kimi", "k2"));
+        assert!(member.session.is_none() && member.launch_id.is_empty() && member.state == MemberState::NotCreated);
+        // H6: it starts again even before its next task.
+        assert!(member.launch_after_swap && !team.member("dev").unwrap().session.is_some());
+        assert_eq!(team.members.len(), 3);
+        // A member cannot swap, only the owner.
+        let error = apply(&mut team, "swap-member", &json!({"member":"dev"}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only you swap a member");
+    }
+
+    #[test]
+    fn swapping_the_lead_revokes_its_task_and_briefs_the_new_session() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // The lead has its own task in progress.
+        let task = team.tasks.first_mut().unwrap();
+        task.assignee = "lead".into();
+        task.status = TaskStatus::InProgress;
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "lead-a1".into(),
+            member: "lead".into(),
+            state: AttemptState::Delivered,
+            sent_at: 5.0,
+            delivered_at: Some(6.0),
+            ..Default::default()
+        });
+        let result = apply(
+            &mut team,
+            "swap-member",
+            &json!({"member":"lead","session":{"name":"claude/x/lead2","run_id":"r9"}}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((result["lead"].as_bool(), result["to"].as_str()), (Some(true), Some("claude/x/lead2")));
+        assert_eq!(team.lead, "lead");
+        let task = team.task(1).unwrap();
+        let attempt = task.attempts.last().unwrap();
+        assert_eq!((attempt.state, attempt.error.as_str()), (AttemptState::Revoked, "swapped"));
+        // H6: nothing is handed out for the lead; its task waits in the inbox
+        // and the new session gets one brief.
+        assert!(task.continuation.is_none());
+        assert_eq!(team.brief, Notice::Pending);
+        assert_eq!(team.swapped.last().unwrap()["old"], "claude/x/lead");
+        assert!(events.iter().any(|event| event.kind == "member_swapped" && event.payload["lead"] == true));
     }
 }

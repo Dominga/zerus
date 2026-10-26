@@ -10,12 +10,12 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
-    "retry", "check", "expect", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
+    "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -135,7 +135,10 @@ fn pending_phase(team: &Team) -> Option<u32> {
 /// Operations after which new work may be ready for the dispatcher, or a
 /// question or answer waits to be delivered.
 fn starts_worker(op: &str) -> bool {
-    matches!(op, "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release" | "expect")
+    matches!(
+        op,
+        "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release" | "expect" | "swap-member"
+    )
 }
 
 /// Whether the attempt's member was last seen stopped: the dispatcher records
@@ -810,12 +813,25 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
     let Ok(Some(team)) = store.load(text(input, "team")) else { return Ok(()) };
     let planned = op == "plan" && team.status == TeamStatus::Planning;
     let joined = op == "add-member" && matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused);
+    let swapped = op == "swap-member"
+        && matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
+        && filled["session"].is_object();
     if planned {
         if let Some(members) = filled["members"].as_array_mut() {
             adopt_members(store, &team, members)?;
         }
     } else if joined {
         adopt_members(store, &team, std::slice::from_mut(&mut filled["member"]))?;
+    } else if swapped {
+        // H6: the session named for the swap is adopted under the same checks
+        // as a new member's existing session.
+        let member = team.member(text(input, "member")).context("Unknown member")?.clone();
+        let mut with_session = member;
+        with_session.session = serde_json::from_value(filled["session"].clone()).ok();
+        let sessions = live_sessions()?;
+        let teams = store.active_teams(ACTIVE_TEAMS)?;
+        let adopted = adopted_session(&team, &with_session, &teams, &sessions)?;
+        filled["session"] = serde_json::to_value(&adopted.session)?;
     }
     Ok(())
 }

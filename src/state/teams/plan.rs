@@ -491,14 +491,16 @@ fn health_of(team: &Team, scope: &[Task]) -> Health {
 /// non-discarded phase in display order with its derived status, counts and
 /// the short health line.
 pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
-    let mut phases: Vec<(u32, u32)> = team.tasks.iter().map(|task| (task.phase, task.phase)).collect();
-    phases.extend(
-        team.phases
-            .iter()
-            .filter(|phase| phase.state != PhaseState::Discarded)
-            .map(|phase| (phase.n, phase.order())),
-    );
-    phases.push((1, 1));
+    // One entry per phase number: task phases (phase 1 often has no record)
+    // plus every non-discarded phase record. The display order is the record's
+    // order; a phase without a record keeps its number as the order.
+    let mut numbers: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).collect();
+    numbers.extend(team.phases.iter().filter(|phase| phase.state != PhaseState::Discarded).map(|phase| phase.n));
+    numbers.insert(1);
+    let mut phases: Vec<(u32, u32)> = numbers
+        .into_iter()
+        .map(|n| (n, team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order())))
+        .collect();
     phases.sort_by_key(|(n, order)| (*order, *n));
     phases.dedup_by_key(|(n, _)| *n);
     let paused = team.status == super::model::TeamStatus::Paused;
@@ -524,8 +526,13 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "in_work"
             };
             let health = phase_health(team, n);
-            let mut line = format!("path {} \u{b7} par {:.1}", health.critical_path, health.parallelism);
-            if !health.warnings.is_empty() {
+            // A phase with no open tasks has nothing to schedule: no line.
+            let mut line = if open == 0 {
+                String::new()
+            } else {
+                format!("path {} \u{b7} par {:.1}", health.critical_path, health.parallelism)
+            };
+            if open > 0 && !health.warnings.is_empty() {
                 line += &format!(
                     " \u{b7} {} warning{}",
                     health.warnings.len(),
@@ -892,6 +899,40 @@ mod tests {
         let paused_summary = phase_summary(&t);
         let paused: Vec<&str> = paused_summary.iter().map(|phase| phase["status"].as_str().unwrap()).collect();
         assert_eq!(paused, ["done", "paused", "approved", "draft"]);
+    }
+
+    #[test]
+    fn the_phase_summary_emits_each_record_once_in_display_order() {
+        use super::super::model::TeamStatus;
+        // Shaped like team 528aebfe: phase 1 has no record, phases 31-35 are
+        // approved with orders 2-6, a renumbered draft 36 has order 36, and a
+        // discarded record must not appear at all.
+        let mut t = team(vec![]);
+        t.status = TeamStatus::Running;
+        for (index, phase) in [1u32, 31, 32, 33, 34, 35, 36].into_iter().enumerate() {
+            let mut task = task(index as u32 + 1, &[], Pending);
+            task.phase = phase;
+            if phase == 31 {
+                task.status = Accepted;
+            }
+            t.tasks.push(task);
+        }
+        t.phases = vec![
+            Phase { n: 31, order: 2, state: PhaseState::Approved, tasks: vec![2], ..Default::default() },
+            Phase { n: 32, order: 3, state: PhaseState::Approved, tasks: vec![3], ..Default::default() },
+            Phase { n: 33, order: 4, state: PhaseState::Approved, tasks: vec![4], ..Default::default() },
+            Phase { n: 34, order: 5, state: PhaseState::Approved, tasks: vec![5], ..Default::default() },
+            Phase { n: 35, order: 6, state: PhaseState::Approved, tasks: vec![6], ..Default::default() },
+            Phase { n: 36, order: 36, state: PhaseState::Draft, tasks: vec![7], ..Default::default() },
+            Phase { n: 37, order: 7, state: PhaseState::Discarded, tasks: vec![8], ..Default::default() },
+        ];
+        let summary = phase_summary(&t);
+        let numbers: Vec<u64> = summary.iter().map(|phase| phase["n"].as_u64().unwrap()).collect();
+        assert_eq!(numbers, [1, 31, 32, 33, 34, 35, 36]);
+        // A done phase has no schedule left to describe.
+        let done = summary.iter().find(|phase| phase["n"] == 31).unwrap();
+        assert_eq!((done["status"].as_str(), done["health_line"].as_str()), (Some("done"), Some("")));
+        assert_ne!(summary.iter().find(|phase| phase["n"] == 1).unwrap()["health_line"], "");
     }
 
     #[test]

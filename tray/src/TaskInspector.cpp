@@ -6,6 +6,9 @@
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
 #include <QDateTime>
+#include <QDropEvent>
+#include <QFrame>
+#include <QScrollBar>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QLabel>
@@ -58,6 +61,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     filters->setContentsMargins(0, 0, 0, 0); filters->setSpacing(4);
     for (const auto &stage : TaskBoard::stages()) {
         auto *tile = new TaskTile(stage, m_filters); m_tiles.insert(stage, tile); filters->addWidget(tile, 1);
+        tile->setAcceptDrops(true); tile->installEventFilter(this);
         connect(tile, &QAbstractButton::clicked, this, [this, stage] {
             if (m_stage != stage) { m_stage = stage; m_selected.clear(); m_detail = {}; ++m_generation; m_showOlder = false; }
             refresh();
@@ -67,6 +71,16 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_scroll = new QScrollArea; m_scroll->setObjectName("taskInspectorList"); m_scroll->setWidgetResizable(true);
     m_scroll->setFrameShape(QFrame::NoFrame); m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_listPage = new QWidget; m_listPage->setObjectName("taskInspectorCards");
+    m_listPage->setAcceptDrops(true); m_listPage->installEventFilter(this);
+    m_dropLine = new QFrame(m_listPage); m_dropLine->setObjectName("taskInspectorDropLine"); m_dropLine->hide();
+    m_autoScroll.setInterval(30);
+    connect(&m_autoScroll, &QTimer::timeout, this, [this] {
+        m_scroll->verticalScrollBar()->setValue(m_scroll->verticalScrollBar()->value() + m_scrollStep);
+        followDrag(m_drag, m_listPage->mapFrom(m_scroll->viewport(), m_dragAt));
+    });
+    connect(m_board, &TasksView::taskDragFinished, this, [this] {
+        endListDrag(); for (auto *tile : std::as_const(m_tiles)) tile->setDropTarget(false);
+    });
     m_cards = new QVBoxLayout(m_listPage); m_cards->setContentsMargins(0, 0, 0, 0); m_cards->setSpacing(4); m_cards->addStretch();
     m_scroll->setWidget(m_listPage); m_scroll->setMinimumHeight(150);
     auto *boardPane = new QWidget; auto *boardLayout = new QVBoxLayout(boardPane);
@@ -83,9 +97,10 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_state->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); m_state->setFixedHeight(24); context->addWidget(m_state, 1);
     m_open = new QPushButton; m_open->setObjectName("taskOpenActivity"); m_open->setAutoDefault(false);
     m_edit = new QPushButton; m_edit->setObjectName("taskInspectorEdit"); m_edit->setAutoDefault(false);
-    for (auto *button : {m_open, m_edit}) { button->setFixedSize(30, 28); button->setIconSize(QSize(20, 20)); context->addWidget(button); }
+    m_open->setFixedSize(30, 28); m_edit->setText(tr("Edit")); m_edit->setFixedHeight(28);
+    for (auto *button : {m_open, m_edit}) { button->setIconSize(QSize(20, 20)); context->addWidget(button); }
     m_open->setToolTip(tr("Open executor Activity")); m_open->setAccessibleName(m_open->toolTip());
-    m_edit->setToolTip(tr("Edit task / actions")); m_edit->setAccessibleName(m_edit->toolTip());
+    m_edit->setToolTip(tr("Edit task description, attachments and assignment")); m_edit->setAccessibleName(tr("Edit task"));
     connect(m_open, &QPushButton::clicked, this, [this] {
         if (const auto *found = executor()) emit executorRequested(found->host, found->name, found->id);
     });
@@ -163,7 +178,7 @@ void TaskInspector::showEvent(QShowEvent *event) {
 }
 
 void TaskInspector::hideEvent(QHideEvent *event) {
-    QWidget::hideEvent(event); m_board->setInspectorVisible(false);
+    endListDrag(); QWidget::hideEvent(event); m_board->setInspectorVisible(false);
 }
 
 void TaskInspector::selectTask(const QString &uuid) {
@@ -211,6 +226,7 @@ void TaskInspector::refresh() {
                 selectTask(row->task().uuid);
             });
             connect(row, &TaskRow::actionRequested, this, [this, row](TaskAction action) { m_board->actOnTask(row->task(), action); });
+            connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { m_board->dragTask(row, hotSpot); });
         }
         row->setTask(task, m_board->rowState(task), colors, view.now);
         row->setProperty("expanded", task.uuid == m_selected);
@@ -219,7 +235,7 @@ void TaskInspector::refresh() {
     }
     for (auto it = m_rows.begin(); it != m_rows.end();) {
         if (keep.contains(it.key())) { ++it; continue; }
-        auto *row = it.value(); m_cards->removeWidget(row); row->hide(); row->setObjectName({}); row->deleteLater(); it = m_rows.erase(it);
+        auto *row = it.value(); m_cards->removeWidget(row); m_board->retireTaskRow(row); it = m_rows.erase(it);
     }
     if (!selectedShown && !m_selected.isEmpty()) { m_selected.clear(); m_detail = {}; ++m_generation; }
     m_scope->setText(m_project.isEmpty() ? tr("Open a project session to see tasks")
@@ -228,6 +244,9 @@ void TaskInspector::refresh() {
     m_older->setVisible(!older.isEmpty()); m_older->setText(m_showOlder ? tr("Hide older") : tr("Show older (%1)").arg(older.size()));
     updateFilters();
     renderDetail(); if (isVisible()) fetch();
+    if (m_overList) QMetaObject::invokeMethod(this, [this] {
+        if (m_overList) followDrag(m_drag, m_listPage->mapFrom(m_scroll->viewport(), m_dragAt));
+    }, Qt::QueuedConnection);
 }
 
 void TaskInspector::resizeEvent(QResizeEvent *event) {
@@ -239,6 +258,70 @@ void TaskInspector::updateFilters() {
     int required = (m_tiles.size() - 1) * 4;
     for (auto *tile : std::as_const(m_tiles)) required += tile->expandedWidth();
     for (auto *tile : std::as_const(m_tiles)) tile->setCompact(m_filters->width() < required);
+}
+
+QList<TaskRow *> TaskInspector::shownRows() const {
+    QList<TaskRow *> rows;
+    for (int i = 0; i < m_cards->count(); ++i)
+        if (auto *row = qobject_cast<TaskRow *>(m_cards->itemAt(i)->widget()); row && !row->isHidden()) rows << row;
+    return rows;
+}
+
+int TaskInspector::dropGap(const QString &uuid, const QPoint &point) const {
+    const auto rows = shownRows(); int gap = rows.size(), from = -1;
+    for (int i = 0; i < rows.size(); ++i) {
+        if (rows[i]->task().uuid == uuid) from = i;
+        if (gap == rows.size() && point.y() < rows[i]->y() + rows[i]->height() / 2) gap = i;
+    }
+    return from >= 0 && (gap == from || gap == from + 1) ? -1 : gap;
+}
+
+void TaskInspector::followDrag(const TaskDrag &drag, const QPoint &point) {
+    const auto rows = shownRows();
+    if (!m_board->canReorderTask(drag, m_stage) || rows.isEmpty()) { endListDrag(); return; }
+    m_drag = drag; m_dragAt = m_listPage->mapTo(m_scroll->viewport(), point); m_overList = true;
+    const int gap = dropGap(drag.uuid, point);
+    if (gap < 0) m_dropLine->hide();
+    else {
+        const auto *edge = gap < rows.size() ? rows[gap] : rows.last();
+        const int y = edge->y() + (gap < rows.size() ? 0 : edge->height());
+        m_dropLine->setGeometry(8, y - 1, m_listPage->width() - 16, 2); m_dropLine->show(); m_dropLine->raise();
+    }
+    const int height = m_scroll->viewport()->height();
+    m_scrollStep = m_dragAt.y() < 28 ? -8 : m_dragAt.y() > height - 28 ? 8 : 0;
+    if (!m_scrollStep) m_autoScroll.stop(); else if (!m_autoScroll.isActive()) m_autoScroll.start();
+}
+
+void TaskInspector::endListDrag() { m_autoScroll.stop(); m_overList = false; m_scrollStep = 0; m_dropLine->hide(); }
+
+bool TaskInspector::eventFilter(QObject *watched, QEvent *event) {
+    const auto type = event->type();
+    if (type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::DragLeave && type != QEvent::Drop)
+        return QWidget::eventFilter(watched, event);
+    if (watched == m_listPage) {
+        if (type == QEvent::DragLeave) { endListDrag(); return true; }
+        auto *drop = static_cast<QDropEvent *>(event); const auto drag = TaskDrag::from(drop->mimeData()); const auto rows = shownRows();
+        if (!drag || rows.isEmpty() || !m_board->canReorderTask(*drag, m_stage)) { endListDrag(); drop->ignore(); return true; }
+        drop->setDropAction(Qt::MoveAction); drop->accept();
+        if (type == QEvent::Drop) {
+            const int gap = dropGap(drag->uuid, drop->position().toPoint()); endListDrag();
+            if (gap >= 0) m_board->reorderTask(*drag, gap < rows.size() ? rows[gap]->task().uuid : rows.last()->task().uuid, gap < rows.size());
+        } else followDrag(*drag, drop->position().toPoint());
+        return true;
+    }
+    for (auto it = m_tiles.cbegin(); it != m_tiles.cend(); ++it) {
+        if (it.value() != watched) continue;
+        auto *tile = it.value();
+        if (type == QEvent::DragLeave) { tile->setDropTarget(false); return true; }
+        auto *drop = static_cast<QDropEvent *>(event); const auto drag = TaskDrag::from(drop->mimeData());
+        const bool takes = drag && m_board->canStageTask(*drag, it.key());
+        tile->setDropTarget(takes && type != QEvent::Drop);
+        if (!takes) { drop->ignore(); return true; }
+        drop->setDropAction(Qt::MoveAction); drop->accept();
+        if (type == QEvent::Drop) m_board->stageTask(*drag, it.key());
+        return true;
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 void TaskInspector::fetch() {
@@ -282,6 +365,13 @@ void TaskInspector::renderDetail() {
     const auto data = labels(m_detail); auto task = TaskBoard::item(data);
     for (const auto &listed : m_board->board().tasks) if (listed.uuid == task.uuid) { task.queue = listed.queue; break; }
     m_open->setEnabled(!m_detail.isEmpty() && executor()); m_edit->setEnabled(!m_detail.isEmpty());
+    const bool editable = m_detail.isEmpty() || TaskDrag::draggable(task);
+    m_edit->setText(editable ? tr("Edit") : tr("Details"));
+    m_edit->setAccessibleName(editable ? tr("Edit task") : tr("Task details"));
+    m_edit->setIcon(workspaceIcon(editable ? "task-edit" : "task-list", TaskColors::of(m_dark).muted));
+    m_edit->setToolTip(editable ? tr("Edit task description, attachments and assignment")
+        : !task.writable ? tr("View task details. Update Zerus to edit this task.")
+        : tr("View details and notes. Description and assignment can be edited in To do or Backlog."));
     m_detailTabs->setEnabled(!m_detail.isEmpty()); m_moreDetail->hide();
     const auto empty = [this](const QString &text) {
         m_activity->setTaskJournal({}, {}); m_emptyDetail->setText(text); m_content->setCurrentWidget(m_emptyDetail);
@@ -362,7 +452,8 @@ void TaskInspector::setTheme(bool dark) {
         "#taskDetailMore{color:%5;border:0;padding:4px;}" )
         .arg(colors.fg.name(), colors.surface.name(), colors.border.name(), colors.muted.name(), colors.accent.name()) + workspaceScrollbars(dark));
     m_activity->setTheme(dark);
-    m_open->setIcon(workspaceIcon("external", colors.muted)); m_edit->setIcon(workspaceIcon("more", colors.muted));
+    setWorkspaceStyle(m_dropLine, QStringLiteral("background:%1;border-radius:1px;").arg(colors.accent.name()));
+    m_open->setIcon(workspaceIcon("external", colors.muted)); m_edit->setIcon(workspaceIcon("task-edit", colors.muted));
     for (auto *button : {m_open, m_edit}) setWorkspaceStyle(button,
         QStringLiteral("QPushButton{border:0;border-radius:5px;background:transparent;}QPushButton:hover{background:%1;}").arg(colors.hover.name()));
     refresh();

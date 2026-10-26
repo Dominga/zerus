@@ -421,27 +421,30 @@ void TasksView::addTask(const QString &key, const QString &text, const QList<Mes
 }
 
 void TasksView::startDrag(TaskRow *row, const QPoint &hotSpot) {
-    if (m_projectId.isEmpty()) return;
+    if (m_projectId.isEmpty() || m_dragSource || !TaskDrag::draggable(row->task())) return;
     // A listing may take the row out of the list while the drag runs; the drag
     // carries the task, and the row is kept until the drag ends.
     m_dragSource = row;
     auto *drag = new QDrag(this);
+    QPointer<QDrag> dragGuard(drag);
     drag->setMimeData(TaskDrag::of(m_projectId, row->task()).mimeData());
     drag->setPixmap(row->grab()); drag->setHotSpot(hotSpot);
     row->setDragging(true);
     execDrag(drag);
+    if (dragGuard) dragGuard->deleteLater();
     const QPointer<TaskRow> source = std::exchange(m_dragSource, nullptr);
     if (source) {
         source->setDragging(false);
-        if (m_rows.value(source->task().uuid) != source) source->deleteLater();
+        if (source->property("taskRetired").toBool()) source->deleteLater();
     }
     // The drag is over wherever it ended, whether or not a leave reached the target.
     endListDrag();
     for (auto *tile : std::as_const(m_tiles)) tile->setDropTarget(false);
+    emit taskDragFinished();
 }
 
 void TasksView::retire(TaskRow *row) {
-    row->hide(); row->setObjectName({});
+    row->setProperty("taskRetired", true); row->hide(); row->setObjectName({});
     if (row != m_dragSource) row->deleteLater();
 }
 
@@ -449,11 +452,31 @@ Qt::DropAction TasksView::execDrag(QDrag *drag) { return drag->exec(Qt::MoveActi
 
 bool TasksView::takesOnTile(const TaskDrag &drag, const QString &stage) const {
     const auto list = [](const QString &s) { return s == QLatin1String("todo") || s == QLatin1String("backlog"); };
-    return drag.projectId == m_projectId && list(stage) && list(drag.stage) && drag.stage != stage;
+    return canReorderTask(drag, drag.stage) && list(stage) && list(drag.stage) && drag.stage != stage;
+}
+
+bool TasksView::canReorderTask(const TaskDrag &drag, const QString &stage) const {
+    if (m_projectId.isEmpty() || drag.projectId != m_projectId || drag.stage != stage) return false;
+    for (const auto &task : m_board.tasks)
+        if (task.uuid == drag.uuid) return TaskDrag::draggable(task) && task.stage == stage;
+    return false;
+}
+
+bool TasksView::canStageTask(const TaskDrag &drag, const QString &stage) const { return takesOnTile(drag, stage); }
+
+void TasksView::reorderTask(const TaskDrag &drag, const QString &anchor, bool before) {
+    if (!canReorderTask(drag, drag.stage) || anchor == drag.uuid) return;
+    for (const auto &task : m_board.tasks) if (task.uuid == anchor && task.stage == drag.stage && task.writable) {
+        run({{withProject({"move", drag.uuid, before ? "--before" : "--after", anchor}), {}}}); return;
+    }
+}
+
+void TasksView::stageTask(const TaskDrag &drag, const QString &stage) {
+    if (canStageTask(drag, stage)) run({{withProject({"stage", drag.uuid, stage}), {}}});
 }
 
 bool TasksView::takesInList(const TaskDrag &drag) const {
-    return drag.projectId == m_projectId && m_stage == QLatin1String("todo") && drag.stage == QLatin1String("todo") && !shownRows().isEmpty();
+    return canReorderTask(drag, m_stage) && !shownRows().isEmpty();
 }
 
 QList<TaskRow *> TasksView::shownRows() const {
@@ -490,8 +513,7 @@ void TasksView::followDrag(const TaskDrag &drag, const QPoint &point) {
 void TasksView::reorder(const TaskDrag &drag, const QPoint &point) {
     const auto rows = shownRows(); const int gap = rows.isEmpty() ? -1 : dropGap(drag.uuid, point);
     if (gap < 0) return;
-    run({{withProject(gap < rows.size() ? QStringList{"move", drag.uuid, "--before", rows[gap]->task().uuid}
-                                        : QStringList{"move", drag.uuid, "--after", rows.last()->task().uuid}), {}}});
+    reorderTask(drag, gap < rows.size() ? rows[gap]->task().uuid : rows.last()->task().uuid, gap < rows.size());
 }
 
 void TasksView::endListDrag() { m_autoScroll.stop(); m_scrollStep = 0; m_overList = false; m_dropLine->hide(); }
@@ -520,7 +542,7 @@ bool TasksView::eventFilter(QObject *watched, QEvent *event) {
         tile->setDropTarget(takes && type != QEvent::Drop);
         if (!takes) { drop->ignore(); return true; }
         drop->setDropAction(Qt::MoveAction); drop->accept();
-        if (type == QEvent::Drop) run({{withProject({"stage", drag->uuid, it.key()}), {}}});
+        if (type == QEvent::Drop) stageTask(*drag, it.key());
         return true;
     }
     return QWidget::eventFilter(watched, event);
@@ -568,11 +590,12 @@ void TasksView::openTask(const TaskItem &task) {
             if (action == TaskAction::Cancel) return run(editSteps(task, edits), [this, close, edited] { close(); confirmCancel(edited); }, refused);
             run(editSteps(task, edits) + steps(edited, action), close, refused);
         });
-        connect(dialog, &TaskDialog::commentRequested, this, [this, guard, uuid = task.uuid](const QString &text) {
-            request(withProject({"comment", uuid}), text, [guard](const QJsonObject &reply) {
+        connect(dialog, &TaskDialog::commentRequested, this, [this, guard, refused, uuid = task.uuid](const QString &text) {
+            request(withProject({"comment", uuid}), text, [this, guard](const QJsonObject &reply) {
+                refresh();
                 if (!guard) return;
                 guard->clearComment(); guard->setHistory(reply.value("task").toObject().value("log").toArray());
-            });
+            }, refused);
         });
         dialog->open();
     });

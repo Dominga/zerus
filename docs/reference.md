@@ -2515,7 +2515,7 @@ task for the open session in To do, or in Backlog while Backlog is open. The tab
 label counts the tasks In review and in To do. Done lists the last 7 days, and
 Show older adds the rest. A session outside every project has no tasks.
 To do and Backlog rows can be dragged: onto the other list's tile to move them
-there, within To do to reorder it, onto a session of the project in the session
+there, within To do or Backlog to reorder it, onto a session of the project in the session
 list to pin them to it, or onto the project's header to make them Any session.
 
 The **Tasks** inspector hosts the board's session filter and project settings
@@ -2525,7 +2525,14 @@ board. Stage labels appear when the panel is wide enough; narrow filters keep
 their icons, counts, tooltips and accessible names. The board occupies the upper
 pane; selecting a card updates the permanent lower details pane without moving
 cards or changing the list viewport. Drag the divider to resize these panes; its
-position is saved. Card actions use the same guarded commands as the project board.
+position is saved. Both board surfaces support dragging To do and Backlog cards
+with an insertion marker and edge scrolling. Drop onto a stage filter to move
+between these two lists, or onto a session to route queued work. Right-click a
+card for its stage actions; this uses the same guarded commands as the action
+menu. The lower pane's explicit **Edit** button opens description, attachment and
+assignment changes in To do or Backlog. Other stages show **Details**, keeping
+notes and inspection available while explaining why description editing is unavailable. A task note saved in the legacy dialog is not a message to the
+executor. Failed note saves keep the draft and report the error in that dialog.
 Collapsed inspector cards show a short title and worker; their action menu keeps
 the controls within one compact row. Full reports and cancellations appear only
 after selecting a task. Its **Description**, **Result** and **History** sections are

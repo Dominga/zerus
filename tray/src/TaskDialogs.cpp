@@ -1,4 +1,6 @@
 #include "TaskDialogs.h"
+#include "ActivityView.h"
+#include "ContentScale.h"
 #include "MonospaceFont.h"
 #include "ScopeFilterWidgets.h"
 #include "SessionStatusBadge.h"
@@ -42,6 +44,17 @@ protected:
     void insertFromMimeData(const QMimeData *source) override {
         if (!isReadOnly() && media && media(source)) return;
         QPlainTextEdit::insertFromMimeData(source);
+    }
+};
+class TaskNote : public QLineEdit {
+public:
+    using QLineEdit::QLineEdit;
+protected:
+    void keyPressEvent(QKeyEvent *event) override {
+        QLineEdit::keyPressEvent(event);
+        // Return saves a note; it must not also trigger the dialog's default
+        // Save/Close button. Let the line edit handle IME/validation first.
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) event->accept();
     }
 };
 // A field's name, small and muted; a heading groups fields.
@@ -101,9 +114,10 @@ QString taskHistoryLine(const QJsonObject &entry) {
 TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions, std::function<QString(const TaskTarget &)> sendBlocker,
                        bool dark, QWidget *parent)
     : QDialog(parent), m_task(TaskBoard::item(task)), m_sendBlocker(std::move(sendBlocker)) {
-    setObjectName("taskDialog"); setWindowTitle(tr("Task %1").arg(m_task.id)); resize(900, 740);
+    setObjectName("taskDialog"); resize(900, 740);
     setMinimumSize(640, 520); setSizeGripEnabled(true);
     m_editable = m_task.writable && (m_task.stage == QLatin1String("todo") || m_task.stage == QLatin1String("backlog"));
+    setWindowTitle((m_editable ? tr("Edit task %1") : tr("Task details · %1")).arg(m_task.id));
     m_target = {m_task.targetSession.isEmpty(), m_task.targetHost, m_task.targetSession, m_task.targetId};
     const auto colors = TaskColors::of(dark);
     auto *layout = new QVBoxLayout(this); layout->setSpacing(8);
@@ -116,11 +130,16 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
     meta->setObjectName("taskDialogMeta"); meta->setTextFormat(Qt::PlainText);
     meta->setStyleSheet(QStringLiteral("color:%1;font-size:11px;").arg(colors.muted.name()));
     header->addWidget(stage); header->addWidget(title); header->addWidget(meta); header->addStretch(); layout->addLayout(header);
-    layout->addWidget(section(tr("Prompt")));
+    layout->addWidget(section(tr("Description")));
+    if (!m_editable) {
+        auto *reason = section(!m_task.writable ? tr("Update Zerus to edit this task.")
+            : tr("Description, attachments and assignment can be edited in To do or Backlog."));
+        reason->setObjectName("taskEditReason"); reason->setWordWrap(true); layout->addWidget(reason);
+    }
     auto *prompt = new TaskPrompt(m_task.text); m_prompt = prompt;
     prompt->media = [this](const QMimeData *source) { return insertMedia(source); };
     m_prompt->setObjectName("taskPrompt"); m_prompt->setReadOnly(!m_editable);
-    m_prompt->setAccessibleName(tr("Task prompt")); layout->addWidget(m_prompt, 2);
+    m_prompt->setAccessibleName(tr("Task description")); layout->addWidget(m_prompt, 2);
     auto *media = new QWidget; m_attachmentRows = new QVBoxLayout(media); m_attachmentRows->setContentsMargins(0, 0, 0, 0);
     auto *mediaArea = new QScrollArea; mediaArea->setObjectName("taskAttachments"); mediaArea->setWidgetResizable(true);
     mediaArea->setFrameShape(QFrame::NoFrame); mediaArea->setMaximumHeight(140); mediaArea->setWidget(media); layout->addWidget(mediaArea);
@@ -142,13 +161,12 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
     }
     refreshAttachments();
     if (m_task.stage == QLatin1String("review") && !m_task.summary.isEmpty()) {
-        auto *summary = new QLabel(QStringLiteral("<b>%1 reported:</b> %2").arg(TaskBoard::sessionLabel(m_task.sessionHost, m_task.sessionName).toHtmlEscaped(),
-            m_task.summary.toHtmlEscaped()));
-        summary->setObjectName("taskDialogSummary"); summary->setWordWrap(true);
-        summary->setStyleSheet(QStringLiteral("border-left:2px solid %1;padding:1px 0 1px 10px;").arg(colors.warn.name()));
+        auto *summary = new ActivityView; summary->setObjectName("taskDialogSummary"); summary->setTheme(dark);
+        summary->setContentScale(ContentScale::factor());
+        summary->setMinimumHeight(90); summary->setMaximumHeight(150);
         layout->addWidget(summary);
     }
-    layout->addWidget(section(tr("Session")));
+    layout->addWidget(section(tr("Assigned to")));
     if (m_editable) {
         // The sessions wrap onto rows and scroll past three, however many the project has.
         auto *area = m_choicesArea = new QScrollArea; area->setObjectName("taskSessionChoices"); area->setWidgetResizable(true);
@@ -179,18 +197,29 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
         drag->setObjectName("taskSessionHint"); drag->setProperty("taskSection", true); drag->setWordWrap(true); layout->addWidget(drag);
         connect(m_sessions, &QButtonGroup::idClicked, this, &TaskDialog::refreshButtons);
     } else {
-        auto *fixed = new QLabel(m_task.sessionName.isEmpty() ? (m_task.targetSession.isEmpty() ? tr("Any session")
-            : TaskBoard::sessionLabel(m_task.targetHost, m_task.targetSession)) : TaskBoard::sessionLabel(m_task.sessionHost, m_task.sessionName));
-        fixed->setObjectName("taskDialogSession"); layout->addWidget(fixed);
+        auto *assigned = new QLabel(m_task.targetSession.isEmpty() ? tr("Any session") : TaskBoard::sessionLabel(m_task.targetHost, m_task.targetSession));
+        assigned->setObjectName("taskDialogAssigned"); layout->addWidget(assigned);
+        if (!m_task.sessionName.isEmpty()) {
+            bool started = false;
+            for (const auto &value : task.value("log").toArray()) {
+                const auto kind = value.toObject().value("kind").toString();
+                if (kind == QLatin1String("sent")) started = false; else if (kind == QLatin1String("started")) started = true;
+            }
+            layout->addWidget(section(m_task.stage != QLatin1String("active") ? tr("Last executor")
+                : started ? tr("Executor") : tr("Dispatched to · start unconfirmed")));
+            auto *fixed = new QLabel(TaskBoard::sessionLabel(m_task.sessionHost, m_task.sessionName));
+            fixed->setObjectName("taskDialogSession"); layout->addWidget(fixed);
+        }
     }
     layout->addWidget(section(tr("History")));
     m_history = new QTextBrowser; m_history->setObjectName("taskHistory"); m_history->setOpenLinks(false); layout->addWidget(m_history, 1);
     setHistory(task.value("log").toArray());
     auto *comment = new QHBoxLayout;
-    m_comment = new QLineEdit; m_comment->setObjectName("taskComment");
-    m_comment->setPlaceholderText(tr("Comment — people and agents see it; it is not sent to the session"));
-    auto *add = new QPushButton(tr("Add")); add->setObjectName("addTaskComment"); add->setAutoDefault(false);
-    const auto commentNow = [this] { if (!m_comment->text().trimmed().isEmpty()) emit commentRequested(m_comment->text().trimmed()); };
+    m_comment = new TaskNote; m_comment->setObjectName("taskComment");
+    m_comment->setPlaceholderText(tr("Task note (not sent to the executor)"));
+    m_comment->setToolTip(tr("Save this note in task history. It does not deliver a message to the executor."));
+    auto *add = new QPushButton(tr("Save note")); add->setObjectName("addTaskComment"); add->setAutoDefault(false);
+    const auto commentNow = [this] { if (!m_busy && m_task.writable && !m_comment->text().trimmed().isEmpty()) { setBusy(true); emit commentRequested(m_comment->text().trimmed()); } };
     connect(add, &QPushButton::clicked, this, commentNow); connect(m_comment, &QLineEdit::returnPressed, this, commentNow);
     comment->addWidget(m_comment, 1); comment->addWidget(add); layout->addLayout(comment);
     m_error = errorLabel("taskDialogError"); layout->addWidget(m_error);
@@ -211,7 +240,7 @@ TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessio
     actions->addStretch();
     if (m_editable) {
         auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("discardTaskEdits"); cancel->setAutoDefault(false);
-        auto *save = new QPushButton(tr("Save")); save->setObjectName("saveTask"); save->setDefault(true); save->setProperty("primaryAction", true);
+        auto *save = new QPushButton(tr("Save changes")); save->setObjectName("saveTask"); save->setDefault(true); save->setProperty("primaryAction", true);
         connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
         connect(save, &QPushButton::clicked, this, [this] { setBusy(true); emit saveRequested(edits()); });
         connect(m_prompt, &QPlainTextEdit::textChanged, this, &TaskDialog::refreshButtons);
@@ -239,11 +268,12 @@ void TaskDialog::refreshButtons() {
     for (auto *button : findChildren<QPushButton *>()) {
         QString why, label;
         if (button->objectName() == QLatin1String("saveTask")) {
-            why = empty ? tr("The prompt is empty.") : QString(); label = tr("Save the prompt and the session");
+            why = empty ? tr("The description is empty.") : QString(); label = tr("Save description, attachments and assignment");
         } else if (button->property("taskAction").isValid()) {
             const auto action = TaskAction(button->property("taskAction").toInt());
             label = TaskBoard::actionLabel(action);
-            why = !m_task.writable ? tr("Update Zerus to edit this task") : empty ? tr("The prompt is empty.")
+            if (m_editable) label = tr("Save description, attachments and assignment changes, then: %1").arg(label);
+            why = !m_task.writable ? tr("Update Zerus to edit this task") : empty ? tr("The description is empty.")
                 : action == TaskAction::SendNow && m_sendBlocker ? m_sendBlocker(chosenTarget()) : QString();
         } else continue;
         button->setEnabled(!m_busy && !m_mediaBusy && why.isEmpty()); button->setToolTip(why.isEmpty() ? label : why);
@@ -251,6 +281,9 @@ void TaskDialog::refreshButtons() {
     if (auto *attach = findChild<QPushButton *>("attachTaskFiles")) attach->setEnabled(!m_busy && !m_mediaBusy);
     for (auto *remove : findChildren<QPushButton *>("removeTaskAttachment")) remove->setEnabled(!m_busy && !m_mediaBusy);
     m_prompt->setReadOnly(!m_editable || m_busy || m_mediaBusy);
+    m_comment->setEnabled(!m_busy && m_task.writable);
+    if (auto *add = findChild<QPushButton *>("addTaskComment")) add->setEnabled(!m_busy && m_task.writable);
+    if (m_choicesArea) m_choicesArea->setEnabled(!m_busy && !m_mediaBusy);
 }
 
 TaskEdits TaskDialog::edits() const {
@@ -372,6 +405,17 @@ void TaskDialog::setHistory(const QJsonArray &log) {
     QString html;
     for (const auto &entry : log) html += taskHistoryLine(entry.toObject());
     m_history->setHtml(html);
+    if (auto *summary = findChild<ActivityView *>("taskDialogSummary")) {
+        QJsonObject report;
+        for (const auto &value : log) {
+            const auto entry = value.toObject();
+            if (entry.value("kind") == "report" && entry.value("text") == m_task.summary) report = entry;
+        }
+        const auto source = report.value("actor").toObject();
+        summary->setTaskJournal(QStringLiteral("task-result:") + m_task.uuid, {QJsonObject{{"id", "report"}, {"role", source.value("kind") == "person" ? "person" : "agent"},
+            {"author", source.isEmpty() ? TaskBoard::sessionLabel(m_task.sessionHost, m_task.sessionName) : actor(source)},
+            {"at", report.value("at")}, {"label", tr("Report")}, {"text", m_task.summary}}}, false);
+    }
 }
 
 void TaskDialog::updateSessionLabels(const QList<TaskSession> &sessions) {
@@ -413,12 +457,12 @@ void TaskDialog::updateSessionLabels(const QList<TaskSession> &sessions) {
     if (auto *meta = findChild<QLabel *>("taskDialogMeta")) meta->setText((m_task.author.isEmpty() ? tr("You") : TaskBoard::sessionLabel(m_task.authorHost, m_task.author)) + QStringLiteral(" · ") + time(m_task.createdAt));
     if (auto *fixed = findChild<QLabel *>("taskDialogSession")) fixed->setText(m_task.sessionName.isEmpty()
         ? (m_task.targetSession.isEmpty() ? tr("Any session") : TaskBoard::sessionLabel(m_task.targetHost, m_task.targetSession)) : TaskBoard::sessionLabel(m_task.sessionHost, m_task.sessionName));
-    if (auto *summary = findChild<QLabel *>("taskDialogSummary")) summary->setText(QStringLiteral("<b>%1 reported:</b> %2")
-        .arg(TaskBoard::sessionLabel(m_task.sessionHost, m_task.sessionName).toHtmlEscaped(), m_task.summary.toHtmlEscaped()));
+    if (auto *assigned = findChild<QLabel *>("taskDialogAssigned")) assigned->setText(m_task.targetSession.isEmpty()
+        ? tr("Any session") : TaskBoard::sessionLabel(m_task.targetHost, m_task.targetSession));
     setHistory(log);
 }
 
-void TaskDialog::clearComment() { m_comment->clear(); }
+void TaskDialog::clearComment() { m_comment->clear(); setBusy(false); }
 
 // While hgs works the buttons wait; a refusal shows here and gives them back.
 void TaskDialog::setBusy(bool busy) {

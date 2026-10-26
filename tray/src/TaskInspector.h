@@ -12,6 +12,7 @@ class QScrollArea;
 class QVBoxLayout;
 class TaskTile;
 class QTabBar;
+class QFrame;
 
 // Session tasks beside Activity. Shares the board's listing, but fetches only
 // the selected task's history. It never infers task execution from native work.
@@ -32,11 +33,16 @@ protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 private:
     void refresh();
     void fetch();
     void renderDetail();
     void updateFilters();
+    QList<TaskRow *> shownRows() const;
+    int dropGap(const QString &uuid, const QPoint &point) const;
+    void followDrag(const TaskDrag &drag, const QPoint &point);
+    void endListDrag();
     QJsonObject labels(QJsonObject task) const;
     const TaskSession *executor() const;
     HgsClient *m_client;
@@ -62,4 +68,10 @@ private:
     bool m_dark = true;
     bool m_showOlder = false;
     int m_historyVisible = 8;
+    QFrame *m_dropLine;
+    QTimer m_autoScroll;
+    TaskDrag m_drag;
+    QPoint m_dragAt;
+    int m_scrollStep = 0;
+    bool m_overList = false;
 };

@@ -4,6 +4,11 @@
 #include "TaskDrag.h"
 #include "TaskRow.h"
 #include "TasksView.h"
+#include "TaskInspector.h"
+#include <QContextMenuEvent>
+#include <QMenu>
+#include <QAction>
+#include <QPushButton>
 #include <QAbstractButton>
 #include <QApplication>
 #include <QCursor>
@@ -85,6 +90,9 @@ private slots:
     void init() { QSettings().remove("tasks"); }
     void thePayloadNamesTheTaskAndItsProject();
     void toDoAndBacklogRowsStartADrag();
+    void inspectorReordersQueuesAndPreservesDragLifetime();
+    void inspectorScrollsAndRejectsInvalidDrops();
+    void taskContextMenuUsesTheSameGuardedActions();
     void theOtherListsTileTakesADroppedTask();
     void toDoRowsAreReorderedByDropping();
     void theFunnelReordersAmongTheRowsItShows();
@@ -148,6 +156,82 @@ void TestTaskDrag::toDoAndBacklogRowsStartADrag() {
     taskRow->setDragging(false); QVERIFY(!taskRow->property("dragging").toBool()); QVERIFY(!taskRow->graphicsEffect());
 }
 
+void TestTaskDrag::inspectorReordersQueuesAndPreservesDragLifetime() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo"),
+        FakeTasksCli::task(3, "todo"), FakeTasksCli::task(4, "backlog"), FakeTasksCli::task(5, "backlog")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); LoopingTasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(380, 760); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); inspector.setContext("project-1", "", "codex/api", sessions());
+    QTRY_COMPARE(inspector.displayedCount(), 3);
+    auto *page = inspector.findChild<QWidget *>("taskInspectorCards"); auto *line = inspector.findChild<QWidget *>("taskInspectorDropLine");
+    const auto card = [&](int n) { return inspector.findChild<TaskRow *>(QString("taskInspectorRow:T-%1").arg(n, 6, 10, QLatin1Char('0'))); };
+    const auto at = [&](int n, bool after = false) { auto *r = card(n); return r->mapTo(page, QPoint(60, after ? r->height() - 2 : 2)); };
+    auto *first = card(1); QPointer<TaskRow> source(first); QVERIFY(first);
+    board.during = [&] {
+        QVERIFY(source->property("dragging").toBool());
+        QVERIFY(dragOver(page, todo(1), at(3, true))); QVERIFY(line->isVisible());
+        QVERIFY(drop(page, todo(1), at(3, true)));
+        QTRY_VERIFY(card(1)->y() > card(3)->y());
+    };
+    pressMoveRelease(first, QPoint(60, 25), QApplication::startDragDistance() + 4);
+    QVERIFY(source); QVERIFY(!source->property("dragging").toBool()); QVERIFY(!line->isVisible());
+    QVERIFY(called(dir.path(), {"task", "move", "uuid-1", "--after", "uuid-3", "--project", "project-1"}));
+    QVERIFY(inspector.selectedTask().isEmpty());
+    // A no-op makes no CLI mutation; a refused move keeps the server's order.
+    const auto countMoves = [&] { int n = 0; for (const auto &c : FakeTasksCli::calls(dir.path())) n += c.value(1) == "move"; return n; };
+    const int before = countMoves(); QVERIFY(drop(page, todo(1), at(1))); QTest::qWait(60); QCOMPARE(countMoves(), before);
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("move"); fail.close();
+    QSignalSpy notices(&board, &TasksView::notice); QVERIFY(drop(page, todo(1), at(2))); QTRY_COMPARE(notices.size(), 1);
+    QVERIFY(card(1)->y() > card(3)->y()); QVERIFY(fail.remove());
+    // Moving the source out of this list during the drag keeps it until the loop ends.
+    board.during = [&] {
+        QVERIFY(drop(inspector.findChild<QWidget *>("taskTile:backlog"), todo(1)));
+        QTRY_COMPARE(inspector.displayedCount(), 2); QVERIFY(source && source->isHidden());
+    };
+    pressMoveRelease(first, QPoint(60, 25), QApplication::startDragDistance() + 4);
+    QTRY_VERIFY(source.isNull());
+    inspector.findChild<QAbstractButton *>("taskTile:backlog")->click(); QTRY_COMPARE(inspector.displayedCount(), 3);
+    const auto backlog = TaskDrag::of("project-1", item(5, "backlog")); QVERIFY(drop(page, backlog, at(4)));
+    QTRY_VERIFY(card(5)->y() < card(4)->y());
+    QVERIFY(called(dir.path(), {"task", "move", "uuid-5", "--before", "uuid-4", "--project", "project-1"}));
+}
+
+void TestTaskDrag::inspectorScrollsAndRejectsInvalidDrops() {
+    QJsonArray tasks; for (int n = 1; n <= 40; ++n) tasks.append(FakeTasksCli::task(n, "todo"));
+    tasks.append(FakeTasksCli::task(41, "todo", {{"writable", false}}));
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), tasks)); HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(380, 700); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); inspector.setContext("project-1", "", "codex/api", sessions());
+    QTRY_COMPARE(inspector.displayedCount(), 41);
+    auto *page = inspector.findChild<QWidget *>("taskInspectorCards"); auto *scroll = inspector.findChild<QScrollArea *>("taskInspectorList");
+    QVERIFY(!dragOver(page, TaskDrag::of("project-2", item(1, "todo"))));
+    QVERIFY(!dragOver(page, TaskDrag::of("project-1", item(41, "todo"))));
+    auto stale = todo(1); stale.stage = "backlog"; QVERIFY(!dragOver(page, stale));
+    const auto edge = page->mapFrom(scroll->viewport(), QPoint(70, scroll->viewport()->height() - 2));
+    QVERIFY(dragOver(page, todo(1), edge)); QTRY_VERIFY(scroll->verticalScrollBar()->value() > 0);
+    leave(page); const int stop = scroll->verticalScrollBar()->value(); QTest::qWait(100); QCOMPARE(scroll->verticalScrollBar()->value(), stop);
+    for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) == "list");
+}
+
+void TestTaskDrag::taskContextMenuUsesTheSameGuardedActions() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"),
+        FakeTasksCli::task(2, "todo", {{"target", FakeTasksCli::pinned("codex/missing")}})}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
+    inspector.resize(380, 700); inspector.show(); board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions()); QTRY_COMPARE(inspector.displayedCount(), 2);
+    auto *row = inspector.findChild<TaskRow *>("taskInspectorRow:T-000002"); QSignalSpy opened(row, &TaskRow::opened);
+    QContextMenuEvent menuEvent(QContextMenuEvent::Mouse, QPoint(60, 25), row->mapToGlobal(QPoint(60, 25)));
+    QApplication::sendEvent(row, &menuEvent);
+    auto *menu = row->findChild<QMenu *>("taskContextMenu"); QVERIFY(menu && menu->isVisible()); QCOMPARE(opened.size(), 0);
+    auto *send = menu->findChild<QAction *>("taskMenuAction:sendNow"); QVERIFY(send && !send->isEnabled()); QVERIFY(!send->toolTip().isEmpty());
+    auto *move = menu->findChild<QAction *>("taskMenuAction:toBacklog"); QVERIFY(move && move->isEnabled()); menu->hide(); move->trigger();
+    QTRY_COMPARE(inspector.displayedCount(), 1); QVERIFY(called(dir.path(), {"task", "stage", "uuid-2", "backlog", "--project", "project-1"}));
+    inspector.selectTask("uuid-1"); auto *edit = inspector.findChild<QPushButton *>("taskInspectorEdit");
+    QTRY_VERIFY(edit->isEnabled()); QCOMPARE(edit->text(), QString("Edit"));
+    board.actOnTask(item(1, "todo"), TaskAction::SendNow);
+    QTRY_COMPARE(edit->text(), QString("Details")); QVERIFY(edit->isEnabled()); QVERIFY(edit->toolTip().contains("To do"));
+}
+
 void TestTaskDrag::theOtherListsTileTakesADroppedTask() {
     QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo"), FakeTasksCli::task(3, "backlog")}));
     HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
@@ -209,11 +293,11 @@ void TestTaskDrag::toDoRowsAreReorderedByDropping() {
     QVERIFY(called(dir.path(), {"task", "move", "uuid-1", "--after", "uuid-3", "--project", "project-1"}));
     // A drop where it already is asks nothing of hgs.
     const int before = moves(); QVERIFY(drop(page, todo(4), at(4, 0.6))); QTest::qWait(100); QCOMPARE(moves(), before);
-    // Backlog tasks and other projects' tasks do not join To do here, and Backlog is not reordered.
+    // Backlog tasks and other projects' tasks do not join To do here.
     QVERIFY(!dragOver(page, TaskDrag::of("project-1", TaskBoard::item(FakeTasksCli::task(5, "backlog"))), at(1, 0.25)));
     QVERIFY(!dragOver(page, TaskDrag::of("project-2", TaskBoard::item(FakeTasksCli::task(1, "todo"))), at(1, 0.25)));
     tile(view, "backlog")->click(); QTRY_COMPARE(visibleRows(view), QStringList{"T-000005"});
-    QVERIFY(!dragOver(page, TaskDrag::of("project-1", TaskBoard::item(FakeTasksCli::task(5, "backlog"))), at(5, 0.25)));
+    QVERIFY(dragOver(page, TaskDrag::of("project-1", TaskBoard::item(FakeTasksCli::task(5, "backlog"))), at(5, 0.25)));
     QVERIFY(!line->isVisible());
 }
 

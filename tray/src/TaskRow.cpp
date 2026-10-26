@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QMenu>
+#include <QContextMenuEvent>
 #include <QPainter>
 #include <QTextLayout>
 #include <QTimer>
@@ -135,8 +136,8 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     auto *actionsLayout = new QHBoxLayout(m_actions); actionsLayout->setContentsMargins(0, 0, 0, 0); actionsLayout->setSpacing(2);
     m_more = new QToolButton(m_actions); m_more->setObjectName("taskMoreActions"); m_more->setFixedSize(34, 32);
     m_more->setIconSize(QSize(20, 20)); m_more->setAutoRaise(true); m_more->setPopupMode(QToolButton::InstantPopup);
-    m_more->setToolTip(tr("Task actions")); m_more->setAccessibleName(tr("Task actions")); m_more->hide();
-    m_menu = new QMenu(m_more); m_menu->setToolTipsVisible(true); m_more->setMenu(m_menu);
+    m_more->setCursor(Qt::PointingHandCursor); m_more->setToolTip(tr("Task actions")); m_more->setAccessibleName(tr("Task actions")); m_more->hide();
+    m_menu = new QMenu(m_more); m_menu->setObjectName("taskContextMenu"); m_menu->setToolTipsVisible(true); m_more->setMenu(m_menu);
     connect(m_menu, &QMenu::aboutToShow, this, &TaskRow::rebuildMenu);
     actionsLayout->addWidget(m_more);
     headerLayout->addWidget(m_meta); headerLayout->addWidget(m_status); headerLayout->addWidget(m_tail, 1); headerLayout->addWidget(m_actions);
@@ -171,6 +172,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     const bool rebuild = task.stage != m_task.stage || m_buttons.isEmpty();
     const bool menuChanged = rebuild || state.blocked != m_state.blocked || colors.dark != m_colors.dark;
     m_task = task; m_state = state; m_colors = colors;
+    setCursor(TaskDrag::draggable(task) ? Qt::OpenHandCursor : Qt::PointingHandCursor);
     setProperty("mine", state.mine);
     const QColor stage = colors.stage(task.stage);
     const QString glyph = task.stage == QLatin1String("todo") ? QString::number(task.queue)
@@ -285,6 +287,11 @@ bool TaskRow::eventFilter(QObject *watched, QEvent *event) {
 void TaskRow::keyPressEvent(QKeyEvent *event) {
     if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter || event->key() == Qt::Key_Space) { emit opened(); event->accept(); return; }
     QWidget::keyPressEvent(event);
+}
+
+void TaskRow::contextMenuEvent(QContextMenuEvent *event) {
+    m_pressed = false;
+    m_menu->popup(event->reason() == QContextMenuEvent::Keyboard ? mapToGlobal(rect().center()) : event->globalPos()); event->accept();
 }
 
 void TaskRow::showActions(bool shown) {

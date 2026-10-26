@@ -514,3 +514,28 @@ The proposal succeeds when the person can answer four questions from one work
 surface: **what is happening, who is doing it, what happens next, and where the
 result is**. A cosmetically updated board with the old lifecycle does not meet
 that criterion.
+
+## Task editing interaction review, 2026-10-26
+
+Reviewed the branch at `84898fc1` against the Activity-centered workflow after
+owner feedback on missing reordering, the ambiguous lower-pane ellipsis and task
+context menus. The old `TaskDialog` is a combined task console, not a focused
+editor: it mixes description/attachment changes, routing, reports, history,
+immediate notes and workflow actions. It cannot be the main work surface.
+
+| Finding | Consequence | Disposition |
+| --- | --- | --- |
+| `TaskInspector` connected card clicks and actions but not `TaskRow::dragStarted`; it had no drop targets. | The sidebar looked like the board but lost queue ordering and session/stage drops. | Restore both queue surfaces through shared drag lifetime and guarded mutations, insertion feedback and edge scrolling. Backlog ordering is project priority; neither it nor To do implies parallel execution. |
+| The lower ellipsis opened `TaskDialog` even when the task was read-only. | An apparent editing action opened a window in which description and routing could not change. | Use an explicit pencil plus Edit label for editable tasks; use Details for other stages so notes and inspection remain accessible. Explain the backend edit restriction. |
+| The dialog's Session field chose between target and recorded worker. | Routing preference appeared to be the actual executor. | Show Assigned to separately from Executor / Last executor; a send without a start remains unconfirmed. These fields do not implement an active handoff. |
+| The Review report was an unbounded wrapping label. | A long result could force the dialog beyond the screen and obscure controls. | Use a bounded Activity report view with Markdown, author and known timestamp. A report remains an agent statement, not verified delivery evidence. |
+| The note control was a single line, persisted independently, and never delivered to the session. Duplicate submits were possible, while a refusal used the board notice instead of the open dialog. | A clarification could fail silently or be saved twice, and a saved note could be mistaken for communication with the worker. | Label Save note explicitly, reserve one pending UI submission, retain the draft and show refusal locally. Return saves only the note and does not trigger the dialog default Save/Close. Task-linked delivery and rich drafts remain `zerus-cg5h.3`. |
+| Workflow buttons applied unsaved edits before changing task state. The modal also duplicated result/history and had no durable discussion draft. | Editing, workflow and discussion had different commit boundaries inside one form; closing it could discard an unsent discussion draft. | Make the explicit editor contain only description, attachments and next-send routing with Save/Cancel. Keep workflow actions in card menus, read results/history in the inspector and discuss through Activity. This separation is `zerus-cg5h.9`, after `zerus-cg5h.3`. |
+| `TaskDoc::edit_text`, attachment edits and routing require Backlog or To do; rank changes also require these stages. | Enabling an active-task editor or dragging running tasks would misrepresent the current execution model. | Keep these guards. Revision-scoped edits, executor queues, handoff and verified artifacts belong to `zerus-cg5h.4`. Legacy full-journal reads remain `zerus-cg5h.2`. |
+
+The target interaction is: select to inspect; drag to prioritize queued work;
+right-click for explicit stage actions; Edit for requirement/routing changes;
+Activity for discussion with the current executor. Saving a task note is not
+message delivery, and changing routing is not changing recorded execution
+ownership. The current UI slice improves these boundaries without claiming the
+remaining execution/composer model is implemented.

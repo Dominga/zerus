@@ -81,6 +81,13 @@ public:
     void setOpenInInspector(bool enabled) { m_openInInspector = enabled; }
     void editTask(const TaskItem &task) { openTask(task); }
     void actOnTask(const TaskItem &task, TaskAction action) { act(task, action); }
+    // Both board surfaces use the same drag lifetime and guarded mutations.
+    void dragTask(TaskRow *row, const QPoint &hotSpot) { startDrag(row, hotSpot); }
+    void retireTaskRow(TaskRow *row) { retire(row); }
+    bool canReorderTask(const TaskDrag &drag, const QString &stage) const;
+    bool canStageTask(const TaskDrag &drag, const QString &stage) const;
+    void reorderTask(const TaskDrag &drag, const QString &anchor, bool before);
+    void stageTask(const TaskDrag &drag, const QString &stage);
     TaskRowState rowState(const TaskItem &task) const;
     QString selectedStage() const { return m_stage; }
     // The Activity sidebar hosts the board's existing scope/settings controls.
@@ -94,6 +101,7 @@ signals:
     void notice(const QString &text, bool error);
     void boardChanged();
     void taskSelected(const QString &uuid);
+    void taskDragFinished();
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;

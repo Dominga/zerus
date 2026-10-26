@@ -9,8 +9,12 @@ from the remaining design. Public distribution follows the normal release flow.
 
 Activity remains the primary work surface. Add a **Tasks** tab to the existing
 right inspector beside **Plan & agents**, **Details**, and **Worktrees**. It
-shows the current task, actual executor, queue, expected result and verified
-delivery milestones. Opening a task's conversation uses the central Activity
+contains the task board, with the current task, actual executor, queue, expected
+result and verified delivery milestones. Owner live review, 2026-10-26: reuse the
+board's stage filters and cards; show stage labels when width permits and icons
+with counts on narrow panels. A card expands its details immediately underneath
+it in the same scrolling board and collapses on a second click. Opening a task's
+conversation uses the central Activity
 renderer and composer, with an explicit task context. Do not put another full
 conversation inside a narrow inspector or require a modal task window to work.
 
@@ -26,7 +30,7 @@ when the corresponding facts are available.
 ```text
 Sessions       Activity                           Inspector
                Task T-a1b2c3 / all session work    Tasks | Plan & agents | Details
-               discussion, tools, approvals       Current work + actual executor
+               discussion, tools, approvals       Board + actual executor
                progress and results               Next tasks, in explicit order
                shared Activity composer           Result, milestones, history
                [Task T-a1b2c3 -> executor]         Open full project overview

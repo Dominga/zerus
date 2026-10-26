@@ -79,6 +79,8 @@ public:
     void setInspectorVisible(bool visible);
     void setOpenInInspector(bool enabled) { m_openInInspector = enabled; }
     void editTask(const TaskItem &task) { openTask(task); }
+    void actOnTask(const TaskItem &task, TaskAction action) { act(task, action); }
+    TaskRowState rowState(const TaskItem &task) const;
     QString selectedStage() const { return m_stage; }
     MessageComposer *composer() const { return m_composer; }
 signals:

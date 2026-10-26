@@ -119,10 +119,10 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     m_glyph = new TaskGlyph; m_glyph->setObjectName("taskGlyph"); m_glyph->setFixedSize(22, 22); m_glyph->setAlignment(Qt::AlignCenter);
     auto *glyphColumn = new QVBoxLayout; glyphColumn->setContentsMargins(0, 4, 0, 0); glyphColumn->addWidget(m_glyph); glyphColumn->addStretch();
     layout->addLayout(glyphColumn);
-    auto *main = new QVBoxLayout; main->setContentsMargins(0, 0, 0, 0); main->setSpacing(0); layout->addLayout(main, 1);
+    auto *main = m_mainLayout = new QVBoxLayout; main->setContentsMargins(0, 0, 0, 0); main->setSpacing(0); layout->addLayout(main, 1);
     // The header's height is fixed, so showing the icons never moves anything.
     auto *header = new QWidget; header->setFixedHeight(34);
-    auto *headerLayout = new QHBoxLayout(header); headerLayout->setContentsMargins(0, 0, 0, 0); headerLayout->setSpacing(8);
+    auto *headerLayout = m_headerLayout = new QHBoxLayout(header); headerLayout->setContentsMargins(0, 0, 0, 0); headerLayout->setSpacing(8);
     // The rich-text labels take no mouse input: presses, drags and clicks on them are the row's.
     m_meta = new QLabel; m_meta->setObjectName("taskMeta"); m_meta->setTextFormat(Qt::RichText); m_meta->setTextInteractionFlags(Qt::NoTextInteraction);
     // The meta keeps its width, then In progress's status, then the rest, which gives way first.
@@ -140,6 +140,18 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     m_summary = new QLabel; m_summary->setObjectName("taskSummary"); m_summary->setTextFormat(Qt::RichText); m_summary->setWordWrap(true);
     m_summary->setTextInteractionFlags(Qt::NoTextInteraction);
     main->addSpacing(2); main->addWidget(m_summary); m_summary->hide();
+}
+
+void TaskRow::setCompact(bool compact) {
+    if (property("compact").toBool() == compact) return;
+    setProperty("compact", compact);
+    if (compact) {
+        m_headerLayout->removeWidget(m_actions); m_actions->setFixedHeight(34);
+        m_mainLayout->addWidget(m_actions, 0, Qt::AlignRight);
+    } else {
+        m_mainLayout->removeWidget(m_actions); m_headerLayout->addWidget(m_actions);
+    }
+    updateGeometry();
 }
 
 void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const TaskColors &colors, qint64 now) {
@@ -291,7 +303,7 @@ void TaskRow::mouseReleaseEvent(QMouseEvent *event) {
 
 void TaskRow::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    const bool lit = m_hovered || hasFocus();
+    const bool lit = m_hovered || hasFocus() || property("expanded").toBool();
     QColor tint = m_state.mine ? m_colors.accent : m_colors.fg;
     tint.setAlphaF(m_state.mine ? (lit ? 0.11 : 0.07) : (lit ? 0.04 : 0));
     p.fillRect(rect(), tint);

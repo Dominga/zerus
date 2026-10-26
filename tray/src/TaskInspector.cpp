@@ -1,6 +1,7 @@
 #include "TaskInspector.h"
 #include "TaskDialogs.h"
 #include "TaskRow.h"
+#include "TaskStageFilter.h"
 #include "WorkspaceIcons.h"
 #include "WorkspaceStyle.h"
 #include <QCheckBox>
@@ -8,12 +9,16 @@
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QLabel>
-#include <QListWidget>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QScrollArea>
 #include <QScrollBar>
-#include <QSignalBlocker>
+#include <QSet>
+#include <QTextDocument>
 #include <QTextBrowser>
 #include <QVBoxLayout>
+#include <QtMath>
+#include <algorithm>
 
 namespace {
 constexpr int VisibleTasks = 100;
@@ -37,20 +42,28 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     header->addWidget(m_scope, 1); header->addWidget(overview); layout->addLayout(header);
     m_only = new QCheckBox(tr("This session")); m_only->setObjectName("taskInspectorOnlySession"); m_only->setChecked(true);
     connect(m_only, &QCheckBox::toggled, this, &TaskInspector::refresh); layout->addWidget(m_only);
-    m_list = new QListWidget; m_list->setObjectName("taskInspectorList"); m_list->setWordWrap(true);
-    m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); m_list->setMinimumHeight(96); m_list->setMaximumHeight(220);
-    m_list->setIconSize(QSize(20, 20)); m_list->setSpacing(2); layout->addWidget(m_list);
-    connect(m_list, &QListWidget::currentRowChanged, this, [this](int row) {
-        const auto *item = m_list->item(row); if (!item) return;
-        const QString uuid = item->data(Qt::UserRole).toString();
-        if (uuid == m_selected) return;
-        m_selected = uuid; ++m_generation; m_detail = {}; renderDetail(); fetch();
-    });
+    m_filters = new QWidget; auto *filters = new QHBoxLayout(m_filters);
+    filters->setContentsMargins(0, 0, 0, 0); filters->setSpacing(4);
+    for (const auto &stage : TaskBoard::stages()) {
+        auto *tile = new TaskTile(stage, m_filters); m_tiles.insert(stage, tile); filters->addWidget(tile, 1);
+        connect(tile, &QAbstractButton::clicked, this, [this, stage] {
+            if (m_stage != stage) { m_stage = stage; m_selected.clear(); m_detail = {}; ++m_generation; m_showOlder = false; }
+            refresh();
+        });
+    }
+    layout->addWidget(m_filters);
+    m_scroll = new QScrollArea; m_scroll->setObjectName("taskInspectorList"); m_scroll->setWidgetResizable(true);
+    m_scroll->setFrameShape(QFrame::NoFrame); m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_listPage = new QWidget; m_listPage->setObjectName("taskInspectorCards");
+    m_cards = new QVBoxLayout(m_listPage); m_cards->setContentsMargins(0, 0, 0, 0); m_cards->setSpacing(4); m_cards->addStretch();
+    m_scroll->setWidget(m_listPage); layout->addWidget(m_scroll, 1);
+    m_expansion = new QWidget(m_listPage); m_expansion->setObjectName("taskInlineDetails");
+    auto *details = new QVBoxLayout(m_expansion); details->setContentsMargins(10, 4, 10, 12); details->setSpacing(8);
     m_state = new QLabel; m_state->setObjectName("taskInspectorState"); m_state->setWordWrap(true); m_state->setTextFormat(Qt::PlainText);
-    layout->addWidget(m_state);
+    details->addWidget(m_state);
     m_description = new QTextBrowser; m_description->setObjectName("taskInspectorDetail");
     m_description->setOpenLinks(false); m_description->setOpenExternalLinks(false);
-    m_description->setFrameShape(QFrame::NoFrame); layout->addWidget(m_description, 1);
+    m_description->setFrameShape(QFrame::NoFrame); details->addWidget(m_description);
     auto *actions = new QHBoxLayout;
     m_open = new QPushButton(tr("Open Activity")); m_open->setObjectName("taskOpenActivity"); m_open->setAutoDefault(false);
     m_edit = new QPushButton(tr("Edit / actions")); m_edit->setObjectName("taskInspectorEdit"); m_edit->setAutoDefault(false);
@@ -60,7 +73,10 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     connect(m_edit, &QPushButton::clicked, this, [this] {
         if (!m_detail.isEmpty()) m_board->editTask(TaskBoard::item(labels(m_detail)));
     });
-    actions->addWidget(m_open); actions->addWidget(m_edit); actions->addStretch(); layout->addLayout(actions);
+    actions->addWidget(m_open); actions->addWidget(m_edit); actions->addStretch(); details->addLayout(actions);
+    m_expansion->hide();
+    m_older = new QPushButton; m_older->setObjectName("taskInspectorOlder"); m_older->hide(); layout->addWidget(m_older);
+    connect(m_older, &QPushButton::clicked, this, [this] { m_showOlder = !m_showOlder; refresh(); });
     connect(m_board, &TasksView::boardChanged, this, &TaskInspector::refresh);
     connect(m_client, &HgsClient::taskReady, this, [this](quint64 id, const QJsonObject &reply) {
         if (id != m_request) return;
@@ -92,7 +108,7 @@ void TaskInspector::setContext(const QString &project, const QString &host, cons
     const bool changed = project != m_project || host != m_host
         || (id.isEmpty() || m_sessionId.isEmpty() ? name != m_session : id != m_sessionId);
     m_project = project; m_host = host; m_session = name; m_sessionId = id; m_sessions = sessions;
-    if (changed) { ++m_generation; m_selected.clear(); m_detail = {}; }
+    if (changed) { ++m_generation; m_selected.clear(); m_detail = {}; m_stage.clear(); m_showOlder = false; }
     refresh();
 }
 
@@ -105,46 +121,87 @@ void TaskInspector::hideEvent(QHideEvent *event) {
 }
 
 void TaskInspector::selectTask(const QString &uuid) {
-    m_only->setChecked(false);
+    const auto board = m_board->displayBoard();
+    for (const auto &task : board.tasks) if (task.uuid == uuid) {
+        m_stage = task.stage;
+        if (!TaskBoard::keptFor(task, m_host, m_session, m_sessionId)) m_only->setChecked(false);
+        if (task.stage == QLatin1String("done") && QDateTime::currentMSecsSinceEpoch() - task.stageAt > TaskBoard::RecentDoneMs) m_showOlder = true;
+        break;
+    }
     if (m_selected != uuid) { m_selected = uuid; ++m_generation; m_detail = {}; }
     refresh(); fetch();
 }
 
 void TaskInspector::refresh() {
-    if (!m_list) return;
-    const QSignalBlocker blocker(m_list);
+    if (!m_cards) return;
     const auto board = m_board->displayBoard(); const auto colors = TaskColors::of(m_dark);
-    const int scroll = m_list->verticalScrollBar()->value();
-    m_list->clear(); int total = 0, selected = -1;
-    // Execution and review come before the ordered, manually dispatched To do.
-    for (const auto &stage : {"active", "review", "todo", "backlog"}) {
-        const auto rows = board.rows(stage, {m_host, m_session, m_only->isChecked(), QDateTime::currentMSecsSinceEpoch(), m_sessionId});
-        for (const auto &task : rows) {
-            ++total; if (m_list->count() >= VisibleTasks) continue;
-            QString prefix = TaskBoard::stageLabel(task.stage);
-            if (task.queue > 0 && task.stage == QLatin1String("todo")) prefix += tr(" #%1").arg(task.queue);
-            auto *item = new QListWidgetItem(workspaceIcon(TaskBoard::stageIcon(task.stage), colors.stage(task.stage)),
-                QStringLiteral("%1 · %2\n%3").arg(task.id, prefix, task.text.left(240).simplified()), m_list);
-            item->setData(Qt::UserRole, task.uuid); item->setToolTip(task.text.left(2000));
-            if (task.uuid == m_selected) selected = m_list->count() - 1;
+    const TaskBoard::View view{m_host, m_session, m_only->isChecked(), QDateTime::currentMSecsSinceEpoch(), m_sessionId};
+    if (m_stage.isEmpty() && !board.projectId.isEmpty()) {
+        m_stage = m_board->selectedStage();
+        if (!board.count(m_stage, view)) for (const auto &stage : TaskBoard::stages())
+            if (board.count(stage, view)) { m_stage = stage; break; }
+    }
+    // Follow a selected task's recorded stage change while keeping its details open.
+    for (const auto &task : board.tasks) if (task.uuid == m_selected) m_stage = task.stage;
+    for (const auto &stage : TaskBoard::stages()) {
+        auto *tile = m_tiles.value(stage); tile->setColors(colors); tile->setCount(board.count(stage, view)); tile->setChecked(stage == m_stage);
+    }
+    auto rows = board.rows(m_stage, view);
+    const auto older = m_stage == QLatin1String("done") ? board.rows(m_stage, view, true) : QList<TaskItem>();
+    if (m_showOlder) rows += older;
+    const int total = rows.size();
+    QList<TaskItem> shown = rows.mid(0, VisibleTasks);
+    // An explicit selection beyond the window replaces its last card, never
+    // growing the retained widget set past the bound.
+    if (!m_selected.isEmpty() && std::none_of(shown.begin(), shown.end(), [this](const TaskItem &t) { return t.uuid == m_selected; }))
+        for (const auto &task : rows) if (task.uuid == m_selected) { if (shown.size() == VisibleTasks) shown.removeLast(); shown.append(task); break; }
+    m_cards->removeWidget(m_expansion); QSet<QString> keep; int index = 0, expanded = -1;
+    for (const auto &task : shown) {
+        auto *row = m_rows.value(task.uuid);
+        if (!row) {
+            row = new TaskRow(m_listPage); row->setCompact(true); m_rows.insert(task.uuid, row);
+            row->setObjectName(QStringLiteral("taskInspectorRow:") + task.id);
+            connect(row, &TaskRow::opened, this, [this, row] {
+                if (m_selected == row->task().uuid) { m_selected.clear(); m_detail = {}; ++m_generation; refresh(); }
+                else selectTask(row->task().uuid);
+            });
+            connect(row, &TaskRow::actionRequested, this, [this, row](TaskAction action) { m_board->actOnTask(row->task(), action); });
         }
+        row->setTask(task, m_board->rowState(task), colors, view.now);
+        row->setProperty("expanded", task.uuid == m_selected);
+        m_cards->removeWidget(row); m_cards->insertWidget(index++, row); row->show(); keep.insert(task.uuid);
+        if (task.uuid == m_selected) expanded = index;
     }
-    // A selected Done task remains available when opened from the project board.
-    if (selected < 0 && !m_selected.isEmpty()) for (const auto &task : board.tasks) {
-        if (task.uuid != m_selected || (m_only->isChecked() && !TaskBoard::keptFor(task, m_host, m_session, m_sessionId))) continue;
-        auto *item = new QListWidgetItem(QStringLiteral("%1 · %2\n%3").arg(task.id, TaskBoard::stageLabel(task.stage), task.text.left(240).simplified()), m_list);
-        item->setData(Qt::UserRole, task.uuid); selected = m_list->count() - 1; break;
+    for (auto it = m_rows.begin(); it != m_rows.end();) {
+        if (keep.contains(it.key())) { ++it; continue; }
+        auto *row = it.value(); m_cards->removeWidget(row); row->hide(); row->setObjectName({}); row->deleteLater(); it = m_rows.erase(it);
     }
-    if (selected < 0 && m_list->count()) selected = 0;
-    const QString uuid = selected < 0 ? QString() : m_list->item(selected)->data(Qt::UserRole).toString();
-    if (uuid != m_selected) { m_selected = uuid; ++m_generation; m_detail = {}; }
-    m_list->setCurrentRow(selected); m_list->verticalScrollBar()->setValue(scroll);
-    const int rowHeight = m_list->count() ? m_list->sizeHintForRow(0) : 48;
-    m_list->setFixedHeight(qBound(96, rowHeight * m_list->count() + 8, 220));
+    if (expanded < 0 && !m_selected.isEmpty()) { m_selected.clear(); m_detail = {}; ++m_generation; }
+    if (expanded >= 0) m_cards->insertWidget(expanded, m_expansion);
+    m_expansion->setVisible(expanded >= 0);
     m_scope->setText(m_project.isEmpty() ? tr("Open a project session to see tasks")
         : total > VisibleTasks ? tr("%1 of %2 tasks").arg(VisibleTasks).arg(total)
         : total == 1 ? tr("1 task") : tr("%1 tasks").arg(total));
+    m_older->setVisible(!older.isEmpty()); m_older->setText(m_showOlder ? tr("Hide older") : tr("Show older (%1)").arg(older.size()));
+    updateFilters();
     renderDetail(); if (isVisible()) fetch();
+}
+
+void TaskInspector::resizeEvent(QResizeEvent *event) {
+    QWidget::resizeEvent(event); updateFilters(); updateDetailHeight();
+}
+
+void TaskInspector::updateFilters() {
+    if (!m_filters) return;
+    int required = (m_tiles.size() - 1) * 4;
+    for (auto *tile : std::as_const(m_tiles)) required += tile->expandedWidth();
+    for (auto *tile : std::as_const(m_tiles)) tile->setCompact(m_filters->width() < required);
+}
+
+void TaskInspector::updateDetailHeight() {
+    if (!m_description) return;
+    m_description->document()->setTextWidth(qMax(100, m_description->viewport()->width()));
+    m_description->setFixedHeight(qBound(120, qCeil(m_description->document()->size().height()) + 16, 900));
 }
 
 void TaskInspector::fetch() {
@@ -227,14 +284,16 @@ void TaskInspector::renderDetail() {
     if (m_description->property("renderedHtml").toString() == html) return;
     const int scroll = m_description->verticalScrollBar()->value();
     m_description->setProperty("renderedHtml", html); m_description->setHtml(html);
-    m_description->verticalScrollBar()->setValue(scroll);
+    updateDetailHeight(); m_description->verticalScrollBar()->setValue(scroll);
 }
 
 void TaskInspector::setTheme(bool dark) {
-    m_dark = dark; if (!m_list) return;
+    m_dark = dark; if (!m_cards) return;
     const auto colors = TaskColors::of(dark);
-    setWorkspaceStyle(this, QStringLiteral("QListWidget,QTextBrowser{background:%1;color:%2;border:0;}"
-        "QListWidget::item{padding:8px 6px;border-radius:7px;}QListWidget::item:selected{background:%3;color:%2;}")
-        .arg(colors.surface.name(), colors.fg.name(), colors.border.name()) + workspaceScrollbars(dark));
+    setWorkspaceStyle(this, QStringLiteral("#taskInspector{background:%2;color:%1;}"
+        "#taskInspector QLabel,#taskInspector QCheckBox{color:%1;}"
+        "QScrollArea,#taskInspectorCards{background:%2;border:0;}QTextBrowser{background:transparent;color:%1;border:0;}"
+        "#taskInlineDetails{background:%2;border:1px solid %3;border-radius:8px;}")
+        .arg(colors.fg.name(), colors.surface.name(), colors.border.name()) + workspaceScrollbars(dark));
     refresh();
 }

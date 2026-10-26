@@ -6,6 +6,8 @@
 
 class QLabel;
 class QToolButton;
+class QHBoxLayout;
+class QVBoxLayout;
 
 // The Tasks tab's colours, from design/task-tracker/index.html.
 struct TaskColors {
@@ -37,6 +39,7 @@ public:
     void setTask(const TaskItem &task, const TaskRowState &state, const TaskColors &colors, qint64 now);
     const TaskItem &task() const { return m_task; }
     static QString actionKey(TaskAction action);
+    void setCompact(bool compact);
     // While its drag runs the row stays in its place, faded.
     void setDragging(bool dragging);
 signals:
@@ -68,6 +71,8 @@ private:
     TaskStatusPill *m_status;
     QLabel *m_meta, *m_tail, *m_text, *m_summary;
     QWidget *m_actions;
+    QHBoxLayout *m_headerLayout;
+    QVBoxLayout *m_mainLayout;
     QHash<int, QToolButton *> m_buttons;
     QPoint m_pressAt;
     bool m_hovered = false, m_pressed = false;

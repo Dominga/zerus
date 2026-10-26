@@ -2519,9 +2519,13 @@ there, within To do to reorder it, onto a session of the project in the session
 list to pin them to it, or onto the project's header to make them Any session.
 
 The **Tasks** inspector shows the current session's tasks by default; uncheck
-**This session** to see the project. In progress and In review precede the ordered
-To do and Backlog lists. It retains at most 100 listed tasks and 80 selected-task
-history entries; the full history is available through **Edit / actions**.
+**This session** to see the project. It uses the same stage filters and task cards
+as the project board. Stage labels appear when the panel is wide enough; narrow
+filters keep their icons, counts, tooltips and accessible names. Clicking a card
+expands its details directly underneath it, inside the board; click again to
+collapse. Card actions use the same guarded commands as the project board.
+It retains at most 100 listed tasks and 80 selected-task history entries; the full
+history is available through **Edit / actions**.
 **Assigned to** identifies routing; **Executor** requires a recorded start.
 An unconfirmed start is labelled explicitly. **Agent report** is the saved report,
 not proof that a commit was merged or a build installed. **Open Activity** follows

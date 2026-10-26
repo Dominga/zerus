@@ -1,4 +1,5 @@
 #include "TasksView.h"
+#include "TaskStageFilter.h"
 #include "TaskContent.h"
 #include "AttachmentViewer.h"
 #include "HgsClient.h"
@@ -24,54 +25,8 @@
 #include <QVBoxLayout>
 
 namespace {
-QColor mix(const QColor &color, double share, const QColor &base) {
-    return QColor::fromRgbF(base.redF() + (color.redF() - base.redF()) * share, base.greenF() + (color.greenF() - base.greenF()) * share,
-                            base.blueF() + (color.blueF() - base.blueF()) * share);
-}
 QColor alpha(QColor color, double a) { color.setAlphaF(a); return color; }
 }
-
-// A stage tile: its icon on a tinted circle, its name and its count.
-class TaskTile : public QAbstractButton {
-public:
-    TaskTile(const QString &stage, QWidget *parent) : QAbstractButton(parent), m_stage(stage), m_colors(TaskColors::of(true)) {
-        setObjectName(QStringLiteral("taskTile:") + stage); setCheckable(true); setFixedHeight(34); setMinimumWidth(72);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); setCursor(Qt::PointingHandCursor); setAttribute(Qt::WA_Hover);
-        setToolTip(TaskBoard::stageLabel(stage)); setCount(0);
-    }
-    void setCount(int count) {
-        setProperty("count", count); setAccessibleName(QStringLiteral("%1, %2").arg(TaskBoard::stageLabel(m_stage)).arg(count)); update();
-    }
-    void setColors(const TaskColors &colors) { m_colors = colors; update(); }
-    // A dashed outline while a dragged task would move here.
-    void setDropTarget(bool on) { if (property("dropTarget").toBool() != on) { setProperty("dropTarget", on); update(); } }
-    QSize sizeHint() const override { return {120, 34}; }
-protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
-        const QColor color = m_colors.stage(m_stage);
-        const QColor fill = isChecked() ? mix(color, 0.17, m_colors.surface) : m_colors.surface;
-        const QColor edge = isChecked() ? alpha(color, 0.45) : underMouse() ? m_colors.border : Qt::transparent;
-        p.setPen(edge.alpha() ? QPen(edge, 1) : Qt::NoPen); p.setBrush(fill);
-        p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 9, 9);
-        if (property("dropTarget").toBool()) {
-            p.setPen(QPen(color, 2, Qt::DashLine)); p.setBrush(Qt::NoBrush); p.drawRoundedRect(QRectF(rect()).adjusted(3, 3, -3, -3), 7, 7);
-        }
-        p.setPen(Qt::NoPen); p.setBrush(alpha(color, 0.18)); p.drawEllipse(QRectF(8, 4, 26, 26));
-        workspaceIcon(TaskBoard::stageIcon(m_stage), color).paint(&p, QRect(11, 7, 20, 20));
-        QFont count = font(); count.setPixelSize(15); count.setBold(true); p.setFont(count); p.setPen(m_colors.fg);
-        const QString number = QString::number(property("count").toInt());
-        const int numberWidth = QFontMetrics(count).horizontalAdvance(number);
-        p.drawText(QRect(width() - 10 - numberWidth, 0, numberWidth, height()), Qt::AlignVCenter, number);
-        QFont label = font(); label.setPixelSize(12); label.setWeight(QFont::DemiBold); p.setFont(label);
-        p.setPen(isChecked() ? m_colors.fg : m_colors.muted);
-        const QRect text(38, 0, qMax(0, width() - 38 - numberWidth - 16), height());
-        p.drawText(text, Qt::AlignVCenter, QFontMetrics(label).elidedText(TaskBoard::stageLabel(m_stage), Qt::ElideRight, text.width()));
-    }
-private:
-    QString m_stage;
-    TaskColors m_colors;
-};
 
 TaskTabBadge::TaskTabBadge(QWidget *parent) : QWidget(parent) { setObjectName("taskTabBadge"); setCounts(0, 0); }
 
@@ -327,12 +282,7 @@ void TasksView::render() {
             connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { startDrag(row, hotSpot); });
         }
         row->setObjectName(QStringLiteral("taskRow:") + task.id);
-        TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session, v.id); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
-        if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.sessionKnown && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
-        if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
-            if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
-        if (!task.writable)
-            for (const auto action : TaskBoard::actions(task.stage)) if (action != TaskAction::Edit) state.blocked.insert(int(action), tr("Update Zerus to edit this task"));
+        const auto state = rowState(task);
         row->setProperty("separated", index > 0);
         row->setTask(task, state, colors, v.now);
         m_list->removeWidget(row); m_list->insertWidget(index++, row); row->show(); shown.insert(task.uuid);
@@ -360,6 +310,17 @@ void TasksView::render() {
     if (m_overList)
         QMetaObject::invokeMethod(this, [this] { if (m_overList) followDrag(m_drag, m_listPage->mapFrom(m_scroll->viewport(), m_dragAt)); },
                                   Qt::QueuedConnection);
+}
+
+TaskRowState TasksView::rowState(const TaskItem &task) const {
+    const auto v = view();
+    TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session, v.id); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
+    if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.sessionKnown && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
+    if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
+        if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
+    if (!task.writable)
+        for (const auto action : TaskBoard::actions(task.stage)) if (action != TaskAction::Edit) state.blocked.insert(int(action), tr("Update Zerus to edit this task"));
+    return state;
 }
 
 void TasksView::updateComposer() {

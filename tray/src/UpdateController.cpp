@@ -125,11 +125,16 @@ QJsonObject UpdateController::buildInfo(){
     info["devBuildNumber"]=qint64(ZERUS_DEV_BUILD_NUMBER);
     info["versionName"]=QStringLiteral(ZERUS_DEV_BASE_VERSION)+QString("-dev.%1").arg(qint64(ZERUS_DEV_BUILD_NUMBER));
 #endif
+#ifdef ZERUS_LOCAL_PREVIEW_LABEL
+    info["previewLabel"]=QStringLiteral(ZERUS_LOCAL_PREVIEW_LABEL);
+    info["versionName"]=QStringLiteral(ZERUS_DEV_BASE_VERSION)+"-preview."+QStringLiteral(ZERUS_LOCAL_PREVIEW_LABEL)
+        +'.'+info["sourceCommit"].toString().left(7);
+#endif
     return info;
 }
 QString UpdateController::installedVersion(){
     const auto info=buildInfo();const auto version=info["versionName"].toString();
-    if(info["devBuildNumber"].toInteger()>0||info["sourceCommit"].toString().isEmpty())return version;
+    if(info["devBuildNumber"].toInteger()>0||info.contains("previewLabel")||info["sourceCommit"].toString().isEmpty())return version;
     const auto source=info["sourceCommit"].toString().left(7);
     return info["sourceDirty"].toBool()?tr("%1 (local changes %2)").arg(version,source):QString("%1 (%2)").arg(version,source);
 }

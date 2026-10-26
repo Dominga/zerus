@@ -1,13 +1,17 @@
 name: macOS unsigned bundle
 
 # Credential-free distribution build; Dev overlaps it with checks. Signing is
-# a separate trusted-main job and always waits for the verification gate.
+# a separate trusted-main job after the required package checks.
 on:
   workflow_call:
     inputs:
       channel:
         type: string
         required: true
+      run_tests:
+        description: Run full Qt regression tests (only Dev may opt out)
+        type: boolean
+        default: true
     outputs:
       release:
         value: ${{ jobs.bundle.outputs.release }}
@@ -36,6 +40,7 @@ jobs:
         id: release
         env:
           CHANNEL: ${{ inputs.channel }}
+          RUN_TESTS: ${{ inputs.run_tests }}
           COMMIT: ${{ github.sha }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
@@ -46,6 +51,9 @@ jobs:
           from nightly_common import nightly_version
           channel = os.environ['CHANNEL']
           cask_for(channel)
+          run_tests = os.environ['RUN_TESTS']
+          if run_tests not in ('true', 'false') or (run_tests == 'false' and channel != 'dev'):
+              raise SystemExit('Only Dev bundles may skip full regression tests.')
           product = pathlib.Path('VERSION').read_text().strip()
           if channel == 'nightly':
               # The same inputs prepare-nightly.py uses for the Arch nightly.
@@ -63,8 +71,10 @@ jobs:
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: Install the pinned official Qt
         run: python3 scripts/install-qt-macos.py --output "$RUNNER_TEMP/qt"
-      - name: Build, test and assemble the unsigned bundle
+      - name: Build and assemble the unsigned bundle
         env:
+          ZERUS_RELEASE_CHANNEL: ${{ inputs.channel }}
+          ZERUS_RUN_TESTS: ${{ inputs.run_tests }}
           ZERUS_RELEASE_VERSION: ${{ steps.release.outputs.release }}
           ZERUS_DEV_BUILD_NUMBER: ${{ inputs.channel == 'dev' && github.run_number || '' }}
         run: ZERUS_QT_PREFIX="$RUNNER_TEMP/qt" bash scripts/ci/macos-bundle.sh

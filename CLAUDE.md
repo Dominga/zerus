@@ -91,6 +91,15 @@ default cleanup rules.
 Use bounded indexed queue reads and bounded archive metadata checks; see
 the worktree cleanup section in `docs/reference.md`.
 
+Explicit desktop termination cleanup may remove verified generated caches only
+after its Remove worktree choice and exact successful termination. Keep branch
+and archive-restore identity. Bind cleanup to the checkout ownership recorded
+at session launch and bind removal fingerprints to that nonce. Missing or
+replaced ownership, unknown local data, source changes, other occupants and
+uncertain process use require fresh manual review. Background
+maintenance continues to preserve all ignored data. Never stop unrelated system
+services to make a worktree removable; uncertain removals are never replayed.
+
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
 remains in Active and accepts new messages. Native work and explicit attention
 take precedence. A native Stop ends a turn; it does not prove those jobs finished.
@@ -132,9 +141,14 @@ audit record durably before delivery, and retain exact run/conversation/question
 identity. Unknown delivery never authorizes replay. Ordinary questions, startup
 trust and broader persistent permission changes remain manual.
 
-Hosted Dev CI checks shared Rust/protocol contracts, Linux CLI, Arch, macOS and
-Android on main. PRs add Windows/iOS for affected desktop, native or shared paths;
-unknown change inventories retain both. Nightly and Stable run the full matrix.
+Dev publication is build-gated: successful distributables, package/source identity,
+signatures and installation checks admit Dev without waiting for the full regression
+matrix. Main regression tests run separately and keep failures visible; file and fix
+them as follow-up work without blocking an available Dev. Internal same-repository
+PRs need no additional manual trust approval for ordinary Dev integration.
+Main regressions cover shared Rust/protocol contracts, Linux CLI, Arch, macOS and
+Android. PRs add Windows/iOS for affected desktop, native or shared paths;
+unknown change inventories retain both. Nightly and Stable retain the full matrix.
 iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
 source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise

@@ -276,6 +276,8 @@ private slots:
     void machineChooserCountsFollowStateScopeWithoutMachineOrTextFilters();
     void projectFilterCombinesScopesCountsAndNavigation();
     void accountFilterCombinesScopesAndKeepsTheOpenDraft();
+    void accountFilterWarmsAcrossMachinesAndRefreshesOnOpening();
+    void accountChooserMatchesAccountsAndKeepsRemovedProfileDetails();
     void accountDetailsResolveOnlyTheRecordedBinding();
     void accountScopeLimitsArchiveRemoval();
     void pagedArchiveSearchJoinsExactProjectBeforeFiltering();
@@ -409,6 +411,8 @@ private slots:
     void keptWorktreeReviewUsesOnlyCurrentInspectionOccupancy();
     void keptWorktreeReviewFormatsTheSourceMachinePath();
     void terminatingWorktreeSessionOffersRemainingCleanupAndConsumesExactNativeOutcome();
+    void terminationWorktreeChoiceKeepsItsOriginalFolder_data();
+    void terminationWorktreeChoiceKeepsItsOriginalFolder();
     void nativeCleanupCanSupplyAnUncachedFolderAndArchiveTransitionsExpireOnlyTheirRepository();
     void renameValidationCancelAndSelection();
     void renameValidationKeepsDialogGeometry_data();
@@ -1324,6 +1328,131 @@ void TestSessionsWindow::accountFilterCombinesScopesAndKeepsTheOpenDraft()
     QCOMPARE(accounts->selection(),QSet<QString>{personal});QCOMPARE(count(),1);
     local.sessions.removeAt(2);state.setLocal(local,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
     QCOMPARE(accounts->selection(),QSet<QString>{personal});QCOMPARE(count(),0); // Disappearance must not broaden the scope.
+}
+
+void TestSessionsWindow::accountFilterWarmsAcrossMachinesAndRefreshesOnOpening()
+{
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject profile{{"id","shared-profile"},{"provider","codex"},{"label","Shared"},{"home","/fixture/shared"},{"installed",true}};
+    const auto catalog=QString::fromUtf8(QJsonDocument(QJsonObject{{"profiles",QJsonArray{profile}}}).toJson(QJsonDocument::Compact));
+    const auto usage=QString::fromUtf8(QJsonDocument(QJsonObject{{"id","shared-profile"},{"provider","codex"},{"home","/fixture/shared"},{"status","ok"},
+        {"identity",QJsonObject{{"account_id","shared-account"},{"email","shared@example.test"}}}}).toJson(QJsonDocument::Compact));
+    const auto fixture=m_dir->filePath("filter-warm");
+    const auto answer=QByteArray(R"PY(elif c=='account' and a[1:2]==['ls']:
+ from pathlib import Path
+ import time
+ data=json.loads(CATALOG)
+ label=Path(__file__+'.label')
+ if label.exists():data['profiles'][0]['label']=label.read_text()
+ host=sys.argv[1][1:] if sys.argv[1].startswith('@') else 'local'
+ with Path(__file__+'.reads').open('a') as reads:reads.write(json.dumps([host,data['profiles'][0]['label']])+'\n')
+ hold=Path(__file__+'.hold-'+host)
+ if hold.exists():
+  ready=Path(__file__+'.ready-'+host)
+  staged=Path(str(ready)+'.tmp');staged.write_text(json.dumps(data));staged.replace(ready)
+  while hold.exists():time.sleep(.01)
+ print(json.dumps(data))
+elif c=='account' and a[1:2]==['inspect']:
+ from pathlib import Path
+ import time
+ deadline=time.monotonic()+30
+ while Path(__file__+'.identity-hold').exists():
+  if time.monotonic()>=deadline:raise RuntimeError('Identity fixture gate expired')
+  time.sleep(.01)
+ print(USAGE)
+)PY").replace("CATALOG",FakeCli::pythonString(catalog)).replace("USAGE",FakeCli::pythonString(usage));
+    QVERIFY(FakeCli::install(fixture,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    auto state=fleet();auto local=state.local();local.sessions[0].accountId="shared-profile";local.sessions[0].accountHome="/fixture/shared";
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());auto remote=*state.peer("mac");remote.sessions[0].cmd="codex";remote.sessions[0].accountId="shared-profile";remote.sessions[0].accountHome="/fixture/shared";state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
+    QFile identityHold(fixture+".identity-hold");QVERIFY(identityHold.open(QIODevice::WriteOnly));identityHold.close();
+    SessionsWindow window(FakeCli::program(fixture));keepDetailsPollsOut(window);window.setFleet(state);window.show();
+    auto *page=window.findChild<AccountsPage *>();QVERIFY(page);QVERIFY(!page->isVisible());
+    // Select the recorded bindings before asynchronous identity publication so
+    // the public chips can show when Sessions has actually grouped them.
+    auto *startupFilter=window.findChild<AccountFilter *>("accountFilterChips");QVERIFY(startupFilter);
+    const QSet<QString> startupBindings{SessionAccounts::binding({},local.sessions[0]),SessionAccounts::binding("mac",remote.sessions[0])};
+    QVERIFY(startupFilter->selection().isEmpty());startupFilter->setSelection(startupBindings);
+    const auto heldPresentationReady=[&]{const auto chips=startupFilter->findChildren<QPushButton *>("accountFilterChip");return chips.size()==1 && chips.first()->toolTip().contains("shared@example.test");};
+    QVERIFY(!heldPresentationReady());QVERIFY(QFile::remove(fixture+".identity-hold"));
+    const auto identitiesReady=[&]{const auto profiles=page->profiles();return profiles.size()==2 && std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &v){return v.toObject()["usage"].toObject()["identity"].toObject()["account_id"]=="shared-account";});};
+    QTRY_VERIFY(identitiesReady());
+    const auto startupPresentationReady=[&]{const auto chips=startupFilter->findChildren<QPushButton *>("accountFilterChip");return chips.size()==1 && chips.first()->toolTip().contains("shared@example.test");};
+    QTRY_VERIFY(startupPresentationReady());QCOMPARE(startupFilter->selection(),startupBindings);
+    startupFilter->setSelection({});QVERIFY(startupFilter->selection().isEmpty());QVERIFY(!page->isVisible());
+    auto *filter=window.findChild<AccountFilter *>("accountFilterChips");auto *menu=filter->button()->menu();
+    const QSet<QString> bindings{SessionAccounts::binding({},local.sessions[0]),SessionAccounts::binding("mac",remote.sessions[0])};
+    const auto sharedChoice=[&]() -> QCheckBox * {for(auto *choice:menu->findChildren<QCheckBox *>("accountFilterChoice")){const auto members=choice->property("bindings").toStringList();if(QSet<QString>(members.cbegin(),members.cend())==bindings)return choice;}return nullptr;};
+    const QStringList hosts{"local","mac"};
+    for(const auto &host:hosts){QFile hold(fixture+".hold-"+host);QVERIFY(hold.open(QIODevice::WriteOnly));}
+    QElapsedTimer refreshWindow;refreshWindow.start();
+    menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());QTRY_VERIFY(sharedChoice());
+    // The first open has already captured an old snapshot on BOTH machines,
+    // but neither read can finish before the next explicit open requests it.
+    for(const auto &host:hosts){
+        const auto ready=fixture+".ready-"+host;QTRY_VERIFY(QFile::exists(ready));
+        QFile snapshot(ready);QVERIFY(snapshot.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(snapshot.readAll()).object()["profiles"].toArray().first().toObject()["label"].toString(),QString("Shared"));
+    }
+    QVERIFY(sharedChoice()->text().contains("shared@example.test"));sharedChoice()->click();QCOMPARE(filter->selection(),bindings);menu->hide();
+    auto *list=window.findChild<SessionList *>("sessionList");const auto count=[&]{int n=0;for(int i=0;i<list->count();++i)if(!list->item(i)->data(SessionRoles::Header).toBool())++n;return n;};
+    QCOMPARE(count(),2);auto *machines=window.findChild<MachineFilter *>("machineFilterChips");machines->setSelection({"mac"});QCOMPARE(count(),1);QCOMPARE(filter->selection(),bindings);
+    QFile label(fixture+".label");QVERIFY(label.open(QIODevice::WriteOnly));label.write("Renamed shared account");label.close();
+    menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());
+    // Multiple opens while the same reads are pending must coalesce once per
+    // machine. Releasing the old result must honor that explicit fresh read.
+    menu->hide();menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());
+    for(const auto &host:hosts)QVERIFY(QFile::remove(fixture+".hold-"+host));
+    const auto refreshed=[&]{const auto profiles=page->profiles();return profiles.size()==2 && std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &v){return v.toObject()["label"]=="Renamed shared account";});};
+    QTRY_VERIFY(refreshed());QVERIFY(!page->isVisible());QCOMPARE(filter->selection(),bindings);
+    QVERIFY(refreshWindow.elapsed()<30000);
+    QFile reads(fixture+".reads");QVERIFY(reads.open(QIODevice::ReadOnly));QMap<QString,int> perHost;
+    for(const auto &line:reads.readAll().split('\n'))if(!line.isEmpty()){const auto row=QJsonDocument::fromJson(line).array();QCOMPARE(row.size(),2);++perHost[row[0].toString()];}
+    const QMap<QString,int> expectedReads{{"local",3},{"mac",3}};QCOMPARE(perHost,expectedReads);
+    // Catalog publication queues the Sessions rebuild. Wait for its visible
+    // presentation before taking a new menu snapshot; the open action stays old.
+    const auto presentationRefreshed=[&]{const auto chips=filter->findChildren<QPushButton *>("accountFilterChip");return chips.size()==1 && chips.first()->toolTip().contains("Renamed shared account");};
+    QTRY_VERIFY(presentationRefreshed());
+    QVERIFY(!sharedChoice()->text().contains("Renamed shared account"));
+    // Existing actions keep their snapshot; reopening presents the newly read label.
+    menu->hide();menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());QTRY_VERIFY(sharedChoice());QVERIFY(sharedChoice()->text().contains("Renamed shared account"));
+}
+
+void TestSessionsWindow::accountChooserMatchesAccountsAndKeepsRemovedProfileDetails()
+{
+    QFile original(script());QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject usage{{"id","current"},{"provider","claude"},{"home","/fixture/current"},{"status","ok"},
+        {"identity",QJsonObject{{"account_id","shared-account"},{"email","shared@example.test"},{"organization","Workspace"}}}};
+    const QJsonObject current{{"id","current"},{"provider","claude"},{"label","shared@example.test"},{"home","/fixture/current"},{"installed",true},{"account_status",usage}};
+    const QJsonObject removedDefault{{"id","native-claude"},{"provider","claude"},{"label","Default account"},{"home","/fixture/default"},{"installed",true}};
+    const QJsonObject retired{{"id","retired"},{"provider","claude"},{"label","shared@example.test"},{"home","/fixture/retired"},{"installed",true}};
+    const auto catalog=QString::fromUtf8(QJsonDocument(QJsonObject{{"profiles",QJsonArray{current}},{"removed_profiles",QJsonArray{removedDefault,retired}}}).toJson(QJsonDocument::Compact));
+    const auto path=m_dir->filePath("account-catalog");
+    const auto answer="elif c=='account' and a[1:2]==['ls']:print("+FakeCli::pythonString(catalog)+")\nelif c=='account' and a[1:2]==['inspect']:print("+FakeCli::pythonString(QString::fromUtf8(QJsonDocument(usage).toJson(QJsonDocument::Compact)))+")\n";
+    QVERIFY(FakeCli::install(path,original.readAll().replace("if False:pass\n","if False:pass\n"+answer)));
+    auto state=fleet();auto local=state.local();local.sessions[0].cmd="claude";local.sessions[0].accountId="current";local.sessions[0].accountHome="/fixture/current";
+    local.sessions[1].cmd="claude";local.sessions[1].accountId.clear();local.sessions[1].accountHome="/fixture/current";
+    auto past=local.sessions[0];past.name="claude/project/retired";past.state="stopped";past.accountId="retired";past.accountHome="/fixture/retired";local.sessions.append(past);
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());auto remote=*state.peer("mac");remote.sessions[0].cmd="claude";remote.sessions[0].accountId="current";remote.sessions[0].accountHome="/fixture/current";state.setPeer(remote,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(path));keepDetailsPollsOut(window);window.setFleet(state);window.show();
+    auto *page=window.findChild<AccountsPage *>();QVERIFY(page);
+    QTRY_COMPARE(page->profiles(true).size(),6);QTRY_COMPARE(page->catalogProfiles().size(),2);
+    QPushButton *accountsNav=nullptr;for(auto *button:window.findChildren<QPushButton *>("railButton"))if(button->accessibleName()=="Agent accounts")accountsNav=button;
+    QVERIFY(accountsNav);accountsNav->click();QTRY_VERIFY(page->isVisible());
+    auto *accountRows=page->findChild<QListWidget *>("accountProfiles");QVERIFY(accountRows);QTRY_COMPARE(accountRows->count(),1);
+    const auto published=accountRows->item(0)->data(Qt::UserRole).toJsonObject();QCOMPARE(published["members"].toArray().size(),2);
+    window.showSessionList();QVERIFY(!page->isVisible());
+    auto *filter=window.findChild<AccountFilter *>("accountFilterChips");auto *menu=filter->button()->menu();
+    menu->popup(filter->button()->mapToGlobal(QPoint(0,30)));QTRY_VERIFY(menu->isVisible());
+    const auto choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),accountRows->count());
+    QCOMPARE(choices.first()->property("account").toString(),published["account_key"].toString());
+    QVERIFY(!choices.first()->text().contains("Default account"));
+    const QSet<QString> expected{SessionAccounts::binding({},local.sessions[0]),SessionAccounts::binding({},local.sessions[1]),SessionAccounts::binding("mac",remote.sessions[0])};
+    const auto members=choices.first()->property("bindings").toStringList();QCOMPARE(QSet<QString>(members.cbegin(),members.cend()),expected);
+    choices.first()->click();QCOMPARE(filter->selection(),expected);menu->hide();
+    window.showSession({},past.name);
+    auto *inspector=window.findChild<QTabWidget *>("sessionInspector");auto *toggle=window.findChild<QPushButton *>("toggleInspector");QVERIFY(inspector&&toggle);toggle->setChecked(true);inspector->setCurrentIndex(1);
+    auto *browser=window.findChild<QTextBrowser *>("sessionInfo");QVERIFY(browser);QTRY_VERIFY(browser->toPlainText().contains("/fixture/retired"));
+    QVERIFY(browser->toPlainText().contains("shared@example.test"));QVERIFY(!browser->toPlainText().contains("Workspace"));
 }
 
 void TestSessionsWindow::accountDetailsResolveOnlyTheRecordedBinding()
@@ -8514,6 +8643,56 @@ void TestSessionsWindow::terminatingWorktreeSessionOffersRemainingCleanupAndCons
     client->worktreeCleanupFinished({},"terminate codex/hgs/dashboard",{{"status","kept"},{"path","/workspace/owned"},{"common_dir","/workspace/project/.git"},{"reason","Uncommitted changes remain"}});
     QVERIFY(offer->isVisible());QVERIFY(offer->toolTip().contains("Uncommitted changes"));
     client->worktreeCleanupFinished({},"terminate codex/hgs/dashboard",{{"status","removed"},{"path","/workspace/owned"},{"common_dir","/workspace/project/.git"}});QVERIFY(!offer->isVisible());
+}
+
+void TestSessionsWindow::terminationWorktreeChoiceKeepsItsOriginalFolder_data()
+{
+    QTest::addColumn<QString>("mode");
+    for(const auto *mode:{"checked","unchecked","cancel","bulk"})QTest::newRow(mode)<<QString::fromLatin1(mode);
+}
+void TestSessionsWindow::terminationWorktreeChoiceKeepsItsOriginalFolder()
+{
+    QFETCH(QString,mode);QSettings().setValue("workspace/removeWorktreeAfterTermination",false);
+    auto state=fleet();auto local=state.local();const int count=mode=="bulk"?2:1;
+    QSet<QString> expected;
+    for(int i=0;i<count;++i){auto &s=local.sessions[i];s.state="running";s.cmd="codex";s.tracked=true;s.runId="cleanup-run-"+QString::number(i);s.worktreeOwnerId="original-owner-"+QString::number(i);s.gitWorktree=true;s.gitRoot="/workspace/owned-"+QString::number(i);s.gitCommonDir="/workspace/project/.git";expected.insert(s.gitRoot);}
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());SessionsWindow window(program());keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},local.sessions[0].name);
+    auto *client=window.findChild<HgsClient *>();QSignalSpy writes(client,&HgsClient::writeDone);
+    bool checkboxSeen=false;QSet<QString> reviewed;QTimer closer;
+    closer.setInterval(10);connect(&closer,&QTimer::timeout,&window,[&]{
+        if(auto *dialog=window.findChild<QDialog *>("worktreeBatchCleanupDialog")){
+            auto *list=dialog->findChild<QTreeWidget *>("batchCleanupList");
+            for(int i=0;i<list->topLevelItemCount();++i){const auto entry=list->topLevelItem(i)->data(0,Qt::UserRole).toJsonObject();const auto path=entry["row"].toObject()["path"].toString();reviewed.insert(path);QCOMPARE(entry["expected_owner_id"].toString(),"original-owner-"+path.section('-',-1));}
+            dialog->reject();
+        }
+    });closer.start();
+    QTimer::singleShot(0,&window,[&]{
+        auto *dialog=qobject_cast<QMessageBox *>(QApplication::activeModalWidget());QVERIFY(dialog);
+        auto *choice=dialog->findChild<QCheckBox *>(mode=="bulk"?"removeTerminatedWorktrees":"removeTerminatedWorktree");QVERIFY(choice);checkboxSeen=true;
+        choice->setChecked(mode!="unchecked");
+        if(mode=="cancel"){dialog->done(QMessageBox::Cancel);return;}
+        if(mode=="bulk"){
+            for(auto *button:dialog->buttons())if(dialog->buttonRole(button)==QMessageBox::DestructiveRole){button->click();return;}
+        }else dialog->done(QMessageBox::Yes);
+    });
+    if(mode=="bulk"){
+        auto *list=window.findChild<SessionList *>("sessionList");
+        QListWidgetItem *second=nullptr;
+        for(int i=0;i<list->count();++i)if(list->item(i)->data(SessionRoles::Key).toString()=="\n"+local.sessions[1].name)second=list->item(i);
+        QVERIFY(second);list->scrollToItem(second);
+        QTest::mouseClick(list->viewport(),Qt::LeftButton,Qt::ControlModifier,list->visualItemRect(second).center());
+        QSet<QString> chosen;for(const auto *item:list->selectedItems())chosen.insert(item->data(SessionRoles::Key).toString());
+        QCOMPARE(chosen,(QSet<QString>{"\n"+local.sessions[0].name,"\n"+local.sessions[1].name}));
+        window.findChild<QAction *>("selectionstop")->trigger();
+    }else window.findChild<QAction *>("forgetSessionAction")->trigger();
+    QVERIFY(checkboxSeen);
+    if(mode=="cancel"){QTest::qWait(80);QCOMPARE(writes.size(),0);QVERIFY(reviewed.isEmpty());}
+    else{
+        window.showSession({},local.sessions[2].name);
+        QTRY_COMPARE(writes.size(),count);
+        if(mode=="unchecked"){QTest::qWait(100);QVERIFY(reviewed.isEmpty());}
+        else QTRY_COMPARE(reviewed,expected);
+    }
 }
 
 void TestSessionsWindow::nativeCleanupCanSupplyAnUncachedFolderAndArchiveTransitionsExpireOnlyTheirRepository()

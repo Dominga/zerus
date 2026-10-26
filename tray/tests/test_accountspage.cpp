@@ -83,6 +83,7 @@ private slots:
     void refreshPreservesRowsAndShowsPendingUsage();
     void summaryCountsReadInSingularAndPlural();
     void initialLoadingPublishesOnlyGroupedAccounts();
+    void hiddenStartupWarmsAndPublishesVerifiedIdentities();
     void loadingFinishesWithPartialOrUnavailableResults_data();
     void loadingFinishesWithPartialOrUnavailableResults();
     void permissionsStayBoundToSelectedMachine();
@@ -1012,6 +1013,25 @@ void TestAccountsPage::localWindowsOffersNoDeepSeekOrOpenCode()
     add->click();
 }
 
+void TestAccountsPage::hiddenStartupWarmsAndPublishesVerifiedIdentities()
+{
+    QFile shared(m_dir.filePath("shared-identity"));QVERIFY(shared.open(QIODevice::WriteOnly));shared.close();
+    AccountsPage page(FakeCli::program(m_script));QSignalSpy changed(&page,&AccountsPage::catalogChanged);
+    page.setFleet(fleet());QVERIFY(!page.isVisible());
+    QTRY_COMPARE(page.profiles().size(),8);
+    const auto identified=[&] {
+        const auto profiles=page.profiles();
+        return std::all_of(profiles.cbegin(),profiles.cend(),[](const QJsonValue &value){return !value.toObject()["usage"].toObject()["identity"].toObject()["email"].toString().isEmpty();});
+    };
+    QTRY_VERIFY(identified());QVERIFY(changed.size()>2);
+    const auto grouped=AccountCatalog::group(page.profiles());QCOMPARE(grouped.size(),7);
+    const auto sharedAccount=std::find_if(grouped.cbegin(),grouped.cend(),[](const QJsonValue &value){return value.toObject()["members"].toArray().size()==2;});
+    QVERIFY(sharedAccount!=grouped.cend());QCOMPARE((*sharedAccount).toObject()["provider"].toString(),QString("codex"));
+    QVERIFY(!page.isVisible());
+    const auto calls=[&]{QFile file(m_dir.filePath("calls"));if(!file.open(QIODevice::ReadOnly))return QByteArray();return file.readAll();};
+    const auto before=calls();page.setFleet(fleet());QTest::qWait(60);QCOMPARE(calls(),before); // Ordinary fleet polls do not restart the warm-up.
+}
+
 void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()
 {
     QFile shared(m_dir.filePath("shared-identity")); QVERIFY(shared.open(QIODevice::WriteOnly)); shared.close();
@@ -1027,15 +1047,18 @@ void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()
     QVERIFY(QFile::remove(catalogHold.fileName()));
     QTRY_COMPARE(page.profiles().size(),8);QTest::qWait(100);
     QCOMPARE(list->count(),0);QVERIFY(loading->isVisible());QVERIFY(refresh->property("refreshing").toBool());
+    QVERIFY(page.catalogProfiles().isEmpty());
     int maximumRows=0;connect(list->model(),&QAbstractItemModel::rowsInserted,&page,[&]{maximumRows=qMax(maximumRows,list->count());});
     const auto preview=qEnvironmentVariable("HGS_ACCOUNTS_PREVIEW");
     if(!preview.isEmpty()){QDir().mkpath(preview);page.setTheme(true);QVERIFY(page.grab().save(preview+"/loading-dark.png"));page.setTheme(false);QVERIFY(page.grab().save(preview+"/loading-light.png"));}
     QFile remoteHold(m_dir.filePath("hold-remote-inspect"));QVERIFY(remoteHold.open(QIODevice::WriteOnly));remoteHold.close();
     QVERIFY(QFile::remove(hold.fileName()));QTRY_COMPARE(list->count(),4);
+    QCOMPARE(page.catalogProfiles().size(),4);
     QVERIFY(content->isVisible());QVERIFY(!loading->isVisible());QVERIFY(refresh->property("refreshing").toBool());
     for(int i=0;i<list->count();++i)for(const auto &member:list->item(i)->data(Qt::UserRole).toJsonObject()["members"].toArray())QCOMPARE(member.toObject()["host"].toString(),QString());
     const QPersistentModelIndex localRow(list->model()->index(0,0));
     QVERIFY(QFile::remove(remoteHold.fileName()));QTRY_COMPARE(list->count(),7);QTRY_VERIFY(refresh->isEnabled());
+    QCOMPARE(page.catalogProfiles().size(),8);QCOMPARE(AccountCatalog::group(page.catalogProfiles()).size(),list->count());
     QVERIFY(localRow.isValid());
     QVERIFY(!loading->isVisible());QVERIFY(content->isVisible());QCOMPARE(maximumRows,7);
     QCOMPARE(list->currentItem()->data(Qt::UserRole).toJsonObject()["members"].toArray().size(),2);

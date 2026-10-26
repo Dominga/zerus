@@ -69,7 +69,7 @@ void AccountFilter::setAccounts(const QList<SessionAccounts::Account> &accounts)
     for (auto it = m_selectedAccounts.begin(); it != m_selectedAccounts.end();) {
         if (!m_selection.contains(it.key())) it = m_selectedAccounts.erase(it); else ++it;
     }
-    rebuildChips(); updateMenu();
+    rebuildChips(); if (m_menu->isVisible()) appendChoices(); updateMenu();
 }
 void AccountFilter::setSessionCounts(const QMap<QString,int> &counts, const QString &caption) { m_counts = counts; m_caption = caption; updateMenu(); }
 void AccountFilter::setTheme(bool dark) { m_dark = dark; m_signature.clear(); rebuildChips(); }
@@ -104,18 +104,31 @@ void AccountFilter::rebuildMenu() {
     auto *all = new QPushButton; all->setObjectName("allAccountFilters"); all->setCheckable(true); layout->addWidget(all);
     connect(all, &QPushButton::clicked, this, [this] { setSelection({}); });
     auto *choicesWidget = new QWidget; auto *rows = new QVBoxLayout(choicesWidget); rows->setContentsMargins(0,0,0,0); rows->setSpacing(4);
+    auto *scroll = new QScrollArea; scroll->setObjectName("accountFilterChoices"); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); scroll->setWidget(choicesWidget); layout->addWidget(scroll);
+    auto *hint = new QLabel(tr("Changes apply immediately")); hint->setStyleSheet("font-size:10px;"); layout->addWidget(hint);
+    auto *action = new QWidgetAction(m_menu); action->setDefaultWidget(panel); m_menu->addAction(action); appendChoices(); updateMenu();
+}
+void AccountFilter::appendChoices() {
+    auto *scroll = m_menu->findChild<QScrollArea *>("accountFilterChoices"); if (!scroll) return;
+    auto *choicesWidget = scroll->widget(); auto *rows = qobject_cast<QVBoxLayout *>(choicesWidget->layout());
+    QSet<QString> ids, bindings;
+    for (auto *choice : m_menu->findChildren<QCheckBox *>("accountFilterChoice")) {
+        ids.insert(choice->property("account").toString());
+        const auto members = choice->property("bindings").toStringList(); bindings.unite(QSet<QString>(members.cbegin(), members.cend()));
+    }
+    // Populate a cold/open chooser as reads complete. Existing choices retain
+    // their exact presentation and bound action until reopen, even on regrouping.
     for (const auto &account : choices()) {
+        if (ids.contains(account.id) || account.bindings.intersects(bindings)) continue;
         auto *check = new ScopeFilterWidgets::Choice(caption(account), m_dark); check->setObjectName("accountFilterChoice"); check->setProperty("account", account.id);
         check->setProperty("bindings", QStringList(account.bindings.cbegin(), account.bindings.cend()));
         check->setProperty("caption", caption(account)); check->setProperty("machines", account.machines);
         check->setIcon(workspaceIcon(account.provider, IdentityBadges::providerColor(account.provider, m_dark))); rows->addWidget(check);
         connect(check, &QCheckBox::clicked, this, [this,account](bool checked) { toggle(account, checked); });
+        ids.insert(account.id); bindings.unite(account.bindings);
     }
-    auto *scroll = new QScrollArea; scroll->setObjectName("accountFilterChoices"); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff); scroll->setWidget(choicesWidget);
-    scroll->setMinimumWidth(qMin(520, choicesWidget->sizeHint().width() + 24)); scroll->setFixedHeight(qMin(324, choicesWidget->sizeHint().height() + 4)); layout->addWidget(scroll);
-    auto *hint = new QLabel(tr("Changes apply immediately")); hint->setStyleSheet("font-size:10px;"); layout->addWidget(hint);
-    auto *action = new QWidgetAction(m_menu); action->setDefaultWidget(panel); m_menu->addAction(action); updateMenu();
+    scroll->setMinimumWidth(qMin(520, choicesWidget->sizeHint().width() + 24)); scroll->setFixedHeight(qMin(324, choicesWidget->sizeHint().height() + 4));
 }
 void AccountFilter::updateMenu() {
     int total = 0; for (auto count : m_counts) total += count;

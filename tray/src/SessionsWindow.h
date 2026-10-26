@@ -201,13 +201,15 @@ private:
     // Native lifecycle cleanup reports its result after Archive or Terminate.
     // Keep a review action for remaining work. Host, session, root, common dir.
     QStringList m_archivedWorktree;
-    QString m_archivedWorktreeRun, m_worktreeCleanupReason;
+    QString m_archivedWorktreeRun, m_archivedWorktreeOwnerId, m_worktreeCleanupReason;
     bool m_worktreeCleanupOffered = false, m_worktreeCleanupUnconfirmed = false;
     QPushButton *m_worktreeCleanup = nullptr;
     int m_worktreeCleanupRevision = 0;
     void offerWorktreeCleanup();
     void updateWorktreeCleanupOffer();
     void cleanUpArchivedWorktree();
+    void reviewTerminatedWorktrees(const QList<QStringList> &offers);
+    bool m_removeTerminatedWorktree = false;
     void renameSession();
     void forkSession();
     void populateBatchActions(QMenu *menu);
@@ -239,6 +241,10 @@ private:
     QStringList m_selectionErrors;
     int m_selectionTotal = 0, m_selectionDone = 0, m_selectionFailed = 0;
     bool m_selectionRunning = false;
+    bool m_selectionRemoveWorktrees = false;
+    QStringList m_selectionCleanupTarget;
+    QList<QStringList> m_selectionCleanupOffers;
+    int m_selectionCleanupOverflow = 0;
     enum class SessionMenuAction { OpenTerminal, OpenProcesses, OpenFolder, FolderShell, CopyCommand, ChangeState, Rename, Fork, Archive, CopyName, CopyReference, CopyFolder, Terminate, MarkRead, ReviewLater, StartFresh, Clear, ToggleMute, CollapseRow, ExpandRow };
     void copySessionReference(const Entry &entry, const QString &agent = {});
     void showSessionMenu(const QString &key, const QPoint &position);
@@ -383,6 +389,7 @@ private:
     QSet<QString> m_hostFilters, m_projectFilters, m_accountFilters;
     SessionAccounts::Catalog m_sessionAccounts;
     QJsonArray m_sessionAccountProfiles;
+    QJsonArray m_sessionAccountDetailsProfiles;
     QString selectedHostTarget() const;
     void updateDashboard();
     QJsonObject m_details;

@@ -15,6 +15,8 @@ private slots:
     void duplicateCaptionsNameTheSpecificProfile();
     void missingGroupedBindingsKeepOneNamedChoice();
     void openMenuKeepsPresentationAndBindingsAcrossIdentitySplit();
+    void coldOpenMenuReceivesGroupedAccountsWithoutReopening();
+    void catalogChoicesExcludeSessionOnlyAccountsAndKeepHomeBindings();
 private:
     static QJsonObject profile(const QString &host, const QString &id, const QString &identity, const QString &email) {
         return {{"host",host},{"machine",host.isEmpty()?QString("workstation"):host},{"id",id},{"provider","codex"},{"label","Work"},
@@ -131,6 +133,49 @@ void TestAccountFilter::openMenuKeepsPresentationAndBindingsAcrossIdentitySplit(
         QVERIFY(current->toolTip().contains(profileId=="one"?"one@example.test":"two@example.test"));
         QVERIFY(current->isChecked());
     }
+}
+void TestAccountFilter::coldOpenMenuReceivesGroupedAccountsWithoutReopening() {
+    QWidget host;auto *layout=new QVBoxLayout(&host);auto *filter=new AccountFilter;
+    layout->addWidget(filter->button());layout->addWidget(filter);host.show();
+    auto *menu=filter->button()->menu();menu->popup(host.mapToGlobal(QPoint(10,10)));QTRY_VERIFY(menu->isVisible());
+    QCOMPARE(menu->findChildren<QCheckBox *>("accountFilterChoice").size(),0);
+    SessionAccounts::Catalog catalog;
+    catalog.reset({profile({},"one","shared","shared@example.test"),profile("mac","other","shared","shared@example.test")});
+    filter->setAccounts(catalog.accounts());
+    const auto choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),1);QVERIFY(menu->isVisible());
+    auto *choice=choices.first();QVERIFY(choice->text().contains("shared@example.test"));
+    QCOMPARE(choice->property("bindings").toStringList().size(),2);
+    choice->click();QCOMPARE(filter->selection(),catalog.accounts().first().bindings);
+    // A newly discovered unrelated account can appear without retargeting this action.
+    catalog.reset({profile({},"one","shared","shared@example.test"),profile("mac","other","shared","shared@example.test"),profile({},"two","separate","two@example.test")});
+    filter->setAccounts(catalog.accounts());QCOMPARE(menu->findChildren<QCheckBox *>("accountFilterChoice").size(),2);
+    QVERIFY(menu->findChildren<QCheckBox *>("accountFilterChoice").contains(choice));
+    QCOMPARE(choice->property("bindings").toStringList().size(),2);
+}
+void TestAccountFilter::catalogChoicesExcludeSessionOnlyAccountsAndKeepHomeBindings() {
+    SessionAccounts::Catalog catalog;
+    catalog.reset({profile({},"one","shared","shared@example.test"),profile("mac","two","shared","shared@example.test")});
+    auto legacy=session({});legacy.accountHome="/fixture/one";catalog.observe({},"workstation",legacy);
+    const auto retired=session("native-claude");catalog.observe({},"workstation",retired);
+    QCOMPARE(catalog.accounts().size(),2);QCOMPARE(catalog.catalogAccounts().size(),1);
+    const auto bindings=catalog.catalogAccounts().first().bindings;QCOMPARE(bindings.size(),3);
+    QVERIFY(bindings.contains(SessionAccounts::binding({},legacy)));
+    QVERIFY(!bindings.contains(SessionAccounts::binding({},retired)));
+    QWidget host;auto *layout=new QVBoxLayout(&host);auto *filter=new AccountFilter;
+    layout->addWidget(filter->button());layout->addWidget(filter);host.show();filter->setAccounts(catalog.catalogAccounts());
+    auto *menu=filter->button()->menu();menu->popup(host.mapToGlobal(QPoint(10,10)));QTRY_VERIFY(menu->isVisible());
+    auto choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),1);
+    choices.first()->click();QCOMPARE(filter->selection(),bindings);
+    catalog.reset({});catalog.observe({},"workstation",retired);QVERIFY(catalog.catalogAccounts().isEmpty());
+    filter->setAccounts(catalog.catalogAccounts());QCOMPARE(filter->selection(),bindings);
+    menu->hide();menu->popup(host.mapToGlobal(QPoint(10,10)));QTRY_VERIFY(menu->isVisible());
+    choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),1);
+    QVERIFY(choices.first()->isChecked());QVERIFY(choices.first()->text().contains("shared@example.test"));
+    const auto current=profile({},"one","shared","shared@example.test"),remote=profile("mac","two","shared","shared@example.test");
+    auto removed=profile({},"retired","different","old@example.test");removed["home"]="/fixture/one";
+    catalog.reset({current,remote},{current,remote,removed});catalog.observe({},"workstation",legacy);
+    QCOMPARE(catalog.catalogAccounts().size(),1);QCOMPARE(catalog.catalogAccounts().first().bindings.size(),2);
+    QVERIFY(!catalog.catalogAccounts().first().bindings.contains(SessionAccounts::binding({},legacy)));
 }
 QTEST_MAIN(TestAccountFilter)
 #include "test_accountfilter.moc"

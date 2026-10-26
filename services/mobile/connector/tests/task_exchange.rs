@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! The phone's task exchange, which only this connector offers: advertised
 //! when hgs names `task exchange|digests --json`, run with its payload on
 //! stdin, kept as a short read, and each project's tasks digest in the

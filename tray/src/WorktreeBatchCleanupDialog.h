@@ -13,6 +13,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QTimer>
+#include <algorithm>
 
 // Entries are immutable host/common-dir/path/fingerprint snapshots. Every native
 // removal rechecks the snapshot, and uncertain failures are never replayed.
@@ -53,6 +54,7 @@ public:
         m_processes = new QCheckBox(tr("I checked these folders are not in use; remove them anyway"));
         m_processes->setObjectName("confirmUncheckedWorktreeProcesses"); m_processes->hide(); layout->addWidget(m_processes);
         m_branches = new QCheckBox(tr("Also delete branches proven merged by Git")); m_branches->setObjectName("batchDeleteMergedBranches"); layout->addWidget(m_branches);
+        if(std::any_of(entries.cbegin(),entries.cend(),[](const QJsonObject &entry){return entry["exit_cleanup"]==true;}))m_branches->hide();
         m_status = new QLabel; m_status->setTextFormat(Qt::PlainText);m_status->setObjectName("batchCleanupStatus"); m_status->setWordWrap(true); layout->addWidget(m_status);
         auto *buttons = new QDialogButtonBox;
         m_cancel = buttons->addButton(QDialogButtonBox::Cancel); m_cancel->setText(tr("Keep folders")); m_remove = buttons->addButton(tr("Remove %1 worktrees").arg(entries.size()), QDialogButtonBox::DestructiveRole);
@@ -73,7 +75,7 @@ public:
             if (request != m_request) return; m_request = 0;
             auto *item = m_list->topLevelItem(m_index); item->setText(3, ok ? (result["status"] == "forgotten" ? tr("Forgotten") : tr("Removed")) : tr("Not confirmed"));
             item->setToolTip(3, ok ? result["branch_error"].toString() : error);
-            if (ok) { m_changed = true; ++m_removed; } else ++m_failed;
+            if (ok) { m_changed = true; ++m_removed; m_removedEntries << m_entries[m_index]; } else ++m_failed;
             if (!error.isEmpty()) m_errors << item->text(0) + ": " + error;
             if (!result["branch_error"].toString().isEmpty()) m_errors << result["branch_error"].toString();
             ++m_index; next();
@@ -95,6 +97,7 @@ public:
         updateAction(); QTimer::singleShot(0, this, [this] { reviewNext(); });
     }
     bool changed() const { return m_changed; }
+    const QList<QJsonObject> &removedEntries() const { return m_removedEntries; }
     bool attempted() const { return m_started; }
     QString summary() const { return tr("%1 removed · %2 unconfirmed").arg(m_removed).arg(m_failed) + (m_skipped ? tr(" · %1 kept").arg(m_skipped) : QString()); }
     void reject() override { if (!m_request && (!m_started || m_index == m_entries.size())) QDialog::reject(); }
@@ -113,6 +116,19 @@ private:
                 : m_requiresDiscard && !m_discard->isChecked() ? tr("Removal is paused: confirm discarding unsaved work, or keep the folders.")
                 : m_requiresLocal && !m_local->isChecked() ? tr("Removal is paused: inspect the local files, then confirm they are no longer needed.")
                 : tr("Removing the working folders keeps conversations and, unless selected above, branches. Local files will be permanently deleted."));
+        if (!m_started && !m_autoScheduled && m_reviewIndex==m_entries.size() && !m_entries.isEmpty()
+            && std::all_of(m_entries.cbegin(),m_entries.cend(),[](const QJsonObject &entry) {
+                return entry["exit_cleanup"]==true && entry["verified"]==true
+                    && !entry["expected_owner_id"].toString().isEmpty() && entry["expected_owner_id"]==entry["row"].toObject()["ownership_id"]
+                    && WorktreeReviewUi::exitCleanupReady(entry["row"].toObject());
+            })) {
+            m_autoScheduled=true;
+            QTimer::singleShot(0,this,[this] {
+                if(!isVisible() || m_stop || m_started)return;
+                m_local->setChecked(m_requiresLocal);
+                if(m_remove->isEnabled())m_remove->click();
+            });
+        }
     }
     void reviewNext() {
         while (m_reviewIndex < m_entries.size()) {
@@ -161,10 +177,11 @@ private:
         m_request = m_client->removeWorktree(entry["host"].toString(), row["path"].toString(), entry["common_dir"].toString(), row["fingerprint"].toString(),
             m_branches->isChecked() && row["merged"] == true, m_requiresLocal && m_local->isChecked() ? row["ignored_fingerprint"].toString() : QString(),
             m_requiresDiscard && m_discard->isChecked() ? row["discard_fingerprint"].toString() : QString(),
-            m_processes->isChecked() && WorktreeReviewUi::processReviewable(row) ? row["process_fingerprint"].toString() : QString());
+            m_processes->isChecked() && WorktreeReviewUi::processReviewable(row) ? row["process_fingerprint"].toString() : QString(),
+            entry["exit_cleanup"]==true && row["archive_restore_ready"]==true);
     }
-    HgsClient *m_client; QList<QJsonObject> m_entries; QTreeWidget *m_list; QPlainTextEdit *m_details;
+    HgsClient *m_client; QList<QJsonObject> m_entries, m_removedEntries; QTreeWidget *m_list; QPlainTextEdit *m_details;
     QCheckBox *m_local, *m_discard, *m_processes, *m_branches; QLabel *m_status; QPushButton *m_cancel, *m_remove, *m_inspect;
     QStringList m_errors; quint64 m_request = 0, m_reviewRequest = 0; int m_reviewIndex = 0, m_index = 0, m_removed = 0, m_failed = 0, m_skipped = 0;
-    bool m_started = false, m_changed = false, m_requiresLocal = false, m_requiresDiscard = false, m_requiresProcesses = false, m_stop = false;
+    bool m_started = false, m_changed = false, m_requiresLocal = false, m_requiresDiscard = false, m_requiresProcesses = false, m_stop = false, m_autoScheduled = false;
 };

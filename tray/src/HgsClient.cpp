@@ -127,6 +127,7 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.backgroundObservedAt = work.value("sampled_at").toDouble();
     s.backgroundCommand = work.value("command").toString();
     s.runId = obj.value(QStringLiteral("run_id")).toString();
+    s.worktreeOwnerId = obj.value("worktree_owner_id").toString();
     s.notificationPreferences = obj.value("notification_preferences").toObject();
     s.sharedNotifications = SessionNotifications::valid(s.notificationPreferences, s.conversationId);
     if (s.sharedNotifications) s.muted = s.notificationPreferences.value("muted").toBool();
@@ -1488,7 +1489,7 @@ quint64 HgsClient::inspectWorktree(const QString &host,const QString &path,const
     return request;
 }
 
-quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint,const QString &discardFingerprint,const QString &processFingerprint)
+quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const QString &commonDir,const QString &fingerprint,bool deleteBranch,const QString &ignoredFingerprint,const QString &discardFingerprint,const QString &processFingerprint,bool preserveArchiveRestore)
 {
     const auto request=++m_worktreeRequest;const auto token=QUuid::createUuid().toString(QUuid::WithoutBraces);
     QStringList args{"worktrees","remove","--path",path,"--common-dir",commonDir,"--fingerprint",fingerprint,"--request-id",token,"--json"};
@@ -1496,6 +1497,7 @@ quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const 
     if(!ignoredFingerprint.isEmpty())args<<"--ignored-fingerprint"<<ignoredFingerprint;
     if(!discardFingerprint.isEmpty())args<<"--discard-fingerprint"<<discardFingerprint;
     if(!processFingerprint.isEmpty())args<<"--process-fingerprint"<<processFingerprint;
+    if(preserveArchiveRestore)args<<"--preserve-archive-restore";
     const auto forget=[this,host,commonDir]{invalidateWorktreeCache(host,commonDir);};
     runHgs(m_hgs,args,330000,this,[this,request,token,path,forget](const QByteArray &out){
         forget();const auto data=QJsonDocument::fromJson(out).object();

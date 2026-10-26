@@ -25,11 +25,12 @@ struct Account {
 };
 class Catalog {
 public:
-    void reset(const QJsonArray &profiles) {
-        m_accounts.clear(); m_groups.clear();
+    void reset(const QJsonArray &profiles, const QJsonArray &bindingEvidence = {}) {
+        m_accounts.clear(); m_groups.clear(); m_catalogIds.clear();
         QHash<QString, QSet<QString>> homes;
         for (const auto &value : AccountCatalog::group(profiles)) {
             const auto group = value.toObject(); const auto id = group["account_key"].toString();
+            m_catalogIds.insert(id);
             Account account{id, group["label"].toString(), group["provider"].toString(), {}, {}};
             const auto identity = group["usage"].toObject()["identity"].toObject();
             const auto email = identity["email"].toString(), organization = identity["organization"].toString();
@@ -44,6 +45,15 @@ public:
                 if (!member["home"].toString().isEmpty()) homes[binding(member["host"].toString(), account.provider, {}, member["home"].toString())].insert(id);
             }
             m_accounts.insert(id, account);
+        }
+        // Removed or unresolved profiles are evidence against a home alias,
+        // never extra chooser accounts. Keep ambiguity checks across history.
+        for (const auto &value : AccountCatalog::group(bindingEvidence)) {
+            const auto group = value.toObject();
+            for (const auto &memberValue : group["members"].toArray()) {
+                const auto member = memberValue.toObject();
+                if (!member["home"].toString().isEmpty()) homes[binding(member["host"].toString(), group["provider"].toString(), {}, member["home"].toString())].insert(group["account_key"].toString());
+            }
         }
         // Older sessions may record only their agent home. Ambiguous homes do
         // not borrow a catalog account or the machine's current default.
@@ -70,6 +80,11 @@ public:
         });
         return rows;
     }
+    QList<Account> catalogAccounts() const {
+        auto rows = accounts();
+        rows.removeIf([this](const Account &account) { return !m_catalogIds.contains(account.id); });
+        return rows;
+    }
     QString description(const QString &host, const SessionInfo &session) const {
         const auto key = binding(host, session); const auto account = m_accounts.value(m_groups.value(key));
         return account.name.isEmpty() ? QObject::tr("Account not recorded") : account.name + " (" + IdentityBadges::providerName(account.provider) + ")";
@@ -77,5 +92,6 @@ public:
 private:
     QHash<QString, Account> m_accounts;
     QHash<QString, QString> m_groups;
+    QSet<QString> m_catalogIds;
 };
 }

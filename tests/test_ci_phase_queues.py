@@ -77,19 +77,20 @@ class PhaseQueues(unittest.TestCase):
                 self.assertEqual(evaluate(group, **overrides), 'ci-CI-' + overrides.get('ref', 'refs/heads/main'))
         self.assertEqual(evaluate(group, event='workflow_dispatch', test_ref='b' * 40), 'ci-CI-' + 'b' * 40)
 
-    def test_rollout_qualification_waits_on_the_legacy_whole_run_lock(self):
+    def test_dev_build_does_not_wait_on_the_legacy_test_lock(self):
         caller = job(self.ci, 'qualification')
         qualification = re.search(r'(?m)^      group: (.*)$', caller)[1]
         top = re.search(r'(?m)^  group: (.*)$', self.ci)[1]
         tail = re.search(r'(?m)^      group: (.*)$', job(self.ci, 'dev-tail'))[1]
         publisher = re.search(r'(?m)^  group: (.*)$', self.publisher)[1]
-        # These are the old CI key's two admitted source forms. The caller
-        # shares that lock with an active old run, but never its own new top.
+        # The old lock can still be held by a long regression run during rollout.
+        # Build-only work must not inherit that dependency.
         for test_ref in ('', 'a' * 40):
             with self.subTest(test_ref=test_ref):
                 legacy = 'ci-CI-' + (test_ref or 'refs/heads/main')
                 self.assertEqual(self.selected(test_ref=test_ref), ['qualification'])
-                self.assertEqual(concurrency_value(qualification, test_ref=test_ref), legacy)
+                self.assertEqual(concurrency_value(qualification, test_ref=test_ref), 'ci-main-dev-builds')
+                self.assertNotEqual(concurrency_value(qualification, test_ref=test_ref), legacy)
                 self.assertNotEqual(evaluate(top, test_ref=test_ref), legacy)
                 self.assertNotIn(legacy, (tail, publisher))
         self.assertIn('      cancel-in-progress: false\n', caller)
@@ -104,13 +105,11 @@ class PhaseQueues(unittest.TestCase):
                           {'event': 'workflow_dispatch', 'test_ref': 'b' * 40},
                           {'event': 'schedule'}, {'ref': 'refs/heads/topic'}):
             with self.subTest(overrides=overrides):
-                # Reusing the legacy top is safe only because this entire
-                # reusable caller is skipped before acquiring its job lock.
-                self.assertEqual(concurrency_value(top_group, **overrides), concurrency_value(child_group, **overrides))
+                self.assertNotEqual(concurrency_value(top_group, **overrides), concurrency_value(child_group, **overrides))
                 self.assertFalse(evaluate(field(qualification, 'if'), **overrides))
                 self.assertNotIn('qualification', self.selected(**overrides))
         self.assertEqual(self.selected(test_ref='b' * 40), ['review'])
-        self.assertEqual(concurrency_value(child_group, test_ref='b' * 40), 'ci-CI-' + 'b' * 40)
+        self.assertEqual(concurrency_value(child_group, test_ref='b' * 40), 'ci-main-dev-builds')
 
     def test_distinct_caller_locks_span_whole_phases_without_nested_self_lock(self):
         groups = []

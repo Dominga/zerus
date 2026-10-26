@@ -121,7 +121,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees policy get|set --json   worktree-maintenance-v1 (host-local cleanup rules)
        hgs [@host] worktrees sweep --json   one bounded automatic cleanup step
        hgs [@host] worktrees inspect --path WORKTREE --common-dir DIR [--file RELATIVE_PATH] [--json]   bounded read-only changes
-       hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--delete-branch] [--json]
+       hgs [@host] worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--discard-fingerprint HASH] [--preserve-archive-restore] [--delete-branch] [--json]
        Mobile worktree ABI: worktrees-v1 (catalog/create/verified project placement)
        hgs [@host] repository check|clone --url URL --parent PATH --name NAME --json
        hgs [@host] repository status --request-id UUID --json

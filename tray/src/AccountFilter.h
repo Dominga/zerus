@@ -22,6 +22,7 @@ signals:
 private:
     void rebuildChips();
     void rebuildMenu();
+    void appendChoices();
     void updateMenu();
     void toggle(const SessionAccounts::Account &account, bool checked);
     QString caption(const SessionAccounts::Account &account) const;

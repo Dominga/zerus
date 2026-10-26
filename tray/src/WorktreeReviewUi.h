@@ -92,6 +92,17 @@ inline bool processReviewable(const QJsonObject &row) {
         && !row["fingerprint"].toString().isEmpty() && !row["process_fingerprint"].toString().isEmpty()
         && (!localData(row) || !row["ignored_fingerprint"].toString().isEmpty());
 }
+inline bool exitCleanupReady(const QJsonObject &row) {
+    const auto kind=row["integration"].toObject()["kind"].toString();
+    return row["kind"]=="linked" && row["zerus_owned"]==true && row["archive_restore_ready"]==true
+        && (row["verdict"]=="ready" || row["verdict"]=="review")
+        && !row["fingerprint"].toString().isEmpty() && row["reasons"].isArray() && row["reasons"].toArray().isEmpty()
+        && row["changes"].toInt(-1)==0 && row["untracked"].toInt(-1)==0
+        && row["disk_complete"]==true && row["ignored_complete"]==true
+        && (kind=="ancestor" || kind=="same_tree" || kind=="equivalent_patches")
+        && row["ignored_count"].toInt(-1)>=0
+        && (row["ignored_count"].toInt(-1)==0 || row["generated_files_only"]==true);
+}
 inline bool removable(const QJsonObject &row) {
     return row["kind"] == "linked" && (row["verdict"] == "ready" || row["verdict"] == "review" || row["verdict"] == "missing")
         && !row["fingerprint"].toString().isEmpty() && (!localData(row) || !row["ignored_fingerprint"].toString().isEmpty());

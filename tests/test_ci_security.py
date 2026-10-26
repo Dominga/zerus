@@ -569,7 +569,12 @@ class WorkflowSecurityTests(unittest.TestCase):
                 # The published recipes keep their check() and never use ccache.
                 self.assertIn("\ncheck() {\n", text)
                 self.assertNotIn("ccache", text)
-        self.assertNotIn("--nocheck", (ROOT / "scripts/build-arch-package.sh").read_text())
+        # Dev explicitly builds a usable package without the regression check().
+        # The normal script and distributed recipes retain their full checks.
+        dev_package = (ROOT / '.github/workflows/dev-arch.yml').read_text()
+        self.assertIn('ZERUS_RELEASE_CHANNEL=dev', dev_package)
+        self.assertIn('scripts/build-arch-package.sh --build-only', dev_package)
+        self.assertNotIn('--build-only', job(checks, 'arch-package'))
 
     def test_relay_job_runs_every_mobile_service_module(self):
         relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
@@ -802,10 +807,13 @@ class WorkflowSecurityTests(unittest.TestCase):
                 passed = re.findall(r"(?m)^ +save_caches: *(.*)$", text)
                 if path.name in {"ci.yml", "ci-dev-qualification.yml", "nightly.yml"}:
                     self.assertEqual(passed, ["true"])
-                elif path.name == "checks.yml":
+                elif path.name in {"checks.yml", "dev-arch.yml"}:
                     self.assertEqual(passed, [""])
-                    self.assertRegex(text, r"(?m)^      save_caches:\n        description: .+\n"
+                    self.assertRegex(text, r"(?m)^      save_caches:\n(?:        description: .+\n)?"
                                            r"        type: boolean\n        default: false$")
+                elif path.name == 'ci-regression.yml':
+                    self.assertEqual(passed, ['false'])
+                    self.assertRegex(text, r'(?m)^cache-mode: read$')
                 else:
                     self.assertNotIn("save_caches", text)
 
@@ -1151,16 +1159,21 @@ class WorkflowSecurityTests(unittest.TestCase):
                 for runner in re.findall(r'"((?:ubuntu|macos|windows)-[^"]+)"', text):
                     self.assertIn(runner, labels)
 
-    def test_dev_candidates_require_shared_checks_arch_mac_android(self):
+    def test_dev_candidates_require_arch_mac_android_builds(self):
         automatic = job(self.ci, 'automatic')
         for name in ('linux', 'arch', 'macos'):
             self.assertIn("run_" + name + ": ${{ github.event_name == 'push' || github.event_name == 'pull_request' || inputs.run_" + name + " }}", automatic)
         self.assertIn('      run_windows: false\n      run_ios: false', automatic)
         checks = job(self.qualification, 'checks')
-        self.assertEqual(field(checks, 'uses'), './.github/workflows/checks.yml')
+        self.assertEqual(field(checks, 'uses'), './.github/workflows/dev-arch.yml')
+        self.assertIn('      save_caches: true\n', checks)
+        bundle = job(self.qualification, 'bundle')
+        self.assertIn('      run_tests: false\n', bundle)
+        regression = job((ROOT / '.github/workflows/ci-regression.yml').read_text(), 'checks')
+        self.assertEqual(field(regression, 'uses'), './.github/workflows/checks.yml')
         for name in ('linux', 'arch', 'macos'):
-            self.assertIn('      run_' + name + ': true\n', checks)
-        self.assertIn('      run_windows: false\n      run_ios: false', checks)
+            self.assertIn('      run_' + name + ': true\n', regression)
+        self.assertIn('      run_windows: false\n      run_ios: false', regression)
         self.assertEqual(field(job(self.ci, 'dev-tail'), 'needs'), '[gate, qualification]')
         self.assertEqual(field(job(self.tail, 'dev'), 'needs'), '[dev-android, dev-macos]')
         dev = (ROOT / '.github/workflows/dev.yml').read_text()

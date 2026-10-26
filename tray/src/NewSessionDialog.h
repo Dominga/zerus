@@ -37,7 +37,11 @@ public:
     bool implicitInbox() const;
     void setProjectCatalogSwarm(const QString &swarm) { m_projectCatalogSwarm = swarm; }
     void reject() override;
+    void setBackgroundCreation(bool enabled) { m_backgroundCreation = enabled; }
+    void restoreCreationChoices(const QJsonObject &plan);
+    void creationAdmissionFailed(const QString &error);
 signals:
+    void creationRequested(const QJsonObject &plan);
     // addFolder: the confirmed folder outside the project that joins it once the
     // session starts, or empty. A worktree generated from it never replaces it.
     // effort: the chosen OpenCode model's variant, or empty for that model's default.
@@ -97,6 +101,8 @@ private:
     SessionOrganization m_projects;
     SessionOrganization *m_liveProjects=nullptr;
     bool m_cloneLaunchPending=false,m_repositorySource=false,m_customDestination=false,m_customProjectName=false,m_repositoryNewProject=false;
+    bool m_backgroundCreation=false,m_creationSubmitted=false;
+    QString m_creationPredecessor;
     RepositoryClone *m_repository=nullptr;
     MachinePlatform::Style m_repositoryStyle=MachinePlatform::Style::Posix;
     QFormLayout *m_form;

@@ -382,7 +382,7 @@ namespace {
 // instead of the GUI thread. ProcessRunner also reports exactly once: the finished()
 // that follows a timeout kill() must not reach onFailed() again (--selftest leaves
 // main() on the first failure).
-void runHgs(const QString &hgs, const QStringList &args, int timeoutMs, QObject *parent,
+void runHgsDirect(const QString &hgs, const QStringList &args, int timeoutMs, QObject *parent,
             const std::function<void(const QByteArray &)> &onFinished,
             const std::function<void(const QString &, const QString &)> &onFailed,
             const QByteArray &input = {})
@@ -403,6 +403,25 @@ void runHgs(const QString &hgs, const QStringList &args, int timeoutMs, QObject 
         }
         onFinished(result.standardOutput);
     });
+}
+
+void guardMachine(QStringList &args,const QString &expected)
+{
+    if(expected.isEmpty())return;
+    const int at=!args.isEmpty()&&args.first().startsWith('@')?1:0;
+    args.insert(at,"--expect-machine");args.insert(at+1,expected);
+}
+void runHgs(const QString &hgs,const QStringList &args,int timeoutMs,QObject *parent,
+            const std::function<void(const QByteArray &)> &done,
+            const std::function<void(const QString &,const QString &)> &failed,const QByteArray &input={})
+{
+    const int at=!args.isEmpty()&&args.first().startsWith('@')?1:0;
+    if(args.value(at)!="--expect-machine"){runHgsDirect(hgs,args,timeoutMs,parent,done,failed,input);return;}
+    QStringList help{"--help"};if(at)help.prepend(args.first());
+    runHgsDirect(hgs,help,15000,parent,[=](const QByteArray &out){
+        if(!out.contains("guarded-create-v1")){failed({},QObject::tr("The selected CLI cannot verify this creation's computer. Update hgs before continuing."));return;}
+        runHgsDirect(hgs,args,timeoutMs,parent,done,failed,input);
+    },failed);
 }
 
 } // namespace
@@ -976,7 +995,7 @@ void HgsClient::launchNativeSession(const QString &host, const QString &target, 
     launchDetachedSession(host,"dsh",target,name,account,launchId);
 }
 
-void HgsClient::launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model, const QString &effort)
+void HgsClient::launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model, const QString &effort,const QString &expectedMachine)
 {
     QStringList args{agent, target, "--new", "-n", name, "--launch-id", launchId};
     if (agent != "dsh" && agent != "opencode") args << "-d";
@@ -985,6 +1004,7 @@ void HgsClient::launchDetachedSession(const QString &host, const QString &agent,
     // hgs requires --model with --effort: effort is that model's variant.
     if (agent == "opencode" && !model.isEmpty() && !effort.isEmpty()) args << "--effort" << effort;
     if (!host.isEmpty()) args.prepend('@' + host);
+    guardMachine(args,expectedMachine);
     runHgs(m_hgs, args, 90000, this,
         [this,launchId](const QByteArray &) { emit nativeSessionLaunched(launchId,true,{}); },
         [this,launchId](const QString &,const QString &error) { emit nativeSessionLaunched(launchId,false,error); });
@@ -1297,8 +1317,18 @@ void HgsClient::pumpGitStatus()
     }
 }
 
-quint64 HgsClient::requestWorktrees(const QString &host,const QString &path,bool refresh)
+quint64 HgsClient::requestWorktrees(const QString &host,const QString &path,bool refresh,const QString &expectedMachine)
 {
+    if(!expectedMachine.isEmpty()){
+        const auto request=++m_worktreeRequest;QStringList args{"worktrees","--creation","--path",path,"--refresh","--json"};
+        if(!host.isEmpty())args.prepend('@'+host);guardMachine(args,expectedMachine);
+        runHgs(m_hgs,args,15000,this,[this,request,host,path](const QByteArray &out){
+            const auto data=QJsonDocument::fromJson(out).object();
+            if(!data["worktrees"].isArray()||!data["state"].isString())emit worktreesFailed(request,host,path,tr("Invalid verified worktree catalog."));
+            else emit worktreesReady(request,host,path,data);
+        },[this,request,host,path](const QString &,const QString &error){emit worktreesFailed(request,host,path,error);});
+        return request;
+    }
     const quint64 request=++m_worktreeRequest;
     const auto cached=worktreeSnapshot(host,path);
     const auto age=QDateTime::currentSecsSinceEpoch()-qint64(cached.value("sampled_at").toDouble());
@@ -1340,16 +1370,21 @@ quint64 HgsClient::requestWorktrees(const QString &host,const QString &path,bool
 }
 
 quint64 HgsClient::createWorktree(const QString &host,const QString &path,const QString &commonDir,
-    const QString &branch,const QString &base,const QString &destination)
+    const QString &branch,const QString &base,const QString &destination,const QString &requestId,bool receipt,const QString &expectedMachine)
 {
     const auto request=++m_worktreeRequest;
-    const auto token=QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const auto token=requestId.isEmpty()?QUuid::createUuid().toString(QUuid::WithoutBraces):requestId;
     QStringList args{"worktrees","create","--path",path,"--common-dir",commonDir,"--branch",branch,
         "--base",base,"--destination",destination,"--request-id",token,"--json"};
+    if(receipt)args<<"--receipt";
     if(!host.isEmpty())args.prepend('@'+host);
-    runHgs(m_hgs,args,330000,this,[this,request,token,branch,commonDir,host](const QByteArray &out){
+    guardMachine(args,expectedMachine);
+    runHgs(m_hgs,args,330000,this,[this,request,token,branch,commonDir,host,receipt](const QByteArray &out){
         invalidateWorktreeCache(host, commonDir);
         const auto data=QJsonDocument::fromJson(out).object();
+        if(receipt&&data["request_id"]==token&&data["status"]!="created"){
+            emit worktreeCreated(request,false,data,data["detail"].toString(tr("Worktree creation is not confirmed. Check its original result.")));return;
+        }
         if(data["request_id"]!=token||data["status"]!="created"||data["branch"]!=branch||data["common_dir"]!=commonDir
             ||!QFileInfo(data["path"].toString()).isAbsolute()){
             emit worktreeCreated(request,false,{},tr("Creation could not be confirmed. Refresh the catalog and check the destination before retrying."));return;
@@ -1359,6 +1394,20 @@ quint64 HgsClient::createWorktree(const QString &host,const QString &path,const 
         invalidateWorktreeCache(host, commonDir);
         emit worktreeCreated(request,false,{},error+tr("\nCheck %1 before retrying. Any created worktree is kept.").arg(destination));
     });
+    return request;
+}
+
+quint64 HgsClient::worktreeReceipt(const QString &host,const QString &action,const QString &requestId,const QString &expectedMachine)
+{
+    const auto request=++m_worktreeRequest;
+    QStringList args{"worktrees",action,"--request-id",requestId,"--json"};
+    if(!host.isEmpty())args.prepend('@'+host);
+    guardMachine(args,expectedMachine);
+    runHgs(m_hgs,args,15000,this,[this,request,requestId](const QByteArray &out){
+        const auto result=QJsonDocument::fromJson(out).object();
+        const bool ok=result["schema"]==1&&result["request_id"]==requestId&&result["status"].isString();
+        emit worktreeReceiptReady(request,ok,result,ok?QString():tr("Invalid worktree receipt."));
+    },[this,request](const QString &,const QString &error){emit worktreeReceiptReady(request,false,{},error);});
     return request;
 }
 
@@ -1516,6 +1565,24 @@ quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const 
             ? tr("Removal could not be confirmed. Check the folder before deciding what to do next.") : cleanupError(host,detail));
     });
     return request;
+}
+
+quint64 HgsClient::requestCreationDirectory(const QString &host,const QString &path,const QString &expectedMachine)
+{
+    const auto request=++m_directoryRequest;QStringList help{"--help"};if(!host.isEmpty())help.prepend('@'+host);
+    const auto execute=[this,request,host,path,expectedMachine](bool verified){
+        if(!verified&&!expectedMachine.isEmpty()){emit directoriesFailed(request,host,tr("The original computer identity cannot be verified by this CLI."));return;}
+        QStringList args{"dirs"};if(verified)args<<"--creation";args<<(path.isEmpty()?QStringLiteral("~"):path);
+        if(!host.isEmpty())args.prepend('@'+host);guardMachine(args,expectedMachine);
+        runHgs(m_hgs,args,host.isEmpty()?10000:20000,this,[this,request,host,verified](const QByteArray &out){
+            const auto data=QJsonDocument::fromJson(out).object();
+            if(!data["path"].isString()||!data["directories"].isArray()||(verified&&(!data["creation_identity_v1"].toBool()||QUuid(data["computer_id"].toString()).isNull())))
+                emit directoriesFailed(request,host,tr("Invalid creation directory identity."));
+            else emit directoriesReady(request,host,data);
+        },[this,request,host](const QString &,const QString &error){emit directoriesFailed(request,host,error);});
+    };
+    runHgs(m_hgs,help,15000,this,[execute](const QByteArray &out){execute(out.contains("guarded-create-v1"));},
+        [this,request,host](const QString &,const QString &error){emit directoriesFailed(request,host,error);});return request;
 }
 
 quint64 HgsClient::requestDirectories(const QString &host, const QString &path, bool hidden)
@@ -2232,11 +2299,12 @@ quint64 HgsClient::requestRead(const QString &host, const QString &name, const Q
 }
 
 quint64 HgsClient::repositoryOperation(const QString &host,const QString &action,const QString &url,
-    const QString &parent,const QString &name,const QString &token)
+    const QString &parent,const QString &name,const QString &token,const QString &expectedMachine)
 {
     const auto request=++m_directoryRequest;
     QStringList help{"--help"};if(!host.isEmpty())help.prepend('@'+host);
-    runHgs(m_hgs,help,15000,this,[this,request,host,action,url,parent,name,token](const QByteArray &help){
+    guardMachine(help,expectedMachine);
+    runHgs(m_hgs,help,15000,this,[this,request,host,action,url,parent,name,token,expectedMachine](const QByteArray &help){
         if(!help.contains("repository-clone-v1")){
             emit repositoryFinished(request,false,{},tr("Update hgs on %1 to clone repositories.").arg(host.isEmpty()?tr("this computer"):host));return;
         }
@@ -2244,6 +2312,7 @@ quint64 HgsClient::repositoryOperation(const QString &host,const QString &action
         if(action!="status")args<<"--url"<<url<<"--parent"<<parent<<"--name"<<name;
         if(action!="check")args<<"--request-id"<<token;
         if(!host.isEmpty())args.prepend('@'+host);
+        guardMachine(args,expectedMachine);
         auto process=processRequest(m_hgs,args);process.input=QByteArray();process.maximumOutputBytes=65536;
         process.timeoutMs=action=="clone"?650000:30000;
         ProcessRunner::run(std::move(process),this,[this,request,action,name,token,host](const ProcessRunner::Result &result){

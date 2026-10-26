@@ -126,11 +126,13 @@ QHash<QString, QList<int>> SessionOrganization::orderedMembers(const QStringList
     return result;
 }
 
-QString SessionOrganization::createGroup(const QString &name)
+QString SessionOrganization::createGroup(const QString &name,const QString &reservedId)
 {
     const QString title = name.trimmed().left(80);
     if (title.isEmpty()) return {};
-    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    if(!reservedId.isEmpty()&&QUuid(reservedId).isNull())return {};
+    const QString id = reservedId.isEmpty()?QUuid::createUuid().toString(QUuid::WithoutBraces):reservedId;
+    if(group(id))return id;
     int position = 0;
     while (position < m_groups.size() && m_groups[position].id != "ungrouped") ++position;
     m_groups.insert(position, {id, title, false, {}, "#64b5f6", {}});

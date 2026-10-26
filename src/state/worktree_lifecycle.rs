@@ -5,6 +5,7 @@ use super::worktrees::{cache_file, git};
 use super::*;
 use fs2::FileExt;
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::time::{Duration, Instant};
 
 fn receipt_path(common: &Path, path: &Path) -> PathBuf {
@@ -33,7 +34,13 @@ pub(super) fn created(common: &Path, path: &Path, branch: &str, head: &str) -> R
 }
 
 pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {
-    let value: Value = serde_json::from_slice(&fs::read(receipt_path(common, path)).ok()?).ok()?;
+    let read = |path: &Path| -> Option<Value> {
+        let mut bytes=Vec::new();
+        fs::File::open(path).ok()?.take(16385).read_to_end(&mut bytes).ok()?;
+        if bytes.len()>16384 { return None; }
+        serde_json::from_slice(&bytes).ok()
+    };
+    let value = read(&receipt_path(common,path))?;
     if value["version"] != 1
         || value["common_dir"] != json!(common)
         || value["path"] != json!(path)
@@ -47,8 +54,7 @@ pub(super) fn owned(common: &Path, path: &Path) -> Option<Value> {
     {
         return None;
     }
-    let marker: Value =
-        serde_json::from_slice(&fs::read(metadata.join("zerus-owner.json")).ok()?).ok()?;
+    let marker = read(&metadata.join("zerus-owner.json"))?;
     if marker != value {
         return None;
     }

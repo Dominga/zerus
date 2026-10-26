@@ -310,7 +310,7 @@ void SessionList::mousePressEvent(QMouseEvent *e)
         e->accept(); return;
     }
     if (e->button() == Qt::LeftButton) { m_bulkSelecting = false; emit bulkSelectionChanged(); }
-    if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()) { e->accept(); return; }
+    if (item && !item->data(SessionRoles::LaunchId).toString().isEmpty()&&!item->flags().testFlag(Qt::ItemIsSelectable)) { e->accept(); return; }
     if (e->button() == Qt::LeftButton && item && item->data(SessionRoles::Header).toBool()) {
         m_pressedGroup = item->data(SessionRoles::Group).toString(); setFocus(); e->accept(); return;
     }

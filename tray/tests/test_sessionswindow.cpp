@@ -105,6 +105,7 @@
 #include "LaunchWarnings.h"
 #include "LocalSessionHost.h"
 #include "ProcessRunner.h"
+#include "SessionCreationController.h"
 #include "ProcessSettings.h"
 #include "QuestionNotificationSettings.h"
 #include "Shortcuts.h"
@@ -227,7 +228,7 @@ private slots:
     void localWindowsSessionExplainsDisabledVoice();
     // Shards run functions and data rows in any order, so every test starts without
     // the settings an earlier one saved, window geometry included.
-    void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QSettings().setValue("downloads/folder", m_dir->filePath("download-cache")); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
+    void init() { ComposerDraftStore::flushWrites(); QSettings().clear(); QFile::remove(QSettings().fileName()+".creations.json");QSettings().setValue("downloads/folder", m_dir->filePath("download-cache")); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); }
     // Chords a test rebinds end with it.
     void cleanup() { ShortcutRegistry::instance().resetAll(); }
     void workspaceRestoresDraftAcrossRestartAndSessionRemoval();
@@ -10003,6 +10004,7 @@ void TestSessionsWindow::launchAddsOnlyFoldersOutsideTheProject()
     SessionsWindow window(program());window.setFleet(state);window.show();
     QSignalSpy launches(&window,&SessionsWindow::newSessionRequested);QStringList paths;
     const auto start=[&](const QString &path,const QString &name,const QString &hint){
+        const auto previousLaunches=launches.size();
         QTimer::singleShot(0,&window,[&,name,hint]{
             auto *dialog=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget());QVERIFY(dialog);
             // The safety reject outlasts the waits: slow Windows runners start each fake CLI through Python.
@@ -10013,7 +10015,7 @@ void TestSessionsWindow::launchAddsOnlyFoldersOutsideTheProject()
             dialog->findChild<QLineEdit *>("launchName")->setText(name);
             auto *button=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY_WITH_TIMEOUT(button->isEnabled(),15000);button->click();
         });
-        window.showNewSession("codex",group,"mac",{},path);QVERIFY(!launches.isEmpty());
+        window.showNewSession("codex",group,"mac",{},path);QTRY_COMPARE(launches.size(),previousLaunches+1);
         SessionInfo created;created.name="codex/infra/"+name;created.cmd="codex";created.project="infra";created.tag=name;
         created.runId="run-"+name;created.state="running";created.launchId=launches.last()[5].toString();
         box.sessions.append(created);state.setPeer(box,QDateTime::currentMSecsSinceEpoch());window.setFleet(state);
@@ -11549,7 +11551,7 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
         dialog->findChild<QLineEdit *>("launchName")->setText("grouped");
         auto *start = dialog->findChild<QPushButton *>("primary"); QTRY_VERIFY_WITH_TIMEOUT(start->isEnabled(), 15000); start->click();
     });
-    window->showNewSession("codex", group, host); QCOMPARE(launches.size(), 1);
+    window->showNewSession("codex", group, host); QTRY_COMPARE(launches.size(), 1);
     const QString token = launches[0][5].toString(); QVERIFY(!QUuid(token).isNull()); QCOMPARE(launches[0][0].toString(), host);
     auto placeholder = [&]() -> QListWidgetItem * {
         auto *list = window->findChild<SessionList *>("sessionList");
@@ -11557,13 +11559,13 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
         return nullptr;
     };
     QVERIFY(placeholder()); QCOMPARE(placeholder()->data(SessionRoles::Title).toString(), QString("grouped"));
-    QCOMPARE(placeholder()->data(SessionRoles::Status).toString(), QString("Starting…"));
+    QCOMPARE(placeholder()->data(SessionRoles::Status).toString(), QString("Starting agent…"));
     QCOMPARE(placeholder()->data(SessionRoles::Group).toString(), destination);
-    QVERIFY(!placeholder()->isHidden()); QVERIFY(!(placeholder()->flags() & Qt::ItemIsSelectable));
+    QVERIFY(!placeholder()->isHidden()); QVERIFY(placeholder()->flags() & Qt::ItemIsSelectable);
     QVERIFY(!(placeholder()->flags() & Qt::ItemIsDragEnabled));
     const auto preview = qEnvironmentVariable("HGS_NAVIGATION_PREVIEW");
     if (mode == "empty" && !preview.isEmpty()) { QDir().mkpath(preview); QVERIFY(window->grab().save(preview + "/starting-session.png")); }
-    auto pending = QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object();
+    auto pending = window->findChild<SessionCreationController *>()->operations();
     QCOMPARE(pending.value(token).toObject().value("group").toString(), destination);
     QCOMPARE(SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object()).group(destination)->folders.size(),1);
     SessionInfo created; created.name = "codex/infra/grouped"; created.cmd = "codex"; created.project = "infra"; created.tag = "grouped";
@@ -11579,8 +11581,8 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     QVERIFY(placeholder());
     auto stored = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
     QCOMPARE(stored.groupFor(machine + '\n' + created.name), QString("ungrouped"));
-    QVERIFY(QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
-    if (mode == "failed") { window->newSessionLaunchFailed(token); QVERIFY(!placeholder()); }
+    QVERIFY(window->findChild<SessionCreationController *>()->owns(token));
+    if (mode == "failed") { window->newSessionLaunchFailed(token); QVERIFY(placeholder());QCOMPARE(placeholder()->data(SessionRoles::Status).toString(),QString("Creation result unknown")); }
     if (mode == "dismissed") {
         auto *list = window->findChild<SessionList *>("sessionList");
         list->customContextMenuRequested(list->visualItemRect(placeholder()).center());
@@ -11590,19 +11592,20 @@ void TestSessionsWindow::newSessionGroupFollowsLaunchIdentity()
     if (mode == "restart" || mode == "deleted" || mode == "legacy") {
         window.reset();
         if (mode == "legacy") {
-            auto launch = pending.value(token).toObject(); launch.remove("show_pending"); pending[token] = launch;
-            QSettings().setValue("workspace/pendingLaunches", QJsonDocument(pending).toJson(QJsonDocument::Compact));
+            auto launch = pending.value(token).toObject(); launch.remove("show_pending");launch.remove("creation_schema");launch.remove("launch_id");
+            QFile::remove(QSettings().fileName()+".creations.json");
+            QSettings().setValue("workspace/pendingLaunches", QJsonDocument(QJsonObject{{token,launch}}).toJson(QJsonDocument::Compact));
         }
         if (mode == "deleted") {
             stored.removeGroup(group); QSettings().setValue("workspace/organization", QJsonDocument(stored.toJson()).toJson(QJsonDocument::Compact));
         }
         window = std::make_unique<SessionsWindow>(program()); window->setFleet(state); window->show();
-        QCOMPARE(placeholder() != nullptr, mode != "legacy");
+        QTRY_COMPARE(placeholder() != nullptr, mode != "legacy");
     }
     created.launchId = token; created.runId = "run-receipt"; deliver();
     QVERIFY(!placeholder());
     stored = SessionOrganization(QJsonDocument::fromJson(QSettings().value("workspace/organization").toByteArray()).object());
-    QCOMPARE(stored.groupFor(machine + '\n' + created.name), mode == "deleted" || mode == "failed" ? QString("ungrouped") : destination);
+    QCOMPARE(stored.groupFor(machine + '\n' + created.name), mode == "deleted" ? QString("ungrouped") : destination);
     QVERIFY(!QJsonDocument::fromJson(QSettings().value("workspace/pendingLaunches").toByteArray()).object().contains(token));
     const auto *resultGroup=stored.group(mode=="deleted"?stored.defaultProject():destination);QVERIFY(resultGroup);
     // The listed folder already belongs to the project, whatever path confirmed it.
@@ -11998,7 +12001,7 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
         QTRY_VERIFY_WITH_TIMEOUT(claude()>=0,15000);accounts->setCurrentRow(claude());dialog->findChild<QCheckBox *>("launchOpenTerminal")->setChecked(true);
         const auto preview=qEnvironmentVariable("HGS_PROJECT_LAUNCH_PREVIEW");if(!preview.isEmpty()){QDir().mkpath(preview);QTest::qWait(30);QVERIFY(dialog->grab().save(preview+"/launch.png"));}
         auto *start=dialog->findChild<QPushButton *>("primary");QTRY_VERIFY_WITH_TIMEOUT(start->isEnabled(),15000);start->click();});
-    launch->trigger();QVERIFY(remoteOpened);QCOMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),QString("mac"));
+    launch->trigger();QVERIFY(remoteOpened);QTRY_COMPARE(launched.size(),1);QCOMPARE(launched[0][0].toString(),QString("mac"));
     QCOMPARE(launched[0][1].toString(),QString("claude"));QCOMPARE(launched[0][2].toString(),QString("/remote/work tree"));delete menu.data();
     window.showProjects();page->selectProject(project);table->setCurrentCell(rowFor(remoteId),0);
     table->customContextMenuRequested(table->visualItemRect(table->item(rowFor(remoteId),0)).center());menu=page->findChild<QMenu *>("projectFolderMenu");

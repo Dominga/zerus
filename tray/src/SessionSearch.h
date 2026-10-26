@@ -20,10 +20,14 @@ public:
     void setAccountScope(const QSet<QString> &bindings);
     void setTheme(bool dark);
     void setFolderScope(const QString &host,const QString &path,bool checkout);
+    // Bounded creation rows already restricted to the workspace's project scope.
+    void setCreations(const QJsonObject &operations);
+    static QString creationId(const QListWidgetItem *item);
     bool active() const { return !m_query.isEmpty(); }
     // The workspace key of a result row's session (with its archive id for an archive).
     static QString sessionKey(const QListWidgetItem *item);
 signals:
+    void creationActivated(const QString &id);
     void archiveSessionsReady(const QString &host, const QJsonArray &rows);
     void resultActivated(const QString &host, const QString &name, const QString &archive,
                          const QString &run, const QJsonObject &event, const QString &query);
@@ -49,6 +53,7 @@ private:
     QPushButton *m_refresh;
     QHash<QString, QPair<quint64, QString>> m_pending;
     QHash<QString, QJsonObject> m_replies;
+    QJsonObject m_creations;
     QHash<QString, QString> m_errors;
     bool m_dark = false;
 };

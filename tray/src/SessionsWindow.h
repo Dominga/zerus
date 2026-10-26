@@ -9,6 +9,8 @@ class ToolbarChip;
 class SettingsPage;
 class SwarmController;
 class WorktreeCleanupStatus;
+class SessionCreationController;
+class QPlainTextEdit;
 
 #include <QJsonArray>
 #include <QJsonObject>
@@ -74,7 +76,7 @@ public:
     void showAttentionSession(const QString &host, const QString &name);
     void showNotificationNotice(const QString &message) { showNotice(message, false); }
     void showProjects(const QString &host = {});
-    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {});
+    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {}, const QJsonObject &recipe = {});
     void newSessionLaunchFailed(const QString &launchId, const QString &error = {});
     void setClipboardMode(bool clipboard);
     void setConnectionError(const QString &error);
@@ -101,7 +103,7 @@ signals:
     void folderShellRequested(const QString &host, const QString &directory);
     void copySessionCommandRequested(const QString &host, const QString &name, const QString &archiveId);
     void copyTextRequested(const QString &text);
-    void newSessionRequested(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId);
+    void newSessionRequested(const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &launchId,const QString &expectedMachine = {});
     void projectsChanged(const QString &host);
     void accountLoginRequested(const QString &host, const QString &id);
     void accountInstallRequested(const QString &host, const QString &provider);
@@ -127,6 +129,8 @@ private:
     void saveSessionRowPreferences();
     void updateSessionRowPresentation();
     void savePendingLaunches();
+    void renderCreation();
+    void selectCreation(const QString &id);
     void placeLaunchedSessions();
     bool takeEndedLaunch(const QString &launchId, QJsonObject *launch = nullptr);
     void createGroup(const QString &session = {});
@@ -370,6 +374,14 @@ private:
     FleetState m_fleet;
     QList<Entry> m_entries;
     QJsonObject m_pendingLaunches;
+    SessionCreationController *m_creations=nullptr;
+    QString m_selectedCreation,m_revealCreation,m_creationSessionToSelect;
+    QWidget *m_creationPanel=nullptr;
+    QLabel *m_creationTitle=nullptr;
+    QPlainTextEdit *m_creationText=nullptr;
+    QPushButton *m_creationContinue=nullptr,*m_creationCheck=nullptr,*m_creationStop=nullptr,*m_creationEdit=nullptr;
+    bool m_admittingCreation=false;
+    QHash<QString,QString> m_creationNotices;
     // Launches a listing reported ended, oldest first, with their launch intent.
     QList<QPair<QString, QJsonObject>> m_endedLaunches;
     QHash<QString, Entry> m_terminating;

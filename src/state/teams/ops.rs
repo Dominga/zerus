@@ -429,6 +429,63 @@ fn ensure_draft_revision(team: &Team, input: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// F1.5: the lead or owner changes a team's settings and its members in place.
+/// While Planning any member changes; a running team only members without a
+/// session. A wider permissions profile keeps the B5 confirmation.
+fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you change the team's settings");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team changes its settings"
+    );
+    let planning = team.status == TeamStatus::Planning;
+    let mut changed = Vec::new();
+    let mut widen = Vec::new();
+    for update in input["members_update"].as_array().into_iter().flatten() {
+        let id = text(update, "id").to_owned();
+        ensure!(!id.is_empty(), "A member update names its member");
+        let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
+        ensure!(planning || member.session.is_none(), "A running team changes only members without a session");
+        if let Some(folder) = update.get("folder") {
+            member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
+        }
+        if let Some(directory) = update.get("directory") {
+            member.directory = clean(directory.as_str().unwrap_or_default(), 500, "A directory")?;
+        }
+        if let Some(role) = update.get("role") {
+            let role = clean(role.as_str().unwrap_or_default().trim(), 60, "A role")?;
+            ensure!(!role.is_empty(), "A role is not empty");
+            member.role = role;
+        }
+        if let Some(prompt) = update.get("prompt") {
+            member.prompt = clean(prompt.as_str().unwrap_or_default(), 8000, "A role prompt")?;
+        }
+        if let Some(profile) = update.get("permissions_profile") {
+            let profile = profile.as_str().unwrap_or_default().to_owned();
+            ensure!(
+                profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&profile.as_str()),
+                "A permissions profile is read, write, build, commit or network"
+            );
+            if profile_rank(&profile) > profile_rank(&member.permissions_profile) {
+                widen.push(json!({"member":id,"from":member.permissions_profile,"to":profile}));
+            }
+            member.permissions_profile = profile;
+        }
+        changed.push(json!(id));
+    }
+    if let Some(value) = input.get("settings") {
+        let updated: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
+        validate_settings(&updated)?;
+        team.settings = updated;
+    }
+    if changed.is_empty() && input.get("settings").is_none() {
+        anyhow::bail!("A settings change names settings or members_update");
+    }
+    team.profile_widening.extend(widen);
+    events.push(Event::new("settings_changed", json!({"by":actor.label(team),"members":changed})));
+    Ok(json!({"status":"updated","members":changed,"profile_widening":team.profile_widening}))
+}
+
 fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you extend the team");
     ensure!(
@@ -1653,6 +1710,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "move-phase" => move_phase(team, input, actor, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
+        "settings" => settings(team, input, actor, events),
         "finish" => finish(team, input, actor, events),
         "approve" => {
             // B5: a wider permissions profile needs the owner's word.
@@ -3561,6 +3619,48 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("Draft numbers changed"), "{error}");
+    }
+
+    #[test]
+    fn settings_change_planning_members_and_keep_a_widening_for_the_owner() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        let value = apply(
+            &mut team,
+            "settings",
+            &json!({"members_update":[{"id":"dev","role":"API","folder":"clone","permissions_profile":"commit"}],
+                "settings":{"report_timeout_seconds":90}}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(value["status"], "updated");
+        let dev = team.member("dev").unwrap();
+        assert_eq!((dev.role.as_str(), dev.folder, dev.permissions_profile.as_str()), ("API", MemberFolder::Clone, "commit"));
+        assert_eq!(team.settings.report_timeout_seconds, 90);
+        assert_eq!(team.profile_widening[0]["to"], "commit");
+        assert_eq!(events.last().unwrap().kind, "settings_changed");
+        // A member with a session cannot change on a running team.
+        let mut running = running_team();
+        let error = apply(
+            &mut running,
+            "settings",
+            &json!({"members_update":[{"id":"lead","role":"X"}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("without a session"), "{error}");
     }
 
     #[test]

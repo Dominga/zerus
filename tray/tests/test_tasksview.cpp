@@ -4,6 +4,10 @@
 #include "TaskBoard.h"
 #include "SessionStatusBadge.h"
 #include "TasksView.h"
+#include "TaskInspector.h"
+#include <QCheckBox>
+#include <QListWidget>
+#include <QTextBrowser>
 #include <QAbstractButton>
 #include <QDateTime>
 #include <QLabel>
@@ -58,7 +62,76 @@ private slots:
     void aRowOpensOnlyOnAClickOnItself();
     void renamedTaskKeepsItsEmphasisAndRejectsAReusedName();
     void taskImagesAreSavedWithTheDescription();
+    void inspectorFollowsExecutorIdentityAcrossRename();
+    void inspectorShowsReportsAndBoundsItsTaskList();
+    void inspectorDiscardsHistoryAfterLeavingTheProject();
 };
+
+void TestTasksView::inspectorFollowsExecutorIdentityAcrossRename() {
+    auto retained = FakeTasksCli::pinned("codex/old"); retained["session_id"] = "launch_id:original";
+    const QJsonArray history{QJsonObject{{"kind", "started"}, {"actor", QJsonObject{{"kind", "agent"},
+        {"host", ""}, {"session", "codex/old"}, {"session_id", "launch_id:original"}}}, {"at", 1}}};
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "active",
+        {{"target", retained}, {"session", retained}, {"log", history}})}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(400, 700); inspector.show();
+    auto known = sessions(); known[0].name = "codex/new"; known[0].id = "launch_id:original";
+    board.setContext("project-1", "orchard", "", "codex/new", "key", known);
+    inspector.setContext("project-1", "", "codex/new", known);
+    auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
+    QTRY_VERIFY(detail->toPlainText().contains("Executor"));
+    QVERIFY(detail->toPlainText().contains("new")); QVERIFY(!detail->toPlainText().contains("old"));
+    QSignalSpy opened(&inspector, &TaskInspector::executorRequested);
+    inspector.findChild<QPushButton *>("taskOpenActivity")->click(); QCOMPARE(opened.size(), 1);
+    QCOMPARE(opened.first().at(1).toString(), QString("codex/new"));
+    QCOMPARE(opened.first().at(2).toString(), QString("launch_id:original"));
+    // A different session reusing the label must never become the executor.
+    known[0].id = "launch_id:replacement";
+    inspector.setContext("project-1", "", "codex/new", known);
+    inspector.findChild<QCheckBox *>("taskInspectorOnlySession")->setChecked(false);
+    QTRY_VERIFY(!inspector.findChild<QPushButton *>("taskOpenActivity")->isEnabled());
+    const auto preview = qEnvironmentVariable("HGS_TASK_INSPECTOR_PREVIEW");
+    if (!preview.isEmpty()) { inspector.resize(430, 760); QTest::qWait(50); QVERIFY(inspector.grab().save(preview)); }
+}
+
+void TestTasksView::inspectorShowsReportsAndBoundsItsTaskList() {
+    QJsonArray tasks{FakeTasksCli::task(1, "review", {{"session", FakeTasksCli::pinned("codex/api")},
+        {"summary", "Committed <abc123>; installation pending."}, {"text", "Keep <script> literal"},
+        {"log", QJsonArray{QJsonObject{{"kind", "comment"}, {"actor", QJsonObject{{"kind", "person"}}}, {"at", 1}, {"text", "Please keep the history."}}}}})};
+    tasks.append(FakeTasksCli::task(2, "active", {{"session", FakeTasksCli::pinned("codex/api")}}));
+    for (int n = 3; n < 125; ++n) tasks.append(FakeTasksCli::task(n, "todo"));
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), tasks));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(400, 700); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions());
+    inspector.selectTask("uuid-1");
+    auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
+    QTRY_VERIFY(detail->toPlainText().contains("Committed <abc123>; installation pending."));
+    QVERIFY(detail->toPlainText().contains("Keep <script> literal")); QVERIFY(detail->toPlainText().contains("Please keep the history."));
+    QCOMPARE(inspector.findChild<QListWidget *>("taskInspectorList")->count(), 100);
+    QVERIFY(inspector.findChild<QLabel *>("taskInspectorScope")->text().contains("100 of 124"));
+    inspector.selectTask("uuid-2");
+    QTRY_VERIFY(detail->toPlainText().contains("start unconfirmed"));
+    inspector.selectTask("uuid-3");
+    QTRY_VERIFY(detail->toPlainText().contains("#1 · starts with Send now"));
+    for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.at(1) == "list" || call.at(1) == "get");
+}
+
+void TestTasksView::inspectorDiscardsHistoryAfterLeavingTheProject() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions());
+    QTRY_VERIFY(inspector.findChild<QListWidget *>("taskInspectorList")->count());
+    // A listing has started the asynchronous detail fetch. Leave before its reply.
+    board.setContext({}, {}, {}, {}, {}, {}); inspector.setContext({}, {}, {}, {});
+    QTest::qWait(150);
+    QCOMPARE(inspector.findChild<QListWidget *>("taskInspectorList")->count(), 0);
+    QVERIFY(inspector.findChild<QTextBrowser *>("taskInspectorDetail")->toPlainText().isEmpty());
+    QVERIFY(!inspector.findChild<QPushButton *>("taskOpenActivity")->isEnabled());
+}
 
 void TestTasksView::initTestCase() {
     QVERIFY(m_settings.isValid());

@@ -1129,6 +1129,12 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     QVERIFY(row->findChild<QLabel *>("taskMeta")->text().contains("→ research"));
     // The side panel's first tab is the agent's own plan, not the project's tasks.
     QCOMPARE(window.findChild<QTabWidget *>("sessionInspector")->tabText(0), QString("Plan && agents"));
+    messages->editor()->setPlainText("Keep my Activity draft");
+    QTest::mouseClick(row, Qt::LeftButton, {}, QPoint(60, row->height() - 15));
+    QTRY_COMPARE(tabs->currentIndex(), 0);
+    auto *inspector = window.findChild<QTabWidget *>("sessionInspector");
+    QCOMPARE(inspector->currentWidget()->objectName(), QString("taskInspector"));
+    QVERIFY(inspector->isVisible()); QCOMPARE(messages->editor()->toPlainText(), QString("Keep my Activity draft"));
     // A session in no project explains where tasks live.
     window.showSession({}, "codex/website/navigation");
     QTRY_VERIFY(view->findChild<QLabel *>("taskEmpty")->text().startsWith("Tasks belong to a project"));
@@ -6648,7 +6654,7 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     auto *editor = window.findChild<MessageComposer *>("messageComposer")->findChild<QPlainTextEdit *>("messageInput");
     QVERIFY(tabs && inspector && toggle && panel && splitter && editor);
     QCOMPARE(tabs->count(), 5); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
-    QCOMPARE(tabs->tabText(2), QString("Tasks")); QCOMPARE(tabs->tabText(3), QString("Native UI"));
+    QCOMPARE(tabs->tabText(2), QString("Task board")); QCOMPARE(tabs->tabText(3), QString("Native UI"));
     QCOMPARE(tabs->tabText(4),QString("Processes"));QVERIFY(tabs->isTabVisible(4));
     QVERIFY(tabs->isTabVisible(1)); QVERIFY(tabs->isTabVisible(2)); QVERIFY(!tabs->isTabVisible(3));
     QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle);

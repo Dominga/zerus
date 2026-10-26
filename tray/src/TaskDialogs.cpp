@@ -72,8 +72,10 @@ QString actor(const QJsonObject &actor) {
     return actor.value("kind").toString() == QLatin1String("agent") ? TaskBoard::sessionLabel(actor.value("host").toString(), actor.value("session").toString())
                                                                     : QObject::tr("You");
 }
+}
+
 // One history line: who, when and what happened.
-QString historyLine(const QJsonObject &entry) {
+QString taskHistoryLine(const QJsonObject &entry) {
     const QString kind = entry.value("kind").toString(), text = entry.value("text").toString();
     QString what;
     if (kind == QLatin1String("created")) what = QObject::tr("created the task");
@@ -91,12 +93,12 @@ QString historyLine(const QJsonObject &entry) {
     return QStringLiteral("<p style='margin:0 0 6px 0'><b>%1</b> <span style='opacity:.7'>%2</span> · %3</p>")
         .arg(actor(entry.value("actor").toObject()).toHtmlEscaped(), time(qint64(entry.value("at").toDouble())), what.toHtmlEscaped());
 }
-}
 
 TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions, std::function<QString(const TaskTarget &)> sendBlocker,
                        bool dark, QWidget *parent)
     : QDialog(parent), m_task(TaskBoard::item(task)), m_sendBlocker(std::move(sendBlocker)) {
-    setObjectName("taskDialog"); setWindowTitle(tr("Task %1").arg(m_task.id)); resize(640, 640);
+    setObjectName("taskDialog"); setWindowTitle(tr("Task %1").arg(m_task.id)); resize(900, 740);
+    setMinimumSize(640, 520); setSizeGripEnabled(true);
     m_editable = m_task.writable && (m_task.stage == QLatin1String("todo") || m_task.stage == QLatin1String("backlog"));
     m_target = {m_task.targetSession.isEmpty(), m_task.targetHost, m_task.targetSession, m_task.targetId};
     const auto colors = TaskColors::of(dark);
@@ -364,7 +366,7 @@ void TaskDialog::refreshAttachments() {
 void TaskDialog::setHistory(const QJsonArray &log) {
     m_log = log;
     QString html;
-    for (const auto &entry : log) html += historyLine(entry.toObject());
+    for (const auto &entry : log) html += taskHistoryLine(entry.toObject());
     m_history->setHtml(html);
 }
 

@@ -682,6 +682,24 @@ answered; a denial cannot carry an explanation.
   its lead. Agents that cannot be asked are marked, never blocked.
   Owner: yes, in the fixes phase.
 
+- **U20. Sandboxed members can report and ask (seen 2026-10-27).** A DeepSeek
+  member's hgs team report/ask failed with 'attempt to write a readonly
+  database'; its report stayed a chat message and A2 did not capture it, so the
+  task stood for two hours. Owner: yes, in the fixes phase.
+
+- **U21. Command templates instead of escalations (owner, 2026-10-27).** 133
+  sandbox escalations in 6 hours: 124 routine (46 git commit/merge, 78 Qt
+  build/test), 9 needing judgment (all 5 denials). Owner-approved templates with
+  typed, allowlisted arguments that Zerus runs outside the sandbox in the
+  member's folder (hgs team run); clones for DeepSeek members remove the git
+  escalations. Expected: about 9 requests instead of 133. No automatic approval
+  of native prompts. Owner: yes, in the fixes phase.
+
+- **U22. DeepSeek session-log upload (found 2026-10-27).** 18 of 21 dsh sessions
+  upload their transcripts to DeepSeek (session-log-deepseek). Zerus launches
+  its dsh sessions with it off, verifies it, and warns the owner otherwise.
+  Owner: to be confirmed.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

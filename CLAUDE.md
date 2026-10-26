@@ -130,6 +130,16 @@ no-reply address instead if email privacy matters.
 
 ## Validation and handoff
 
+The owner evaluates features through local main builds. After a short review and
+ordinary merge of a trusted internal PR, promptly build main's CLI and GUI on the
+owner's Mac and update through the maintained installers. Do not wait for hosted
+CI, regression completion or public Dev publication. Use a clean, persistent Git
+checkout and incremental build caches, disable test targets for this build, and
+use the exact main push's CI sequence as the Dev number; the run need only exist.
+Retain local signing, source identity and the updater's draft/native-process
+checks. Monitor CI separately and track failures as follow-up work. This local
+evaluation loop does not authorize unrelated production relay changes.
+
 Session counts can reach tens of thousands or more. Histories, audit journals,
 logs and administrative views must use bounded pages, indexed queries and
 background I/O; do not load complete journals or grow per-session GUI caches

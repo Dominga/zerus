@@ -315,6 +315,34 @@ Check the leaf certificate's issuer and expiration during each rotation; select
 
 ### Local source builds
 
+For the owner's feature evaluation, merge a trusted internal PR after a short
+review, then build and update the Mac immediately from main. Hosted CI,
+regressions and public Dev publication run independently. A clean persistent
+checkout with retained Cargo and CMake build directories keeps subsequent
+iterations incremental. Use the CI sequence of that exact main push as
+`ZERUS_DEV_BUILD_NUMBER`; do not wait for its result.
+
+From that clean checkout on the Mac, configure the GUI without test targets,
+then use the maintained installers:
+
+```sh
+export ZERUS_DEV_BUILD_NUMBER=NUMBER_FROM_THIS_MAIN_PUSH
+export HGS_MOBILE_CONNECTOR=0
+cmake -S tray -B tray/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DZERUS_DEV_BUILD_NUMBER="$ZERUS_DEV_BUILD_NUMBER" \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
+bash install.sh
+bash tray/install.sh
+```
+
+The CLI and GUI builds can overlap before installation. Keep the build and
+signature checks, then let the GUI updater save drafts, retain native processes
+and verify the installed source/version. Skip full regression runs in this local
+delivery path; investigate their CI results separately. The connector remains
+unchanged unless its update is separately requested. These locally signed builds
+are for evaluation; public distribution retains its packaging and notarization
+flow below.
+
 Raw CMake build bundles use `com.hgdev.hgs-tray.local`, so an uninstalled ad hoc
 copy cannot replace the installed application's privacy identity. Do not grant
 that copy permissions as a substitute for the installed app. Settings, native

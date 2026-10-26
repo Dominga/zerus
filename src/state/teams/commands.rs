@@ -10,12 +10,13 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings", "finding",
+    "draft", "propose", "decide-proposal",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -954,6 +955,34 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
         "create" => create(input),
         "answer" => answer(input),
         "commit" => commit(input),
+        "next-goal" => {
+            // F7: a done team starts the next goal: the same folder, settings,
+            // lead and members, their live sessions adopted, the old team kept.
+            let request = text(input, "request_id").to_owned();
+            ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
+            let mut store = Store::open(true)?;
+            if let Some(receipt) = store.receipt(&request, input)? {
+                return Ok(receipt);
+            }
+            let old = store.load(text(input, "team"))?.context("Unknown team")?;
+            ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
+            let caller = actor(&old, "next-goal", input)?;
+            ensure!(matches!(caller, Actor::Human) || matches!(&caller, Actor::Member(member) if *member == old.lead), "Only the lead or you start the next goal");
+            let goal = text(input, "goal").trim().to_owned();
+            ensure!(!goal.is_empty(), "A next goal needs its goal");
+            ensure!(goal.chars().count() <= 4000, "A goal has at most 4000 characters");
+            let name = text(input, "name").trim().to_owned();
+            ensure!(name.chars().count() <= 80, "A name has at most 80 characters");
+            let next = super::ops::next_team(&old, &goal, &name);
+            let next_id = next.id.clone();
+            store.create(&request, input, next, vec![Event::new("next_goal", json!({"team":next_id,"previous":old.id}))])?;
+            store.mutate(None, &old.id, None, |team, events| {
+                team.next = next_id.clone();
+                events.push(Event::new("next_goal_started", json!({"team":next_id})));
+                Ok(Value::Null)
+            })?;
+            Ok(json!({"status":"planned","team":next_id,"previous":old.id}))
+        }
         "leftovers" => {
             let store = Store::open(false)?;
             let teams = store.teams(true, 1000)?;

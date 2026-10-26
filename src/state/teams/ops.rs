@@ -1696,6 +1696,198 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
     Ok(json!({"status":action,"finding":id,"state":state}))
 }
 
+/// F5: the owner and the lead edit a draft; the owner creates or discards it.
+fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(team.status == TeamStatus::Draft, "The team is not a draft");
+    let human = matches!(actor, Actor::Human);
+    let action = text(input, "action").to_owned();
+    let mut state = team.draft.clone().unwrap_or_default();
+    match action.as_str() {
+        "update" => {
+            ensure!(human || actor.is_lead(team), "Only the lead or you edit the draft");
+            let revision = input["revision"].as_u64().context("A draft update carries the revision it read")?;
+            ensure!(revision == state.revision, "Draft revision is {} now; read it again", state.revision);
+            let set = input["set"].as_object().context("A draft update names the fields to set")?;
+            let mut changed = Vec::new();
+            for (field, value) in set {
+                if !human && state.owner_edited.contains(field) {
+                    bail!("Owner changed {field}");
+                }
+                match field.as_str() {
+                    "name" => team.name = clean(value.as_str().unwrap_or_default().trim(), 80, "A name")?,
+                    "goal" => team.goal = clean(value.as_str().unwrap_or_default(), 4000, "A goal")?,
+                    "settings" => {
+                        let settings: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
+                        validate_settings(&settings)?;
+                        team.settings = settings;
+                    }
+                    "members" => {
+                        let lead = team.member(&team.lead).cloned();
+                        let mut members: Vec<Member> = value
+                            .as_array()
+                            .context("Members are a list")?
+                            .iter()
+                            .map(parse_member)
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        ensure!(!members.is_empty(), "A draft keeps at least its lead");
+                        if let Some(lead) = lead {
+                            members.retain(|member| member.id != lead.id);
+                            members.insert(0, lead);
+                        }
+                        team.members = members;
+                    }
+                    "tasks" => {
+                        let tasks: Vec<Task> = value
+                            .as_array()
+                            .context("Tasks are a list")?
+                            .iter()
+                            .map(parse_task)
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        team.tasks = tasks;
+                    }
+                    other => bail!("A draft sets name, goal, settings, members or tasks, not {other}"),
+                }
+                changed.push(field.clone());
+            }
+            if human {
+                for field in &changed {
+                    if !state.owner_edited.contains(field) {
+                        state.owner_edited.push(field.clone());
+                    }
+                }
+                state.unseen.retain(|field| !changed.contains(field));
+            } else {
+                for field in &changed {
+                    if !state.unseen.contains(field) {
+                        state.unseen.push(field.clone());
+                    }
+                }
+            }
+            state.revision += 1;
+            team.draft = Some(state.clone());
+            events.push(Event::new("draft_updated", json!({"by":actor.label(team),"fields":changed,"revision":state.revision})));
+            Ok(json!({"status":"updated","revision":state.revision,"unseen":state.unseen}))
+        }
+        "seen" => {
+            ensure!(human, "Only you mark the draft as seen");
+            let fields: Vec<String> = input["fields"].as_array().into_iter().flatten().filter_map(|field| field.as_str().map(str::to_owned)).collect();
+            state.unseen.retain(|field| !fields.contains(field));
+            team.draft = Some(state.clone());
+            Ok(json!({"status":"seen","unseen":state.unseen}))
+        }
+        "create" => {
+            ensure!(human, "Only you create the team from the draft");
+            let validation = plan::validate(team, offline);
+            ensure!(
+                validation.errors.is_empty(),
+                "Fix {} plan error(s) to create: {}",
+                validation.errors.len(),
+                validation.errors.iter().map(|finding| finding.text.as_str()).collect::<Vec<_>>().join("; ")
+            );
+            let approve = input["approve"].as_bool() == Some(true);
+            if approve {
+                ensure!(
+                    team.profile_widening.is_empty() || input["confirm_widening"].as_bool() == Some(true),
+                    "The owner confirms the wider permissions first: create with \"confirm_widening\": true"
+                );
+            }
+            team.status = if approve { TeamStatus::Running } else { TeamStatus::Planning };
+            for task in &mut team.tasks {
+                if task.status == TaskStatus::Draft && task.phase == 1 {
+                    task.status = TaskStatus::Pending;
+                }
+            }
+            team.draft = None;
+            events.push(Event::new("draft_created", json!({"approve":approve,"team":team.id})));
+            Ok(json!({"status":if approve {"running"} else {"planning"},"team":team.id}))
+        }
+        "discard" => {
+            ensure!(human, "Only you discard a draft");
+            team.status = TeamStatus::Stopped;
+            team.draft = None;
+            let stop_lead = input["stop_lead"].as_bool() == Some(true);
+            events.push(Event::new("draft_discarded", json!({"stop_lead":stop_lead})));
+            Ok(json!({"status":"stopped","stop_lead":stop_lead}))
+        }
+        other => bail!("A draft action is update, seen, get, create or discard, not {other}"),
+    }
+}
+
+/// F7: the next team a Done team starts: the same folder, settings, lead and
+/// members, whose live sessions are adopted; empty plan and goal.
+pub(crate) fn next_team(team: &Team, goal: &str, name: &str) -> Team {
+    let mut next = Team {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() { team.name.clone() } else { name.to_owned() },
+        goal: goal.to_owned(),
+        folder: team.folder.clone(),
+        settings: team.settings.clone(),
+        lead: team.lead.clone(),
+        previous: team.id.clone(),
+        status: TeamStatus::Planning,
+        created: now(),
+        members: team.members.clone(),
+        ..Default::default()
+    };
+    for member in &mut next.members {
+        if member.session.is_none() {
+            member.state = MemberState::NotCreated;
+        }
+    }
+    next
+}
+
+/// F8: the lead proposes a membership change; the owner decides.
+fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(actor.is_lead(team), "The lead proposes a membership change");
+    let kind = text(input, "kind").to_owned();
+    ensure!(["add-member", "remove-member", "next-goal"].contains(&kind.as_str()), "A proposal adds or removes a member, or starts the next goal");
+    let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
+    ensure!(!reason.is_empty(), "A proposal needs its reason");
+    ensure!(team.proposals.iter().filter(|proposal| proposal["state"] == "open").count() < 50, "A team keeps at most 50 open proposals");
+    let id = format!("p{}", team.proposals.len() + 1);
+    let proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
+        "member":input["member"].clone(),"goal":input["goal"].clone()});
+    team.proposals.push(proposal);
+    events.push(Event::new("proposed", json!({"id":id,"kind":kind})));
+    Ok(json!({"status":"proposed","proposal":id}))
+}
+
+/// F8: only the owner decides a proposal; accepting runs the change as the
+/// owner would.
+fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human), "Only you decide a proposal");
+    let id = text(input, "proposal").to_owned();
+    let at = team.proposals.iter().position(|proposal| proposal["id"] == id).context("Unknown proposal")?;
+    ensure!(team.proposals[at]["state"] == "open", "The proposal is already decided");
+    let accept = input["accept"].as_bool() == Some(true);
+    let reason = clean(text(input, "reason").trim(), 2000, "A decision reason")?;
+    if !accept {
+        team.proposals[at]["state"] = json!("rejected");
+        team.proposals[at]["note"] = json!(reason);
+        events.push(Event::new("proposal_decided", json!({"id":id,"accept":false})));
+        return Ok(json!({"status":"rejected","proposal":id}));
+    }
+    let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
+    let member = team.proposals[at]["member"].clone();
+    let result = match kind.as_str() {
+        "add-member" => {
+            let mut value = member;
+            value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
+            apply(team, "add-member", &json!({"member":value}), &Actor::Human, offline, events)?
+        }
+        "remove-member" => {
+            let id = member["id"].as_str().or(member.as_str()).unwrap_or_default().to_owned();
+            apply(team, "remove-member", &json!({"member":id}), &Actor::Human, offline, events)?
+        }
+        _ => bail!("A next-goal proposal is accepted with hgs team next-goal"),
+    };
+    team.proposals[at]["state"] = json!("accepted");
+    team.proposals[at]["note"] = json!(reason);
+    events.push(Event::new("proposal_decided", json!({"id":id,"accept":true,"kind":kind})));
+    Ok(json!({"status":"accepted","proposal":id,"result":result}))
+}
+
 fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let human = matches!(actor, Actor::Human);
@@ -1871,6 +2063,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "settings" => settings(team, input, actor, events),
         "finding" => finding(team, input, actor, offline, events),
+        "draft" => draft(team, input, actor, offline, events),
+        "propose" => propose(team, input, actor, events),
+        "decide-proposal" => decide_proposal(team, input, actor, offline, events),
         "finish" => finish(team, input, actor, events),
         "approve" => {
             // B5: a wider permissions profile needs the owner's word.
@@ -4148,6 +4343,86 @@ mod tests {
         apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
         let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!(approved["tasks"], json!([4]));
+    }
+
+    #[test]
+    fn a_draft_keeps_the_owners_edit_and_creates_after_the_preflight() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        team.status = TeamStatus::Draft;
+        team.draft = Some(Draft { revision: 1, ..Default::default() });
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // The lead edits the goal; the owner sees it later.
+        apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"goal":"Ship"}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((team.goal.as_str(), team.draft.as_ref().unwrap().revision), ("Ship", 2));
+        assert_eq!(team.draft.as_ref().unwrap().unseen, vec!["goal".to_string()]);
+        // The owner's edit wins over a later lead edit of that field.
+        apply(&mut team, "draft", &json!({"action":"update","revision":2,"set":{"members":[{"id":"dev","role":"Backend","agent":"claude"}]}}), &Actor::Human, &none, &mut events).unwrap();
+        let error = apply(&mut team, "draft", &json!({"action":"update","revision":3,"set":{"members":[{"id":"qa","role":"Tester","agent":"claude"}]}}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Owner changed members");
+        // A stale revision is refused with the current one, and seen clears it.
+        let error = apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"goal":"X"}}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("Draft revision is 3 now"), "{error}");
+        let value = apply(&mut team, "draft", &json!({"action":"seen","fields":["goal"]}), &Actor::Human, &none, &mut events).unwrap();
+        assert!(value["unseen"].as_array().unwrap().is_empty());
+        // Create runs the preflight: an unknown assignee refuses, a good plan creates.
+        team.tasks.push(Task { id: 1, title: "A".into(), assignee: "ghost".into(), ..Default::default() });
+        let error = apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("no assignee"), "{error}");
+        team.tasks[0].assignee = "dev".into();
+        let value = apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(value["status"], "planning");
+        assert_eq!(team.status, TeamStatus::Planning);
+        assert!(team.draft.is_none());
+        assert_eq!(team.tasks[0].status, TaskStatus::Pending);
+        // Discard stops a draft and carries stop_lead.
+        let mut fresh = running_team();
+        fresh.status = TeamStatus::Draft;
+        fresh.draft = Some(Draft::default());
+        let value = apply(&mut fresh, "draft", &json!({"action":"discard","stop_lead":true}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((fresh.status, value["stop_lead"].as_bool()), (TeamStatus::Stopped, Some(true)));
+    }
+
+    #[test]
+    fn a_next_goal_team_keeps_members_and_adopts_their_sessions() {
+        let mut team = running_team();
+        team.status = TeamStatus::Done;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "claude/x/dev".into(), ..Default::default() });
+        let next = next_team(&team, "Ship v2", "Checkout 2");
+        assert_eq!(next.status, TeamStatus::Planning);
+        assert_eq!((next.folder.as_str(), next.goal.as_str(), next.previous.as_str()), (team.folder.as_str(), "Ship v2", team.id.as_str()));
+        assert_eq!(next.lead, team.lead);
+        assert_eq!(next.members.len(), team.members.len());
+        assert!(next.tasks.is_empty());
+        assert_eq!(next.member("dev").unwrap().session.as_ref().map(|session| session.name.as_str()), Some("claude/x/dev"));
+    }
+
+    #[test]
+    fn the_owner_decides_the_leads_membership_proposal() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let value = apply(
+            &mut team,
+            "propose",
+            &json!({"kind":"add-member","reason":"needs help","member":{"id":"extra","role":"Helper","agent":"claude"}}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        let id = value["proposal"].as_str().unwrap().to_owned();
+        // Only the owner decides.
+        let error = apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only you decide a proposal");
+        apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true}), &Actor::Human, &none, &mut events).unwrap();
+        assert!(team.member("extra").is_some());
+        assert_eq!(team.proposals[0]["state"], "accepted");
     }
 
     #[test]

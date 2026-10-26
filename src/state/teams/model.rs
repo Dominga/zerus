@@ -6,6 +6,8 @@ use serde_json::Value;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TeamStatus {
+    /// F5: a team the owner and the lead are still drafting, before Planning.
+    Draft,
     #[default]
     Planning,
     Running,
@@ -13,6 +15,21 @@ pub(crate) enum TeamStatus {
     Stopped,
     Done,
     Archived,
+}
+
+/// F5: a draft team's editing state: who changed what since the other side last
+/// looked, so the owner's edit always wins and the lead sees the changes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Draft {
+    #[serde(default)]
+    pub revision: u64,
+    /// Fields the lead changed that the owner has not seen yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unseen: Vec<String>,
+    /// Fields the owner edited after the lead's last read; a later lead edit of
+    /// one is refused ("owner changed <field>").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_edited: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -868,6 +885,17 @@ pub(crate) struct Team {
     /// D2: the last finding number given; ids stay unique for the team's life.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub findings_seq: u64,
+    /// F5: the editing state while the team is a draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<Draft>,
+    /// F7: the team this one continues, and the team that continues it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub previous: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub next: String,
+    /// F8: membership and next-goal proposals the lead made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<serde_json::Value>,
     #[serde(default)]
     pub revision: u64,
     /// F11: the revision that last changed draft phase or task numbers; a

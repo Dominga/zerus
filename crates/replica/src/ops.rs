@@ -82,8 +82,9 @@ impl ProjectStore {
         Ok(())
     }
 
-    /// Puts a task of To do or Backlog at `position` of its list.
+    /// Puts a task at `position` within its current stage, without changing execution.
     pub fn reorder(&self, task: &mut TaskDoc, position: &Position) -> Result<()> {
+        task.writable()?;
         let rank = self.rank_for(task.stage()?, position, Some(task.uuid()))?;
         task.set_rank(&rank)
     }
@@ -202,4 +203,41 @@ mod tests {
         store.save(&mut task).unwrap();
         assert_eq!(texts(&store, Stage::Todo), ["Three", "One", "Two"]);
     }
+    #[test]
+    fn every_stage_can_be_reordered_without_changing_execution_or_history() {
+        use crate::SessionKey;
+        for stage in [Stage::Backlog, Stage::Todo, Stage::Active, Stage::Review, Stage::Done] {
+            let (_root, store) = open();
+            let owner = SessionKey { machine: "m1".into(), session: "codex/api".into(), session_id: "launch_id:worker".into() };
+            let mut ids = Vec::new();
+            for text in ["One", "Two", "Three"] {
+                let uuid = file(&store, text, if stage == Stage::Backlog { stage } else { Stage::Todo }, Position::End);
+                let mut task = store.load(&uuid).unwrap();
+                if matches!(stage, Stage::Active | Stage::Review | Stage::Done) {
+                    task.record_send(&owner, &format!("request-{text}"), &Actor::Person, 2).unwrap();
+                    if matches!(stage, Stage::Review | Stage::Done) {
+                        task.record_report("Result", &Actor::Agent(owner.clone()), 3).unwrap();
+                    }
+                    if stage == Stage::Done { task.set_stage(stage, &Actor::Person, 4).unwrap(); }
+                    store.save(&mut task).unwrap();
+                }
+                let mut ordered = store.load(&uuid).unwrap();
+                ordered.set_rank(["A", "B", "C"][ids.len()]).unwrap();
+                store.save(&mut ordered).unwrap();
+                ids.push(uuid);
+            }
+            let mut task = store.load(&ids[2]).unwrap();
+            let before = serde_json::to_value(task.view().unwrap()).unwrap();
+            store.reorder(&mut task, &Position::Before(ids[0].clone())).unwrap();
+            store.save(&mut task).unwrap();
+            assert_eq!(texts(&store, stage), ["Three", "One", "Two"]);
+            let mut after = serde_json::to_value(store.load(&ids[2]).unwrap().view().unwrap()).unwrap();
+            after["rank"] = before["rank"].clone();
+            assert_eq!(after, before, "a board reorder changed execution in {stage:?}");
+            // An anchor in another stage must still be refused.
+            let other = file(&store, "Other stage", if stage == Stage::Backlog { Stage::Todo } else { Stage::Backlog }, Position::End);
+            assert!(store.reorder(&mut task, &Position::After(other)).is_err());
+        }
+    }
+
 }

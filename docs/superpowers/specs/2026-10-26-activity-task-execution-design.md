@@ -539,3 +539,32 @@ Activity for discussion with the current executor. Saving a task note is not
 message delivery, and changing routing is not changing recorded execution
 ownership. The current UI slice improves these boundaries without claiming the
 remaining execution/composer model is implemented.
+
+
+### Owner follow-up: one fixed task work surface, 2026-10-26
+
+The owner superseded the Edit/Details text and duplicate-modal dispositions
+above: use one stable icon-only Task details action and put the form directly
+inside Description in the fixed lower pane. Description shows the assignment
+and its change control; description, attachments and routing use the shared
+form and explicit Save/Cancel. History and result remain Activity-rendered tabs.
+Task workflow commands stay in a fixed bottom bar on every tab. Task notes are
+saved to history with a local durable draft and an explicit non-delivery label;
+task-linked rich Activity communication remains `zerus-cg5h.3`.
+
+Every writable stage supports persisted board ordering, not just the two queues.
+This supersedes the old rank guard while preserving description/attachment/target
+edit guards. Reordering active work is a presentation change, never preemption,
+stop, resume or an implicit executor queue mutation. Invalid cross-stage anchors,
+foreign projects and future-schema writes remain refused.
+
+Compact cards expose their stage's primary action, with other actions in the
+context menu. The owner explicitly chose task-scoped pause and execution
+accounting first. A whole-session interrupt cannot implement this action.
+Task pause therefore remains unavailable in this UI slice until
+`zerus-cg5h.4` provides the execution identity and controller.
+
+Selection updates must be atomic from the person's perspective: retain the
+previous document while fetching the exact new task, disable commands during
+the read and keep permanent command widgets and pane geometry. Do not clear the
+pane or rebuild its buttons on each card click.

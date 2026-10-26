@@ -6,9 +6,8 @@
 #include <QMimeData>
 #include <optional>
 
-// A To do or Backlog task dragged out of the Tasks tab, as its drop targets read
-// it: the stage tiles move it, the To do list reorders it and the session list
-// pins it to a session or makes it Any session.
+// A task dragged from either board surface. Every writable stage can be
+// reordered; stage changes and session routing have their own guards.
 struct TaskDrag {
     QString projectId, uuid, id, stage;
     // Its pinned session; an empty name is Any session. targetKnown is false for a
@@ -17,9 +16,9 @@ struct TaskDrag {
     bool targetKnown = true;
 
     static QString mimeType() { return QStringLiteral("application/x-zerus-task"); }
-    // Rows that can be dragged: To do and Backlog tasks this Zerus can change.
+    // Every stage supports board ordering; future-schema documents stay read-only.
     static bool draggable(const TaskItem &task) {
-        return task.writable && (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog"));
+        return task.writable && TaskBoard::stages().contains(task.stage);
     }
     static TaskDrag of(const QString &projectId, const TaskItem &task) {
         return {projectId, task.uuid, task.id, task.stage, task.targetHost, task.targetSession, task.targetKnown};

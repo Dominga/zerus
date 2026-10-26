@@ -336,7 +336,9 @@ void TestActivityView::taskJournalUsesMarkdownAndActualAuthors()
     QVERIFY(!plain.contains("Sent")); QVERIFY(!plain.contains("tool calls"));
     const int passes = view.renderPasses(); view.setTaskJournal("task-a/history", entries); settle(view); QCOMPARE(view.renderPasses(), passes);
     view.setTaskJournal("task-b/result", {QJsonObject{{"id", "result"}, {"author", "worker"}, {"label", "Report"}, {"role", "agent"},
-        {"text", QString("A long report with `readable_code`.\n\n").repeated(80)}}}, false); settle(view);
+        {"text", QString("A long report with `readable_code`.\n\n").repeated(80)}}}, false);
+    QCOMPARE(view.plainText(), plain); // The prepared replacement never publishes an empty frame.
+    settle(view);
     QCOMPARE(view.browser()->verticalScrollBar()->value(), 0); QVERIFY(!view.plainText().contains("ownership_id"));
 }
 

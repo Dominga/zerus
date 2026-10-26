@@ -25,7 +25,7 @@ struct TaskItem {
     int queue = 0;   // position in the project's To do, from 1
 };
 
-enum class TaskAction { Edit, ToBacklog, Top, SendNow, ToTodo, Cancel, BackToTodo, Accept };
+enum class TaskAction { Edit, ToBacklog, Top, SendNow, ToTodo, Cancel, BackToTodo, Accept, Pause };
 
 // A project's tasks and the rules the Tasks tab shows them by
 // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md, Desktop interface).
@@ -43,8 +43,7 @@ public:
     // "Only this session" keeps those and the Any session tasks in To do and Backlog.
     static bool keptFor(const TaskItem &task, const QString &host, const QString &session, const QString &id = {});
     struct View { QString host, session; bool only = false; qint64 now = 0; QString id; };
-    // A stage's rows in display order: To do and Backlog by rank, In review and In
-    // progress oldest first, Done newest first. Done holds the last 7 days; `older`
+    // Every stage follows persisted board rank. Done holds the last 7 days; `older`
     // asks for the rest of it.
     QList<TaskItem> rows(const QString &stage, const View &view, bool older = false) const;
     int count(const QString &stage, const View &view) const { return int(rows(stage, view).size()); }
@@ -56,6 +55,7 @@ public:
     static QString stageIcon(const QString &stage);
     // The same actions in the same order on every surface; the main one is last.
     static QList<TaskAction> actions(const QString &stage);
+    static TaskAction primaryAction(const QString &stage);
     static QString actionLabel(TaskAction action);
     static QString actionIcon(TaskAction action);
 };

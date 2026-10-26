@@ -10,6 +10,11 @@
 #include "SessionStatusBadge.h"
 #include "TasksView.h"
 #include "TaskInspector.h"
+#include "TaskDialogs.h"
+#include <QComboBox>
+#include <QElapsedTimer>
+#include <QLineEdit>
+#include <QPlainTextEdit>
 #include "TaskRow.h"
 #include <QCheckBox>
 #include <QScrollArea>
@@ -72,12 +77,77 @@ private slots:
     void renamedTaskKeepsItsEmphasisAndRejectsAReusedName();
     void taskImagesAreSavedWithTheDescription();
     void inspectorFollowsExecutorIdentityAcrossRename();
+    void inlineTaskEditingRetainsFailuresAndCommandsStayInTheFooter();
+    void selectingAnotherTaskNeverPublishesAnEmptyDetailsFrame();
     void inspectorShowsReportsAndBoundsItsTaskList();
     void inspectorDiscardsHistoryAfterLeavingTheProject();
     void inspectorKeepsSelectionInAFixedLowerPane();
     void sixLongReviewTasksStayCompactAndRevealOneDetailSection();
     void inspectorHistoryShowsEarlierEntriesWithoutMovingTheBoard();
+    void inspectorPagesOlderHistoryWithoutGrowingItsWindow();
 };
+
+void TestTasksView::selectingAnotherTaskNeverPublishesAnEmptyDetailsFrame() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
+    inspector.resize(380, 760); inspector.show(); board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions()); QTRY_COMPARE(inspector.displayedCount(), 2); inspector.selectTask("uuid-1");
+    auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail"); QTRY_VERIFY(detail->toPlainText().contains("Task 1"));
+    auto *start = inspector.findChild<QToolButton *>("taskInspectorAction:sendNow"); QVERIFY(start && start->isEnabled());
+    auto *split = inspector.findChild<QSplitter *>("taskInspectorSplit"); const auto sizes = split->sizes();
+    QFile delay(dir.filePath("delay-get")); QVERIFY(delay.open(QIODevice::WriteOnly)); delay.write("0.3"); delay.close();
+    inspector.selectTask("uuid-2");
+    QVERIFY(detail->toPlainText().contains("Task 1")); QVERIFY(!start->isEnabled()); QCOMPARE(split->sizes(), sizes);
+    QElapsedTimer elapsed; elapsed.start();
+    while (!detail->toPlainText().contains("Task 2") && elapsed.elapsed() < 3000) {
+        QTest::qWait(5); QVERIFY(!detail->toPlainText().isEmpty());
+    }
+    QVERIFY(detail->toPlainText().contains("Task 2"));
+    QCOMPARE(inspector.findChild<QToolButton *>("taskInspectorAction:sendNow"), start);
+    QVERIFY(start->isEnabled()); QCOMPARE(split->sizes(), sizes); QCOMPARE(detail->verticalScrollBar()->value(), 0);
+    // Context Edit waits for the requested task, never editing the previous document.
+    board.setOpenInInspector(true); board.actOnTask(TaskBoard::item(FakeTasksCli::task(1, "todo")), TaskAction::Edit);
+    QTRY_VERIFY(inspector.findChild<TaskForm *>());
+    QCOMPARE(inspector.findChild<TaskForm *>()->findChild<QPlainTextEdit *>("taskPrompt")->toPlainText(), QString("Task 1"));
+}
+
+void TestTasksView::inlineTaskEditingRetainsFailuresAndCommandsStayInTheFooter() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
+    inspector.resize(380, 760); inspector.show(); board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions()); QTRY_COMPARE(inspector.displayedCount(), 1);
+    auto *card = inspector.findChild<TaskRow *>("taskInspectorRow:T-000001");
+    auto *primary = card->findChild<QToolButton *>("taskAction:sendNow"); QVERIFY(primary && primary->isVisibleTo(card));
+    inspector.selectTask("uuid-1"); auto *details = inspector.findChild<QPushButton *>("taskInspectorEdit");
+    QTRY_VERIFY(details->isEnabled()); details->click();
+    auto *form = inspector.findChild<TaskForm *>(); QVERIFY(form && form->isVisibleTo(&inspector));
+    QVERIFY(inspector.findChildren<TaskDialog *>().isEmpty()); QVERIFY(!form->findChild<QTextBrowser *>("taskHistory"));
+    auto *prompt = form->findChild<QPlainTextEdit *>("taskPrompt"); prompt->setPlainText("Revised requirement");
+    auto *target = form->findChild<QComboBox *>("taskAssignedTo"); QVERIFY(target); target->setCurrentIndex(1);
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("edit"); fail.close();
+    form->findChild<QPushButton *>("saveTask")->click();
+    QTRY_VERIFY(form->findChild<QLabel *>("taskDialogError")->isVisibleTo(form)); QCOMPARE(prompt->toPlainText(), QString("Revised requirement"));
+    QVERIFY(fail.remove()); form->findChild<QPushButton *>("saveTask")->click();
+    QTRY_VERIFY(!inspector.findChild<QScrollArea *>("taskInlineEditor"));
+    auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail"); QTRY_VERIFY(detail->toPlainText().contains("Revised requirement"));
+    QVERIFY(FakeTasksCli::calls(dir.path()).contains({"task", "target", "uuid-1", "codex/api", "--project", "project-1"}));
+    auto *tabs = inspector.findChild<QTabBar *>("taskDetailTabs"); auto *footer = inspector.findChild<QWidget *>("taskInspectorActions");
+    const auto footerTop = footer->mapTo(&inspector, QPoint());
+    for (const int tab : {1, 2, 0}) { tabs->setCurrentIndex(tab); QTest::qWait(20); QCOMPARE(footer->mapTo(&inspector, QPoint()), footerTop); }
+    auto *note = inspector.findChild<QLineEdit *>("taskInspectorNote"); note->setText("Keep this note");
+    QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("comment"); fail.close();
+    inspector.findChild<QPushButton *>("taskInspectorSaveNote")->click();
+    QTRY_VERIFY(inspector.findChild<QLabel *>("taskInspectorNoteError")->isVisibleTo(&inspector)); QCOMPARE(note->text(), QString("Keep this note"));
+    QVERIFY(fail.remove()); inspector.findChild<QPushButton *>("taskInspectorSaveNote")->click(); QTRY_VERIFY(note->text().isEmpty());
+    tabs->setCurrentIndex(2); QTRY_VERIFY(detail->toPlainText().contains("Keep this note"));
+    inspector.findChild<QToolButton *>("taskInspectorAction:sendNow")->click();
+    QTRY_COMPARE(inspector.selectedStage(), QString("active"));
+    auto *pause = inspector.findChild<QToolButton *>("taskInspectorAction:pause"); QVERIFY(pause && !pause->isEnabled());
+    QVERIFY(pause->toolTip().contains("individual task"));
+    for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) != "cancel");
+    const auto preview = qEnvironmentVariable("HGS_TASK_INLINE_PREVIEW");
+    if (!preview.isEmpty()) { inspector.selectTask("uuid-1"); QTest::qWait(50); QVERIFY(inspector.grab().save(preview)); }
+}
 
 void TestTasksView::inspectorFollowsExecutorIdentityAcrossRename() {
     auto retained = FakeTasksCli::pinned("codex/old"); retained["session_id"] = "launch_id:original";
@@ -219,6 +289,28 @@ void TestTasksView::inspectorHistoryShowsEarlierEntriesWithoutMovingTheBoard() {
     QTRY_COMPARE(activity->browser()->verticalScrollBar()->value(), 0); QCOMPARE(split->sizes(), sizes);
     more->click(); QTRY_VERIFY(activity->plainText().contains("COMMENT_1_END")); QVERIFY(more->isHidden());
     QTRY_COMPARE(activity->browser()->verticalScrollBar()->value(), 0); QCOMPARE(split->sizes(), sizes);
+}
+
+void TestTasksView::inspectorPagesOlderHistoryWithoutGrowingItsWindow() {
+    QJsonArray history;
+    for (int n = 1; n <= 95; ++n) history.append(QJsonObject{{"kind", "comment"}, {"actor", QJsonObject{{"kind", "person"}}},
+        {"at", double(n)}, {"text", QString("EVENT_%1_END").arg(n)}});
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "review", {{"log", history}})}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
+    inspector.resize(380, 760); inspector.show(); board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions()); QTRY_COMPARE(inspector.displayedCount(), 1); inspector.selectTask("uuid-1");
+    auto *tabs = inspector.findChild<QTabBar *>("taskDetailTabs"); QTRY_VERIFY(tabs->isEnabled()); tabs->setCurrentIndex(2);
+    auto *activity = inspector.findChild<ActivityView *>("taskDetailActivity"); QTRY_VERIFY(activity->plainText().contains("EVENT_95_END"));
+    auto *more = inspector.findChild<QPushButton *>("taskDetailMore");
+    for (int n = 0; n < 9; ++n) more->click();
+    QTRY_VERIFY(activity->plainText().contains("EVENT_16_END")); QVERIFY(!activity->plainText().contains("EVENT_15_END"));
+    more->click(); QTRY_VERIFY(activity->plainText().contains("EVENT_15_END")); QVERIFY(!activity->plainText().contains("EVENT_95_END"));
+    auto *latest = inspector.findChild<QPushButton *>("taskHistoryLatest"); QVERIFY(latest->isVisibleTo(&inspector));
+    more->click(); QTRY_VERIFY(activity->plainText().contains("EVENT_1_END")); QVERIFY(more->isHidden());
+    // A new appended event cannot shift the anchored older page during a poll.
+    bool appended = false; board.saveTaskNote("uuid-1", "EVENT_96_END", [&] { appended = true; }, [](const QString &) {});
+    QTRY_VERIFY(appended); QTest::qWait(100); QVERIFY(activity->plainText().contains("EVENT_1_END")); QVERIFY(!activity->plainText().contains("EVENT_96_END"));
+    latest->click(); QTRY_VERIFY(activity->plainText().contains("EVENT_96_END")); QVERIFY(latest->isHidden());
 }
 
 void TestTasksView::inspectorDiscardsHistoryAfterLeavingTheProject() {
@@ -511,9 +603,9 @@ void TestTasksView::doneShowsTheLastWeekAndOlderOnRequest() {
     HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
     view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
     QTRY_COMPARE(tile(view, "done")->property("count").toInt(), 2);
-    tile(view, "done")->click(); QCOMPARE(visibleRows(view), QStringList({"T-000003", "T-000001"}));
+    tile(view, "done")->click(); QCOMPARE(visibleRows(view), QStringList({"T-000001", "T-000003"}));
     auto *older = view.findChild<QPushButton *>("showOlderTasks"); QVERIFY(older->isVisible()); QCOMPARE(older->text(), QString("Show older (1)"));
-    older->click(); QCOMPARE(visibleRows(view), QStringList({"T-000003", "T-000001", "T-000002"})); QCOMPARE(older->text(), QString("Hide older"));
+    older->click(); QCOMPARE(visibleRows(view), QStringList({"T-000001", "T-000003", "T-000002"})); QCOMPARE(older->text(), QString("Hide older"));
 }
 
 void TestTasksView::aFailedListingIsShownInsteadOfTasks() {

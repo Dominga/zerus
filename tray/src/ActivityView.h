@@ -98,6 +98,8 @@ private:
     void render(bool contentUpdate);
     void startRender();
     void clearDocument();
+    void resetSessionKey(const QString &key, bool preserveDocument);
+    bool m_taskJournalReset = false;
     void commitRender(const std::shared_ptr<ActivityRenderResult> &result);
     void updateJumpButton();
     void positionJumpButton();

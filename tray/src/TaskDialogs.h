@@ -10,6 +10,7 @@
 
 class QButtonGroup;
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -41,19 +42,18 @@ struct TaskEdits {
     std::optional<QJsonArray> attachments;
 };
 
-// A task's settings: its prompt and session (editable in To do and Backlog), its
-// history, a comment field and the stage's actions. An action first applies the
-// unsaved prompt and session; Cancel or Escape discards them. Save and the actions
-// wait for their owner: it closes the dialog once hgs took them, or calls setError
-// and the person's edits stay.
-class TaskDialog : public QDialog {
+// Shared description, attachments and routing form. Compact mode is embedded
+// in Description; workflow, notes and history remain in the fixed inspector.
+class TaskForm : public QWidget {
     Q_OBJECT
 public:
     // task: the `hgs task get` view, history included. sendBlocker: why Send now
     // cannot paste into a session the task would go to (empty when it can).
-    TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions, std::function<QString(const TaskTarget &)> sendBlocker,
-               bool dark, QWidget *parent = nullptr);
+    TaskForm(const QJsonObject &task, const QList<TaskSession> &sessions, std::function<QString(const TaskTarget &)> sendBlocker,
+               bool dark, QWidget *parent = nullptr, bool compact = false);
     TaskEdits edits() const;
+    bool hasEdits() const;
+    bool isBusy() const { return m_busy || m_mediaBusy; }
     void setHistory(const QJsonArray &log);
     void clearComment();
     void updateSessionLabels(const QList<TaskSession> &sessions);
@@ -62,6 +62,7 @@ signals:
     void saveRequested(const TaskEdits &edits);
     void actionRequested(const TaskEdits &edits, TaskAction action);
     void commentRequested(const QString &text);
+    void dismissRequested();
 protected:
     void resizeEvent(QResizeEvent *event) override;
 private:
@@ -81,16 +82,37 @@ private:
     bool m_busy = false;
     QPlainTextEdit *m_prompt;
     QButtonGroup *m_sessions = nullptr;
+    QComboBox *m_sessionChoice = nullptr;
     QScrollArea *m_choicesArea = nullptr;
     QList<TaskTarget> m_choices;
-    QTextBrowser *m_history;
-    QLineEdit *m_comment;
+    QTextBrowser *m_history = nullptr;
+    QLineEdit *m_comment = nullptr;
     bool m_editable;
     bool m_mediaBusy = false;
     QList<MessageAttachment> m_attachments;
     QJsonArray m_originalAttachments;
     QJsonArray m_log;
     QVBoxLayout *m_attachmentRows = nullptr;
+};
+
+// Standalone fallback for clients without the Activity inspector. The inspector
+// embeds the same form, so media limits, identity binding and save guards agree.
+class TaskDialog : public QDialog {
+    Q_OBJECT
+public:
+    TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions,
+               std::function<QString(const TaskTarget &)> sendBlocker, bool dark, QWidget *parent = nullptr);
+    TaskEdits edits() const { return m_form->edits(); }
+    void setHistory(const QJsonArray &log) { m_form->setHistory(log); }
+    void clearComment() { m_form->clearComment(); }
+    void updateSessionLabels(const QList<TaskSession> &sessions) { m_form->updateSessionLabels(sessions); }
+    void setError(const QString &error) { m_form->setError(error); }
+signals:
+    void saveRequested(const TaskEdits &edits);
+    void actionRequested(const TaskEdits &edits, TaskAction action);
+    void commentRequested(const QString &text);
+private:
+    TaskForm *m_form;
 };
 
 // Confirms a Cancel: the task moves to In review and its session gets the cancel

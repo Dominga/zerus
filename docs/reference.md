@@ -2509,14 +2509,17 @@ session's project. Stage tiles (In review, In progress, To do, Backlog, Done)
 filter one list; the funnel tile keeps only the open session's tasks and the Any
 session tasks it can take, and the gear opens the project's task settings. A row
 shows its actions on hover, and a click returns to Activity with that task selected
-in the right **Tasks** inspector. **Edit / actions** opens its prompt and session
-(editable in To do and Backlog), attachments, history and comments. The input below files a
+in the right **Tasks** inspector. Its fixed lower pane contains description,
+attachments, assignment, result, history and task notes. The icon-only **Task details**
+action opens the inline description/attachment/assignment form (editable in To do
+and Backlog), without opening a duplicate window. The input below files a
 task for the open session in To do, or in Backlog while Backlog is open. The tab
 label counts the tasks In review and in To do. Done lists the last 7 days, and
 Show older adds the rest. A session outside every project has no tasks.
-To do and Backlog rows can be dragged: onto the other list's tile to move them
-there, within To do or Backlog to reorder it, onto a session of the project in the session
-list to pin them to it, or onto the project's header to make them Any session.
+Rows in every writable stage can be dragged within their current list to save
+their board order. This does not change execution or interrupt running work.
+To do and Backlog additionally support drops on the other list's stage tile,
+on a project session to assign them, or on the project header for Any session.
 
 The **Tasks** inspector hosts the board's session filter and project settings
 buttons. The funnel switches between this session and all project tasks and keeps
@@ -2525,16 +2528,22 @@ board. Stage labels appear when the panel is wide enough; narrow filters keep
 their icons, counts, tooltips and accessible names. The board occupies the upper
 pane; selecting a card updates the permanent lower details pane without moving
 cards or changing the list viewport. Drag the divider to resize these panes; its
-position is saved. Both board surfaces support dragging To do and Backlog cards
-with an insertion marker and edge scrolling. Drop onto a stage filter to move
-between these two lists, or onto a session to route queued work. Right-click a
-card for its stage actions; this uses the same guarded commands as the action
-menu. The lower pane's explicit **Edit** button opens description, attachment and
-assignment changes in To do or Backlog. Other stages show **Details**, keeping
-notes and inspection available while explaining why description editing is unavailable. A task note saved in the legacy dialog is not a message to the
-executor. Failed note saves keep the draft and report the error in that dialog.
-Collapsed inspector cards show a short title and worker; their action menu keeps
-the controls within one compact row. Full reports and cancellations appear only
+position is saved. Both board surfaces support ordering cards in every stage,
+with an insertion marker and edge scrolling. Stage and assignment drops retain
+their workflow guards. Right-click a card for the same actions as its menu.
+Compact cards expose their primary action: Start task for To do/Backlog, Accept
+for Review and Back to To do for Done. Task pause is disabled until independent
+task execution accounting exists; it never interrupts the whole session.
+The lower pane keeps a stable icon-only **Task details** action. Its inline form
+uses Save/Cancel and keeps edits on refusal. Assignment appears on Description;
+workflow commands stay in the bottom action bar on every tab, separately from
+unsaved description changes. Notes saved here enter task history and are not
+messages to the executor. Failed note saves retain the draft and show the error
+beside it. Note drafts survive task selection and application restart locally.
+Selection reads retain the previous document until the selected task's exact
+reply arrives, with controls disabled during the read; there is no blank loading
+frame or reconstruction of the command buttons.
+Full reports and cancellations appear only
 after selecting a task. Its **Description**, **Result** and **History** sections are
 separate, with complete tab captions. Task text, reports and comments use the same
 Markdown and message-card renderer as Activity, retaining authors and timestamps.
@@ -2542,13 +2551,15 @@ Descriptions and results open at the beginning; history opens at its latest entr
 History starts with eight recent events and offers earlier entries explicitly.
 Owner highlighting stays subtle;
 the selected task has the accent outline.
-It retains at most 100 listed tasks and 80 selected-task history entries; the full
-history is available through the task actions menu.
+It retains at most 100 listed tasks and 80 selected-task history entries. Earlier
+history pages load inside the same pane; Latest returns to the tail. Appended
+events do not shift an anchored older page. Legacy CLI reads still transfer the
+full journal; indexed backend reads remain a separate tracked change.
 **Assigned to** identifies routing; **Executor** requires a recorded start.
 An unconfirmed start is labelled explicitly. **Agent report** is the saved report,
 not proof that a commit was merged or a build installed. **Open Activity** follows
 the retained executor identity, including after a rename. This first inspector
-slice shares the existing board poll; To do still starts through **Send now**.
+slice shares the existing board poll; To do starts through **Start task**.
 Automatic dispatch, task-scoped Activity discussion and verified result milestones
 are specified in `superpowers/specs/2026-10-26-activity-task-execution-design.md`.
 

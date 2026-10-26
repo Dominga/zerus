@@ -1301,6 +1301,11 @@ ActivityView::ActivityView(QWidget *parent) : QWidget(parent)
 
 void ActivityView::setSessionKey(const QString &key)
 {
+    resetSessionKey(key, false);
+}
+
+void ActivityView::resetSessionKey(const QString &key, bool preserveDocument)
+{
     if (key == m_sessionKey) return;
     if(m_videoDialog)m_videoDialog->close();
     if(m_voicePlayer)m_voicePlayer->stop();
@@ -1314,7 +1319,9 @@ void ActivityView::setSessionKey(const QString &key)
     m_initial = true; m_followLatest = true; m_unseen = 0; m_html.clear(); m_activityInput = {};
     ++m_renderGeneration; m_renderDirty = false; m_pendingContentUpdate = false;
     m_details = {}; m_events = {}; m_fallbackPrompt.clear();
-    clearDocument(); updateJumpButton();
+    m_taskJournalReset = preserveDocument;
+    if (!preserveDocument) clearDocument();
+    updateJumpButton();
     m_compaction->hide(); m_queue->hide();
 }
 
@@ -1383,7 +1390,9 @@ void ActivityView::setTimeline(const QJsonObject &details, const QJsonArray &eve
 void ActivityView::setTaskJournal(const QString &key, const QJsonArray &entries, bool followLatest)
 {
     const bool changed = key != m_sessionKey;
-    setSessionKey(key);
+    // Task selection keeps its painted document until the prepared replacement
+    // is committed. Normal session navigation still clears identities immediately.
+    resetSessionKey(key, !key.isEmpty());
     if (changed && !followLatest) { m_initial = false; m_followLatest = false; }
     QJsonArray events;
     for (const auto &value : entries) {
@@ -2076,8 +2085,12 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
     const int length = m_browser->document()->characterCount();
     QTextCursor restored(m_browser->document()); restored.setPosition(selectionStart.restored(updatedAnchors, length));
     restored.setPosition(selectionEnd.restored(updatedAnchors, length), QTextCursor::KeepAnchor);
+    if (m_taskJournalReset) restored.setPosition(0);
     m_browser->setTextCursor(restored);
-    if (!follow) {
+    if (m_taskJournalReset) {
+        if (!follow) m_browser->verticalScrollBar()->setValue(0);
+        m_taskJournalReset = false;
+    } else if (!follow) {
         QTextCursor restoredTop(m_browser->document()); restoredTop.setPosition(topPosition.restored(updatedAnchors, length));
         auto *bar = m_browser->verticalScrollBar();
         bar->setValue(bar->value() + m_browser->cursorRect(restoredTop).top() - topY);

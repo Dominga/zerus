@@ -68,8 +68,6 @@ QList<TaskItem> TaskBoard::rows(const QString &stage, const View &view, bool old
         if (done && (view.now - t.stageAt > RecentDoneMs) != older) continue;
         out << t;
     }
-    if (done) std::stable_sort(out.begin(), out.end(), [](const auto &a, const auto &b) { return a.stageAt > b.stageAt; });
-    else if (!listed(stage)) std::stable_sort(out.begin(), out.end(), [](const auto &a, const auto &b) { return a.stageAt < b.stageAt; });
     return out;
 }
 
@@ -112,16 +110,24 @@ QList<TaskAction> TaskBoard::actions(const QString &stage) {
     return {};
 }
 
+TaskAction TaskBoard::primaryAction(const QString &stage) {
+    if (stage == QLatin1String("todo") || stage == QLatin1String("backlog")) return TaskAction::SendNow;
+    if (stage == QLatin1String("review")) return TaskAction::Accept;
+    if (stage == QLatin1String("active")) return TaskAction::Pause;
+    return TaskAction::BackToTodo;
+}
+
 QString TaskBoard::actionLabel(TaskAction action) {
     switch (action) {
     case TaskAction::Edit: return QObject::tr("Edit task");
     case TaskAction::ToBacklog: return QObject::tr("Move to Backlog");
     case TaskAction::Top: return QObject::tr("Move to the top of To do");
-    case TaskAction::SendNow: return QObject::tr("Send now");
+    case TaskAction::SendNow: return QObject::tr("Start task");
     case TaskAction::ToTodo: return QObject::tr("Move to To do");
     case TaskAction::Cancel: return QObject::tr("Cancel task…");
     case TaskAction::BackToTodo: return QObject::tr("Back to To do");
     case TaskAction::Accept: return QObject::tr("Accept");
+    case TaskAction::Pause: return QObject::tr("Pause task");
     }
     return {};
 }
@@ -135,6 +141,7 @@ QString TaskBoard::actionIcon(TaskAction action) {
     case TaskAction::ToTodo: case TaskAction::BackToTodo: return QStringLiteral("task-list-add");
     case TaskAction::Cancel: return QStringLiteral("close");
     case TaskAction::Accept: return QStringLiteral("task-check");
+    case TaskAction::Pause: return QStringLiteral("pause");
     }
     return {};
 }

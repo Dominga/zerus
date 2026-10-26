@@ -13,6 +13,10 @@ class QVBoxLayout;
 class TaskTile;
 class QTabBar;
 class QFrame;
+class TaskForm;
+class QLineEdit;
+class QHBoxLayout;
+class QToolButton;
 
 // Session tasks beside Activity. Shares the board's listing, but fetches only
 // the selected task's history. It never infers task execution from native work.
@@ -39,6 +43,10 @@ private:
     void fetch();
     void renderDetail();
     void updateFilters();
+    void openInlineDetails();
+    void closeInlineDetails();
+    bool canLeaveDetails();
+    void renderCommands(const TaskItem &task);
     QList<TaskRow *> shownRows() const;
     int dropGap(const QString &uuid, const QPoint &point) const;
     void followDrag(const TaskDrag &drag, const QPoint &point);
@@ -62,8 +70,19 @@ private:
     QSplitter *m_splitter;
     QStackedWidget *m_content;
     QLabel *m_emptyDetail;
-    QPushButton *m_moreDetail;
+    QPushButton *m_moreDetail, *m_latestHistory;
+    QJsonObject m_historyBefore;
     QPushButton *m_open, *m_edit;
+    QPushButton *m_assignment, *m_saveNote;
+    QLineEdit *m_note;
+    QLabel *m_noteError;
+    QWidget *m_commands;
+    QHBoxLayout *m_commandLayout;
+    QHash<int, QToolButton *> m_commandButtons;
+    QPointer<TaskForm> m_form;
+    QScrollArea *m_formScroll = nullptr;
+    QString m_commandsKey, m_noteKey, m_inlineRequested;
+    bool m_noteBusy = false;
     QTabBar *m_detailTabs;
     bool m_dark = true;
     bool m_showOlder = false;

@@ -62,10 +62,10 @@ void TestTaskBoard::readsTheListing() {
 
 void TestTaskBoard::rowsFollowEachStageOrder() {
     const auto b = board(); const TaskBoard::View all{"", "codex/api", false, Now};
-    QCOMPARE(ids(b.rows("review", all)), QStringList({"T-r1", "T-r2"}));       // oldest report first
+    QCOMPARE(ids(b.rows("review", all)), QStringList({"T-r2", "T-r1"}));       // persisted board rank
     QCOMPARE(ids(b.rows("todo", all)), QStringList({"T-t1", "T-t2", "T-t3"})); // the queue
-    // Done shows the last 7 days, newest first; older ones come apart.
-    QCOMPARE(ids(b.rows("done", all)), QStringList({"T-d2", "T-d1"}));
+    // Done retains the board order, with the last 7 days and older tasks apart.
+    QCOMPARE(ids(b.rows("done", all)), QStringList({"T-d1", "T-d2"}));
     QCOMPARE(ids(b.rows("done", all, true)), QStringList({"T-d3"}));
     QCOMPARE(b.count("done", all), 2); QCOMPARE(b.count("active", all), 1);
 }

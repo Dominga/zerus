@@ -12,6 +12,7 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QCursor>
+#include <QDateTime>
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -89,9 +90,10 @@ private slots:
     void initTestCase();
     void init() { QSettings().remove("tasks"); }
     void thePayloadNamesTheTaskAndItsProject();
-    void toDoAndBacklogRowsStartADrag();
+    void everyStageStartsADrag();
     void inspectorReordersQueuesAndPreservesDragLifetime();
     void inspectorScrollsAndRejectsInvalidDrops();
+    void everyStagePersistsOrderInBothBoardSurfaces();
     void taskContextMenuUsesTheSameGuardedActions();
     void theOtherListsTileTakesADroppedTask();
     void toDoRowsAreReorderedByDropping();
@@ -131,11 +133,11 @@ void TestTaskDrag::thePayloadNamesTheTaskAndItsProject() {
     QVERIFY(!TaskDrag::from(nullptr));
 }
 
-void TestTaskDrag::toDoAndBacklogRowsStartADrag() {
+void TestTaskDrag::everyStageStartsADrag() {
     QWidget host; auto *taskRow = new TaskRow(&host); host.resize(600, 80); taskRow->resize(600, 80); host.show();
     QSignalSpy started(taskRow, &TaskRow::dragStarted), opened(taskRow, &TaskRow::opened);
     const QPoint text(100, 50); const int far = QApplication::startDragDistance() + 2;
-    for (const char *stage : {"todo", "backlog"}) {
+    for (const char *stage : {"todo", "backlog", "active", "review", "done"}) {
         taskRow->setTask(item(1, stage), {}, TaskColors::of(true), 0); started.clear(); opened.clear();
         // A click that shakes a little still opens the task.
         pressMoveRelease(taskRow, text, 2); QCOMPARE(started.size(), 0); QCOMPARE(opened.size(), 1);
@@ -146,8 +148,8 @@ void TestTaskDrag::toDoAndBacklogRowsStartADrag() {
     // The actions never drag their row.
     auto *actions = taskRow->findChild<QWidget *>("taskActions");
     pressMoveRelease(taskRow, actions->mapTo(taskRow, QPoint(actions->width() - 1, actions->height() / 2)), far); QCOMPARE(started.size(), 1);
-    // Tasks in other stages, and tasks of a newer Zerus, stay where they are.
-    for (const auto &task : {item(2, "active"), item(3, "review"), item(4, "done"), item(5, "todo", {{"writable", false}})}) {
+    // Future-schema tasks and unknown stages stay read-only.
+    for (const auto &task : {item(2, "unknown"), item(5, "todo", {{"writable", false}})}) {
         taskRow->setTask(task, {}, TaskColors::of(true), 0); started.clear();
         pressMoveRelease(taskRow, text, far); QVERIFY2(started.isEmpty(), qPrintable(task.id));
     }
@@ -196,6 +198,26 @@ void TestTaskDrag::inspectorReordersQueuesAndPreservesDragLifetime() {
     QVERIFY(called(dir.path(), {"task", "move", "uuid-5", "--before", "uuid-4", "--project", "project-1"}));
 }
 
+void TestTaskDrag::everyStagePersistsOrderInBothBoardSurfaces() {
+    for (const auto &stage : TaskBoard::stages()) {
+        const QJsonObject fresh{{"stage_at", double(QDateTime::currentMSecsSinceEpoch())}};
+        QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, stage, fresh), FakeTasksCli::task(2, stage, fresh), FakeTasksCli::task(3, stage, fresh)}));
+        HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
+        board.resize(760, 600); board.show(); inspector.resize(380, 760); inspector.show();
+        board.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); inspector.setContext("project-1", "", "codex/api", sessions());
+        QTRY_COMPARE(inspector.displayedCount(), 3); tile(board, stage)->click();
+        auto *page = inspector.findChild<QWidget *>("taskInspectorCards");
+        const auto card = [&](int n) { return inspector.findChild<TaskRow *>(QString("taskInspectorRow:T-%1").arg(n, 6, 10, QLatin1Char('0'))); };
+        QVERIFY(drop(page, TaskDrag::of("project-1", item(3, stage)), card(1)->mapTo(page, QPoint(60, 2))));
+        QTRY_VERIFY(card(3)->y() < card(1)->y());
+        board.refresh(); QTRY_VERIFY(row(board, 3)->y() < row(board, 1)->y());
+        auto *boardPage = board.findChild<QWidget *>("taskListPage"); QVERIFY(boardPage);
+        QVERIFY(drop(boardPage, TaskDrag::of("project-1", item(2, stage)), row(board, 3)->mapTo(boardPage, QPoint(60, 2))));
+        QTRY_VERIFY(card(2)->y() < card(3)->y());
+        for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) == "list" || call.value(1) == "move");
+    }
+}
+
 void TestTaskDrag::inspectorScrollsAndRejectsInvalidDrops() {
     QJsonArray tasks; for (int n = 1; n <= 40; ++n) tasks.append(FakeTasksCli::task(n, "todo"));
     tasks.append(FakeTasksCli::task(41, "todo", {{"writable", false}}));
@@ -227,9 +249,12 @@ void TestTaskDrag::taskContextMenuUsesTheSameGuardedActions() {
     auto *move = menu->findChild<QAction *>("taskMenuAction:toBacklog"); QVERIFY(move && move->isEnabled()); menu->hide(); move->trigger();
     QTRY_COMPARE(inspector.displayedCount(), 1); QVERIFY(called(dir.path(), {"task", "stage", "uuid-2", "backlog", "--project", "project-1"}));
     inspector.selectTask("uuid-1"); auto *edit = inspector.findChild<QPushButton *>("taskInspectorEdit");
-    QTRY_VERIFY(edit->isEnabled()); QCOMPARE(edit->text(), QString("Edit"));
+    QTRY_VERIFY(edit->isEnabled()); QVERIFY(edit->text().isEmpty());
+    QCOMPARE(edit->accessibleName(), QString("Task details")); const auto iconKey = edit->icon().cacheKey();
     board.actOnTask(item(1, "todo"), TaskAction::SendNow);
-    QTRY_COMPARE(edit->text(), QString("Details")); QVERIFY(edit->isEnabled()); QVERIFY(edit->toolTip().contains("To do"));
+    QTRY_COMPARE(inspector.selectedStage(), QString("active"));
+    QVERIFY(edit->text().isEmpty()); QCOMPARE(edit->accessibleName(), QString("Task details"));
+    QCOMPARE(edit->icon().cacheKey(), iconKey); QVERIFY(edit->isEnabled());
 }
 
 void TestTaskDrag::theOtherListsTileTakesADroppedTask() {

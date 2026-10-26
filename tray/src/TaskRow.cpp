@@ -104,6 +104,7 @@ QString TaskRow::actionKey(TaskAction action) {
     case TaskAction::ToBacklog: return QStringLiteral("toBacklog");
     case TaskAction::Top: return QStringLiteral("top");
     case TaskAction::SendNow: return QStringLiteral("sendNow");
+    case TaskAction::Pause: return QStringLiteral("pause");
     case TaskAction::ToTodo: return QStringLiteral("toTodo");
     case TaskAction::Cancel: return QStringLiteral("cancel");
     case TaskAction::BackToTodo: return QStringLiteral("backToTodo");
@@ -223,7 +224,8 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     setWorkspaceStyle(m_summary, QStringLiteral("color:%1;border-left:2px solid %2;padding:1px 0 1px 10px;").arg(colors.muted.name(), stage.name()));
     if (rebuild) {
         qDeleteAll(m_buttons); m_buttons.clear();
-        const auto actions = TaskBoard::actions(task.stage);
+        auto actions = TaskBoard::actions(task.stage);
+        if (!actions.contains(TaskBoard::primaryAction(task.stage))) actions << TaskBoard::primaryAction(task.stage);
         for (const auto action : actions) {
             auto *button = new QToolButton(m_actions); button->setObjectName(QStringLiteral("taskAction:") + actionKey(action));
             button->setFixedSize(34, 32); button->setIconSize(QSize(20, 20)); button->setAutoRaise(true); button->setCursor(Qt::ArrowCursor);
@@ -239,7 +241,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         }
     }
     const int actionCount = m_buttons.size();
-    m_actions->setFixedWidth(compact ? 34 : actionCount * 34 + qMax(0, actionCount - 1) * 2);
+    m_actions->setFixedWidth(compact ? 70 : actionCount * 34 + qMax(0, actionCount - 1) * 2);
     m_more->setIcon(workspaceIcon("more", colors.muted));
     setWorkspaceStyle(m_more, QStringLiteral("QToolButton{border:0;border-radius:6px;background:transparent;}"
         "QToolButton::menu-indicator{image:none;width:0;height:0;}QToolButton:hover{background:%1;}").arg(colors.hover.name()));
@@ -247,7 +249,8 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it) {
         const auto action = TaskAction(it.key()); const QString why = state.blocked.value(it.key());
         // A blocked action stays clickable, dimmed, so a click can say why it does nothing.
-        QColor icon = colors.muted; if (!why.isEmpty()) icon.setAlphaF(0.45);
+        QColor icon = action == TaskBoard::primaryAction(task.stage) ? colors.accent : colors.muted;
+        if (!why.isEmpty()) icon.setAlphaF(0.45);
         it.value()->setIcon(workspaceIcon(TaskBoard::actionIcon(action), icon));
         it.value()->setProperty("blockedReason", why); it.value()->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why);
         it.value()->setAccessibleName(TaskBoard::actionLabel(action));
@@ -297,7 +300,11 @@ void TaskRow::contextMenuEvent(QContextMenuEvent *event) {
 void TaskRow::showActions(bool shown) {
     // The container keeps its width, so the meta never moves.
     const bool compact = property("compact").toBool();
-    for (auto *button : std::as_const(m_buttons)) button->setVisible(shown && !compact);
+    for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it) {
+        const bool primary = TaskAction(it.key()) == TaskBoard::primaryAction(m_task.stage);
+        it.value()->setVisible(compact ? primary : shown);
+        it.value()->setEnabled(!compact || !primary || m_state.blocked.value(it.key()).isEmpty());
+    }
     m_more->setVisible(compact);
 }
 
@@ -320,7 +327,7 @@ void TaskRow::mousePressEvent(QMouseEvent *event) {
     m_pressAt = event->position().toPoint();
 }
 
-// A To do or Backlog row pressed outside its actions is dragged once the pointer
+// A writable row pressed outside its actions is dragged once the pointer
 // moves past the drag distance; the release after a drag opens nothing.
 void TaskRow::mouseMoveEvent(QMouseEvent *event) {
     QWidget::mouseMoveEvent(event);

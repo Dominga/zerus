@@ -38,6 +38,7 @@ struct TaskSession {
 };
 
 struct TaskEdits;
+struct TaskTarget;
 
 // The Tasks tab label's counts: In review as an attention badge, then To do.
 class TaskTabBadge : public QWidget {
@@ -89,6 +90,9 @@ public:
     void reorderTask(const TaskDrag &drag, const QString &anchor, bool before);
     void stageTask(const TaskDrag &drag, const QString &stage);
     TaskRowState rowState(const TaskItem &task) const;
+    void saveTaskEdits(const TaskItem &task, const TaskEdits &edits, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void saveTaskNote(const QString &uuid, const QString &text, std::function<void()> saved, std::function<void(const QString &)> refused);
+    QString taskSendBlocker(const TaskItem &task, const TaskTarget &target) const;
     QString selectedStage() const { return m_stage; }
     // The Activity sidebar hosts the board's existing scope/settings controls.
     void moveControlsTo(QBoxLayout *toolbar);
@@ -101,26 +105,27 @@ signals:
     void notice(const QString &text, bool error);
     void boardChanged();
     void taskSelected(const QString &uuid);
+    void taskEditRequested(const QString &uuid);
     void taskDragFinished();
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
-    // Drops on the stage tiles and on the To do list.
+    // Drops on the stage tiles and on every stage list.
     bool eventFilter(QObject *watched, QEvent *event) override;
     // The platform's drag loop; listings and other events arrive while it runs.
     virtual Qt::DropAction execDrag(QDrag *drag);
 private:
-    // Drags a To do or Backlog row; the tiles and the session list take it.
+    // Every stage can be dragged to reorder; other targets keep their own guards.
     void startDrag(TaskRow *row, const QPoint &hotSpot);
     // A row leaves the list. The row a drag runs from stays, hidden, until the drag
     // ends: Qt is still delivering the move that started it.
     void retire(TaskRow *row);
     // The To do and Backlog tiles take a task of this project from the other list.
     bool takesOnTile(const TaskDrag &drag, const QString &stage) const;
-    // The To do list takes its own tasks to reorder them.
+    // Each stage list takes its own tasks to reorder them.
     bool takesInList(const TaskDrag &drag) const;
     QList<TaskRow *> shownRows() const;
-    // Where a To do task dropped at `point` of the list page goes: the index of the
+    // Where a task dropped at `point` of its stage list goes: the index of the
     // shown row it goes before, or their count below the last one; -1 where it is now.
     int dropGap(const QString &uuid, const QPoint &point) const;
     // Shows where the task would go and scrolls while the pointer is at an edge.

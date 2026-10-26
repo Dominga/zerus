@@ -304,7 +304,7 @@ impl TaskDoc {
         Ok(entry)
     }
 
-    fn writable(&self) -> Result<()> {
+    pub(crate) fn writable(&self) -> Result<()> {
         if self.schema() > TASK_SCHEMA {
             return Err(Error::new("Update Zerus to edit this task"));
         }
@@ -403,10 +403,9 @@ impl TaskDoc {
     }
 
     pub fn set_rank(&mut self, value: &str) -> Result<()> {
-        self.require(
-            &[Stage::Backlog, Stage::Todo],
-            "only tasks in Backlog or To do are ordered",
-        )?;
+        // Board order is presentation priority, independent of execution state.
+        // In particular, moving an active card never interrupts its worker.
+        self.writable()?;
         if !rank::is_rank(value) {
             return Err(Error::new("invalid rank"));
         }

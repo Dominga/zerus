@@ -325,6 +325,7 @@ TaskRowState TasksView::rowState(const TaskItem &task) const {
     if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.sessionKnown && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
     if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
         if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
+    state.blocked.insert(int(TaskAction::Pause), tr("Pausing an individual task is not available yet"));
     if (!task.writable)
         for (const auto action : TaskBoard::actions(task.stage)) if (action != TaskAction::Edit) state.blocked.insert(int(action), tr("Update Zerus to edit this task"));
     return state;
@@ -357,7 +358,7 @@ QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action)
         if (task.targetSession.isEmpty() && !m_host.isEmpty()) arguments << "--host" << m_host;
         return {{withProject(arguments), {}}};
     }
-    case TaskAction::Edit: case TaskAction::Cancel: break;
+    case TaskAction::Edit: case TaskAction::Cancel: case TaskAction::Pause: break;
     }
     return {};
 }
@@ -379,6 +380,7 @@ QStringList TasksView::targetArguments(const QString &uuid, const QString &host,
 }
 
 void TasksView::retarget(const TaskDrag &task, const QString &host, const QString &session) {
+    if (task.stage != QLatin1String("todo") && task.stage != QLatin1String("backlog")) return;
     const auto *target = this->session(host, session);
     run({{targetArguments(task.uuid, host, session, target ? target->id : QString()) << QStringLiteral("--project") << task.projectId, {}}});
 }
@@ -394,7 +396,12 @@ void TasksView::run(QList<Step> steps, std::function<void()> finished, std::func
 }
 
 void TasksView::act(const TaskItem &task, TaskAction action) {
-    if (action == TaskAction::Edit) return openTask(task);
+    if (action == TaskAction::Pause) return; // Task-scoped execution accounting must precede pause.
+    if (action == TaskAction::Edit) {
+        if (m_openInInspector) { emit taskSelected(task.uuid); emit taskEditRequested(task.uuid); return; }
+        return openTask(task);
+    }
+    if (!task.writable || !TaskBoard::actions(task.stage).contains(action)) return;
     if (action == TaskAction::Cancel) return confirmCancel(task);
     if (action == TaskAction::SendNow && !sendBlocker(task).isEmpty()) return;
     run(steps(task, action));
@@ -599,6 +606,23 @@ void TasksView::openTask(const TaskItem &task) {
         });
         dialog->open();
     });
+}
+
+void TasksView::saveTaskEdits(const TaskItem &task, const TaskEdits &edits,
+                              std::function<void()> saved, std::function<void(const QString &)> refused) {
+    run(editSteps(task, edits), saved, refused);
+}
+
+void TasksView::saveTaskNote(const QString &uuid, const QString &text,
+                             std::function<void()> saved, std::function<void(const QString &)> refused) {
+    run({{withProject({"comment", uuid}), text}}, saved, refused);
+}
+
+QString TasksView::taskSendBlocker(const TaskItem &task, const TaskTarget &target) const {
+    auto chosen = task;
+    chosen.targetSession = target.any ? QString() : target.session;
+    chosen.targetHost = target.host; chosen.targetId = target.id; chosen.targetKnown = true;
+    return sendBlocker(chosen);
 }
 
 void TasksView::confirmCancel(const TaskItem &task) {

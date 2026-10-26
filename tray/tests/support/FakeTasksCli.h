@@ -37,6 +37,7 @@ def log(t,kind,body=''): t.setdefault('log',[]).append({'kind':kind,'actor':{'ki
 def top(t): data['tasks'].remove(t); data['tasks'].insert(0,t)
 order=['review','active','todo','backlog','done']
 cmd=a[1]
+if cmd=='get' and (here/'delay-get').exists(): time.sleep(min(.5,float((here/'delay-get').read_text())))
 content={}
 if cmd in ('add','edit') and '--content-json' in a:
     content=json.loads(text); text=content['text']

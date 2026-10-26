@@ -30,7 +30,7 @@ struct TaskRowState {
 // One task in the list: a fixed-height header with the meta on the left and the
 // stage's action icons on the right (shown on hover), then the text clamped to
 // two lines, and for In review the report or the cancellation. Compact inspector
-// cards show only the title and worker, with a menu instead of the action strip;
+// cards show the title, worker, primary action and context menu;
 // their full report belongs in the selected task's Result section.
 class TaskGlyph;
 class TaskStatusPill;
@@ -48,7 +48,7 @@ public:
 signals:
     void actionRequested(TaskAction action);
     void opened();
-    // A To do or Backlog row was pressed and moved: the owner drags it from hotSpot.
+    // A writable row was pressed and moved: the owner drags it from hotSpot.
     void dragStarted(const QPoint &hotSpot);
 protected:
     void paintEvent(QPaintEvent *event) override;

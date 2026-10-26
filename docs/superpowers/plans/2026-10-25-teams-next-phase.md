@@ -661,6 +661,27 @@ answered; a denial cannot carry an explanation.
   stays manual for every other folder. The designer window shows its
   session's questions and permission cards. Owner: yes, in the fixes phase.
 
+- **U17. Permission answers collapse to one line (owner, 2026-10-26).** Member
+  cards list every stored permission answer (up to 20 lines, deny reasons in
+  full) and grow the members column. One summary line ('18 allowed · 2 denied ·
+  last: ...'), expandable to the newest five; the task card the same for its
+  attempt. Owner: yes, in the fixes phase.
+
+- **U18. The lead's inbox does not wait for the lead to be fully idle (owner,
+  2026-10-26).** Three member permission requests waited about 30 minutes while
+  the lead's own subagent ran: the notifier and reminders need activity idle.
+  Deliver to a lead whose turn ended also while its own background work runs;
+  a permission unanswered for remind_owner_minutes goes to the owner's
+  attention and notification, answerable there. Owner: yes, in the fixes phase.
+
+- **U19. Confirm subagents (owner, 2026-10-27).** A session may start subagents
+  on its own and the owner has no say. A global setting in Settings > Sessions,
+  'Ask before an agent starts subagents', ON by default: Zerus's pre-tool hook
+  asks before a subagent starts, one request per turn listing how many, which
+  type, model and effort; never auto-approved; a team member's request goes to
+  its lead. Agents that cannot be asked are marked, never blocked.
+  Owner: yes, in the fixes phase.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

@@ -20,6 +20,24 @@ impl Journal {
             CREATE TABLE IF NOT EXISTS encrypted_usage (
             id INTEGER PRIMARY KEY CHECK(id=1), identities INTEGER NOT NULL,
             result_bytes INTEGER NOT NULL,snapshots INTEGER NOT NULL,snapshot_bytes INTEGER NOT NULL);")?;
+        let has_class = self
+            .db
+            .prepare("PRAGMA table_info(encrypted_requests)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == "read_cache_class");
+        if !has_class {
+            self.db.execute_batch("ALTER TABLE encrypted_requests ADD COLUMN read_cache_class INTEGER NOT NULL DEFAULT 0")?;
+        }
+        self.db.execute_batch(
+            "CREATE INDEX IF NOT EXISTS encrypted_read_classify
+            ON encrypted_requests(updated_at,request_id)
+            WHERE read_cache_class=0 AND delivered=1 AND result IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS encrypted_read_pressure
+            ON encrypted_requests(updated_at,request_id)
+            WHERE read_cache_class=1 AND delivered=1 AND result IS NOT NULL;",
+        )?;
         let tx = self.db.unchecked_transaction()?;
         if tx.execute(
             "INSERT OR IGNORE INTO encrypted_usage VALUES(1,0,0,0,0)",
@@ -44,6 +62,169 @@ impl Journal {
             WHERE delivered=1 AND updated_at<? AND result IS NOT NULL LIMIT 1000)",
             [now - MUTATION_SECONDS],
         )?;
+        Ok(())
+    }
+
+    /// Bounded pressure turns commit independently of the later result admission.
+    /// The verifier runs outside any SQLite transaction and never decrypts data.
+    pub(crate) fn encrypted_reclaim_read_cache(
+        &self,
+        now: f64,
+        required: usize,
+        verified_read: impl FnMut(&str, &str, &str, &str) -> bool,
+    ) -> Result<()> {
+        self.encrypted_reclaim_read_cache_bound(now, required, PAYLOAD_BYTES, verified_read)
+    }
+
+    // Production always supplies PAYLOAD_BYTES; a smaller synthetic bound keeps
+    // focused grace/refund/frontier tests small without fabricated usage counters.
+    pub(crate) fn encrypted_reclaim_read_cache_bound(
+        &self,
+        now: f64,
+        required: usize,
+        limit: i64,
+        verified_read: impl FnMut(&str, &str, &str, &str) -> bool,
+    ) -> Result<()> {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(20);
+        self.encrypted_reclaim_read_cache_turn(
+            now,
+            required,
+            limit,
+            || std::time::Instant::now() >= end,
+            verified_read,
+        )
+    }
+
+    // The clock seam is deterministic in tests. Runtime supplies the ONE
+    // original deadline above; it is checked between finite rows, not before
+    // the first useful step of either committed frontier.
+    pub(crate) fn encrypted_reclaim_read_cache_turn(
+        &self,
+        now: f64,
+        required: usize,
+        limit: i64,
+        expired: impl Fn() -> bool,
+        mut verified_read: impl FnMut(&str, &str, &str, &str) -> bool,
+    ) -> Result<()> {
+        const ROWS: usize = 64;
+        const BYTES: usize = 8 * 1024 * 1024;
+        const ENVELOPE: usize = 2 * 1024 * 1024;
+        const GRACE: f64 = 120.0;
+        if !now.is_finite() || required > ENVELOPE || limit < required as i64 {
+            return Ok(());
+        }
+        let fits = || -> Result<bool> {
+            let used: i64 = self.db.query_row(
+                "SELECT result_bytes FROM encrypted_usage WHERE id=1",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(used <= limit - required as i64)
+        };
+        if fits()? {
+            return Ok(());
+        }
+        let mut freed = 0usize;
+        let mut trim_steps = 0usize;
+        let mut trim = || -> Result<()> {
+            let rows: Vec<(String, i64)> = self
+                .db
+                .prepare(
+                    "SELECT request_id,length(CAST(result AS BLOB)) FROM encrypted_requests
+             INDEXED BY encrypted_read_pressure WHERE read_cache_class=1
+             AND delivered=1 AND result IS NOT NULL AND updated_at<=?
+             ORDER BY updated_at,request_id LIMIT 64",
+                )?
+                .query_map([now - GRACE], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (id, size) in rows {
+                if trim_steps >= ROWS || (trim_steps > 0 && expired()) || fits()? {
+                    break;
+                }
+                trim_steps += 1;
+                if size < 0 || size as usize > ENVELOPE {
+                    self.db.execute("UPDATE encrypted_requests SET read_cache_class=2
+                    WHERE request_id=? AND read_cache_class=1 AND delivered=1 AND result IS NOT NULL", [id])?;
+                    continue;
+                }
+                if freed + size as usize > BYTES {
+                    break;
+                }
+                self.db.execute(
+                    "UPDATE encrypted_requests SET result=NULL
+                WHERE request_id=? AND read_cache_class=1 AND delivered=1
+                AND result IS NOT NULL AND updated_at<=?",
+                    params![id, now - GRACE],
+                )?;
+                freed += size as usize;
+            }
+            Ok(())
+        };
+        // Previously classified rows are reclaimed first, so a full crypto
+        // budget cannot starve evictions behind an adoption backlog.
+        trim()?;
+        if fits()? {
+            return Ok(());
+        }
+        // Class 0 is unexamined, 1 is a verified Read pair, 2 is conservative.
+        // Persist the frontier even when this turn cannot free enough bytes.
+        let candidates: Vec<(i64, i64, i64, i64, i64)> = self.db.prepare(
+            "SELECT rowid,length(CAST(request_id AS BLOB)),length(CAST(header AS BLOB)),length(CAST(result AS BLOB)),length(CAST(digest AS BLOB))
+             FROM encrypted_requests INDEXED BY encrypted_read_classify
+             WHERE read_cache_class=0 AND delivered=1 AND result IS NOT NULL
+             ORDER BY updated_at,request_id LIMIT 64",
+        )?.query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut bytes = 0usize;
+        for (examined, (row, id_len, header_len, result_len, digest_len)) in
+            candidates.into_iter().enumerate()
+        {
+            if examined > 0 && expired() {
+                break;
+            }
+            if digest_len != 64
+                || !(1..=128).contains(&id_len)
+                || !(1..=8192).contains(&header_len)
+                || !(1..=ENVELOPE as i64).contains(&result_len)
+            {
+                self.db.execute(
+                    "UPDATE encrypted_requests SET read_cache_class=2
+                    WHERE rowid=? AND read_cache_class=0 AND delivered=1 AND result IS NOT NULL",
+                    [row],
+                )?;
+                continue;
+            }
+            let size = header_len as usize + result_len as usize;
+            if bytes + size > BYTES {
+                break;
+            }
+            bytes += size;
+            let pair: Option<(String,String,String,String)> = self.db.query_row(
+                "SELECT request_id,digest,header,result FROM encrypted_requests
+                 WHERE rowid=? AND read_cache_class=0 AND delivered=1
+                 AND length(CAST(request_id AS BLOB))<=128 AND length(CAST(header AS BLOB))<=8192 AND length(CAST(digest AS BLOB))=64
+                 AND length(CAST(result AS BLOB))<=2097152", [row],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+            ).optional()?;
+            let Some((id, digest, header, result)) = pair else {
+                continue;
+            };
+            let class = if verified_read(&id, &digest, &header, &result) {
+                1
+            } else {
+                2
+            };
+            // Exact immutable bytes, not a parsed prefix or current-row adoption.
+            self.db.execute(
+                "UPDATE encrypted_requests SET read_cache_class=?
+                WHERE rowid=? AND read_cache_class=0 AND delivered=1
+                AND request_id=? AND digest=? AND header=? AND result=?",
+                params![class, row, id, digest, header, result],
+            )?;
+        }
+        // Separate committed turns: insufficient headroom never rolls back a
+        // prior safe eviction. The original result trigger performs the refund.
+        trim()?;
         Ok(())
     }
 
@@ -253,3 +434,6 @@ mod tests {
         assert!(reopened.encrypted_pending().unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+include!("encrypted_pressure_fixture.rs");

@@ -498,6 +498,14 @@ answered; a denial cannot carry an explanation.
   transcript is behind, do not resume silently: warn and offer the missing
   dialogue from the events. Owner: yes, in the next phase.
 
+- **U4. Members stopped by a reboot stay stopped (seen 2026-10-26).** After the
+  reboot, Backend, Frontend, QA and Reviewer were stopped; their ready tasks
+  (#288, #292) stayed Pending with no word to the lead, until the lead resumed
+  the sessions by hand. The dispatcher must notice a member whose session is
+  stopped while it has a ready or open task, tell the lead once, and resume it
+  (hgs resume -d) when the team setting allows it (default on for team
+  members; never for the lead's own session). Owner: to be confirmed.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

@@ -524,6 +524,19 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             ));
         }
     }
+    // F1.3: a shared member contradicts the worktree policy.
+    if team.settings.folder_policy == super::model::FolderPolicy::Worktree {
+        for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.id != team.lead) {
+            if member.folder == super::model::MemberFolder::Shared {
+                found.errors.push(finding(
+                    "folder",
+                    None,
+                    Some(&member.id),
+                    format!("{}: the worktree policy gives every member its own folder", member.id),
+                ));
+            }
+        }
+    }
     found.health = health(team);
     found
 }

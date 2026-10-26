@@ -233,7 +233,14 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     if policy == FolderPolicy::Auto {
         for (member, value) in members.iter_mut().skip(1).zip(input["members"].as_array().into_iter().flatten()) {
             if value.get("folder").is_none() && member.directory.is_empty() {
-                member.folder = super::dispatcher::default_folder(&member.agent);
+                // F1.2: auto keeps the agent's default folder (a clone for a
+                // sandboxed agent, a worktree otherwise) unless the plan names
+                // one; a project that forbids worktrees leaves the member shared.
+                member.folder = if team.settings.worktrees_forbidden {
+                    MemberFolder::Shared
+                } else {
+                    super::dispatcher::default_folder(&member.agent)
+                };
             }
         }
     }
@@ -1665,7 +1672,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 && input["member"].get("folder").is_none()
                 && member.directory.is_empty()
             {
-                member.folder = super::dispatcher::default_folder(&member.agent);
+                // F1.2: the agent's default folder, shared when the project
+                // forbids worktrees.
+                member.folder = if team.settings.worktrees_forbidden {
+                    MemberFolder::Shared
+                } else {
+                    super::dispatcher::default_folder(&member.agent)
+                };
             }
             ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
             let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
@@ -3386,7 +3399,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_folders_follow_the_agent() {
+    fn auto_gives_the_agents_default_folder() {
         let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
         let mut events = Vec::new();
         plan(
@@ -3400,6 +3413,7 @@ mod tests {
         )
         .unwrap();
         let folder = |id: &str| team.member(id).unwrap().folder;
+        // F1.2: auto keeps the agent's default folder; an explicit one stays.
         assert_eq!(folder("dev"), MemberFolder::Clone);
         assert_eq!(folder("qa"), MemberFolder::Worktree);
         assert_eq!(folder("api"), MemberFolder::Shared);
@@ -3430,6 +3444,22 @@ mod tests {
         team.settings.folder_policy = FolderPolicy::Auto;
         let validation = plan::validate(&team, &BTreeSet::new());
         assert!(!validation.errors.iter().any(|finding| finding.text.contains("folder policy")), "{:?}", validation.errors);
+    }
+
+    #[test]
+    fn the_worktree_policy_refuses_a_shared_member() {
+        let mut team = running_team();
+        team.settings.folder_policy = FolderPolicy::Worktree;
+        for member in team.members.iter_mut() {
+            if member.id != "lead" {
+                member.folder = MemberFolder::Worktree;
+            }
+        }
+        let validation = plan::validate(&team, &BTreeSet::new());
+        assert!(!validation.errors.iter().any(|finding| finding.text.contains("worktree policy")), "{:?}", validation.errors);
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().folder = MemberFolder::Shared;
+        let validation = plan::validate(&team, &BTreeSet::new());
+        assert!(validation.errors.iter().any(|finding| finding.text.contains("worktree policy")), "{:?}", validation.errors);
     }
 
     #[test]

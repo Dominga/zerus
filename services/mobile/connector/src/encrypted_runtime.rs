@@ -40,7 +40,12 @@ fn checked<T>(value: crypto::Result<T>) -> Result<T> {
     value.map_err(|_| Failure::Retry)
 }
 fn journal<T>(value: crate::journal::Result<T>) -> Result<T> {
-    value.map_err(Failure::Fatal)
+    value.map_err(|error| match error {
+        JournalError::Refused(ref refusal) if refusal.message() == crate::error::RETAINED_LIMIT => {
+            Failure::Retry
+        }
+        other => Failure::Fatal(other),
+    })
 }
 fn encoded(value: &impl serde::Serialize) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|_| Failure::Retry)
@@ -57,6 +62,65 @@ async fn call(
         .await
         .map_err(|_| Failure::Retry)?
         .ok_or(Failure::Retry)
+}
+
+/// Legacy headers were committed only after authenticated/decrypted admission;
+/// a2 rejects Read/non-READS before native dispatch. The gateway's full signed
+/// Result echoes that accepted class. No fresh request signature is invented:
+/// its full envelope is not stored. Unknown producer/key/history stays durable.
+fn accepted_read_cache(
+    profile: &Profile,
+    id: &str,
+    digest: &str,
+    header: &str,
+    result: &str,
+) -> bool {
+    if !crate::pyvalue::canonical_uuid(id)
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return false;
+    }
+    let Ok(request) = serde_json::from_str::<Header>(header) else {
+        return false;
+    };
+    let Ok(envelope) = serde_json::from_str::<EncryptedEnvelope>(result) else {
+        return false;
+    };
+    let response = &envelope.header;
+    let me = &profile.identity.device;
+    let Some(phone) = profile.membership.members.get(&request.sender_device_id) else {
+        return false;
+    };
+    request.canonical_bytes().is_ok()
+        && request.kind == PayloadKind::Request
+        && response.kind == PayloadKind::Result
+        && request.operation_class == OperationClass::Read
+        && response.operation_class == OperationClass::Read
+        && phone.role == Role::Phone
+        && me.role == Role::Computer
+        && profile.membership.members.get(&me.device_id) == Some(me)
+        && request.workspace_id == profile.membership.workspace_id
+        && response.workspace_id == request.workspace_id
+        && request.request_id == id
+        && response.request_id == id
+        && request.recipient_device_id == me.device_id
+        && request.recipient_key_generation == me.key_generation
+        && request.gateway_id == me.device_id
+        && response.gateway_id == request.gateway_id
+        && response.sender_device_id == me.device_id
+        && response.sender_key_generation == me.key_generation
+        && response.recipient_device_id == phone.device_id
+        && response.recipient_key_generation == phone.key_generation
+        && request.sender_key_generation == phone.key_generation
+        && response.route_id == request.route_id
+        && profile.historical_heads.get(&request.membership_revision)
+            == Some(&request.membership_head)
+        && profile.historical_heads.get(&response.membership_revision)
+            == Some(&response.membership_head)
+        && envelope.verify_sender(me).is_ok()
 }
 
 struct Engine<'a, N: Native> {
@@ -593,6 +657,11 @@ impl<N: Native + 'static> Engine<'_, N> {
         if text.len() > MAX_SMALL - 4096 {
             return Err(Failure::Retry);
         }
+        journal(self.connector.journal.encrypted_reclaim_read_cache(
+            crate::now(),
+            text.len(),
+            |id, digest, header, result| accepted_read_cache(profile, id, digest, header, result),
+        ))?;
         journal(
             self.connector
                 .journal
@@ -1558,4 +1627,5 @@ mod tests {
         );
         assert!(f.connector.native.calls.borrow().is_empty());
     }
+    include!("encrypted_read_pressure_tests.rs");
 }

@@ -436,3 +436,62 @@ is not evidence of Windows ACL/process behavior. `tests/windows_gateway.rs`
 runs the actual Windows ACL, hard-link, lock, revision, credential rotation and
 stop-generation controls without contacting a relay. The isolated Windows host
 and HTTPS transport suite is described in CONTRIBUTING.md.
+
+### Encrypted result cache pressure
+
+The encrypted outbox keeps permanent request IDs, signed request digests/headers,
+relay-delivery markers and timestamps after releasing result ciphertext. A
+repeat of the same ID never authorizes native execution, including a Read whose
+result cache has been released. Native request identities and outcomes are not
+changed by cache reclamation.
+
+Before admitting a new sealed result, a pressure turn targets its actual encoded
+size within the existing 256 MiB result limit. Only relay-delivered, fully stored
+Read result caches at least 120 seconds past their relay-delivery timestamp are
+eligible. This grace is not an acknowledgement of durable receipt by a phone.
+Paused clients can lose an old Read response; ordinary supported refresh creates
+a fresh safe Read identity. Mutation and Control requests are never resent or
+shortened by this policy. All-too-young, protected or unprovable caches can still
+exhaust the bound; the connector then retains the pending native receipt and
+backs off while its publisher heartbeat continues.
+
+Legacy adoption uses the journal's existing authenticated-admission contract:
+`receive_before` authenticates/decrypts the request before `encrypted_reserve`,
+and rejects signed Read/non-READS requests before any native dispatch. The a2
+`seal_receipt` copies the accepted class into a Computer-signed Result. The full
+request envelope/signature is not stored, so adoption does not claim to verify
+that signature again or infer a plaintext operation from ciphertext. It requires
+an exact typed stored Request/Read header and a full, cryptographically verified
+Result/Read envelope from the current authorized gateway, matching workspace,
+request/route/gateway, Phone/Computer identities, key generations and known
+membership heads. Duplicate/malformed JSON, invalid signatures, class/routing
+mismatches and unknown or retired keys remain conservative. This trusts the
+existing private, profile-bound journal writer contract; it is not provenance
+for an arbitrary foreign database or a different historical writer.
+
+An additive `read_cache_class` column records unexamined/verified/conservative
+classification; partial indexes advance past rejected legacy rows and select
+oldest verified caches. Each call examines at most 64 candidates/8 MiB, refunds
+at most 64 caches/8 MiB and checks a 20 ms original deadline between rows. The
+first finite candidate
+and first eligible trim row can each progress even if setup already exhausted
+the deadline; no deadline is renewed and no SQL/crypto preemption is claimed.
+New reader limits and budgets use `length(CAST(... AS BLOB))`, including
+malformed non-ASCII JSON. Existing counters/triggers stay unchanged: valid signed
+wire envelopes are ASCII. This is a bound on materialized signature inputs,
+not a bound on SQLite planner/metadata page I/O. One candidate is at most 2 MiB
+plus an 8 KiB header; parsing/signature verification
+runs outside a SQLite transaction and is not preempted mid-row. Previously
+classified caches are reclaimed before more signature work, avoiding adoption
+starvation. Each classification has an exact immutable-byte CAS; each eviction
+is an independent committed `result=NULL` update, and the existing result trigger
+refunds the exact bytes once. Neither insufficient admission nor cancellation of
+a later turn rolls those commits back. The existing exclusive journal lock
+fences concurrent connector owners; restart/handoff retains committed progress.
+No identity, native receipt, quota counter, snapshot or timestamp is reset.
+
+Only typed `JournalError::Refused(RETAINED_LIMIT)` becomes transport retry;
+conflicts, SQLite and I/O failures remain fatal. Reclaim does not shrink the
+SQLite file, change its journal mode, run VACUUM, decrypt stored result payloads
+or restore evicted ciphertext. An older executable ignores the additive column
+but cannot restore released Read caches.

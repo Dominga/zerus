@@ -346,7 +346,19 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             "policy" => super::worktree_maintenance::command(&args[1..])?,
             "sweep" if args[1..].iter().all(|a| a=="--json") => super::worktree_maintenance::Sweep::default().tick()?,
             "sweep" => return Err("usage: hgs worktrees sweep --json (one bounded automatic cleanup step)".into()),
-            _ => super::worktree_cleanup::remove_command(&args[1..])?,
+            _ => {
+                let (result, attempted) = super::worktree_cleanup::remove_with_outcome(&args[1..]);
+                if let Err(detail) = &result {
+                    if args.iter().any(|s| s == "--json") {
+                        let option = |key| args.windows(2).find(|w| w[0] == key).map(|w| w[1].as_str());
+                        println!("{}", json!({"operation":"worktree_remove","outcome_version":1,
+                            "status":if attempted {"unconfirmed"} else {"kept"},
+                            "path":option("--path"),"common_dir":option("--common-dir"),
+                            "request_id":option("--request-id"),"detail":detail}));
+                    }
+                }
+                result?
+            },
         };
         println!("{value}");
         return Ok(0);

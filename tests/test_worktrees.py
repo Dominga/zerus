@@ -236,25 +236,26 @@ class Cleanup(Repository,unittest.TestCase):
         self.assertEqual(row['verdict'],'review',row);self.assertIn('ignored_data',codes(row['notes']));self.assertEqual(row['ignored'],[{'path':'target','bytes':1024,'complete':True}]);self.assertEqual(row['ignored_bytes'],1024)
         row=self.row(gone,data);self.assertEqual(row['verdict'],'missing');self.assertFalse(row['available'])
     @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
-    def test_manual_process_confirmation_is_exact_and_never_overrides_other_blockers(self):
+    def test_manual_process_confirmation_survives_churn_but_never_overrides_other_blockers(self):
         def protected():
             child=subprocess.Popen([sys.executable,'-I','-c',
                 'import ctypes,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print("ready",flush=True); time.sleep(90)'],
                 cwd=self.root,stdout=subprocess.PIPE,text=True)
-            self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(child.kill)
+            self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(lambda: child.poll() is None and child.kill())
             self.assertEqual(child.stdout.readline().strip(),'ready');return child
         tree=self.linked('manual');self.age(tree);unknown=protected();row=self.row(tree)
         self.assertEqual(codes(row['reasons']),['processes_unavailable'])
         self.assertEqual(row['unreadable_processes'][0]['pid'],unknown.pid)
-        self.assertTrue(row['unreadable_processes'][0]['identity']);self.assertEqual(len(row['process_fingerprint']),64)
+        self.assertTrue(row['unreadable_processes'][0]['identity']);self.assertRegex(row['process_fingerprint'],r'^v2:[0-9]+:[a-f0-9]{64}$')
         refused=self.remove(tree,row['fingerprint']);self.assertNotEqual(refused.returncode,0);self.assertTrue(tree.exists())
         stale=self.remove(tree,row['fingerprint'],extra=('--process-fingerprint','0'*64))
         self.assertNotEqual(stale.returncode,0);self.assertIn('confirmation is stale',stale.stderr)
         automatic=self.remove(tree,row['fingerprint'],extra=('--automatic','--process-fingerprint',row['process_fingerprint']))
         self.assertNotEqual(automatic.returncode,0);self.assertTrue(tree.exists())
-        protected();changed=self.row(tree);self.assertNotEqual(changed['process_fingerprint'],row['process_fingerprint'])
-        stale=self.remove(tree,row['fingerprint'],extra=('--process-fingerprint',row['process_fingerprint']))
-        self.assertNotEqual(stale.returncode,0);self.assertTrue(tree.exists())
+        churn=self.linked('churn');self.age(churn);old=self.row(churn)
+        unknown.terminate();unknown.wait(timeout=5);protected();changed=self.row(tree)
+        allowed=self.remove(churn,old['fingerprint'],extra=('--process-fingerprint',old['process_fingerprint']))
+        self.assertEqual(allowed.returncode,0,allowed.stderr);self.assertFalse(churn.exists())
         known=subprocess.Popen(['sleep','90'],cwd=tree)
         self.addCleanup(lambda: known.poll() is None and (known.terminate(),known.wait(timeout=5)))
         busy=self.row(tree);self.assertIn('processes',codes(busy['reasons']));self.assertIn(known.pid,[p['pid'] for p in busy['processes']])
@@ -302,7 +303,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         first,row=review();second,current=review()
         self.assertNotEqual(first,second)
         self.assertEqual(row['fingerprint'],current['fingerprint'])
-        self.assertEqual(row['process_fingerprint'],current['process_fingerprint'])
+        self.assertTrue(current['process_fingerprint'].startswith('v2:'))
         self.assertTrue(next(r for r in current['unreadable_processes'] if r['pid']==second)['invocation_ancestor'])
         args=['remove','--path',str(tree),'--common-dir',str(self.repo/'.git'),
             '--fingerprint',row['fingerprint'],'--process-fingerprint',row['process_fingerprint']]
@@ -319,11 +320,22 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         tree=self.linked('task');self.age(tree);before=self.row(tree);self.catalog()
         self.commit(tree,'late work')
         stale=self.remove(tree,before['fingerprint']);self.assertNotEqual(stale.returncode,0);self.assertIn('changed since the review',stale.stderr);self.assertTrue(tree.exists())
+        refusal=json.loads(stale.stdout);self.assertEqual(refusal['status'],'kept');self.assertEqual(refusal['operation'],'worktree_remove');self.assertEqual(refusal['request_id'],'test-remove')
         result=self.remove(tree,self.row(tree)['fingerprint']);self.assertEqual(result.returncode,0,result.stderr)
         data=json.loads(result.stdout);self.assertEqual(data['status'],'removed');self.assertEqual(data['request_id'],'test-remove');self.assertFalse(data['branch_deleted'])
         self.assertEqual(data['path'],str(tree.resolve()));self.assertEqual(data['common_dir'],str((self.repo/'.git').resolve()))
         self.assertFalse(tree.exists());self.assertIn('feature/task',self.git('-C',str(self.repo),'branch','--list','feature/task'))
         self.assertNotIn(str(tree.resolve()),[r['path'] for r in self.catalog()['worktrees']])
+    def test_remove_failure_after_git_admission_has_an_unknown_structured_outcome(self):
+        tree=self.linked('git-failure');self.age(tree);row=self.row(tree)
+        self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n sys.stderr.write('fixture removal failure\\n');sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
+        result=self.remove(tree,row['fingerprint'])
+        self.assertNotEqual(result.returncode,0);self.assertTrue(tree.exists())
+        outcome=json.loads(result.stdout)
+        self.assertEqual(outcome['status'],'unconfirmed');self.assertEqual(outcome['outcome_version'],1)
+        self.assertEqual(outcome['request_id'],'test-remove');self.assertEqual(outcome['path'],str(tree))
+        self.assertIn('fixture removal failure',outcome['detail'])
+
     def test_remove_deletes_ignored_data_and_only_merged_branches(self):
         merged=self.linked('merged');(merged/'target').mkdir();(merged/'target'/'out').write_text('build');self.age(merged)
         reviewed=self.row(merged);result=self.remove(merged,reviewed['fingerprint'],extra=('--delete-branch','--ignored-fingerprint',reviewed['ignored_fingerprint']));self.assertEqual(result.returncode,0,result.stderr)

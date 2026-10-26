@@ -3,6 +3,7 @@
 #include "SessionsWindow.h"
 #include <QStandardPaths>
 #include "WorktreeBatchCleanupDialog.h"
+#include "WorktreeCleanupStatus.h"
 #include "SessionNotifications.h"
 #include "DownloadCache.h"
 #include "SessionFileDrop.h"
@@ -1561,6 +1562,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     auto *workspace = new QVBoxLayout; workspace->setContentsMargins(0, 0, 0, 0); workspace->setSpacing(0);
     workspace->addWidget(m_pages, 1);
+    m_terminationCleanup = new WorktreeCleanupStatus(&m_client, this);
+    workspace->addWidget(m_terminationCleanup);
+    m_terminationCleanup->foldersRemoved = [this](const QList<QJsonObject> &entries) {
+        for(const auto &entry:entries)
+            if(m_archivedWorktree.size()==4 && entry["host"]==m_archivedWorktree[0] && entry["row"].toObject()["path"]==m_archivedWorktree[2])
+                {m_archivedWorktree.clear();m_worktreeCleanupOffered=false;m_worktreeCleanup->hide();}
+        emit refreshRequested();updateWorktrees();
+    };
     auto *statusBar = new QFrame; statusBar->setObjectName("workspaceStatus"); statusBar->setFixedHeight(28);
     auto *statusLayout = new QHBoxLayout(statusBar); statusLayout->setContentsMargins(12, 3, 12, 3);
     m_connectionStatus = new StatusMessage; m_connectionStatus->setObjectName("workspaceConnectionStatus");
@@ -1728,9 +1737,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             const bool requested=m_removeTerminatedWorktree && operation==QStringLiteral("terminate %1").arg(offer[1]);
             m_removeTerminatedWorktree=false;
             if (ok) {
-                if(!m_worktreeCleanupOffered)offerWorktreeCleanup();
-                if(requested && !offer[2].isEmpty() && !offer[3].isEmpty())
+                if(requested && !offer[2].isEmpty() && !offer[3].isEmpty()) {
+                    m_worktreeCleanupOffered=false;m_worktreeCleanup->hide();
+                    m_terminationCleanupResults.insert(offer[0]+'\n'+offer[1]+'\n'+offer[2],{});
                     QTimer::singleShot(0,this,[this,cleanupOffer]{reviewTerminatedWorktrees({cleanupOffer});});
+                } else if(!m_worktreeCleanupOffered)offerWorktreeCleanup();
             } else m_archivedWorktree.clear();
         }
         if (!ok && (operation == QStringLiteral("resume %1").arg(m_startSend.name) || operation == QStringLiteral("fresh %1").arg(m_startSend.name)))
@@ -1778,6 +1789,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested(); rebuild(); inspect();
     });
     connect(&m_client, &HgsClient::worktreeCleanupFinished, this, [this](const QString &host, const QString &operation, const QJsonObject &result) {
+        const auto pending=host+'\n'+operation.mid(QStringLiteral("terminate ").size())+'\n'+result["path"].toString();
+        if(operation.startsWith("terminate ") && m_terminationCleanupResults.contains(pending)) {
+            m_terminationCleanupResults[pending]=result;return;
+        }
         if (m_archivedWorktree.size() != 4 || m_archivedWorktree[0] != host || (!m_archivedWorktree[2].isEmpty() && m_archivedWorktree[2] != result["path"].toString())
             || (!m_archivedWorktree[3].isEmpty() && m_archivedWorktree[3] != result["common_dir"].toString())
             || (operation != "archive " + m_archivedWorktree[1] && operation != "terminate " + m_archivedWorktree[1])) return;
@@ -1879,6 +1894,9 @@ void SessionsWindow::applyTheme()
     setStyleSheet(QString(R"(
         QWidget#settingsPage, QWidget#recoverySettingsPage, QWidget#sessionsWindow, QWidget#machinesPage, QWidget#accountsPage, QDialog#accountDialog, QDialog#accountPermissionsDialog, QDialog#machineSetupDialog, QDialog#projectsPage, QDialog#projectColorDialog, QDialog#projectFolderDialog, QDialog#deleteProjectDialog, QDialog#newSessionDialog, QDialog#folderBrowser, QDialog#forkSessionDialog, QDialog#renameSessionDialog, QDialog#workspaceSettingsDialog, QDialog#sessionFileDialog, QDialog#swarmDialog, QDialog#speechProfileEditor { background:%1; color:%2; }
         QColorDialog#workspaceColorDialog { background:%1; color:%2; }
+        QDialog#worktreeBatchCleanupDialog, QDialog#cleanupFileInspection { background:%1; color:%2; }
+        QFrame#terminationCleanupStatus { background:%3; border:0; border-top:1px solid %4; }
+        QPlainTextEdit#worktreeCleanupDecision, QDialog#cleanupFileInspection QPlainTextEdit, QDialog#cleanupFileInspection QTreeWidget, QDialog#cleanupFileInspection QListWidget { background:%3; color:%2; border:1px solid %4; border-radius:7px; selection-background-color:%10; selection-color:%2; }
         QDialog#phonePairingDialog { background:%1; color:%2; }
         QDialog#phonePairingDialog QScrollArea { background:transparent; border:0; }
         QPlainTextEdit#phonePairingCodeText { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:4px; selection-background-color:%10; selection-color:%2; }
@@ -1976,7 +1994,7 @@ void SessionsWindow::applyTheme()
         QComboBox::drop-down { border:0; width:24px; }
         QComboBox::down-arrow { image:url(:/hgs/chevron-down.svg); width:14px; height:14px; }
         QComboBox QAbstractItemView { background:%3; color:%2; selection-background-color:%10; selection-color:%2; }
-        QTableWidget, QTreeWidget#worktreeCatalog, QTreeWidget#processList, QListWidget#folderList { background:%3; color:%2; border:1px solid %4; border-radius:8px; gridline-color:%4; selection-background-color:%10; selection-color:%2; }
+        QTableWidget, QTreeWidget#worktreeCatalog, QTreeWidget#batchCleanupList, QTreeWidget#processList, QListWidget#folderList { background:%3; color:%2; border:1px solid %4; border-radius:8px; gridline-color:%4; selection-background-color:%10; selection-color:%2; }
         QHeaderView::section { background:%3; color:%6; border:0; border-bottom:1px solid %4; padding:10px; }
         QListWidget#folderList::item { padding:9px 12px; }
         QListWidget#logicalProjects, QListWidget#swarmConflicts { background:%3; color:%2; border:1px solid %4; border-radius:8px; padding:5px; outline:0; }
@@ -1985,7 +2003,7 @@ void SessionsWindow::applyTheme()
         QListWidget#logicalProjects::item:hover, QListWidget#swarmConflicts::item:hover { background:%10; }
         QSplitter#swarmConflictSplit::handle { width:14px; }
         QTableWidget#swarmConflictChoices::item { padding:8px 10px; }
-        QTreeWidget#worktreeCatalog::item, QTreeWidget#processList::item { padding:6px 4px; }
+        QTreeWidget#worktreeCatalog::item, QTreeWidget#batchCleanupList::item, QTreeWidget#processList::item { padding:6px 4px; }
         QTableWidget#projectFolders::item { padding:0 10px; }
         QSpinBox, QDoubleSpinBox#downloadCacheSize { background:%3; color:%2; border:1px solid %4; border-radius:7px; padding:8px 10px; }
         QDoubleSpinBox#downloadCacheSize:disabled { color:%6; background:%1; }
@@ -5563,18 +5581,17 @@ void SessionsWindow::reviewTerminatedWorktrees(const QList<QStringList> &offers)
     QList<QJsonObject> entries;
     for(const auto &offer:offers) {
         if(offer.size()<4 || offer[2].isEmpty() || offer[3].isEmpty())continue;
-        entries << QJsonObject{{"host",offer[0]},{"machine",offer[0].isEmpty()?m_fleet.local().host:offer[0]},
+        auto entry=QJsonObject{{"host",offer[0]},{"machine",offer[0].isEmpty()?m_fleet.local().host:offer[0]},
             {"common_dir",offer[3]},{"exit_cleanup",true},{"expected_owner_id",offer.value(4)},{"row",QJsonObject{{"path",offer[2]},{"kind","linked"}}}};
+        const auto outcome=m_terminationCleanupResults.take(offer[0]+'\n'+offer[1]+'\n'+offer[2]);
+        if(!outcome.isEmpty() && (outcome["common_dir"]!=offer[3] || outcome["status"]!="kept")) {
+            entry["cleanup_status"]=outcome["common_dir"]==offer[3] && outcome["status"]=="removed"?QStringLiteral("removed"):QStringLiteral("unconfirmed");
+            entry["cleanup_detail"]=outcome["reason"];
+        }
+        entries<<entry;
     }
     if(entries.isEmpty())return;
-    WorktreeBatchCleanupDialog dialog(&m_client,entries,this);
-    dialog.exec();
-    if(dialog.changed()) {
-        for(const auto &entry:dialog.removedEntries())
-            if(m_archivedWorktree.size()==4 && entry["host"]==m_archivedWorktree[0] && entry["row"].toObject()["path"]==m_archivedWorktree[2])
-                {m_archivedWorktree.clear();m_worktreeCleanupOffered=false;m_worktreeCleanup->hide();}
-        showNotice(dialog.summary());emit refreshRequested();updateWorktrees();
-    }
+    m_terminationCleanup->add(entries);
 }
 
 void SessionsWindow::forkSession()
@@ -5700,14 +5717,19 @@ void SessionsWindow::terminateSession()
         && m_details.value("conversation_id").toString()==conversation;
     const bool linked=original.session.gitWorktree || (exactInspection && m_details.value("git_worktree").toBool());
     if(live && keepArchive && linked) {
-        removeWorktree=new QCheckBox(tr("Remove the unused worktree after stopping"),&confirm);
+        removeWorktree=new QCheckBox(tr("Remove the working folder after stopping"),&confirm);
         removeWorktree->setObjectName("removeTerminatedWorktree");
         removeWorktree->setChecked(QSettings().value("workspace/removeWorktreeAfterTermination",false).toBool());
-        removeWorktree->setToolTip(tr("Keep branches and conversation history. Verified generated caches can be removed; unsaved work and other local files require review."));
+        removeWorktree->setToolTip(tr("Cleanup runs in the background. Unsaved work, unknown local files and folders in use are kept for review."));
         confirm.setCheckBox(removeWorktree);
+        confirm.setInformativeText(tr("Computer: %1\nThe conversation and branch are kept. Folders that need review stay on disk.").arg(original.machine));
     }
     confirm.button(QMessageBox::Yes)->setText(live ? (keepArchive ? tr("Stop and archive") : tr("Terminate session"))
         : archived ? tr("Forget archived session") : tr("Forget saved session"));
+    if(removeWorktree){
+        const auto update=[&confirm](bool checked){confirm.button(QMessageBox::Yes)->setText(checked?tr("Stop and remove folder"):tr("Stop and archive"));};
+        connect(removeWorktree,&QCheckBox::toggled,&confirm,update);update(removeWorktree->isChecked());
+    }
     confirm.setDefaultButton(QMessageBox::Cancel); confirm.setEscapeButton(QMessageBox::Cancel);
     if (confirm.exec() != QMessageBox::Yes || !selectSessionEntry(original)) return;
     const auto *current = selected();

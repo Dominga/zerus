@@ -2256,20 +2256,25 @@ and staged Git blobs (bounded to 64 MiB and two seconds), and does not override
 any other protection. A changed or incomplete proof requires a new review.
 
 Linux can deny access to a protected process's current folder or executable,
-including desktop services. A completed process inventory with only those
-access denials offers **Check running programs** in manual cleanup. The folder
-stays protected until you explicitly confirm **I checked these folders are not
-in use; remove them anyway**. This accepts the uncertainty about those programs;
-it does not establish that the folder is unused. The confirmation is bound to
-the exact folder review and unreadable process identities and is checked again
-before removal. A protected ancestor that launches the current CLI request
-(including a fresh SSH session) is matched by its verified invocation role,
-program name, hidden-path shape and computer boot rather than its temporary PID. Other
-protected processes retain exact PID and start identities. Readable ancestor
-paths still protect their folders. A known program or session using the folder, another blocker,
-an incomplete inventory, or changed process identities still prevents removal.
-Automatic cleanup never uses this exception. Older owning CLIs without this
-proof keep the folder; update that computer before trying manual cleanup again.
+including desktop services. A complete inventory containing only access denials
+allows explicit manual acceptance: **Remove even if some running programs cannot
+be checked**. This accepts uncertainty; it does not prove those programs are
+unrelated. The acceptance lasts five minutes on the owning computer and is bound
+to the exact checkout review, repository and ownership. Unrelated protected
+processes starting, exiting or changing PID do not invalidate it. Removal still
+requires a fresh complete inventory and refuses known programs or sessions using
+the folder, changed files or ownership, and all other protections. An incomplete
+inventory remains blocked. Automatic cleanup never uses this exception. Process
+names, PIDs and access details remain available under **Details**.
+
+A refusal before deletion shows **Folder kept**. **Check again** refreshes only
+remaining folders and clears the prior local-file, discard and process choices;
+removal needs a new explicit confirmation. File inspection remains available.
+Successfully removed targets are never resubmitted. A lost response, an older CLI
+without a verified outcome, or an error after Git may have started shows **Result
+unknown** and never enables another removal in that operation. Files can still be
+inspected. The CLI preserves nonzero failure exits and stderr while adding a
+request-bound JSON outcome for clients that request `--json`.
 
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
@@ -2353,17 +2358,27 @@ A replacement checkout at the same path or branch is kept for manual review;
 older sessions without a launch ownership record also require review. Fresh
 removal fingerprints include the ownership nonce, so replacing a checkout after
 review cannot inherit its removal consent.
-It runs only after the exact termination succeeds and checks the original folder
-on its owning computer. A verified Zerus-created, clean, integrated checkout can
-be removed with tool-declared generated caches without another confirmation.
-Supported cache proofs include Cargo's cache-directory tag, source-backed Python
-bytecode, package-manager metadata, Gradle build metadata and a CMake build bound
-to this checkout. A directory name alone does not establish disposable data.
-Other local files, source changes, external checkouts and uncertain process use
-open the ordinary cleanup review. The branch and conversation are retained, and
-managed archive restoration records the exact retained head before removal.
-Cancellation, failed termination and unconfirmed removal never trigger a retry.
-Background maintenance keeps its existing policy and preserves all ignored data.
+After the original confirmation closes, cleanup runs in the background only
+following exact successful termination. A compact workspace notice shows progress,
+then **Working folder removed**, **Working folder kept** with a short reason, or
+an unknown result. **Check again**, **View files**, **Details** and **Keep** provide
+explicit next actions. Review opens only when requested and does not block the
+rest of Zerus. Pending work and retained results are bounded to 64 folders, and
+background batches run sequentially. Closing the review does not cancel an
+accepted removal.
+
+The original folder is checked on its owning computer. A verified Zerus-created,
+clean, integrated checkout can be removed with tool-declared generated caches
+without another confirmation. Supported cache proofs include Cargo's cache-directory
+tag, source-backed Python bytecode, package-manager metadata, Gradle build metadata
+and a CMake build bound to this checkout. A directory name alone does not establish
+disposable data. Other local files, source changes, external checkouts and uncertain
+process use keep the folder for explicit review. The branch and conversation are
+retained, and managed archive restoration records the exact retained head before
+removal. An already completed native cleanup is reported directly; an uncertain
+native cleanup is never restarted by the desktop. Cancellation, failed termination
+and unconfirmed removal never trigger a retry. Background maintenance keeps its
+existing policy and preserves all ignored data.
 
 The cleanup review always shows integration evidence, even when local files
 remain. Git integration uses local refs, not a fresh remote check. The selected

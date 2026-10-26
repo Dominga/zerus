@@ -1499,13 +1499,22 @@ quint64 HgsClient::removeWorktree(const QString &host,const QString &path,const 
     if(!processFingerprint.isEmpty())args<<"--process-fingerprint"<<processFingerprint;
     if(preserveArchiveRestore)args<<"--preserve-archive-restore";
     const auto forget=[this,host,commonDir]{invalidateWorktreeCache(host,commonDir);};
-    runHgs(m_hgs,args,330000,this,[this,request,token,path,forget](const QByteArray &out){
-        forget();const auto data=QJsonDocument::fromJson(out).object();
-        if(data["request_id"]!=token||(data["status"]!="removed"&&data["status"]!="forgotten")||data["path"]!=path){
-            emit worktreeRemoved(request,false,{},tr("Removal could not be confirmed. Review the worktrees again."));return;
+    auto process=processRequest(m_hgs,args); process.timeoutMs=330000; process.maximumOutputBytes=65536;
+    ProcessRunner::run(std::move(process),this,[this,request,token,path,commonDir,host,forget](const ProcessRunner::Result &reply){
+        forget();
+        const auto data=QJsonDocument::fromJson(reply.standardOutput).object();
+        const bool finished=reply.outcome==ProcessRunner::Result::Finished && reply.exitStatus==QProcess::NormalExit;
+        const bool identity=data["request_id"]==token && data["path"]==path;
+        if(finished && reply.exitCode==0 && identity && (data["status"]=="removed" || data["status"]=="forgotten")) {
+            emit worktreeRemoved(request,true,data,{});return;
         }
-        emit worktreeRemoved(request,true,data,{});
-    },[this,request,host,forget](const QString &,const QString &error){forget();emit worktreeRemoved(request,false,{},cleanupError(host,error));});
+        const bool verified=finished && reply.exitCode!=0 && identity && data["common_dir"]==commonDir
+            && data["operation"]=="worktree_remove" && data["outcome_version"]==1
+            && (data["status"]=="kept" || data["status"]=="unconfirmed");
+        const auto detail=verified?data["detail"].toString().left(4000):QString::fromLocal8Bit(reply.standardError).trimmed().left(4000);
+        emit worktreeRemoved(request,false,verified?data:QJsonObject(),detail.isEmpty()
+            ? tr("Removal could not be confirmed. Check the folder before deciding what to do next.") : cleanupError(host,detail));
+    });
     return request;
 }
 

@@ -8653,20 +8653,26 @@ void TestSessionsWindow::terminatingWorktreeSessionOffersRemainingCleanupAndCons
 
 void TestSessionsWindow::terminationWorktreeChoiceKeepsItsOriginalFolder_data()
 {
-    QTest::addColumn<QString>("mode");
-    for(const auto *mode:{"checked","unchecked","cancel","bulk"})QTest::newRow(mode)<<QString::fromLatin1(mode);
+    QTest::addColumn<QString>("mode");QTest::addColumn<QString>("theme");
+    for(const auto *mode:{"checked","unchecked","cancel","bulk","native-removed","native-unconfirmed"})QTest::newRow(mode)<<QString::fromLatin1(mode)<<QString("light");
+    QTest::newRow("checked-dark")<<QString("checked")<<QString("dark");
 }
 void TestSessionsWindow::terminationWorktreeChoiceKeepsItsOriginalFolder()
 {
-    QFETCH(QString,mode);QSettings().setValue("workspace/removeWorktreeAfterTermination",false);
+    QFETCH(QString,mode);QFETCH(QString,theme);QSettings().setValue("workspace/theme",theme);QSettings().setValue("workspace/removeWorktreeAfterTermination",false);
     auto state=fleet();auto local=state.local();const int count=mode=="bulk"?2:1;
     QSet<QString> expected;
     for(int i=0;i<count;++i){auto &s=local.sessions[i];s.state="running";s.cmd="codex";s.tracked=true;s.runId="cleanup-run-"+QString::number(i);s.worktreeOwnerId="original-owner-"+QString::number(i);s.gitWorktree=true;s.gitRoot="/workspace/owned-"+QString::number(i);s.gitCommonDir="/workspace/project/.git";expected.insert(s.gitRoot);}
-    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());SessionsWindow window(program());keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},local.sessions[0].name);
+    state.setLocal(local,QDateTime::currentMSecsSinceEpoch());SessionsWindow window(program());keepDetailsPollsOut(window);window.resize(960,760);window.setFleet(state);window.show();window.showSession({},local.sessions[0].name);
     auto *client=window.findChild<HgsClient *>();QSignalSpy writes(client,&HgsClient::writeDone);
+    QSignalSpy reviews(client,&HgsClient::worktreeReviewReady);
+    if(mode.startsWith("native-"))connect(client,&HgsClient::writeDone,&window,[&](const QString &operation,bool ok,const QString &){
+        if(ok && operation.startsWith("terminate "))client->worktreeCleanupFinished({},operation,{{"status",mode.mid(7)},{"path",local.sessions[0].gitRoot},{"common_dir",local.sessions[0].gitCommonDir},{"reason","Fixture native outcome"}});
+    });
     bool checkboxSeen=false;QSet<QString> reviewed;QTimer closer;
     closer.setInterval(10);connect(&closer,&QTimer::timeout,&window,[&]{
         if(auto *dialog=window.findChild<QDialog *>("worktreeBatchCleanupDialog")){
+            QVERIFY(!dialog->isVisible());QCOMPARE(dialog->windowModality(),Qt::NonModal);
             auto *list=dialog->findChild<QTreeWidget *>("batchCleanupList");
             for(int i=0;i<list->topLevelItemCount();++i){const auto entry=list->topLevelItem(i)->data(0,Qt::UserRole).toJsonObject();const auto path=entry["row"].toObject()["path"].toString();reviewed.insert(path);QCOMPARE(entry["expected_owner_id"].toString(),"original-owner-"+path.section('-',-1));}
             dialog->reject();
@@ -8697,7 +8703,30 @@ void TestSessionsWindow::terminationWorktreeChoiceKeepsItsOriginalFolder()
         window.showSession({},local.sessions[2].name);
         QTRY_COMPARE(writes.size(),count);
         if(mode=="unchecked"){QTest::qWait(100);QVERIFY(reviewed.isEmpty());}
-        else QTRY_COMPARE(reviewed,expected);
+        else {
+            QTRY_COMPARE(reviewed,expected);
+            if(mode.startsWith("native-")){
+                auto *dialog=window.findChild<QDialog *>("worktreeBatchCleanupDialog");QVERIFY(dialog);
+                QTRY_COMPARE(dialog->findChild<QTreeWidget *>("batchCleanupList")->topLevelItem(0)->text(3),mode=="native-removed"?QString("Folder removed"):QString("Result unknown"));
+                QCOMPARE(reviews.size(),0);
+            }
+            auto *bar=window.findChild<QFrame *>("terminationCleanupStatus");auto *label=bar->findChild<QLabel *>("terminationCleanupSummary");QVERIFY(bar->isVisible());
+            QTRY_VERIFY(!label->text().startsWith("Cleaning"));
+            QVERIFY(label->height()>=label->heightForWidth(label->width()));
+            for(auto *button:bar->findChildren<QPushButton *>())if(button->isVisible())QVERIFY(bar->rect().contains(QRect(button->mapTo(bar,QPoint()),button->size())));
+            const auto preview=qEnvironmentVariable("HGS_WORKTREE_PREVIEW");
+            if(mode=="checked"){
+                closer.stop();bar->findChild<QPushButton *>("reviewTerminationCleanup")->click();
+                auto *review=bar->findChild<QDialog *>("worktreeBatchCleanupDialog");QVERIFY(review);QVERIFY(review->isVisible());
+                const auto canvas=review->findChild<QTreeWidget *>("batchCleanupList")->viewport()->grab().toImage();
+                const auto background=canvas.pixelColor(canvas.width()/2,canvas.height()-1);
+                QCOMPARE(background.lightness()<128,theme=="dark");
+                if(!preview.isEmpty()){
+                    QDir().mkpath(preview);QVERIFY(bar->grab().save(preview+"/workspace-cleanup-"+theme+".png"));
+                    QVERIFY(review->grab().save(preview+"/workspace-review-"+theme+".png"));
+                }
+            }
+        }
     }
 }
 

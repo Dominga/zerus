@@ -271,12 +271,16 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         dialog.setObjectName("confirmSelectionAction"); dialog.setTextFormat(Qt::PlainText); dialog.setDetailedText(names.join('\n'));
         QCheckBox *cleanup=nullptr;
         if(action==SelectionAction::Terminate && std::any_of(targets.cbegin(),targets.cend(),[](const Entry &entry){return entry.session.gitWorktree;})) {
-            cleanup=new QCheckBox(tr("Remove unused worktrees after stopping"),&dialog);cleanup->setObjectName("removeTerminatedWorktrees");
+            cleanup=new QCheckBox(tr("Remove working folders after stopping"),&dialog);cleanup->setObjectName("removeTerminatedWorktrees");
             cleanup->setChecked(QSettings().value("workspace/removeWorktreeAfterTermination",false).toBool());
-            cleanup->setToolTip(tr("Keep branches and history. Generated caches can be removed; other local files and uncertain folders require review."));
+            cleanup->setToolTip(tr("Keep branches and conversations. Cleanup runs in the background; folders that need review stay on disk."));
             dialog.setCheckBox(cleanup);
         }
         auto *confirm = dialog.addButton(clearArchive ? tr("Clear archive") : tr("%1 %2 sessions").arg(selectionActionText(action)).arg(targets.size()), QMessageBox::DestructiveRole);
+        if(cleanup){
+            const auto update=[confirm,count=targets.size()](bool checked){confirm->setText(checked?tr("Stop %1 sessions and remove folders").arg(count):tr("Stop %1 sessions").arg(count));};
+            connect(cleanup,&QCheckBox::toggled,&dialog,update);update(cleanup->isChecked());
+        }
         dialog.setDefaultButton(QMessageBox::Cancel); dialog.setEscapeButton(QMessageBox::Cancel); dialog.exec();
         if (dialog.clickedButton() != confirm) return;
         removeWorktrees=cleanup && cleanup->isChecked();
@@ -383,7 +387,10 @@ bool SessionsWindow::finishSelectionAction(const QString &operation, bool ok, co
     if(ok && !m_selectionCleanupTarget.isEmpty()) {
         const auto target=m_selectionCleanupTarget;
         const bool duplicate=std::any_of(m_selectionCleanupOffers.cbegin(),m_selectionCleanupOffers.cend(),[&](const QStringList &offer){return offer[0]==target[0] && offer[2]==target[2];});
-        if(!duplicate){if(m_selectionCleanupOffers.size()<64)m_selectionCleanupOffers.append(target);else ++m_selectionCleanupOverflow;}
+        if(!duplicate){if(m_selectionCleanupOffers.size()<64){
+            m_selectionCleanupOffers.append(target);
+            m_terminationCleanupResults.insert(target[0]+'\n'+target[1]+'\n'+target[2],{});
+        }else ++m_selectionCleanupOverflow;}
     }
     m_selectionCleanupTarget.clear();
     m_selectionCommand.clear();

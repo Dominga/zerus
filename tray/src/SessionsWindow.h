@@ -8,6 +8,7 @@ class ArchiveBrowser;
 class ToolbarChip;
 class SettingsPage;
 class SwarmController;
+class WorktreeCleanupStatus;
 
 #include <QJsonArray>
 #include <QJsonObject>
@@ -204,6 +205,8 @@ private:
     QString m_archivedWorktreeRun, m_archivedWorktreeOwnerId, m_worktreeCleanupReason;
     bool m_worktreeCleanupOffered = false, m_worktreeCleanupUnconfirmed = false;
     QPushButton *m_worktreeCleanup = nullptr;
+    WorktreeCleanupStatus *m_terminationCleanup = nullptr;
+    QHash<QString,QJsonObject> m_terminationCleanupResults;
     int m_worktreeCleanupRevision = 0;
     void offerWorktreeCleanup();
     void updateWorktreeCleanupOffer();

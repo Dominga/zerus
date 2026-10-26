@@ -6,8 +6,8 @@ hierarchy" of team "Teams v2", 2026-10-26. Plan:
 F12 (refinement), H1-H4, H6, H7 (rest), D1, D2, C7 (refinement), G9, U8, U9 and
 REQUIREMENTS Prompt 2 (hierarchy). Builds on `2026-10-25-team-phases.md`,
 `2026-10-26-team-delivery.md` and `2026-10-26-team-permissions-and-lead-load.md`.
-Section 9 (hierarchy) keeps the defaults of Prompt 2; the owner confirms them
-before tasks 351 and 352 write code (the lead tells backend2).
+Section 9 (hierarchy) keeps the defaults of Prompt 2; the owner confirmed
+them on 2026-10-26, so tasks 351 and 352 implement them as written.
 
 Owners (task numbers of phase 35):
 
@@ -47,10 +47,14 @@ task replaces fixtures that differ with real status output.
    project of its repository (git common dir), never to General. The GUI
    files any session that is a team member (status `members[].session`) into
    the lead's group before any default rule (`SessionOrganization`).
-2. *No worktree by default.* `folder_policy: auto` (default since phase 32)
-   gives `shared` unless the plan names `worktree` or `clone`.
-   `settings.worktrees_forbidden` and the project's `teams.worktrees:
-   forbidden` refuse both.
+2. *Folder kind by default.* `folder_policy: auto` (default since phase 32)
+   keeps `dispatcher::default_folder`: a member without an explicit folder in
+   a Git team folder gets a `clone` when its agent is dsh (its sandbox cannot
+   write the shared `.git`, so merge and commit need no permission request)
+   and a `worktree` otherwise; a non-Git team folder gives `shared`. The plan
+   may name any kind. `settings.worktrees_forbidden` and the project's
+   `teams.worktrees: forbidden` refuse `worktree` and `clone` (the member is
+   `shared`). Existing members keep their folders.
 3. *Mismatch is an error.* `plan`, `approve`, `extend`, `add-member`: a member
    folder that the policy forbids, or a `shared` member when the policy is
    `worktree`, is a validation error (`kind: "folder"`), not a warning.
@@ -282,7 +286,7 @@ records event `member_rebound {member, from, to}`.
 
 ## 9. Hierarchy (Prompt 2)
 
-Defaults as proposed by REQUIREMENTS Prompt 2; owner to confirm.
+Defaults as proposed by REQUIREMENTS Prompt 2; confirmed by the owner.
 
 1. *Link.* `Team.parent: Option<{team, task, member}>`, `Team.children:
    Vec<String>` (at most 32). `hgs team create` with `"parent": {team, task}`

@@ -1,8 +1,9 @@
 //! WhiteWh fork: pure rules of a team's task graph, as the prototype
 //! (design/agent-teams/index.html: cycleNodes, layersOf, chainOf, readyTasks,
 //! planErrors) defines them. Edges run from a dependency to its dependent.
-use super::model::{DependencyKind, MemberState, Task, TaskStatus, Team};
+use super::model::{DependencyKind, MemberState, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 /// The tasks that depend on `id`, in id order.
 fn dependents(tasks: &[Task], id: u32) -> Vec<u32> {
@@ -411,10 +412,48 @@ pub(crate) fn health(team: &Team) -> Health {
     health
 }
 
+/// Whether a phase is waiting for the owner's approval (U9): phase 1 is
+/// approved with the plan, a later phase only by its own record.
+fn phase_draft(team: &Team, n: u32) -> bool {
+    n > 1 && team.phases.iter().find(|phase| phase.n == n).is_none_or(|phase| phase.state == PhaseState::Draft)
+}
+
+/// U9: every open task waits for the owner: it is in a draft phase, or in an
+/// approved barrier phase whose only open work before it is a draft phase.
+/// Members idle meanwhile are expected, not starved.
+pub(crate) fn waiting_for_owner(team: &Team) -> bool {
+    let open: Vec<&Task> = team.tasks.iter().filter(|task| !task.status.finished()).collect();
+    if open.is_empty() {
+        return false;
+    }
+    open.iter().all(|task| {
+        if task.phase == 1 {
+            return false;
+        }
+        let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else {
+            return false;
+        };
+        if phase.state == PhaseState::Draft {
+            return true;
+        }
+        phase.state == PhaseState::Approved
+            && phase.barrier
+            && team
+                .tasks
+                .iter()
+                .filter(|lower| lower.phase < phase.n && !lower.status.finished())
+                .all(|lower| phase_draft(team, lower.phase))
+    })
+}
+
 /// Members idle without a ready task while tasks are open (C7), for status.
+/// U9: no episode exists while every open task waits for the owner.
 pub(crate) fn starved(team: &Team, now: f64) -> Vec<Starved> {
     let open: Vec<u32> = team.tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();
-    if open.is_empty() || !matches!(team.status, super::model::TeamStatus::Running | super::model::TeamStatus::Paused) {
+    if open.is_empty()
+        || waiting_for_owner(team)
+        || !matches!(team.status, super::model::TeamStatus::Running | super::model::TeamStatus::Paused)
+    {
         return Vec::new();
     }
     team.members
@@ -430,6 +469,33 @@ pub(crate) fn starved(team: &Team, now: f64) -> Vec<Starved> {
             })
         })
         .collect()
+}
+
+/// H4: the dsh configuration files that could enable session-log upload.
+fn dsh_config_paths() -> Vec<PathBuf> {
+    let home = std::env::var_os("DSH_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| super::super::home().join(".dsh"));
+    ["settings.json", "config.json", "profiles/hgs/settings.json", "profiles/hgs/config.json", "profiles/hgs/profile.json"]
+        .iter()
+        .map(|name| home.join(name))
+        .collect()
+}
+
+/// H4: a warning when the user's own dsh configuration enables
+/// session-log-deepseek. Zerus never writes it.
+fn log_upload_warning(paths: &[PathBuf]) -> Option<String> {
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let lower = text.to_lowercase();
+        if lower.contains("session-log-deepseek") || lower.contains("sessionlogdeepseek") {
+            return Some(format!(
+                "The dsh configuration at {} enables session-log-deepseek; Zerus never enables it, but the host reads that setting - turn it off in dsh",
+                path.display()
+            ));
+        }
+    }
+    None
 }
 
 /// Plan errors block Approve & Run; warnings do not. `offline` lists the
@@ -524,6 +590,13 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             ));
         }
     }
+    // H4: B3 preflight also names a user dsh configuration that would upload
+    // whole session logs; Zerus itself never enables it.
+    if team.status == super::model::TeamStatus::Planning {
+        if let Some(warning) = log_upload_warning(&dsh_config_paths()) {
+            found.warnings.push(finding("log_upload", None, None, warning));
+        }
+    }
     found.health = health(team);
     found
 }
@@ -604,6 +677,37 @@ mod tests {
         // A soft dependency still waiting does not let its dependent start.
         let t = team(vec![task(1, &[], Pending), task(2, &[(1, Soft)], Pending)]);
         assert_eq!(ready(&t), vec![1]);
+    }
+
+    #[test]
+    fn starving_waits_for_the_owner_until_a_phase_is_in_work() {
+        let mut team = team(vec![task(1, &[], Accepted), task(2, &[], Draft)]);
+        team.tasks[1].phase = 2;
+        team.status = super::super::model::TeamStatus::Running;
+        team.phases.push(Phase { n: 2, title: "Next".into(), state: PhaseState::Draft, tasks: vec![2], ..Default::default() });
+        team.members[1].starved_since = Some(0.0);
+        // U9: the only open task is in a draft phase, so a member with nothing
+        // ready is expected and there is no episode.
+        assert!(waiting_for_owner(&team));
+        assert!(starved(&team, 3600.0).is_empty());
+        // An approved barrier phase behind that draft is still the owner's wait.
+        let mut barrier = team.clone();
+        barrier.phases.push(Phase { n: 3, title: "Later".into(), barrier: true, state: PhaseState::Approved, tasks: vec![3], ..Default::default() });
+        barrier.tasks.push(task(3, &[], Draft));
+        barrier.tasks[2].phase = 3;
+        assert!(waiting_for_owner(&barrier));
+        assert!(starved(&barrier, 3600.0).is_empty());
+        // Once phase 2 is approved and its task is in work, the wait ends.
+        let mut in_work = team.clone();
+        in_work.phases[0].state = PhaseState::Approved;
+        in_work.tasks[1].status = Pending;
+        assert!(!waiting_for_owner(&in_work));
+        assert_eq!(starved(&in_work, 3600.0).len(), 1);
+        // No open task at all is not an owner wait either.
+        let mut done = team.clone();
+        done.tasks[1].status = Accepted;
+        done.members[1].starved_since = Some(0.0);
+        assert!(!waiting_for_owner(&done));
     }
 
     #[test]
@@ -739,5 +843,18 @@ mod tests {
         t.phases = vec![Phase { n: 2, barrier: true, ..Default::default() }];
         assert_eq!(barrier_blockers(&t, &t.tasks[2]), vec![1]);
         assert!(barrier_blockers(&t, &t.tasks[0]).is_empty());
+    }
+
+    #[test]
+    fn the_preflight_warns_when_the_dsh_config_enables_log_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let safe = dir.path().join("safe.json");
+        std::fs::write(&safe, r#"{"upload":false,"plugins":[]}"#).unwrap();
+        assert!(log_upload_warning(&[safe]).is_none());
+        let risky = dir.path().join("settings.json");
+        std::fs::write(&risky, r#"{"plugins":["@deepseek-ai/dsh-session-log-deepseek"]}"#).unwrap();
+        let warning = log_upload_warning(&[risky]).unwrap();
+        assert!(warning.contains("session-log-deepseek"), "{warning}");
+        assert!(log_upload_warning(&[dir.path().join("missing.json")]).is_none());
     }
 }

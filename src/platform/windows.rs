@@ -1990,6 +1990,20 @@ mod process {
     }
 }
 
+/// H2: the current process reads this file as stdin (`--json-file`); the
+/// handle stays open for the process lifetime.
+pub fn redirect_stdin(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_INPUT_HANDLE};
+    let file = std::fs::File::open(path)?;
+    let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    if unsafe { SetStdHandle(STD_INPUT_HANDLE, handle) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    std::mem::forget(file);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

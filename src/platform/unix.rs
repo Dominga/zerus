@@ -1663,6 +1663,18 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
     Ok(0)
 }
 
+/// H2: the current process reads this file as stdin (`--json-file`); the
+/// descriptor stays open for the process lifetime.
+pub fn redirect_stdin(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let file = std::fs::File::open(path)?;
+    if unsafe { libc::dup2(file.as_raw_fd(), 0) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    std::mem::forget(file);
+    Ok(())
+}
+
 /// Write the script `text` to `path` for a test to run at once. The system
 /// will not execute a file that is open for writing (ETXTBSY), and a child that
 /// another test thread starts while this process writes one keeps that

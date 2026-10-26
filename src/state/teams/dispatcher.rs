@@ -634,6 +634,9 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     // plan. The lead hears once after 20 minutes; the episode ends with work.
     let ready_ids = plan::ready(team);
     let staging_open = team.tasks.iter().any(|task| !task.status.finished());
+    // U9: while every open task waits for the owner's phase approval, a
+    // member with nothing ready is expected; no episode starts or continues.
+    let owner_wait = plan::waiting_for_owner(team);
     for member in &team.members {
         if member.id == team.lead || matches!(member.state, MemberState::Removed | MemberState::Paused) {
             continue;
@@ -642,7 +645,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
         let has_work = busy.contains(member.id.as_str())
             || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
-        if !staging_open || has_work || !(found.free && found.live) {
+        if !staging_open || owner_wait || has_work || !(found.free && found.live) {
             if member.starved_since.is_some() {
                 steps.push(Step::StarvedEnded { member: member.id.clone() });
             }
@@ -3937,6 +3940,45 @@ mod tests {
         team.task_mut(2).unwrap().assignee = "qa".into();
         let busy_dev = session("codex/x/dev", "r1", false);
         assert!(!steps(&team, &[lead, busy_dev, qa], 10.0 + 30.0 * 60.0).iter().any(|step| matches!(step, Step::Starving { .. })));
+    }
+
+    #[test]
+    fn starving_stays_quiet_until_the_owner_approves_a_phase() {
+        let mut team = team();
+        // Every open task is in a draft phase: the owner owes an approval.
+        for task in &mut team.tasks {
+            task.phase = 2;
+            task.status = TaskStatus::Draft;
+        }
+        for id in [1, 2] {
+            team.task_mut(id).unwrap().assignee = "qa".into();
+        }
+        team.phases.push(Phase {
+            n: 2,
+            title: "Next".into(),
+            state: PhaseState::Draft,
+            tasks: team.tasks.iter().map(|task| task.id).collect(),
+            ..Default::default()
+        });
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = Some(10.0);
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", true);
+        let qa = session("kimi/x/qa", "r2", true);
+        let seen = [lead.clone(), dev.clone(), qa.clone()];
+        // U9: no episode starts or continues; the old one ends.
+        let waiting = steps(&team, &seen, 10.0 + 30.0 * 60.0);
+        assert!(
+            !waiting.iter().any(|step| matches!(step, Step::Starving { .. } | Step::PlanStarved { .. })),
+            "{waiting:?}"
+        );
+        assert!(waiting.contains(&Step::StarvedEnded { member: "dev".into() }), "{waiting:?}");
+        // The phase is approved and its tasks are in work: dev starves again.
+        team.phases[0].state = PhaseState::Approved;
+        for task in &mut team.tasks {
+            task.status = TaskStatus::Pending;
+        }
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = None;
+        assert!(steps(&team, &seen, 10.0).contains(&Step::Starving { member: "dev".into() }));
     }
 
     #[test]

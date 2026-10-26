@@ -205,6 +205,32 @@ fn left_running(team: &Team, teams: &[Team], sessions: &[super::dispatcher::Seen
         .collect()
 }
 
+/// H3: group dsh members by the host process serving them. A member is
+/// `host_shared` when its host serves more than one; status keeps the host's
+/// pid, start and members.
+fn hosts_value(members: &[(String, Option<Value>)]) -> (Value, BTreeSet<String>) {
+    let mut hosts: std::collections::BTreeMap<u32, (f64, Vec<String>)> = std::collections::BTreeMap::new();
+    let mut shared = BTreeSet::new();
+    for (id, info) in members {
+        let Some(info) = info else { continue };
+        let Some(pid) = info["pid"].as_u64() else { continue };
+        let entry = hosts
+            .entry(pid as u32)
+            .or_insert_with(|| (info["started"].as_f64().unwrap_or(0.0), Vec::new()));
+        entry.1.push(id.clone());
+    }
+    for (_, ids) in hosts.values() {
+        if ids.len() > 1 {
+            shared.extend(ids.iter().cloned());
+        }
+    }
+    let value = json!(hosts
+        .iter()
+        .map(|(pid, (started, ids))| json!({"agent":"dsh","pid":pid,"started":started,"members":ids}))
+        .collect::<Vec<_>>());
+    (value, shared)
+}
+
 /// The team with its live members when the caller listed sessions (F7).
 fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
     let mut value = serde_json::to_value(team).unwrap_or_default();
@@ -308,10 +334,27 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             }
         }
     }
+    // H3: the DeepSeek host(s) serving members, read only from their host pid
+    // files; every member of a host with others is marked shared.
+    let host_members: Vec<(String, Option<Value>)> = team
+        .members
+        .iter()
+        .filter(|member| member.agent == "dsh")
+        .filter_map(|member| {
+            let session = member.session.as_ref()?;
+            if !session.host.is_empty() {
+                return None;
+            }
+            Some((member.id.clone(), super::super::dsh::host_of(&session.name)))
+        })
+        .collect();
+    let (hosts, shared) = hosts_value(&host_members);
+    value["hosts"] = hosts;
     // Each member's queue: its open task first, then the tasks returned to it
     // (A5, spec section 6).
     if let Some(members) = value["members"].as_array_mut() {
         for (member, value) in team.members.iter().zip(members) {
+            value["host_shared"] = json!(shared.contains(&member.id));
             value["queue"] = json!(member_queue(team, &member.id));
             // C12: the declared budget, its state and the job it is tied to.
             if let Some(budget) = &member.budget {
@@ -1275,26 +1318,47 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() == 2 && args[0] == "worker" && args[1] == "--stop" {
         return super::dispatcher::stop_worker();
     }
+    // H2: `--json` reads stdin; `--json-file PATH` reads the same request from
+    // a file (PowerShell 5.1 turns Cyrillic in a pipe into "?").
+    let mut args = args.to_vec();
+    let file = if let Some(index) = args.iter().position(|arg| arg == "--json-file") {
+        let path = args
+            .get(index + 1)
+            .cloned()
+            .ok_or_else(|| "--json-file needs a path".to_owned())?;
+        args.drain(index..=index + 1);
+        Some(path)
+    } else {
+        None
+    };
     let catalog = args.first().map(String::as_str) == Some("catalog");
-    let args = if catalog { &args[1..] } else { args };
-    if args.len() != 2 || args[1] != "--json" {
+    if catalog {
+        args.remove(0);
+    }
+    if args.len() != 2 || (args[1] != "--json" && file.is_none()) {
         return Err(USAGE.into());
     }
-    let mut bytes = Vec::new();
-    io::stdin().take(256 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let operation = args[0].clone();
+    let bytes = if let Some(path) = file {
+        std::fs::read(&path).map_err(|e| format!("Cannot read {path}: {e}"))?
+    } else {
+        let mut bytes = Vec::new();
+        io::stdin().take(256 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        bytes
+    };
     if bytes.len() > 256 * 1024 {
         return Err("Team request exceeds 256 KiB".into());
     }
-    let input: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let input: Value = super::super::json_request(&bytes)?;
     if !input.is_object() {
         return Err("A JSON object is required".into());
     }
     let result = if catalog {
         // The designer proposes from its session; only you decide and apply.
         let human = caller_record().is_none() && nonempty_env("HGS_SESSION").is_none() && text(&input, "by") == "human";
-        super::catalog::run(&args[0], &input, human)
+        super::catalog::run(&operation, &input, human)
     } else {
-        run(&args[0], &input)
+        run(&operation, &input)
     }
     .map_err(|e| e.to_string())?;
     println!("{result}");
@@ -1303,6 +1367,42 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_shared_dsh_host_lists_its_members_and_marks_them() {
+        let members = vec![
+            ("a".to_owned(), Some(json!({"pid":7,"started":10.0}))),
+            ("b".to_owned(), Some(json!({"pid":7,"started":10.0}))),
+            ("c".to_owned(), Some(json!({"pid":9,"started":20.0}))),
+            ("d".to_owned(), None),
+        ];
+        let (hosts, shared) = hosts_value(&members);
+        assert_eq!(
+            hosts,
+            json!([
+                {"agent":"dsh","pid":7,"started":10.0,"members":["a","b"]},
+                {"agent":"dsh","pid":9,"started":20.0,"members":["c"]}
+            ])
+        );
+        assert_eq!(shared, BTreeSet::from(["a".to_owned(), "b".to_owned()]));
+    }
+
+    #[test]
+    fn a_json_request_drops_a_bom_and_refuses_non_utf8() {
+        let mut with_bom = vec![0xEF, 0xBB, 0xBF];
+        with_bom.extend_from_slice(br#"{"a":1}"#);
+        assert_eq!(crate::state::json_request(&with_bom).unwrap()["a"], 1);
+        let error = crate::state::json_request(&[0xFF, 0xFE, b'{']).unwrap_err().to_string();
+        assert_eq!(error, "Input is not UTF-8 (PowerShell 5.1: use --json-file)");
+        // A `--json-file` request is read and goes through the same reader.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("request.json");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(br#"{"task":342}"#);
+        std::fs::write(&path, bytes).unwrap();
+        let read = std::fs::read(&path).unwrap();
+        assert_eq!(crate::state::json_request(&read).unwrap()["task"], 342);
+    }
+
     #[test]
     fn the_list_summary_carries_task_phases_and_phase_records() {
         let mut team = crate::state::teams::model::Team::default();

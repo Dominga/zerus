@@ -101,6 +101,7 @@ QString clamp(const QString &text, const QFont &font, int width, int lines) {
 QString TaskRow::actionKey(TaskAction action) {
     switch (action) {
     case TaskAction::Edit: return QStringLiteral("edit");
+    case TaskAction::Rename: return QStringLiteral("rename");
     case TaskAction::ToBacklog: return QStringLiteral("toBacklog");
     case TaskAction::Top: return QStringLiteral("top");
     case TaskAction::SendNow: return QStringLiteral("sendNow");
@@ -180,7 +181,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         : task.stage == QLatin1String("review") || task.stage == QLatin1String("done") ? QStringLiteral("✓")
         : QString();
     m_glyph->setText(glyph); m_glyph->setSpinning(task.stage == QLatin1String("active"), stage);
-    setAccessibleName(task.id + QStringLiteral(": ") + task.text.section(QLatin1Char('\n'), 0, 0));
+    setAccessibleName(task.id + QStringLiteral(": ") + task.displayTitle());
     setWorkspaceStyle(m_glyph, QStringLiteral("border:2px solid %1;border-radius:11px;color:%1;font-size:11px;font-weight:700;").arg(stage.name()));
     // Meta: ID, the session (or the target), the session's status for In
     // progress, the time, and who filed it.
@@ -319,7 +320,7 @@ void TaskRow::showActions(bool shown) {
 }
 
 void TaskRow::layoutText() {
-    const QString text = property("compact").toBool() ? m_task.text.section(QLatin1Char('\n'), 0, 0).simplified() : m_task.text;
+    const QString text = property("compact").toBool() ? m_task.displayTitle().simplified() : m_task.text;
     m_text->setText(clamp(text, m_text->font(), m_text->width() > 0 ? m_text->width() : width() - 60, 2));
 }
 

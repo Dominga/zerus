@@ -2393,6 +2393,8 @@ JSON. Tasks belong to a catalog project, named by its ID or name; a task is
 
 ```sh
 hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt
+hgs task add --project orchard --title "Task title" --request-id UUID < description.txt
+hgs task rename orchard/T-a1b2c3 < title.txt
 hgs task list --project orchard [--stage todo]
 hgs task get orchard/T-a1b2c3
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
@@ -2469,10 +2471,27 @@ on stdin. Omit `attachments` to keep description files while editing, or pass an
 empty array to remove them. Listings contain file metadata and omit history;
 `get` includes the retained bytes.
 
+The desktop right-hand Tasks board has a New task (+) button. Enter a title and
+confirm it to create a shared To do card (Backlog in that list), then fill its
+description in the central Task View. Subsequent input adds comments; Edit
+description explicitly returns the same composer to the description draft.
+Rename changes only the title. Creation and discussion never start an executor.
+Task View retains separate drafts from Activity, supports description and comment
+attachments, and offers voice recording with preview and transcription into the
+draft before the person sends it. Task comments remain history-only.
+
+Named cards use `--title`; description stdin may be empty. `--request-id` reserves
+the card UUID and binds the original creation input. Repeating that input recovers
+the existing card without reverting later edits or lifecycle changes. Reusing the
+UUID for a different creation is refused. A title is one nonblank line, at most
+512 UTF-8 bytes. Legacy cards keep their first description line as the displayed
+title until an explicit Rename gives them an independent one.
+
 Immutable session identities and description media use task schema 2. Comment
-media, executor plans and native worker bindings require task schema 3. A later
-edit never downgrades that schema. Older readers and the current mobile ABI show
-schema-three tasks read-only. Project documents and the paged exchange protocol
+media, executor plans and native worker bindings require task schema 3. Independent
+titles and title-only creation require task schema 4. A later edit never downgrades that schema. Older readers and the current mobile ABI show
+schema-three and schema-four tasks read-only; named cards keep a visible title in
+the existing text field. Project documents and the paged exchange protocol
 remain schema 1. Mobile picker/preview and executor-plan presentation are separate
 work; host-side mobile sends keep the complete description attachment payload.
 

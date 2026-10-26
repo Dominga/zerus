@@ -254,6 +254,23 @@ class TaskCommands(Fixture):
         self.assertIn("no project", self.hgs("list", "--project", "missing", ok=False))
         self.assertIn("no task", self.hgs("get", "orchard/T-zzzzzz", ok=False))
 
+    def test_named_card_creation_recovery_and_independent_rename(self):
+        request = str(uuid.uuid4())
+        args = ("add", "--project", "project-1", "--title", "Title only", "--request-id", request)
+        first = self.hgs(*args, text="")["task"]
+        self.assertEqual((first["uuid"], first["title"], first["text"], first["stage"]), (request, "Title only", "", "todo"))
+        self.hgs("edit", first["ref"], text="Detailed task content")
+        self.hgs("rename", first["ref"], text="Independent title")
+        self.hgs("stage", first["ref"], "backlog")
+        before = self.hgs("get", first["ref"])["task"]
+        recovered = self.hgs(*args, text="")["task"]
+        self.assertEqual(recovered, before)
+        self.assertEqual(len(self.hgs("list", "--project", "project-1")["tasks"]), 1)
+        self.assertIn("another input", self.hgs("add", "--project", "project-1", "--title", "Changed intent", "--request-id", request, text="", ok=False))
+        self.hgs("edit", first["ref"], text="")
+        final = self.hgs("get", first["ref"])["task"]
+        self.assertEqual((final["title"], final["text"]), ("Independent title", ""))
+
     def test_order_and_positions(self):
         first, second, third = (self.add(t)["id"] for t in ("one", "two", "three"))
         self.assertEqual(self.ids("todo"), [first, second, third])

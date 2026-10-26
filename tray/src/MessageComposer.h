@@ -41,6 +41,7 @@ public:
     void setSessionStatus(const QString &text, bool error = false, bool blockInput = false, const QString &html = {});
     // Independent of delivery/loading locks; keeps the existing draft selectable.
     void setRecording(bool recording);
+    bool isRecording() const { return m_recording; }
     void setAttachmentAvailability(bool available, const QString &reason = {});
     // Editable path text on this exact session's computer, without reading or
     // uploading the file. An empty key withdraws the reference target.
@@ -116,7 +117,7 @@ public:
     VoiceTarget voiceTarget() const { return {m_key, m_saveRevision.value(m_key), m_navigationRevision}; }
     // Append only to an unchanged, still selected editable draft. A successful
     // callback means the inserted text is durable; it never submits a message.
-    bool insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved);
+    bool insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved, const QString &operation = {});
     // Opens a stored copy of an attachment; tests replace the desktop handler.
     std::function<bool(const QUrl &)> openUrl;
     // Whether the session a saved draft belongs to can be shown now. Without it,
@@ -131,6 +132,8 @@ public:
     // send button carries the stage a new task goes to. Drafts keep their keys.
     void setTaskMode(bool taskMode);
     void setSendLabel(const QString &label);
+    void addTaskControls(QWidget *controls);
+    void setSendIconOnly(bool enabled) { setProperty("sendIconOnly", enabled); updateControls(); }
     // Shown in an empty field when the agent has no suggestion.
     void setPlaceholder(const QString &placeholder);
 

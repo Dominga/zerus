@@ -21,8 +21,9 @@ public:
         bool available = false;
         // Why an unavailable target can never take voice: the voice button's tooltip.
         QString reason;
+        bool draftOnly = false;
         bool sameConversation(const Target &other) const {
-            return key == other.key && host == other.host && session == other.session
+            return draftOnly == other.draftOnly && key == other.key && host == other.host && session == other.session
                 && run == other.run && conversation == other.conversation;
         }
     };
@@ -44,6 +45,9 @@ private:
     void recorded(const QByteArray &base64);
     void send();
     void check();
+    void draftRequest(bool submit);
+    void draftResult(const QJsonObject &reply, const QString &error);
+    void applyTranscript();
     void result(const QJsonObject &reply, const QString &error, const QJsonObject &request);
     void discard();
     void syncTarget();
@@ -82,6 +86,8 @@ private:
     Target m_target;
     ComposerDraftStore m_store;
     QByteArray m_pcm;
+    QString m_transcript;
+    MessageComposer::VoiceTarget m_draftTarget;
     QString m_id, m_notice, m_loadedKey, m_operationId;
     QJsonObject m_rejection;
     qint64 m_attemptedRejectionGeneration = 0;
@@ -93,6 +99,6 @@ private:
     Notice m_noticeKind = Notice::General;
     quint64 m_generation = 0;
     quint64 m_profileGeneration = 0;
-    int m_seconds = 0;
+    int m_seconds = 0, m_draftPolls = 0;
     QSet<int> m_stopKeys;
 };

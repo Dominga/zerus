@@ -100,7 +100,7 @@ pub fn task_prompt(template: &str, task: &TaskView, project: &str, tools: Tools)
     checked(fill(template, tools, &reference, |key| match key {
         "ref" => Some(reference.clone()),
         "author" => Some(author(task)),
-        "prompt" => Some(task.text.clone()),
+        "prompt" => Some(if task.title.is_empty() { task.text.clone() } else if task.text.is_empty() { task.title.clone() } else { format!("{}\n\n{}", task.title, task.text) }),
         "history" => Some(history.clone()),
         _ => None,
     }))
@@ -141,6 +141,15 @@ mod tests {
         .unwrap()
         .view()
         .unwrap()
+    }
+
+    #[test]
+    fn named_worker_prompts_include_both_title_and_description() {
+        let mut task = view(); task.title = "Independent {ref} title".into(); task.text = "Detailed content".into();
+        let text = task_prompt(DEFAULT_TASK_TEMPLATE, &task, "orchard", Tools::Cli).unwrap();
+        assert!(text.contains("Independent {ref} title\n\nDetailed content"));
+        task.text.clear();
+        assert!(task_prompt(DEFAULT_TASK_TEMPLATE, &task, "orchard", Tools::Cli).unwrap().contains("Independent {ref} title"));
     }
 
     #[test]

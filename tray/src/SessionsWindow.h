@@ -506,6 +506,7 @@ private:
     ActivityView *m_activityView = nullptr;
     class ProcessView *m_processes = nullptr;
     class TasksView *m_tasks = nullptr;
+    QWidget *m_taskView = nullptr;
     class TaskInspector *m_taskInspector = nullptr;
     class TaskTabBadge *m_tasksBadge = nullptr;
     QWidget *m_nativeSignIn = nullptr;

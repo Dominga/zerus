@@ -6,7 +6,8 @@
 
 // One task as `hgs task list` reports it.
 struct TaskItem {
-    QString ref, id, uuid, text, stage, summary, cancelReason;
+    QString ref, id, uuid, title, text, stage, summary, cancelReason;
+    QString displayTitle() const { return title.isEmpty() ? text.section(QLatin1Char('\n'), 0, 0) : title; }
     // A pinned session: its computer ("" for this one, otherwise its SSH alias) and
     // name. An empty name is Any session; targetKnown is false for a computer this
     // one has not verified.
@@ -27,7 +28,7 @@ struct TaskItem {
     int queue = 0;   // position in the project's To do, from 1
 };
 
-enum class TaskAction { Edit, ToBacklog, Top, SendNow, ToTodo, Cancel, BackToTodo, Accept, Pause };
+enum class TaskAction { Edit, ToBacklog, Top, SendNow, ToTodo, Cancel, BackToTodo, Accept, Pause, Rename };
 
 // A project's tasks and the rules the Tasks tab shows them by
 // (docs/superpowers/specs/2026-10-13-project-task-queue-design.md, Desktop interface).

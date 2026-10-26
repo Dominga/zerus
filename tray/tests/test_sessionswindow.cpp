@@ -1209,7 +1209,14 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     QCOMPARE(window.findChild<QTabWidget *>("sessionInspector")->tabText(0), QString("Plan && agents"));
     messages->editor()->setPlainText("Keep my Activity draft");
     QTest::mouseClick(row, Qt::LeftButton, {}, QPoint(60, row->height() - 15));
-    QTRY_COMPARE(tabs->currentIndex(), 0);
+    auto *taskView = window.findChild<QWidget *>("taskDetailsPane");
+    QTRY_COMPARE(tabs->currentWidget(), taskView); QCOMPARE(tabs->tabText(tabs->indexOf(taskView)), QString("Task View"));
+    auto *taskComposer = window.findChild<MessageComposer *>("taskCommentComposer"); QVERIFY(taskComposer && taskComposer->isVisible());
+    QVERIFY(taskComposer->findChild<ToolbarChip *>("voiceRecord"));
+    QTRY_VERIFY(taskComposer->sessionKey().endsWith("T-000002"));
+    taskComposer->editor()->setPlainText("A task comment draft");
+    tabs->setCurrentIndex(0); QCOMPARE(messages->editor()->toPlainText(), QString("Keep my Activity draft"));
+    tabs->setCurrentWidget(taskView); QCOMPARE(taskComposer->editor()->toPlainText(), QString("A task comment draft"));
     auto *inspector = window.findChild<QTabWidget *>("sessionInspector");
     QCOMPARE(inspector->currentWidget()->objectName(), QString("taskInspector"));
     QVERIFY(inspector->isVisible()); QCOMPARE(messages->editor()->toPlainText(), QString("Keep my Activity draft"));
@@ -1222,8 +1229,8 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
 QString TestSessionsWindow::tasksFixture(const QString &name, const QJsonArray &tasks) const
 {
     QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
-    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n if a[1:2]==['send'] and __import__('pathlib').Path(__file__+'.task-receipt').exists(): print(open(__file__+'.task-receipt').read())\n else: print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':json.loads("
-        + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + "),'damaged':[]}))\n";
+    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n if a[1:2]==['send'] and __import__('pathlib').Path(__file__+'.task-receipt').exists(): print(open(__file__+'.task-receipt').read())\n else:\n  tasks=json.loads("
+        + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + ")\n  if a[1:2]==['get']: print(json.dumps({'task':next(t for t in tasks if t['uuid']==a[2])}))\n  else: print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':tasks,'damaged':[]}))\n";
     const QString fixture = m_dir->filePath(name);
     return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? fixture : QString();
 }
@@ -6734,7 +6741,7 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     auto *splitter = window.findChild<QSplitter *>("sessionWorkSplitter");
     auto *editor = window.findChild<MessageComposer *>("messageComposer")->findChild<QPlainTextEdit *>("messageInput");
     QVERIFY(tabs && inspector && toggle && panel && splitter && editor);
-    QCOMPARE(tabs->count(), 5); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
+    QCOMPARE(tabs->count(), 6); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
     QCOMPARE(tabs->tabText(2), QString("Task board")); QCOMPARE(tabs->tabText(3), QString("Native UI"));
     QCOMPARE(tabs->tabText(4),QString("Processes"));QVERIFY(tabs->isTabVisible(4));
     QVERIFY(tabs->isTabVisible(1)); QVERIFY(tabs->isTabVisible(2)); QVERIFY(!tabs->isTabVisible(3));

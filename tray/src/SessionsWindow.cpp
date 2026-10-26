@@ -1440,6 +1440,16 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_taskInspector = new TaskInspector(&m_client, m_tasks);
     m_inspector->addTab(m_taskInspector, tr("Tasks"));
+    m_taskView = m_taskInspector->takeDetailsPane();
+    new SpeechComposer(m_client.executable(), m_taskInspector->composer(), [this] {
+        SpeechComposer::Target target; target.key = m_taskInspector->composer()->sessionKey(); target.draftOnly = true;
+        target.session = m_taskInspector->selectedTask(); target.available = m_taskInspector->canDictate(); return target;
+    });
+    const int taskViewIndex = m_detailTabs->addTab(m_taskView, tr("Task View"));
+    m_detailTabs->setTabVisible(taskViewIndex, false);
+    connect(m_taskInspector, &TaskInspector::taskViewRequested, this, [this] {
+        m_detailTabs->setTabVisible(m_detailTabs->indexOf(m_taskView), true); m_detailTabs->setCurrentWidget(m_taskView);
+    });
     connect(m_taskInspector, &TaskInspector::subagentRequested, this, [this](const QString &host, const QString &name, const QString &parentId, const QString &conversation, const QString &child) {
         for (const auto &entry : std::as_const(m_entries)) {
             const QString retained = entry.session.launchId.isEmpty() ? QStringLiteral("run_id:") + entry.session.runId : QStringLiteral("launch_id:") + entry.session.launchId;
@@ -1463,8 +1473,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         showNotice(tr("The task's session identity is no longer available."), true);
     });
     connect(m_tasks, &TasksView::taskSelected, this, [this](const QString &uuid) {
-        m_detailTabs->setCurrentWidget(m_activityStack); setInspectorVisible(true);
-        m_inspector->setCurrentWidget(m_taskInspector); m_taskInspector->selectTask(uuid);
+        setInspectorVisible(true); m_inspector->setCurrentWidget(m_taskInspector); m_taskInspector->openTask(uuid);
     });
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
@@ -1493,11 +1502,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     detail->addWidget(m_workSplitter, 1); m_detailStack->addWidget(details); m_splitter->addWidget(m_detailStack);
     m_fileDrop=new SessionFileDrop(details,[this]()->MessageComposer *{
-        // A task is text only: nothing is dropped on the Tasks tab.
+        if (m_detailTabs->currentWidget() == m_taskView) return m_taskInspector->composer();
         if(!selected()||m_detailTabs->currentWidget()==m_terminal||m_detailTabs->currentWidget()==m_tasks)return nullptr;
         if(m_detailTabs->currentIndex()==0&&!m_subagentId.isEmpty())return m_subagentComposer->isInputVisible()?m_subagentComposer:nullptr;
         return m_composer;
-    },[this](MessageComposer *composer){if(composer==m_composer)closeSubagent();m_detailTabs->setCurrentIndex(0);},
+    },[this](MessageComposer *composer){if(composer==m_taskInspector->composer()){m_detailTabs->setCurrentWidget(m_taskView);return;}if(composer==m_composer)closeSubagent();m_detailTabs->setCurrentIndex(0);},
     [this]{return terminalDropTarget();},[this](const QStringList &paths){dropTerminalFiles(paths);});
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &result,const QString &error) {
         if(id!=m_terminalDropRequest)return;

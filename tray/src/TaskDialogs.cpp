@@ -93,6 +93,7 @@ QString taskHistoryAction(const QJsonObject &entry) {
     const QString kind = entry.value("kind").toString(), text = entry.value("text").toString();
     QString what;
     if (kind == QLatin1String("created")) what = QObject::tr("created the task");
+    else if (kind == QLatin1String("title")) what = QObject::tr("renamed the task: %1").arg(text);
     else if (kind == QLatin1String("edited")) what = QObject::tr("edited the prompt");
     else if (kind == QLatin1String("stage")) what = QObject::tr("moved it to %1").arg(TaskBoard::stageLabel(text));
     else if (kind == QLatin1String("target")) what = QObject::tr("changed the session: %1").arg(text);
@@ -282,7 +283,7 @@ TaskForm::TaskForm(const QJsonObject &task, const QList<TaskSession> &sessions, 
     auto *actions = new QHBoxLayout; actions->setSpacing(8);
     const auto stageActions = TaskBoard::actions(m_task.stage);
     for (const auto action : stageActions) {
-        if (compact || action == TaskAction::Edit) continue;
+        if (compact || action == TaskAction::Edit || action == TaskAction::Rename) continue;
         auto *button = new QPushButton(workspaceIcon(TaskBoard::actionIcon(action), colors.muted), TaskBoard::actionLabel(action).remove(QChar(0x2026)));
         button->setObjectName(QStringLiteral("taskDialogAction:") + TaskRow::actionKey(action)); button->setAutoDefault(false);
         button->setProperty("taskAction", int(action));

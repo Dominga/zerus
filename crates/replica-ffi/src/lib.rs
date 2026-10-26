@@ -200,6 +200,7 @@ pub struct TaskInfo {
 
 impl From<replica::TaskView> for TaskInfo {
     fn from(view: replica::TaskView) -> Self {
+        let text = if view.title.is_empty() { view.text.clone() } else if view.text.is_empty() { view.title.clone() } else { format!("{}\n\n{}", view.title, view.text) };
         Self {
             uuid: view.uuid,
             id: view.id,
@@ -219,7 +220,7 @@ impl From<replica::TaskView> for TaskInfo {
             summary: view.summary,
             cancelled_at: view.cancelled_at,
             cancel_reason: view.cancel_reason,
-            text: view.text,
+            text,
             log: view.log.into_iter().map(Into::into).collect(),
         }
     }

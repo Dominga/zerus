@@ -510,11 +510,20 @@ void MessageComposer::ensureDraftLoaded(const QString &key)
     }
 }
 
-bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved)
+bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved, const QString &operation)
 {
     if (target.key.isEmpty() || target.key != m_key || target.revision != m_saveRevision.value(m_key)
         || target.navigation != m_navigationRevision || !canEditAttachments() || isPreparingSending(m_key)
         || !isInputVisible() || m_editor->isReadOnly() || text.isEmpty()) return false;
+    auto insertions = m_drafts[m_key].formState.value("voice_insertions").toArray();
+    if (!operation.isEmpty()) {
+        if (insertions.contains(operation)) {
+            m_draftStore.saveDurableAsync(m_key, m_drafts.value(m_key), this, [saved](bool ok, const ComposerDraft &) { saved(ok); });
+            return true;
+        }
+        if (insertions.size() >= 32) insertions.removeFirst();
+        insertions.append(operation); m_drafts[m_key].formState["voice_insertions"] = insertions;
+    }
     // Dictation appends at the captured caret without replacing a selection.
     auto cursor = m_editor->textCursor(); cursor.clearSelection();
     QString insertion = text;
@@ -568,6 +577,8 @@ void MessageComposer::setTaskMode(bool taskMode)
     setAttachmentAvailability(true);
     updateControls();
 }
+
+void MessageComposer::addTaskControls(QWidget *controls) { m_actions->insertWidget(m_actions->indexOf(m_send), controls); }
 
 void MessageComposer::setSendLabel(const QString &label) { m_sendLabel = label; updateControls(); }
 
@@ -1165,8 +1176,10 @@ void MessageComposer::updateControls()
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
     m_attach->setVisible(true);
+    m_send->setAccessibleName(m_taskMode ? m_sendLabel : tr("Send"));
+    m_send->setIconSize(property("sendIconOnly").toBool() ? QSize(20, 20) : QSize(14, 14));
     m_send->setText(draft.sending ? (m_taskMode ? tr("Saving…") : tr("Sending…")) : waiting ? tr("Waiting to send…")
-        : m_taskMode ? m_sendLabel : tr("Send"));
+        : property("sendIconOnly").toBool() ? QString() : m_taskMode ? m_sendLabel : tr("Send"));
     m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_taskMode ? tr("%1: Enter; new line: Shift+Enter").arg(m_sendLabel)
         : tr("Send: Enter; new line: Shift+Enter"));
     m_retry->setVisible(draft.uncertain && !operationLocked);

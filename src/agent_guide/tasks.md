@@ -11,6 +11,8 @@ go on stdin; a change prints one line saying what happened (--json: the task).
   hgs task start REF                         take or acknowledge work without sending it again
   hgs task report REF <<'EOF'               report a task you were sent
   hgs task comment REF <<'EOF'              a note, never pasted into a session
+  hgs task rename REF <<'EOF'               an independent title (any stage)
+  hgs task add --title "Task title" [--request-id UUID]  title-first card; description on stdin
   hgs task edit REF <<'EOF'                 a new prompt (To do, Backlog)
   hgs task move REF --position N            priority within its current stage
   hgs task stage REF todo|backlog|done      done only when the person asks
@@ -44,3 +46,9 @@ Rules
 - Each desktop reserves new-session delivery before transport. A restored or
   uncertain reservation needs explicit review, never an automatic retry. These
   local records do not provide a distributed execution lease or task-scoped Pause.
+
+Named cards keep title and description separate. Rename never changes the prompt
+body, task owner or lifecycle. A title-only card is valid. Creation request UUIDs
+bind the original title, content, target, initial stage and start intent; replay
+recovers that card without reverting later changes. A different input using the
+same UUID is refused. The rendered worker prompt includes title and description.

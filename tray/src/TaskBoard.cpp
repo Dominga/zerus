@@ -17,7 +17,7 @@ void session(const QJsonValue &value, QString &host, QString &name, bool &known)
 TaskItem TaskBoard::item(const QJsonObject &t) {
     TaskItem item;
     item.ref = t.value("ref").toString(); item.id = t.value("id").toString(); item.uuid = t.value("uuid").toString();
-    item.text = t.value("text").toString(); item.stage = t.value("stage").toString();
+    item.title = t.value("title").toString(); item.text = t.value("text").toString(); item.stage = t.value("stage").toString();
     item.summary = t.value("summary").toString(); item.cancelReason = t.value("cancel_reason").toString();
     item.createdAt = qint64(t.value("created_at").toDouble()); item.stageAt = qint64(t.value("stage_at").toDouble());
     item.cancelledAt = qint64(t.value("cancelled_at").toDouble()); item.writable = t.value("writable").toBool(true);
@@ -104,11 +104,11 @@ QString TaskBoard::stageIcon(const QString &stage) {
 
 QList<TaskAction> TaskBoard::actions(const QString &stage) {
     using A = TaskAction;
-    if (stage == QLatin1String("todo")) return {A::Edit, A::ToBacklog, A::Top, A::SendNow};
-    if (stage == QLatin1String("backlog")) return {A::Edit, A::ToTodo, A::SendNow};
-    if (stage == QLatin1String("active")) return {A::Cancel};
-    if (stage == QLatin1String("review")) return {A::BackToTodo, A::Accept};
-    if (stage == QLatin1String("done")) return {A::BackToTodo};
+    if (stage == QLatin1String("todo")) return {A::Edit, A::Rename, A::ToBacklog, A::Top, A::SendNow};
+    if (stage == QLatin1String("backlog")) return {A::Edit, A::Rename, A::ToTodo, A::SendNow};
+    if (stage == QLatin1String("active")) return {A::Rename, A::Cancel};
+    if (stage == QLatin1String("review")) return {A::Rename, A::BackToTodo, A::Accept};
+    if (stage == QLatin1String("done")) return {A::Rename, A::BackToTodo};
     return {};
 }
 
@@ -121,7 +121,8 @@ TaskAction TaskBoard::primaryAction(const QString &stage) {
 
 QString TaskBoard::actionLabel(TaskAction action) {
     switch (action) {
-    case TaskAction::Edit: return QObject::tr("Edit task");
+    case TaskAction::Edit: return QObject::tr("Task details");
+    case TaskAction::Rename: return QObject::tr("Rename…");
     case TaskAction::ToBacklog: return QObject::tr("Move to Backlog");
     case TaskAction::Top: return QObject::tr("Move to the top of To do");
     case TaskAction::SendNow: return QObject::tr("Start task");
@@ -136,7 +137,8 @@ QString TaskBoard::actionLabel(TaskAction action) {
 
 QString TaskBoard::actionIcon(TaskAction action) {
     switch (action) {
-    case TaskAction::Edit: return QStringLiteral("task-edit");
+    case TaskAction::Edit: return QStringLiteral("task-list");
+    case TaskAction::Rename: return QStringLiteral("task-edit");
     case TaskAction::ToBacklog: return QStringLiteral("task-clock");
     case TaskAction::Top: return QStringLiteral("task-top");
     case TaskAction::SendNow: return QStringLiteral("play");

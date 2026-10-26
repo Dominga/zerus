@@ -64,6 +64,87 @@ Unknown delivery is reserved durably and requires explicit review before another
 launch. This slice does not implement the execution/revision scheduler, true
 per-task pause, automatic native comment delivery, or verified result artifacts.
 
+
+## Central Task View after inspector preview
+
+Status: implemented on the feature branch after `815571f9`, 2026-10-26;
+qualification and signed Mac preview are in progress. The central Task View
+replaces the lower inspector discussion/editor. The owner is reviewing branch
+previews; this does not authorize a main merge.
+
+Keep the board, its filters, ordering, selection and compact task actions in the
+right inspector. A card opens one reusable central **Task View**, identified by
+project and task UUID. It appears beside ordinary Activity with a task ID/title,
+actual executor and stage. Selecting another card updates that one view instead
+of opening an unbounded set of task tabs. Ordinary session Activity retains its
+selection, scroll and draft and remains directly reachable. Opening a task must
+not implicitly switch the selected session or send input to an executor.
+
+The central body contains the description, discussion, execution evidence and
+reported result using Activity's existing presentation. Keep a result reachable
+without scrolling a long journal. Native session events enter this view only
+when their task/execution identity is known; filtering a whole conversation by
+its name, current task or timestamp cannot establish attribution.
+
+Use one shared input surface with explicit task context, attachments, speech,
+previews and durable drafts. Description editing, new-task creation and task
+comments are distinct destinations using the same input system. Recording or
+recognizing speech must not submit native session input. New-task speech fills
+a reviewable task draft; task comments retain their task UUID throughout capture,
+recognition and submission. A context change saves/ends recording safely rather
+than redirecting it. Ordinary session drafts remain separate.
+
+
+### Title-first creation from the right board
+
+Owner steering, 2026-10-26 supersedes the earlier private-card publication
+proposal: add a **New task** plus control to the right board. It opens a one-line
+name entry. Confirming the name creates a shared title-only task in To do (or
+Backlog when that column is selected) and immediately opens its central Task View.
+There is no extra publish step after naming. Creation never starts an executor.
+
+The task title is an explicit persisted field. **Rename** is a separate action;
+subsequent description text, voice recognition and comments never overwrite it.
+The existing single task text field becomes the description, which can be empty
+when a named task is created. Older text-only tasks keep their complete text and
+derive a display title until explicitly renamed. Names never establish identity.
+
+The central Task View uses the familiar full input for description content,
+attachments, reviewed speech and later comments. Its destination is explicit:
+**Description** on a new card's Description tab until the first description is saved, then **Comment**. History selects comment input. Description
+editing selects that destination explicitly. Retain unsent input privately and
+durably across navigation/restart, including a failed new-name submission. Voice
+capture/recognition must not submit native input or start an executor.
+
+Only an unconfirmed new name and unsent content are drafts. Once the name is
+confirmed, the real card remains in the shared board even if it has no description
+yet. Preserve selection and the same card UUID through content edits and rename.
+Reserve an idempotent creation identity before transport, so duplicate clicks or
+an uncertain reply cannot create another card. Stage and executor selection stay
+separate from title/content entry; only explicit Start dispatches work.
+
+Proposed submission flow:
+
+| Task state | Default input destination | Executor delivery |
+| --- | --- | --- |
+| New name | Enter creates a title-only task and opens Task View | Only explicit Start creates/dispatches an executor. |
+| Backlog / To do | Durable task comment | Included with the next explicit dispatch. |
+| In progress | Durable task comment | Also deliver to the verified current worker; show that destination before submission. |
+| In review / Done | Durable task comment | Requesting more work uses an explicit reopen-and-send action. |
+
+A comment's history identity and delivery receipt remain distinct. Show saved,
+queued, submitted or delivery-unconfirmed evidence without claiming model
+consumption. A failed or uncertain delivery keeps the comment and never permits
+a hidden retry or fallback to another executor.
+
+Put compact stage actions in the task context/input toolbar: Back to do, Accept,
+Start, and a send icon for comments. Keep text for less obvious stage transitions;
+use existing familiar attachment, microphone and send icons. Place Jump to latest
+in that toolbar, following the existing desktop Activity pattern. Avoid a floating
+control bundle that obscures the journal or another full composer in the inspector.
+The task view solves the space/input duplication; distributed execution tracking,
+real task Pause and verified artifacts still require the open execution work.
+
 ## Verified starting point
 
 The inspected task implementation is the PR348 tree, merged as main
@@ -585,3 +666,26 @@ Selection updates must be atomic from the person's perspective: retain the
 previous document while fetching the exact new task, disable commands during
 the read and keep permanent command widgets and pane geometry. Do not clear the
 pane or rebuild its buttons on each card click.
+
+### Central Task View implementation boundary (2026-10-26)
+
+The branch now has a title field (task schema 4), separately audited Rename,
+caller-reserved idempotent creation UUIDs, and title-plus-description worker
+prompts. Current mobile ABI readers remain read-only for schemas above 2 and
+show named cards through their existing text field. The right board creates a
+shared named card and opens one reusable central Task View; ordinary Activity
+keeps its own draft and selection. Task View uses MessageComposer for description
+and comments, including media, previews and draft speech. Workflow controls share
+the bottom attachment/send row, and latest navigation uses the toolbar icon.
+
+Draft speech uses verified speech-computer routing without a native session send.
+Recording is saved before transcription; job status reads never replay Submit.
+Completed text is checkpointed before insertion, bound to the original task input
+key and unchanged draft revision. An edited draft requires explicit insertion.
+Insertion UUID receipts prevent repeated transcript insertion after an uncertain
+local clear. Recordings remain recoverable across task navigation.
+
+Task comments still persist in task history only. Verified delivery to an active
+executor, execution-scoped Activity attribution, revision guards, distributed
+claims and true per-task Pause remain the execution workstream; this UI iteration
+must not imply that those contracts have shipped.

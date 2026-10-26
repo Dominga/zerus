@@ -13,7 +13,6 @@ class QVBoxLayout;
 class TaskTile;
 class QTabBar;
 class QFrame;
-class TaskForm;
 class QLineEdit;
 class QHBoxLayout;
 class QToolButton;
@@ -29,10 +28,16 @@ public:
     void setTheme(bool dark);
     void setContentScale(double scale);
     void selectTask(const QString &uuid);
+    void openTask(const QString &uuid) { selectTask(uuid); if (m_selected == uuid) emit taskViewRequested(); }
     QString selectedTask() const { return m_selected; }
     QString selectedStage() const { return m_stage; }
     int displayedCount() const { return m_rows.size(); }
+    // One central Task View owns these widgets; the right pane remains a board.
+    QWidget *takeDetailsPane();
+    MessageComposer *composer() const { return m_commentComposer; }
+    bool canDictate() const { return !selectionPending() && !m_detail.isEmpty() && m_detail.value("writable").toBool(true) && !m_noteBusy; }
 signals:
+    void taskViewRequested();
     void executorRequested(const QString &host, const QString &name, const QString &id);
     void subagentRequested(const QString &host, const QString &parent, const QString &parentId, const QString &conversation, const QString &child);
 protected:
@@ -42,6 +47,11 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 private:
     void refresh();
+    bool descriptionMode(const QJsonObject &task) const;
+    QString inputKey(const QJsonObject &task) const;
+    void seedDescriptionDraft();
+    void createCard();
+    void restoreNewCard();
     void fetch();
     void renderDetail();
     void updateFilters();
@@ -66,6 +76,12 @@ private:
     QJsonObject m_detail;
     quint64 m_request = 0, m_generation = 0;
     QLabel *m_scope, *m_state;
+    QLabel *m_title, *m_identity, *m_inputMode;
+    QToolButton *m_add;
+    QLineEdit *m_newTitle;
+    QLabel *m_createError;
+    QJsonObject m_creation;
+    bool m_creating = false, m_detached = false, m_descriptionEditing = false, m_descriptionSeed = false;
     QWidget *m_filters = nullptr, *m_listPage = nullptr, *m_details = nullptr;
     QScrollArea *m_scroll = nullptr;
     QVBoxLayout *m_cards = nullptr;
@@ -92,8 +108,6 @@ private:
     QWidget *m_commands;
     QHBoxLayout *m_commandLayout;
     QHash<int, QPushButton *> m_commandButtons;
-    QPointer<TaskForm> m_form;
-    QScrollArea *m_formScroll = nullptr;
     QString m_commandsKey, m_noteKey, m_inlineRequested;
     bool m_noteBusy = false;
     QTabBar *m_detailTabs;

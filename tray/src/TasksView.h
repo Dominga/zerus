@@ -91,9 +91,11 @@ public:
     void reorderTask(const TaskDrag &drag, const QString &anchor, bool before);
     void stageTask(const TaskDrag &drag, const QString &stage);
     TaskRowState rowState(const TaskItem &task) const;
+    void setDescriptionDraft(const QString &uuid, bool unsaved);
     void setExecutorLaunches(const QJsonObject &launches);
     bool hasExecutorLaunch(const QString &uuid) const { return m_executorLaunchBlockers.contains(uuid); }
     void reviewExecutorLaunch(const QString &uuid) { emit executorLaunchReviewRequested(uuid); }
+    void createNamedTask(const QJsonObject &intent, std::function<void(const QJsonObject &)> saved, std::function<void(const QString &)> refused);
     void saveTaskEdits(const TaskItem &task, const TaskEdits &edits, std::function<void()> saved, std::function<void(const QString &)> refused);
     void saveTaskAssignment(const TaskItem &task, const TaskTarget &target, std::function<void()> saved, std::function<void(const QString &)> refused);
     void saveTaskNote(const QString &uuid, const QString &text, const QList<MessageAttachment> &files, std::function<void()> saved, std::function<void(const QString &)> refused);
@@ -169,6 +171,7 @@ private:
     HgsClient *m_client;
     TaskBoard m_board;
     QHash<QString, QString> m_executorLaunchBlockers;
+    QString m_descriptionDraft;
     QString m_projectId, m_projectName, m_host, m_session, m_sessionKey, m_stage, m_error;
     QList<TaskSession> m_sessions;
     QHash<QString, TaskTile *> m_tiles;

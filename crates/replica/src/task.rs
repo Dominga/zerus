@@ -1,7 +1,7 @@
 //! One task as one Loro document: `meta` (identity, set once), `fields`
 //! (last writer wins), `text` (the prompt, merged by character) and `log`
 //! (history, append only).
-use crate::attachment::{check_attachments, TaskAttachment, BASE_TASK_SCHEMA, TASK_SCHEMA};
+use crate::attachment::{check_attachments, TaskAttachment, BASE_TASK_SCHEMA, DISCUSSION_TASK_SCHEMA, TASK_SCHEMA};
 use crate::schema::{
     check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, TaskWorker, MAX_DOCUMENT, SCHEMA,
 };
@@ -60,10 +60,25 @@ pub(crate) fn check_new_stage(stage: Stage) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn check_title(title: &str) -> Result<()> {
+    if title.trim().is_empty() || title.len() > 512 || title.chars().any(char::is_control) {
+        return Err(Error::new("task title must be nonempty, at most 512 UTF-8 bytes and contain no control characters"));
+    }
+    Ok(())
+}
+
 impl TaskDoc {
-    pub fn create(task: NewTask<'_>) -> Result<Self> {
+    pub fn create(task: NewTask<'_>) -> Result<Self> { Self::create_inner(task, None, None) }
+
+    pub(crate) fn create_named(task: NewTask<'_>, title: &str, identity: Option<(&str, &str)>) -> Result<Self> {
+        Self::create_inner(task, Some(title), identity)
+    }
+
+    fn create_inner(task: NewTask<'_>, title: Option<&str>, identity: Option<(&str, &str)>) -> Result<Self> {
         check_new_stage(task.stage)?;
-        check_text(task.text, "prompt")?;
+        if let Some(title) = title { check_title(title)?; }
+        if title.is_none() || !task.text.trim().is_empty() { check_text(task.text, "prompt")?; }
+        else if !task.text.is_empty() { return Err(Error::new("an empty description must contain no whitespace")); }
         if !ids::is_short_id(task.id) {
             return Err(Error::new(format!("invalid task ID {:?}", task.id)));
         }
@@ -73,7 +88,11 @@ impl TaskDoc {
         if task.project.is_empty() || task.project.len() > 128 {
             return Err(Error::new("invalid project ID"));
         }
-        let uuid = ids::new_uuid();
+        let uuid = match identity {
+            Some((uuid, _)) if ids::is_uuid(uuid) => uuid.to_owned(),
+            Some(_) => return Err(Error::new("invalid task creation identity")),
+            None => ids::new_uuid(),
+        };
         let doc = LoroDoc::new();
         let meta = doc.get_map("meta");
         let planned = matches!(&task.target, Target::NewSession { .. } | Target::Subagent { .. });
@@ -82,18 +101,20 @@ impl TaskDoc {
         }
         let identified = matches!(&task.target, Target::Session(key) if !key.session_id.is_empty())
             || matches!(&task.author, Actor::Agent(key) if !key.session_id.is_empty());
-        meta.insert("schema", if planned { TASK_SCHEMA } else if identified { BASE_TASK_SCHEMA } else { SCHEMA })?;
+        meta.insert("schema", if title.is_some() { TASK_SCHEMA } else if planned { DISCUSSION_TASK_SCHEMA } else if identified { BASE_TASK_SCHEMA } else { SCHEMA })?;
         meta.insert("uuid", uuid.as_str())?;
         meta.insert("id", task.id)?;
         meta.insert("project", task.project)?;
         meta.insert("created_at", task.now)?;
         meta.insert("author", serde_json::to_string(&task.author)?)?;
+        if let Some((_, fingerprint)) = identity { meta.insert("creation_fingerprint", fingerprint)?; }
         let fields = doc.get_map("fields");
         fields.insert("stage", task.stage.as_str())?;
         fields.insert("stage_at", task.now)?;
         fields.insert("target", serde_json::to_string(&task.target)?)?;
         fields.insert("rank", task.rank)?;
         fields.insert("summary", "")?;
+        if let Some(title) = title { fields.insert("title", title)?; }
         doc.get_text("text").insert(0, task.text)?;
         let this = Self {
             uuid,
@@ -194,6 +215,19 @@ impl TaskDoc {
         string(&self.meta(), "id").unwrap_or_default()
     }
 
+    pub(crate) fn creation_fingerprint(&self) -> Option<String> { string(&self.meta(), "creation_fingerprint") }
+
+    pub fn title(&self) -> String { string(&self.fields(), "title").unwrap_or_default() }
+
+    pub fn set_title(&mut self, title: &str, actor: &Actor, now: i64) -> Result<()> {
+        self.writable()?; check_title(title)?;
+        if self.title() == title { return Ok(()); }
+        if self.content_len() + title.len() > MAX_DOCUMENT { return Err(Error::new("task history is full")); }
+        self.upgrade_schema(TASK_SCHEMA)?;
+        self.fields().insert("title", title)?;
+        self.log("title", actor, now, title, None)?; self.doc.commit(); Ok(())
+    }
+
     pub fn schema(&self) -> i64 {
         integer(&self.meta(), "schema").unwrap_or(0)
     }
@@ -291,6 +325,7 @@ impl TaskDoc {
             summary: string(&fields, "summary").unwrap_or_default(),
             cancelled_at: integer(&fields, "cancelled_at"),
             cancel_reason: string(&fields, "cancel_reason").unwrap_or_default(),
+            title: self.title(),
             text: self.doc.get_text("text").to_string(),
             attachments,
             log,
@@ -417,7 +452,7 @@ impl TaskDoc {
             &[Stage::Backlog, Stage::Todo],
             "the prompt can be edited only in Backlog or To do",
         )?;
-        check_text(text, "prompt")?;
+        if !text.is_empty() || self.title().is_empty() { check_text(text, "prompt")?; }
         let current = self.doc.get_text("text");
         let quick = UpdateOptions {
             timeout_ms: Some(200.0),
@@ -489,7 +524,7 @@ impl TaskDoc {
         }
         if let Target::NewSession { parent } | Target::Subagent { parent } = target {
             if parent.session_id.is_empty() || parent.machine.is_empty() { return Err(Error::new("choose a parent with a confirmed session identity")); }
-            self.upgrade_schema(TASK_SCHEMA)?;
+            self.upgrade_schema(DISCUSSION_TASK_SCHEMA)?;
         }
         self.fields()
             .insert("target", serde_json::to_string(target)?)?;
@@ -694,7 +729,7 @@ impl TaskDoc {
             return Err(Error::new("a worker needs its native child and parent conversation identities"));
         }
         if view.worker.as_ref() == Some(worker) { return Ok(()); }
-        self.upgrade_schema(TASK_SCHEMA)?;
+        self.upgrade_schema(DISCUSSION_TASK_SCHEMA)?;
         self.fields().insert("worker", serde_json::to_string(worker)?)?;
         self.log("worker", actor, now, &format!("Delegated to {} ({})", worker.name, worker.id), Some(&worker.parent))?;
         self.doc.commit(); Ok(())
@@ -716,7 +751,7 @@ impl TaskDoc {
         }
         let entry = self.log("comment", actor, now, text, None)?;
         if !files.is_empty() {
-            self.upgrade_schema(TASK_SCHEMA)?;
+            self.upgrade_schema(DISCUSSION_TASK_SCHEMA)?;
             entry.insert("attachments", serde_json::to_string(files)?)?;
         }
         self.doc.commit();
@@ -943,7 +978,7 @@ mod tests {
             let mut task = task(Stage::Todo);
             task.set_target(&target, &Actor::Person, 2).unwrap();
             let before = task.view().unwrap();
-            assert_eq!(before.schema, TASK_SCHEMA);
+            assert_eq!(before.schema, DISCUSSION_TASK_SCHEMA);
             assert_eq!(before.stage, Stage::Todo);
             assert!(before.session.is_none() && before.worker.is_none());
             assert_eq!(before.log.last().unwrap().kind, "target");
@@ -952,7 +987,7 @@ mod tests {
             task.bind_session_identity(&parent, &renamed).unwrap();
             let current = match task.view().unwrap().target { Target::NewSession { parent } | Target::Subagent { parent } => parent, _ => panic!("lost executor plan") };
             assert_eq!(current.session, renamed.session);
-            assert_eq!(task.schema(), TASK_SCHEMA);
+            assert_eq!(task.schema(), DISCUSSION_TASK_SCHEMA);
         }
     }
 
@@ -1012,7 +1047,7 @@ mod tests {
         task.comment_with_attachments("Inspect [Image #1]", &[file.clone()], &Actor::Person, 2).unwrap();
         task.set_target(&Target::Session(SessionKey { session_id: "launch_id:parent".into(), ..api() }), &Actor::Person, 3).unwrap();
         task.set_attachments(&[file.clone()], &Actor::Person, 4).unwrap();
-        assert_eq!(task.schema(), TASK_SCHEMA);
+        assert_eq!(task.schema(), DISCUSSION_TASK_SCHEMA);
         let log = task.view().unwrap().log;
         assert_eq!(log[1].attachments, [file]);
         let bytes = task.snapshot().unwrap();

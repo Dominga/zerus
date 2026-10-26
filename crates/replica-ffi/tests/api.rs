@@ -270,3 +270,21 @@ fn planned_executors_stay_read_only_in_the_current_mobile_abi() {
     assert!(api.edit_text(uuid.clone(), "Changed".into()).is_err());
     assert_eq!(api.get(uuid).unwrap().text, "Delegate later");
 }
+
+#[test]
+fn named_cards_have_a_visible_title_but_remain_read_only_in_mobile_abi() {
+    use zerus_replica::{Actor, Position, ProjectStore, Stage, Target};
+    let root = tempfile::tempdir().unwrap();
+    let uuid = {
+        let project = ProjectStore::open(root.path(), "project-1").unwrap();
+        let (mut task, _) = project.new_named_task("Title only", "", &[], Stage::Todo, Target::Any, Actor::Person,
+            &Position::End, "orchard", 1, None, false).unwrap();
+        project.save(&mut task).unwrap(); task.uuid().to_owned()
+    };
+    let api = store(&root);
+    let shown = api.get(uuid.clone()).unwrap();
+    assert_eq!(shown.text, "Title only"); assert!(!shown.writable);
+    assert!(api.edit_text(uuid.clone(), "Changed".into()).is_err());
+    assert!(api.set_stage(uuid.clone(), TaskStage::Backlog).is_err());
+    assert_eq!(api.get(uuid).unwrap().text, "Title only");
+}

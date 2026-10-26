@@ -1,4 +1,5 @@
 #include "TasksView.h"
+#include <QInputDialog>
 #include "TaskStageFilter.h"
 #include "TaskContent.h"
 #include "AttachmentViewer.h"
@@ -247,6 +248,7 @@ const TaskSession *TasksView::session(const QString &host, const QString &name) 
 
 // Why Send now cannot paste into the session the task would go to, as hgs would say it.
 QString TasksView::sendBlocker(const TaskItem &task) const {
+    if (task.uuid == m_descriptionDraft && !task.uuid.isEmpty()) return tr("Save the description before starting this task");
     if (task.targetKind == QLatin1String("new_session")) {
         if (task.targetId.isEmpty() || task.targetMachine.isEmpty()) return tr("Choose a parent with a confirmed computer and session identity");
         return m_executorLaunchBlockers.value(task.uuid);
@@ -335,6 +337,12 @@ void TasksView::setExecutorLaunches(const QJsonObject &launches) {
     m_executorLaunchBlockers = blockers; render();
 }
 
+void TasksView::setDescriptionDraft(const QString &uuid, bool unsaved) {
+    const auto blocked = unsaved ? uuid : QString();
+    if (m_descriptionDraft == blocked) return;
+    m_descriptionDraft = blocked; render(); emit boardChanged();
+}
+
 TaskRowState TasksView::rowState(const TaskItem &task) const {
     const auto v = view();
     TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session, v.id); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
@@ -374,7 +382,7 @@ QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action)
         if (task.targetSession.isEmpty() && !m_host.isEmpty()) arguments << "--host" << m_host;
         return {{withProject(arguments), {}}};
     }
-    case TaskAction::Edit: case TaskAction::Cancel: case TaskAction::Pause: break;
+    case TaskAction::Rename: case TaskAction::Edit: case TaskAction::Cancel: case TaskAction::Pause: break;
     }
     return {};
 }
@@ -414,6 +422,18 @@ void TasksView::run(QList<Step> steps, std::function<void()> finished, std::func
 }
 
 void TasksView::act(const TaskItem &task, TaskAction action) {
+    if (action == TaskAction::Rename) {
+        if (!task.writable) return;
+        auto *dialog = new QInputDialog(this); dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setObjectName("taskRenameDialog"); dialog->setWindowTitle(tr("Rename task"));
+        dialog->setLabelText(tr("Title")); dialog->setTextValue(task.displayTitle()); dialog->setInputMode(QInputDialog::TextInput);
+        const auto project = m_projectId;
+        connect(dialog, &QDialog::accepted, this, [this, dialog, task, project] {
+            const auto title = dialog->textValue().trimmed();
+            if (!title.isEmpty()) run({{{"rename", task.uuid, "--project", project}, title}});
+        });
+        dialog->open(); return;
+    }
     if (action == TaskAction::Pause) return; // Task-scoped execution accounting must precede pause.
     if (action == TaskAction::Edit) {
         if (m_openInInspector) { emit taskSelected(task.uuid); emit taskEditRequested(task.uuid); return; }
@@ -625,6 +645,28 @@ void TasksView::openTask(const TaskItem &task) {
         });
         dialog->open();
     });
+}
+
+void TasksView::createNamedTask(const QJsonObject &intent, std::function<void(const QJsonObject &)> saved,
+                                std::function<void(const QString &)> refused) {
+    const auto project = intent.value("project").toString();
+    if (project.isEmpty() || project != m_projectId) { refused(tr("The selected project changed. The new task draft was kept.")); return; }
+    QStringList args{"add", "--project", project, "--title", intent.value("title").toString(), "--request-id", intent.value("request_id").toString(),
+                     "--target", intent.value("session").toString("any"), "--content-json"};
+    if (intent.value("stage") == QLatin1String("backlog")) args << "--backlog";
+    if (!intent.value("session_id").toString().isEmpty()) args << "--session-id" << intent.value("session_id").toString();
+    if (!intent.value("host").toString().isEmpty()) args << "--host" << intent.value("host").toString();
+    request(args, TaskContent::payload({}, {}), [this, intent, project, saved, refused](const QJsonObject &reply) {
+        const auto task = reply.value("task").toObject();
+        if (task.value("uuid") != intent.value("request_id")) { refused(tr("Task creation needs review: the reply did not match the reserved card.")); return; }
+        if (project == m_projectId) {
+            const auto uuid = task.value("uuid").toString();
+            auto found = std::find_if(m_board.tasks.begin(), m_board.tasks.end(), [uuid](const TaskItem &t) { return t.uuid == uuid; });
+            if (found == m_board.tasks.end()) m_board.tasks.prepend(TaskBoard::item(task));
+            render(); emit boardChanged();
+        }
+        saved(task); refresh();
+    }, refused);
 }
 
 void TasksView::saveTaskEdits(const TaskItem &task, const TaskEdits &edits,

@@ -48,11 +48,14 @@ if cmd=='settings':
     if '--set' in a: data['settings'].update(json.loads(text)); save()
     out({'project':project,'settings':data['settings']}); sys.exit(0)
 if cmd=='add':
+    existing=next((t for t in data['tasks'] if t['uuid']==opt('--request-id')),None)
+    if existing: out({'task':existing}); sys.exit(0)
     n=data['next']; data['next']=n+1
-    target={'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':opt('--target'),'host':opt('--host') or ''} if opt('--target') else {'kind':'any'}
-    t={'uuid':'uuid-%d'%n,'id':'T-%06d'%n,'ref':'orchard/T-%06d'%n,'text':text,'stage':'backlog' if '--backlog' in a else 'todo',
+    target={'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':opt('--target'),'host':opt('--host') or ''} if opt('--target') and opt('--target')!='any' else {'kind':'any'}
+    t={'uuid':opt('--request-id') or 'uuid-%d'%n,'id':'T-%06d'%n,'ref':'orchard/T-%06d'%n,'text':text,'stage':'backlog' if '--backlog' in a else 'todo',
        'summary':'','cancel_reason':'','cancelled_at':None,'created_at':now,'stage_at':now,'writable':True,
        'author':{'kind':'person'},'target':target,'session':None,'rank':'V'}
+    if opt('--title'): t['title']=opt('--title')
     if 'attachments' in content: t['attachments']=content['attachments']
     log(t,'created'); data['tasks'].append(t); save(); out({'task':t}); sys.exit(0)
 t=find(a[2])
@@ -70,6 +73,8 @@ elif cmd=='send':
     t['stage']='active'; t['stage_at']=now; t['session']={'machine':'m-here','session':session,'host':''}; log(t,'sent')
 elif cmd=='cancel':
     t['stage']='review'; t['stage_at']=now; t['cancelled_at']=now; t['cancel_reason']=opt('--reason') or ''; log(t,'cancelled')
+elif cmd=='rename':
+    t['title']=text; log(t,'title',text)
 elif cmd=='edit':
     t['text']=text; log(t,'edited')
     if 'attachments' in content: t['attachments']=content['attachments']

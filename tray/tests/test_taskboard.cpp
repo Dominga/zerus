@@ -88,11 +88,11 @@ void TestTaskBoard::theOpenSessionsTasksAndTheFilter() {
 
 void TestTaskBoard::actionsFollowTheStage() {
     using A = TaskAction;
-    QCOMPARE(TaskBoard::actions("todo"), QList<A>({A::Edit, A::ToBacklog, A::Top, A::SendNow}));
-    QCOMPARE(TaskBoard::actions("backlog"), QList<A>({A::Edit, A::ToTodo, A::SendNow}));
-    QCOMPARE(TaskBoard::actions("active"), QList<A>({A::Cancel}));
-    QCOMPARE(TaskBoard::actions("review"), QList<A>({A::BackToTodo, A::Accept}));
-    QCOMPARE(TaskBoard::actions("done"), QList<A>({A::BackToTodo}));
+    QCOMPARE(TaskBoard::actions("todo"), QList<A>({A::Edit, A::Rename, A::ToBacklog, A::Top, A::SendNow}));
+    QCOMPARE(TaskBoard::actions("backlog"), QList<A>({A::Edit, A::Rename, A::ToTodo, A::SendNow}));
+    QCOMPARE(TaskBoard::actions("active"), QList<A>({A::Rename, A::Cancel}));
+    QCOMPARE(TaskBoard::actions("review"), QList<A>({A::Rename, A::BackToTodo, A::Accept}));
+    QCOMPARE(TaskBoard::actions("done"), QList<A>({A::Rename, A::BackToTodo}));
     QCOMPARE(TaskBoard::stages(), QStringList({"review", "active", "todo", "backlog", "done"}));
     QCOMPARE(TaskBoard::stageLabel("active"), QString("In progress"));
     QCOMPARE(TaskBoard::actionLabel(A::Top), QString("Move to the top of To do"));

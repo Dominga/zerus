@@ -140,6 +140,8 @@ pub struct TaskView {
     pub summary: String,
     pub cancelled_at: Option<i64>,
     pub cancel_reason: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     pub text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::TaskAttachment>,

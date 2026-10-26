@@ -33,7 +33,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -104,6 +104,7 @@ fn agent_text(text: &str, action: &str, who: &Actor) -> Result<()> {
     let (what, example) = match action {
         "add" => ("prompt", "add"),
         "edit" => ("prompt", "edit REF"),
+        "rename" => ("title", "rename REF"),
         "comment" => ("comment", "comment REF"),
         _ => ("report", "report REF"),
     };
@@ -391,7 +392,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": view(&task, &r.project.1, true, &machines)?}))
         }
         "add" => add(config, args),
-        "edit" | "move" | "stage" | "target" | "comment" | "report" | "start" | "send" | "handoff" | "cancel" | "worker" => {
+        "edit" | "rename" | "move" | "stage" | "target" | "comment" | "report" | "start" | "send" | "handoff" | "cancel" | "worker" => {
             change(config, action, args)
         }
         "settings" => settings(config, args),
@@ -461,7 +462,8 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
     let text = content.text;
     let machines = machines(config)?;
     let author = actor(&machines.here, args, false)?;
-    agent_text(&text, "add", &author)?;
+    let title = option(args, "--title")?;
+    if title.is_none() { agent_text(&text, "add", &author)?; }
     let (id, name) = project_arg(config, args, &author)?;
     let stage = if flag(args, "--backlog") {
         Stage::Backlog
@@ -484,12 +486,18 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
     };
     let position = position_index(args)?.map_or(Position::End, Position::Index);
     let store = store(config, &id)?;
-    let mut task = store
-        .new_task(&text, stage, target, author.clone(), &position, &name, now())
-        .map_err(fail)?;
-    if let Some(files) = content.attachments { task.set_attachments(&files, &author, now()).map_err(fail)?; }
-    if flag(args, "--start") { task.record_start(&author, now()).map_err(fail)?; }
-    store.save(&mut task).map_err(fail)?;
+    let (mut task, created) = if let Some(title) = title {
+        store.new_named_task(title, &text, content.attachments.as_deref().unwrap_or_default(), stage, target, author.clone(), &position, &name, now(), option(args, "--request-id")?, flag(args, "--start")).map_err(fail)?
+    } else {
+        if option(args, "--request-id")?.is_some() { return Err(fail("--request-id requires --title")); }
+        let mut task = store.new_task(&text, stage, target, author.clone(), &position, &name, now()).map_err(fail)?;
+        if let Some(files) = content.attachments { task.set_attachments(&files, &author, now()).map_err(fail)?; }
+        (task, true)
+    };
+    if created {
+        if title.is_none() && flag(args, "--start") { task.record_start(&author, now()).map_err(fail)?; }
+        store.save(&mut task).map_err(fail)?;
+    }
     let at = place(&store, &task)?;
     Ok(with_answer(&author, "add", json!({"task": view(&task, &name, true, &machines)?}), at, ""))
 }
@@ -506,13 +514,14 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
         "comment" => Some(match &content { Some(content) => content.text.clone(), None => stdin_text("comment")? }),
         "report" => Some(stdin_text("report")?),
+        "rename" => Some(stdin_text("title")?.trim().to_owned()),
         _ => None,
     };
     let machines = machines(config)?;
     let here = machines.here.as_str();
     let who = actor(here, args, matches!(action, "send" | "handoff" | "cancel"))?;
     if let Some(text) = &text {
-        agent_text(text, action, &who)?;
+        if action != "edit" || !text.is_empty() { agent_text(text, action, &who)?; }
     }
     let r = reference(config, args, &who)?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
@@ -549,6 +558,7 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
             .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
     };
     let mut task = store.find(&r.task).map_err(fail)?;
+    if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
     if task.view().map_err(fail)?.writable {
         let view = task.view().map_err(fail)?;
         let target = match view.target { Target::Session(target) | Target::NewSession { parent: target } | Target::Subagent { parent: target } => Some(target), Target::Any => None };
@@ -608,6 +618,7 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
     match action {
         "worker" => { task.record_worker(worker_proof.as_ref().expect("worker proof"), &who, now()).map_err(fail)?; task.record_start(&who, now()).map_err(fail)?; },
         "start" => task.record_start(&who, now()).map_err(fail)?,
+        "rename" => { task.set_title(&text, &who, now()).map_err(fail)?; store.check_prompt(&task, project_name).map_err(fail)?; },
         "edit" => {
             store
                 .edit_task(&mut task, &text, &who, project_name, now())

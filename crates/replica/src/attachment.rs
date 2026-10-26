@@ -11,7 +11,9 @@ pub const MAX_ATTACHMENT_TOTAL: usize = 20 * 1024 * 1024;
 /// Schema two supports description media and immutable session identity.
 pub(crate) const BASE_TASK_SCHEMA: i64 = 2;
 /// Schema three adds immutable comment media. Older readers stay read-only.
-pub const TASK_SCHEMA: i64 = 3;
+pub(crate) const DISCUSSION_TASK_SCHEMA: i64 = 3;
+/// Schema four adds independent task titles and title-only cards.
+pub const TASK_SCHEMA: i64 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

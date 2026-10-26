@@ -545,6 +545,13 @@ pub(crate) struct Report {
     /// Captured texts this report replaced, the newest three (A6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaced: Vec<ReplacedReport>,
+    /// D1: the structured report object, validated and bounded; None for an
+    /// unstructured report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
+    /// D1: a report without a structured object, shown as such in status.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unstructured: bool,
 }
 
 /// A report text that a member's real report replaced (A6).
@@ -1064,6 +1071,7 @@ mod tests {
                         at: 1792939600.0,
                         captured: true,
                         replaced: vec![ReplacedReport { text: "Building and running...".into(), at: 1792939550.0 }],
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }],

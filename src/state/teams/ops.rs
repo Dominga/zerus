@@ -1078,6 +1078,55 @@ pub(crate) fn attempt_phase(task: &Task, session_stopped: bool) -> Option<&'stat
     Some(phase)
 }
 
+/// D1: validates a structured report against the task's criteria and bounds.
+fn structured_report(team: &Team, id: u32, report: &Value) -> anyhow::Result<Value> {
+    ensure!(serde_json::to_string(report)?.len() <= 64 * 1024, "A structured report stays within 64 KB");
+    let criteria = report["criteria"].as_array().cloned().unwrap_or_default();
+    ensure!(criteria.len() <= 50, "A report lists at most 50 criteria");
+    let count = team.task(id).map(|task| task.criteria.len()).unwrap_or(0);
+    let evidence = report["evidence"].as_array().cloned().unwrap_or_default();
+    ensure!(evidence.len() <= 50, "A report lists at most 50 evidence items");
+    for (index, item) in evidence.iter().enumerate() {
+        let kind = item["kind"].as_str().context("An evidence item names its kind")?;
+        ensure!(["command", "image", "html", "file", "log", "url", "text"].contains(&kind), "Unknown evidence kind {kind}");
+        clean(item["caption"].as_str().unwrap_or_default(), 500, "An evidence caption")?;
+        match kind {
+            "command" => {
+                ensure!(!item["command"].as_str().unwrap_or_default().trim().is_empty(), "Command evidence {} needs its command", index);
+                ensure!(item["exit"].as_i64().is_some(), "Command evidence {} needs its exit code", index);
+                clean(item["tail"].as_str().unwrap_or_default(), 4000, "An evidence tail")?;
+            }
+            "url" => ensure!(
+                item["url"].as_str().is_some_and(|url| url.starts_with("http://") || url.starts_with("https://")),
+                "Evidence {} needs an http(s) url",
+                index
+            ),
+            "text" => ensure!(!item["text"].as_str().unwrap_or_default().trim().is_empty(), "Text evidence {} needs its text", index),
+            _ => ensure!(!item["path"].as_str().unwrap_or_default().trim().is_empty(), "Evidence {} needs its path", index),
+        }
+    }
+    for criterion in &criteria {
+        let n = criterion["n"].as_u64().context("A criterion names its 1-based number")?;
+        ensure!(n >= 1 && n as usize <= count, "Task #{id} has no criterion {n}");
+        let result = criterion["result"].as_str().context("A criterion names its result")?;
+        ensure!(["pass", "fail", "partial", "n/a"].contains(&result), "A criterion result is pass, fail, partial or n/a");
+        for index in criterion["evidence"].as_array().into_iter().flatten() {
+            ensure!(
+                index.as_u64().is_some_and(|index| (index as usize) < evidence.len()),
+                "A criterion cites evidence {index} that the report does not list"
+            );
+        }
+    }
+    let limits = report["limits"].as_array().cloned().unwrap_or_default();
+    ensure!(limits.len() <= 50, "A report lists at most 50 limits");
+    for limit in &limits {
+        clean(limit.as_str().unwrap_or_default(), 1000, "A limit")?;
+    }
+    let findings = report["findings"].as_array();
+    ensure!(!findings.is_some_and(|findings| findings.len() > 100), "A report lists at most 100 findings");
+    Ok(report.clone())
+}
+
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let attempt_id = text(input, "attempt");
@@ -1085,6 +1134,14 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     // C5: a check task reports its exit code and output tail; its text is
     // optional (Zerus writes the summary) and its decision is the exit code.
     let check = input.get("check").filter(|value| value.is_object());
+    // D1: an optional structured report; text falls back to its summary.
+    let structured = input.get("report").filter(|value| value.is_object());
+    let structured = structured.map(|report| structured_report(team, id, report)).transpose()?;
+    if let Some(report) = &structured {
+        if body.is_empty() {
+            body = clean(report["summary"].as_str().unwrap_or_default().trim(), 64 * 1024, "A report")?;
+        }
+    }
     ensure!(!body.is_empty() || check.is_some(), "A report needs text");
     let check_task = team.task(id).is_some_and(Task::is_check);
     ensure!(!check_task || check.is_some(), "A check task's report needs \"check\":{{\"exit\":N,\"tail\":\"...\"}}");
@@ -1126,7 +1183,7 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         };
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
-        attempt.report = Some(Report { text: body, at: now(), ..Default::default() });
+        attempt.report = Some(Report { text: body, at: now(), structured: structured.clone(), unstructured: structured.is_none(), ..Default::default() });
         attempt.no_report = false;
         attempt.check = check_result;
         // The lead hears of a report unless it wrote it.
@@ -1168,6 +1225,8 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
             report.replaced.remove(0);
         }
         report.text = body;
+        report.structured = structured.clone();
+        report.unstructured = structured.is_none();
         report.at = now();
         report.captured = false;
         attempt.no_report = false;
@@ -3444,6 +3503,59 @@ mod tests {
         team.settings.folder_policy = FolderPolicy::Auto;
         let validation = plan::validate(&team, &BTreeSet::new());
         assert!(!validation.errors.iter().any(|finding| finding.text.contains("folder policy")), "{:?}", validation.errors);
+    }
+
+    #[test]
+    fn a_structured_report_is_validated_and_kept() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"}],
+                "tasks":[{"id":1,"title":"A","assignee":"dev","criteria":["one","two"]}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let attempt = hand_out(&mut team, 1);
+        // D1: text becomes the summary; the object is kept with its evidence.
+        report(
+            &mut team,
+            &json!({"task":1,"attempt":attempt,"report":{
+                "summary":"Done: the guard is in.",
+                "criteria":[{"n":1,"result":"pass","evidence":[0]}],
+                "evidence":[{"kind":"command","caption":"cargo test teams","command":"cargo test --locked --bin hgs teams","exit":0,"tail":"ok"},
+                    {"kind":"text","caption":"note","text":"reads well"},
+                    {"kind":"url","caption":"log","url":"https://example.com/log"}],
+                "limits":["the GUI was not rebuilt"]}}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        let stored = team.task(1).unwrap().attempts[0].report.as_ref().unwrap();
+        assert_eq!(stored.text, "Done: the guard is in.");
+        assert!(!stored.unstructured);
+        assert_eq!(stored.structured.as_ref().unwrap()["evidence"].as_array().unwrap().len(), 3);
+        // Refusals: an unknown criterion, evidence kind, result or missing path.
+        let attempt = hand_out(&mut team, 1);
+        for (object, expected) in [
+            (json!({"summary":"x","criteria":[{"n":9,"result":"pass"}]}), "has no criterion 9"),
+            (json!({"summary":"x","evidence":[{"kind":"video","path":"a"}]}), "Unknown evidence kind video"),
+            (json!({"summary":"x","criteria":[{"n":1,"result":"maybe"}]}), "A criterion result is pass, fail, partial or n/a"),
+            (json!({"summary":"x","evidence":[{"kind":"file","caption":"no path"}]}), "Evidence 0 needs its path"),
+            (json!({"summary":"x","criteria":[{"n":1,"result":"pass","evidence":[4]}]}), "cites evidence 4"),
+        ] {
+            let error = report(&mut team, &json!({"task":1,"attempt":attempt,"report":object}), &Actor::Member("dev".into()), &mut events)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        // An unstructured report is still accepted and flagged as such.
+        report(&mut team, &json!({"task":1,"attempt":attempt,"text":"plain"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        let stored = team.task(1).unwrap().attempts.last().unwrap().report.as_ref().unwrap();
+        assert!(stored.unstructured);
+        assert!(stored.structured.is_none());
     }
 
     #[test]

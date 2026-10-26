@@ -437,6 +437,27 @@ private:
 // Wide runs left to right with layer columns (the team workspace). While
 // planning, a node's handle drags onto another node to add a dependency, and a
 // selected edge is removed with Delete or its ×.
+// G9: the status chip of a phase header, from status.phase_summary.
+inline QString phaseStatusText(const QString &status)
+{
+    if (status == "done") return QCoreApplication::translate("TeamPanel", "Done");
+    if (status == "in_work") return QCoreApplication::translate("TeamPanel", "In work");
+    if (status == "approved") return QCoreApplication::translate("TeamPanel", "Approved (not started)");
+    if (status == "draft") return QCoreApplication::translate("TeamPanel", "Draft");
+    if (status == "paused") return QCoreApplication::translate("TeamPanel", "Paused");
+    return status;
+}
+
+inline QColor phaseStatusColor(const Colors &c, const QString &status)
+{
+    if (status == "done") return c.accent;
+    if (status == "in_work") return c.folder;
+    if (status == "approved") return c.muted;
+    if (status == "draft") return c.warn;
+    if (status == "paused") return c.dim;
+    return c.muted;
+}
+
 class TaskView : public QWidget {
 public:
     enum Mode { List, Graph, Wide };
@@ -444,7 +465,17 @@ public:
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
-    struct PhaseBand { int n = 0; QString heading, title; bool barrier = false, draft = false, collapsed = false; int done = 0, total = 0; QList<int> tasks; };
+    // G9: the header also carries the phase's status, progress and health from
+    // status.phase_summary/phases_health, and a draft's Approve/Discard.
+    struct PhaseBand {
+        int n = 0; QString heading, title; bool barrier = false, draft = false, collapsed = false; int done = 0, total = 0; QList<int> tasks;
+        QString status;       // done|in_work|approved|draft|paused (empty: older hgs)
+        QString healthLine;   // "path 8 · par 2.4 · 1 warning"
+        QString healthTip;
+        QString blocked;      // F12: why Approve is disabled, empty when ready
+        QString blockedTip;
+        int changes = 0;      // the lead's pending edits on a draft
+    };
     TaskView(const Colors &colors, Mode mode, QWidget *parent = nullptr) : QWidget(parent), m_c(colors), m_mode(mode)
     {
         setMouseTracking(true);
@@ -462,6 +493,25 @@ public:
     // toggles call phaseToggled; the caller re-renders with the new collapse.
     QList<PhaseBand> bands;
     std::function<void(int phase)> phaseToggled;
+    // G9: the draft decisions from the band header, and the F10 reorder. A
+    // decision returns true only when it was really sent (the owner confirmed),
+    // so a cancelled confirmation leaves the header usable.
+    std::function<bool(int phase)> phaseApprove, phaseDiscard;
+    std::function<void(int phase)> phaseMoveUp, phaseMoveDown;
+    // G9: a decision goes out once; the header control stays off until a new
+    // render builds a new view.
+    QSet<int> decided;
+    // The painted place of a band's header controls, for hit tests and tests.
+    QRectF approveRect(int phase) const { return m_approve.value(phase); }
+    QRectF discardRect(int phase) const { return m_discard.value(phase); }
+    QRectF moveUpRect(int phase) const { return m_moveUp.value(phase); }
+    QRectF moveDownRect(int phase) const { return m_moveDown.value(phase); }
+    QString bandTooltip(int phase) const { return m_bandTips.value(phase); }
+    const PhaseBand *bandOf(int phase) const
+    {
+        for (const auto &band : bands) if (band.n == phase) return &band;
+        return nullptr;
+    }
     // The painted place of a phase header or of a collapsed phase's summary
     // node, in the view's own (unzoomed) coordinates.
     QRectF bandRect(int phase) const { return m_bandRects.value(phase); }
@@ -484,17 +534,17 @@ public:
     QSizeF natural() const
     {
         if (banded() && m_mode == Wide) {
-            double width = 16;
-            int tall = 0;
+            double wide = BandMin;
+            int tall = 8;
             for (const auto &band : bands) {
                 QMap<int, int> lines;
                 for (int id : band.tasks) if (const Node *node = nodeOf(id)) ++lines[node->layer];
                 int rows = 0;
                 for (int count : lines) rows = qMax(rows, count);
-                tall = qMax(tall, BandTop + qMax(1, rows) * (WideH + 12));
-                width += bandWidth(band) + BandGap;
+                wide = qMax(wide, double(bandWidth(band)));
+                tall += BandHead + (band.collapsed ? 0 : (BandTop - BandHead) + qMax(1, rows) * (WideH + 12) + 4) + BandGap;
             }
-            return {width, double(tall + 8)};
+            return {wide + 8, double(tall + 2)};
         }
         QMap<int, int> column;
         for (const auto &n : nodes) ++column[n.layer];
@@ -505,6 +555,7 @@ public:
     void layout()
     {
         m_rects.clear(); m_bandRects.clear(); m_summaries.clear(); m_bandBackgrounds.clear(); m_listLayers.clear(); m_bandLayers.clear();
+        m_approve.clear(); m_discard.clear(); m_moveUp.clear(); m_moveDown.clear();
         // G3: inside a layer (and inside a phase band) a task other tasks depend
         // on comes first, in the existing order; a dead-end task — nothing
         // depends on it — sinks to the bottom of its column.
@@ -552,37 +603,46 @@ public:
             m_ox = qMax(0.0, (viewW - size.width()) / 2);
             m_oy = banded() ? 0.0 : qMax(0.0, (viewH - size.height()) / 2);
             if (banded()) {
-                double x = m_ox + 8;
+                // G9: phases stack top to bottom; a band's layers run left to
+                // right inside it. A collapsed band is one header row.
+                const double width = qMax(size.width() - 8, viewW > 0 ? viewW - 16 : 0.0);
+                double y = 4;
                 for (const auto &band : bands) {
-                    const double width = bandWidth(band);
-                    m_bandRects.insert(band.n, QRectF(x, m_oy + 4, width - BandGap, BandHead - 4));
-                    m_bandBackgrounds.append(QRectF(x - 6, 0, width, qMax(size.height(), viewH)));
-                    QMap<int, int> used;
-                    for (int id : band.tasks) {
-                        const Node *node = nodeOf(id);
-                        if (!node) continue;
-                        m_rects.insert(id, QRectF(x + 6 + node->layer * WideStep, m_oy + BandTop + used[node->layer]++ * (WideH + 12), WideW, WideH));
-                    }
-                    if (band.collapsed) { m_summaries.insert(band.n, QRectF(x + 6, m_oy + BandTop, WideW, WideH)); m_rects.insert(-band.n, m_summaries.value(band.n)); }
-                    // G4: the band keeps its own layer columns, so each layer
-                    // inside it gets a stripe and a small label.
-                    if (!band.collapsed) {
-                        QMap<int, int> counts;
-                        for (int id : band.tasks) if (const Node *node = nodeOf(id)) ++counts[node->layer];
-                        const double bandRight = x + width - BandGap;
+                    QMap<int, int> counts;
+                    for (int id : band.tasks) if (const Node *node = nodeOf(id)) ++counts[node->layer];
+                    int rows = 0;
+                    for (int count : counts) rows = qMax(rows, count);
+                    const double body = band.collapsed ? 0 : (BandTop - BandHead) + qMax(1, rows) * (WideH + 12) + 4;
+                    m_bandRects.insert(band.n, QRectF(8, y, width, BandHead - 4));
+                    m_bandBackgrounds.append(QRectF(0, y - 4, width + 16, BandHead + body + 6));
+                    if (band.collapsed) {
+                        // G9: a collapsed band is its header row alone; edges
+                        // that end in it attach to the header.
+                        m_rects.insert(-band.n, m_bandRects.value(band.n));
+                    } else {
+                        QMap<int, int> used;
+                        for (int id : band.tasks) {
+                            const Node *node = nodeOf(id);
+                            if (!node) continue;
+                            m_rects.insert(id, QRectF(14 + node->layer * WideStep, y + BandTop + used[node->layer]++ * (WideH + 12), WideW, WideH));
+                        }
+                        // G4: each layer inside the band keeps its stripe and
+                        // small label above the band's tasks.
                         for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
-                            const double left = x + 6 + it.key() * WideStep;
-                            const double w = qMin(double(WideStep), bandRight - left);
+                            const double left = 14 + it.key() * WideStep;
+                            const double w = qMin(double(WideStep), width - left + 8);
                             if (w <= 4) continue;
                             BandLayer layer; layer.phase = band.n; layer.layer = it.key(); layer.count = it.value();
-                            layer.rect = QRectF(left, m_oy + BandHead, w, BandTop - BandHead);
+                            layer.rect = QRectF(left, y + BandHead, w, BandTop - BandHead);
                             m_bandLayers.append(layer);
                         }
                     }
-                    x += width + BandGap;
+                    y += BandHead + body + BandGap;
                 }
                 m_layers = 0;
-                setFixedSize(int(qMax(size.width(), viewW) * zoom), int(qMax(size.height(), viewH) * zoom));
+                const double finalW = qMax(size.width(), viewW);
+                const double finalH = qMax(qMax(double(y), size.height()), viewH);
+                setFixedSize(int(finalW * zoom), int(finalH * zoom));
             } else {
                 for (const auto &n : nodes) {
                     const double x = m_ox + 12 + n.layer * WideStep, y = m_oy + 30 + column[n.layer]++ * (WideH + 12);
@@ -630,7 +690,7 @@ public:
     QPair<int, int> selectedEdge() const { return m_edge; }
 protected:
     static constexpr int NodeW = 118, NodeH = 46, Gutter = 20, WideW = 146, WideH = 76, WideStep = 170;
-    static constexpr int BandHead = 26, BandTop = 42, BandGap = 10, BandMin = 240;
+    static constexpr int BandHead = 40, BandTop = 58, BandGap = 10, BandMin = 240;
     bool banded() const { return !bands.isEmpty(); }
     const Node *nodeOf(int id) const
     {
@@ -649,7 +709,7 @@ protected:
     {
         if (m_rects.contains(id)) return id;
         for (const auto &band : bands)
-            if (band.collapsed && m_summaries.contains(band.n) && band.tasks.contains(id)) return -band.n;
+            if (band.collapsed && band.tasks.contains(id) && m_bandRects.contains(band.n)) return -band.n;
         return 0;
     }
     // The phase header or summary node under a point, 0 when there is none.
@@ -660,41 +720,87 @@ protected:
         for (auto it = m_summaries.cbegin(); it != m_summaries.cend(); ++it) if (it.value().contains(point)) return it.key();
         return 0;
     }
-    // A phase header: chevron, "Phase 2 · QA fixes · 3/5", its barrier and
-    // draft tags.
+    // A phase header: chevron, "Phase 2 · QA fixes", the phase status chip,
+    // done/total, the health line and, for a draft, Approve and Discard (and
+    // the F10 move arrows). G9: without phase_summary (older hgs) it falls back
+    // to today's heading with the barrier and draft tags.
     void paintBand(QPainter &p, const PhaseBand &band, const QRectF &r)
     {
         p.setOpacity(1);
-        const QPointF middle(r.left() + 7, r.center().y());
+        QStringList tips;
+        if (!band.healthTip.isEmpty()) tips << band.healthTip;
+        if (!band.blockedTip.isEmpty()) tips << band.blockedTip;
+        if (band.blocked.isEmpty() && band.healthLine.isEmpty()) m_bandTips.remove(band.n);
+        else m_bandTips.insert(band.n, tips.join(QLatin1Char('\n')));
+        const double line1 = r.top() + 3, lineH = 16;
+        const QPointF middle(r.left() + 7, line1 + lineH / 2);
         QPainterPath chevron;
         if (band.collapsed) { chevron.moveTo(middle + QPointF(-2, -4)); chevron.lineTo(middle + QPointF(3, 0)); chevron.lineTo(middle + QPointF(-2, 4)); }
         else { chevron.moveTo(middle + QPointF(-4, -2)); chevron.lineTo(middle + QPointF(0, 3)); chevron.lineTo(middle + QPointF(4, -2)); }
         p.setPen(Qt::NoPen); p.setBrush(m_c.muted); p.drawPath(chevron);
-        QFont caps = font(); caps.setPixelSize(11); caps.setWeight(QFont::DemiBold);
-        p.setFont(caps);
-        const QFontMetrics fm(caps);
-        QFont tagFont = font(); tagFont.setPixelSize(9); tagFont.setWeight(QFont::DemiBold);
-        const auto tagWidth = [&](const QString &text) { return QFontMetrics(tagFont).horizontalAdvance(text) + 10; };
-        const QString barrier = QCoreApplication::translate("TeamPanel", "barrier");
-        const QString draft = QCoreApplication::translate("TeamPanel", "draft");
-        int tags = 0;
-        if (band.barrier) tags += tagWidth(barrier) + 6;
-        if (band.draft) tags += tagWidth(draft) + 6;
-        const double room = qMax(0.0, r.width() - 26 - tags);
-        const QString shown = fm.elidedText(band.heading, Qt::ElideRight, int(room));
-        p.setPen(m_c.text2);
-        p.drawText(QRectF(r.left() + 17, r.top(), room, r.height()), Qt::AlignLeft | Qt::AlignVCenter, shown);
-        double x = r.left() + 21 + qMin(room, double(fm.horizontalAdvance(shown)));
-        const auto tag = [&](const QString &text, const QColor &color) {
-            const int width = tagWidth(text);
-            const QRectF box(x, r.center().y() - 7, width, 14);
-            p.setFont(tagFont);
-            p.setPen(QPen(alpha(color, .45), 1)); p.setBrush(alpha(color, .10)); p.drawRoundedRect(box, 7, 7);
-            p.setPen(color); p.drawText(box, Qt::AlignCenter, text);
-            x += width + 4;
+        QFont titleFont = font(); titleFont.setPixelSize(11); titleFont.setWeight(QFont::DemiBold);
+        QFont metaFont = font(); metaFont.setPixelSize(9); metaFont.setWeight(QFont::DemiBold);
+        const QFontMetrics tf(titleFont), mf(metaFont);
+        double right = r.right() - 6;
+        const auto pill = [&](const QString &text, const QColor &tone) {
+            const double width = QFontMetrics(metaFont).horizontalAdvance(text) + 12;
+            const QRectF box(right - width, line1, width, lineH);
+            p.setPen(QPen(alpha(tone, .5), 1)); p.setBrush(alpha(tone, .12)); p.drawRoundedRect(box, 7, 7);
+            p.setFont(metaFont); p.setPen(tone); p.drawText(box, Qt::AlignCenter, text);
+            right -= width + 5;
         };
-        if (band.barrier) tag(barrier, m_c.muted);
-        if (band.draft) tag(draft, m_c.warn);
+        const auto control = [&](const QString &text, const QColor &tone, bool enabled, QRectF *store) {
+            const double width = mf.horizontalAdvance(text) + 14;
+            const QRectF box(right - width, line1, width, lineH);
+            p.setPen(QPen(enabled ? alpha(tone, .65) : m_c.border, 1));
+            p.setBrush(enabled ? alpha(tone, .12) : QColor(Qt::transparent));
+            p.drawRoundedRect(box, 4, 4);
+            p.setFont(metaFont); p.setPen(enabled ? tone : m_c.dim);
+            p.drawText(box, Qt::AlignCenter, text);
+            if (store) *store = box;
+            right -= width + 5;
+        };
+        if (band.draft) {
+            control(QCoreApplication::translate("TeamPanel", "Approve"), m_c.accent, band.blocked.isEmpty() && !decided.contains(band.n), &m_approve[band.n]);
+            control(QCoreApplication::translate("TeamPanel", "Discard"), m_c.danger, !decided.contains(band.n), &m_discard[band.n]);
+            const QRectF up(right - 14, line1, 14, lineH), down(right - 30, line1, 14, lineH);
+            m_moveUp.insert(band.n, up); m_moveDown.insert(band.n, down);
+            p.setFont(metaFont); p.setPen(m_c.text3);
+            p.drawText(up, Qt::AlignCenter, QStringLiteral("↑"));
+            p.drawText(down, Qt::AlignCenter, QStringLiteral("↓"));
+            right -= 36;
+        } else {
+            m_approve.remove(band.n); m_discard.remove(band.n); m_moveUp.remove(band.n); m_moveDown.remove(band.n);
+        }
+        if (!band.status.isEmpty()) {
+            pill(phaseStatusText(band.status), phaseStatusColor(m_c, band.status));
+        } else if (band.draft) {
+            pill(QCoreApplication::translate("TeamPanel", "draft"), m_c.warn);
+        }
+        if (!band.status.isEmpty() || band.draft) {
+            const QString progress = QStringLiteral("%1/%2").arg(band.done).arg(band.total);
+            const double width = mf.horizontalAdvance(progress) + 2;
+            p.setFont(metaFont); p.setPen(m_c.muted);
+            p.drawText(QRectF(right - width, line1, width, lineH), Qt::AlignRight | Qt::AlignVCenter, progress);
+            right -= width + 8;
+        }
+        const double titleLeft = r.left() + 17;
+        const double room = qMax(0.0, right - titleLeft);
+        p.setFont(titleFont); p.setPen(m_c.text2);
+        p.drawText(QRectF(titleLeft, line1, room, lineH), Qt::AlignLeft | Qt::AlignVCenter, tf.elidedText(band.heading, Qt::ElideRight, int(room)));
+        // The second line: the phase health and, for a blocked draft, the F12
+        // reason. Details are in the header's tooltip.
+        QStringList meta;
+        if (!band.healthLine.isEmpty()) meta << band.healthLine;
+        if (!band.blocked.isEmpty()) meta << band.blocked;
+        if (band.changes > 0) meta << QCoreApplication::translate("TeamPanel", "%1 change(s) from the lead").arg(band.changes);
+        if (!meta.isEmpty()) {
+            QFont small = font(); small.setPixelSize(9);
+            const bool blocked = !band.blocked.isEmpty();
+            p.setFont(small); p.setPen(blocked ? m_c.warn : m_c.text3);
+            p.drawText(QRectF(titleLeft, r.top() + 21, qMax(0.0, r.width() - 24), 13), Qt::AlignLeft | Qt::AlignVCenter,
+                       QFontMetrics(small).elidedText(meta.join(QStringLiteral(" · ")), Qt::ElideRight, int(qMax(0.0, r.width() - 24))));
+        }
     }
     // A collapsed phase stands in for its tasks in the graph.
     void paintSummary(QPainter &p, int phase, const QRectF &r)
@@ -895,7 +1001,9 @@ protected:
                 }
             }
             // A collapsed phase is one summary node; its header stays above.
-            for (auto it = m_summaries.cbegin(); it != m_summaries.cend(); ++it) paintSummary(p, it.key(), it.value());
+            // G9: in the Wide graph a collapsed band is its header row only.
+            if (m_mode != Wide)
+                for (auto it = m_summaries.cbegin(); it != m_summaries.cend(); ++it) paintSummary(p, it.key(), it.value());
             for (const auto &band : bands) paintBand(p, band, m_bandRects.value(band.n));
             return;
         }
@@ -963,7 +1071,12 @@ protected:
     {
         const int id = at(e->position());
         if (m_dragFrom) { m_dragAt = e->position(); m_hover = id; update(); return; }
-        if (phaseAt(e->position())) { if (m_hover) { m_hover = 0; update(); } setCursor(Qt::PointingHandCursor); return; }
+        if (phaseAt(e->position())) {
+            if (m_hover) { m_hover = 0; update(); }
+            setCursor(Qt::PointingHandCursor);
+            setToolTip(bandTooltip(phaseAt(e->position())));
+            return;
+        }
         if (id != m_hover) {
             m_hover = id;
             // The hovered node's phase tooltip names the state, the time and
@@ -985,6 +1098,26 @@ protected:
             return;
         }
         if (e->button() == Qt::LeftButton) {
+            const QPointF point = graph() ? e->position() / zoom : e->position();
+            for (auto it = m_approve.cbegin(); it != m_approve.cend(); ++it)
+                if (it.value().contains(point)) {
+                    const auto *band = bandOf(it.key());
+                    if (band && band->blocked.isEmpty() && !decided.contains(it.key()) && phaseApprove) {
+                        if (phaseApprove(it.key())) { decided.insert(it.key()); update(); }
+                    }
+                    return;
+                }
+            for (auto it = m_discard.cbegin(); it != m_discard.cend(); ++it)
+                if (it.value().contains(point)) {
+                    if (!decided.contains(it.key()) && phaseDiscard) {
+                        if (phaseDiscard(it.key())) { decided.insert(it.key()); update(); }
+                    }
+                    return;
+                }
+            for (auto it = m_moveUp.cbegin(); it != m_moveUp.cend(); ++it)
+                if (it.value().contains(point)) { if (phaseMoveUp) phaseMoveUp(it.key()); return; }
+            for (auto it = m_moveDown.cbegin(); it != m_moveDown.cend(); ++it)
+                if (it.value().contains(point)) { if (phaseMoveDown) phaseMoveDown(it.key()); return; }
             const int phase = phaseAt(e->position());
             if (phase) { if (phaseToggled) phaseToggled(phase); return; }
         }
@@ -1011,21 +1144,68 @@ private:
     // (keyed by phase), the alternating wide bands, and the layer rules inside
     // the list's phase groups.
     QMap<int, QRectF> m_bandRects, m_summaries;
+    // G9: the bands' header controls and tooltips, rebuilt by layout().
+    QMap<int, QRectF> m_approve, m_discard, m_moveUp, m_moveDown;
+    QMap<int, QString> m_bandTips;
     QList<QRectF> m_bandBackgrounds;
     QList<BandLayer> m_bandLayers;
     struct ListLayer { int phase = 0, n = 0, count = 0; QRectF rect; };
     QList<ListLayer> m_listLayers;
 };
 
+// G9: the tooltip details behind a phase's health line (C7 numbers + warnings).
+inline QString phaseHealthTip(const Team &team, int phase)
+{
+    const auto *health = team.phaseHealthOf(phase);
+    if (!health) return QString();
+    QStringList details;
+    details << QCoreApplication::translate("TeamPanel", "%1 tasks · critical path %2 · parallelism %3")
+                   .arg(health->tasks).arg(health->criticalPath)
+                   .arg(health->parallelism, 0, 'f', 1);
+    for (const auto &warning : health->warnings) details << warning;
+    return details.join(QLatin1Char('\n'));
+}
+
 // The phase bands a task view draws, with the owner's collapse choices.
+// G9: status.phase_summary gives the status chip and the health line;
+// phases_health the tooltip details; phases[].waiting the disabled reason.
 inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::function<bool(const PhaseGroup &)> &open)
 {
     QList<TaskView::PhaseBand> bands;
+    const auto tr = [](const char *text, const QString &a = {}, const QString &b = {}) {
+        return QCoreApplication::translate("TeamPanel", text).arg(a, b);
+    };
     for (const auto &group : phaseGroups(team)) {
         TaskView::PhaseBand band;
         band.n = group.n; band.title = group.title; band.heading = phaseHeading(group);
         band.barrier = group.barrier; band.draft = group.draft; band.done = group.done; band.total = group.tasks.size();
         band.tasks = group.tasks; band.collapsed = !open(group);
+        if (const auto *summary = team.phaseSummaryOf(group.n)) {
+            band.status = summary->status;
+            band.healthLine = summary->healthLine;
+            // With a summary the header owns the numbers, so the heading is
+            // just "Phase N · title" (the fallback keeps today's heading).
+            band.heading = summary->title.isEmpty() ? tr("Phase %1", QString::number(group.n))
+                                                    : tr("Phase %1 · %2", QString::number(group.n), summary->title);
+            band.done = summary->done;
+            band.total = summary->total;
+            band.healthTip = phaseHealthTip(team, group.n);
+        }
+        // F12: a draft whose predecessor is not ready says why Approve is off.
+        if (const auto *record = team.phase(group.n); record && !record->waiting.text.isEmpty()) {
+            band.blocked = record->waiting.text;
+            QStringList open;
+            for (int id : record->waiting.open) open << QStringLiteral("#%1").arg(id);
+            QString tip = tr("Phase %1 is not ready: %2", QString::number(record->waiting.phase),
+                             open.isEmpty() ? tr("no open tasks listed") : open.join(QStringLiteral(", ")));
+            const QString also = approveBlocked(team, group.n);
+            if (!also.isEmpty()) tip += QLatin1Char('\n') + also;
+            band.blockedTip = tip;
+        } else if (band.draft) {
+            const QString blocked = approveBlocked(team, group.n);
+            if (!blocked.isEmpty()) { band.blocked = approveBlockedShort(team, group.n); band.blockedTip = blocked; }
+        }
+        if (const auto *record = team.phase(group.n)) band.changes = record->changes.size();
         bands.append(band);
     }
     return bands;

@@ -248,6 +248,21 @@ struct Team {
         QList<Starved> starved;
     };
     Health health;
+    // G9 (spec 10.2): status.phase_summary - one header record per phase in
+    // display order, phase 1 included. Empty on an older hgs; the desktop then
+    // falls back to its own heading.
+    struct PhaseSummary {
+        int n = 0;
+        QString title, status, healthLine;   // status: done|in_work|approved|draft|paused
+        int done = 0, total = 0;
+        bool barrier = false;
+    };
+    QList<PhaseSummary> phaseSummary;
+    // G9 (spec 10.1): status.phases_health - the plan health of each phase,
+    // keyed by phase number; empty on an older hgs.
+    QMap<int, Health> phasesHealth;
+    const PhaseSummary *phaseSummaryOf(int n) const;
+    const Health *phaseHealthOf(int n) const;
     // C4: the undecided reports on the owner's attention list.
     struct Attention { QString kind, member; int task = 0, minutes = 0; double since = 0; };
     QList<Attention> attention;

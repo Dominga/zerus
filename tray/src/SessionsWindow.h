@@ -270,6 +270,8 @@ private:
         bool fresh = false, compact = false;
         qint64 started = 0;
     } m_startSend;
+    // U3: the resume guard refused a stale transcript; ask how to continue.
+    void resumeBehind(const QString &name, const QString &detail);
     void cancelStartContinuation(const QString &reason);
     void continueAfterStart(const QString &host, const QString &name, const QJsonObject &data);
     struct CompactContinuation {

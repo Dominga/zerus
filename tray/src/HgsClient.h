@@ -309,7 +309,9 @@ public:
     void pauseSession(const QString &host, const QString &name);
     void openNativeUi(const QString &host, const QString &name);
     quint64 requestNativeUi(const QString &host, const QString &name);
-    void resumeSession(const QString &host, const QString &name);
+    // U3: a resume the guard refused as stale is retried with the lost dialogue
+    // written out, or accepted as it is.
+    void resumeSession(const QString &host, const QString &name, bool lostDialogue = false, bool acceptStale = false);
     // A new conversation from the stopped run's own launch settings.
     void startFreshSession(const QString &host, const QString &name, const QString &run);
     void archiveSession(const QString &host, const QString &name);

@@ -120,6 +120,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::feedChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_teams, &TeamController::inboxChanged, this, [this] { scheduleRender(); });
     setTheme(true);
 }
 
@@ -202,6 +203,9 @@ void TeamWorkspace::render()
         // B5: a plan that widens a role's permissions waits for the owner's
         // explicit confirmation; the strip names what widens.
         if (!team->widenings.isEmpty()) tv->addWidget(wideningStrip(*team));
+        // C2/C4: the lead's inbox and the owner's attention list.
+        if (const auto &items = m_teams->inbox(); !items.isEmpty()) tv->addWidget(inboxStrip(*team, items));
+        if (!team->attention.isEmpty()) tv->addWidget(attentionStrip(*team));
         if (!m_error.isEmpty()) tv->addWidget(errorStrip());
         // Strips: Stuck, plan errors.
         if (status == "stuck" || !team->errors.isEmpty()) {
@@ -362,11 +366,23 @@ QWidget *TeamWorkspace::draftPhase(const Team &team, int phase)
     h->addWidget(new Pill(tr("draft"), c.warn));
     // Spec 10: every lower phase must be approved and finished before this one
     // opens; the compact reason stays on the row, the sentence in its tooltip.
+    // F12: a draft whose predecessor is not ready says so, and its tooltip names
+    // the phase and its open tasks.
     const QString blocked = approveBlocked(team, phase);
-    if (!blocked.isEmpty()) {
-        auto *reason = label(approveBlockedShort(team, phase), c.warn, 10, false, "teamDraftPhaseReason");
+    const auto *record = team.phase(phase);
+    const bool predecessorNotReady = record && !record->waiting.text.isEmpty();
+    if (!blocked.isEmpty() || predecessorNotReady) {
+        QString text = approveBlockedShort(team, phase);
+        if (predecessorNotReady) text = record->waiting.text;
+        auto *reason = label(text, c.warn, 10, false, "teamDraftPhaseReason");
         reason->setObjectName("teamDraftPhaseReason");
-        reason->setToolTip(blocked);
+        QString tip = blocked;
+        if (predecessorNotReady) {
+            QStringList open; for (int id : record->waiting.open) open << QStringLiteral("#%1").arg(id);
+            tip = tr("Phase %1 is not ready: %2").arg(record->waiting.phase).arg(open.isEmpty() ? tr("no open tasks listed") : open.join(QStringLiteral(", ")));
+            if (!blocked.isEmpty()) tip += QLatin1Char('\n') + blocked;
+        }
+        reason->setToolTip(tip);
         reason->setMinimumWidth(0);
         reason->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         h->addWidget(reason, 1);
@@ -520,6 +536,62 @@ void TeamWorkspace::approveTeam(const Team &team)
         return;
     }
     m_panel->act("approve", {});
+}
+
+QWidget *TeamWorkspace::inboxStrip(const Team &team, const QList<InboxItem> &items)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *strip = new QFrame; strip->setObjectName("teamInboxStrip"); strip->setMinimumHeight(30);
+    strip->setStyleSheet(QStringLiteral("QFrame#teamInboxStrip{background:%1;border-bottom:1px solid %2;}")
+                             .arg(alpha(c.accent, .10).name(QColor::HexArgb), alpha(c.accent, .45).name(QColor::HexArgb)));
+    auto *v = new QVBoxLayout(strip); v->setContentsMargins(12, 5, 12, 5); v->setSpacing(2);
+    auto *head = row(6);
+    head->addWidget(label(tr("Inbox"), c.fg, 12, true, "teamInboxTitle"));
+    head->addWidget(label(items.size() == 1 ? tr("1 for the lead") : tr("%1 for the lead").arg(items.size()), c.muted, 11));
+    head->addStretch();
+    v->addLayout(head);
+    // C2: oldest first, the command that answers it in the tooltip.
+    int shown = 0;
+    for (const auto &item : items) {
+        if (shown == 5) break;
+        const QString kind = item.kind == "report" ? tr("report") : item.kind == "question" ? tr("question")
+                          : item.kind == "permission" ? tr("permission") : item.kind == "lead_task" ? tr("lead task")
+                          : item.kind == "stalled" ? tr("stalled") : item.kind == "budget" ? tr("budget") : item.kind;
+        auto *line = row(6);
+        line->addWidget(new Pill(kind, item.kind == "report" ? c.warn : c.accent));
+        line->addWidget(label(item.member, c.text2, 11));
+        if (item.task > 0) line->addWidget(label(QStringLiteral("#%1").arg(item.task), c.muted, 11));
+        auto *summary = elided(item.summary, c.fg, 11);
+        summary->setObjectName("teamInboxSummary");
+        summary->setToolTip(item.command);
+        line->addWidget(summary, 1);
+        v->addLayout(line);
+        ++shown;
+    }
+    if (items.size() > shown) v->addWidget(label(tr("+%1 more").arg(items.size() - shown), c.muted, 10));
+    Q_UNUSED(team);
+    return strip;
+}
+
+QWidget *TeamWorkspace::attentionStrip(const Team &team)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *strip = new QFrame; strip->setObjectName("teamAttentionStrip"); strip->setMinimumHeight(26);
+    strip->setStyleSheet(QStringLiteral("QFrame#teamAttentionStrip{background:%1;}")
+                             .arg(alpha(c.warn, .12).name(QColor::HexArgb)));
+    auto *h = new QHBoxLayout(strip); h->setContentsMargins(12, 4, 12, 4); h->setSpacing(8);
+    h->addWidget(label(tr("Needs your attention"), c.warn, 11, true, "teamAttentionTitle"));
+    QStringList lines;
+    for (const auto &attention : team.attention) {
+        QString line = attention.kind == "report" ? tr("report on #%1 from %2 · %3 min").arg(attention.task).arg(attention.member).arg(attention.minutes)
+                                                  : tr("%1 · #%2 · %3 min").arg(attention.kind).arg(attention.task).arg(attention.minutes);
+        lines << line;
+    }
+    auto *text = elided(lines.join(QStringLiteral("  ·  ")), c.text2, 11);
+    text->setObjectName("teamAttentionText");
+    text->setToolTip(lines.join(QStringLiteral("\n")));
+    h->addWidget(text, 1);
+    return strip;
 }
 
 QWidget *TeamWorkspace::errorStrip()
@@ -927,6 +999,39 @@ QWidget *TeamWorkspace::members(const Team &team)
         // A5: the member's queue, the current task first, then the tasks
         // returned to it.
         if (auto *queue = memberQueueWidget(team, m, c, [this](int id) { m_drawerTask = id; scheduleRender(); })) col->addWidget(queue);
+        // G7: the MCP servers and services its session runs, as an icon with a
+        // tooltip - they outlive the session and are not Background work.
+        // C12: the declared time budget of its background job.
+        if (!m.services.isEmpty() || m.budget.known) {
+            auto *extra = row(6);
+            if (!m.services.isEmpty()) {
+                QStringList lines;
+                for (const auto &service : m.services) {
+                    const QString since = service.since > 0 ? QDateTime::fromSecsSinceEpoch(qint64(service.since)).toString(QStringLiteral("d MMM HH:mm")) : tr("unknown");
+                    lines << tr("%1 · since %2").arg(service.name, since) + (service.command.isEmpty() ? QString() : QStringLiteral("\n") + service.command);
+                }
+                lines << tr("These outlive the session and are not Background work.");
+                auto *services = new StatusMark(m.services.size() == 1 ? tr("1 service") : tr("%1 services").arg(m.services.size()),
+                                                c.muted, "services", 0, Qt::AlignLeft, nullptr, lines.join(QLatin1Char('\n')));
+                services->setObjectName("teamWorkspaceMemberServices");
+                services->setProperty("services", m.services.size());
+                extra->addWidget(services);
+            }
+            if (m.budget.known) {
+                const QColor tone = m.budget.state == "red" ? c.danger : m.budget.state == "amber" ? c.warn : c.muted;
+                QStringList lines;
+                if (!m.budget.label.isEmpty()) lines << m.budget.label;
+                lines << tr("%1 of %2 min · red at %3 min").arg(m.budget.elapsedMinutes).arg(m.budget.minutes).arg(m.budget.redMinutes);
+                if (!m.budget.command.isEmpty()) lines << m.budget.command;
+                auto *budget = new StatusMark(tr("Budget %1 · %2 min").arg(m.budget.state).arg(m.budget.elapsedMinutes),
+                                              tone, "budget", 0, Qt::AlignLeft, nullptr, lines.join(QLatin1Char('\n')));
+                budget->setObjectName("teamWorkspaceMemberBudget");
+                budget->setProperty("budgetState", m.budget.state);
+                extra->addWidget(budget);
+            }
+            extra->addStretch();
+            col->addLayout(extra);
+        }
         bh->addLayout(col, 1);
         auto *right = new QVBoxLayout; right->setSpacing(3);
         auto *ratio = label(QStringLiteral("%1/%2").arg(done).arg(total), c.muted, 11); ratio->setFont(NewSessionDense::mono(11)); ratio->setAlignment(Qt::AlignRight);

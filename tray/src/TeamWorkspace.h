@@ -52,6 +52,9 @@ private:
     // confirmation and sends confirm_widening.
     QWidget *wideningStrip(const Teams::Team &team);
     void approveTeam(const Teams::Team &team);
+    // C2/C4: the lead's inbox and the owner's attention list.
+    QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
+    QWidget *attentionStrip(const Teams::Team &team);
     QWidget *errorStrip();
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).

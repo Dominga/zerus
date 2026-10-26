@@ -37,6 +37,18 @@ struct Member {
     // hgs gets the same list derived from the tasks.
     QList<int> queue;
     bool queueKnown = false;   // `queue` was in the JSON, even when empty
+    // G7: the MCP servers and services this member's session runs; they outlive
+    // the session and are not Background work.
+    struct Service { QString name, command; double since = 0; };
+    QList<Service> services;
+    // C12: the declared time budget of the member's background job.
+    struct Budget {
+        QString label, state, command;
+        int minutes = 0, redMinutes = 0, elapsedMinutes = 0;
+        double since = 0;
+        bool known = false;
+    };
+    Budget budget;
     QJsonObject json() const;
 };
 
@@ -115,11 +127,21 @@ struct Task {
     int phase = 1;             // the approved initial plan is phase 1
     bool pinned = false;       // stays with its assignee
     QString title, description, status, assignee, decidedBy, reason;
+    QString kind;              // C5: "check" for a check task
     QStringList criteria;
     QList<Dep> deps;
     QList<Attempt> attempts;   // oldest first
     bool held = false;         // A5: the lead holds the task
     Hold hold;
+    // C3: why the task waits and what unblocks it.
+    struct Wait { QString for_, unblock; QStringList on; bool known = false; };
+    Wait wait;
+    // C5: a check task runs exactly this command and reports its exit.
+    struct Check { QString command; int expectExit = 0, timeoutMinutes = 0; };
+    Check check;
+    struct CheckResult { int exit = 0; QString tail; bool known = false; };
+    CheckResult checkResult;
+    bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
     QJsonObject json() const;
@@ -145,6 +167,12 @@ struct Phase {
     double addedAt = 0, decidedAt = 0;
     QList<int> tasks;          // task ids; a discarded phase keeps them
     QList<PhaseChange> changes; // F10: the lead's changes since the owner last saw it
+    // F12: why a draft waits - "Waiting for the previous phase to be ready"
+    // with that phase and its open tasks.
+    struct Waiting { QString text; int phase = 0; QList<int> open; };
+    Waiting waiting;
+    // F13: the owner's sentence the lead approved on.
+    QString ownerWord;
     bool draft() const { return state == "draft"; }
 };
 
@@ -194,6 +222,25 @@ struct Team {
     QSet<int> cycle;
     QList<int> ready;
     QStringList errors, warnings;
+    // C7: the plan-health numbers the lead reads before asking for approval and
+    // the owner sees in the GUI, with the starving members while the team runs.
+    struct Health {
+        bool known = false;
+        int tasks = 0, criticalPath = 0, widestReady = 0;
+        double parallelism = 0;
+        QList<QPair<QString, QPair<int, int>>> perMember;   // role, (tasks, on critical path)
+        struct FanIn { int task = 0; QList<int> waitsFor; QString kind; };
+        QList<FanIn> fanIn;
+        QStringList warnings;
+        struct Starved { QString member, role; int minutes = 0; QList<int> blocking; };
+        QList<Starved> starved;
+    };
+    Health health;
+    // C4: the undecided reports on the owner's attention list.
+    struct Attention { QString kind, member; int task = 0, minutes = 0; double since = 0; };
+    QList<Attention> attention;
+    // F13: "approved by Lead on the owner's word" and the sentence.
+    QString approvedBy, ownerWord;
     const Member *member(const QString &id) const;
     const Member *memberOfSession(const QString &host, const QString &session) const;
     const Task *task(int id) const;
@@ -245,6 +292,14 @@ QString approveBlocked(const Team &team, int phase);
 QString approveBlockedShort(const Team &team, int phase);
 // True when this member's session still runs after the team ended (F7).
 bool leftMember(const Team &team, const QString &member);
+// C2: one thing on the lead's desk, as `hgs team inbox` lists it.
+struct InboxItem {
+    QString kind;      // report, question, permission, lead_task, stalled, budget
+    QString member, summary, command;
+    int task = 0;
+    double since = 0;
+};
+QList<InboxItem> parseInbox(const QJsonObject &value);
 // "Phase 2 · QA fixes · 3/5" (the title is left out when empty).
 QString phaseHeading(const PhaseGroup &group);
 // Layers by longest path inside one phase; dependencies outside it are ignored

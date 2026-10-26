@@ -296,6 +296,7 @@ private slots:
     void phaseProgressShowsTwoBars();
     void permissionCardsAndGraphOrder();
     void preflightWarningsShowInThePlanCard();
+    void leadLoadViewsShowInTheDesktop();
     void severalDraftPhasesRenderAndApproveInOrder();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
@@ -1440,6 +1441,90 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
 // profile says so and its approve asks for the owner's confirmation. G3: a
 // dead-end task sinks below the tasks others depend on in its column.
 // B3: a preflight finding arrives as a plan warning and shows in the plan card.
+// C1-C4, C5, C7, C12, G7, F12, F13: the lead-load views in the desktop - the
+// card's waits and check, the plan health and the owner's word, the attention
+// strip, the member's services and budget, and the F12 draft wording.
+void TestTeamsUi::leadLoadViewsShowInTheDesktop()
+{
+    auto load = phasedTeam();
+    load["status"] = "running";
+    load["approved_by"] = "Lead";
+    load["owner_word"] = "план принят, делай";
+    auto tasks = load["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() == 2)
+            task["waits"] = QJsonObject{{"for", "lead"}, {"on", QJsonArray{"Architect"}}, {"unblock", "accept #2"}};
+        if (task["id"].toInt() == 4) {
+            task["kind"] = "check";
+            task["check"] = QJsonObject{{"command", "cargo test --locked --bin hgs teams"}, {"expect_exit", 0}, {"timeout_minutes", 30}};
+            task["check_result"] = QJsonObject{{"exit", 0}, {"tail", "120 passed"}};
+        }
+        tasks[i] = task;
+    }
+    load["tasks"] = tasks;
+    auto members = load["members"].toArray();
+    auto backend = members[1].toObject();
+    backend["services"] = QJsonArray{QJsonObject{{"name", "qdrant"}, {"command", "qdrant --mcp"}, {"since", 1792868400.0}}};
+    backend["budget"] = QJsonObject{{"label", "socraticode"}, {"minutes", 20}, {"red_minutes", 40}, {"since", 1792868400.0},
+                                    {"elapsed_minutes", 47}, {"state", "red"}, {"command", "cargo build --release"}};
+    members[1] = backend; load["members"] = members;
+    load["attention"] = QJsonArray{QJsonObject{{"kind", "report"}, {"task", 2}, {"member", "Frontend"}, {"since", 1792868400.0}, {"minutes", 70}}};
+    auto phases = load["phases"].toArray();
+    auto draftPhase = phases[1].toObject();   // the draft (phase 3)
+    draftPhase["waiting"] = QJsonObject{{"text", "Waiting for the previous phase to be ready"}, {"phase", 2}, {"open", QJsonArray{3, 4}}};
+    phases[1] = draftPhase; load["phases"] = phases;
+    QJsonObject loadMember{{"Backend", QJsonObject{{"tasks", 3}, {"on_critical_path", 2}}}};
+    QJsonObject loadStarved{{"member", "tester"}, {"role", "Tester"}, {"minutes", 25}, {"blocking", QJsonArray{4}}};
+    QJsonObject loadHealth{{"tasks", 7}, {"critical_path", 3}, {"parallelism", 2.3}, {"widest_ready", 4}};
+    loadHealth["per_member"] = loadMember;
+    loadHealth["fan_in"] = QJsonArray{QJsonObject{{"task", 5}, {"waits_for", QJsonArray{3, 4}}, {"kind", "review"}}};
+    loadHealth["warnings"] = QJsonArray{"Parallelism is below 1.5"};
+    loadHealth["starved"] = QJsonArray{loadStarved};
+    load["validation"] = QJsonObject{{"errors", QJsonArray()}, {"warnings", QJsonArray()}, {"health", loadHealth}};
+    setTeam(load);
+    const auto parsed = Teams::parse(load);
+    const auto live = [](const Teams::Member &) { return Teams::Live{}; };
+    // The card: a check's command and result, and what an open task waits for.
+    TeamTaskCard card;
+    card.resize(440, 1100); card.show();
+    card.setTask(parsed, 4, live, true);
+    QVERIFY(card.findChild<QLabel *>("teamCheckCommand"));
+    QCOMPARE(card.findChild<QLabel *>("teamCheckCommand")->text(), QStringLiteral("cargo test --locked --bin hgs teams"));
+    QVERIFY(card.findChild<QLabel *>("teamCheckResult"));
+    QCOMPARE(card.findChild<QLabel *>("teamCheckResult")->text(), QStringLiteral("exit 0"));
+    shot(&card, "lead-load-card");
+    card.setTask(parsed, 2, live, true);
+    QVERIFY(card.findChild<QLabel *>("teamTaskWait"));
+    QVERIFY(card.findChild<QLabel *>("teamTaskWait")->text().contains(QStringLiteral("accept #2")));
+    // The plan card: health numbers, the starving member and the owner's word.
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.resize(460, 1100); panel.show(); panel.showTeam("team-1");
+    auto planning = load; planning["status"] = "planning"; setTeam(planning);
+    QTRY_VERIFY(([&] { controller.refresh(); return panel.findChild<QWidget *>("teamPlanHealth") != nullptr; })());
+    QVERIFY(panel.findChild<QLabel *>("teamPlanHealthNumbers")->text().contains(QStringLiteral("critical path 3")));
+    QVERIFY(panel.findChild<QLabel *>("teamPlanStarved"));
+    QVERIFY(panel.findChild<QLabel *>("teamOwnerWord"));
+    QVERIFY(panel.findChild<QLabel *>("teamOwnerWord")->text().contains(QStringLiteral("план принят, делай")));
+    shot(&panel, "lead-load-plan");
+    // The workspace: F12 wording on the draft, services and budget on the
+    // member, and the attention strip.
+    setTeam(load);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 900); workspace.show();
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QFrame *>("teamWorkspaceDraftPhase") != nullptr; })());
+    QVERIFY(workspace.findChild<QLabel *>("teamDraftPhaseReason"));
+    QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseReason")->text(), QStringLiteral("Waiting for the previous phase to be ready"));
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberServices"));
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberBudget"));
+    QVERIFY(workspace.findChild<QFrame *>("teamAttentionStrip"));
+    shot(&workspace, "lead-load-workspace");
+}
+
 void TestTeamsUi::preflightWarningsShowInThePlanCard()
 {
     auto planning = phasedTeam();

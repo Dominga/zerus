@@ -1128,9 +1128,13 @@ void HgsClient::pauseSession(const QString &host, const QString &name)
     runWrite(QStringLiteral("pause %1").arg(name), args, 45000, true, host);
 }
 
-void HgsClient::resumeSession(const QString &host, const QString &name)
+void HgsClient::resumeSession(const QString &host, const QString &name, bool lostDialogue, bool acceptStale)
 {
-    QStringList args{QStringLiteral("resume"), name, QStringLiteral("-d")};
+    QStringList args{QStringLiteral("resume"), name};
+    // U3: the guard refused a stale transcript; these are the owner's answers.
+    if (lostDialogue) args << QStringLiteral("--with-lost-dialogue");
+    if (acceptStale) args << QStringLiteral("--accept-stale");
+    args << QStringLiteral("-d");
     if (!host.isEmpty())
         args.prepend(QLatin1Char('@') + host);
     runWrite(QStringLiteral("resume %1").arg(name), args, 30000, true, host);

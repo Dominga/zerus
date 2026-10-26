@@ -599,6 +599,44 @@ QWidget *TeamPanel::planning(const Team &team)
         v->addWidget(errors);
     }
     for (const auto &warning : team.warnings) { auto *l = label(QStringLiteral("⚠ ") + warning, c.warn, 12); l->setWordWrap(true); v->addWidget(l); }
+    // C7: the plan-health numbers the lead reads before approval and the owner
+    // sees here, with the members starving on the plan now.
+    if (team.health.known) {
+        auto *health = card(c, c.warn);
+        health->setObjectName("teamPlanHealth");
+        auto *hv = new QVBoxLayout(health); hv->setContentsMargins(10, 8, 10, 8); hv->setSpacing(3);
+        auto *numbers = label(tr("%1 tasks · critical path %2 · parallelism %3 · widest ready %4")
+                                  .arg(team.health.tasks).arg(team.health.criticalPath).arg(team.health.parallelism, 0, 'f', 1).arg(team.health.widestReady),
+                              c.fg, 12, true, "teamPlanHealthNumbers");
+        numbers->setWordWrap(true);
+        hv->addWidget(numbers);
+        for (const auto &member : team.health.perMember)
+            if (member.second.second > 0)
+                hv->addWidget(label(tr("%1: %2 tasks, %3 on the critical path").arg(member.first).arg(member.second.first).arg(member.second.second), c.text2, 11));
+        for (const auto &fanIn : team.health.fanIn) {
+            QStringList waits; for (int id : fanIn.waitsFor) waits << QStringLiteral("#%1").arg(id);
+            hv->addWidget(label(tr("#%1 waits for %2 · %3").arg(fanIn.task).arg(waits.join(QStringLiteral(", ")), fanIn.kind), c.text2, 11));
+        }
+        for (const auto &starved : team.health.starved) {
+            QStringList blocking; for (int id : starved.blocking) blocking << QStringLiteral("#%1").arg(id);
+            auto *line = label(tr("%1 has no ready task for %2 min · blocked by %3").arg(starved.role).arg(starved.minutes).arg(blocking.join(QStringLiteral(", "))),
+                               c.warn, 11, true, "teamPlanStarved");
+            line->setWordWrap(true);
+            hv->addWidget(line);
+        }
+        for (const auto &warning : team.health.warnings) {
+            auto *line = label(QStringLiteral("⚠ ") + warning, c.warn, 11, false, "teamPlanHealthWarning");
+            line->setWordWrap(true);
+            hv->addWidget(line);
+        }
+        v->addWidget(health);
+    }
+    // F13: the lead approved on the owner's word; the quote stays visible.
+    if (!team.ownerWord.isEmpty()) {
+        auto *word = label(tr("Approved by Lead on your word: “%1”").arg(team.ownerWord), c.accent, 11, false, "teamOwnerWord");
+        word->setWordWrap(true);
+        v->addWidget(word);
+    }
     return w;
 }
 

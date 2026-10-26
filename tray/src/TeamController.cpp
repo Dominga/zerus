@@ -35,11 +35,19 @@ void TeamController::refresh()
     if ((m_watchCatalog || m_watchCatalogPage) && !m_catalogInFlight) refreshCatalog();
 }
 
+// C2: the lead's inbox, read with the rest of the watched team's state.
+void TeamController::refreshInbox()
+{
+    if (m_watch.isEmpty() || m_inboxRequest) return;
+    m_inboxRequest = m_client->requestTeam({}, QStringLiteral("inbox"), {{"team", m_watch}});
+}
+
 void TeamController::readWatched()
 {
     if (m_watch.isEmpty()) return;
     if (!m_statusRequest) m_statusRequest = m_client->requestTeam({}, QStringLiteral("status"), {{"team", m_watch}});
     if (!m_feedRequest) m_feedRequest = m_client->requestTeam({}, QStringLiteral("events"), {{"team", m_watch}});
+    if (!m_inboxRequest) refreshInbox();
 }
 
 const Teams::Team *TeamController::team(const QString &id) const
@@ -61,7 +69,8 @@ void TeamController::watch(const QString &team)
     m_watched = {}; m_lastStatus = {};
     m_feed.clear(); m_feedCursor = QJsonValue();
     m_statusRequest = m_feedRequest = m_olderRequest = 0;
-    emit watchedChanged(); emit feedChanged();
+    m_inbox.clear(); m_lastInbox = {}; m_inboxRequest = 0;
+    emit watchedChanged(); emit feedChanged(); emit inboxChanged();
     readWatched();
 }
 
@@ -194,6 +203,12 @@ void TeamController::received(quint64 request, const QString &operation, const Q
         m_lastStatus = result;
         m_watched = team;
         emit watchedChanged();
+    } else if (request == m_inboxRequest) {
+        m_inboxRequest = 0;
+        if (result == m_lastInbox) return;
+        m_lastInbox = result;
+        m_inbox = Teams::parseInbox(result);
+        emit inboxChanged();
     } else if (request == m_feedRequest || request == m_olderRequest) {
         const bool older = request == m_olderRequest;
         (older ? m_olderRequest : m_feedRequest) = 0;
@@ -231,6 +246,7 @@ void TeamController::failed(quint64 request, const QString &operation, const QSt
         if (m_available || !m_teams.isEmpty()) { m_teams.clear(); m_lastList = {}; emit teamsChanged(); }
         m_available = false;
     } else if (request == m_statusRequest) m_statusRequest = 0;
+    else if (request == m_inboxRequest) m_inboxRequest = 0;
     else if (request == m_feedRequest) m_feedRequest = 0;
     else if (request == m_olderRequest) m_olderRequest = 0;
     Q_UNUSED(operation);

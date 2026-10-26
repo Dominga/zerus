@@ -222,6 +222,42 @@ void TeamTaskCard::rebuild()
         }
         break;
     }
+    // C3: why an open task waits and the command that unblocks it.
+    if (task->wait.known) {
+        section(tr("Waiting"));
+        const QString who = task->wait.for_ == "lead" ? tr("the lead") : task->wait.for_ == "owner" ? tr("you")
+                          : task->wait.for_ == "member" ? (task->wait.on.isEmpty() ? tr("the member") : task->wait.on.first())
+                          : task->wait.for_ == "hold" ? tr("the hold") : tr("dependencies");
+        auto *line = label(tr("Waiting for %1 — unblock: %2").arg(who, task->wait.unblock), c.warn, 11, false, "teamTaskWait");
+        line->setWordWrap(true);
+        line->setToolTip(tr("Waits for: %1").arg(task->wait.on.isEmpty() ? who : task->wait.on.join(QStringLiteral(", "))));
+        v->addWidget(line);
+    }
+    // C5: a check task runs exactly this command; the card shows what it expects
+    // and what its run reported.
+    if (task->isCheck()) {
+        section(tr("Check"));
+        auto *command = label(task->check.command, c.fg, 11, false, "teamCheckCommand");
+        command->setFont(NewSessionDense::mono(11));
+        command->setWordWrap(true);
+        command->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        command->setToolTip(task->check.command);
+        v->addWidget(command);
+        auto *expect = label(tr("expect exit %1 · timeout %2 min").arg(task->check.expectExit).arg(task->check.timeoutMinutes),
+                             c.muted, 10, false, "teamCheckExpect");
+        v->addWidget(expect);
+        if (task->checkResult.known) {
+            const bool passed = task->checkResult.exit == task->check.expectExit;
+            auto *result = label(tr("exit %1").arg(task->checkResult.exit), passed ? c.accent : c.danger, 11, true, "teamCheckResult");
+            v->addWidget(result);
+            if (!task->checkResult.tail.isEmpty()) {
+                auto *tail = label(task->checkResult.tail, c.text2, 10, false, "teamCheckTail");
+                tail->setFont(NewSessionDense::mono(10));
+                tail->setWordWrap(true);
+                v->addWidget(tail);
+            }
+        }
+    }
     if (!task->description.isEmpty()) {
         section(tr("Description"));
         auto *d = label(task->description, c.fg, 12); d->setWordWrap(true); d->setTextInteractionFlags(Qt::TextSelectableByMouse);

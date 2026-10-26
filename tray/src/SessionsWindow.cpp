@@ -1880,6 +1880,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (m_archivedWorktree.size() == 4 && (operation == QStringLiteral("archive %1").arg(m_archivedWorktree[1]) || operation == QStringLiteral("terminate %1").arg(m_archivedWorktree[1]))) {
             if (ok) offerWorktreeCleanup(); else m_archivedWorktree.clear();
         }
+        // U3: hgs refused a stale resume; the owner chooses how to continue.
+        if (!ok && operation.startsWith(QStringLiteral("resume ")) && detail.contains(QStringLiteral("transcript_behind")))
+            resumeBehind(operation.mid(7), detail);
         if (!ok && (operation == QStringLiteral("resume %1").arg(m_startSend.name) || operation == QStringLiteral("fresh %1").arg(m_startSend.name)))
             cancelStartContinuation(detail);
         if (!m_terminationCommand.isEmpty() && (operation == QStringLiteral("kill %1").arg(m_terminating.value(m_terminationCommand).session.name) || operation == QStringLiteral("terminate %1").arg(m_terminating.value(m_terminationCommand).session.name))) {
@@ -5164,6 +5167,39 @@ void SessionsWindow::startToSend(const QString &key, const QString &text, const 
             renderDetails();
         });
     renderDetails();
+}
+
+void SessionsWindow::resumeBehind(const QString &name, const QString &detail)
+{
+    // U3: the transcript is behind the events; the dialog names both times and
+    // offers the lost dialogue (default), accepting it as it is, or cancelling.
+    const auto number = [&detail](const char *key) {
+        const QRegularExpression re(QStringLiteral("\"%1\"\\s*:\\s*([0-9.]+)").arg(QLatin1String(key)));
+        const auto match = re.match(detail);
+        return match.hasMatch() ? match.captured(1).toDouble() : 0.0;
+    };
+    const double transcriptAt = number("transcript_at"), eventsAt = number("events_at");
+    const auto when = [](double seconds) {
+        return seconds > 0 ? QDateTime::fromSecsSinceEpoch(qint64(seconds)).toString(QStringLiteral("d MMM HH:mm"))
+                           : tr("an unknown time");
+    };
+    const QRegularExpression missingRe(QStringLiteral("\"missing\"\\s*:\\s*([0-9]+)"));
+    const auto missingMatch = missingRe.match(detail);
+    const QString missing = missingMatch.hasMatch() ? tr(" (%1 entries missing)").arg(missingMatch.captured(1)) : QString();
+    QMessageBox dialog(QMessageBox::Warning, tr("The transcript is behind"),
+        tr("Claude's transcript stops at %1, but Zerus recorded the conversation up to %2%3.\n\n"
+           "Resuming as it is restores the older conversation and leaves that recorded dialogue out.")
+            .arg(when(transcriptAt), when(eventsAt), missing), QMessageBox::NoButton, this);
+    dialog.setObjectName("resumeBehindConfirm"); dialog.setTextFormat(Qt::PlainText);
+    auto *lost = dialog.addButton(tr("Resume with the lost dialogue"), QMessageBox::AcceptRole);
+    auto *asIs = dialog.addButton(tr("Resume as it is"), QMessageBox::ActionRole);
+    auto *cancel = dialog.addButton(QMessageBox::Cancel);
+    dialog.setDefaultButton(lost); dialog.setEscapeButton(cancel);
+    dialog.exec();
+    const auto *entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &e) { return e.session.name == name; });
+    const QString host = entry == m_entries.cend() ? QString() : entry->host;
+    if (dialog.clickedButton() == lost) { m_pending = true; m_client.resumeSession(host, name, true); }
+    else if (dialog.clickedButton() == asIs) { m_pending = true; m_client.resumeSession(host, name, false, true); }
 }
 
 void SessionsWindow::cancelStartContinuation(const QString &reason)

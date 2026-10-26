@@ -32,6 +32,9 @@ public:
     QList<QJsonObject> feed() const;
     bool feedHasOlder() const { return !m_feedCursor.isNull(); }
     void loadOlder();
+    // C2: the lead's inbox for the watched team, read with `hgs team inbox`.
+    const QList<Teams::InboxItem> &inbox() const { return m_inbox; }
+    void refreshInbox();
     // A change: `operation` with `input`; team, by and request_id are added.
     using Done = std::function<void(bool ok, const QString &message)>;
     void act(const QString &operation, QJsonObject input, const Done &done = {});
@@ -67,6 +70,7 @@ signals:
     void watchedChanged();
     void feedChanged();
     void catalogChanged();
+    void inboxChanged();
 private:
     void received(quint64 request, const QString &operation, const QJsonObject &result);
     void failed(quint64 request, const QString &operation, const QString &error);
@@ -82,6 +86,9 @@ private:
     Teams::Team m_watched;
     QMap<qint64, QJsonObject> m_feed;   // by seq
     QJsonValue m_feedCursor;
+    QList<Teams::InboxItem> m_inbox;
+    QJsonObject m_lastInbox;
+    quint64 m_inboxRequest = 0;
     QMap<quint64, std::function<void(bool, const QString &)>> m_actions;
     // A failed change keeps its request_id, so a retry is answered idempotently.
     QHash<QString, QString> m_retryIds;

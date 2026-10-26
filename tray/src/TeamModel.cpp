@@ -186,6 +186,26 @@ Team parse(const QJsonObject &v)
                 if (id > 0) member.queue.append(id);
             }
         }
+        // G7: the services the member's session runs (MCP servers and the like).
+        for (const auto &value : m.value("services").toArray()) {
+            const auto service = value.toObject();
+            Member::Service entry;
+            entry.name = str(service, "name"); entry.command = str(service, "command");
+            entry.since = service.value("since").toDouble();
+            if (!entry.name.isEmpty()) member.services.append(entry);
+        }
+        // C12: the declared budget, its state and the job it is tied to.
+        if (m.value("budget").isObject()) {
+            const auto budget = m.value("budget").toObject();
+            member.budget.known = true;
+            member.budget.label = str(budget, "label");
+            member.budget.state = str(budget, "state");
+            member.budget.command = str(budget, "command");
+            member.budget.minutes = budget.value("minutes").toInt();
+            member.budget.redMinutes = budget.value("red_minutes").toInt();
+            member.budget.elapsedMinutes = budget.value("elapsed_minutes").toInt();
+            member.budget.since = budget.value("since").toDouble();
+        }
         member.lead = member.id == team.lead;
         if (member.lead && member.role.isEmpty()) member.role = tr("Lead");
         team.members.append(member);
@@ -226,6 +246,27 @@ Team parse(const QJsonObject &v)
             const auto h = t.value("hold").toObject();
             task.held = true;
             task.hold.by = str(h, "by"); task.hold.reason = str(h, "reason"); task.hold.at = h.value("at").toDouble();
+        }
+        // C3: why an open task waits, and the command that unblocks it.
+        if (t.value("waits").isObject()) {
+            const auto w = t.value("waits").toObject();
+            task.wait.known = true;
+            task.wait.for_ = str(w, "for"); task.wait.unblock = str(w, "unblock");
+            for (const auto &value : w.value("on").toArray()) task.wait.on.append(value.isDouble() ? QString::number(value.toInt()) : value.toString());
+        }
+        // C5: a check task and the exit its run reported.
+        task.kind = str(t, "kind");
+        if (t.value("check").isObject()) {
+            const auto c = t.value("check").toObject();
+            task.check.command = str(c, "command");
+            task.check.expectExit = c.value("expect_exit").toInt();
+            task.check.timeoutMinutes = c.value("timeout_minutes").toInt();
+        }
+        if (t.value("check_result").isObject()) {
+            const auto r = t.value("check_result").toObject();
+            task.checkResult.known = true;
+            task.checkResult.exit = r.value("exit").toInt();
+            task.checkResult.tail = str(r, "tail");
         }
         const auto readAttempt = [&](const QJsonObject &a) {
             Attempt attempt;
@@ -307,6 +348,15 @@ Team parse(const QJsonObject &v)
             change.to = text(entry.value("to"));
             if (!change.kind.isEmpty()) phase.changes.append(change);
         }
+        // F12: the draft's predecessor is not ready, with its open tasks.
+        if (p.value("waiting").isObject()) {
+            const auto w = p.value("waiting").toObject();
+            phase.waiting.text = str(w, "text"); phase.waiting.phase = w.value("phase").toInt();
+            for (const auto &id : w.value("open").toArray()) phase.waiting.open.append(id.toInt());
+        }
+        // F13: the owner's sentence the lead approved on.
+        const auto word = p.value("owner_word");
+        phase.ownerWord = word.isObject() ? str(word.toObject(), "text") : word.toString();
         if (phase.n < 1) continue;   // phase 0 and negative numbers collide with task ids
         team.phases.append(phase);
     }
@@ -350,10 +400,55 @@ Team parse(const QJsonObject &v)
         const auto validation = v.value("validation").toObject();
         for (const auto &f : validation.value("errors").toArray()) team.errors.append(str(f.toObject(), "text"));
         for (const auto &f : validation.value("warnings").toArray()) team.warnings.append(str(f.toObject(), "text"));
+        // C7: the plan-health numbers, with the starving members while running.
+        // hgs puts them in validation.health; a bare health is accepted too.
+        const auto h = validation.value("health").isObject() ? validation.value("health").toObject() : v.value("health").toObject();
+        if (!h.isEmpty()) {
+            team.health.known = true;
+            team.health.tasks = h.value("tasks").toInt();
+            team.health.criticalPath = h.value("critical_path").toInt();
+            team.health.widestReady = h.value("widest_ready").toInt();
+            team.health.parallelism = h.value("parallelism").toDouble();
+            const auto members = h.value("per_member").toObject();
+            for (auto it = members.begin(); it != members.end(); ++it) {
+                const auto load = it.value().toObject();
+                team.health.perMember.append({it.key(), {load.value("tasks").toInt(), load.value("on_critical_path").toInt()}});
+            }
+            for (const auto &value : h.value("fan_in").toArray()) {
+                const auto entry = value.toObject();
+                Team::Health::FanIn fanIn;
+                fanIn.task = entry.value("task").toInt(); fanIn.kind = str(entry, "kind");
+                for (const auto &id : entry.value("waits_for").toArray()) fanIn.waitsFor.append(id.toInt());
+                team.health.fanIn.append(fanIn);
+            }
+            for (const auto &value : h.value("warnings").toArray()) team.health.warnings.append(value.toString());
+            for (const auto &value : h.value("starved").toArray()) {
+                const auto entry = value.toObject();
+                Team::Health::Starved starved;
+                starved.member = str(entry, "member"); starved.role = str(entry, "role");
+                starved.minutes = entry.value("minutes").toInt();
+                for (const auto &id : entry.value("blocking").toArray()) starved.blocking.append(id.toInt());
+                team.health.starved.append(starved);
+            }
+        }
     } else {
         team.layers = computeLayers(team);
         for (const auto &task : team.tasks) if (ready(team, task)) team.ready.append(task.id);
     }
+    // C4: the undecided reports on the owner's attention list, also from the
+    // polled team list.
+    for (const auto &value : v.value("attention").toArray()) {
+        const auto entry = value.toObject();
+        Team::Attention attention;
+        attention.kind = str(entry, "kind"); attention.task = entry.value("task").toInt();
+        attention.member = str(entry, "member"); attention.since = entry.value("since").toDouble();
+        attention.minutes = entry.value("minutes").toInt();
+        team.attention.append(attention);
+    }
+    // F13: the plan's approval records the owner's sentence.
+    team.approvedBy = str(v, "approved_by");
+    const auto word = v.value("owner_word");
+    team.ownerWord = word.isObject() ? str(word.toObject(), "text") : word.toString();
     return team;
 }
 
@@ -723,6 +818,21 @@ QString phaseHeading(const PhaseGroup &group)
 bool leftMember(const Team &team, const QString &member)
 {
     return team.leftOf(member) != nullptr;
+}
+
+// C2: one thing on the lead's desk, as `hgs team inbox` lists it.
+QList<InboxItem> parseInbox(const QJsonObject &value)
+{
+    QList<InboxItem> items;
+    for (const auto &entry : value.value("items").toArray()) {
+        const auto item = entry.toObject();
+        InboxItem inbox;
+        inbox.kind = str(item, "kind"); inbox.member = str(item, "member");
+        inbox.summary = str(item, "summary"); inbox.command = str(item, "command");
+        inbox.task = item.value("task").toInt(); inbox.since = item.value("since").toDouble();
+        items.append(inbox);
+    }
+    return items;
 }
 
 namespace {

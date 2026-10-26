@@ -141,6 +141,7 @@ private slots:
     void phaseProgressShowsThePhaseInWorkAndThePhases();
     void permissionRequestsCarryTheCommandAndTheAnswer();
     void listSummaryCarriesTaskPhasesAndPhaseRecords();
+    void leadLoadViewsCarryTheirNumbers();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
@@ -354,6 +355,104 @@ void TestTeams::leftRunningMembersOfAFinishedTeam()
 // each task's phase and the phase records. A summary of a team like 528aebfe -
 // phase 1 and 31 finished, 32 in work, 33 and 34 drafts - reads the phase-32
 // tasks bar and 2/5 phases.
+// C1-C4, C5, C7, C12, G7, F12, F13: the lead-load and services fields the
+// desktop reads, from a status shaped like the spec's.
+void TestTeams::leadLoadViewsCarryTheirNumbers()
+{
+    auto team = phasedTeam();
+    team["status"] = "running";
+    team["approved_by"] = "Lead";
+    team["owner_word"] = "план принят, делай";
+    auto tasks = team["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() == 2) {
+            task["waits"] = QJsonObject{{"for", "lead"}, {"on", QJsonArray{"Architect"}}, {"unblock", "accept #2"}};
+        }
+        if (task["id"].toInt() == 4) {
+            task["kind"] = "check";
+            task["check"] = QJsonObject{{"command", "cargo test --locked --bin hgs teams"}, {"expect_exit", 0}, {"timeout_minutes", 30}};
+            task["check_result"] = QJsonObject{{"exit", 0}, {"tail", "120 passed"}};
+        }
+        tasks[i] = task;
+    }
+    team["tasks"] = tasks;
+    auto members = team["members"].toArray();
+    auto backend = members[1].toObject();
+    backend["services"] = QJsonArray{QJsonObject{{"name", "qdrant"}, {"command", "qdrant --mcp"}, {"since", 1792868400.0}}};
+    backend["budget"] = QJsonObject{{"label", "socraticode"}, {"minutes", 20}, {"red_minutes", 40}, {"since", 1792868400.0},
+                                    {"elapsed_minutes", 47}, {"state", "red"}, {"command", "cargo build --release"}};
+    members[1] = backend; team["members"] = members;
+    team["attention"] = QJsonArray{QJsonObject{{"kind", "report"}, {"task", 2}, {"member", "Frontend"}, {"since", 1792868400.0}, {"minutes", 70}}};
+    auto phases = team["phases"].toArray();
+    auto draft = phases[0].toObject();
+    draft["waiting"] = QJsonObject{{"text", "Waiting for the previous phase to be ready"}, {"phase", 1}, {"open", QJsonArray{3, 4}}};
+    phases[0] = draft; team["phases"] = phases;
+    QJsonObject perMember{{"Backend", QJsonObject{{"tasks", 3}, {"on_critical_path", 2}}}};
+    QJsonObject starvedEntry{{"member", "tester"}, {"role", "Tester"}, {"minutes", 25}, {"blocking", QJsonArray{4}}};
+    QJsonObject health{{"tasks", 7}, {"critical_path", 3}, {"parallelism", 2.3}, {"widest_ready", 4}};
+    health["per_member"] = perMember;
+    health["fan_in"] = QJsonArray{QJsonObject{{"task", 5}, {"waits_for", QJsonArray{3, 4}}, {"kind", "review"}}};
+    health["warnings"] = QJsonArray{"Parallelism is below 1.5"};
+    health["starved"] = QJsonArray{starvedEntry};
+    team["validation"] = QJsonObject{{"errors", QJsonArray()}, {"warnings", QJsonArray()}, {"health", health}};
+    const auto parsed = parse(team);
+    QCOMPARE(parsed.approvedBy, QStringLiteral("Lead"));
+    QCOMPARE(parsed.ownerWord, QStringLiteral("план принят, делай"));
+    QVERIFY(!parsed.attention.isEmpty());
+    QCOMPARE(parsed.attention[0].kind, QStringLiteral("report"));
+    QCOMPARE(parsed.attention[0].minutes, 70);
+    const auto *checkTask = parsed.task(4);
+    QVERIFY(checkTask && checkTask->isCheck());
+    QCOMPARE(checkTask->check.command, QStringLiteral("cargo test --locked --bin hgs teams"));
+    QCOMPARE(checkTask->check.expectExit, 0);
+    QCOMPARE(checkTask->check.timeoutMinutes, 30);
+    QVERIFY(checkTask->checkResult.known);
+    QCOMPARE(checkTask->checkResult.exit, 0);
+    QCOMPARE(checkTask->checkResult.tail, QStringLiteral("120 passed"));
+    const auto *waiting = parsed.task(2);
+    QVERIFY(waiting && waiting->wait.known);
+    QCOMPARE(waiting->wait.for_, QStringLiteral("lead"));
+    QCOMPARE(waiting->wait.unblock, QStringLiteral("accept #2"));
+    QCOMPARE(waiting->wait.on, QStringList{QStringLiteral("Architect")});
+    const auto *backendMember = parsed.member("backend");
+    QVERIFY(backendMember);
+    QCOMPARE(backendMember->services.size(), 1);
+    QCOMPARE(backendMember->services[0].name, QStringLiteral("qdrant"));
+    QVERIFY(backendMember->budget.known);
+    QCOMPARE(backendMember->budget.state, QStringLiteral("red"));
+    QCOMPARE(backendMember->budget.elapsedMinutes, 47);
+    QCOMPARE(backendMember->budget.command, QStringLiteral("cargo build --release"));
+    const auto *draftPhase = parsed.phase(2);
+    QVERIFY(draftPhase && !draftPhase->waiting.text.isEmpty());
+    QCOMPARE(draftPhase->waiting.phase, 1);
+    QCOMPARE(draftPhase->waiting.open, (QList<int>{3, 4}));
+    QVERIFY(parsed.health.known);
+    QCOMPARE(parsed.health.tasks, 7);
+    QCOMPARE(parsed.health.criticalPath, 3);
+    QCOMPARE(parsed.health.widestReady, 4);
+    QCOMPARE(parsed.health.perMember.size(), 1);
+    QCOMPARE(parsed.health.perMember[0].second.second, 2);
+    QCOMPARE(parsed.health.fanIn.size(), 1);
+    QCOMPARE(parsed.health.fanIn[0].task, 5);
+    QCOMPARE(parsed.health.warnings, QStringList{QStringLiteral("Parallelism is below 1.5")});
+    QCOMPARE(parsed.health.starved.size(), 1);
+    QCOMPARE(parsed.health.starved[0].minutes, 25);
+    // C2: the inbox list, oldest first as hgs sends it.
+    const auto inbox = parseInbox(QJsonObject{{"items", QJsonArray{
+        QJsonObject{{"kind", "question"}, {"task", 4}, {"member", "Tester"}, {"since", 1792868401.0},
+                    {"summary", "Which field is the key?"}, {"command", "{} | hgs team reply --json"}},
+        QJsonObject{{"kind", "report"}, {"task", 2}, {"member", "Frontend"}, {"since", 1792868402.0},
+                    {"summary", "Form ready"}, {"command", "{} | hgs team accept --json"}}}}});
+    QCOMPARE(inbox.size(), 2);
+    QCOMPARE(inbox[0].kind, QStringLiteral("question"));
+    QCOMPARE(inbox[0].summary, QStringLiteral("Which field is the key?"));
+    QCOMPARE(inbox[0].task, 4);
+    QVERIFY(inbox[0].command.contains("reply"));
+    QCOMPARE(inbox[1].kind, QStringLiteral("report"));
+    QVERIFY(inbox[1].since > inbox[0].since);
+}
+
 void TestTeams::listSummaryCarriesTaskPhasesAndPhaseRecords()
 {
     QJsonObject summary{{"id", "team-1"}, {"name", "Teams v2"}, {"status", "running"}, {"lead", "lead"},

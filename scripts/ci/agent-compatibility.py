@@ -47,7 +47,7 @@ AGENTS = {
         timeout=180,
         suites=['test_clear_context_native.NativeCodexClear', 'test_codex_update.NativeCodexUpdate',
                 'test_external_agents_native.NativeExternalAgents', 'test_codex_async_questions_native',
-                'test_task_context_native.NativeCodexTaskContext'],
+                'test_task_context_native.NativeCodexTaskContext', 'test_terminate_native.NativeCodexTermination'],
         windows=dict(suites=['test_windows_native_agents.NativeWindowsCodex'], timeout=900, coverage=HOST_COVERAGE)),
     'claude': dict(
         name='Claude Code', variable='HGS_CLAUDE_TEST_BIN', version_output='{} (Claude Code)',
@@ -60,7 +60,8 @@ AGENTS = {
         suites=['test_claude_input_native', 'test_claude_questions_native', 'test_claude_approval_native', 'test_claude_safety_native',
                 'test_claude_trust_native', 'test_claude_resume_native', 'test_claude_usage_limit_native', 'test_clear_context_native.NativeClearContext',
                 'test_compact_context_native', 'test_claude_settings_native', 'test_claude_statusline_native',
-                'test_claude_permission_native', 'test_task_context_native.NativeClaudeTaskContext'],
+                'test_claude_permission_native', 'test_task_context_native.NativeClaudeTaskContext',
+                'test_terminate_native.NativeClaudeTermination'],
         windows=dict(suites=['test_windows_native_agents.NativeWindowsClaude'], timeout=1200,
                      coverage=HOST_COVERAGE + '; exec-form answer channel for questions and approvals, Terminal answers, '
                      'owned hook exit and channel-absent unviewed-pane growth')),

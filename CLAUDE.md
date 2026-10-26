@@ -106,6 +106,11 @@ an unknown outcome. Manual acceptance of unreadable process paths lasts five
 minutes for the exact checkout review and tolerates unrelated process churn.
 Fresh known-use, session, ownership and file protections still apply; automatic
 cleanup never uses that manual acceptance.
+On Linux and macOS, Terminate must confirm the exit of the selected agent's
+verified background process trees before worktree cleanup. Pin birth identities
+before terminal teardown loses ancestry; bound verification and restore temporary
+stops on refusal. Folder paths, executable names and shared process groups never
+authorize stopping other programs. Keep Pause and native Stop semantics unchanged.
 
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
 remains in Active and accepts new messages. Native work and explicit attention

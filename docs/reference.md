@@ -178,6 +178,22 @@ session or ordinary shell blocks the operation before the first signal. Once
 stopping begins, some sessions can fail independently; inspect the nonzero result
 before rebooting.
 
+On Linux and macOS, **Terminate** also ends the agent's verified descendant
+processes, including background jobs in separate Unix sessions. It temporarily
+suspends the agent and its descendants while collecting a bounded, fresh tree,
+pins every process to its birth identity, and confirms the complete stopped tree
+before closing the exact terminal. After the terminal accepts teardown, it kills
+the pinned agent and descendants and confirms their exit. The agent stays
+suspended until it is killed, so shutdown handlers cannot fork new jobs after
+verification. An incomplete check keeps the terminal; failed teardown restores
+only processes suspended by this operation. A failed or unconfirmed stop does not
+start worktree cleanup. Pause and native Stop keep their existing behavior.
+
+Process names, shared process groups and the working folder never authorize
+termination of other programs. Already orphaned processes whose session ownership
+cannot be verified stay untouched; a surviving process using the checkout still
+prevents its removal. Run Terminate from outside the target's own process tree.
+
 Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
 supported native DeepSeek operation. It preserves the original folder, account
 and project wrapper. There is no fallback to the latest conversation or a new

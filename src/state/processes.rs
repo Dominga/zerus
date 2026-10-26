@@ -9,6 +9,10 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 mod control;
 mod history;
 mod native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod termination;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use termination::Termination;
 pub(super) use control::WorkSample;
 #[cfg(test)]
 mod tests;

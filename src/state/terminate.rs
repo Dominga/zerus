@@ -45,7 +45,13 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
                 // Pin the tmux instance, never resolve a reusable name a second time.
                 // The writer lock prevents a concurrent HGS rename/relaunch here.
                 if let Some(scope)=scope {scope.changing();}
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                let owned = processes::Termination::prepare(&record)
+                    .map_err(|error| format!("Could not verify session processes; terminal kept: {error}"))?;
                 backend::current().kill_session(backend::Target::Session(&target))?;
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if let Some(owned) = owned { owned.finish()
+                    .map_err(|error| format!("Terminal closed, but process shutdown was not confirmed; worktree kept: {error}"))?; }
             }
         } else if process_alive(&record) {
             return Err(

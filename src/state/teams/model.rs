@@ -306,6 +306,10 @@ fn is_zero(value: &i64) -> bool {
     *value == 0
 }
 
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 /// An MCP server or service a member's session runs (G7): shown on the member
 /// card and never counted as Background work.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -827,6 +831,10 @@ pub(crate) struct Team {
     pub profile_widening: Vec<serde_json::Value>,
     #[serde(default)]
     pub revision: u64,
+    /// F11: the revision that last changed draft phase or task numbers; a
+    /// caller holding an older revision is refused.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub phase_numbers_revision: u64,
     #[serde(default)]
     pub created: f64,
     #[serde(default)]

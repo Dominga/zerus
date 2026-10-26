@@ -418,12 +418,24 @@ fn errors_text(errors: &[plan::Finding]) -> String {
 /// Appends a phase to a planning, running or paused team: the lead's or your
 /// new work after the plan. A phase is a Draft when the plan is still being
 /// drafted, when an earlier phase is a Draft, or when approval is `review`.
+/// F11: refuses a draft change made against numbers that have since shifted.
+fn ensure_draft_revision(team: &Team, input: &Value) -> anyhow::Result<()> {
+    if let Some(revision) = input["revision"].as_u64() {
+        ensure!(
+            team.phase_numbers_revision <= revision,
+            "Draft numbers changed after revision {revision}; read status again"
+        );
+    }
+    Ok(())
+}
+
 fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you extend the team");
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team takes a new phase"
     );
+    ensure_draft_revision(team, input)?;
     let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("A phase needs at least one task")?;
     ensure!(values.len() <= 50, "A phase has at most 50 tasks");
     ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
@@ -571,6 +583,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     } else {
         // The lead adds drafts, so it may drop its own; the owner may too (F10).
         ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you discard a phase");
+        ensure_draft_revision(team, input)?;
     }
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = input["phase"]
@@ -648,6 +661,8 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             "phase_discarded",
             json!({"by":label,"phase":n,"title":record.title,"tasks":titles}),
         ));
+        // F11: a discard invalidates the draft numbers a caller may hold.
+        team.phase_numbers_revision = team.revision + 1;
         let renumbering = renumbered(team, &label, events);
         Ok(json!({"status":"phase_discarded","phase":n,"tasks":ids,"renumbered":renumbering}))
     }
@@ -715,6 +730,10 @@ fn renumber_drafts(team: &mut Team) -> Value {
     // The display order is the phase number order now.
     team.phases.sort_by_key(|phase| phase.n);
     normalize_orders(team);
+    // F11: the numbers a caller may still hold are stale from this revision.
+    if phase_map.iter().any(|(from, to)| from != to) || task_map.iter().any(|(from, to)| from != to) {
+        team.phase_numbers_revision = team.revision + 1;
+    }
     let phases: Vec<Value> = phase_map.iter().filter(|(from, to)| from != to).map(|(from, to)| json!({"from":from,"to":to})).collect();
     let tasks: Vec<Value> = task_map.iter().filter(|(from, to)| from != to).map(|(from, to)| json!({"from":from,"to":to})).collect();
     json!({"phases":phases,"tasks":tasks})
@@ -774,6 +793,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team edits a draft"
     );
+    ensure_draft_revision(team, input)?;
     let n = input["phase"]
         .as_u64()
         .and_then(|phase| u32::try_from(phase).ok())
@@ -910,6 +930,7 @@ fn move_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Ev
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team moves phases"
     );
+    ensure_draft_revision(team, input)?;
     let n = input["phase"]
         .as_u64()
         .and_then(|phase| u32::try_from(phase).ok())
@@ -3503,6 +3524,43 @@ mod tests {
         team.settings.folder_policy = FolderPolicy::Auto;
         let validation = plan::validate(&team, &BTreeSet::new());
         assert!(!validation.errors.iter().any(|finding| finding.text.contains("folder policy")), "{:?}", validation.errors);
+    }
+
+    #[test]
+    fn a_stale_draft_revision_is_refused_until_status_is_read_again() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        extend(&mut team, &json!({"phase_title":"A","tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        // The caller read this revision; a renumber or discard moves the marker.
+        let read = team.revision;
+        team.phase_numbers_revision = team.revision + 1;
+        for op in ["edit-draft", "move-phase"] {
+            let input = if op == "edit-draft" {
+                json!({"phase":2,"task":3,"title":"Changed","revision":read})
+            } else {
+                json!({"phase":2,"to":"after","revision":read})
+            };
+            let error = apply(&mut team, op, &input, &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+            assert_eq!(error, format!("Draft numbers changed after revision {read}; read status again"), "{op}");
+        }
+        let error = apply(&mut team, "discard-phase", &json!({"phase":2,"revision":read}), &Actor::Human, &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, format!("Draft numbers changed after revision {read}; read status again"));
+        // The revision the change produced works, and no revision works as before.
+        let current = team.phase_numbers_revision;
+        apply(&mut team, "edit-draft", &json!({"phase":2,"task":3,"title":"Changed","revision":current}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        apply(&mut team, "edit-draft", &json!({"phase":2,"task":3,"title":"Again"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        // A real discard moves the marker and refuses the revision it read.
+        let mut fresh = running_team();
+        extend(&mut fresh, &json!({"phase_title":"A","tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        let before = fresh.revision;
+        apply(&mut fresh, "discard-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(fresh.phase_numbers_revision, before + 1);
+        let error = apply(&mut fresh, "edit-draft", &json!({"phase":2,"task":3,"title":"X","revision":before}), &Actor::Human, &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Draft numbers changed"), "{error}");
     }
 
     #[test]

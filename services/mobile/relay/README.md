@@ -150,11 +150,39 @@ payload or identity. Adoption only narrows a proved Read expiry relative to
 its original completion time. Existing transactional expiry performs the
 actual workspace/shard byte refund and leaves permanent metadata charged.
 
-This bounds historical Read-cache accumulation; it does not promise admission
-for an arbitrary burst within one hour. The original per-workspace/shard byte
-limits, 2MiB result reservation, concurrency/class policy and permanent receipt
-count remain in force. It is not durable receiving-client acknowledgement,
-nor evidence that a particular phone request completed or its latency improved.
+The one-hour limit is a cache ceiling, not a delivery guarantee. When a new
+request would exceed its workspace byte budget, admission may reclaim oldest
+completed caches whose accepted request and signed result both proved Read,
+after a two-minute response-delivery grace. Queued, claimed, reserved, unknown,
+mismatched, Mutation and Control payloads are ineligible. Only the requesting
+workspace is considered; another workspace and its class reserves are untouched.
+
+A pressure turn reads at most 32 indexed metadata rows and reclaims at most the
+existing maximum request-plus-result envelope bytes. A 25ms check admits each
+subsequent row; it does not preempt an admitted SQL statement. It stops as soon
+as enough bytes are available. All chunk removal and exact workspace/shard
+refunds share the existing transaction and locks. Even if one batch is too small,
+a truthful BUSY response commits that safe cache-only progress without inserting
+a new request. Other errors or cancellation before commit roll it back. A
+committed prefix stays committed across restart and cannot be refunded twice.
+
+Permanent IDs, body/result hashes, completion state, completion time and their
+metadata charge remain. Resubmitting an evicted identity returns the same
+completed receipt without ciphertext and never queues it again; the connector
+also permanently reserves that ID. Result-header expiry is a separate signed
+cryptographic bound (the retained connector uses 23 hours), not the request's
+300-second transport expiry or a cache promise. No receipt GET is treated as
+an acknowledgement. A paused client can lose an unreceived Read result; the
+published Android client reports its missing envelope as uncertain. A normal
+explicit Inspect/History refresh constructs a fresh safe Read identity. No
+native mutation is automatically retried or replayed.
+
+This is bounded cache progress, not guaranteed admission: all-too-young caches,
+too little eligible cache, many tiny records, permanent metadata, active work
+or other shard occupancy can still refuse a request. The original byte quotas,
+2MiB result reservation, concurrency/class policy, seven-day Mutation/Control
+recovery and permanent receipt count remain unchanged. No limit is raised and
+no durable receiving-client acknowledgement is claimed.
 
 An optional `complete_route` UUID on `node/signals` declares the entire current
 active signal set for that route (at most 1000). Omitted scopes become inactive

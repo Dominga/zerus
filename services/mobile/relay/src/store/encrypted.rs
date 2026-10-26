@@ -17,6 +17,12 @@ pub const ENCRYPTED_SMALL_MAX: usize = 2 * MIB;
 // Only a phone's accepted Read AND the computer's authenticated Read result
 // qualify. Neither a delivery GET nor a relay hint acknowledges receipt.
 const READ_PAYLOAD_TTL: f64 = 3600.0;
+// A best-effort Read cache, never a delivery acknowledgement. A freshly
+// completed response has a two-minute grace before byte-pressure reclamation.
+const READ_PRESSURE_GRACE: f64 = 120.0;
+const READ_PRESSURE_BATCH: i64 = 32;
+const READ_PRESSURE_BYTES: i64 = (ENCRYPTED_REQUEST_MAX + ENCRYPTED_SMALL_MAX) as i64;
+
 const CLASS_UNKNOWN: i64 = 0;
 const CLASS_DURABLE: i64 = 1;
 const CLASS_READ: i64 = 2;
@@ -194,6 +200,44 @@ fn receipt(row: &Value) -> Result<Value> {
     )
 }
 impl Store {
+    // The caller holds the encrypted workspace, shard and usage locks. Metadata
+    // only: no ciphertext reconstruction, signature work or new execution here.
+    async fn reclaim_read_cache(&self, t: &mut Tx, w: &str, needed: i64) -> Result<i64> {
+        let cutoff = now() - READ_PRESSURE_GRACE;
+        let rows=t.all("SELECT id,body_bytes,result_bytes FROM encrypted_requests WHERE workspace_id=? AND state='completed' AND payload_class=2 AND reserved_bytes=0 AND (body_bytes>0 OR result_bytes>0) AND updated<=? ORDER BY updated,id LIMIT ? FOR UPDATE",args![w,cutoff,READ_PRESSURE_BATCH]).await?;
+        let started = std::time::Instant::now();
+        let mut refunded = 0_i64;
+        for (index, row) in rows.into_iter().enumerate() {
+            // Admission between records, not SQL preemption or a hard wall-time
+            // bound. Each page and its maximum reclaimed bytes are fixed.
+            if refunded >= needed
+                || (index > 0 && started.elapsed() >= std::time::Duration::from_millis(25))
+            {
+                break;
+            }
+            let body = i(&row, "body_bytes");
+            let result = i(&row, "result_bytes");
+            let bytes = body.checked_add(result).ok_or(Error::UNAVAILABLE)?;
+            if body < 0 || result < 0 || bytes <= 0 || bytes > READ_PRESSURE_BYTES {
+                return Err(Error::UNAVAILABLE);
+            }
+            if refunded + bytes > READ_PRESSURE_BYTES {
+                break;
+            }
+            t.exec(
+                "DELETE FROM encrypted_request_chunks WHERE request_id=?",
+                args![&row["id"]],
+            )
+            .await?;
+            let changed=t.exec("UPDATE encrypted_requests SET body='',body_bytes=0,result=NULL,result_bytes=0 WHERE id=? AND workspace_id=? AND state='completed' AND payload_class=2 AND reserved_bytes=0 AND updated<=? AND body_bytes=? AND result_bytes=?",args![&row["id"],w,cutoff,body,result]).await?;
+            if changed != 1 {
+                return Err(Error::UNAVAILABLE);
+            }
+            self.db.bytes(t, w, -bytes).await?;
+            refunded += bytes;
+        }
+        Ok(refunded)
+    }
     pub async fn encrypted_sender(
         &self,
         c: &Credential,
@@ -221,16 +265,43 @@ impl Store {
             let result=receipt(&row)?; t.commit().await?; return Ok((StatusCode::ACCEPTED,result));
         }
         verify(&mut t, c, e, PayloadKind::Request, &state).await?;
-        let usage = self.db.payload_usage(&mut t, &c.workspace).await?;
+        let mut usage = self.db.payload_usage(&mut t, &c.workspace).await?;
         let total = (encoded.len() + ENCRYPTED_SMALL_MAX) as i64 + ENCRYPTED_METADATA_BYTES;
+        let needed = i(&usage, "payload_bytes")
+            .checked_add(total)
+            .ok_or(Error::UNAVAILABLE)?
+            - self.db.cfg.max_queue_bytes;
+        let refunded = if needed > 0
+            && total <= self.db.cfg.max_queue_bytes
+            && i(&usage, "active") < self.db.cfg.max_queue.min(1000)
+            && i(&usage, "mutations") < 100000
+        {
+            let refunded = self
+                .reclaim_read_cache(&mut t, &c.workspace, needed)
+                .await?;
+            usage = self.db.usage(&mut t, &c.workspace).await?;
+            refunded
+        } else {
+            0
+        };
         if i(&usage, "active") >= self.db.cfg.max_queue.min(1000)
             || i(&usage, "mutations") >= 100000
             || i(&usage, "payload_bytes") + total > self.db.cfg.max_queue_bytes
         {
+            // This transaction contains only authenticated cache maintenance;
+            // no new request was inserted. Commit bounded progress even when
+            // this batch cannot yet admit the new request. Otherwise BUSY would
+            // repeatedly roll the same small prefix back forever.
+            if refunded > 0 {
+                t.commit().await?;
+            }
             return Err(Error::BUSY);
         }
         let shard_capacity = self.db.payload_capacity(&mut t, &c.workspace).await?;
-        if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![total,self.db.shard(&c.workspace),total,shard_capacity]).await?==0 {return Err(Error::BUSY);}
+        if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![total,self.db.shard(&c.workspace),total,shard_capacity]).await?==0 {
+            if refunded > 0 { t.commit().await?; }
+            return Err(Error::BUSY);
+        }
         let at = now();
         let expires = (e.expires_at as f64).min(at + self.db.cfg.queue_ttl as f64);
         t.exec("INSERT INTO encrypted_requests(id,workspace_id,device_id,node_id,route_id,body_hash,body,body_bytes,state,reserved_bytes,created,updated,expires,metadata_bytes,payload_class) VALUES(?,?,?,?,?,?,'',?,'queued',?,?,?,?,?,?)",args![id,&c.workspace,&c.id,&e.gateway_id,&e.route_id,hash,encoded.len(),ENCRYPTED_SMALL_MAX,at,at,expires,ENCRYPTED_METADATA_BYTES,request_payload_class(e)]).await?;

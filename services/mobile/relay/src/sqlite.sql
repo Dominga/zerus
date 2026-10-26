@@ -135,3 +135,4 @@ CREATE INDEX IF NOT EXISTS encrypted_binding_unaccounted ON encrypted_route_bind
 CREATE INDEX IF NOT EXISTS opaque_signal_unaccounted ON opaque_signals(workspace_id,node_id,scope_id,kind) WHERE metadata_bytes=0;
 
 CREATE INDEX IF NOT EXISTS encrypted_payload_classification ON encrypted_requests(id) WHERE state='completed' AND payload_class IN (0,3) AND result_bytes>0;
+CREATE INDEX IF NOT EXISTS encrypted_read_cache_pressure ON encrypted_requests(workspace_id,updated,id) WHERE state='completed' AND payload_class=2 AND reserved_bytes=0 AND (body_bytes>0 OR result_bytes>0);

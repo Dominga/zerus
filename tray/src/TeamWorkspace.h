@@ -42,11 +42,6 @@ protected:
 private:
     void scheduleRender();
     QWidget *teamBar(const Teams::Team &team, const QString &status);
-    // G5/F10: a draft waits for approval as one compact, foldable line at the
-    // top of the members column; opened, it shows its tasks and the lead's diff,
-    // and its arrows move it among the drafts (move-phase).
-    QWidget *draftPhase(const Teams::Team &team, int phase);
-    QWidget *draftDetail(const Teams::Team &team, const Teams::PhaseGroup &group);
     QWidget *finishSummary(const Teams::Team &team);
     // B5: the widening notice, and the approve that asks for the owner's
     // confirmation and sends confirm_widening.
@@ -86,12 +81,18 @@ private:
     QString m_error;
     bool m_dark = true, m_pending = false, m_feedOpen = false, m_fit = true;
     // G9: one phase decision is in flight at a time; a second click on a header
-    // before the answer arrives sends nothing.
+    // before the answer arrives sends nothing. After an answer, that phase stays
+    // decided until the team's revision moves (the store has taken the
+    // decision); a failed send lets it go. Only a sent decision marks it.
     int m_phaseAct = 0;
-    // G5: the two blocks of the members column fold independently, and the
-    // owner's choice survives a restart; one draft at a time opens.
-    bool m_phasesOpen = true, m_membersOpen = true;
-    int m_openDraft = 0;
+    QSet<QString> m_phasesDecided;   // "team/phase" sent at m_decidedRevision
+    qint64 m_decidedRevision = -1;
+    bool phaseDecided(const Teams::Team &team, int phase) const;
+    QString markPhaseDecided(const Teams::Team &team, int phase);
+    void phaseSent(const QString &key, bool ok, const QString &message);
+    // G5: the members block folds, and the owner's choice survives a restart.
+    // (G9 moved the draft phases into the graph's band headers.)
+    bool m_membersOpen = true;
     double m_zoom = 1.0;
     int m_drawerTask = 0;
     QHash<QString, QPoint> m_scroll;

@@ -105,7 +105,6 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     if (!m_sideSplit->restoreState(settings.value("teams/workspaceSideSplit").toByteArray())) m_sideSplit->setSizes({420, 520});
     QObject::connect(m_split, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSplit", m_split->saveState()); });
     QObject::connect(m_sideSplit, &QSplitter::splitterMoved, this, [this] { QSettings().setValue("teams/workspaceSideSplit", m_sideSplit->saveState()); });
-    m_phasesOpen = QSettings().value("teams/phasesOpen", true).toBool();
     m_membersOpen = QSettings().value("teams/membersOpen", true).toBool();
     m_drawer = new TeamTaskCard(this);
     m_drawer->setObjectName("teamWorkspaceDrawer");
@@ -147,7 +146,7 @@ void TeamWorkspace::setTheme(bool dark)
 
 void TeamWorkspace::showTeam(const QString &team)
 {
-    if (m_team != team) { m_team = team; m_focus.clear(); m_drawerTask = 0; m_openDraft = 0; m_fit = true; if (m_popover) m_popover->hide(); }
+    if (m_team != team) { m_team = team; m_focus.clear(); m_drawerTask = 0; m_fit = true; if (m_popover) m_popover->hide(); }
     scheduleRender();
 }
 
@@ -415,177 +414,6 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
     return bar;
 }
 
-// G5: a draft waits for approval as one compact line at the top of the members
-// column — the live phase number, its title, its task count, the pills, the
-// reason it waits, Approve, Discard, and the reorder arrows (F10). Opening it
-// shows its tasks and the lead's diff, so the owner decides without leaving the
-// column. Every handler holds QPointer, because a poll may rebuild the row
-// while its own confirmation runs.
-QWidget *TeamWorkspace::draftPhase(const Team &team, int phase)
-{
-    const Colors c = colorsFor(m_dark);
-    PhaseGroup group;
-    bool found = false;
-    for (const auto &candidate : phaseGroups(team)) if (candidate.n == phase) { group = candidate; found = true; }
-    if (!found) return nullptr;
-    const auto drafts = team.draftPhases();
-    const int position = drafts.indexOf(phase);
-    auto *box = new QWidget; box->setObjectName("teamWorkspaceDraftBox");
-    auto *boxLayout = new QVBoxLayout(box); boxLayout->setContentsMargins(0, 0, 0, 0); boxLayout->setSpacing(0);
-    auto *strip = new QFrame; strip->setObjectName("teamWorkspaceDraftPhase");
-    strip->setProperty("phase", phase);
-    strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceDraftPhase{background:%1;border:1px solid %2;border-radius:7px;}"
-                                        "QPushButton#teamMovePhaseUp,QPushButton#teamMovePhaseDown{background:transparent;border:0;padding:0;"
-                                        "min-width:20px;max-width:20px;font-size:13px;color:%3;}"
-                                        "QPushButton#teamMovePhaseUp:disabled,QPushButton#teamMovePhaseDown:disabled{color:%4;}")
-                             .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .35).name(QColor::HexArgb),
-                                  c.text2.name(), alpha(c.muted, .45).name(QColor::HexArgb)));
-    auto *h = new QHBoxLayout(strip); h->setContentsMargins(6, 3, 6, 3); h->setSpacing(6);
-    const bool open = m_openDraft == phase;
-    auto *toggle = new QToolButton; toggle->setIcon(workspaceIcon(open ? "chevron-down" : "chevron-right", c.muted));
-    toggle->setAutoRaise(true); toggle->setObjectName("teamDraftOpen"); toggle->setProperty("phase", phase);
-    toggle->setToolTip(open ? tr("Fold phase %1") : tr("Show phase %1's tasks and the lead's changes").arg(phase));
-    QObject::connect(toggle, &QToolButton::clicked, this, [this, phase] { m_openDraft = m_openDraft == phase ? 0 : phase; scheduleRender(); });
-    h->addWidget(toggle);
-    // The live number from the store, so a move that renumbers the drafts shows
-    // here at once, not a number cached when the canvas was built.
-    auto *heading = label(QStringLiteral("Phase %1").arg(group.n), c.fg, 12, true, "teamDraftPhaseHeading");
-    heading->setToolTip(tr("Phase %1 · %2 · %3 tasks").arg(group.n).arg(group.title).arg(group.tasks.size()));
-    h->addWidget(heading);
-    if (!group.title.isEmpty()) {
-        auto *name = elided(group.title, c.text2, 11);
-        name->setObjectName("teamDraftPhaseTitle");
-        name->setMinimumWidth(40);
-        h->addWidget(name, 1);
-    } else h->addStretch(1);
-    h->addWidget(label(group.tasks.size() == 1 ? tr("1 task") : tr("%1 tasks").arg(group.tasks.size()), c.muted, 11));
-    if (group.barrier) h->addWidget(new Pill(tr("barrier"), c.muted));
-    h->addWidget(new Pill(tr("draft"), c.warn));
-    // Spec 10: every lower phase must be approved and finished before this one
-    // opens; the compact reason stays on the row, the sentence in its tooltip.
-    // F12: a draft whose predecessor is not ready says so, and its tooltip names
-    // the phase and its open tasks.
-    const QString blocked = approveBlocked(team, phase);
-    const auto *record = team.phase(phase);
-    const bool predecessorNotReady = record && !record->waiting.text.isEmpty();
-    if (!blocked.isEmpty() || predecessorNotReady) {
-        QString text = approveBlockedShort(team, phase);
-        if (predecessorNotReady) text = record->waiting.text;
-        // QA: the whole "Waiting for the previous phase to be ready" stays in
-        // the row's text; on a narrow column it paints elided with an ellipsis.
-        auto *reason = new ElidingLabel(text);
-        reason->setObjectName("teamDraftPhaseReason");
-        reason->setPalette([&] { QPalette pal = reason->palette(); pal.setColor(QPalette::WindowText, c.warn); return pal; }());
-        reason->setFont([&] { QFont f = reason->font(); f.setPixelSize(10); return f; }());
-        reason->setToolTip(text);
-        QString tip = blocked;
-        if (predecessorNotReady) {
-            QStringList open; for (int id : record->waiting.open) open << QStringLiteral("#%1").arg(id);
-            tip = tr("Phase %1 is not ready: %2").arg(record->waiting.phase).arg(open.isEmpty() ? tr("no open tasks listed") : open.join(QStringLiteral(", ")));
-            if (!blocked.isEmpty()) tip += QLatin1Char('\n') + blocked;
-        }
-        reason->setToolTip(tip);
-        reason->setMinimumWidth(0);
-        reason->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        h->addWidget(reason, 1);
-    } else h->addStretch(1);
-    // F10: move the draft among the drafts; it goes before the one above or
-    // after the one below, and the store renumbers the drafts after it.
-    const auto move = [this, id = team.id, phase](int to, const QString &where) {
-        m_error.clear();
-        m_panel->act("move-phase", {{"team", id}, {"phase", phase}, {"to", to}, {"position", where}},
-                     [this](bool ok, const QString &message) { if (!ok) m_error = message; scheduleRender(); });
-    };
-    auto *up = button(QStringLiteral("↑"), "teamMovePhaseUp"); up->setProperty("phase", phase); up->setProperty("ghost", true);
-    up->setFixedWidth(20); up->setEnabled(position > 0);
-    up->setToolTip(position > 0 ? tr("Move phase %1 before phase %2").arg(phase).arg(drafts.value(position - 1))
-                                : tr("This draft is already first"));
-    QObject::connect(up, &QPushButton::clicked, this, [move, to = drafts.value(position - 1), position] {
-        if (position > 0) move(to, QStringLiteral("before"));
-    });
-    auto *down = button(QStringLiteral("↓"), "teamMovePhaseDown"); down->setProperty("phase", phase); down->setProperty("ghost", true);
-    down->setFixedWidth(20); down->setEnabled(position >= 0 && position + 1 < drafts.size());
-    down->setToolTip(position >= 0 && position + 1 < drafts.size() ? tr("Move phase %1 after phase %2").arg(phase).arg(drafts.value(position + 1))
-                                                                  : tr("This draft is already last"));
-    QObject::connect(down, &QPushButton::clicked, this, [move, to = drafts.value(position + 1), position, count = drafts.size()] {
-        if (position >= 0 && position + 1 < count) move(to, QStringLiteral("after"));
-    });
-    h->addWidget(up); h->addWidget(down);
-    auto *approve = button(tr("Approve"), "teamApprovePhase", true);
-    approve->setProperty("phase", phase);
-    approve->setEnabled(blocked.isEmpty());
-    approve->setToolTip(blocked.isEmpty() ? tr("Hand phase %1's tasks out").arg(phase) : blocked);
-    auto *discard = button(tr("Discard"), "teamDiscardPhase");
-    discard->setProperty("phase", phase);
-    discard->setProperty("danger", true);
-    // Both decisions go out once: the buttons stay disabled until the answer.
-    // The confirmation runs its own event loop, and a poll may rebuild this row
-    // meanwhile: the buttons are only touched while they still exist.
-    const auto decide = [this, id = team.id, phase, approve = QPointer<QPushButton>(approve),
-                         discard = QPointer<QPushButton>(discard)](const QString &operation) {
-        if (approve) approve->setEnabled(false);
-        if (discard) discard->setEnabled(false);
-        m_error.clear();
-        m_panel->act(operation, {{"team", id}, {"phase", phase}}, [this](bool ok, const QString &message) {
-            if (!ok) m_error = message;
-            scheduleRender();
-        });
-    };
-    QObject::connect(approve, &QPushButton::clicked, this, [decide] { decide(QStringLiteral("approve-phase")); });
-    QObject::connect(discard, &QPushButton::clicked, this, [this, decide, phase, count = group.tasks.size()] {
-        if (m_panel->confirm("teamDiscardPhaseConfirm", tr("Discard phase?"),
-                             tr("Discard phase %1 and its %2 tasks?").arg(phase).arg(count), tr("Discard phase")))
-            decide(QStringLiteral("discard-phase"));
-    });
-    h->addWidget(approve); h->addWidget(discard);
-    boxLayout->addWidget(strip);
-    if (open) boxLayout->addWidget(draftDetail(team, group));
-    return box;
-}
-
-// The opened draft: its tasks with their states, and the lead's changes as a
-// diff (added +, removed −, changed ~, moved →), from what the store reports in
-// the phase's `changes`. Empty means the lead has not changed it since it was
-// added.
-QWidget *TeamWorkspace::draftDetail(const Team &team, const PhaseGroup &group)
-{
-    const Colors c = colorsFor(m_dark);
-    auto *detail = new QFrame; detail->setObjectName("teamDraftDetail"); detail->setProperty("phase", group.n);
-    auto *v = new QVBoxLayout(detail); v->setContentsMargins(26, 4, 8, 6); v->setSpacing(2);
-    for (int id : group.tasks) {
-        const Task *task = team.task(id);
-        if (!task) continue;
-        const auto state = taskStatus(*task);
-        auto *rowBox = row(6);
-        auto *mark = new StatusMark(state.text, toneColor(c, state.tone), state.kind, 0, Qt::AlignLeft, nullptr, QString());
-        rowBox->addWidget(mark);
-        rowBox->addWidget(elided(QStringLiteral("#%1 %2").arg(task->id).arg(task->title), c.text2, 11), 1);
-        if (!task->assignee.isEmpty()) rowBox->addWidget(new Pill(team.roleOf(task->assignee), roleColor(team.roleOf(task->assignee), m_dark)));
-        v->addLayout(rowBox);
-    }
-    if (group.tasks.isEmpty()) v->addWidget(label(tr("No tasks yet"), c.muted, 11));
-    if (const auto *phase = team.phase(group.n); phase && !phase->changes.isEmpty()) {
-        auto *head = label(tr("Changes from the lead"), c.muted, 10, true, "teamDraftChangesHead");
-        v->addWidget(head);
-        for (const auto &change : phase->changes) {
-            const QColor tone = change.added() ? c.accent : change.removed() ? c.danger : change.kind == "moved" ? c.muted : c.warn;
-            QString text;
-            if (change.kind == "moved") text = tr("→ moved from phase %1 to phase %2").arg(change.from, change.to);
-            else if (change.added()) text = tr("+ #%1 %2").arg(change.task).arg(change.title);
-            else if (change.removed()) text = tr("− #%1 %2").arg(change.task).arg(change.title);
-            else text = tr("~ #%1 %2: %3 → %4").arg(change.task).arg(change.title, change.from, change.to);
-            auto *line = label(text, tone, 11);
-            line->setObjectName("teamDraftChange");
-            v->addWidget(line);
-        }
-    } else {
-        auto *none = label(tr("No changes from the lead yet"), c.muted, 10);
-        none->setObjectName("teamDraftNoChanges");
-        v->addWidget(none);
-    }
-    return detail;
-}
-
 QWidget *TeamWorkspace::finishSummary(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
@@ -640,46 +468,60 @@ void TeamWorkspace::approveTeam(const Team &team)
     m_panel->act("approve", {});
 }
 
+// G9: a decision sent for this phase holds until the store's revision moves,
+// whatever re-renders the header meanwhile; a failed send lets it go.
+bool TeamWorkspace::phaseDecided(const Team &team, int phase) const
+{
+    return m_decidedRevision == team.revision && m_phasesDecided.contains(QStringLiteral("%1/%2").arg(team.id).arg(phase));
+}
+
+QString TeamWorkspace::markPhaseDecided(const Team &team, int phase)
+{
+    // Every phase decided at this revision stays decided; a new revision
+    // means the store has taken them.
+    if (m_decidedRevision != team.revision) { m_phasesDecided.clear(); m_decidedRevision = team.revision; }
+    const QString key = QStringLiteral("%1/%2").arg(team.id).arg(phase);
+    m_phasesDecided.insert(key);
+    m_phaseAct = phase;
+    m_error.clear();
+    return key;
+}
+
+void TeamWorkspace::phaseSent(const QString &key, bool ok, const QString &message)
+{
+    m_phaseAct = 0;
+    if (!ok) { m_phasesDecided.remove(key); m_error = message; }
+    scheduleRender();
+}
+
 // G9: the band header's Approve, confirmed once, then sent through the same
 // operation the draft strip used. Returns false when nothing was sent (a
-// cancelled confirmation or a decision already in flight), so the header keeps
-// its buttons usable.
+// cancelled confirmation, a decision in flight or one already sent for this
+// revision): a cancel leaves the header usable, a sent one never goes twice.
 bool TeamWorkspace::approvePhase(const Team &team, int phase)
 {
-    if (m_phaseAct) return false;
+    if (m_phaseAct || phaseDecided(team, phase)) return false;
     int count = 0;
     for (const auto &group : phaseGroups(team)) if (group.n == phase) count = group.tasks.size();
     if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
                           tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
                           tr("Approve phase")))
         return false;
-    m_phaseAct = phase;
-    m_error.clear();
-    m_panel->act("approve-phase", {{"team", team.id}, {"phase", phase}},
-                 [this](bool ok, const QString &message) {
-                     m_phaseAct = 0;
-                     if (!ok) m_error = message;
-                     scheduleRender();
-                 });
+    const QString key = markPhaseDecided(team, phase);
+    m_panel->act("approve-phase", {{"team", team.id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     return true;
 }
 
 bool TeamWorkspace::discardPhase(const Team &team, int phase)
 {
-    if (m_phaseAct) return false;
+    if (m_phaseAct || phaseDecided(team, phase)) return false;
     int count = 0;
     for (const auto &group : phaseGroups(team)) if (group.n == phase) count = group.tasks.size();
     if (!m_panel->confirm("teamDiscardPhaseConfirm", tr("Discard phase?"),
                           tr("Discard phase %1 and its %2 tasks?").arg(phase).arg(count), tr("Discard phase")))
         return false;
-    m_phaseAct = phase;
-    m_error.clear();
-    m_panel->act("discard-phase", {{"team", team.id}, {"phase", phase}},
-                 [this](bool ok, const QString &message) {
-                     m_phaseAct = 0;
-                     if (!ok) m_error = message;
-                     scheduleRender();
-                 });
+    const QString key = markPhaseDecided(team, phase);
+    m_panel->act("discard-phase", {{"team", team.id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     return true;
 }
 
@@ -866,6 +708,9 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     view->chain = [team](int id) { return Teams::chain(team, id); };
     view->cycle = team.cycle;
     view->bands = phaseBands(team, [this, &team](const PhaseGroup &group) { return m_panel->phaseOpen(team, group); });
+    // G9: a decision already sent keeps its header controls off until the
+    // store's revision moves, across re-renders.
+    for (const auto &band : view->bands) if (phaseDecided(team, band.n) || m_phaseAct == band.n) view->decided.insert(band.n);
     const bool grouped = !view->bands.isEmpty();
     view->phaseToggled = [this, id = team.id](int phase) {
         if (const auto *current = currentTeam(id)) m_panel->togglePhase(*current, phase);

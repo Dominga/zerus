@@ -263,6 +263,21 @@ QPoint viewPoint(const TeamUi::TaskView *view, const QRectF &rect)
 // reject (Cancel) button, otherwise the destructive action button. The dialog
 // runs its own event loop inside the click, so a zero timer lands inside it; the
 // retry covers a timer that fires before the dialog is up.
+// Clicks `point` on `view` and reports whether a confirmation opened; one that
+// opens is cancelled, so a regression fails the check instead of hanging.
+bool clickAsks(QWidget *view, const QPoint &point)
+{
+    bool asked = false;
+    QTimer watch; watch.setInterval(5);
+    QObject::connect(&watch, &QTimer::timeout, [&asked] {
+        if (auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) { asked = true; box->reject(); }
+    });
+    watch.start();
+    QTest::mouseClick(view, Qt::LeftButton, {}, point);
+    QTest::qWait(60);
+    return asked;
+}
+
 void armConfirm(TeamPanel *panel, bool cancel, int tries = 300)
 {
     QTimer::singleShot(0, panel, [panel, cancel, tries] {
@@ -1182,7 +1197,7 @@ void TestTeamsUi::workspaceGroupsTasksByPhase()
         std::sort(ids.begin(), ids.end());
         return ids;
     };
-    // Phases left to right; the finished one starts collapsed.
+    // G9: phases stack top to bottom; the finished one starts collapsed.
     QCOMPARE(graph()->bands[0].heading, QStringLiteral("Phase 1 · 2/2"));
     QVERIFY(graph()->bands[0].collapsed);
     QCOMPARE(graph()->bands[1].heading, QStringLiteral("Phase 2 · QA fixes · 1/2"));
@@ -1190,9 +1205,11 @@ void TestTeamsUi::workspaceGroupsTasksByPhase()
     QVERIFY(!graph()->bands[1].collapsed);
     QCOMPARE(graph()->bands[2].heading, QStringLiteral("Phase 3 · Polish · 0/1"));
     QVERIFY(graph()->bands[2].draft);
-    // A collapsed phase builds no task node; one summary stands in.
+    // G9: a collapsed phase builds no task node and is one header row.
     QCOMPARE(nodeIds(graph()), (QList<int>{3, 4, 5}));
-    QVERIFY(!graph()->summaryRect(1).isNull());
+    QVERIFY(graph()->summaryRect(1).isNull());
+    QVERIFY(graph()->bandRect(1).height() <= 40);
+    QVERIFY(graph()->bandRect(1).top() < graph()->bandRect(2).top());
     shot(&workspace, "d3-phases-graph-collapsed");
     const auto clickHeader = [&](int phase) {
         auto *view = graph(); QVERIFY(view);
@@ -1208,14 +1225,10 @@ void TestTeamsUi::workspaceGroupsTasksByPhase()
     clickHeader(2);   // the current phase closes; its tasks go, the others stay
     QTRY_VERIFY(graph()->bands[1].collapsed);
     QTRY_COMPARE(nodeIds(graph()), (QList<int>{1, 2, 5}));
-    // The collapsed phase's summary node opens it too, and its line says a
-    // finished phase is done rather than just "open".
-    const auto clickSummary = [&](int phase) {
-        auto *view = graph(); QVERIFY(view);
-        QVERIFY(!view->summaryRect(phase).isNull());
-        QTest::mouseClick(view, Qt::LeftButton, {}, (view->summaryRect(phase).center() * view->zoom).toPoint());
-    };
-    clickSummary(2);
+    // The header row opens it again. (The layers view below keeps a summary
+    // node for a collapsed phase; its line says a finished phase is done.)
+    QVERIFY(graph()->summaryRect(2).isNull());
+    clickHeader(2);
     QTRY_VERIFY(!graph()->bands[1].collapsed);
     QTRY_COMPARE(nodeIds(graph()).size(), 5);
     QCOMPARE(TeamUi::phaseSummaryText(2, 2), QStringLiteral("2/2 done · click to open"));
@@ -1331,6 +1344,15 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
     QTRY_VERIFY(graph);
     graph->grab();
+    // A cancelled confirmation sends nothing and leaves Approve usable.
+    armConfirm(&panel, true);
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->approveRect(3)));
+    QTest::qWait(100);
+    QCOMPARE(calls(script(), "approve-phase").size(), 0);
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QTRY_VERIFY(graph);
+    QVERIFY(!graph->decided.contains(3));
+    graph->grab();
     armConfirm(&panel, false);
     QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->approveRect(3)));
     QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
@@ -1344,6 +1366,20 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->approveRect(3)));
     QTest::qWait(80);
     QCOMPARE(calls(script(), "approve-phase").size(), 1);
+    // The answer has come back and the header re-renders: the sent decision
+    // holds until the store's revision moves, so neither button asks again
+    // nor sends (no double send from a double click or a quick re-render).
+    QTest::qWait(300);
+    workspace.render();
+    QTest::qWait(100);
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QTRY_VERIFY(graph);
+    QVERIFY(graph->decided.contains(3));
+    graph->grab();
+    QVERIFY(!clickAsks(graph, viewPoint(graph, graph->approveRect(3))));
+    QVERIFY(!clickAsks(graph, viewPoint(graph, graph->discardRect(3))));
+    QCOMPARE(calls(script(), "approve-phase").size(), 1);
+    QCOMPARE(calls(script(), "discard-phase").size(), 0);
     // The store's next revision reopens the header for the same phase; the
     // Discard test runs on it.
     auto decidedTeam = ready;
@@ -3055,7 +3091,9 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
         QJsonObject{{"n", 4}, {"title", "Review"}, {"barrier", true}, {"state", "approved"}, {"tasks", QJsonArray{6}}},
         QJsonObject{{"n", 5}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{7}},
                     {"waiting", QJsonObject{{"text", "Waiting for the previous phase to be ready"}, {"phase", 4},
-                                            {"open", QJsonArray{6}}}}}};
+                                            {"open", QJsonArray{6}}}},
+                    {"changes", QJsonArray{QJsonObject{{"kind", "added"}, {"task", 7}, {"title", "Screenshots"}},
+                                           QJsonObject{{"kind", "changed"}, {"task", 7}, {"title", "Screenshots"}, {"from", "backend"}, {"to", "tester"}}}}}};
     t["tasks"] = QJsonArray{
         QJsonObject{{"id", 1}, {"phase", 1}, {"title", "Requirements"}, {"assignee", "lead"}, {"status", "accepted"},
                     {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "lead"}, {"state", "reported"}}}}},
@@ -3118,6 +3156,9 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
     // The blocked draft says the F12 sentence, and its Approve is painted but
     // does not send anything (the F12 guard).
     QCOMPARE(graph()->bandOf(5)->blocked, QStringLiteral("Waiting for the previous phase to be ready"));
+    // The lead's changes to the draft read as a diff in the header's tooltip.
+    graph()->grab();
+    QVERIFY(graph()->bandTooltip(5).contains(QStringLiteral("Changes from the lead:\n+ #7 Screenshots\n~ #7 Screenshots: backend → tester")));
     graph()->grab();
     QVERIFY(graph()->approveRect(5).width() > 0);
     QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->approveRect(5)));
@@ -3155,12 +3196,13 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
     workspace.render();
     QTest::qWait(150);
     // All collapsed: one compact header row per band.
-    for (int n = 3; n <= 5; ++n) {
+    for (int n = 1; n <= 5; ++n) {
         QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->bandRect(n)));
         QTRY_VERIFY(([&] { auto *v = graph(); return v && v->bandOf(n) && v->bandOf(n)->collapsed; })());
     }
     QVERIFY(graph()->summaryRect(3).isNull());
     QVERIFY(graph()->bandRect(3).height() <= 40);
+    for (int n = 1; n <= 5; ++n) QVERIFY(graph()->bandOf(n)->collapsed && graph()->bandRect(n).height() <= 40);
     shot(&workspace, "g9-statuses-collapsed-dark");
     lightPalette();
     workspace.setTheme(false);
@@ -3227,6 +3269,12 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
     QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->approveRect(5)));
     QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
     QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 5);
+    // One decision is in flight at a time: wait for the answer and the
+    // re-render before the next one.
+    QTest::qWait(300);
+    workspace.render();
+    QTest::qWait(100);
+    graph()->grab();
     // Discard on the other draft band: Cancel sends nothing, the confirmation
     // sends once with phase 6.
     QVERIFY(graph()->bandOf(6) && graph()->bandOf(6)->draft);
@@ -3239,6 +3287,15 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
     QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->discardRect(6)));
     QTRY_COMPARE(calls(script(), "discard-phase").size(), 1);
     QCOMPARE(calls(script(), "discard-phase").first()["phase"].toInt(), 6);
+    // Both decisions hold at this revision: phase 5's Approve did not come back
+    // when phase 6 was decided.
+    QTest::qWait(300);
+    workspace.render();
+    QTest::qWait(100);
+    graph()->grab();
+    QVERIFY(graph()->decided.contains(5) && graph()->decided.contains(6));
+    QVERIFY(!clickAsks(graph(), viewPoint(graph(), graph()->approveRect(5))));
+    QCOMPARE(calls(script(), "approve-phase").size(), 1);
 }
 
 void TestTeamsUi::reportPreviewsAndFindings()

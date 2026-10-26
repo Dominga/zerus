@@ -476,6 +476,7 @@ public:
         QString blocked;      // F12: why Approve is disabled, empty when ready
         QString blockedTip;
         int changes = 0;      // the lead's pending edits on a draft
+        QStringList changeLines;   // those edits as a diff, for the header's tooltip
     };
     TaskView(const Colors &colors, Mode mode, QWidget *parent = nullptr) : QWidget(parent), m_c(colors), m_mode(mode)
     {
@@ -731,7 +732,9 @@ protected:
         QStringList tips;
         if (!band.healthTip.isEmpty()) tips << band.healthTip;
         if (!band.blockedTip.isEmpty()) tips << band.blockedTip;
-        if (band.blocked.isEmpty() && band.healthLine.isEmpty()) m_bandTips.remove(band.n);
+        if (!band.changeLines.isEmpty())
+            tips << QCoreApplication::translate("TeamPanel", "Changes from the lead:") + QLatin1Char('\n') + band.changeLines.join(QLatin1Char('\n'));
+        if (tips.isEmpty()) m_bandTips.remove(band.n);
         else m_bandTips.insert(band.n, tips.join(QLatin1Char('\n')));
         const double line1 = r.top() + 3, lineH = 16;
         const QPointF middle(r.left() + 7, line1 + lineH / 2);
@@ -1206,7 +1209,18 @@ inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::functi
             const QString blocked = approveBlocked(team, group.n);
             if (!blocked.isEmpty()) { band.blocked = approveBlockedShort(team, group.n); band.blockedTip = blocked; }
         }
-        if (const auto *record = team.phase(group.n)) band.changes = record->changes.size();
+        if (const auto *record = team.phase(group.n)) {
+            band.changes = record->changes.size();
+            // The lead's changes as a diff (added +, removed −, changed ~,
+            // moved →); the G5 strip that listed them went with G9.
+            const auto line = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+            for (const auto &change : record->changes) {
+                if (change.kind == "moved") band.changeLines << line("→ moved from phase %1 to phase %2").arg(change.from, change.to);
+                else if (change.added()) band.changeLines << line("+ #%1 %2").arg(change.task).arg(change.title);
+                else if (change.removed()) band.changeLines << line("− #%1 %2").arg(change.task).arg(change.title);
+                else band.changeLines << line("~ #%1 %2: %3 → %4").arg(change.task).arg(change.title, change.from, change.to);
+            }
+        }
         bands.append(band);
     }
     return bands;

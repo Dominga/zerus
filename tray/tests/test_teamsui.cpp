@@ -332,6 +332,7 @@ private slots:
     void lightThemeShots();
     void deliveryShots();
     void reportPreviewsAndFindings();
+    void hierarchyInTeamViewsAndMemberCards();
     void emptyPanelOffersNewTeamAndDesigner();
     void embeddedNewTeamIsLedByTheSession();
     void workspaceAddsAMember();
@@ -2713,6 +2714,53 @@ void TestTeamsUi::reportPreviewsAndFindings()
     for (const auto &action : {"reopen", "urgent", "replan", "defer", "fixed", "dropped"})
         QVERIFY2(dialog->findChild<QPushButton *>(QStringLiteral("teamFindingAction_%1").arg(action)), action);
     shot(dialog, "findings-dialog");
+}
+
+void TestTeamsUi::hierarchyInTeamViewsAndMemberCards()
+{
+    auto t = team();
+    t["parent"] = QJsonObject{{"team", "parent-team"}, {"task", 3}, {"lead", "lead"}, {"member", "backend"}};
+    t["children"] = QJsonArray{QJsonObject{{"team", "child-team"}, {"name", "Child"}, {"status", "running"}, {"done", 1}, {"total", 3}}};
+    auto tasks = t["tasks"].toArray();
+    auto delegated = tasks[1].toObject();
+    delegated["subteam"] = QJsonObject{{"team", "child-team"}, {"status", "running"}, {"done", 1}, {"total", 3}};
+    tasks[1] = delegated;
+    t["tasks"] = tasks;
+    setTeam(t);
+    const auto parsed = Teams::parse(t);
+    const auto live = [](const Member &) { Live state; state.known = true; return state; };
+    // G1 on the card: the sub-team with its rolled-up count and a way in.
+    TeamTaskCard card;
+    card.setTask(parsed, 2, live, true);
+    card.resize(760, 1000); card.show();
+    QTRY_VERIFY(card.findChild<QWidget *>("teamTaskSubteam"));
+    QVERIFY(card.findChild<QPushButton *>("teamTaskOpenSubteam"));
+    shot(&card, "hierarchy-subteam");
+    card.setTask(parsed, 3, live, true);
+    QTRY_VERIFY(card.findChild<QPushButton *>("teamTaskDelegate"));
+    shot(&card, "hierarchy-delegate");
+
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 900); workspace.show();
+    controller.refresh(); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBreadcrumb"));
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceBreadcrumb")->toolTip().contains("task #3"));
+    auto *view = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QVERIFY(view);
+    const auto *node = [&]() -> const TeamUi::TaskView::Node * {
+        for (const auto &n : view->nodes) if (n.id == 2) return &n;
+        return nullptr;
+    }();
+    QVERIFY(node);
+    QCOMPARE(node->kind, QStringLiteral("subteam"));
+    QCOMPARE(node->subteam, QStringLiteral("child-team"));
+    // The member card names its current task's number.
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberList"));
+    shot(&workspace, "hierarchy-team-view");
 }
 
 #include "test_teamsui.moc"

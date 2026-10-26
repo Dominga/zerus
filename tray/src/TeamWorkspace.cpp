@@ -113,6 +113,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     m_drawer->back = [this] { m_drawerTask = 0; m_drawer->hide(); };
     m_drawer->act = [this](const QString &operation, const QJsonObject &input) { m_panel->act(operation, input); };
     m_drawer->openTask = [this](int task) { m_drawerTask = task; scheduleRender(); };
+    m_drawer->openTeam = [this](const QString &team) { m_teams->watch(team); showTeam(team); };
     m_drawer->openSession = [this](const QString &host, const QString &session) { if (openSession) openSession(host, session); };
     m_drawer->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return m_panel->confirm(name, title, text, action); };
     m_drawer->reassign = [this](int task, const QPoint &global) { if (const auto *team = m_teams->watched()) m_panel->reassignMenu(*team, task, global); };
@@ -259,7 +260,15 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
     bar->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceBar{border-bottom:1px solid %1;}").arg(c.border.name()));
     auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 0, 12, 0); h->setSpacing(10);
     auto *icon = new QLabel; icon->setPixmap(workspaceIcon("team", c.fg).pixmap(16, 16)); h->addWidget(icon);
-    auto *name = label(team.name, c.fg, 14, true, "teamWorkspaceName"); h->addWidget(name);
+    auto *name = label(team.name, c.fg, 14, true, "teamWorkspaceName"); if (!team.parent.known) h->addWidget(name);
+    // G1: where this sub-team sits: parent name / this name.
+    if (team.parent.known) {
+        const auto *parent = m_teams->team(team.parent.team);
+        auto *crumb = label(QStringLiteral("%1 / %2").arg(parent ? parent->name : team.parent.team, team.name),
+                            c.muted, 11, false, "teamWorkspaceBreadcrumb");
+        crumb->setToolTip(tr("Sub-team of task #%1 in %2").arg(team.parent.task).arg(parent ? parent->name : team.parent.team));
+        h->addWidget(crumb);
+    }
     h->addWidget(new Pill(statusLabel(status), toneColor(c, statusTone(status)), status, false));
     if (team.pendingPhase > 0) {
         const auto drafts = team.draftPhases();
@@ -829,6 +838,12 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         node.problem = problemTasks.contains(id);
         node.tone = toneColor(c, node.problem ? problemTone.value(id, Tone::Danger) : status.tone);
         node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
+        if (task->subteam.known && !task->subteam.team.isEmpty()) {
+            // G1: a delegated task is the group node for its sub-team.
+            node.subteam = task->subteam.team;
+            node.kind = QStringLiteral("subteam");
+            node.statusText = tr("Sub-team \u00b7 %1/%2").arg(task->subteam.done).arg(task->subteam.total);
+        }
         // A1: the hovered node's icon names the attempt phase; its tooltip
         // names the state, the time and the next step.
         const auto mark = phaseMark(team, *task);
@@ -851,7 +866,15 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         view->clicked = [this](int id, const QPoint &) { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
         view->linked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, true); };
         view->unlinked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, false); };
-    } else view->clicked = [this](int id, const QPoint &) { m_drawerTask = id; scheduleRender(); };
+    } else view->clicked = [this](int id, const QPoint &) {
+        const auto *team = m_teams->watched();
+        if (team) if (const auto *task = team->task(id); task && task->subteam.known && !task->subteam.team.isEmpty()) {
+            m_teams->watch(task->subteam.team);
+            showTeam(task->subteam.team);
+            return;
+        }
+        m_drawerTask = id; scheduleRender();
+    };
     auto *area = new GraphArea; area->setObjectName("teamWorkspaceCanvas");
     area->setFrameShape(QFrame::NoFrame);
     // Fit starts the graph afresh; otherwise it stays where it was scrolled.

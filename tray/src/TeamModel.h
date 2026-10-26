@@ -156,6 +156,19 @@ struct Attempt {
 
 struct Dep { int task = 0; bool soft = false; };
 
+// G1: the sub-team a task was delegated to (status children[] and
+// tasks[].subteam), and the parent task a team came from.
+struct Subteam {
+    QString team, name, status;
+    int done = 0, total = 0;
+    bool known = false;
+};
+struct ParentLink {
+    QString team, lead, member;
+    int task = 0;
+    bool known = false;
+};
+
 // A task parked by the lead or the owner (A5): pending, but never ready,
 // rebalanced or handed out until `release`.
 struct Hold {
@@ -182,6 +195,8 @@ struct Task {
     Check check;
     struct CheckResult { int exit = 0; QString tail; bool known = false; };
     CheckResult checkResult;
+    // G1: the sub-team delegated from this task.
+    Subteam subteam;
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
@@ -244,6 +259,9 @@ struct Team {
     QList<Member> members;     // removed members are left out
     QList<Task> tasks;
     QList<Phase> phases;       // phase 1 has no record
+    // G1: this team's parent task and its sub-teams, as status sends them.
+    ParentLink parent;
+    QList<Subteam> children;
     bool hasFinish = false;
     Finish finish;
     // `team status` and `team list` derive these; old files are derived here.

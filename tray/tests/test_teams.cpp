@@ -145,6 +145,7 @@ private slots:
     void permissionRequestFromTheMemberAndItsAnswer();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void modelReadsStructuredReportsAndFindings();
+    void modelReadsTheHierarchy();
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
     void oldStatusJsonStillParses();
@@ -1354,6 +1355,27 @@ void TestTeams::modelReadsStructuredReportsAndFindings()
     QCOMPARE(team.findings[0].line, 4);
     QCOMPARE(team.findingsNext, QStringLiteral("cursor-2"));
     QCOMPARE(team.findingsSummary.value("deferred").toInt(), 3);
+}
+
+void TestTeams::modelReadsTheHierarchy()
+{
+    const auto value = QJsonDocument::fromJson(R"({
+ "id":"child","name":"Child","status":"running","lead":"lead",
+ "parent":{"team":"parent","task":3,"lead":"lead","member":"backend"},
+ "children":[{"team":"grand","name":"Grand","status":"running","done":1,"total":2}],
+ "members":[{"id":"lead","role":"Lead","agent":"claude"}],
+ "tasks":[{"id":1,"title":"Delegated","assignee":"lead","status":"in_progress",
+   "subteam":{"team":"grand","status":"running","done":1,"total":2}}]})").object();
+    const auto team = parse(value);
+    QVERIFY(team.parent.known);
+    QCOMPARE(team.parent.team, QStringLiteral("parent"));
+    QCOMPARE(team.parent.task, 3);
+    QCOMPARE(team.children.size(), 1);
+    QCOMPARE(team.children[0].team, QStringLiteral("grand"));
+    QCOMPARE(team.children[0].done, 1);
+    QVERIFY(team.tasks[0].subteam.known);
+    QCOMPARE(team.tasks[0].subteam.team, QStringLiteral("grand"));
+    QCOMPARE(team.tasks[0].subteam.total, 2);
 }
 
 QTEST_MAIN(TestTeams)

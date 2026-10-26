@@ -161,6 +161,26 @@ Team parse(const QJsonObject &v)
     Team team;
     team.id = str(v, "id"); team.name = str(v, "name"); team.status = str(v, "status");
     team.project = str(v, "project"); team.folder = str(v, "folder"); team.lead = str(v, "lead");
+    // G1: the parent task this team came from and its sub-teams.
+    if (v.value("parent").isObject()) {
+        const auto parent = v.value("parent").toObject();
+        team.parent.known = true;
+        team.parent.team = str(parent, "team");
+        team.parent.task = parent.value("task").toInt();
+        team.parent.lead = str(parent, "lead");
+        team.parent.member = str(parent, "member");
+    }
+    for (const auto &child : v.value("children").toArray()) {
+        const auto c = child.toObject();
+        Subteam subteam;
+        subteam.known = true;
+        subteam.team = str(c, "team");
+        subteam.name = str(c, "name");
+        subteam.status = str(c, "status");
+        subteam.done = c.value("done").toInt();
+        subteam.total = c.value("total").toInt();
+        team.children.append(subteam);
+    }
     for (const auto &folder : v.value("settings").toObject().value("evidence_folders").toArray())
         team.evidenceFolders.append(folder.toString());
     team.revision = v.value("revision").toInteger(); team.created = v.value("created").toDouble(); team.updated = v.value("updated").toDouble();
@@ -275,6 +295,15 @@ Team parse(const QJsonObject &v)
             const auto h = t.value("hold").toObject();
             task.held = true;
             task.hold.by = str(h, "by"); task.hold.reason = str(h, "reason"); task.hold.at = h.value("at").toDouble();
+        }
+        // G1: the sub-team this task delegated to, with its rolled-up counts.
+        if (t.value("subteam").isObject()) {
+            const auto s = t.value("subteam").toObject();
+            task.subteam.known = true;
+            task.subteam.team = str(s, "team");
+            task.subteam.status = str(s, "status");
+            task.subteam.done = s.value("done").toInt();
+            task.subteam.total = s.value("total").toInt();
         }
         // C3: why an open task waits, and the command that unblocks it.
         if (t.value("waits").isObject()) {

@@ -440,7 +440,7 @@ private:
 class TaskView : public QWidget {
 public:
     enum Mode { List, Graph, Wide };
-    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
+    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip, subteam; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.

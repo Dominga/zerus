@@ -7,6 +7,9 @@
 #include <QFileInfo>
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QJsonObject>
 #include <QLineEdit>
 #include <QPixmap>
 #include <QTextBrowser>
@@ -111,6 +114,38 @@ void TeamTaskCard::rebuild()
     meta->addWidget(new Pill(role, roleColor(role, m_dark)));
     meta->addStretch();
     v->addLayout(meta);
+    // G1: the sub-team delegated from this task, or the action that makes one.
+    if (task->subteam.known && !task->subteam.team.isEmpty()) {
+        auto *box = new QWidget; box->setObjectName("teamTaskSubteam");
+        auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 4, 0, 2); h->setSpacing(8);
+        const QString statusText = tr("Sub-team \u00b7 %1 \u00b7 %2/%3")
+                                       .arg(task->subteam.status.isEmpty() ? tr("open") : task->subteam.status)
+                                       .arg(task->subteam.done).arg(task->subteam.total);
+        h->addWidget(new Pill(statusText, c.accent));
+        auto *open = new QPushButton(tr("Open sub-team"));
+        open->setObjectName("teamTaskOpenSubteam"); open->setFlat(true); open->setCursor(Qt::PointingHandCursor);
+        QObject::connect(open, &QPushButton::clicked, this, [this, id = task->subteam.team] { if (openTeam) openTeam(id); });
+        h->addWidget(open);
+        h->addStretch();
+        v->addWidget(box);
+    } else if (m_team.status == "running" || m_team.status == "paused") {
+        auto *box = new QWidget; box->setObjectName("teamTaskDelegateBox");
+        auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 4, 0, 2); h->setSpacing(8);
+        auto *delegate = new QPushButton(tr("Delegate to a sub-team\u2026"));
+        delegate->setObjectName("teamTaskDelegate"); delegate->setFlat(true); delegate->setCursor(Qt::PointingHandCursor);
+        QObject::connect(delegate, &QPushButton::clicked, this, [this, id = task->id] {
+            if (!confirm || !confirm("teamDelegateConfirm", tr("Delegate to a sub-team"),
+                                     tr("Create a sub-team from task #%1? Its lead will be the assignee.").arg(id), tr("Delegate")))
+                return;
+            bool ok = false;
+            const auto name = QInputDialog::getText(this, tr("Delegate to a sub-team"), tr("Sub-team name"), QLineEdit::Normal, {}, &ok);
+            if (!ok || name.trimmed().isEmpty() || !act) return;
+            act("create", QJsonObject{{"name", name.trimmed()}, {"parent", QJsonObject{{"team", m_team.id}, {"task", id}}}});
+        });
+        h->addWidget(delegate);
+        h->addStretch();
+        v->addWidget(box);
+    }
     // The problem and what can be done.
     if (problem && assignee) {
         auto *banner = card(c, problem && tone == c.warn ? c.warn : c.danger);

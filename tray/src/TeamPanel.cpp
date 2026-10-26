@@ -62,6 +62,7 @@ TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(pare
     m_card->back = [this] { m_openTask = 0; render(); };
     m_card->act = [this](const QString &operation, const QJsonObject &input) { act(operation, input); };
     m_card->openTask = [this](int task) { openTask(task); };
+    m_card->openTeam = [this](const QString &team) { m_controller->watch(team); };
     m_card->openSession = [this](const QString &host, const QString &session) { if (openSession) openSession(host, session); };
     m_card->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return confirm(name, title, text, action); };
     m_card->reassign = [this](int task, const QPoint &global) {

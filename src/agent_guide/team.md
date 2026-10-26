@@ -38,4 +38,4 @@ Member: the task message names your task and attempt. Do it, then report once:
   Your task again: {"attempt":"ATTEMPT"} | hgs team current --json
   A progress line is not a report.
 Say what changed and how you checked it. A report for a task taken from you
-is refused.
+is refused. Sub-teams: hgs guide team-tree.

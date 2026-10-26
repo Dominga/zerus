@@ -659,8 +659,23 @@ pub(crate) fn denies(label: &str) -> bool {
 
 fn answer(input: &Value) -> anyhow::Result<Value> {
     let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
-    let by = actor(&team, "answer", input)?;
-    ensure!(matches!(&by, Actor::Human) || matches!(&by, Actor::Member(id) if *id == team.lead), "Only the lead answers a member's question");
+    // Section 9.6: a sub-team's permission request may be answered one level
+    // up by the parent lead, who is proven in the parent team.
+    let parent = team.parent.clone().and_then(|link| Store::open(false).ok()?.load(&link.team).ok().flatten());
+    let parent_authority = parent.as_ref().is_some_and(|parent| {
+        caller_record()
+            .as_ref()
+            .is_some_and(|record| calling_member(parent, record).as_deref() == Some(parent.lead.as_str()))
+    });
+    let by = if parent_authority {
+        Actor::Member(parent.as_ref().map(|parent| parent.lead.clone()).unwrap_or_default())
+    } else {
+        actor(&team, "answer", input)?
+    };
+    ensure!(
+        matches!(&by, Actor::Human) || matches!(&by, Actor::Member(id) if *id == team.lead) || parent_authority,
+        "Only the lead or the parent lead answers a member's question"
+    );
     let member_id = text(input, "member").to_owned();
     let member = team.member(&member_id).context("Unknown member")?;
     let session = member.session.clone().context("The member has no session")?;
@@ -1244,42 +1259,18 @@ fn ensure_children_closed(store: &Store, team: &Team) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 9.6: a sub-lead passes one of its open questions to the parent lead as a
-/// question on the parent task; the parent's reply is copied back down.
-fn escalate(input: &Value) -> anyhow::Result<Value> {
-    let request = text(input, "request_id");
-    ensure!(canonical_uuid(request), "A canonical request_id is required");
-    let mut store = Store::open(true)?;
-    let team = store.load(text(input, "team"))?.context("Unknown team")?;
-    let link = team.parent.clone().context("Only a sub-team escalates a question")?;
-    let by = actor(&team, "escalate", input)?;
-    ensure!(matches!(by, Actor::Human) || by.is_lead(&team), "Only the sub-team lead or you escalate a question");
-    let question_id = text(input, "question");
-    ensure!(!question_id.is_empty(), "A question id is required");
-    let question = team
-        .tasks
-        .iter()
-        .flat_map(|task| &task.attempts)
-        .flat_map(|attempt| &attempt.questions)
-        .find(|question| question.id == question_id && question.open())
-        .cloned()
-        .context("No open question with that id in this sub-team")?;
-    let parent_question = ops::forward_question(&team, &question);
-    let child_name = team.name.clone();
+/// 9.6: puts a forwarded question on the parent task (creating an attempt when
+/// the parent task has none).
+fn forward_to_parent(
+    store: &mut Store,
+    team: &Team,
+    parent_question: &str,
+    child_question: &str,
+    text: &str,
+    link: &Parent,
+) -> anyhow::Result<()> {
     let child_id = team.id.clone();
-    store.mutate(None, &child_id, None, |team, events| {
-        for task in &mut team.tasks {
-            for attempt in &mut task.attempts {
-                for question in &mut attempt.questions {
-                    if question.id == question_id {
-                        question.forwarded = parent_question.clone();
-                    }
-                }
-            }
-        }
-        events.push(Event::new("escalated", json!({"question":question_id,"to":parent_question,"parent":link.team})));
-        Ok(Value::Null)
-    })?;
+    let child_name = team.name.clone();
     store.mutate(None, &link.team, None, |parent, events| {
         let task = parent.task_mut(link.task).context("The parent task is gone")?;
         ensure!(!task.status.finished(), "The parent task is already decided");
@@ -1298,15 +1289,91 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         }
         let attempt = task.attempts.iter_mut().rev().find(|attempt| attempt.state.open()).context("The parent task has no open attempt")?;
         attempt.questions.push(Question {
-            id: parent_question.clone(),
-            text: format!("From the sub-team {child_name} (question {question_id}):\n{}", question.text),
+            id: parent_question.to_owned(),
+            text: format!("From the sub-team {child_name}:\n{text}"),
             at: now(),
-            forwarded: question_id.to_owned(),
+            forwarded: child_question.to_owned(),
             ..Default::default()
         });
         events.push(Event::new("subteam_question", json!({"team":child_id,"question":parent_question,"task":link.task})));
         Ok(Value::Null)
     })?;
+    Ok(())
+}
+
+/// 9.6: a sub-lead passes one of its open questions to the parent lead as a
+/// question on the parent task; the parent's reply is copied back down.
+/// 9.6: the parent question that carries a sub-team permission request with
+/// the same command, source and reason as the lead's card.
+fn permission_question(child: &Team, member: &str, pending: &PendingQuestion) -> Question {
+    let tool = pending.card["questions"][0]["header"].as_str().or_else(|| pending.card["tool"].as_str()).unwrap_or_default();
+    let command = super::dispatcher::permission_command_line(&pending.card);
+    let reason: String = pending.card["questions"][0]["body"].as_str().unwrap_or_default().chars().take(2000).collect();
+    Question {
+        id: pending.question_id.clone(),
+        text: format!(
+            "Permission request from {member}: {tool}\n{command}Reason: {reason}\nAnswer the native card on the sub-team:\n  {{\"team\":\"{}\",\"member\":\"{member}\",\"question_id\":\"{}\",\"expected_question_hash\":\"{}\",\"answers\":[...]}} | hgs team answer --json",
+            child.id, pending.question_id, pending.question_hash
+        ),
+        at: now(),
+        ..Default::default()
+    }
+}
+
+fn escalate(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id");
+    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    let mut store = Store::open(true)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let link = team.parent.clone().context("Only a sub-team escalates a question")?;
+    let by = actor(&team, "escalate", input)?;
+    ensure!(matches!(by, Actor::Human) || by.is_lead(&team), "Only the sub-team lead or you escalate a question");
+    let question_id = text(input, "question");
+    ensure!(!question_id.is_empty(), "A question id is required");
+    let found = team
+        .tasks
+        .iter()
+        .flat_map(|task| &task.attempts)
+        .flat_map(|attempt| &attempt.questions)
+        .find(|question| question.id == question_id && question.open())
+        .cloned();
+    // Section 9.6: a permission request travels the same way; the parent lead
+    // answers the native card on the sub-team, by its exact ids.
+    let question = match found {
+        Some(question) => question,
+        None => {
+            let (member, pending) = team
+                .members
+                .iter()
+                .find_map(|member| {
+                    member
+                        .pending
+                        .as_ref()
+                        .filter(|pending| pending.question_id == input["question"].as_str().unwrap_or_default())
+                        .map(|pending| (member.id.clone(), pending.clone()))
+                })
+                .context("No open question or permission request with that id in this sub-team")?;
+            permission_question(&team, &member, &pending)
+        }
+    };
+    let parent_question = ops::forward_question(&team, &question);
+    let child_name = team.name.clone();
+    let child_id = team.id.clone();
+    store.mutate(None, &child_id, None, |team, events| {
+        for task in &mut team.tasks {
+            for attempt in &mut task.attempts {
+                for question in &mut attempt.questions {
+                    if question.id == question_id {
+                        question.forwarded = parent_question.clone();
+                    }
+                }
+            }
+        }
+        events.push(Event::new("escalated", json!({"question":question_id,"to":parent_question,"parent":link.team})));
+        Ok(Value::Null)
+    })?;
+    let _ = child_name;
+    forward_to_parent(&mut store, &team, &parent_question, question_id, &question.text, &link)?;
     Ok(json!({"status":"escalated","team":child_id,"question":parent_question,"parent":link.team}))
 }
 
@@ -1327,14 +1394,14 @@ fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow
     if question.forwarded.is_empty() {
         return Ok(());
     }
-    let forwarded = question.forwarded.clone();
     let answer = text(input, "text").trim().to_owned();
     if answer.is_empty() || store.load(&child)?.is_none() {
         return Ok(());
     }
+    let parent_question = question_id.to_owned();
     store.mutate(None, &child, None, |child, events| {
-        if ops::answer_forwarded(child, &forwarded, &answer) {
-            events.push(Event::new("answered_from_parent", json!({"question":forwarded})));
+        if ops::answer_forwarded(child, &parent_question, &answer) {
+            events.push(Event::new("answered_from_parent", json!({"question":parent_question})));
         }
         Ok(Value::Null)
     })
@@ -1597,6 +1664,78 @@ mod tests {
             ])
         );
         assert_eq!(shared, BTreeSet::from(["a".to_owned(), "b".to_owned()]));
+    }
+
+    #[test]
+    fn the_tree_changes_work_through_the_command_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let request = |n: u8| format!("00000000-0000-4000-8000-00000000000{n}");
+        let mut parent = Team { id: "p".into(), name: "Parent".into(), lead: "lead".into(), status: TeamStatus::Running, children: vec!["c".into(), "c2".into()], ..Default::default() };
+        parent.tasks.push(Task { id: 1, title: "Delegated".into(), assignee: "dev".into(), subteam: Some("c".into()), ..Default::default() });
+        parent.tasks.push(Task { id: 2, title: "Other".into(), assignee: "dev".into(), ..Default::default() });
+        let mut child = Team { id: "c".into(), name: "Child".into(), lead: "dev".into(), status: TeamStatus::Done, parent: Some(Parent { team: "p".into(), task: 1, lead: "lead".into(), member: "dev".into() }), ..Default::default() };
+        child.finish = Some(Finish { by: "Lead".into(), summary: "Sub done".into(), at: 1.0 });
+        let mut sibling = Team { id: "c2".into(), name: "Sibling".into(), lead: "dev".into(), status: TeamStatus::Running, children: vec!["g".into()], parent: Some(Parent { team: "p".into(), task: 2, lead: "lead".into(), member: "dev".into() }), ..Default::default() };
+        sibling.tasks.push(Task { id: 1, title: "Work".into(), assignee: "dev".into(), ..Default::default() });
+        let grand = Team { id: "g".into(), name: "Grand".into(), lead: "dev".into(), status: TeamStatus::Running, parent: Some(Parent { team: "c2".into(), task: 1, lead: "dev".into(), member: "dev".into() }), ..Default::default() };
+        for (i, team) in [parent.clone(), child.clone(), sibling.clone(), grand.clone()].into_iter().enumerate() {
+            store.create(&request(i as u8 + 1), &json!({}), team, Vec::new()).unwrap();
+        }
+        // 9.5: finish files the report, reject reopens with Rework.
+        file_subteam_report(&mut store, "c").unwrap();
+        let parent = store.load("p").unwrap().unwrap();
+        let task = parent.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::Submitted);
+        assert!(task.attempts.last().unwrap().report.as_ref().unwrap().text.contains("Sub-team c Child"));
+        reopen_rejected_subteam(&mut store, "p", &json!({"task":1,"reason":"Fix the migration"})).unwrap();
+        let child = store.load("c").unwrap().unwrap();
+        assert_eq!(child.status, TeamStatus::Running);
+        assert!(child.phases.iter().any(|phase| phase.title == "Rework" && phase.reason == "Fix the migration"));
+        // 9.6: escalate forwards and the parent reply returns to the child.
+        let mut child = child;
+        child.tasks.push(Task { id: 1, title: "Child work".into(), assignee: "dev".into(), ..Default::default() });
+        child.tasks[0].attempts.push(Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Delivered, questions: vec![Question { id: "q1".into(), text: "Which DB?".into(), at: 1.0, ..Default::default() }], ..Default::default() });
+        store.mutate(None, "c", None, |team, _| { *team = child.clone(); Ok(Value::Null) }).unwrap();
+        let link = child.parent.clone().unwrap();
+        let forwarded = ops::forward_question(&child, &child.tasks[0].attempts[0].questions[0]);
+        store.mutate(None, "c", None, |team, _| { team.tasks[0].attempts[0].questions[0].forwarded = forwarded.clone(); Ok(Value::Null) }).unwrap();
+        forward_to_parent(&mut store, &child, &forwarded, "q1", "Which DB?", &link).unwrap();
+        let parent = store.load("p").unwrap().unwrap();
+        assert!(parent.task(1).unwrap().attempts.iter().flat_map(|a| &a.questions).any(|q| q.id == forwarded));
+        route_reply_down(&mut store, "p", &json!({"task":1,"question":forwarded,"text":"Postgres"})).unwrap();
+        let child = store.load("c").unwrap().unwrap();
+        assert_eq!(child.tasks[0].attempts[0].questions[0].answer, "Postgres");
+        // 9.7: archive needs closed children, cancel asks, stop cascades two levels.
+        let parent = store.load("p").unwrap().unwrap();
+        assert!(ensure_children_closed(&store, &parent).is_err());
+        let cancel = json!({"task":1});
+        assert!(choose_subteam(&mut store, &parent, &cancel).is_err());
+        let stop = json!({"task":1,"subteam":"stop"});
+        choose_subteam(&mut store, &parent, &stop).unwrap();
+        assert_eq!(store.load("c").unwrap().unwrap().status, TeamStatus::Stopped);
+        cascade_status(&mut store, "p", "stop", 0).unwrap();
+        for id in ["c", "c2", "g"] {
+            assert_eq!(store.load(id).unwrap().unwrap().status, TeamStatus::Stopped, "{id}");
+        }
+        let parent = store.load("p").unwrap().unwrap();
+        ensure_children_closed(&store, &parent).unwrap();
+    }
+
+    #[test]
+    fn a_permission_escalation_carries_command_source_reason_and_ids() {
+        let child = Team { id: "child".into(), name: "Child".into(), lead: "dev".into(), ..Default::default() };
+        let pending = PendingQuestion {
+            question_id: "claude-approval:x".into(),
+            question_hash: "h".into(),
+            approval: true,
+            at: 1.0,
+            card: json!({"tool_input":{"command":"cargo test --locked"},"questions":[{"id":"approval","header":"Bash","body":"Run the tests","options":[]}]}),
+        };
+        let question = permission_question(&child, "dev", &pending);
+        for part in ["Permission request from dev", "Bash", "cargo test --locked", "from the tool input", "Reason: Run the tests", "claude-approval:x", "\"h\"", "hgs team answer --json", "\"team\":\"child\""] {
+            assert!(question.text.contains(part), "{part} missing in {}", question.text);
+        }
     }
 
     #[test]

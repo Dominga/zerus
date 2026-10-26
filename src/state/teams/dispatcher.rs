@@ -2762,6 +2762,10 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         if let Err(error) = take_dropped_reports(store, team, &sessions) {
             eprintln!("hgs team worker: {}: dropped report: {error}", team.name);
         }
+        // U20: requests a sandboxed member queued in its folder.
+        if let Err(error) = take_outbox(store, team) {
+            eprintln!("hgs team worker: {}: outbox: {error}", team.name);
+        }
     }
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
     for team in &teams {
@@ -2772,6 +2776,128 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// U20: where a sandboxed member queues a request for the team worker.
+pub(crate) fn outbox_dir(folder: &Path) -> PathBuf {
+    folder.join(".zerus-team").join("outbox")
+}
+
+fn outbox_result(dir: &Path, request_id: &str) -> PathBuf {
+    dir.join(format!("{request_id}.result.json"))
+}
+
+/// Where the CLI polls for a queued request's outcome.
+pub(crate) fn outbox_result_file(folder: &Path, request_id: &str) -> PathBuf {
+    outbox_result(&outbox_dir(folder), request_id)
+}
+
+fn outbox_text(value: &Value, key: &str) -> String {
+    value[key].as_str().unwrap_or_default().to_owned()
+}
+
+/// Writes one request with its operation into the member's outbox. The
+/// sandboxed CLI cannot write the team's files, but it owns its folder.
+pub(crate) fn queue_outbox(folder: &Path, op: &str, input: &Value) -> anyhow::Result<PathBuf> {
+    let request_id = outbox_text(input, "request_id");
+    anyhow::ensure!(!request_id.is_empty(), "A queued request needs its request_id");
+    let dir = outbox_dir(folder);
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let mut value = input.clone();
+    value["op"] = Value::String(op.to_owned());
+    let path = dir.join(format!("{request_id}.json"));
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
+    fs::rename(&temporary, &path)?;
+    Ok(path)
+}
+
+/// Applies the requests each local member queued, oldest first, at most 20 per
+/// member per tick. The member's folder and the attempt must both name it;
+/// every outcome (applied or refused) leaves a result file and removes the
+/// request.
+fn take_outbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    if team.status != TeamStatus::Running && team.status != TeamStatus::Paused {
+        return Ok(());
+    }
+    for member in &team.members {
+        if !member.computer.is_empty() || member.directory.is_empty() {
+            continue;
+        }
+        apply_outbox(store, team, &member.id)?;
+    }
+    Ok(())
+}
+
+fn apply_outbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Result<usize> {
+    let member_folder = team.member(member).map(|m| m.directory.clone()).unwrap_or_default();
+    if member_folder.is_empty() {
+        return Ok(0);
+    }
+    let dir = outbox_dir(Path::new(&member_folder));
+    let Ok(entries) = fs::read_dir(&dir) else { return Ok(0) };
+    let mut requests: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    requests.sort_by_key(|(modified, _)| *modified);
+    let mut applied = 0;
+    for (_, path) in requests.into_iter().take(20) {
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let input: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let request_id = outbox_text(&input, "request_id");
+        if request_id.is_empty() {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        let result = outbox_result(&dir, &request_id);
+        // A result already there means this request ran: replay is a no-op.
+        if result.exists() {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        let outcome = apply_outbox_request(store, team, member, &input);
+        let value = match outcome {
+            Ok(receipt) => json!({"request_id": request_id, "ok": true, "receipt": receipt}),
+            Err(error) => json!({"request_id": request_id, "ok": false, "error": error.to_string()}),
+        };
+        let temporary = result.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
+        fs::rename(&temporary, &result)?;
+        let _ = fs::remove_file(&path);
+        applied += 1;
+    }
+    Ok(applied)
+}
+
+fn apply_outbox_request(store: &mut Store, team: &Team, member: &str, input: &Value) -> anyhow::Result<Value> {
+    let request_id = outbox_text(input, "request_id");
+    let attempt = outbox_text(input, "attempt");
+    anyhow::ensure!(!request_id.is_empty() && !attempt.is_empty(), "A queued request names its request_id and attempt");
+    let op = outbox_text(input, "op");
+    anyhow::ensure!(
+        matches!(op.as_str(), "report" | "ask" | "commit" | "run"),
+        "A queued request can report, ask, commit or run"
+    );
+    anyhow::ensure!(outbox_text(input, "team") == team.id, "A queued request for another team");
+    let found = team
+        .tasks
+        .iter()
+        .flat_map(|task| task.attempts.iter())
+        .find(|candidate| candidate.id == attempt)
+        .with_context(|| format!("No attempt {attempt} in this team"))?;
+    anyhow::ensure!(found.member == member, "Attempt {attempt} belongs to another member");
+    let mut request = input.clone();
+    if let Some(object) = request.as_object_mut() {
+        object.remove("op");
+    }
+    let mut receipt = Value::Null;
+    store.mutate(Some((&request_id, &request)), &team.id, None, |team, events| {
+        receipt = ops::apply(team, &op, input, &ops::Actor::Member(member.to_owned()), &BTreeSet::new(), events)?;
+        Ok(receipt.clone())
+    })?;
+    Ok(receipt)
 }
 
 /// Where `hgs team report` leaves a report it could not record (a member in a
@@ -3720,6 +3846,48 @@ mod tests {
             {"type":"Tool","detail":"run"}]});
         assert_eq!(reply_text(&record), "The answer.");
         assert_eq!(reply_text(&json!({})), "");
+    }
+
+    #[test]
+    fn a_queued_report_is_applied_once_and_another_members_attempt_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let folder = dir.path().join("dev-folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        t.members.iter_mut().find(|m| m.id == "dev").unwrap().directory = folder.to_string_lossy().into_owned();
+        {
+            let task = t.task_mut(1).unwrap();
+            task.status = TaskStatus::InProgress;
+            task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+            let qa = t.task_mut(3).unwrap();
+            qa.attempts.push(Attempt { n: 1, id: "Q1".into(), member: "qa".into(), state: AttemptState::Delivered, ..Default::default() });
+        }
+        store.create("33333333-3333-4333-8333-333333333333", &json!({}), t.clone(), vec![]).unwrap();
+        // The member's own report is queued in its folder and applied.
+        queue_outbox(&folder, "report", &json!({"request_id":"44444444-4444-4444-8444-444444444444",
+            "team":t.id,"task":1,"attempt":"A1","text":"Done and checked"})).unwrap();
+        assert_eq!(apply_outbox(&mut store, &t, "dev").unwrap(), 1);
+        let applied: Value = serde_json::from_slice(&std::fs::read(outbox_dir(&folder).join("44444444-4444-4444-8444-444444444444.result.json")).unwrap()).unwrap();
+        assert_eq!(applied["ok"], true, "{applied}");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().status, TaskStatus::Submitted);
+        assert_eq!(saved.task(1).unwrap().attempts[0].report.as_ref().unwrap().text, "Done and checked");
+        // A queued attempt of another member is refused, with the reason kept.
+        queue_outbox(&folder, "report", &json!({"request_id":"55555555-5555-4555-8555-555555555555",
+            "team":t.id,"task":3,"attempt":"Q1","text":"Not mine"})).unwrap();
+        assert_eq!(apply_outbox(&mut store, &t, "dev").unwrap(), 1);
+        let result: Value = serde_json::from_slice(&std::fs::read(outbox_dir(&folder).join("55555555-5555-4555-8555-555555555555.result.json")).unwrap()).unwrap();
+        assert_eq!(result["ok"], false);
+        assert!(result["error"].as_str().unwrap().contains("another member"), "{result}");
+        // Replaying the recorded request does not apply it twice.
+        queue_outbox(&folder, "report", &json!({"request_id":"44444444-4444-4444-8444-444444444444",
+            "team":t.id,"task":1,"attempt":"A1","text":"Done again"})).unwrap();
+        apply_outbox(&mut store, &t, "dev").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().attempts[0].report.as_ref().unwrap().text, "Done and checked");
+        assert_eq!(saved.task(1).unwrap().attempts.len(), 1);
     }
 
     #[test]

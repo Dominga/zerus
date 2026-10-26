@@ -1149,14 +1149,34 @@ fn read_only(error: &anyhow::Error) -> bool {
         .any(|sign| text.contains(sign))
 }
 
-fn drop_report(input: &Value) -> anyhow::Result<Value> {
-    ensure!(!text(input, "attempt").is_empty() && !text(input, "team").is_empty(), "A report names its team and attempt");
-    ensure!(!text(input, "text").trim().is_empty(), "A report needs text");
-    let path = super::dispatcher::dropped_report(&std::env::current_dir()?, text(input, "attempt"));
-    std::fs::create_dir_all(path.parent().context("no report folder")?)?;
-    std::fs::write(&path, serde_json::to_vec(input)?)?;
-    Ok(json!({"status":"queued","request_id":input["request_id"],"task":input["task"],
-        "note":"The team's files are read-only here; Zerus records this report from your folder."}))
+/// U20: a sandboxed member cannot write the team's database. Its request goes
+/// to the outbox in its folder, where the team worker (outside the sandbox)
+/// applies it. `--wait` polls the worker's result for up to 30 seconds.
+fn queue_for_worker(store: &mut Store, team_id: &str, op: &str, input: &Value) -> anyhow::Result<Value> {
+    let team = store.load(team_id)?.context("Unknown team")?;
+    let attempt = text(input, "attempt");
+    let member = attempt_member(&team, attempt).context("Only a team member's request can be queued")?;
+    let record = team.member(&member).context("The attempt's member is not in this team")?;
+    let folder = if !record.directory.is_empty() {
+        std::path::PathBuf::from(&record.directory)
+    } else if !team.folder.is_empty() {
+        std::path::PathBuf::from(&team.folder)
+    } else {
+        std::env::current_dir()?
+    };
+    let path = super::dispatcher::queue_outbox(&folder, op, input)?;
+    let request_id = text(input, "request_id");
+    if input["wait"].as_bool() == Some(true) && op == "report" {
+        let result = super::dispatcher::outbox_result_file(&folder, request_id);
+        for _ in 0..60 {
+            if let Ok(bytes) = std::fs::read(&result) {
+                return Ok(serde_json::from_slice(&bytes)?);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+    Ok(json!({"status":"queued","request_id":request_id,"task":input["task"],
+        "note":"queued for the team worker","file":path.display().to_string()}))
 }
 
 /// The teams a finished team's `left_running` looks at: only the ones that
@@ -1491,7 +1511,12 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             // refusal can come with the write as well as with the open.
             let mut store = match Store::open(true) {
                 Ok(store) => store,
-                Err(_) if op == "report" => return drop_report(input),
+                Err(_) if matches!(op, "report" | "ask" | "commit" | "run") => {
+                    let folder = std::env::current_dir()?;
+                    let path = super::dispatcher::queue_outbox(&folder, op, input)?;
+                    return Ok(json!({"status":"queued","request_id":input["request_id"],
+                        "note":"queued for the team worker","file":path.display().to_string()}));
+                }
                 Err(error) => return Err(error),
             };
             let mut filled = input.clone();
@@ -1568,7 +1593,9 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
             }) {
                 Ok(receipt) => receipt,
-                Err(error) if op == "report" && read_only(&error) => return drop_report(input),
+                Err(error) if read_only(&error) && matches!(op, "report" | "ask" | "commit" | "run") => {
+                    return queue_for_worker(&mut store, team_id, op, &filled)
+                }
                 Err(error) => return Err(error),
             };
             if starts_worker(op) {
@@ -1612,6 +1639,8 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     // H2: `--json` reads stdin; `--json-file PATH` reads the same request from
     // a file (PowerShell 5.1 turns Cyrillic in a pipe into "?").
     let mut args = args.to_vec();
+    let wait = args.iter().any(|arg| arg == "--wait");
+    args.retain(|arg| arg != "--wait");
     let file = if let Some(index) = args.iter().position(|arg| arg == "--json-file") {
         let path = args
             .get(index + 1)
@@ -1640,9 +1669,12 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 256 * 1024 {
         return Err("Team request exceeds 256 KiB".into());
     }
-    let input: Value = super::super::json_request(&bytes)?;
+    let mut input: Value = super::super::json_request(&bytes)?;
     if !input.is_object() {
         return Err("A JSON object is required".into());
+    }
+    if wait {
+        input["wait"] = Value::Bool(true);
     }
     let result = if catalog {
         // The designer proposes from its session; only you decide and apply.

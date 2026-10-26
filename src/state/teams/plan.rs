@@ -279,6 +279,38 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             format!("{count} members — over the team limit of {}", team.settings.max_members),
         ));
     }
+    // B3/B6 preflight: a member's folder against the folder policy and the
+    // project's ban; a sandboxed agent cannot commit from a worktree.
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+        let own = member.folder != super::model::MemberFolder::Shared;
+        if !own {
+            continue;
+        }
+        if team.settings.worktrees_forbidden {
+            found.errors.push(finding(
+                "folder",
+                None,
+                Some(&member.id),
+                format!("{}: the project forbids worktrees and clones", member.id),
+            ));
+        }
+        if team.settings.folder_policy == super::model::FolderPolicy::Shared {
+            found.errors.push(finding(
+                "folder",
+                None,
+                Some(&member.id),
+                format!("{}: the shared folder policy leaves no own folder", member.id),
+            ));
+        }
+        if member.folder == super::model::MemberFolder::Worktree && member.agent == "dsh" {
+            found.warnings.push(finding(
+                "folder",
+                None,
+                Some(&member.id),
+                format!("{}: a sandboxed dsh agent in a worktree cannot write its git metadata; use a clone", member.id),
+            ));
+        }
+    }
     found
 }
 

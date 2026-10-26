@@ -314,7 +314,10 @@ class MainActivity : ComponentActivity() {
                     LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
             }
             if (selected == null) CatalogRefreshStatus(model)
-            if (selected != null) SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
+            // Give the request disclosure room above the IME. The title still opens details;
+            // the secondary tools return when editing ends, while refresh stays visible.
+            if (selected != null && WindowInsets.ime.getBottom(LocalDensity.current) == 0)
+                SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
             if (selected != null) ConversationRefreshStatus(model, conversationLoad)
             if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -759,17 +762,36 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
 @Composable private fun ConversationRefreshStatus(model: ZerusViewModel, status: ConversationLoadPresentation.Status?) {
     val banner = ConversationLoadPresentation.banner(status, model.conversationEvents.isNotEmpty(),
         model.activityVerified, model.historyComplete && model.readPositionReady, model.demo) ?: return
-    // Keep the status outside the scrollable history and reserve both text lines
-    // and the indicator slot: changing read phases must not move the messages.
+    if (BuildConfig.READ_TIMING_ENABLED) {
+        val stage = when {
+            banner.text == "Latest activity checked" -> RelayReadTiming.Stage.VisibleChecked
+            banner.spinner -> RelayReadTiming.Stage.VisibleChecking
+            else -> null
+        }
+        LaunchedEffect(model.selected?.target, stage, banner.detail) {
+            if (stage != null) withFrameNanos {
+                RelayReadTiming.point(stage)
+                if (stage == RelayReadTiming.Stage.VisibleChecked && banner.detail == "Message history loaded.")
+                    RelayReadTiming.point(RelayReadTiming.Stage.VisibleHistory)
+            }
+        }
+    }
+    val compact = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    // Keep a stable slot across read phases. With the keyboard open, preserve
+    // space for the request disclosure; its delivery detail remains accessible.
     Surface(color = Surface, modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp).heightIn(min = 40.dp),
+        Row(Modifier.padding(horizontal = 16.dp, vertical = if (compact) 3.dp else 6.dp)
+            .heightIn(min = if (compact) 24.dp else 40.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
                 if (banner.spinner) CircularProgressIndicator(Modifier.fillMaxSize(), color = Mint, strokeWidth = 2.dp)
             }
-            Column(Modifier.weight(1f).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }) {
+            Column(Modifier.weight(1f).semantics(mergeDescendants = true) {
+                liveRegion = LiveRegionMode.Polite
+                if (compact) stateDescription = banner.detail
+            }) {
                 Text(banner.text, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(banner.detail, style = MaterialTheme.typography.labelSmall, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!compact) Text(banner.detail, style = MaterialTheme.typography.labelSmall, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }

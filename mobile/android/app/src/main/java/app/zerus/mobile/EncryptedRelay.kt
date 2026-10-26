@@ -1,6 +1,8 @@
 package app.zerus.mobile
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
@@ -37,8 +39,10 @@ internal suspend fun RelayApi.enrollPrepared(connection:Connection) {
 }
 
 /** Receipt-only recovery, including after process death. Never issues an enrollment POST. */
-internal suspend fun RelayApi.synchronizeWorkspace(connection:Connection):WorkspaceState =
+internal suspend fun RelayApi.synchronizeWorkspace(connection:Connection):WorkspaceState = RelayReadTiming.measure(RelayReadTiming.Stage.MembershipSync) {
+    val waiting=RelayReadTiming.begin()
     WorkspaceFlights.locks.getOrPut(connection.id) { Mutex() }.withLock {
+        RelayReadTiming.finish(RelayReadTiming.Stage.MembershipLock,waiting)
         withContext(Dispatchers.IO) {
             val journal=journal();var state=journal.load(connection)
             if(state.enrollment==null) {
@@ -76,6 +80,7 @@ internal suspend fun RelayApi.synchronizeWorkspace(connection:Connection):Worksp
             state
         }
     }
+}
 
 private fun WorkspaceState.requireEnrollmentHistory(journal:WorkspaceJournal,connection:Connection) {
     val approval=requireNotNull(enrollment)
@@ -221,26 +226,33 @@ internal suspend fun RelayApi.encryptedPost(connection:Connection,body:JSONObjec
     // Retain every identity at the endpoint; read hints never authorize native replay.
     val header=WorkspaceHeader(membership.workspaceId,state.identity.device.deviceId,recipient.deviceId,state.identity.device.keyGeneration,
         recipient.keyGeneration,route.gatewayId,route.routeId,id,"request",WorkspaceProtocol.operationClass(body.string("operation")),nowSeconds()+300,membership.revision,membership.head)
-    val envelope=WorkspaceEnvelope.seal(state.identity,recipient,header,plaintext)
+    val envelope=RelayReadTiming.measure(RelayReadTiming.Stage.Seal) { WorkspaceEnvelope.seal(state.identity,recipient,header,plaintext) }
     val hash=WorkspaceProtocol.encode(MessageDigest.getInstance("SHA-256").digest(plaintext))
-    val retained=journal.reserve(connection,id,hash,envelope)
+    val retained=RelayReadTiming.measure(RelayReadTiming.Stage.Reserve) { journal.reserve(connection,id,hash,envelope) }
     val result=call(connection.url,connection.token,"/v2/requests",JSONObject().put("envelope",retained.json()))
     decodeEncryptedReceipt(connection,state,result,id,retained.header)
 }
 
 internal suspend fun RelayApi.encryptedReceipt(connection:Connection,id:String):JSONObject=withContext(Dispatchers.IO) {
     WorkspaceProtocol.identifier(id)
-    val state=synchronizeWorkspace(connection);state.requireActive()
-    val expected=journal().request(connection,id)
-    decodeEncryptedReceipt(connection,state,call(connection.url,connection.token,"/v2/requests/$id"),id,expected)
+    val journal=journal();val previous=journal.load(connection)
+    previous.requireActive();previous.requireEnrollmentHistory(journal,connection)
+    val expected=journal.request(connection,id)
+    coroutineScope {
+        // Fetch only retained ciphertext in parallel with a NEW membership check.
+        // No completion, decryption or settlement is admitted before that check.
+        val outer=async { call(connection.url,connection.token,"/v2/requests/$id") }
+        val state=synchronizeWorkspace(connection);state.requireActive()
+        decodeEncryptedReceipt(connection,state,outer.await(),id,expected)
+    }
 }
 
-private fun RelayApi.decodeEncryptedReceipt(connection:Connection,state:WorkspaceState,outer:JSONObject,id:String,request:WorkspaceHeader):JSONObject {
+private fun RelayApi.decodeEncryptedReceipt(connection:Connection,state:WorkspaceState,outer:JSONObject,id:String,request:WorkspaceHeader):JSONObject = RelayReadTiming.measure(RelayReadTiming.Stage.OpenResult) {
     require(outer.string("request_id")==id)
     if(outer.isNull("envelope")) {
         val status=outer.string("state")
         // Only a verified endpoint receipt can confirm completion or native failure.
-        return JSONObject().put("request_id",id).put("state",if(status in setOf("queued","claimed")) status else "uncertain")
+        return@measure JSONObject().put("request_id",id).put("state",if(status in setOf("queued","claimed")) status else "uncertain")
     }
     val envelope=WorkspaceEnvelope.parse(outer.getJSONObject("envelope"));val h=envelope.header
     require(h.workspaceId==request.workspaceId && h.requestId==id && h.senderDeviceId==request.recipientDeviceId &&
@@ -250,5 +262,5 @@ private fun RelayApi.decodeEncryptedReceipt(connection:Connection,state:Workspac
     val bytes=journal().open(connection,envelope,h);require(bytes.size<=1024*1024)
     val result=JSONObject(String(bytes,Charsets.UTF_8));require(result.string("request_id")==id && result.string("state") in setOf("completed","failed","uncertain"))
     journal().settle(connection,id)
-    return result
+    result
 }

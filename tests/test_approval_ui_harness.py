@@ -1278,6 +1278,20 @@ class ApprovalHarnessTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 without_native_tool_preparation(altered)
 
+    def test_disclosure_idle_projection_refuses_changed_missing_or_duplicate_observation(self):
+        source = (ROOT / _focus_projection.FIXTURE).read_text()
+        original = _focus_projection.reverse_scroll_idle(source)
+        self.assertNotIn('uiAutomation.waitForIdle(500, 2000)', original)
+        # Pre-tap observation may not remove or repeat any original touch/case assertion.
+        old_tap = original.split('    private fun tap(label: String)', 1)[1].split('    private fun reveal(', 1)[0]
+        new_tap = source.split('    private fun tap(label: String)', 1)[1].split('    private fun reveal(', 1)[0]
+        self.assertEqual(old_tap, new_tap)
+        for altered in (source.replace('uiAutomation.waitForIdle(500, 2000)', 'uiAutomation.waitForIdle(0, 2000)'),
+                        source.replace('        var stableBounds: Rect? = null\n', ''),
+                        source.replace('        var stableBounds: Rect? = null\n', '        var stableBounds: Rect? = null\n' * 2)):
+            with self.assertRaises(AssertionError):
+                _focus_projection.reverse_scroll_idle(altered)
+
     def test_android_focus_diagnostics_project_to_exact_reviewed_driver_and_unchanged_ui(self):
         source = (ROOT / "scripts/ci/android-project-ui.py").read_text()
         self.assertEqual(hashlib.sha256(without_android_focus_diagnostics(without_native_tool_preparation(source)).encode()).hexdigest(),

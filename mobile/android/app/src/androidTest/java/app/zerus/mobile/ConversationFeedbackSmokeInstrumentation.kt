@@ -90,7 +90,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
         val raw = JSONObject().put("name", target.session).put("run_id", target.run).put("conversation_id", target.conversation)
             .put("tracked", true).put("runtime_state", "live").put("process_state", "running")
             .put("activity", "idle").put("phase", "idle").put("agent", "codex").put("history_epoch", "fixture-epoch")
-            .put("events", JSONArray(listOf(row(1, saved))))
+            .put("events", JSONArray(listOf(row(1, saved)))).put("reply_id", "fixture-reply").put("mobile_unread_reply", true)
         runBlocking { ConversationCache(targetContext).write(target, raw) }
         val second = target.copy(session = target.session + "-second", run = "second-run", conversation = "second-conversation")
         val secondRaw = JSONObject(raw.toString()).put("name", second.session).put("run_id", second.run).put("conversation_id", second.conversation)
@@ -99,6 +99,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
         val history = AtomicReference(CountDownLatch(1))
         val inspectionReads = AtomicInteger()
         val historyReads = AtomicInteger()
+        val backgroundHeadReads = AtomicInteger()
         val mutations = AtomicInteger()
         val failInspection = AtomicBoolean(false)
         val client = OkHttpClient.Builder().addInterceptor { chain ->
@@ -125,6 +126,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
                     val payload = input.getJSONObject("payload")
                     check(payload.string("expected_run_id") == requested.run && payload.string("expected_conversation_id") == requested.conversation)
                     if (payload.getInt("limit") > 1) { historyReads.incrementAndGet(); check(history.get().await(20, TimeUnit.SECONDS)) }
+                    else backgroundHeadReads.incrementAndGet()
                     JSONObject().put("request_id", input.string("request_id")).put("name", requested.session)
                         .put("run_id", requested.run).put("conversation_id", requested.conversation).put("history_epoch", "fixture-epoch")
                         .put("events", JSONArray(listOf(row(1, saved), row(2, fresh))))
@@ -142,6 +144,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
         val model = main { activity.javaClass.getDeclaredMethod("getModel").apply { isAccessible = true }.invoke(activity) as ZerusViewModel }
         try {
             await("private storage") { main { model.storageReady } }
+            await("read tracking ready") { main { model.javaClass.getDeclaredMethod("getReadTrackingReady").apply { isAccessible = true }.invoke(model) as Boolean } }
             main {
                 model.javaClass.getDeclaredField("api").apply { isAccessible = true }.set(model, RelayApi(client))
                 set(model, "setConnections", listOf(Connection(target.connectionId, "Fixture workspace", "https://relay.example.test", "fixture-token")))
@@ -153,6 +156,8 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
                 model.open(session)
             }
             await("both reads started while inspection and history are held") { inspectionReads.get() > 0 && historyReads.get() > 0 && text(saved) != null }
+            // A catalog update during opening must not spend the serial relay queue on head probes.
+            main { model.javaClass.getDeclaredMethod("watchHistoryHeads", Target::class.java).apply { isAccessible = true }.invoke(model, null) }
             try {
                 await("opening indicator before five-second threshold", 1_500) { refreshing() }
             } catch (error: Throwable) {
@@ -171,6 +176,7 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
             val openingInspections = inspectionReads.get()
             SystemClock.sleep(5_500)
             check(inspectionReads.get() == openingInspections) { "Background polling repeated the opening inspection while history was pending" }
+            check(backgroundHeadReads.get() == 0) { "Catalog history-head scans competed with the visible conversation" }
             history.get().countDown()
             await("fresh history and settled indicator") { text(fresh) != null && main { !model.detailBusy && !model.olderLoading && model.activityVerified } && !progressVisible() }
             check(historyReads.get() == 1) { "Opening fetched the complete page twice" }
@@ -222,6 +228,9 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
             inspection.get().countDown()
             await("second conversation verified and history settled") { main { model.activityVerified && !model.detailBusy && !model.olderLoading } && text(fresh) != null && !progressVisible() }
             check(historyReads.get() == beforeHistory + 1) { "History-first opening fetched the complete page twice" }
+            val headsBeforeBack = backgroundHeadReads.get()
+            main { model.back() }
+            await("catalog head scanning resumes after leaving the conversation") { backgroundHeadReads.get() > headsBeforeBack }
             check(mutations.get() == 0) { "The presentation fixture sent a mutation" }
         } finally {
             inspection.get().countDown(); history.get().countDown()

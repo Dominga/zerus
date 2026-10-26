@@ -637,6 +637,30 @@ answered; a denial cannot carry an explanation.
   and the compaction runs on acceptance of a task that was reassigned to a
   member tagged `rework`. Owner: yes.
 
+- **U14. Catalog decisions on the owner's word (owner, 2026-10-26).** The owner
+  asked the lead to apply two role proposals while the desktop could not be
+  used; catalog decide/apply accept only "by":"human" from outside any agent
+  session, so the lead had to hand the owner a script. As F13 does for phases:
+  `catalog decide` and `apply` from the lead's own session accept
+  `"owner_word": {"text"}` when the owner typed that sentence there within 30
+  minutes ("примени изменения каталога" / "apply the catalog changes"); the
+  draft and the event say "Applied by Lead on your word" with the quote.
+  Owner: yes.
+
+- **U15. Catalog proposals are decided without a designer session (seen
+  2026-10-26).** Keep, Reject and Apply did nothing while the Team designer
+  session was not active; the designer page drops the result and the error of
+  `catalog decide`. They must work in any session state and show errors.
+  Owner: yes, in the fixes phase.
+
+- **U16. The Team designer starts with what it needs (owner, 2026-10-26).** Its
+  session stopped at Claude's folder-trust prompt in its own Zerus folder, and
+  the prompt showed only in the main sessions list. Zerus trusts that private
+  folder and writes narrow rules (catalog get/propose/route, guides, read-only
+  tools) at the designer's launch, never by answering prompts; start-up trust
+  stays manual for every other folder. The designer window shows its
+  session's questions and permission cards. Owner: yes, in the fixes phase.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

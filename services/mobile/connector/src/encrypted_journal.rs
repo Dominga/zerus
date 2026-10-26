@@ -182,7 +182,7 @@ impl Journal {
             if examined > 0 && expired() {
                 break;
             }
-            if digest_len != 64
+            if digest_len != 43
                 || !(1..=128).contains(&id_len)
                 || !(1..=8192).contains(&header_len)
                 || !(1..=ENVELOPE as i64).contains(&result_len)
@@ -202,7 +202,7 @@ impl Journal {
             let pair: Option<(String,String,String,String)> = self.db.query_row(
                 "SELECT request_id,digest,header,result FROM encrypted_requests
                  WHERE rowid=? AND read_cache_class=0 AND delivered=1
-                 AND length(CAST(request_id AS BLOB))<=128 AND length(CAST(header AS BLOB))<=8192 AND length(CAST(digest AS BLOB))=64
+                 AND length(CAST(request_id AS BLOB))<=128 AND length(CAST(header AS BLOB))<=8192 AND length(CAST(digest AS BLOB))=43
                  AND length(CAST(result AS BLOB))<=2097152", [row],
                 |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
             ).optional()?;
@@ -388,6 +388,9 @@ impl Journal {
 }
 
 #[cfg(test)]
+include!("encrypted_pressure_fixture.rs");
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -434,6 +437,3 @@ mod tests {
         assert!(reopened.encrypted_pending().unwrap().is_empty());
     }
 }
-
-#[cfg(test)]
-include!("encrypted_pressure_fixture.rs");

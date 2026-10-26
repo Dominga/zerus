@@ -1387,8 +1387,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 ? (entry.session.runId.isEmpty() ? QString() : QStringLiteral("run_id:") + entry.session.runId)
                 : QStringLiteral("launch_id:") + entry.session.launchId;
             if (entry.host != host || (id.isEmpty() ? entry.session.name != name : retained != id)) continue;
+            const QString task = m_taskInspector->selectedTask();
             openRelatedSession(entry.host, entry.session.name, {}); closeSubagent();
-            m_detailTabs->setCurrentWidget(m_activityStack); return;
+            m_detailTabs->setCurrentWidget(m_activityStack); m_taskInspector->selectTask(task); return;
         }
         showNotice(tr("The task's session identity is no longer available."), true);
     });

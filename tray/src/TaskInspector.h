@@ -18,6 +18,7 @@ public:
     void setContext(const QString &project, const QString &host, const QString &session, const QList<TaskSession> &sessions);
     void setTheme(bool dark);
     void selectTask(const QString &uuid);
+    QString selectedTask() const { return m_selected; }
 signals:
     void boardRequested();
     void executorRequested(const QString &host, const QString &name, const QString &id);

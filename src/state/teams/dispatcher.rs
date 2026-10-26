@@ -989,9 +989,8 @@ pub(crate) fn tag(text: &str) -> String {
 }
 
 /// B6: a sandboxed agent's folder is a clone (its `.git` is inside, so commit,
-/// merge and fetch work there); other agents get a worktree. The folder policy
-/// (task 289) calls this when a member has no folder of its own.
-#[allow(dead_code)]
+/// merge and fetch work there); other agents get a worktree. Used when a plan
+/// leaves the folder to the team (folder policy auto).
 pub(crate) fn default_folder(agent: &str) -> MemberFolder {
     if agent == "dsh" {
         MemberFolder::Clone

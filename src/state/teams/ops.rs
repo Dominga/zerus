@@ -203,6 +203,16 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     if let Some(settings) = &settings {
         validate_settings(settings)?;
     }
+    // B6: under the auto folder policy a member without its own choice gets
+    // its agent's default: a clone for a sandboxed agent, else a worktree.
+    let policy = settings.as_ref().map(|settings| settings.folder_policy).unwrap_or(team.settings.folder_policy);
+    if policy == FolderPolicy::Auto {
+        for (member, value) in members.iter_mut().skip(1).zip(input["members"].as_array().into_iter().flatten()) {
+            if value.get("folder").is_none() && member.directory.is_empty() {
+                member.folder = super::dispatcher::default_folder(&member.agent);
+            }
+        }
+    }
     // The roadmap (spec section 10): phases 2..N in order, all Draft. The owner
     // approves each one strictly after the phase before it ended.
     let approval = settings.as_ref().map(|settings| settings.phase_approval.unwrap_or(settings.approval)).unwrap_or_else(|| phase_approval(team));
@@ -1457,7 +1467,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(human_or_lead, "Only the lead or you add a member");
             ensure!(matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
                 "Only a planning, running or paused team takes new members");
-            let member = parse_member(&input["member"])?;
+            let mut member = parse_member(&input["member"])?;
+            if team.settings.folder_policy == FolderPolicy::Auto
+                && input["member"].get("folder").is_none()
+                && member.directory.is_empty()
+            {
+                member.folder = super::dispatcher::default_folder(&member.agent);
+            }
             ensure!(team.members.iter().all(|m| m.id != member.id), "Member id {} is used", member.id);
             let active = team.members.iter().filter(|m| m.state != MemberState::Removed).count();
             ensure!(active < team.settings.max_members, "The team already has its {} members", team.settings.max_members);
@@ -2799,6 +2815,30 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert_eq!(error, "A permissions profile is read, write, build, commit or network");
+    }
+
+    #[test]
+    fn auto_folders_follow_the_agent() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"settings":{"folder_policy":"auto"},
+                "members":[{"id":"dev","role":"Backend","agent":"dsh"},{"id":"qa","role":"Tester","agent":"claude"},
+                    {"id":"api","role":"Backend","agent":"codex","folder":"shared"}],
+                "tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        let folder = |id: &str| team.member(id).unwrap().folder;
+        assert_eq!(folder("dev"), MemberFolder::Clone);
+        assert_eq!(folder("qa"), MemberFolder::Worktree);
+        assert_eq!(folder("api"), MemberFolder::Shared);
+        // A stored team keeps its members' folders.
+        let (mut old, _) = create("t2", &json!({"name":"T2","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        plan(&mut old, &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}), &Actor::Human, &mut events).unwrap();
+        assert_eq!(old.member("dev").unwrap().folder, MemberFolder::Shared);
     }
 
     #[test]

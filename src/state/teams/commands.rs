@@ -306,13 +306,45 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             let drafted = team.phases.iter().any(|other| other.n == previous && other.state == PhaseState::Draft);
             let open: Vec<u32> =
                 team.tasks.iter().filter(|task| task.phase == previous && !task.status.finished()).map(|task| task.id).collect();
-            if drafted || !open.is_empty() {
+            if drafted {
+                value["waiting"] = json!({
+                    "text":"Waiting for the previous phase to be approved",
+                    "phase":previous,
+                    "open":open
+                });
+            } else if !open.is_empty() {
                 value["waiting"] = json!({
                     "text":"Waiting for the previous phase to be ready",
                     "phase":previous,
                     "open":open
                 });
             }
+        }
+    }
+    // F12: an approved barrier phase starts only when the earlier phases are
+    // finished; it says which one still holds it.
+    if let Some(phases) = value["phases"].as_array_mut() {
+        for (phase, value) in team.phases.iter().zip(phases) {
+            if phase.state != PhaseState::Approved || !phase.barrier {
+                continue;
+            }
+            let target = phase.order();
+            let order_of = |n: u32| team.phases.iter().find(|other| other.n == n).map_or(n, |other| other.order());
+            let mut open: Vec<u32> = team
+                .tasks
+                .iter()
+                .filter(|task| order_of(task.phase) < target && !task.status.finished())
+                .map(|task| task.id)
+                .collect();
+            open.sort_unstable();
+            let Some(previous) = open.iter().map(|id| team.task(*id).map(|task| task.phase).unwrap_or(1)).min() else {
+                continue;
+            };
+            value["waiting"] = json!({
+                "text":format!("Starts when phase {previous} is finished"),
+                "phase":previous,
+                "open":open
+            });
         }
     }
     // Each member's queue: its open task first, then the tasks returned to it
@@ -428,6 +460,75 @@ fn summary(team: &Team) -> Value {
         // C4: the owner's attention list, also from the polled team list.
         "attention":super::inbox::attention(team, super::super::now()),
     })
+}
+
+/// F5: the draft with its revision, unseen fields and preflight.
+fn draft_get(input: &Value) -> anyhow::Result<Value> {
+    let store = Store::open(false)?;
+    draft_get_in(&store, input)
+}
+
+fn draft_get_in(store: &Store, input: &Value) -> anyhow::Result<Value> {
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    ensure!(team.status == TeamStatus::Draft, "The team is not a draft");
+    let draft = team.draft.clone().unwrap_or_default();
+    let validation = super::plan::validate(&team, &BTreeSet::new());
+    Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"preflight":validation}))
+}
+
+/// F5: the owner starts a draft team; the lead session is adopted when given,
+/// otherwise the lead is not created yet. Nothing exists before this call.
+fn draft_start(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id").to_owned();
+    ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
+    let mut store = Store::open(true)?;
+    draft_start_in(&mut store, &request, input)
+}
+
+fn draft_start_in(store: &mut Store, request: &str, input: &Value) -> anyhow::Result<Value> {
+    if let Some(receipt) = store.receipt(request, input)? {
+        return Ok(receipt);
+    }
+    let folder = text(input, "folder").trim().to_owned();
+    ensure!(!folder.is_empty(), "A draft names its folder");
+    let name = text(input, "name").trim().to_owned();
+    ensure!(name.chars().count() <= 80, "A name has at most 80 characters");
+    let mut lead_value = input["lead"].clone();
+    if lead_value.get("id").is_none() {
+        lead_value["id"] = json!("lead");
+    }
+    let mut lead: super::model::Member = serde_json::from_value(lead_value).context("Invalid lead")?;
+    ensure!(lead.session.is_some() || !lead.agent.is_empty(), "A draft lead needs an agent or an existing session");
+    lead.id = "lead".into();
+    if lead.role.is_empty() {
+        lead.role = "Lead".into();
+    }
+    lead.state = if lead.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
+    let mut team = Team {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() { "New team".into() } else { name },
+        folder,
+        status: TeamStatus::Draft,
+        lead: "lead".into(),
+        draft: Some(super::model::Draft { revision: 1, ..Default::default() }),
+        revision: 1,
+        ..Default::default()
+    };
+    team.members.push(lead);
+    let id = team.id.clone();
+    let brief = format!(
+        "[Zerus team \u{b7} draft]\nYou lead the draft team {id}. Read the built-in lead protocol and hgs guide designer; \
+         the owner and you edit the draft with hgs team draft before it can be created.",
+        id = id
+    );
+    let session = team.member("lead").and_then(|member| member.session.clone());
+    store.create(request, input, team, vec![Event::new("team_drafted", json!({"team":id}))])?;
+    // One brief, when the lead already has a session; a launched lead gets it
+    // from the dispatcher's first-turn hand-off.
+    if let Some(session) = session {
+        let _ = super::dispatcher::send(&session, &uuid::Uuid::new_v4().to_string(), &brief);
+    }
+    Ok(json!({"team":id,"revision":1}))
 }
 
 fn create(input: &Value) -> anyhow::Result<Value> {
@@ -951,6 +1052,14 @@ fn inbox_view(team: &Team) -> Value {
 }
 
 fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
+    // F5: the draft's read and its start are not mutations.
+    if op == "draft" {
+        match text(input, "action") {
+            "get" => return draft_get(input),
+            "start" => return draft_start(input),
+            _ => {}
+        }
+    }
     match op {
         "create" => create(input),
         "answer" => answer(input),
@@ -1208,6 +1317,27 @@ mod tests {
         // A new finding does not shift the second page.
         team.findings.push(Finding { id: "f121".into(), severity: "normal".into(), title: "New".into(), scenario: "s".into(), state: "open".into(), ..Default::default() });
         assert_eq!(super::findings_page(&team, Some(71))["items"][0]["id"], "f70");
+    }
+
+    #[test]
+    fn a_draft_starts_with_its_lead_and_nothing_before_it() {
+        use crate::state::teams::model::TeamStatus;
+        use crate::state::teams::store::Store;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams.db"), true).unwrap();
+        let request = "11111111-1111-4111-8111-111111111111";
+        let input = json!({"request_id":request,"folder":dir.path().display().to_string(),"name":"Checkout","lead":{"agent":"claude"}});
+        let value = super::draft_start_in(&mut store, request, &input).unwrap();
+        let id = value["team"].as_str().unwrap().to_owned();
+        assert_eq!(value["revision"], 1);
+        let team = store.load(&id).unwrap().unwrap();
+        assert_eq!(team.status, TeamStatus::Draft);
+        assert_eq!(team.draft.as_ref().unwrap().revision, 1);
+        assert_eq!(team.member("lead").map(|member| member.role.as_str()), Some("Lead"));
+        assert_eq!(team.members.len(), 1);
+        // A repeated request returns the first result and creates nothing twice.
+        super::draft_start_in(&mut store, request, &input).unwrap();
+        assert_eq!(store.teams(true, 10).unwrap().len(), 1);
     }
 
     #[test]
@@ -1914,15 +2044,18 @@ mod tests {
             tasks: vec![],
             ..Default::default()
         });
+        // F12: a draft behind a draft says it waits for the approval, not for
+        // readiness.
         let value = view_with(&team, &[], None);
         assert_eq!(value["phases"][1]["waiting"]["phase"], 2);
         assert_eq!(value["phases"][1]["waiting"]["open"], json!([3]));
+        assert_eq!(value["phases"][1]["waiting"]["text"], "Waiting for the previous phase to be approved");
         // The approval refusal stays specific about which phase is in the way.
         let mut events = Vec::new();
         let error = ops::apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &BTreeSet::new(), &mut events)
             .unwrap_err()
             .to_string();
-        assert_eq!(error, "Phase 3 opens after phase 2 ends");
+        assert_eq!(error, "Phase 3 opens after the previous phase is approved");
     }
 
     #[test]

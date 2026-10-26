@@ -1212,7 +1212,7 @@ pub(crate) fn classify(output: &anyhow::Result<Output>) -> Sent {
     }
 }
 
-fn send(session: &SessionRef, request_id: &str, text: &str) -> Sent {
+pub(crate) fn send(session: &SessionRef, request_id: &str, text: &str) -> Sent {
     let input = json!({"request_id":request_id,"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"text":text});
     classify(&hgs(&session.host, &["send", &session.name, "--json"], Some(&input), Duration::from_secs(120)))

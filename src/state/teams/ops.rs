@@ -674,10 +674,11 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             if order >= target {
                 continue;
             }
-            let open = team.tasks.iter().any(|task| task.phase == phase_n && !task.status.finished());
+            // F12: the earlier phase must be approved, not finished: an
+            // approved barrier phase still holds its own tasks until they end.
             ensure!(
-                listed.is_none_or(|phase| phase.state != PhaseState::Draft) && !open,
-                "Phase {n} opens after phase {phase_n} ends"
+                listed.is_none_or(|phase| phase.state != PhaseState::Draft),
+                "Phase {n} opens after the previous phase is approved"
             );
         }
         // An assignee may have been removed since the phase was added.
@@ -2379,27 +2380,27 @@ mod tests {
     }
 
     #[test]
-    fn approve_phase_waits_for_every_earlier_phase() {
+    fn approve_phase_waits_for_the_earlier_phases_approval() {
         let mut team = running_team();
         let mut events = Vec::new();
         let none = BTreeSet::new();
         for id in [3, 4] {
             extend(&mut team, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         }
-        // Phase 1 is still open.
-        let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert_eq!(error, "Phase 2 opens after phase 1 ends");
-        // Decide phase 1: phase 2 may open, phase 3 still waits.
-        for id in [1, 2] {
-            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
-        }
+        // F12: phase 1's tasks are still open, and phase 2 opens anyway.
         let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!(approved["status"], "phase_approved");
-        let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert_eq!(error, "Phase 3 opens after phase 2 ends");
-        apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
+        // Phase 3 opens while phase 2's tasks are open too.
         let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([4])));
+        // A draft before the phase still refuses the approval.
+        let mut review = running_team();
+        review.settings.approval = Approval::Review;
+        for id in [3, 4] {
+            extend(&mut review, &json!({"tasks":[{"id":id,"title":"T","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
+        let error = apply(&mut review, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(error, "Phase 3 opens after the previous phase is approved");
     }
 
     #[test]
@@ -3251,20 +3252,24 @@ mod tests {
         assert_eq!(record.owner_word.as_ref().unwrap().text, "next phase plan approved");
         let event = events.iter().rev().find(|event| event.kind == "phase_approved").unwrap();
         assert_eq!(event.payload["owner_word"]["text"], "next phase plan approved");
-        // The ordering rule (F12) still applies before the word matters.
+        // The ordering rule (F12) still applies: a draft before the phase
+        // refuses, before the word matters.
         let mut early = running_team();
-        extend(&mut early, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        early.settings.approval = Approval::Review;
+        for id in [3, 4] {
+            extend(&mut early, &json!({"tasks":[{"id":id,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        }
         let blocked = apply(
             &mut early,
             "approve-phase",
-            &json!({"phase":2,"owner_word_checked":{"text":"next phase plan approved","at":1000.0,"event":7}}),
+            &json!({"phase":3,"owner_word_checked":{"text":"next phase plan approved","at":1000.0,"event":7}}),
             &Actor::Member("lead".into()),
             &none,
             &mut events,
         )
         .unwrap_err()
         .to_string();
-        assert_eq!(blocked, "Phase 2 opens after phase 1 ends");
+        assert_eq!(blocked, "Phase 3 opens after the previous phase is approved");
     }
 
     #[test]
@@ -4337,7 +4342,7 @@ mod tests {
             apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
         }
         let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert_eq!(error, "Phase 3 opens after phase 2 ends");
+        assert_eq!(error, "Phase 3 opens after the previous phase is approved");
         let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
         assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([3])));
         apply(&mut team, "cancel", &json!({"task":3}), &Actor::Human, &none, &mut events).unwrap();
@@ -4423,6 +4428,27 @@ mod tests {
         apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true}), &Actor::Human, &none, &mut events).unwrap();
         assert!(team.member("extra").is_some());
         assert_eq!(team.proposals[0]["state"], "accepted");
+    }
+
+    #[test]
+    fn a_phase_opens_when_the_previous_is_approved_not_finished() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        extend(&mut team, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        extend(&mut team, &json!({"tasks":[{"id":4,"title":"Next","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        // F12: phase 2 opens while phase 1's tasks are still open, and phase 3
+        // while phase 2's are: approval, not completion, orders the phases.
+        let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(approved["phase"], 2);
+        apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
+        // A draft before it still refuses the approval.
+        let mut review = running_team();
+        review.settings.approval = Approval::Review;
+        extend(&mut review, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        extend(&mut review, &json!({"tasks":[{"id":4,"title":"Next","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        let error = apply(&mut review, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("after the previous phase is approved"), "{error}");
     }
 
     #[test]

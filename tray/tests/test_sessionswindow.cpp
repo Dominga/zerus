@@ -251,6 +251,7 @@ private slots:
     void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
     void agentTeamsGroupTheirSessions();
+    void teamRowBarsCountThePhaseInWork();
     void teamLeftoverStopAsksTheRealAction();
     void readmeScreenshots();
     void groupsPersistFilterAndRevealAttention();
@@ -1270,6 +1271,57 @@ elif c=='swarm':out({'schema':1,'organization':d['organization'],'node_id':'node
 elif c=='project' and a[1:2]==['ls']:out([])
 else:out({})
 )PY";
+}
+
+// G8: the session row reads the team list summary, which now carries each
+// task's phase and the phase records. A team like 528aebfe - phase 1 and 31
+// finished, 32 in work, 33 and 34 drafts - reads the phase-32 tasks bar and
+// 2/5 phases on the row, and the shot shows it.
+void TestSessionsWindow::teamRowBarsCountThePhaseInWork()
+{
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    QJsonObject summary{{"id", "team-1"}, {"name", "Teams v2"}, {"status", "running"}, {"lead", "lead"},
+                        {"pending_phase", 33}, {"revision", 40}};
+    QJsonArray tasks;
+    const auto addTask = [&](int id, int phase, const QString &status) {
+        tasks.append(QJsonObject{{"id", id}, {"phase", phase}, {"title", QStringLiteral("Task %1").arg(id)},
+                                 {"status", status}, {"assignee", "backend"}});
+    };
+    QJsonArray phase1Tasks, phase31, phase32, phase33, phase34;
+    for (int id = 1; id <= 30; ++id) { addTask(id, 1, "accepted"); phase1Tasks.append(id); }
+    for (int id = 271; id <= 286; ++id) { addTask(id, 31, "accepted"); phase31.append(id); }
+    for (int id = 287; id <= 297; ++id) { addTask(id, 32, id == 292 ? "in_progress" : "accepted"); phase32.append(id); }
+    for (int id = 298; id <= 308; ++id) { addTask(id, 33, "draft"); phase33.append(id); }
+    for (int id = 309; id <= 319; ++id) { addTask(id, 34, "draft"); phase34.append(id); }
+    summary["tasks"] = tasks;
+    summary["phases"] = QJsonArray{QJsonObject{{"n", 1}, {"state", "approved"}, {"tasks", phase1Tasks}},
+        QJsonObject{{"n", 31}, {"title", "Phase 1 fixes and urgent"}, {"state", "approved"}, {"tasks", phase31}},
+        QJsonObject{{"n", 32}, {"title", "Permissions and lead load"}, {"state", "approved"}, {"tasks", phase32}},
+        QJsonObject{{"n", 33}, {"title", "Team creation"}, {"state", "draft"}, {"tasks", phase33}},
+        QJsonObject{{"n", 34}, {"title", "Reports and findings"}, {"state", "draft"}, {"tasks", phase34}}};
+    summary["members"] = QJsonArray{QJsonObject{{"id", "lead"}, {"role", "Lead"}, {"agent", "codex"}, {"state", "active"},
+        {"session", QJsonObject{{"host", ""}, {"name", "codex/hgs/dashboard"}}}}};
+    const auto teams = QJsonDocument(QJsonObject{{"items", QJsonArray{summary}}}).toJson(QJsonDocument::Compact);
+    const QByteArray answer = "elif c=='team' and a[1:2]==['list']:print(" + FakeCli::pythonString(QString::fromUtf8(teams)) + ")\n"
+                              "elif c=='team':print('{}')\n";
+    const QString fixture = m_dir->filePath("hgs-team-bars");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1280, 760); window.setFleet(fleet()); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList");
+    auto *controller = window.findChild<TeamController *>();
+    QVERIFY(list && controller);
+    QTRY_COMPARE(controller->teams().size(), 1);
+    const auto rowOf = [&](const QString &key) { for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key) == key) return i; return -1; };
+    const int leadRow = rowOf("\ncodex/hgs/dashboard");
+    QTRY_VERIFY(leadRow >= 0 && !list->item(leadRow)->data(SessionRoles::TeamLead).toMap().isEmpty());
+    const auto strip = list->item(leadRow)->data(SessionRoles::TeamLead).toMap();
+    QCOMPARE(strip.value("phaseText").toString(), QStringLiteral("10/11"));
+    QCOMPARE(strip.value("phaseNumber").toInt(), 32);
+    QCOMPARE(strip.value("phasesText").toString(), QStringLiteral("2/5"));
+    QVERIFY(strip.value("progressTooltip").toString().contains(QStringLiteral("Phase 32 Permissions and lead load: 10/11")));
+    QTest::qWait(200);
+    if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty())
+        window.grab().save(QDir(shots).filePath("team-row-phases.png"));
 }
 
 // N7: the Team tab's leftover Stop names a session, not the action. The window

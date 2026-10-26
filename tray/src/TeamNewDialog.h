@@ -54,6 +54,9 @@ private:
     QLineEdit *m_name, *m_folder;
     QComboBox *m_template, *m_leadAgent, *m_leadAccount, *m_leadModel, *m_leadEffort, *m_existingLead;
     QCheckBox *m_useExisting, *m_worktrees, *m_review;
+    // B6: how members get their folders - auto (the lead picks), shared or a
+    // worktree each. A folder that is not a Git repository allows only shared.
+    QComboBox *m_folderPolicy = nullptr;
     QComboBox *m_planning;
     QSpinBox *m_maxMembers;
     QPlainTextEdit *m_goal;

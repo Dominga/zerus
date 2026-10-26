@@ -155,9 +155,20 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
     folderRow->addWidget(m_folder, 1); folderRow->addWidget(browse);
     v->addLayout(folderRow);
     auto *wtRow = row(8);
-    m_worktrees = new QCheckBox(tr("Worktree per member")); m_worktrees->setObjectName("teamNewWorktrees"); m_worktrees->setChecked(true);
+    m_worktrees = new QCheckBox(tr("Worktree per member"), this); m_worktrees->setObjectName("teamNewWorktrees"); m_worktrees->setChecked(true);
+    m_worktrees->hide();   // B6: the folder policy combo is the control
     m_branch = new QLabel; m_branch->setObjectName("teamNewBranch");
-    wtRow->addWidget(m_worktrees); wtRow->addWidget(m_branch, 1);
+    // B6: auto is the default for a new team; Shared forces one folder.
+    m_folderPolicy = new QComboBox; m_folderPolicy->setObjectName("teamNewFolderPolicy");
+    m_folderPolicy->addItem(tr("Auto — the lead picks per member"), QStringLiteral("auto"));
+    m_folderPolicy->addItem(tr("Shared folder"), QStringLiteral("shared"));
+    m_folderPolicy->addItem(tr("Worktree per member"), QStringLiteral("worktree"));
+    m_folderPolicy->setToolTip(tr("Auto lets the lead choose the folder each member works in"));
+    QObject::connect(m_folderPolicy, &QComboBox::currentIndexChanged, this, [this] {
+        m_worktrees->setChecked(m_folderPolicy->currentData().toString() != QStringLiteral("shared"));
+        validate();
+    });
+    wtRow->addWidget(m_folderPolicy); wtRow->addWidget(m_branch, 1);
     v->addLayout(wtRow);
     m_gitNote = new QLabel(tr("Folder is not a Git repository — members will share one folder. Worktrees are off."));
     m_gitNote->setObjectName("teamNewGitNote"); static_cast<QLabel *>(m_gitNote)->setWordWrap(true);
@@ -585,11 +596,20 @@ void TeamNewTab::renderMembers()
 
 void TeamNewTab::validate()
 {
+    // B6: a combo signal may reach validate before the last widgets exist.
+    if (!m_folderPolicy || !m_name || !m_create) return;
     const Colors c = colorsFor(m_dark);
     const QString folder = m_folder->text().trimmed();
     const bool git = !folder.isEmpty() && QDir(folder).exists(QStringLiteral(".git"));
     m_worktrees->setEnabled(git);
     if (!git && m_worktrees->isChecked()) { const QSignalBlocker block(m_worktrees); m_worktrees->setChecked(false); }
+    // B6: without a Git folder only a shared folder makes sense.
+    if (m_folderPolicy && !git && m_folderPolicy->currentData().toString() != "shared") {
+        // No signals: currentIndexChanged would call validate() again inside this one.
+        const QSignalBlocker block(m_folderPolicy);
+        m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
+        m_worktrees->setChecked(false);
+    }
     m_gitNote->setVisible(!folder.isEmpty() && !git);
     const QString name = m_name->text().trimmed();
     QString slug = name.toLower(); slug.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")), QStringLiteral("-")); slug.remove(QRegularExpression(QStringLiteral("^-+|-+$")));
@@ -648,7 +668,8 @@ void TeamNewTab::create()
         }
     }
     const bool worktrees = m_worktrees->isChecked() && m_worktrees->isEnabled();
-    QJsonObject settings{{"folder_policy", worktrees ? "worktree" : "shared"}, {"approval", m_review->isChecked() ? "review" : "auto"},
+    const QString folderPolicy = m_folderPolicy ? m_folderPolicy->currentData().toString() : (worktrees ? QStringLiteral("worktree") : QStringLiteral("shared"));
+    QJsonObject settings{{"folder_policy", folderPolicy}, {"approval", m_review->isChecked() ? "review" : "auto"},
                          {"max_members", m_max->value()}};
     if (t && !t->phaseApproval.isEmpty()) settings.insert("phase_approval", t->phaseApproval);
     const QJsonObject input{{"name", m_name->text().trimmed()}, {"goal", m_goal->toPlainText().trimmed()}, {"folder", m_folder->text().trimmed()},

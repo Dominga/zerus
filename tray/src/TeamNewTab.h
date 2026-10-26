@@ -84,6 +84,8 @@ private:
     bool m_protocolEdited = false;
     QLineEdit *m_name, *m_folder;
     QCheckBox *m_worktrees, *m_review;
+    // B6: auto (the lead picks), shared or a worktree per member.
+    class QComboBox *m_folderPolicy = nullptr;
     QWidget *m_planning;
     QString m_planningValue = QStringLiteral("lead");
     QSpinBox *m_max;

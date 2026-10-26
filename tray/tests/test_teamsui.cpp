@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QScrollBar>
 #include <QtTest>
+#include <QStandardItemModel>
 #include <algorithm>
 #include <QStyle>
 #include <QApplication>
@@ -294,6 +295,7 @@ private slots:
     void memberEditorPicksAnExistingSession();
     void phaseProgressShowsTwoBars();
     void permissionCardsAndGraphOrder();
+    void preflightWarningsShowInThePlanCard();
     void severalDraftPhasesRenderAndApproveInOrder();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
@@ -838,6 +840,10 @@ void TestTeamsUi::newTeamStartsTheLeadWithTheTemplate()
     // Not a Git folder: members share it, no worktrees.
     QTRY_VERIFY(dialog.findChild<QLabel *>("teamNewGitNote")->isVisible());
     QVERIFY(!dialog.findChild<QCheckBox *>("teamNewWorktrees")->isEnabled());
+    // B6: the folder policy combo is the control and falls back to shared here.
+    auto *policy = dialog.findChild<QComboBox *>("teamNewFolderPolicy");
+    QVERIFY(policy);
+    QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
     // F7/L7: "Take into a new team" names the leftover session; the dialog
     // offers it as the existing lead, and a session on another computer cannot
     // lead from here.
@@ -1432,6 +1438,28 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
 // request names who answered and the deny text. B5: a plan that widens a
 // profile says so and its approve asks for the owner's confirmation. G3: a
 // dead-end task sinks below the tasks others depend on in its column.
+// B3: a preflight finding arrives as a plan warning and shows in the plan card.
+void TestTeamsUi::preflightWarningsShowInThePlanCard()
+{
+    auto planning = phasedTeam();
+    planning["status"] = "planning";
+    planning["validation"] = QJsonObject{{"errors", QJsonArray()},
+        {"warnings", QJsonArray{QJsonObject{{"kind", "sandbox_worktree"},
+            {"text", "Preflight: Backend runs in a worktree but its agent cannot write git metadata; commits will ask"}}}}};
+    setTeam(planning);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.resize(460, 900); panel.show();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(([&] {
+        for (auto *label : panel.findChildren<QLabel *>())
+            if (label->text().contains(QStringLiteral("Preflight:"))) return true;
+        return false;
+    })());
+    shot(&panel, "preflight-warning-dark");
+}
+
 void TestTeamsUi::permissionCardsAndGraphOrder()
 {
     // B1/B2, the card.

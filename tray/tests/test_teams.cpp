@@ -140,6 +140,7 @@ private slots:
     void draftPhasesApproveInOrder();
     void phaseProgressShowsThePhaseInWorkAndThePhases();
     void permissionRequestsCarryTheCommandAndTheAnswer();
+    void listSummaryCarriesTaskPhasesAndPhaseRecords();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
@@ -349,6 +350,48 @@ void TestTeams::leftRunningMembersOfAFinishedTeam()
 // B1/B2: a permission request carries the exact command, where it came from and
 // the agent's reason; the answer keeps the decision, who answered and the deny
 // text. B5: a plan that widens a role's profile says so.
+// G8: the session row is built from `hgs team list`, whose summary now carries
+// each task's phase and the phase records. A summary of a team like 528aebfe -
+// phase 1 and 31 finished, 32 in work, 33 and 34 drafts - reads the phase-32
+// tasks bar and 2/5 phases.
+void TestTeams::listSummaryCarriesTaskPhasesAndPhaseRecords()
+{
+    QJsonObject summary{{"id", "team-1"}, {"name", "Teams v2"}, {"status", "running"}, {"lead", "lead"},
+                        {"pending_phase", 33}, {"revision", 40}};
+    QJsonObject phase1{{"n", 1}, {"title", ""}, {"state", "approved"}, {"tasks", QJsonArray()}};
+    QJsonArray tasks;
+    const auto addTask = [&](int id, int phase, const QString &status) {
+        tasks.append(QJsonObject{{"id", id}, {"phase", phase}, {"title", QStringLiteral("Task %1").arg(id)},
+                                 {"status", status}, {"assignee", "backend"}});
+    };
+    QJsonArray phase1Tasks, phase31, phase32, phase33, phase34;
+    for (int id = 1; id <= 30; ++id) { addTask(id, 1, "accepted"); phase1Tasks.append(id); }
+    for (int id = 271; id <= 286; ++id) { addTask(id, 31, "accepted"); phase31.append(id); }
+    for (int id = 287; id <= 297; ++id) { addTask(id, 32, id == 292 ? "in_progress" : "accepted"); phase32.append(id); }
+    for (int id = 298; id <= 308; ++id) { addTask(id, 33, "draft"); phase33.append(id); }
+    for (int id = 309; id <= 319; ++id) { addTask(id, 34, "draft"); phase34.append(id); }
+    phase1["tasks"] = phase1Tasks;
+    summary["tasks"] = tasks;
+    summary["phases"] = QJsonArray{phase1,
+        QJsonObject{{"n", 31}, {"title", "Phase 1 fixes and urgent"}, {"state", "approved"}, {"tasks", phase31}},
+        QJsonObject{{"n", 32}, {"title", "Permissions and lead load"}, {"state", "approved"}, {"tasks", phase32}},
+        QJsonObject{{"n", 33}, {"title", "Team creation"}, {"state", "draft"}, {"tasks", phase33}},
+        QJsonObject{{"n", 34}, {"title", "Reports and findings"}, {"state", "draft"}, {"tasks", phase34}}};
+    const auto teams = parseList(QJsonObject{{"items", QJsonArray{summary}}});
+    QCOMPARE(teams.size(), 1);
+    const auto &team = teams.first();
+    QVERIFY(team.phased());
+    QCOMPARE(team.tasks.size(), 79);
+    const auto progress = phaseProgress(team);
+    QCOMPARE(progress.phase, 32);       // the phase in work
+    QCOMPARE(progress.draft, false);
+    QCOMPARE(progress.phaseText(), QStringLiteral("10/11"));
+    QCOMPARE(progress.phasesDone, 2);   // phase 1 and phase 31
+    QCOMPARE(progress.phasesTotal, 5);  // phase 1, 31, 32, 33 and 34
+    QCOMPARE(progress.phasesText(), QStringLiteral("2/5"));
+    QCOMPARE(progress.tooltip().section('\n', 0, 0), QStringLiteral("Phase 32 Permissions and lead load: 10/11"));
+}
+
 void TestTeams::permissionRequestsCarryTheCommandAndTheAnswer()
 {
     auto team = deliveryTeam();

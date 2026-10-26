@@ -19,6 +19,9 @@ const TICK: Duration = Duration::from_secs(3);
 const IDLE_EXIT: Duration = Duration::from_secs(300);
 /// After a refused hand-off the member gets no new one for this long.
 const REFUSAL_PAUSE: f64 = 30.0;
+/// How long a member may sit idle without ready work before the lead hears
+/// once that the plan starves it (C7).
+const STARVED_AFTER: f64 = 20.0 * 60.0;
 /// The worker's session listing is bounded, so a stop request is never far away.
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The worker's log keeps at most this much before it starts over.
@@ -57,6 +60,11 @@ pub(crate) struct Seen {
     /// Its own jobs run in the background: work in progress, not a finished
     /// turn (`process_work.count > 0`, or activity `background`) (A2).
     pub background: bool,
+    /// The newest Background job: its command and when it started (C12).
+    pub work: Option<SeenWork>,
+    /// The MCP servers and services it runs, which are not Background work
+    /// (G7).
+    pub services: Vec<SeenService>,
     /// Waiting on an answer: a question or a permission request.
     pub asking: bool,
     /// Its process or native session runs.
@@ -68,6 +76,21 @@ pub(crate) struct Seen {
     /// (None when the host does not know it).
     pub muted: bool,
     pub notify_revision: Option<u64>,
+}
+
+/// The newest Background job of a session (C12).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeenWork {
+    pub command: String,
+    pub started_at: f64,
+}
+
+/// An MCP server or service of a session (G7).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeenService {
+    pub name: String,
+    pub command: String,
+    pub since: f64,
 }
 
 /// Every session of this computer and its peers from one listing.
@@ -91,8 +114,31 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 && record["send_available"] != false;
             // Background work is not a finished turn, whatever the activity
             // says: a long command, a watcher or a native job still runs (A2).
-            let background = record["process_work"]["count"].as_u64().is_some_and(|count| count > 0)
-                || activity == "background";
+            // C12: its command and start let a declared budget tell the lead
+            // when the job is overdue.
+            let work = record["process_work"]
+                .as_object()
+                .filter(|work| work.get("count").and_then(|count| count.as_u64()).is_some_and(|count| count > 0))
+                .map(|work| SeenWork {
+                    command: work.get("command").and_then(|command| command.as_str()).unwrap_or_default().to_owned(),
+                    started_at: work.get("started_at").and_then(|started| started.as_f64()).unwrap_or(0.0),
+                });
+            let background = work.is_some() || activity == "background";
+            // G7: MCP servers and services ride along with the session and are
+            // not Background work.
+            let services: Vec<SeenService> = record["process_work"]["services"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|service| {
+                    let name = service["name"].as_str().unwrap_or_default();
+                    (!name.is_empty()).then(|| SeenService {
+                        name: name.to_owned(),
+                        command: service["command"].as_str().unwrap_or_default().to_owned(),
+                        since: service["since"].as_f64().unwrap_or(0.0),
+                    })
+                })
+                .collect();
             sessions.push(Seen {
                 host: host.clone(),
                 name: field("name").to_owned(),
@@ -107,6 +153,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 activity,
                 phase: field("phase").to_owned(),
                 background,
+                work,
+                services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 live,
                 cwd: field("cwd").to_owned(),
@@ -141,6 +189,27 @@ pub(crate) enum Step {
     Inbox,
     /// Reminds the free lead once that a report still waits for a decision (C4).
     RemindReport { task: u32 },
+    /// The member is idle without a ready task while tasks are open (C7).
+    Starving { member: String },
+    /// The member got work again or nothing is open: the episode ends (C7).
+    StarvedEnded { member: String },
+    /// Idle without work for too long: tell the free lead once (C7).
+    PlanStarved { member: String },
+    /// The member's Background work appeared; its default red time starts now
+    /// (C12).
+    BackgroundStart { member: String },
+    /// Its Background work ended: the budget ends with the job (C12).
+    BackgroundEnd { member: String },
+    /// Tie a declared budget to the live Background job (C12).
+    BudgetTie { member: String, command: String, since: f64 },
+    /// The job passed its estimate (C12).
+    BudgetAmber { member: String },
+    /// The job passed its red time: tell the lead once (C12).
+    BudgetRed { member: String },
+    /// Background work without a budget passed the default red time (C12).
+    BackgroundRed { member: String, command: String, since: f64 },
+    /// The MCP servers and services the member's session runs changed (G7).
+    Services { member: String, services: Vec<SeenService> },
     /// Gives the member the lead's answer as a message (A3).
     AnswerQuestion { task: u32, question: String },
     TurnEnded { task: u32, at: f64, reply: String },
@@ -344,6 +413,16 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         if member.seen.is_none_or(|recorded| recorded.live != found.live) {
             steps.push(Step::Liveness { member: member.id.clone(), live: found.live });
         }
+        // G7: services ride with the session; status shows them on the member.
+        let changed = member.services.len() != found.services.len()
+            || member
+                .services
+                .iter()
+                .zip(&found.services)
+                .any(|(old, new)| old.name != new.name || old.command != new.command || old.since != new.since);
+        if changed {
+            steps.push(Step::Services { member: member.id.clone(), services: found.services.clone() });
+        }
     }
     // A hand-out that never started: the lead hears once, when free (A1).
     if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
@@ -455,6 +534,88 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         .filter_map(|task| task.open_attempt())
         .map(|attempt| attempt.member.as_str())
         .collect();
+    // C7: a member idle without a ready task while tasks are open starves the
+    // plan. The lead hears once after 20 minutes; the episode ends with work.
+    let ready_ids = plan::ready(team);
+    let staging_open = team.tasks.iter().any(|task| !task.status.finished());
+    for member in &team.members {
+        if member.id == team.lead || matches!(member.state, MemberState::Removed | MemberState::Paused) {
+            continue;
+        }
+        let Some(session) = member.session.as_ref() else { continue };
+        let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
+        let has_work = busy.contains(member.id.as_str())
+            || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
+        if !staging_open || has_work || !(found.free && found.live) {
+            if member.starved_since.is_some() {
+                steps.push(Step::StarvedEnded { member: member.id.clone() });
+            }
+        } else if member.starved_since.is_none() {
+            steps.push(Step::Starving { member: member.id.clone() });
+        } else if !member.starved_told
+            && now - member.starved_since.unwrap_or(now) >= STARVED_AFTER
+        {
+            steps.push(Step::PlanStarved { member: member.id.clone() });
+        }
+    }
+    // C12: Background work and the budgets declared for it. A job without a
+    // budget gets the default red time; a budget ends with its job and never
+    // stops anything.
+    for member in &team.members {
+        if member.state == MemberState::Removed {
+            continue;
+        }
+        let found = session_of(member, seen);
+        let background = found.is_some_and(|found| found.background);
+        let work = found.and_then(|found| found.work.clone());
+        if !background {
+            let stale_budget = member.budget.as_ref().is_some_and(|budget| budget.job.is_some() || now - budget.declared_at > 60.0);
+            if member.background_since.is_some() || stale_budget {
+                steps.push(Step::BackgroundEnd { member: member.id.clone() });
+            }
+            continue;
+        }
+        if member.background_since.is_none() {
+            steps.push(Step::BackgroundStart { member: member.id.clone() });
+        }
+        match &member.budget {
+            None => {
+                let since = member.background_since.unwrap_or(now);
+                if !member.background_told
+                    && team.settings.background_red_minutes > 0
+                    && now - since >= team.settings.background_red_minutes as f64 * 60.0
+                {
+                    steps.push(Step::BackgroundRed {
+                        member: member.id.clone(),
+                        command: work.map(|work| work.command).unwrap_or_default(),
+                        since,
+                    });
+                }
+            }
+            Some(budget) => {
+                if budget.job.is_none() {
+                    if now - budget.declared_at <= 60.0 {
+                        if let Some(work) = work {
+                            steps.push(Step::BudgetTie {
+                                member: member.id.clone(),
+                                command: work.command,
+                                since: if work.started_at > 0.0 { work.started_at } else { now },
+                            });
+                        }
+                    } else {
+                        steps.push(Step::BackgroundEnd { member: member.id.clone() });
+                    }
+                } else {
+                    let state = budget.state(now);
+                    if state == "red" && !budget.red_told {
+                        steps.push(Step::BudgetRed { member: member.id.clone() });
+                    } else if state != "ok" && !budget.amber_told {
+                        steps.push(Step::BudgetAmber { member: member.id.clone() });
+                    }
+                }
+            }
+        }
+    }
     let mut launching = BTreeSet::new();
     let refused_recently = |member: &Member| {
         team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.member == member.id && a.state == AttemptState::Refused && now - a.sent_at < REFUSAL_PAUSE)
@@ -469,7 +630,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     };
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
-    let ready = plan::dispatch_order(team, plan::ready(team));
+    let ready = plan::dispatch_order(team, ready_ids);
     for id in ready {
         let Some(task) = team.task(id) else { continue };
         let Some(member) = team.member(&task.assignee) else { continue };
@@ -532,6 +693,9 @@ fn coalesce_lead(steps: Vec<Step>) -> Vec<Step> {
             step,
             Step::Inbox
                 | Step::RemindReport { .. }
+                | Step::PlanStarved { .. }
+                | Step::BudgetRed { .. }
+                | Step::BackgroundRed { .. }
                 | Step::TellStartLate { .. }
                 | Step::BlockedLate { .. }
                 | Step::Rebalanced { .. }
@@ -682,7 +846,20 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
         text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
     }
+    if let Some(check) = task.check.as_ref().filter(|_| task.is_check()) {
+        // C5: the member runs the exact command; Zerus decides by its exit code.
+        text += &format!(
+            "\nThis is a check task: run exactly this command in your folder, change nothing else, and report its exit code:\n  {}\n\
+             Expected exit code: {} (timeout {} min).\n",
+            check.command, check.expect_exit, check.timeout_minutes
+        );
+    }
     let at = if member_host.is_empty() { String::new() } else { format!("@{report_host} ") };
+    let mut report = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."});
+    if task.is_check() {
+        report["text"] = json!("");
+        report["check"] = json!({"exit":0,"tail":"the last 40 lines"});
+    }
     // H5: every hand-out names the question route, the current-attempt route
     // and the report command.
     text += &format!(
@@ -694,7 +871,7 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
          the report as your last message: Zerus gives it to the lead. A blocker goes to the lead too: ask it, not the owner.",
         ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."}),
         current = json!({"attempt":attempt.id}),
-        report = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
+        report = report
     );
     text
 }
@@ -1430,6 +1607,129 @@ fn remind_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result
     })
 }
 
+/// The message that tells the lead a member starves on the plan (C7), with the
+/// blocking chain of the open tasks.
+pub(crate) fn starved_text(team: &Team, member: &Member, now: f64) -> String {
+    let minutes = (((now - member.starved_since.unwrap_or(now)).max(0.0)) / 60.0).round() as u64;
+    let role = team.role_of(&member.id);
+    let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
+    let open: Vec<&Task> = team.tasks.iter().filter(|task| !task.status.finished()).collect();
+    let mut chain = String::new();
+    for task in open.iter().take(5) {
+        if let Some(wait) = inbox::waits(team, task, ready.contains(&task.id)) {
+            let on: Vec<String> = wait["on"].as_array().into_iter().flatten().map(|value| {
+                value.as_str().map(str::to_owned).or_else(|| value.as_u64().map(|id| format!("#{id}"))).unwrap_or_default()
+            }).collect();
+            chain += &format!("  #{} {}: {} {}\n", task.id, task.title, wait["for"].as_str().unwrap_or_default(), on.join(", "));
+        }
+    }
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} starved]\n{role} has had no ready task for {minutes} min while {} task(s) are open.\n\
+         Blocking:\n{chain}\
+         Give it work, release a held task or change the plan (hgs guide team-lead).",
+        open.len()
+    )
+}
+
+/// Tells the free lead once that a member starves on the plan (C7).
+fn tell_lead_starved(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let member = team.member(member_id).context("unknown member")?.clone();
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &starved_text(team, &member, now()));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let role = team.role_of(member_id);
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else {
+            return Ok(());
+        };
+        found.starved_told = true;
+        let minutes = (((now() - found.starved_since.unwrap_or(now())).max(0.0)) / 60.0).round() as u64;
+        events.push(Event::new("plan_starved", json!({"member":role,"minutes":minutes})));
+        Ok(())
+    })
+}
+
+/// The last lines of a job's output, bounded (C12).
+fn output_tail(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(12)..].join("\n");
+    if tail.is_empty() {
+        "(no output captured; check its session with hgs inspect)".into()
+    } else if tail.chars().count() > 1000 {
+        tail.chars().take(1000).collect::<String>() + "\n[cut]"
+    } else {
+        tail
+    }
+}
+
+/// The message that tells the lead a Background job passed its red time (C12).
+pub(crate) fn budget_text(team: &Team, member: &Member, command: &str, since: f64, now: f64, last_output: &str) -> String {
+    let role = team.role_of(&member.id);
+    let minutes = (((now - since).max(0.0)) / 60.0).round() as u64;
+    let command = if command.is_empty() { "(command not reported)" } else { command };
+    match member.budget.as_ref() {
+        Some(budget) => format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} budget red]\n{role}: \"{}\" expected {} min, red after {} min; {minutes} min now.\n\
+             Command: {command}\nLast output:\n{last_output}\n\
+             Check whether the job hangs or died; a budget never stops it (hgs guide team-lead).",
+            budget.label, budget.minutes, budget.red_minutes
+        ),
+        None => format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} budget red]\n{role}'s Background work has run {minutes} min without a declared budget \
+             (red after {} min).\nCommand: {command}\nLast output:\n{last_output}\n\
+             Check whether the job hangs or died (hgs guide team-lead).",
+            team.settings.background_red_minutes
+        ),
+    }
+}
+
+/// Tells the free lead once that a job is red, with its command and last
+/// output lines (C12).
+fn tell_lead_budget_red(
+    store: &mut Store,
+    team: &Team,
+    member_id: &str,
+    default: bool,
+    command: String,
+    since: f64,
+) -> anyhow::Result<()> {
+    let member = team.member(member_id).context("unknown member")?.clone();
+    let session = member.session.clone().context("the member has no session")?;
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let last_output = last_reply(&session).unwrap_or_default();
+    let start = if since > 0.0 { since } else { member.budget.as_ref().map(|budget| budget.elapsed(now())).map(|elapsed| now() - elapsed).unwrap_or(now()) };
+    let command = if command.is_empty() { member.budget.as_ref().and_then(|budget| budget.job.as_ref()).map(|job| job.command.clone()).unwrap_or_default() } else { command };
+    let text = budget_text(team, &member, &command, start, now(), &output_tail(&last_output));
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let role = team.role_of(member_id);
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else { return Ok(()) };
+        let mut label = String::new();
+        if default {
+            if found.background_told {
+                return Ok(());
+            }
+            found.background_told = true;
+        } else if let Some(budget) = found.budget.as_mut() {
+            if budget.red_told {
+                return Ok(());
+            }
+            budget.red_told = true;
+            label = budget.label.clone();
+        } else {
+            return Ok(());
+        }
+        let minutes = (((now() - start).max(0.0)) / 60.0).round() as u64;
+        events.push(Event::new("budget_red", json!({"member":role,"label":label,"default":default,"minutes":minutes})));
+        Ok(())
+    })
+}
+
 fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     let brief_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -1497,6 +1797,7 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
 fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, expected_reply: &str) -> anyhow::Result<()> {
     change(store, team_id, |team, events| {
         let task = team.task(task_id).context("unknown task")?;
+        anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
         let attempt = task.attempts.last().context("the task has no attempt")?;
         // The gate was checked before the reply was read, which can take up to
         // 45 s: re-check it here, including the reply identity (N1).
@@ -1531,6 +1832,73 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::Inbox => tell_lead_inbox(store, team),
         Step::RemindReport { task } => remind_report(store, team, *task),
+        Step::Starving { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if found.starved_since.is_none() {
+                    found.starved_since = Some(now());
+                    found.starved_told = false;
+                }
+            }
+            Ok(())
+        }),
+        Step::StarvedEnded { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                found.starved_since = None;
+                found.starved_told = false;
+            }
+            Ok(())
+        }),
+        Step::PlanStarved { member } => tell_lead_starved(store, team, member),
+        Step::BackgroundStart { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if found.background_since.is_none() {
+                    found.background_since = Some(now());
+                    found.background_told = false;
+                }
+            }
+            Ok(())
+        }),
+        Step::BackgroundEnd { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                // C12: a budget ends with the job, and one that never met a job
+                // within its minute is dropped.
+                found.background_since = None;
+                found.background_told = false;
+                found.budget = None;
+            }
+            Ok(())
+        }),
+        Step::BudgetTie { member, command, since } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if let Some(budget) = found.budget.as_mut() {
+                    if budget.job.is_none() {
+                        budget.job = Some(JobRef { command: command.clone(), since: *since });
+                    }
+                }
+            }
+            Ok(())
+        }),
+        Step::BudgetAmber { member } => change(store, &team.id, |team, events| {
+            let role = team.role_of(member);
+            let mut told = None;
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if let Some(budget) = found.budget.as_mut() {
+                    if !budget.amber_told {
+                        budget.amber_told = true;
+                        told = Some((budget.label.clone(), budget.minutes, budget.red_minutes));
+                    }
+                }
+            }
+            if let Some((label, minutes, red)) = told {
+                events.push(Event::new(
+                    "budget_amber",
+                    json!({"member":role,"label":label,"minutes":minutes,"red_minutes":red}),
+                ));
+            }
+            Ok(())
+        }),
+        Step::BudgetRed { member } => tell_lead_budget_red(store, team, member, false, String::new(), 0.0),
+        Step::BackgroundRed { member, command, since } => tell_lead_budget_red(store, team, member, true, command.clone(), *since),
         Step::Quiet { member, session, muted, revision } => {
             if !*muted {
                 let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id,"muted":true,"expected_revision":revision});
@@ -1655,6 +2023,19 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             // change lets status derive `stopped` by itself (L3).
             let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
             found.seen = Some(MemberSeen { at: now(), live: *live });
+            Ok(())
+        }),
+        Step::Services { member, services } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                found.services = services
+                    .iter()
+                    .map(|service| MemberService {
+                        name: service.name.clone(),
+                        command: service.command.clone(),
+                        since: service.since,
+                    })
+                    .collect();
+            }
             Ok(())
         }),
         Step::Started { task } => change(store, &team.id, |team, events| {
@@ -2912,6 +3293,143 @@ mod tests {
         let found = steps(&team, &[session("claude/x/lead", "r0", false), dev.clone()], 10.0);
         assert!(found.contains(&Step::HandOut { task: 4, member: "dev".into() }), "{found:?}");
         assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 1, .. })), "{found:?}");
+    }
+
+    #[test]
+    fn a_check_hand_out_names_the_command_and_its_exit_code() {
+        let mut team = team();
+        team.tasks.push(Task {
+            id: 4,
+            title: "Build".into(),
+            assignee: "dev".into(),
+            kind: TaskKind::Check,
+            check: Some(Check { command: "cargo test --locked".into(), expect_exit: 0, timeout_minutes: 30 }),
+            status: TaskStatus::Pending,
+            ..Default::default()
+        });
+        let attempt = Attempt { n: 1, id: "A4".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+        let text = hand_off_text(&team, team.task(4).unwrap(), &attempt, "", "");
+        assert!(text.contains("This is a check task"), "{text}");
+        assert!(text.contains("cargo test --locked") && text.contains("Expected exit code: 0"), "{text}");
+        // The report command carries the check result the member fills in.
+        assert!(text.contains("\"check\":{\"exit\":0"), "{text}");
+        // A plan task's hand-out has no check section.
+        let normal = hand_off_text(&team, team.task(1).unwrap(), &attempt, "", "");
+        assert!(!normal.contains("This is a check task"), "{normal}");
+    }
+
+    #[test]
+    fn a_member_with_no_ready_work_starves_the_plan_and_the_lead_hears_once() {
+        let mut team = team();
+        // All ready work belongs to qa; dev sits idle while tasks are open.
+        for id in [1, 2] {
+            team.task_mut(id).unwrap().assignee = "qa".into();
+        }
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", true);
+        let qa = session("kimi/x/qa", "r2", true);
+        let seen = [lead.clone(), dev.clone(), qa.clone()];
+        // The first idle tick opens the episode.
+        assert!(steps(&team, &seen, 10.0).contains(&Step::Starving { member: "dev".into() }));
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = Some(10.0);
+        // Not before 20 minutes, then once.
+        assert!(!steps(&team, &seen, 10.0 + 20.0 * 60.0 - 1.0).iter().any(|step| matches!(step, Step::PlanStarved { .. })));
+        let late = steps(&team, &seen, 10.0 + 20.0 * 60.0);
+        assert!(late.contains(&Step::PlanStarved { member: "dev".into() }), "{late:?}");
+        let member = team.member("dev").unwrap().clone();
+        let text = starved_text(&team, &member, 10.0 + 20.0 * 60.0);
+        assert!(text.contains("starved") && text.contains("Backend") && text.contains("20 min"), "{text}");
+        assert!(text.contains("#1") && text.contains("hgs guide team-lead"), "{text}");
+        // Told once per episode.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_told = true;
+        assert!(!steps(&team, &seen, 10.0 + 30.0 * 60.0).iter().any(|step| matches!(step, Step::PlanStarved { .. })));
+        // Getting work ends the episode.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_told = false;
+        team.task_mut(2).unwrap().assignee = "dev".into();
+        assert!(steps(&team, &seen, 10.0 + 30.0 * 60.0).contains(&Step::StarvedEnded { member: "dev".into() }));
+        // A busy leader is not starving: it has work.
+        team.task_mut(1).unwrap().assignee = "qa".into();
+        team.task_mut(2).unwrap().assignee = "qa".into();
+        let busy_dev = session("codex/x/dev", "r1", false);
+        assert!(!steps(&team, &[lead, busy_dev, qa], 10.0 + 30.0 * 60.0).iter().any(|step| matches!(step, Step::Starving { .. })));
+    }
+
+    #[test]
+    fn a_declared_budget_ties_to_the_job_and_turns_amber_then_red() {
+        let mut team = team();
+        let lead = session("claude/x/lead", "r0", true);
+        let mut dev = session("codex/x/dev", "r1", true);
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().budget = Some(Budget {
+            label: "install".into(),
+            minutes: 15,
+            red_minutes: 30,
+            declared_at: 100.0,
+            ..Default::default()
+        });
+        // Without Background work the budget waits for its job (up to a minute).
+        let idle = steps(&team, &[lead.clone(), dev.clone()], 110.0);
+        assert!(!idle.iter().any(|step| matches!(step, Step::BudgetRed { .. } | Step::BudgetAmber { .. })), "{idle:?}");
+        // The job appears: the budget is tied to it and the episode starts.
+        dev.background = true;
+        dev.work = Some(SeenWork { command: "npm install".into(), started_at: 140.0 });
+        let tied = steps(&team, &[lead.clone(), dev.clone()], 150.0);
+        assert!(tied.contains(&Step::BackgroundStart { member: "dev".into() }), "{tied:?}");
+        assert!(
+            tied.contains(&Step::BudgetTie { member: "dev".into(), command: "npm install".into(), since: 140.0 }),
+            "{tied:?}"
+        );
+        // Tied and running: amber at 15 minutes, red at 30, once each.
+        let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        member.background_since = Some(140.0);
+        member.budget.as_mut().unwrap().job = Some(JobRef { command: "npm install".into(), since: 140.0 });
+        let amber = steps(&team, &[lead.clone(), dev.clone()], 140.0 + 15.0 * 60.0);
+        assert!(amber.contains(&Step::BudgetAmber { member: "dev".into() }), "{amber:?}");
+        assert!(!amber.iter().any(|step| matches!(step, Step::BudgetRed { .. })));
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().budget.as_mut().unwrap().amber_told = true;
+        let red = steps(&team, &[lead.clone(), dev.clone()], 140.0 + 30.0 * 60.0);
+        assert!(red.contains(&Step::BudgetRed { member: "dev".into() }), "{red:?}");
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().budget.as_mut().unwrap().red_told = true;
+        assert!(!steps(&team, &[lead.clone(), dev.clone()], 140.0 + 40.0 * 60.0).iter().any(|step| matches!(step, Step::BudgetRed { .. })));
+        // The message names the label, the estimate, the command and the output.
+        let member = team.member("dev").unwrap().clone();
+        let text = budget_text(&team, &member, "npm install", 140.0, 140.0 + 34.0 * 60.0, "npm ERR! build failed");
+        assert!(text.contains("install") && text.contains("expected 15 min, red after 30 min"), "{text}");
+        assert!(text.contains("npm install") && text.contains("npm ERR! build failed"), "{text}");
+        // Background work without a budget is red at the default 30 minutes.
+        let mut plain = team.clone();
+        plain.members.iter_mut().find(|member| member.id == "dev").unwrap().budget = None;
+        plain.members.iter_mut().find(|member| member.id == "dev").unwrap().background_since = Some(0.0);
+        let late = steps(&plain, &[lead.clone(), dev.clone()], 31.0 * 60.0);
+        assert!(
+            late.contains(&Step::BackgroundRed { member: "dev".into(), command: "npm install".into(), since: 0.0 }),
+            "{late:?}"
+        );
+        // The job ends: the budget ends with it.
+        dev.background = false;
+        dev.work = None;
+        let ended = steps(&team, &[lead, dev], 140.0 + 41.0 * 60.0);
+        assert!(ended.contains(&Step::BackgroundEnd { member: "dev".into() }), "{ended:?}");
+    }
+
+    #[test]
+    fn mcp_services_are_listed_on_the_member_and_not_background_work() {
+        let listing = json!([{"sessions":[
+            {"name":"codex/x/dev","process_state":"running","activity":"idle","phase":"idle",
+             "process_work":{"count":0,"services":[{"name":"socraticode","command":"node socraticode.js","since":5.0}]}}]}]);
+        let found = seen(&listing);
+        assert_eq!(
+            found[0].services,
+            vec![SeenService { name: "socraticode".into(), command: "node socraticode.js".into(), since: 5.0 }]
+        );
+        // G7: a session that only keeps its MCP server alive is not Background.
+        assert!(!found[0].background && found[0].free);
+        // The member carries its services for status.
+        let team = team();
+        let steps_now = steps(&team, &[session("claude/x/lead", "r0", true), found[0].clone()], 10.0);
+        assert!(
+            steps_now.iter().any(|step| matches!(step, Step::Services { member, services } if member == "dev" && services.len() == 1)),
+            "{steps_now:?}"
+        );
     }
 
     /// The team with a second Backend member, dev2, free and started.

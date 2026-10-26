@@ -76,12 +76,17 @@ never create a worktree. Keep direct-folder launch and explicit custom/existing
 worktree choices available. Destructive UI actions require explicit confirmation.
 
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
-remains in Active and accepts new messages. Native work and explicit attention
-take precedence. A native Stop ends a turn; it does not prove those jobs finished.
-Retain unread reply identity and defer reply-only badges/notifications until the
-work completes. Historical, unknown and offline jobs never establish current work.
-Keep this contract aligned across desktop, Android, shared fixtures and docs;
-changes to these status semantics need explicit owner direction.
+remains in Active and accepts new messages. Its MCP servers and other services
+(from the agent's own config, with their children) live with the session: they
+show as a services icon with names, start times and whether they outlive it,
+never as `Background`, and never count as Background work for the teams'
+capture gate, blocked reminder or time budget. Native work and explicit
+attention take precedence. A native Stop ends a turn; it does not prove those
+jobs finished. Retain unread reply identity and defer reply-only
+badges/notifications until the work completes. Historical, unknown and offline
+jobs never establish current work. Keep this contract aligned across desktop,
+Android, shared fixtures and docs; changes to these status semantics need
+explicit owner direction.
 
 Owner-approved independent-agent waits use `hgs wait`, separately from native
 work. Before handing off work whose acceptance or result you will wait for,

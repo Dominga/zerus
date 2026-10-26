@@ -87,6 +87,26 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     task.title = clean(&task.title, 200, "A task title")?;
     ensure!(!task.title.trim().is_empty(), "Task #{} needs a title", task.id);
     task.description = clean(&task.description, 20_000, "A task description")?;
+    // C5: a check carries its exact command and expected exit code; a plan
+    // task may not hide one.
+    match task.kind {
+        TaskKind::Check => {
+            let check = task
+                .check
+                .as_mut()
+                .with_context(|| format!("Task #{} is a check: add \"check\":{{\"command\":\"...\"}}", task.id))?;
+            check.command = clean(check.command.trim(), 2000, "A check command")?;
+            ensure!(!check.command.is_empty(), "Task #{} is a check: its command is empty", task.id);
+            ensure!(
+                (1..=1440).contains(&check.timeout_minutes),
+                "Task #{}: a check waits 1 to 1440 minutes",
+                task.id
+            );
+        }
+        TaskKind::Task => {
+            ensure!(task.check.is_none(), "Task #{} has a check but no \"kind\":\"check\"", task.id);
+        }
+    }
     for criterion in &mut task.criteria {
         *criterion = clean(criterion, 500, "An acceptance criterion")?;
     }
@@ -270,10 +290,26 @@ fn set_status(team: &mut Team, status: TeamStatus, kind: &'static str, actor: &A
     json!({"status":kind})
 }
 
-fn approve(team: &mut Team, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+/// The owner's sentence the CLI checked for this request (F13): present only
+/// when a `UserPromptSubmit` event of the lead's own session carried it.
+fn verified_word(input: &Value) -> anyhow::Result<Option<OwnerWord>> {
+    match input.get("owner_word_checked") {
+        Some(value) if value.is_object() => {
+            Ok(Some(serde_json::from_value(value.clone()).context("Invalid checked owner word")?))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn approve(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(team.status == TeamStatus::Planning, "Only a plan in Planning can be approved");
-    ensure!(matches!(actor, Actor::Human) || (team.settings.approval == Approval::Auto && actor.is_lead(team)),
-        "You approve this plan in Zerus");
+    let owner_word = verified_word(input)?;
+    ensure!(
+        matches!(actor, Actor::Human)
+            || owner_word.is_some()
+            || (team.settings.approval == Approval::Auto && actor.is_lead(team)),
+        "The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence"
+    );
     ensure!(!team.tasks.is_empty(), "The plan has no tasks");
     let validation = plan::validate(team, offline);
     ensure!(validation.errors.is_empty(), "Fix {} plan error(s) to run: {}", validation.errors.len(),
@@ -285,7 +321,17 @@ fn approve(team: &mut Team, actor: &Actor, offline: &BTreeSet<String>, events: &
             task.status = TaskStatus::Pending;
         }
     }
-    Ok(set_status(team, TeamStatus::Running, "approved", actor, events))
+    let by = actor.label(team);
+    team.status = TeamStatus::Running;
+    // F13: the plan records who approved it and, for the lead, the owner's
+    // exact sentence; the GUI says "Approved by Lead on your word".
+    team.approved_by = by.clone();
+    team.owner_word = owner_word.clone();
+    events.push(Event::new(
+        "approved",
+        json!({"by":by,"owner_word":owner_word,"plan":true}),
+    ));
+    Ok(json!({"status":"approved","by":by,"owner_word":owner_word}))
 }
 
 /// The approval new phases wait for: their own setting, else the plan's.
@@ -426,7 +472,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         }
         team.phases[at].tasks.extend(ids.iter().copied());
         events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids}})));
-        return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":{"errors":[],"warnings":validation.warnings}}));
+        return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation}));
     }
     team.phases.push(Phase {
         n,
@@ -440,20 +486,27 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         added_at: now(),
         decided_by: String::new(),
         decided_at: None,
+        owner_word: None,
         changes: Vec::new(),
     });
     events.push(Event::new(
         "phase_added",
         json!({"by":by,"phase":n,"title":title,"tasks":ids.len(),"barrier":barrier,"approval":approval}),
     ));
-    Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":{"errors":[],"warnings":validation.warnings}}))
+    Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":validation}))
 }
 
 /// Approves a draft phase once every phase before it ended (owner), or discards
 /// it with its tasks (the lead or the owner, F10).
 fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let owner_word = verified_word(input)?;
     if approve {
-        ensure!(matches!(actor, Actor::Human), "You approve a phase in Zerus");
+        // F13: only the owner approves in person; the lead does it on the
+        // owner's exact sentence, checked by the CLI against its session.
+        ensure!(
+            matches!(actor, Actor::Human) || owner_word.is_some(),
+            "The lead approves a phase only on the owner's word: pass \"owner_word\""
+        );
     } else {
         // The lead adds drafts, so it may drop its own; the owner may too (F10).
         ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you discard a phase");
@@ -508,8 +561,13 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         record.state = PhaseState::Approved;
         record.decided_by = label.clone();
         record.decided_at = Some(now());
-        events.push(Event::new("phase_approved", json!({"by":label,"phase":n,"tasks":count})));
-        Ok(json!({"status":"phase_approved","phase":n,"tasks":ids}))
+        // F13: the phase keeps the owner's sentence when the lead opened it.
+        record.owner_word = owner_word.clone();
+        events.push(Event::new(
+            "phase_approved",
+            json!({"by":label,"phase":n,"tasks":count,"owner_word":owner_word}),
+        ));
+        Ok(json!({"status":"phase_approved","phase":n,"tasks":ids,"owner_word":owner_word}))
     } else {
         // F285: a discarded draft leaves no trace in the numbering. The record
         // goes, its Draft tasks go, and the later drafts close the gaps; the
@@ -779,7 +837,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     ensure!(validation.errors.is_empty(), "Fix {} plan error(s) to edit: {}", validation.errors.len(), errors_text(&validation.errors));
     *team = proposed;
     events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":diff})));
-    Ok(json!({"status":"draft_edited","phase":n,"diff":diff,"validation":{"errors":[],"warnings":validation.warnings}}))
+    Ok(json!({"status":"draft_edited","phase":n,"diff":diff,"validation":validation}))
 }
 
 /// F10/F285: moves a draft next to another draft - before or after it - and
@@ -962,8 +1020,14 @@ pub(crate) fn attempt_phase(task: &Task, session_stopped: bool) -> Option<&'stat
 fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let attempt_id = text(input, "attempt");
-    let body = clean(text(input, "text").trim(), 64 * 1024, "A report")?;
-    ensure!(!body.is_empty(), "A report needs text");
+    let mut body = clean(text(input, "text").trim(), 64 * 1024, "A report")?;
+    // C5: a check task reports its exit code and output tail; its text is
+    // optional (Zerus writes the summary) and its decision is the exit code.
+    let check = input.get("check").filter(|value| value.is_object());
+    ensure!(!body.is_empty() || check.is_some(), "A report needs text");
+    let check_task = team.task(id).is_some_and(Task::is_check);
+    ensure!(!check_task || check.is_some(), "A check task's report needs \"check\":{{\"exit\":N,\"tail\":\"...\"}}");
+    ensure!(!check.is_some() || check_task, "Task #{id} is not a check: drop \"check\" from its report");
     let by_member = match actor {
         Actor::Member(member) => member.clone(),
         Actor::Human => String::new(),
@@ -984,10 +1048,26 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         if accept {
             ensure!(member == team_lead, "Task #{id} is not the lead's own task: accept it with hgs team accept");
         }
+        let expected = task.check.clone();
+        let check_result = match (expected.as_ref(), check) {
+            (Some(expected), Some(result)) => {
+                let exit = result["exit"]
+                    .as_i64()
+                    .and_then(|exit| i32::try_from(exit).ok())
+                    .context("A check result names its exit code")?;
+                let tail = clean(result["tail"].as_str().unwrap_or_default().trim(), 20_000, "A check output tail")?;
+                if body.is_empty() {
+                    body = format!("Check `{}`: exit {exit} (expected {})", expected.command, expected.expect_exit);
+                }
+                Some(CheckResult { exit, tail, at: now() })
+            }
+            _ => None,
+        };
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
         attempt.report = Some(Report { text: body, at: now(), ..Default::default() });
         attempt.no_report = false;
+        attempt.check = check_result;
         // The lead hears of a report unless it wrote it.
         attempt.notice = if member == team_lead { Notice::None } else { Notice::Pending };
         task.status = TaskStatus::Submitted;
@@ -999,6 +1079,10 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
             let decided = decide(team, input, actor, true, events)?;
             let status = decided["status"].clone();
             return Ok(json!({"status":status,"task":id,"attempt":n}));
+        }
+        if check.is_some() {
+            // C5: the check decides, without the lead.
+            return decide_check(team, id, n, events);
         }
         return Ok(json!({"status":"submitted","task":id,"attempt":n}));
     }
@@ -1043,6 +1127,80 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     // The refusal is a result, not an error, so its feed entry is kept.
     events.push(Event::new("stale_report", json!({"by":label,"task":id,"attempt":n})));
     Ok(json!({"status":"stale","task":id,"attempt":n}))
+}
+
+/// C5: the exit code decides a check task's report. The lead is not asked; the
+/// expected code accepts, anything else finally rejects, and the feed says
+/// which happened.
+fn decide_check(team: &mut Team, id: u32, n: u32, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let task = team.task_mut(id).context("Unknown task")?;
+    let expected = task.check.clone().context("Task is not a check")?;
+    let exit = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported)
+        .and_then(|attempt| attempt.check.as_ref())
+        .map(|check| check.exit)
+        .context("The check result is missing")?;
+    let title = task.title.clone();
+    if exit == expected.expect_exit {
+        revoke(task, "check passed");
+        task.status = TaskStatus::Accepted;
+        task.decided_by = None;
+        task.decision_reason = format!("check passed: exit {exit}");
+        events.push(Event::new(
+            "check_passed",
+            json!({"task":id,"attempt":n,"exit":exit,"expect":expected.expect_exit,"command":expected.command,"title":title}),
+        ));
+        Ok(json!({"status":"accepted","task":id,"attempt":n,"check":"passed"}))
+    } else {
+        if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
+            attempt.state = AttemptState::Rejected;
+        }
+        revoke(task, "check failed");
+        task.status = TaskStatus::Rejected;
+        task.decided_by = None;
+        task.decision_reason = format!("check failed: exit {exit}, expected {}", expected.expect_exit);
+        events.push(Event::new(
+            "check_failed",
+            json!({"task":id,"attempt":n,"exit":exit,"expect":expected.expect_exit,"command":expected.command,"title":title}),
+        ));
+        Ok(json!({"status":"rejected","task":id,"attempt":n,"check":"failed"}))
+    }
+}
+
+/// C12: a member declares how long its newest Background job should take; the
+/// dispatcher ties the budget to the live job and the lead hears when it is
+/// red. A budget never stops anything.
+fn expect(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+    let Actor::Member(member) = actor else {
+        bail!("Only a team member declares a budget for its own work");
+    };
+    let label = clean(text(input, "label").trim(), 80, "A budget label")?;
+    ensure!(!label.is_empty(), "A budget needs a label");
+    let minutes = input["minutes"]
+        .as_u64()
+        .and_then(|minutes| u32::try_from(minutes).ok())
+        .filter(|minutes| (1..=1440).contains(minutes))
+        .context("A budget is 1 to 1440 minutes")?;
+    let red_minutes = match input["red_minutes"].as_u64() {
+        Some(red) => u32::try_from(red)
+            .ok()
+            .filter(|red| (1..=2880).contains(red))
+            .context("A red time is 1 to 2880 minutes")?,
+        None => minutes.saturating_mul(2),
+    };
+    ensure!(red_minutes >= minutes, "The red time cannot come before the estimate");
+    let role = team.role_of(member);
+    let found = team.members.iter_mut().find(|found| found.id == *member).context("Unknown member")?;
+    found.budget = Some(Budget { label: label.clone(), minutes, red_minutes, declared_at: now(), ..Default::default() });
+    events.push(Event::new(
+        "budget_declared",
+        json!({"member":role,"label":label,"minutes":minutes,"red_minutes":red_minutes}),
+    ));
+    Ok(json!({"status":"expected","label":label,"minutes":minutes,"red_minutes":red_minutes}))
 }
 
 /// The id of the next question of a team: `q1`, `q2`, ... Questions are never
@@ -1345,7 +1503,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "finish" => finish(team, input, actor, events),
-        "approve" => approve(team, actor, offline, events),
+        "approve" => approve(team, input, actor, offline, events),
         "discard" => {
             ensure!(human_or_lead, "Only the lead or you discard a plan");
             ensure!(team.status == TeamStatus::Planning, "Only a plan in Planning can be discarded");
@@ -1395,6 +1553,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "take-over" => take_over(team, input, actor, events),
         "cancel" => cancel(team, input, actor, events),
         "check" => check(team, input, actor, events),
+        "expect" => expect(team, input, actor, events),
         "relaunch" => {
             ensure!(matches!(actor, Actor::Human), "Only you relaunch a member");
             let id = text(input, "member").to_owned();
@@ -1499,7 +1658,7 @@ mod tests {
             &mut events,
         )
         .unwrap();
-        approve(&mut team, &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         team
     }
 
@@ -1532,7 +1691,7 @@ mod tests {
         assert_eq!((team.task(1).unwrap().phase, team.task(2).unwrap().phase, team.task(3).unwrap().phase), (1, 2, 3));
         assert_eq!(events.last().unwrap().payload["phases"], 2);
         // Approving the plan opens phase 1 only; later phases stay Draft.
-        approve(&mut team, &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         assert_eq!(team.task(1).unwrap().status, TaskStatus::Pending);
         assert_eq!((team.task(2).unwrap().status, team.task(3).unwrap().status), (TaskStatus::Draft, TaskStatus::Draft));
     }
@@ -1824,11 +1983,11 @@ mod tests {
             &mut events,
         )
         .unwrap();
-        // The owner approves; the lead may only discard its own draft (F10).
+        // The owner approves in person; the lead needs the owner's exact word (F13).
         let error = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Member("lead".into()), &none, &mut events)
             .unwrap_err()
             .to_string();
-        assert!(error.starts_with("You "), "{error}");
+        assert_eq!(error, "The lead approves a phase only on the owner's word: pass \"owner_word\"");
         // A finished team refuses both.
         for op in ["approve-phase", "discard-phase"] {
             let mut stopped = team.clone();
@@ -2195,8 +2354,8 @@ mod tests {
         let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
         let mut events = Vec::new();
         plan(&mut team, &json!({"tasks":[{"id":1,"title":"A","assignee":"ghost"}]}), &Actor::Human, &mut events).unwrap();
-        assert!(approve(&mut team, &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).is_err());
-        let error = approve(&mut team, &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+        assert!(approve(&mut team, &json!({}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).is_err());
+        let error = approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
         assert!(error.contains("no assignee"), "{error}");
         assert!(plan(&mut team, &json!({"tasks":[{"id":1,"title":"A","assignee":"lead","deps":[{"task":1}]}]}), &Actor::Human, &mut events).is_err());
     }
@@ -2230,7 +2389,7 @@ mod tests {
             &mut events,
         )
         .unwrap();
-        approve(&mut team, &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
         // C1: the lead's task is handed out without a message; its report and
         // its acceptance are one step.
         let attempt = hand_out(&mut team, 1);
@@ -2269,6 +2428,281 @@ mod tests {
         // Without accept the report waits for a decision, as any other.
         let receipt = report(&mut other, &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &mut events).unwrap();
         assert_eq!(receipt["status"], "submitted");
+    }
+
+    #[test]
+    fn a_check_task_is_decided_by_its_exit_code() {
+        let check_team = |command: &str, expect_exit: i32| -> Team {
+            let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+            let mut events = Vec::new();
+            plan(
+                &mut team,
+                &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+                    "tasks":[{"id":1,"title":"Build","assignee":"dev","kind":"check",
+                        "check":{"command":command,"expect_exit":expect_exit,"timeout_minutes":5}}]}),
+                &Actor::Human,
+                &mut events,
+            )
+            .unwrap();
+            approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            team
+        };
+        let mut events = Vec::new();
+        // A check task carries its command, expected exit code and time limit.
+        let mut team = check_team("cargo test --locked", 0);
+        let attempt = hand_out(&mut team, 1);
+        let passed = report(
+            &mut team,
+            &json!({"task":1,"attempt":attempt,"check":{"exit":0,"tail":"test result: ok. 42 passed"}}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((passed["status"].as_str(), passed["check"].as_str()), (Some("accepted"), Some("passed")));
+        let task = team.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::Accepted);
+        assert_eq!(task.decided_by, None);
+        assert_eq!(task.decision_reason, "check passed: exit 0");
+        let check = task.attempts.last().unwrap().check.as_ref().unwrap();
+        assert_eq!((check.exit, check.tail.as_str()), (0, "test result: ok. 42 passed"));
+        assert!(task.attempts.last().unwrap().report.as_ref().unwrap().text.contains("cargo test --locked"));
+        assert_eq!(events.iter().rev().take(2).map(|event| event.kind).collect::<Vec<_>>(), vec!["check_passed", "reported"]);
+        // A wrong exit code rejects the task finally, without the lead.
+        let mut failed_team = check_team("cargo test", 0);
+        let attempt = hand_out(&mut failed_team, 1);
+        let failed = report(
+            &mut failed_team,
+            &json!({"task":1,"attempt":attempt,"check":{"exit":101,"tail":"error: test failed"}}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((failed["status"].as_str(), failed["check"].as_str()), (Some("rejected"), Some("failed")));
+        let task = failed_team.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::Rejected);
+        assert_eq!(task.decision_reason, "check failed: exit 101, expected 0");
+        assert_eq!(task.attempts.last().unwrap().check.as_ref().unwrap().exit, 101);
+        assert_eq!(events.last().unwrap().kind, "check_failed");
+        // Its report is final: a late one is stale.
+        let late = report(
+            &mut failed_team,
+            &json!({"task":1,"attempt":attempt,"check":{"exit":0,"tail":"now green"}}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(late["status"], "stale");
+        // A non-zero expected exit accepts a failing command (a lint check).
+        let mut nonzero = check_team("cargo fmt --check", 1);
+        let attempt = hand_out(&mut nonzero, 1);
+        let passed = report(
+            &mut nonzero,
+            &json!({"task":1,"attempt":attempt,"check":{"exit":1,"tail":"Diff in src/lib.rs"}}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(passed["check"], "passed");
+    }
+
+    #[test]
+    fn a_check_task_needs_a_command_and_kind() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        let mut plan_with = |team: &mut Team, task: Value| {
+            plan(team, &json!({"tasks":[task]}), &Actor::Human, &mut events).map(|_| ())
+        };
+        let missing = plan_with(&mut team, json!({"id":1,"title":"Build","assignee":"dev","kind":"check"})).unwrap_err().to_string();
+        assert!(missing.contains("add \"check\":"), "{missing}");
+        let empty = plan_with(
+            &mut team,
+            json!({"id":1,"title":"Build","assignee":"dev","kind":"check","check":{"command":"  "}}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(empty, "Task #1 is a check: its command is empty");
+        let timeout = plan_with(
+            &mut team,
+            json!({"id":1,"title":"Build","assignee":"dev","kind":"check","check":{"command":"cargo test","timeout_minutes":0}}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(timeout, "Task #1: a check waits 1 to 1440 minutes");
+        let no_kind = plan_with(
+            &mut team,
+            json!({"id":1,"title":"Build","assignee":"dev","check":{"command":"cargo test"}}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(no_kind, "Task #1 has a check but no \"kind\":\"check\"");
+    }
+
+    #[test]
+    fn a_member_declares_a_budget_for_its_background_job() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let receipt = apply(
+            &mut team,
+            "expect",
+            &json!({"label":"install","minutes":15}),
+            &Actor::Member("dev".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((receipt["status"].as_str(), receipt["red_minutes"].as_u64()), (Some("expected"), Some(30)));
+        let budget = team.member("dev").unwrap().budget.clone().unwrap();
+        assert_eq!((budget.label.as_str(), budget.minutes, budget.red_minutes), ("install", 15, 30));
+        assert_eq!(budget.job, None);
+        assert_eq!(events.last().unwrap().kind, "budget_declared");
+        // C12: ok, then amber past the estimate, then red past the red time.
+        assert_eq!(budget.state(budget.declared_at + 14.0 * 60.0), "ok");
+        assert_eq!(budget.state(budget.declared_at + 15.0 * 60.0), "amber");
+        assert_eq!(budget.state(budget.declared_at + 29.0 * 60.0), "amber");
+        assert_eq!(budget.state(budget.declared_at + 30.0 * 60.0), "red");
+        // Only the member declares; bounds are named.
+        let human = apply(&mut team, "expect", &json!({"label":"x","minutes":15}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+        assert_eq!(human, "Only a team member declares a budget for its own work");
+        let zero = apply(&mut team, "expect", &json!({"label":"x","minutes":0}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(zero, "A budget is 1 to 1440 minutes");
+        let red_early = apply(
+            &mut team,
+            "expect",
+            &json!({"label":"x","minutes":15,"red_minutes":10}),
+            &Actor::Member("dev".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(red_early, "The red time cannot come before the estimate");
+        let empty = apply(&mut team, "expect", &json!({"minutes":15}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(empty, "A budget needs a label");
+    }
+
+    #[test]
+    fn the_lead_approves_only_on_the_owners_checked_word() {
+        let (mut team, _) = create(
+            "t",
+            &json!({"name":"T","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
+            &Actor::Member("lead".into()),
+            &mut events,
+        )
+        .unwrap();
+        // F13: without the owner's sentence the lead cannot approve the plan.
+        let refused = approve(&mut team, &json!({}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
+        assert_eq!(refused, "The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence");
+        let word = json!({"text":"plan approved, go ahead","at":1000.0,"event":2});
+        let approved = approve(
+            &mut team,
+            &json!({"owner_word_checked":word}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((approved["status"].as_str(), approved["by"].as_str()), (Some("approved"), Some("Lead")));
+        assert_eq!(team.approved_by, "Lead");
+        assert_eq!(team.owner_word.as_ref().unwrap().text, "plan approved, go ahead");
+        let event = events.iter().rev().find(|event| event.kind == "approved").unwrap();
+        assert_eq!(event.payload["by"], "Lead");
+        assert_eq!(event.payload["owner_word"]["text"], "plan approved, go ahead");
+        // A phase opens the same way: the owner's quote stays on the record.
+        let mut team = running_team();
+        extend(
+            &mut team,
+            &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        for id in [1, 2] {
+            apply(&mut team, "cancel", &json!({"task":id}), &Actor::Human, &none, &mut events).unwrap();
+        }
+        let refused = apply(
+            &mut team,
+            "approve-phase",
+            &json!({"phase":2}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(refused, "The lead approves a phase only on the owner's word: pass \"owner_word\"");
+        let opened = apply(
+            &mut team,
+            "approve-phase",
+            &json!({"phase":2,"owner_word_checked":{"text":"next phase plan approved","at":1000.0,"event":7}}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(opened["status"], "phase_approved");
+        let record = team.phases.iter().find(|phase| phase.n == 2).unwrap();
+        assert_eq!((record.state, record.decided_by.as_str()), (PhaseState::Approved, "Lead"));
+        assert_eq!(record.owner_word.as_ref().unwrap().text, "next phase plan approved");
+        let event = events.iter().rev().find(|event| event.kind == "phase_approved").unwrap();
+        assert_eq!(event.payload["owner_word"]["text"], "next phase plan approved");
+        // The ordering rule (F12) still applies before the word matters.
+        let mut early = running_team();
+        extend(&mut early, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        let blocked = apply(
+            &mut early,
+            "approve-phase",
+            &json!({"phase":2,"owner_word_checked":{"text":"next phase plan approved","at":1000.0,"event":7}}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(blocked, "Phase 2 opens after phase 1 ends");
+    }
+
+    #[test]
+    fn plan_and_extend_carry_the_plan_health() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // C7: the planning lead sees the numbers before asking for approval.
+        let receipt = plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[
+                {"id":1,"title":"API","assignee":"dev"},
+                {"id":2,"title":"Tests","assignee":"dev","deps":[{"task":1}]}]}),
+            &Actor::Member("lead".into()),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(receipt["validation"]["health"]["tasks"], 2);
+        assert_eq!(receipt["validation"]["health"]["critical_path"], 2);
+        assert!(receipt["validation"]["health"]["per_member"].get("dev").is_some());
+        approve(&mut team, &json!({}), &Actor::Human, &none, &mut events).unwrap();
+        let added = extend(
+            &mut team,
+            &json!({"tasks":[{"id":3,"title":"Docs","assignee":"dev"}]}),
+            &Actor::Human,
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(added["validation"]["health"]["tasks"], 3);
+        assert_eq!(added["validation"]["health"]["critical_path"], 2);
     }
 
     #[test]
@@ -2983,6 +3417,6 @@ mod tests {
         let discarded = apply(&mut team, "discard-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert_eq!(discarded["status"], "phase_discarded");
         let error = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
-        assert!(error.starts_with("You "), "{error}");
+        assert_eq!(error, "The lead approves a phase only on the owner's word: pass \"owner_word\"");
     }
 }

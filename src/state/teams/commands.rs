@@ -10,12 +10,12 @@ use super::store::{self, canonical_uuid, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
-    "retry", "check", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
+    "retry", "check", "expect", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -135,7 +135,7 @@ fn pending_phase(team: &Team) -> Option<u32> {
 /// Operations after which new work may be ready for the dispatcher, or a
 /// question or answer waits to be delivered.
 fn starts_worker(op: &str) -> bool {
-    matches!(op, "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release")
+    matches!(op, "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release" | "expect")
 }
 
 /// Whether the attempt's member was last seen stopped: the dispatcher records
@@ -205,12 +205,39 @@ fn left_running(team: &Team, teams: &[Team], sessions: &[super::dispatcher::Seen
 /// The team with its live members when the caller listed sessions (F7).
 fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::Seen]>) -> Value {
     let mut value = serde_json::to_value(team).unwrap_or_default();
-    value["validation"] = json!(plan::validate(team, &BTreeSet::new()));
+    // C7: the plan-health block, with the members starving on the plan now.
+    let now = super::super::now();
+    let mut validation = plan::validate(team, &BTreeSet::new());
+    validation.health.starved = plan::starved(team, now);
+    for starving in &validation.health.starved {
+        validation.health.warnings.push(format!(
+            "starved: {} idle {} min without a ready task; Open: {}",
+            starving.role,
+            starving.minutes,
+            starving.blocking.iter().map(|task| format!("#{task}")).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    value["validation"] = json!(&validation);
+    value["health"] = json!(&validation.health);
     value["layers"] = json!(plan::layers(&team.tasks));
     value["cycle"] = json!(plan::cycle_tasks(&team.tasks));
     value["ready"] = json!(plan::ready(team));
     value["waiting_for_lead"] = json!(waiting_for_lead(team));
     value["pending_phase"] = json!(pending_phase(team));
+    // C5: the plan approval view lists every check command with its expected
+    // exit code, so the owner sees what will run and where.
+    value["checks"] = json!(team
+        .tasks
+        .iter()
+        .filter(|task| task.is_check())
+        .map(|task| {
+            let check = task.check.as_ref();
+            json!({"task":task.id,"title":task.title,
+                "command":check.map(|check| check.command.clone()).unwrap_or_default(),
+                "expect_exit":check.map(|check| check.expect_exit).unwrap_or(0),
+                "timeout_minutes":check.map(|check| check.timeout_minutes).unwrap_or(0)})
+        })
+        .collect::<Vec<_>>());
     // Each task's last attempt carries its derived phase (spec section 2). The
     // dispatcher records each member's last seen liveness, so `stopped` is
     // derived here without a listing of status's own (L3).
@@ -230,11 +257,50 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     }
     // C4: the reports the owner's attention list shows.
     value["attention"] = json!(super::inbox::attention(team, super::super::now()));
+    // F12: a draft that cannot open yet says so plainly; the tooltip data names
+    // the phase before it and that phase's open tasks.
+    if let Some(phases) = value["phases"].as_array_mut() {
+        for (phase, value) in team.phases.iter().zip(phases) {
+            if phase.state != PhaseState::Draft {
+                continue;
+            }
+            let target = phase.order();
+            let mut numbers: Vec<(u32, u32)> =
+                team.phases.iter().map(|other| (other.n, other.order())).filter(|(n, _)| *n != phase.n).collect();
+            numbers.push((1, 1));
+            let Some((previous, _)) = numbers.into_iter().filter(|(_, order)| *order < target).max_by_key(|(_, order)| *order) else {
+                continue;
+            };
+            let drafted = team.phases.iter().any(|other| other.n == previous && other.state == PhaseState::Draft);
+            let open: Vec<u32> =
+                team.tasks.iter().filter(|task| task.phase == previous && !task.status.finished()).map(|task| task.id).collect();
+            if drafted || !open.is_empty() {
+                value["waiting"] = json!({
+                    "text":"Waiting for the previous phase to be ready",
+                    "phase":previous,
+                    "open":open
+                });
+            }
+        }
+    }
     // Each member's queue: its open task first, then the tasks returned to it
     // (A5, spec section 6).
     if let Some(members) = value["members"].as_array_mut() {
         for (member, value) in team.members.iter().zip(members) {
             value["queue"] = json!(member_queue(team, &member.id));
+            // C12: the declared budget, its state and the job it is tied to.
+            if let Some(budget) = &member.budget {
+                let since = budget.job.as_ref().map(|job| job.since).unwrap_or(budget.declared_at);
+                value["budget"] = json!({
+                    "label":budget.label,"minutes":budget.minutes,"red_minutes":budget.red_minutes,
+                    "since":since,"elapsed_minutes":((now - since).max(0.0) / 60.0).round() as u64,
+                    "state":budget.state(now),
+                    "command":budget.job.as_ref().map(|job| job.command.clone()).unwrap_or_default()
+                });
+            }
+            if let Some(since) = member.background_since {
+                value["background_minutes"] = json!(((now - since).max(0.0) / 60.0).round() as u64);
+            }
         }
     }
     // Done and Stopped teams say which of their members still run (F7).
@@ -257,7 +323,8 @@ fn summary(team: &Team) -> Value {
         .filter(|m| m.state != MemberState::Removed)
         .map(|m| {
             json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
-                "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id)})
+                "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
+                "services":m.services})
         })
         .collect();
     let tasks: Vec<Value> = team
@@ -773,6 +840,22 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 // active team; its own folder replaces the planned one (F8).
                 // A retry returns here before any listing (L4).
                 adopt_existing_sessions(&store, request, input, op, &mut filled)?;
+            }
+            if matches!(op, "approve" | "approve-phase") {
+                // F13: the lead approves only on the owner's exact sentence,
+                // typed in the lead's own session; the CLI checks it here and
+                // records the verified quote for the state machine and the feed.
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let caller = actor(&team, op, &filled)?;
+                let auto_plan = op == "approve" && team.settings.approval == Approval::Auto;
+                if matches!(&caller, Actor::Member(member) if *member == team.lead) && !auto_plan {
+                    let word = input
+                        .get("owner_word")
+                        .filter(|word| word.is_object())
+                        .context("The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence")?;
+                    let verified = super::owner_word::verify(&team, word, super::super::now())?;
+                    filled["owner_word_checked"] = serde_json::to_value(&verified)?;
+                }
             }
             let receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = actor(team, op, &filled)?;
@@ -1417,8 +1500,97 @@ mod tests {
     }
 
     #[test]
+    fn the_status_lists_every_check_command() {
+        let mut team = running_team();
+        team.tasks.push(Task {
+            id: 7,
+            title: "Build".into(),
+            assignee: "dev".into(),
+            kind: TaskKind::Check,
+            check: Some(Check { command: "cargo test".into(), expect_exit: 0, timeout_minutes: 15 }),
+            ..Default::default()
+        });
+        let value = view_with(&team, &[], None);
+        assert_eq!(
+            value["checks"],
+            json!([{"task":7,"title":"Build","command":"cargo test","expect_exit":0,"timeout_minutes":15}])
+        );
+        // A plan without checks says so with an empty list.
+        assert_eq!(view_with(&running_team(), &[], None)["checks"], json!([]));
+    }
+
+    #[test]
+    fn status_shows_the_budget_state_on_the_member() {
+        let mut team = running_team();
+        let now = super::super::super::now();
+        let since = now - 40.0 * 60.0;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().budget = Some(Budget {
+            label: "install".into(),
+            minutes: 15,
+            red_minutes: 30,
+            declared_at: since,
+            job: Some(JobRef { command: "npm install".into(), since }),
+            ..Default::default()
+        });
+        let value = view_with(&team, &[], None);
+        let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
+        assert_eq!(dev["budget"]["state"], "red");
+        assert_eq!((dev["budget"]["label"].as_str(), dev["budget"]["elapsed_minutes"].as_u64()), (Some("install"), Some(40)));
+        assert_eq!(dev["budget"]["command"], "npm install");
+        // Amber between the estimate and the red time.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().budget.as_mut().unwrap().job.as_mut().unwrap().since =
+            now - 20.0 * 60.0;
+        let value = view_with(&team, &[], None);
+        let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
+        assert_eq!(dev["budget"]["state"], "amber");
+    }
+
+    #[test]
+    fn a_draft_phase_says_it_waits_for_the_previous_phase() {
+        let mut team = running_team();
+        // Phase 1 still has open tasks, so the draft after it cannot open (F12).
+        team.tasks.push(Task { id: 3, title: "Fix".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
+        team.phases.push(Phase {
+            n: 2,
+            order: 2,
+            title: "Fixes".into(),
+            approval: Approval::Review,
+            state: PhaseState::Draft,
+            tasks: vec![3],
+            ..Default::default()
+        });
+        let value = view_with(&team, &[], None);
+        let phase = &value["phases"][0];
+        assert_eq!(phase["waiting"]["text"], "Waiting for the previous phase to be ready");
+        assert_eq!((phase["waiting"]["phase"].as_u64(), phase["waiting"]["open"].clone()), (Some(1), json!([1])));
+        // Once the previous phase is decided, the draft is simply a draft.
+        team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+        let value = view_with(&team, &[], None);
+        assert!(value["phases"][0].get("waiting").is_none());
+        // A second draft waits for the first draft by its number.
+        team.phases.push(Phase {
+            n: 3,
+            order: 3,
+            title: "Later".into(),
+            approval: Approval::Review,
+            state: PhaseState::Draft,
+            tasks: vec![],
+            ..Default::default()
+        });
+        let value = view_with(&team, &[], None);
+        assert_eq!(value["phases"][1]["waiting"]["phase"], 2);
+        assert_eq!(value["phases"][1]["waiting"]["open"], json!([3]));
+        // The approval refusal stays specific about which phase is in the way.
+        let mut events = Vec::new();
+        let error = ops::apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Phase 3 opens after phase 2 ends");
+    }
+
+    #[test]
     fn the_commands_that_create_work_start_the_worker() {
-        for op in ["approve", "resume", "extend", "approve-phase", "ask", "reply", "release"] {
+        for op in ["approve", "resume", "extend", "approve-phase", "ask", "reply", "release", "expect"] {
             assert!(starts_worker(op), "{op}");
         }
         for op in ["report", "cancel", "finish", "discard-phase", "hold"] {

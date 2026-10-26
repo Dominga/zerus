@@ -4,6 +4,13 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 prefix="${HGS_INSTALL_PREFIX:-$HOME/.local}"
+if [ "${1:-}" = "--connector-only" ]; then
+    if [ "$#" -ne 3 ]; then
+        echo "Usage: install.sh --connector-only BINARY SHA256" >&2
+        exit 2
+    fi
+    exec python3 "$here/scripts/install-mobile-connector-binary.py" "$2" "$3" "$prefix"
+fi
 if command -v cargo >/dev/null 2>&1; then
     cargo_bin="$(command -v cargo)"
 elif [ -x "$HOME/.cargo/bin/cargo" ]; then

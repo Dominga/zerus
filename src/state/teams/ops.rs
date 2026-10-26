@@ -1717,6 +1717,8 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                 match field.as_str() {
                     "name" => team.name = clean(value.as_str().unwrap_or_default().trim(), 80, "A name")?,
                     "goal" => team.goal = clean(value.as_str().unwrap_or_default(), 4000, "A goal")?,
+                    // Spec 3: the protocol addendum is the team's lead protocol.
+                    "addendum" => team.lead_protocol = clean(value.as_str().unwrap_or_default(), 8000, "The lead protocol")?,
                     "settings" => {
                         let settings: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
                         validate_settings(&settings)?;
@@ -1746,7 +1748,7 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                             .collect::<anyhow::Result<Vec<_>>>()?;
                         team.tasks = tasks;
                     }
-                    other => bail!("A draft sets name, goal, settings, members or tasks, not {other}"),
+                    other => bail!("A draft sets name, goal, addendum, settings, members or tasks, not {other}"),
                 }
                 changed.push(field.clone());
             }
@@ -4364,16 +4366,19 @@ mod tests {
         apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"goal":"Ship"}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
         assert_eq!((team.goal.as_str(), team.draft.as_ref().unwrap().revision), ("Ship", 2));
         assert_eq!(team.draft.as_ref().unwrap().unseen, vec!["goal".to_string()]);
+        // Spec 3: the protocol addendum is the team's lead protocol.
+        apply(&mut team, "draft", &json!({"action":"update","revision":2,"set":{"addendum":"Two waves"}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!((team.lead_protocol.as_str(), team.draft.as_ref().unwrap().unseen.len()), ("Two waves", 2));
         // The owner's edit wins over a later lead edit of that field.
-        apply(&mut team, "draft", &json!({"action":"update","revision":2,"set":{"members":[{"id":"dev","role":"Backend","agent":"claude"}]}}), &Actor::Human, &none, &mut events).unwrap();
-        let error = apply(&mut team, "draft", &json!({"action":"update","revision":3,"set":{"members":[{"id":"qa","role":"Tester","agent":"claude"}]}}), &Actor::Member("lead".into()), &none, &mut events)
+        apply(&mut team, "draft", &json!({"action":"update","revision":3,"set":{"members":[{"id":"dev","role":"Backend","agent":"claude"}]}}), &Actor::Human, &none, &mut events).unwrap();
+        let error = apply(&mut team, "draft", &json!({"action":"update","revision":4,"set":{"members":[{"id":"qa","role":"Tester","agent":"claude"}]}}), &Actor::Member("lead".into()), &none, &mut events)
             .unwrap_err()
             .to_string();
         assert_eq!(error, "Owner changed members");
         // A stale revision is refused with the current one, and seen clears it.
         let error = apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"goal":"X"}}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
-        assert!(error.contains("Draft revision is 3 now"), "{error}");
-        let value = apply(&mut team, "draft", &json!({"action":"seen","fields":["goal"]}), &Actor::Human, &none, &mut events).unwrap();
+        assert!(error.contains("Draft revision is 4 now"), "{error}");
+        let value = apply(&mut team, "draft", &json!({"action":"seen","fields":["goal","addendum"]}), &Actor::Human, &none, &mut events).unwrap();
         assert!(value["unseen"].as_array().unwrap().is_empty());
         // Create runs the preflight: an unknown assignee refuses, a good plan creates.
         team.tasks.push(Task { id: 1, title: "A".into(), assignee: "ghost".into(), ..Default::default() });

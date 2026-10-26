@@ -571,6 +571,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private fun watchHistoryHeads(priority:Target?=null) {
+        // Catalog-wide probes yield the serial relay queue to the visible read.
+        // Explicit read-evidence preparation keeps its existing priority path.
+        if(priority==null && selected!=null) return
         if(historyHeadJob?.isActive==true || !readTrackingReady) return
         historyHeadJob=viewModelScope.launch {
             val rows=sessions;val state=readState;val hosts=machines;val workspaces=connections
@@ -596,6 +599,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             // Continue only when this pass selected work; an empty catalog must settle.
             if(priority==null) coroutineContext[Job]?.invokeOnCompletion { cause -> if(cause==null) viewModelScope.launch { watchHistoryHeads() } }
             chosen.forEach { target ->
+                // Navigation may occur while the prior retained probe is in flight.
+                if(priority==null && selected!=null) return@launch
                 val result=runCatching {
                     val page=historyOnce(target,"","",1)
                     if(sessions.none { it.target==target } || historyNetworkReason(target).isNotBlank() ||
@@ -2891,6 +2896,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         flushDrafts()
         if (selected != null) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-back */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.BACK) /* END QUESTION_AVAILABILITY_PROBE writer-back */ }
         else selectedProject = null
+        if(!demo) watchHistoryHeads()
     }
     fun refreshActivity(explicit: Boolean = false) {
         refreshActivity(explicit,freshInspection=false)

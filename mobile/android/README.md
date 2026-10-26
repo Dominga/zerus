@@ -43,7 +43,28 @@ forward secrecy. See the [wire contract](../../services/mobile/crypto/README.md)
 
 Shared protocol fixtures and HTTP tests cover signature/key substitution,
 membership history, exact ciphertext retry and receipt-only recovery. The
-emulator-only `WorkspaceJournalSmokeInstrumentation` separately exercises real
+activity and history reads first poll their retained receipt after 100 ms,
+then at 200 ms through the first eight polls, returning to the ordinary 800 ms
+cadence. The maximum
+poll count remains bounded; a pending receipt never resubmits its request.
+Encrypted receipt HTTP overlaps a fresh signed membership check, but the app
+requires the original protected request and active enrollment before fetching,
+and verifies current membership before decrypting or settling any result.
+
+For a privately signed diagnostic preview, `-PzerusReadTiming=true` enables the
+`ZerusReadTiming` logcat tag. It contains only fixed operation/stage names,
+process-local sequence numbers and monotonic durations. It records no request
+IDs, workspace identities, paths, bodies, keys or error strings. Ordinary builds
+leave it disabled; do not use a diagnostic preview's local measurements as
+evidence of a published version or an end-to-end latency guarantee.
+
+Catalog history-head probes pause while a conversation is selected, so unseen
+chat metadata does not queue ahead of its visible inspection and history. An
+already submitted probe keeps its request identity and may finish; explicit
+read-evidence preparation remains available. Returning to the list resumes the
+bounded fair head scheduler.
+
+The emulator-only `WorkspaceJournalSmokeInstrumentation` separately exercises real
 Keystore/SQLite recovery with private state and ciphertext larger than 2 MiB.
 Compiling its test APK does not qualify that native runtime path; running it
 requires an isolated emulator and separately authorized installation.

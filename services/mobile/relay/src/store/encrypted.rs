@@ -7,10 +7,87 @@ use crate::{
     protocol::{self, MIB},
 };
 use axum::http::StatusCode;
-use zerus_mobile_crypto::{EncryptedEnvelope, Header, PayloadKind, Role as DeviceRole};
+use zerus_mobile_crypto::{
+    EncryptedEnvelope, Header, OperationClass, PayloadKind, Role as DeviceRole,
+};
 
 pub const ENCRYPTED_REQUEST_MAX: usize = 41 * MIB;
 pub const ENCRYPTED_SMALL_MAX: usize = 2 * MIB;
+// Payload caches are separate from the permanent request identity/receipt.
+// Only a phone's accepted Read AND the computer's authenticated Read result
+// qualify. Neither a delivery GET nor a relay hint acknowledges receipt.
+const READ_PAYLOAD_TTL: f64 = 3600.0;
+const CLASS_UNKNOWN: i64 = 0;
+const CLASS_DURABLE: i64 = 1;
+const CLASS_READ: i64 = 2;
+// Distinct from a completed pair: an older worker may still publish a result
+// during a rolling upgrade without updating this newly added column.
+const CLASS_REQUEST_READ: i64 = 3;
+// Conservative legacy adoption: no large request reconstruction, one bounded
+// pair at a time, four candidates per maintenance turn. Larger/invalid legacy
+// pairs keep their original retention. No endpoint payload is decrypted.
+const LEGACY_REQUEST_MAX: usize = 128 * 1024;
+const LEGACY_BATCH: i64 = 4;
+
+fn request_payload_class(h: &Header) -> i64 {
+    if h.operation_class == OperationClass::Read {
+        CLASS_REQUEST_READ
+    } else {
+        CLASS_DURABLE
+    }
+}
+
+fn authenticated_read_pair(
+    row: &Value,
+    request: &str,
+    result: &str,
+    phone: &zerus_mobile_crypto::DevicePublic,
+    computer: &zerus_mobile_crypto::DevicePublic,
+) -> bool {
+    if request.len() > LEGACY_REQUEST_MAX
+        || result.len() > ENCRYPTED_SMALL_MAX - 4096
+        || request.len() as i64 != i(row, "body_bytes")
+        || result.len() as i64 != i(row, "result_bytes")
+        || phone.role != DeviceRole::Phone
+        || computer.role != DeviceRole::Computer
+    {
+        return false;
+    }
+    // These strict structs reject duplicate and unknown fields. Reconstruct
+    // and authenticate the COMPLETE envelopes; a prefix is not a class proof.
+    let (Ok(request), Ok(result)) = (
+        serde_json::from_str::<EncryptedEnvelope>(request),
+        serde_json::from_str::<EncryptedEnvelope>(result),
+    ) else {
+        return false;
+    };
+    let (q, r) = (&request.header, &result.header);
+    if q.kind != PayloadKind::Request
+        || r.kind != PayloadKind::Result
+        || q.operation_class != OperationClass::Read
+        || r.operation_class != OperationClass::Read
+        || q.workspace_id != s(row, "workspace_id")
+        || r.workspace_id != q.workspace_id
+        || q.request_id != s(row, "id")
+        || r.request_id != q.request_id
+        || q.sender_device_id != s(row, "device_id")
+        || r.recipient_device_id != q.sender_device_id
+        || q.recipient_device_id != s(row, "node_id")
+        || r.sender_device_id != q.recipient_device_id
+        || q.gateway_id != s(row, "node_id")
+        || r.gateway_id != q.gateway_id
+        || q.route_id != s(row, "route_id")
+        || r.route_id != q.route_id
+        || q.sender_key_generation != r.recipient_key_generation
+        || q.recipient_key_generation != r.sender_key_generation
+    {
+        return false;
+    }
+    request.digest().is_ok_and(|h| h == s(row, "body_hash"))
+        && result.digest().is_ok_and(|h| h == s(row, "result_hash"))
+        && request.verify_sender(phone).is_ok()
+        && result.verify_sender(computer).is_ok()
+}
 async fn verify(
     t: &mut Tx,
     c: &Credential,
@@ -156,7 +233,7 @@ impl Store {
         if t.exec("UPDATE payload_shards SET payload_bytes=payload_bytes+? WHERE id=? AND payload_bytes+?<=?",args![total,self.db.shard(&c.workspace),total,shard_capacity]).await?==0 {return Err(Error::BUSY);}
         let at = now();
         let expires = (e.expires_at as f64).min(at + self.db.cfg.queue_ttl as f64);
-        t.exec("INSERT INTO encrypted_requests(id,workspace_id,device_id,node_id,route_id,body_hash,body,body_bytes,state,reserved_bytes,created,updated,expires,metadata_bytes) VALUES(?,?,?,?,?,?,'',?,'queued',?,?,?,?,?)",args![id,&c.workspace,&c.id,&e.gateway_id,&e.route_id,hash,encoded.len(),ENCRYPTED_SMALL_MAX,at,at,expires,ENCRYPTED_METADATA_BYTES]).await?;
+        t.exec("INSERT INTO encrypted_requests(id,workspace_id,device_id,node_id,route_id,body_hash,body,body_bytes,state,reserved_bytes,created,updated,expires,metadata_bytes,payload_class) VALUES(?,?,?,?,?,?,'',?,'queued',?,?,?,?,?,?)",args![id,&c.workspace,&c.id,&e.gateway_id,&e.route_id,hash,encoded.len(),ENCRYPTED_SMALL_MAX,at,at,expires,ENCRYPTED_METADATA_BYTES,request_payload_class(e)]).await?;
         for (sequence, chunk) in encoded.as_bytes().chunks(MIB).enumerate() {
             let chunk = std::str::from_utf8(chunk).map_err(|_| Error::BAD)?;
             t.exec(
@@ -235,7 +312,7 @@ impl Store {
         self.authorized_tx(&mut t, c).await?;
         let row = t
             .one(
-                "SELECT id,device_id,route_id,state,result_hash,reserved_bytes,result_bytes FROM encrypted_requests WHERE id=? AND workspace_id=? AND node_id=?",
+                "SELECT id,device_id,route_id,state,result_hash,reserved_bytes,result_bytes,payload_class FROM encrypted_requests WHERE id=? AND workspace_id=? AND node_id=?",
                 args![id, &c.workspace, &c.id],
             )
             .await?
@@ -269,7 +346,17 @@ impl Store {
             return Err(Error::LARGE);
         }
         self.db.bytes(&mut t, &c.workspace, delta).await?;
-        t.exec("UPDATE encrypted_requests SET state='completed',result=?,result_hash=?,result_bytes=?,reserved_bytes=0,updated=?,expires=? WHERE id=?",args![encoded,hash,encoded.len(),now(),now()+self.db.cfg.retention as f64,id]).await?;
+        let payload_class = match i(&row, "payload_class") {
+            CLASS_REQUEST_READ if e.operation_class == OperationClass::Read => CLASS_READ,
+            CLASS_UNKNOWN => CLASS_UNKNOWN,
+            _ => CLASS_DURABLE,
+        };
+        let retention = if payload_class == CLASS_READ {
+            (self.db.cfg.retention as f64).min(READ_PAYLOAD_TTL)
+        } else {
+            self.db.cfg.retention as f64
+        };
+        t.exec("UPDATE encrypted_requests SET state='completed',result=?,result_hash=?,result_bytes=?,reserved_bytes=0,updated=?,expires=?,payload_class=? WHERE id=?",args![encoded,hash,encoded.len(),now(),now()+retention,payload_class,id]).await?;
         t.exec(
             "UPDATE workspace_usage SET active=active-1 WHERE workspace_id=?",
             args![&c.workspace],
@@ -549,6 +636,85 @@ impl Store {
         t.exec("UPDATE computer_routes SET active=0,snapshot=NULL,snapshot_hash=NULL,last_seen=NULL WHERE gateway_id=?",args![id]).await?;
         Ok(())
     }
+    async fn legacy_read_pair(&self, t: &mut Tx, row: &Value) -> Result<bool> {
+        if !(1..=LEGACY_REQUEST_MAX as i64).contains(&i(row, "body_bytes"))
+            || !(1..=(ENCRYPTED_SMALL_MAX - 4096) as i64).contains(&i(row, "result_bytes"))
+        {
+            return Ok(false);
+        }
+        // CASE bounds actual stored strings independently of byte counters.
+        // Bad/missing data is conservative, not a batch-stopping parse error.
+        let Some(encoded) = t.one("SELECT CASE WHEN BYTES(body AS_BYTES)<=? THEN body ELSE NULL END AS body,CASE WHEN BYTES(result AS_BYTES)<=? THEN result ELSE NULL END AS result FROM encrypted_requests WHERE id=?",args![LEGACY_REQUEST_MAX,ENCRYPTED_SMALL_MAX-4096,&row["id"]]).await? else { return Ok(false); };
+        let (Some(body), Some(result)) = (encoded["body"].as_str(), encoded["result"].as_str())
+        else {
+            return Ok(false);
+        };
+        let chunks=t.all("SELECT sequence,CASE WHEN BYTES(body AS_BYTES)<=? THEN body ELSE NULL END AS body FROM encrypted_request_chunks WHERE request_id=? ORDER BY sequence LIMIT 3",args![LEGACY_REQUEST_MAX,&row["id"]]).await?;
+        // A full capped page cannot prove absence of a fourth chunk. Do not
+        // classify it, even when its first three rows form a signed envelope.
+        if chunks.len() == 3 {
+            return Ok(false);
+        }
+        let mut request = body.to_owned();
+        if !request.is_empty() && !chunks.is_empty() {
+            return Ok(false);
+        }
+        for (sequence, chunk) in chunks.iter().enumerate() {
+            let Some(body) = chunk["body"].as_str() else {
+                return Ok(false);
+            };
+            if i(chunk, "sequence") != sequence as i64
+                || body.is_empty()
+                || request.len() + body.len() > i(row, "body_bytes") as usize
+            {
+                return Ok(false);
+            }
+            request.push_str(body);
+        }
+        if request.len() as i64 != i(row, "body_bytes") {
+            return Ok(false);
+        }
+        // Unknown/revoked keys do not acquire a shorter recovery lifetime.
+        let phone = match member(t, s(row, "workspace_id"), s(row, "device_id")).await {
+            Ok(key) => key,
+            Err(error) if error.0 == Error::UNAUTHORIZED.0 => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let computer = match member(t, s(row, "workspace_id"), s(row, "node_id")).await {
+            Ok(key) => key,
+            Err(error) if error.0 == Error::UNAUTHORIZED.0 => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(authenticated_read_pair(
+            row, &request, result, &phone, &computer,
+        ))
+    }
+    async fn adopt_read_payloads(&self) -> Result<()> {
+        // The partial index removes every classified row from this frontier.
+        // No rescan of completed mutation history or unbounded payload fetch.
+        let mut t = self.db.begin().await?;
+        let rows=t.all("SELECT id,workspace_id FROM encrypted_requests WHERE state='completed' AND payload_class IN (0,3) AND result_bytes>0 ORDER BY id LIMIT ?",args![self.db.cfg.maintenance_batch.min(LEGACY_BATCH)]).await?;
+        t.commit().await?;
+        let started = std::time::Instant::now();
+        for (index, row) in rows.into_iter().enumerate() {
+            // Between-item admission, not a claim of preempting a signature
+            // check or an SQL statement. Each admitted pair has fixed caps.
+            if index > 0 && started.elapsed() >= std::time::Duration::from_millis(25) {
+                break;
+            }
+            let mut t = self.db.begin().await?;
+            let w = s(&row, "workspace_id");
+            workspace(&mut t, w).await?;
+            self.db.payload_usage(&mut t, w).await?;
+            if let Some(current)=t.one("SELECT id,workspace_id,device_id,node_id,route_id,body_hash,result_hash,body_bytes,result_bytes,updated,expires FROM encrypted_requests WHERE id=? AND state='completed' AND payload_class IN (0,3) AND result_bytes>0 FOR UPDATE",args![&row["id"]]).await? {
+                let read = self.legacy_read_pair(&mut t, &current).await?;
+                let expires = if read { f(&current, "expires").min(f(&current, "updated") + READ_PAYLOAD_TTL) } else { f(&current, "expires") };
+                t.exec("UPDATE encrypted_requests SET payload_class=?,expires=? WHERE id=? AND state='completed' AND payload_class IN (0,3)",args![if read { CLASS_READ } else { CLASS_DURABLE },expires,&row["id"]]).await?;
+            }
+            t.commit().await?;
+        }
+        Ok(())
+    }
     pub async fn maintain_encrypted(&self) -> Result<()> {
         // Bounded indexed expiry; receipt IDs and hashes are never deleted.
         let mut t = self.db.begin().await?;
@@ -590,6 +756,7 @@ impl Store {
             }
             t.commit().await?;
         }
+        self.adopt_read_payloads().await?;
         Ok(())
     }
 }

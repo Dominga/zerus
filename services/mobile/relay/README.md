@@ -121,6 +121,41 @@ workspace ID or accepts client-selected priority.
 | `GET /v2/events` | Ordered generic hints with `id,computer_id,kind,scope_id,alert_kind,created_at`; phones refresh authenticated private content. |
 | `POST /v2/push`, `DELETE /v2/push` | Existing bounded provider registration/removal and generic wake delivery. |
 
+Encrypted request identities, body/result digests and receipt state remain
+permanent. Their ciphertext payload cache is separate. A completed result has
+a one-hour payload ceiling (or the configured retention when shorter) only
+when both the accepted phone request and the authenticated computer result
+declare the signed visible `Read` class. Mutation, Control and mismatched
+classes retain the configured recovery period (seven days by default). An
+HTTP receipt read is not a receiving-device acknowledgement. No ciphertext is
+decrypted or native operation name exposed to make this decision. The connector
+permanently reserves every identity before native dispatch, and rejects a Read
+class paired with a non-`READS` decrypted operation before dispatch. An expired
+Read result becomes an unavailable payload on the same permanent receipt;
+resubmission of that identity cannot enqueue or execute it again.
+
+Existing encrypted expiry runs before optional legacy adoption, so a deferred
+classification cannot starve queued/claimed expiry or its byte refund.
+Older completed rows start with an unknown payload class. Bounded indexed
+maintenance classifies at most four pairs per turn, admitting another pair
+only within a 25ms between-item budget. This does not preempt an already
+admitted SQL statement or cryptographic check. A legacy request must be at
+most 128KiB and its result below the existing 2MiB envelope ceiling. Complete
+contiguous chunks, strict JSON, both accepted semantic digests, both current
+member signatures/roles, all request/workspace/device/gateway/route bindings,
+key generations and both Read classes must agree. Oversized, malformed,
+missing, revoked/unknown-key or mismatched pairs keep the original retention;
+they leave the adoption frontier as conservative records, without losing any
+payload or identity. Adoption only narrows a proved Read expiry relative to
+its original completion time. Existing transactional expiry performs the
+actual workspace/shard byte refund and leaves permanent metadata charged.
+
+This bounds historical Read-cache accumulation; it does not promise admission
+for an arbitrary burst within one hour. The original per-workspace/shard byte
+limits, 2MiB result reservation, concurrency/class policy and permanent receipt
+count remain in force. It is not durable receiving-client acknowledgement,
+nor evidence that a particular phone request completed or its latency improved.
+
 An optional `complete_route` UUID on `node/signals` declares the entire current
 active signal set for that route (at most 1000). Omitted scopes become inactive
 atomically; reactivation resets delivery even with the same opaque change ID.

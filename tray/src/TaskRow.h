@@ -8,6 +8,7 @@ class QLabel;
 class QToolButton;
 class QHBoxLayout;
 class QVBoxLayout;
+class QMenu;
 
 // The Tasks tab's colours, from design/task-tracker/index.html.
 struct TaskColors {
@@ -28,7 +29,9 @@ struct TaskRowState {
 
 // One task in the list: a fixed-height header with the meta on the left and the
 // stage's action icons on the right (shown on hover), then the text clamped to
-// two lines, and for In review the report or the cancellation.
+// two lines, and for In review the report or the cancellation. Compact inspector
+// cards show only the title and worker, with a menu instead of the action strip;
+// their full report belongs in the selected task's Result section.
 class TaskGlyph;
 class TaskStatusPill;
 
@@ -64,6 +67,7 @@ private:
     // The actions show while the pointer is over the row or the focus is in it.
     void updateActions();
     void layoutText();
+    void rebuildMenu();
     TaskItem m_task;
     TaskRowState m_state;
     TaskColors m_colors;
@@ -74,6 +78,8 @@ private:
     QHBoxLayout *m_headerLayout;
     QVBoxLayout *m_mainLayout;
     QHash<int, QToolButton *> m_buttons;
+    QToolButton *m_more;
+    QMenu *m_menu;
     QPoint m_pressAt;
     bool m_hovered = false, m_pressed = false;
 };

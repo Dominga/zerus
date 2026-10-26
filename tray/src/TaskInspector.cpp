@@ -16,6 +16,7 @@
 #include <QSet>
 #include <QTextDocument>
 #include <QTextBrowser>
+#include <QTabBar>
 #include <QVBoxLayout>
 #include <QtMath>
 #include <algorithm>
@@ -41,7 +42,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     connect(overview, &QPushButton::clicked, this, &TaskInspector::boardRequested);
     header->addWidget(m_scope, 1); header->addWidget(overview); layout->addLayout(header);
     m_only = new QCheckBox(tr("This session")); m_only->setObjectName("taskInspectorOnlySession"); m_only->setChecked(true);
-    connect(m_only, &QCheckBox::toggled, this, &TaskInspector::refresh); layout->addWidget(m_only);
+    connect(m_only, &QCheckBox::toggled, this, &TaskInspector::refresh); header->insertWidget(1, m_only);
     m_filters = new QWidget; auto *filters = new QHBoxLayout(m_filters);
     filters->setContentsMargins(0, 0, 0, 0); filters->setSpacing(4);
     for (const auto &stage : TaskBoard::stages()) {
@@ -61,9 +62,18 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     auto *details = new QVBoxLayout(m_expansion); details->setContentsMargins(10, 4, 10, 12); details->setSpacing(8);
     m_state = new QLabel; m_state->setObjectName("taskInspectorState"); m_state->setWordWrap(true); m_state->setTextFormat(Qt::PlainText);
     details->addWidget(m_state);
+    m_detailTabs = new QTabBar; m_detailTabs->setObjectName("taskDetailTabs"); m_detailTabs->setExpanding(false); m_detailTabs->setDrawBase(false);
+    m_detailTabs->addTab(tr("Description")); m_detailTabs->addTab(tr("Result")); m_detailTabs->addTab(tr("History"));
+    details->addWidget(m_detailTabs);
     m_description = new QTextBrowser; m_description->setObjectName("taskInspectorDetail");
     m_description->setOpenLinks(false); m_description->setOpenExternalLinks(false);
     m_description->setFrameShape(QFrame::NoFrame); details->addWidget(m_description);
+    connect(m_detailTabs, &QTabBar::currentChanged, this, [this] { renderDetail(); });
+    connect(m_description, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
+        if (url == QUrl("hgs-task:older")) { m_historyVisible += 8; renderDetail(); }
+        else if (url == QUrl("hgs-task:attachments") || url == QUrl("hgs-task:history"))
+            if (!m_detail.isEmpty()) m_board->editTask(TaskBoard::item(labels(m_detail)));
+    });
     auto *actions = new QHBoxLayout;
     m_open = new QPushButton(tr("Open Activity")); m_open->setObjectName("taskOpenActivity"); m_open->setAutoDefault(false);
     m_edit = new QPushButton(tr("Edit / actions")); m_edit->setObjectName("taskInspectorEdit"); m_edit->setAutoDefault(false);
@@ -128,7 +138,7 @@ void TaskInspector::selectTask(const QString &uuid) {
         if (task.stage == QLatin1String("done") && QDateTime::currentMSecsSinceEpoch() - task.stageAt > TaskBoard::RecentDoneMs) m_showOlder = true;
         break;
     }
-    if (m_selected != uuid) { m_selected = uuid; ++m_generation; m_detail = {}; }
+    if (m_selected != uuid) { m_selected = uuid; ++m_generation; m_detail = {}; m_historyVisible = 8; m_detailTabs->setCurrentIndex(0); }
     refresh(); fetch();
 }
 
@@ -201,7 +211,8 @@ void TaskInspector::updateFilters() {
 void TaskInspector::updateDetailHeight() {
     if (!m_description) return;
     m_description->document()->setTextWidth(qMax(100, m_description->viewport()->width()));
-    m_description->setFixedHeight(qBound(120, qCeil(m_description->document()->size().height()) + 16, 900));
+    const int maximum = qBound(160, m_scroll->viewport()->height() / 2, 360);
+    m_description->setFixedHeight(qBound(80, qCeil(m_description->document()->size().height()) + 16, maximum));
 }
 
 void TaskInspector::fetch() {
@@ -249,37 +260,45 @@ void TaskInspector::renderDetail() {
         m_state->setText(m_selected.isEmpty() ? tr("No tasks here. Add one on the project board.") : tr("Loading task…"));
         m_description->setProperty("renderedHtml", QVariant()); m_description->clear(); return;
     }
-    m_state->setText(QStringLiteral("%1 · %2").arg(task.id, TaskBoard::stageLabel(task.stage)));
-    const auto colors = TaskColors::of(m_dark);
-    const auto field = [&](const QString &title, const QString &value) {
-        return QStringLiteral("<p><span style='color:%1'>%2</span><br><b>%3</b></p>")
-            .arg(colors.muted.name(), escaped(title), escaped(value));
-    };
-    QString html = field(tr("Assigned to"), task.targetSession.isEmpty() ? tr("Any session") : TaskBoard::sessionLabel(task.targetHost, task.targetSession));
     bool started = false;
     for (const auto &entry : data.value("log").toArray()) {
         const auto kind = entry.toObject().value("kind").toString();
         if (kind == QLatin1String("sent")) started = false;
         else if (kind == QLatin1String("started")) started = true;
     }
+    QString context;
     if (!task.sessionName.isEmpty()) {
-        const QString title = task.stage == QLatin1String("active")
-            ? (started ? tr("Executor") : tr("Dispatched to · start unconfirmed")) : tr("Last executor");
-        html += field(title, TaskBoard::sessionLabel(task.sessionHost, task.sessionName));
-        if (const auto *found = executor()) html += field(tr("Session status"), found->status);
+        const QString worker = TaskBoard::sessionLabel(task.sessionHost, task.sessionName);
+        context = task.stage == QLatin1String("active") && !started ? tr("Dispatched to %1 · start unconfirmed").arg(worker)
+            : task.stage == QLatin1String("active") ? tr("Executor: %1").arg(worker) : tr("Last executor: %1").arg(worker);
+    } else context = tr("Assigned: %1").arg(task.targetSession.isEmpty() ? tr("Any session") : TaskBoard::sessionLabel(task.targetHost, task.targetSession));
+    if (task.stage == QLatin1String("todo")) context += tr(" · #%1 in queue").arg(task.queue);
+    m_state->setText(context); m_state->setToolTip(QStringLiteral("%1 · %2").arg(task.id, TaskBoard::stageLabel(task.stage)));
+    QString html;
+    const auto body = [](const QString &text) { return escaped(text).replace('\n', QStringLiteral("<br>")); };
+    switch (m_detailTabs->currentIndex()) {
+    case 0: {
+        // Task text is untrusted; attachments are opened explicitly.
+        html = body(task.text);
+        const int files = data.value("attachments").toArray().size();
+        if (files) html += QStringLiteral("<p><a href='hgs-task:attachments'>%1</a></p>")
+            .arg(escaped(files == 1 ? tr("1 attachment") : tr("%1 attachments").arg(files)));
+        break;
     }
-    if (task.stage == QLatin1String("todo")) html += field(tr("Project queue position"), tr("#%1 · starts with Send now").arg(task.queue));
-    if (!task.summary.isEmpty()) html += field(tr("Agent report"), task.summary);
-    if (task.cancelledAt) html += field(tr("Cancelled"), task.cancelReason);
-    html += QStringLiteral("<h3>%1</h3>").arg(escaped(tr("Description")));
-    // Task markdown is untrusted. Do not load remote images from this preview.
-    html += QStringLiteral("<div>%1</div>").arg(escaped(task.text).replace('\n', QStringLiteral("<br>")));
-    const int files = data.value("attachments").toArray().size();
-    if (files) html += field(tr("Attachments"), tr("%1 · open Edit / actions to view").arg(files == 1 ? tr("1 file") : tr("%1 files").arg(files)));
-    html += QStringLiteral("<h3>%1</h3>").arg(escaped(tr("History")));
-    const auto log = data.value("log").toArray();
-    if (data.value("log_total").toInt() > VisibleHistory) html += QStringLiteral("<p>%1</p>").arg(escaped(tr("Latest %1 events; full history in Edit / actions.").arg(VisibleHistory)));
-    for (int i = qMax(0, int(log.size()) - VisibleHistory); i < log.size(); ++i) html += taskHistoryLine(log.at(i).toObject());
+    case 1:
+        html = task.cancelledAt ? QStringLiteral("<b>%1</b><p>%2</p>").arg(escaped(tr("Cancelled")), body(task.cancelReason))
+            : task.summary.isEmpty() ? escaped(tr("No result reported yet.")) : body(task.summary);
+        break;
+    case 2: {
+        const auto log = data.value("log").toArray(); const int first = qMax(0, int(log.size()) - m_historyVisible);
+        if (first > 0) html += QStringLiteral("<p><a href='hgs-task:older'>%1</a></p>").arg(escaped(tr("Earlier events (%1)").arg(first)));
+        else if (data.value("log_total").toInt() > VisibleHistory)
+            html += QStringLiteral("<p><a href='hgs-task:history'>%1</a></p>").arg(escaped(tr("Full history…")));
+        for (int i = first; i < log.size(); ++i) html += taskHistoryLine(log.at(i).toObject());
+        if (log.isEmpty()) html += escaped(tr("No history yet."));
+        break;
+    }
+    }
     // Avoid replacing a document on unchanged polls: preserve selection and scroll.
     if (m_description->property("renderedHtml").toString() == html) return;
     const int scroll = m_description->verticalScrollBar()->value();
@@ -293,7 +312,10 @@ void TaskInspector::setTheme(bool dark) {
     setWorkspaceStyle(this, QStringLiteral("#taskInspector{background:%2;color:%1;}"
         "#taskInspector QLabel,#taskInspector QCheckBox{color:%1;}"
         "QScrollArea,#taskInspectorCards{background:%2;border:0;}QTextBrowser{background:transparent;color:%1;border:0;}"
-        "#taskInlineDetails{background:%2;border:1px solid %3;border-radius:8px;}")
-        .arg(colors.fg.name(), colors.surface.name(), colors.border.name()) + workspaceScrollbars(dark));
+        "#taskInlineDetails{background:%2;border:1px solid %3;border-radius:8px;}"
+        "#taskInspectorState{color:%4;font-size:11px;}"
+        "#taskDetailTabs::tab{color:%4;padding:5px 8px;border:0;border-bottom:2px solid transparent;}"
+        "#taskDetailTabs::tab:selected{color:%1;border-bottom-color:%5;}")
+        .arg(colors.fg.name(), colors.surface.name(), colors.border.name(), colors.muted.name(), colors.accent.name()) + workspaceScrollbars(dark));
     refresh();
 }

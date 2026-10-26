@@ -18,6 +18,12 @@ conversation uses the central Activity
 renderer and composer, with an explicit task context. Do not put another full
 conversation inside a narrow inspector or require a modal task window to work.
 
+Owner density correction, 2026-10-26: collapsed cards must remain short regardless
+of report length. Show a two-line title and one worker/identity line, with actions
+in a compact menu. Full reports are not list previews. The selected card reveals
+Description, Result or History individually; do not concatenate them into one
+long document or tint every card broadly because one session owns them.
+
 The project-wide task list remains useful for planning and review. It becomes
 an optional overview; it must not replace Activity during execution.
 

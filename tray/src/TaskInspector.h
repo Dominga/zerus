@@ -10,6 +10,7 @@ class QTextBrowser;
 class QScrollArea;
 class QVBoxLayout;
 class TaskTile;
+class QTabBar;
 
 // Session tasks beside Activity. Shares the board's listing, but fetches only
 // the selected task's history. It never infers task execution from native work.
@@ -54,6 +55,8 @@ private:
     QPushButton *m_older;
     QTextBrowser *m_description;
     QPushButton *m_open, *m_edit;
+    QTabBar *m_detailTabs;
     bool m_dark = true;
     bool m_showOlder = false;
+    int m_historyVisible = 8;
 };

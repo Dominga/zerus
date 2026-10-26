@@ -2524,6 +2524,12 @@ as the project board. Stage labels appear when the panel is wide enough; narrow
 filters keep their icons, counts, tooltips and accessible names. Clicking a card
 expands its details directly underneath it, inside the board; click again to
 collapse. Card actions use the same guarded commands as the project board.
+Collapsed inspector cards show a short title and worker; their action menu keeps
+the controls within one compact row. Full reports and cancellations appear only
+after opening a task. Its **Description**, **Result** and **History** sections are
+separate, with only the selected section visible. History opens with eight recent
+events and offers earlier entries explicitly. Owner highlighting stays subtle;
+the selected task has the accent outline.
 It retains at most 100 listed tasks and 80 selected-task history entries; the full
 history is available through **Edit / actions**.
 **Assigned to** identifies routing; **Executor** requires a recorded start.

@@ -10,6 +10,8 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 #include <QTextBrowser>
+#include <QTabBar>
+#include <QMenu>
 #include <QAbstractButton>
 #include <QDateTime>
 #include <QLabel>
@@ -68,6 +70,7 @@ private slots:
     void inspectorShowsReportsAndBoundsItsTaskList();
     void inspectorDiscardsHistoryAfterLeavingTheProject();
     void inspectorBoardFiltersAdaptAndDetailsExpandUnderTheCard();
+    void sixLongReviewTasksStayCompactAndRevealOneDetailSection();
 };
 
 void TestTasksView::inspectorFollowsExecutorIdentityAcrossRename() {
@@ -83,8 +86,9 @@ void TestTasksView::inspectorFollowsExecutorIdentityAcrossRename() {
     inspector.setContext("project-1", "", "codex/new", known);
     QTRY_COMPARE(inspector.displayedCount(), 1); inspector.selectTask("uuid-1");
     auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
-    QTRY_VERIFY(detail->toPlainText().contains("Executor"));
-    QVERIFY(detail->toPlainText().contains("new")); QVERIFY(!detail->toPlainText().contains("old"));
+    auto *context = inspector.findChild<QLabel *>("taskInspectorState");
+    QTRY_VERIFY(context->text().contains("Executor"));
+    QVERIFY(context->text().contains("new")); QVERIFY(!context->text().contains("old"));
     QSignalSpy opened(&inspector, &TaskInspector::executorRequested);
     inspector.findChild<QPushButton *>("taskOpenActivity")->click(); QCOMPARE(opened.size(), 1);
     QCOMPARE(opened.first().at(1).toString(), QString("codex/new"));
@@ -112,17 +116,79 @@ void TestTasksView::inspectorShowsReportsAndBoundsItsTaskList() {
     QTRY_COMPARE(inspector.displayedCount(), 1);
     inspector.selectTask("uuid-1");
     auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
-    QTRY_VERIFY(detail->toPlainText().contains("Committed <abc123>; installation pending."));
-    QVERIFY(detail->toPlainText().contains("Keep <script> literal")); QVERIFY(detail->toPlainText().contains("Please keep the history."));
+    QTRY_VERIFY(detail->toPlainText().contains("Keep <script> literal"));
+    QVERIFY(!detail->toPlainText().contains("Committed <abc123>"));
+    auto *sections = inspector.findChild<QTabBar *>("taskDetailTabs"); sections->setCurrentIndex(1);
+    QVERIFY(detail->toPlainText().contains("Committed <abc123>; installation pending."));
+    QVERIFY(!detail->toPlainText().contains("Keep <script> literal"));
+    sections->setCurrentIndex(2); QVERIFY(detail->toPlainText().contains("Please keep the history."));
     inspector.selectTask("uuid-2");
-    QTRY_VERIFY(detail->toPlainText().contains("start unconfirmed"));
+    QTRY_VERIFY(inspector.findChild<QLabel *>("taskInspectorState")->text().contains("start unconfirmed"));
     inspector.selectTask("uuid-3");
-    QTRY_VERIFY(detail->toPlainText().contains("#1 · starts with Send now"));
+    QTRY_VERIFY(inspector.findChild<QLabel *>("taskInspectorState")->text().contains("#1 in queue"));
     QCOMPARE(inspector.displayedCount(), 100);
     QVERIFY(inspector.findChild<QLabel *>("taskInspectorScope")->text().contains("100 of 122"));
     inspector.selectTask("uuid-124");
     QTRY_VERIFY(detail->toPlainText().contains("Task 124")); QCOMPARE(inspector.displayedCount(), 100);
     for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.at(1) == "list" || call.at(1) == "get");
+}
+
+void TestTasksView::sixLongReviewTasksStayCompactAndRevealOneDetailSection() {
+    QJsonArray live;
+    if (const auto path = qEnvironmentVariable("HGS_TASK_DENSITY_DATA"); !path.isEmpty()) {
+        QFile file(path); QVERIFY(file.open(QIODevice::ReadOnly)); live = QJsonDocument::fromJson(file.readAll()).object().value("tasks").toArray();
+    }
+    QJsonArray tasks;
+    for (int n = 1; n <= 6; ++n) {
+        const QString prompt = QString("Task %1: make task ownership clear while working in Activity. ").arg(n).repeated(8);
+        const QString report = QString("REPORT_BODY_%1: implemented the change, checked the behavior, and recorded the remaining work. ").arg(n).repeated(30);
+        auto task = FakeTasksCli::task(n, "review", {{"text", prompt}, {"summary", report}, {"session", FakeTasksCli::pinned("codex/api")},
+            {"log", QJsonArray{QJsonObject{{"kind", "comment"}, {"actor", QJsonObject{{"kind", "person"}}}, {"at", 1}, {"text", "HISTORY_BODY: please verify the result."}}}}});
+        if (n <= live.size()) {
+            const auto actual = live.at(n - 1).toObject(); task["text"] = actual.value("text"); task["summary"] = actual.value("summary");
+        }
+        tasks.append(task);
+    }
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), tasks));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(560, 900); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions());
+    QTRY_COMPARE(inspector.displayedCount(), 6);
+    auto *scroll = inspector.findChild<QScrollArea *>("taskInspectorList");
+    auto *last = inspector.findChild<TaskRow *>("taskInspectorRow:T-000006"); QVERIFY(last);
+    for (const int width : {560, 380}) {
+        inspector.resize(width, 760); QTest::qWait(30);
+        for (auto *row : inspector.findChildren<TaskRow *>()) {
+            QVERIFY2(row->height() <= 88, qPrintable(QString("Collapsed task height %1 at width %2").arg(row->height()).arg(width)));
+            QVERIFY(!row->findChild<QLabel *>("taskSummary")->isVisibleTo(row));
+            QVERIFY(row->findChild<QLabel *>("taskSummary")->text().isEmpty());
+        }
+        QVERIFY(last->y() + last->height() <= scroll->viewport()->height());
+    }
+    const auto preview = qEnvironmentVariable("HGS_TASK_DENSITY_PREVIEW");
+    if (!preview.isEmpty()) for (const bool dark : {true, false}) {
+        inspector.setTheme(dark); inspector.resize(560, 900); QTest::qWait(50);
+        QVERIFY(inspector.grab().save(preview + (dark ? "-dark.png" : "-light.png")));
+    }
+    inspector.selectTask("uuid-1");
+    auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
+    auto *sections = inspector.findChild<QTabBar *>("taskDetailTabs");
+    QTRY_VERIFY(!detail->toPlainText().isEmpty());
+    QCOMPARE(sections->currentIndex(), 0); QVERIFY(!detail->toPlainText().contains("REPORT_BODY_1"));
+    QVERIFY(!detail->toPlainText().contains("HISTORY_BODY"));
+    sections->setCurrentIndex(1); QCOMPARE(detail->toPlainText(), tasks.first().toObject().value("summary").toString());
+    QVERIFY(detail->height() <= 360);
+    sections->setCurrentIndex(2); QVERIFY(detail->toPlainText().contains("HISTORY_BODY"));
+    if (!preview.isEmpty()) {
+        inspector.setTheme(true); sections->setCurrentIndex(1); QTest::qWait(50);
+        QVERIFY(inspector.grab().save(preview + "-result.png"));
+    }
+    auto *first = inspector.findChild<TaskRow *>("taskInspectorRow:T-000001");
+    auto *more = first->findChild<QToolButton *>("taskMoreActions"); QVERIFY(more->isVisibleTo(first));
+    auto *accept = more->menu()->findChild<QAction *>("taskMenuAction:accept"); QVERIFY(accept && accept->isEnabled());
+    accept->trigger();
+    QTRY_COMPARE(inspector.findChild<QAbstractButton *>("taskTile:done")->property("count").toInt(), 1);
 }
 
 void TestTasksView::inspectorDiscardsHistoryAfterLeavingTheProject() {

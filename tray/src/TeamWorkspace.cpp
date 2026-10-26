@@ -1071,22 +1071,28 @@ QWidget *TeamWorkspace::members(const Team &team)
             answerRow->addWidget(reasonEdit, 1);
             auto *deny = button(tr("Deny"), "teamMemberPermissionDeny"); deny->setProperty("danger", true);
             auto *allow = button(tr("Allow"), "teamMemberPermissionAllow", true);
-            const bool answerable = !m.permission.id.isEmpty() && !m.permission.hash.isEmpty();
+            // C4: the answer must carry the card's own question id and option
+            // ids (question.answer); without them the card cannot answer.
+            const bool hasHash = !m.permission.id.isEmpty() && !m.permission.hash.isEmpty();
+            const bool answerable = hasHash && m.permission.native.known;
             allow->setEnabled(answerable); deny->setEnabled(answerable);
             if (!answerable) {
-                const auto tip = tr("This hgs sends no question hash in status; answer it in the session.");
+                const auto tip = hasHash
+                    ? tr("This hgs sends no answer ids for the question; answer it in the session.")
+                    : tr("This hgs sends no question hash in status; answer it in the session.");
                 allow->setToolTip(tip); deny->setToolTip(tip); reasonEdit->setToolTip(tip);
             }
-            const auto decide = [this, member = m.id, question = m.permission.id, hash = m.permission.hash](const QString &decision, const QString &text) {
+            const auto decide = [this, member = m.id, question = m.permission.id, hash = m.permission.hash,
+                                 answer = m.permission.native](bool allowIt, const QString &text) {
                 m_panel->act("answer", {{"member", member}, {"question_id", question}, {"expected_question_hash", hash},
-                                        {"answers", QJsonArray{QJsonObject{{"question_id", "decision"},
-                                                                           {"selected_option_ids", QJsonArray{decision}},
+                                        {"answers", QJsonArray{QJsonObject{{"question_id", answer.questionId},
+                                                                           {"selected_option_ids", QJsonArray{allowIt ? answer.allow : answer.deny}},
                                                                            {"text", text}}}}});
             };
             QObject::connect(deny, &QPushButton::clicked, this, [reasonEdit, decide] {
-                decide(QStringLiteral("deny"), reasonEdit->text().trimmed());
+                decide(false, reasonEdit->text().trimmed());
             });
-            QObject::connect(allow, &QPushButton::clicked, this, [decide] { decide(QStringLiteral("allow"), QString()); });
+            QObject::connect(allow, &QPushButton::clicked, this, [decide] { decide(true, QString()); });
             answerRow->addWidget(deny); answerRow->addWidget(allow);
             pv->addLayout(answerRow);
             col->addWidget(box);

@@ -205,6 +205,15 @@ Team parse(const QJsonObject &v)
             member.permission.reason = str(q, "reason");
             member.permission.at = q.value("asked_at").toDouble();
             member.permission.hash = q.value("question_hash").toString(q.value("expected_question_hash").toString());
+            // C4: the card's own ids for Allow and Deny.
+            if (q.value("answer").isObject()) {
+                const auto a = q.value("answer").toObject();
+                member.permission.native.questionId = str(a, "question_id");
+                member.permission.native.allow = str(a, "allow");
+                member.permission.native.deny = str(a, "deny");
+                member.permission.native.known = !member.permission.native.questionId.isEmpty()
+                    && !member.permission.native.allow.isEmpty() && !member.permission.native.deny.isEmpty();
+            }
         }
         for (const auto &value : m.value("permission_answers").toArray()) {
             const auto a = value.toObject();

@@ -399,6 +399,21 @@ void TestTeams::permissionRequestFromTheMemberAndItsAnswer()
     QVERIFY(member->permissionAnswers[0].denied());
     QCOMPARE(member->permissionAnswers[0].by, QStringLiteral("lead"));
     QCOMPARE(member->permissionAnswers[0].reason, QStringLiteral("not now"));
+    // C4: the card's own answer ids, as status sends them in question.answer.
+    auto answered = team;
+    auto answeredMembers = answered["members"].toArray();
+    auto answeredMember = answeredMembers[1].toObject();
+    answeredMember["question"] = QJsonObject{{"question_id", "deepseek-approval:9c1d"}, {"question_hash", "9c1d"},
+        {"tool", "Terminal"}, {"command", "make test"}, {"command_source", "tool_input"}, {"reason", "run the suite"},
+        {"asked_at", 1792868400.0},
+        {"answer", QJsonObject{{"question_id", "decision"}, {"allow", "allow"}, {"deny", "deny"}}}};
+    answeredMembers[1] = answeredMember; answered["members"] = answeredMembers;
+    const auto *answeredParsed = parse(answered).member("backend");
+    QVERIFY(answeredParsed);
+    QVERIFY(answeredParsed->permission.native.known);
+    QCOMPARE(answeredParsed->permission.native.questionId, QStringLiteral("decision"));
+    QCOMPARE(answeredParsed->permission.native.allow, QStringLiteral("allow"));
+    QCOMPARE(answeredParsed->permission.native.deny, QStringLiteral("deny"));
     const auto *check = parsed.task(4);
     QVERIFY(check && check->isCheck());
     QCOMPARE(check->check.command, QStringLiteral("cargo test --locked --bin hgs teams"));

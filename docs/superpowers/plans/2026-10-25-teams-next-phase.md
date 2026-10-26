@@ -689,16 +689,19 @@ answered; a denial cannot carry an explanation.
 
 - **U21. Command templates instead of escalations (owner, 2026-10-27).** 133
   sandbox escalations in 6 hours: 124 routine (46 git commit/merge, 78 Qt
-  build/test), 9 needing judgment (all 5 denials). Owner-approved templates with
-  typed, allowlisted arguments that Zerus runs outside the sandbox in the
-  member's folder (hgs team run); clones for DeepSeek members remove the git
-  escalations. Expected: about 9 requests instead of 133. No automatic approval
-  of native prompts. Owner: yes, in the fixes phase.
+  build/test), 9 needing judgment (all 5 denials). A built-in template set,
+  shipped with Zerus and on for every team (no approval per plan; a global
+  switch turns it off, projects may add templates): typed, allowlisted
+  arguments, run by Zerus outside the sandbox in the member's folder (hgs team
+  run); clones for DeepSeek members remove the git escalations. Expected: about
+  9 requests instead of 133. No automatic approval of native prompts.
+  Owner: yes, in the fixes phase.
 
 - **U22. DeepSeek session-log upload (found 2026-10-27).** 18 of 21 dsh sessions
-  upload their transcripts to DeepSeek (session-log-deepseek). Zerus launches
-  its dsh sessions with it off, verifies it, and warns the owner otherwise.
-  Owner: to be confirmed.
+  upload their transcripts to DeepSeek (session-log-deepseek). Settings >
+  Sessions 'Block DeepSeek session-log upload', on by default: Zerus starts its
+  dsh sessions with it off, verifies it and marks a session that still
+  uploads. Owner: yes, in the fixes phase.
 
 ## Order of work (proposal)
 

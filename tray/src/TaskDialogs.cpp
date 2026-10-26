@@ -9,6 +9,7 @@
 #include "AttachmentViewer.h"
 #include "LocalFile.h"
 #include "TaskContent.h"
+#include "MessageComposer.h"
 #include <QFileDialog>
 #include <QMimeData>
 #include <QMimeDatabase>
@@ -118,10 +119,51 @@ TaskForm::TaskForm(const QJsonObject &task, const QList<TaskSession> &sessions, 
     setObjectName("taskForm");
     m_editable = m_task.writable && (m_task.stage == QLatin1String("todo") || m_task.stage == QLatin1String("backlog"));
     setWindowTitle((m_editable ? tr("Edit task %1") : tr("Task details · %1")).arg(m_task.id));
-    m_target = {m_task.targetSession.isEmpty(), m_task.targetHost, m_task.targetSession, m_task.targetId};
+    m_target = {m_task.targetSession.isEmpty(), m_task.targetHost, m_task.targetSession, m_task.targetId, m_task.targetKind == "subagent" || m_task.targetKind == "new_session" ? m_task.targetKind : QString()};
     const auto colors = TaskColors::of(dark);
     auto *layout = new QVBoxLayout(this); layout->setSpacing(6);
     if (compact) layout->setContentsMargins(0, 0, 0, 0);
+    if (compact) {
+        m_originalAttachments = task.value("attachments").toArray();
+        m_composer = new MessageComposer; m_composer->setObjectName("taskDescriptionComposer");
+        m_composer->setTaskMode(true); m_composer->setTheme(dark); m_composer->setContentScale(ContentScale::factor());
+        m_composer->setSendLabel(tr("Save description")); m_composer->setPlaceholder(tr("Task description…"));
+        m_prompt = m_composer->editor(); m_prompt->setObjectName("taskPrompt");
+        const auto key = QStringLiteral("task-description\n%1\n%2").arg(task.value("project").toString(), m_task.uuid);
+        const auto seed = [this, key] {
+            if (m_composer->isDraftLoading(key) || m_mediaBusy) return;
+            m_composer->offerDraft(key, m_task.text, m_originalFiles);
+            m_composer->setDraftLabel(tr("Description · %1").arg(m_task.id));
+            m_composer->setAvailability(m_editable, m_editable ? QString() : tr("Description can be edited in To do or Backlog"));
+            m_composer->setSessionStatus(m_editable ? QString() : tr("Description can be edited in To do or Backlog"), false, !m_editable);
+        };
+        connect(m_composer, &MessageComposer::draftLoaded, this, [seed](const QString &) { seed(); });
+        m_composer->setSessionKey(key);
+        m_mediaBusy = !m_originalAttachments.isEmpty();
+        if (m_mediaBusy) AttachmentFiles::runAsync<QList<MessageAttachment>>(this, [files = m_originalAttachments] { return TaskContent::decode(files); },
+            [this, seed](const QList<MessageAttachment> &files) {
+                m_mediaBusy = false; m_originalFiles = files;
+                if (files.size() != m_originalAttachments.size()) { m_mediaBusy = true; setError(tr("The task attachments could not be read.")); return; }
+                seed();
+            });
+        else seed();
+        connect(m_composer, &MessageComposer::sendRequested, this, [this](const QString &key, const QString &text, const QList<MessageAttachment> &files) {
+            m_composer->prepareSendingAsync(key, false, [this, text, files](bool ready) {
+                if (!ready) return;
+                m_busy = true;
+                TaskEdits change; if (text != m_task.text) change.text = text;
+                AttachmentFiles::runAsync<QJsonArray>(this, [files] { return TaskContent::encode(files); }, [this, change](const QJsonArray &encoded) mutable {
+                    if (encoded != m_originalAttachments) change.attachments = encoded;
+                    emit saveRequested(change);
+                });
+            });
+        });
+        layout->addWidget(m_composer, 1);
+        auto *close = new QPushButton(tr("Close editor")); close->setObjectName("discardTaskEdits"); close->setAutoDefault(false);
+        close->setToolTip(tr("Keep this draft locally and return to the description"));
+        connect(close, &QPushButton::clicked, this, &TaskForm::dismissRequested); layout->addWidget(close, 0, Qt::AlignRight);
+        m_error = errorLabel("taskDialogError"); layout->addWidget(m_error); return;
+    }
     auto *header = new QHBoxLayout; header->setSpacing(10);
     auto *stage = new QLabel(TaskBoard::stageLabel(m_task.stage)); stage->setObjectName("taskDialogStage");
     stage->setStyleSheet(QStringLiteral("color:%1;border:1px solid %1;border-radius:9px;padding:1px 8px;font-size:11px;font-weight:600;")
@@ -279,6 +321,7 @@ TaskTarget TaskForm::chosenTarget() const {
 }
 
 void TaskForm::refreshButtons() {
+    if (m_composer) return;
     const bool empty = m_editable && m_prompt->toPlainText().trimmed().isEmpty();
     for (auto *button : findChildren<QPushButton *>()) {
         QString why, label;
@@ -305,6 +348,12 @@ void TaskForm::refreshButtons() {
 TaskEdits TaskForm::edits() const {
     TaskEdits edits;
     if (!m_editable) return edits;
+    if (m_composer) {
+        const auto draft = m_composer->draftSnapshot();
+        if (draft.text != m_task.text) edits.text = draft.text;
+        const auto files = TaskContent::encode(draft.attachments); if (files != m_originalAttachments) edits.attachments = files;
+        return edits;
+    }
     if (const QString text = m_prompt->toPlainText(); text != m_task.text && !text.trimmed().isEmpty()) edits.text = text;
     if (const auto chosen = chosenTarget(); !(chosen == m_target)) edits.target = chosen;
     const auto files = TaskContent::encode(m_attachments);
@@ -417,6 +466,7 @@ void TaskForm::refreshAttachments() {
 }
 
 void TaskForm::setHistory(const QJsonArray &log) {
+    if (m_composer) return;
     m_log = log;
     QString html;
     for (const auto &entry : log) html += taskHistoryLine(entry.toObject());
@@ -490,10 +540,23 @@ void TaskForm::setBusy(bool busy) {
     if (busy) m_error->hide();
 }
 
-void TaskForm::setError(const QString &error) { m_error->setText(error); m_error->show(); setBusy(false); }
+void TaskForm::setError(const QString &error) {
+    m_error->setText(error); m_error->show(); setBusy(false);
+    if (m_composer) m_composer->deliveryFinished(m_composer->sessionKey(), false, error);
+}
+
+bool TaskForm::isBusy() const {
+    return m_busy || m_mediaBusy || (m_composer && m_composer->isSending(m_composer->sessionKey()));
+}
+
+void TaskForm::completeSave() {
+    if (m_composer) m_composer->deliveryFinished(m_composer->sessionKey(), true);
+    setBusy(false);
+}
 
 bool TaskForm::hasEdits() const {
     if (!m_editable) return false;
+    if (m_composer) return !m_composer->draftMatches(m_composer->sessionKey(), m_task.text, m_originalFiles);
     return m_prompt->toPlainText() != m_task.text || !(chosenTarget() == m_target)
         || TaskContent::encode(m_attachments) != m_originalAttachments;
 }

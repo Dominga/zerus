@@ -17,6 +17,7 @@ class TaskForm;
 class QLineEdit;
 class QHBoxLayout;
 class QToolButton;
+class MessageComposer;
 
 // Session tasks beside Activity. Shares the board's listing, but fetches only
 // the selected task's history. It never infers task execution from native work.
@@ -33,6 +34,7 @@ public:
     int displayedCount() const { return m_rows.size(); }
 signals:
     void executorRequested(const QString &host, const QString &name, const QString &id);
+    void subagentRequested(const QString &host, const QString &parent, const QString &parentId, const QString &conversation, const QString &child);
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
@@ -47,6 +49,10 @@ private:
     void closeInlineDetails();
     bool canLeaveDetails();
     void renderCommands(const TaskItem &task);
+    void showAssignment();
+    void publishDetail(QJsonObject task);
+    void publishJournal(const QString &key, const QJsonArray &entries, bool followLatest);
+    bool selectionPending() const;
     QList<TaskRow *> shownRows() const;
     int dropGap(const QString &uuid, const QPoint &point) const;
     void followDrag(const TaskDrag &drag, const QPoint &point);
@@ -73,12 +79,19 @@ private:
     QPushButton *m_moreDetail, *m_latestHistory;
     QJsonObject m_historyBefore;
     QPushButton *m_open, *m_edit;
-    QPushButton *m_assignment, *m_saveNote;
-    QLineEdit *m_note;
+    QPushButton *m_assignment;
+    QWidget *m_assignmentRow;
+    MessageComposer *m_commentComposer;
+    QJsonObject m_pendingDetail;
+    QJsonArray m_journalSource;
+    QString m_journalKey;
+    quint64 m_journalGeneration = 0;
+    QLabel *m_blocker;
+    QPushButton *m_reviewLaunch;
     QLabel *m_noteError;
     QWidget *m_commands;
     QHBoxLayout *m_commandLayout;
-    QHash<int, QToolButton *> m_commandButtons;
+    QHash<int, QPushButton *> m_commandButtons;
     QPointer<TaskForm> m_form;
     QScrollArea *m_formScroll = nullptr;
     QString m_commandsKey, m_noteKey, m_inlineRequested;

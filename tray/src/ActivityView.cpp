@@ -1399,7 +1399,8 @@ void ActivityView::setTaskJournal(const QString &key, const QJsonArray &entries,
         const auto entry = value.toObject();
         events.append(QJsonObject{{"source", "zerus_task"}, {"type", "TaskEntry"}, {"activity_key", entry.value("id")},
             {"at", entry.value("at").toDouble() / 1000.0}, {"detail", entry.value("text")},
-            {"task_author", entry.value("author")}, {"task_label", entry.value("label")}, {"task_role", entry.value("role")}});
+            {"task_author", entry.value("author")}, {"task_label", entry.value("label")}, {"task_role", entry.value("role")},
+            {"attachments", entry.value("attachments")}});
     }
     setActivity({{"task_journal", true}}, events);
 }

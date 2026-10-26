@@ -21,10 +21,12 @@ TaskItem TaskBoard::item(const QJsonObject &t) {
     item.summary = t.value("summary").toString(); item.cancelReason = t.value("cancel_reason").toString();
     item.createdAt = qint64(t.value("created_at").toDouble()); item.stageAt = qint64(t.value("stage_at").toDouble());
     item.cancelledAt = qint64(t.value("cancelled_at").toDouble()); item.writable = t.value("writable").toBool(true);
-    const auto target = t.value("target").toObject();
-    if (target.value("kind").toString() == QLatin1String("session")) session(target, item.targetHost, item.targetSession, item.targetKnown);
+    auto target = t.value("target").toObject();
+    item.targetKind = target.value("kind").toString(); item.worker = t.value("worker").toObject();
+    if (target.contains("parent")) target = target.value("parent").toObject();
+    if (item.targetKind != QLatin1String("any")) session(target, item.targetHost, item.targetSession, item.targetKnown);
     if (t.value("session").isObject()) session(t.value("session"), item.sessionHost, item.sessionName, item.sessionKnown);
-    item.targetId = target.value("session_id").toString();
+    item.targetId = target.value("session_id").toString(); item.targetMachine = target.value("machine").toString();
     item.sessionId = t.value("session").toObject().value("session_id").toString();
     const auto author = t.value("author").toObject();
     if (author.value("kind").toString() == QLatin1String("agent")) {

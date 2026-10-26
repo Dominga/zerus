@@ -49,7 +49,10 @@ public:
     // Same as Stop; false when no turn can be interrupted now.
     bool requestInterrupt();
     // Fills an empty draft, for example with the prompt of an interrupted turn.
-    bool offerDraft(const QString &key, const QString &text);
+    bool offerDraft(const QString &key, const QString &text, const QList<MessageAttachment> &attachments = {});
+    ComposerDraft draftSnapshot() const { return m_drafts.value(m_key); }
+    void setDraftLabel(const QString &label);
+    void setDraftCacheLimit(int count) { m_draftCacheLimit = count; trimDraftCache(); }
     // The agent's suggested next message: the empty field's placeholder, inserted
     // with Tab. An empty text withdraws it; one already answered is not shown again.
     void setSuggestion(const QString &key, const QString &text, double at);
@@ -159,6 +162,8 @@ protected:
 private:
     using Draft = ComposerDraft;
     bool saveDraft(const QString &key);
+    void trimDraftCache();
+    int m_draftCacheLimit = 0;
     void send();
     void push();
     void applyShortcuts();

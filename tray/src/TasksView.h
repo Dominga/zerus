@@ -31,9 +31,10 @@ struct TaskSession {
     bool working = false; // whether its agent is in a turn, for the cancel dialog
     int kind = 0;         // the status's SessionStatusBadge::Kind, as the session list shows it
     QString id;          // immutable launch identity, run identity for legacy bindings
+    QString conversation;
     bool operator==(const TaskSession &other) const {
         return host == other.host && name == other.name && status == other.status && blocker == other.blocker
-            && running == other.running && working == other.working && kind == other.kind && id == other.id;
+            && conversation == other.conversation && running == other.running && working == other.working && kind == other.kind && id == other.id;
     }
 };
 
@@ -90,8 +91,12 @@ public:
     void reorderTask(const TaskDrag &drag, const QString &anchor, bool before);
     void stageTask(const TaskDrag &drag, const QString &stage);
     TaskRowState rowState(const TaskItem &task) const;
+    void setExecutorLaunches(const QJsonObject &launches);
+    bool hasExecutorLaunch(const QString &uuid) const { return m_executorLaunchBlockers.contains(uuid); }
+    void reviewExecutorLaunch(const QString &uuid) { emit executorLaunchReviewRequested(uuid); }
     void saveTaskEdits(const TaskItem &task, const TaskEdits &edits, std::function<void()> saved, std::function<void(const QString &)> refused);
-    void saveTaskNote(const QString &uuid, const QString &text, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void saveTaskAssignment(const TaskItem &task, const TaskTarget &target, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void saveTaskNote(const QString &uuid, const QString &text, const QList<MessageAttachment> &files, std::function<void()> saved, std::function<void(const QString &)> refused);
     QString taskSendBlocker(const TaskItem &task, const TaskTarget &target) const;
     QString selectedStage() const { return m_stage; }
     // The Activity sidebar hosts the board's existing scope/settings controls.
@@ -106,6 +111,8 @@ signals:
     void boardChanged();
     void taskSelected(const QString &uuid);
     void taskEditRequested(const QString &uuid);
+    void executorLaunchReviewRequested(const QString &uuid);
+    void newExecutorRequested(const TaskItem &task, const QString &project);
     void taskDragFinished();
 protected:
     void showEvent(QShowEvent *event) override;
@@ -143,7 +150,7 @@ private:
     QList<Step> steps(const TaskItem &task, TaskAction action) const;
     QList<Step> editSteps(const TaskItem &task, const TaskEdits &edits) const;
     // `target REF SESSION|any [--host ALIAS]` without the project.
-    static QStringList targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id = {});
+    static QStringList targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id = {}, const QString &mode = {});
     // Runs the steps in order and refreshes after. `finished` follows the last
     // success; `failed` replaces the notice for the first refusal.
     void run(QList<Step> steps, std::function<void()> finished = {}, std::function<void(const QString &)> failed = {});
@@ -161,6 +168,7 @@ private:
     TaskBoard::View view() const;
     HgsClient *m_client;
     TaskBoard m_board;
+    QHash<QString, QString> m_executorLaunchBlockers;
     QString m_projectId, m_projectName, m_host, m_session, m_sessionKey, m_stage, m_error;
     QList<TaskSession> m_sessions;
     QHash<QString, TaskTile *> m_tiles;

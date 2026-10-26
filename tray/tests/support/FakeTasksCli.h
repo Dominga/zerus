@@ -39,7 +39,7 @@ order=['review','active','todo','backlog','done']
 cmd=a[1]
 if cmd=='get' and (here/'delay-get').exists(): time.sleep(min(.5,float((here/'delay-get').read_text())))
 content={}
-if cmd in ('add','edit') and '--content-json' in a:
+if cmd in ('add','edit','comment') and '--content-json' in a:
     content=json.loads(text); text=content['text']
 if cmd=='list':
     tasks=sorted(data['tasks'],key=lambda t: order.index(t['stage']))
@@ -74,9 +74,13 @@ elif cmd=='edit':
     t['text']=text; log(t,'edited')
     if 'attachments' in content: t['attachments']=content['attachments']
 elif cmd=='target':
-    t['target']={'kind':'any'} if a[3]=='any' else {'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':a[3],'host':opt('--host') or ''}
+    target={'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':opt('--parent') or a[3],'host':opt('--host') or ''}
+    if opt('--session-id'): target['session_id']=opt('--session-id')
+    t['target']={'kind':'any'} if a[3]=='any' else {'kind':a[3].replace('-','_'),'parent':target} if a[3] in ('new-session','subagent') else target
     log(t,'target',a[3])
-elif cmd=='comment': log(t,'comment',text)
+elif cmd=='comment':
+    log(t,'comment',text)
+    if 'attachments' in content: t['log'][-1]['attachments']=content['attachments']
 else: print('unknown task command '+cmd,file=sys.stderr); sys.exit(2)
 save(); out({'task':t})
 )PY";

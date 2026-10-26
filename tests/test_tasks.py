@@ -209,6 +209,36 @@ class TaskCommands(Fixture):
         self.assertIn("base64", self.hgs("edit", task["ref"], "--content-json", text=json.dumps(dict(text="Bad", attachments=[bad])), ok=False))
         self.assertEqual(self.hgs("get", task["ref"])["task"]["text"], "Updated text")
 
+    def test_comment_media_is_immutable_and_not_expanded_in_listing(self):
+        task = self.add("Inspect the screenshot")
+        file = dict(name="screen.png", mime="image/png", reference="[Image #1]",
+                    data_base64=base64.b64encode(b"comment image bytes").decode())
+        noted = self.hgs("comment", task["ref"], "--content-json", text=json.dumps(dict(text="See [Image #1]", attachments=[file])))["task"]
+        self.assertEqual(noted["schema"], 3)
+        self.assertEqual(noted["log"][-1]["attachments"], [file])
+        self.hgs("edit", task["ref"], text="Revised description")
+        restored = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(restored["schema"], 3)
+        self.assertEqual(restored["log"][1]["attachments"], [file])
+        self.assertNotIn("log", self.hgs("list", "--project", "orchard")["tasks"][0])
+        bad = dict(file, data_base64="%%%")
+        self.assertIn("base64", self.hgs("comment", task["ref"], "--content-json", text=json.dumps(dict(text="Bad", attachments=[bad])), ok=False))
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["log"], restored["log"])
+
+    def test_executor_plans_are_saved_without_starting_and_keep_parent_identity(self):
+        self.agent("codex/api")
+        task = self.add("Delegate after explicit start")
+        for mode in ("new-session", "subagent"):
+            planned = self.hgs("target", task["ref"], mode, "--parent", "codex/api")["task"]
+            self.assertEqual(planned["stage"], "todo")
+            self.assertIsNone(planned["session"])
+            self.assertEqual(planned["target"]["kind"], mode.replace("-", "_"))
+            self.assertEqual(planned["target"]["parent"]["session_id"], "run_id:" + self.runs["codex/api"])
+            self.assertNotIn("sent", [entry["kind"] for entry in planned["log"]])
+        self.assertIn("selected executor plan", self.hgs("start", task["ref"], session="codex/api", ok=False))
+        self.assertIn("task assignment changed", self.hgs("send", task["ref"], "--session", "codex/api", "--expect-new-session-parent", "run_id:other", ok=False))
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "todo")
+
     def test_add_list_and_get(self):
         task = self.add("Add rate limiting")
         self.assertRegex(task["id"], r"^T-[0-9a-z]{6}$")

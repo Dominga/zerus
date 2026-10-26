@@ -12,6 +12,8 @@ struct TaskItem {
     // one has not verified.
     QString targetHost, targetSession;
     QString targetId;
+    QString targetKind, targetMachine;
+    QJsonObject worker;
     bool targetKnown = true;
     // The session the task was last sent to; empty when it was never sent.
     QString sessionHost, sessionName;

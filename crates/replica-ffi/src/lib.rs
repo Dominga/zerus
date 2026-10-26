@@ -118,7 +118,7 @@ pub enum TaskTarget {
 impl From<replica::Target> for TaskTarget {
     fn from(target: replica::Target) -> Self {
         match target {
-            replica::Target::Any => Self::AnySession,
+            replica::Target::Any | replica::Target::NewSession { .. } | replica::Target::Subagent { .. } => Self::AnySession,
             replica::Target::Session(key) => Self::Session {
                 session: key.into(),
             },
@@ -205,7 +205,10 @@ impl From<replica::TaskView> for TaskInfo {
             id: view.id,
             project: view.project,
             schema: view.schema,
-            writable: view.writable,
+            // The current mobile ABI has no planned executors, worker binding,
+            // or comment media. Keep schema-three tasks read-only until that ABI
+            // exposes them; a fallback caption must never authorize a send.
+            writable: view.writable && view.schema <= 2,
             created_at: view.created_at,
             stage_at: view.stage_at,
             author: view.author.into(),
@@ -380,6 +383,7 @@ impl TaskStore {
     ) -> Result<TaskInfo> {
         let store = self.store()?;
         let mut task = store.find(reference)?;
+        if task.schema() > 2 { return Err(ReplicaError::Refused("This task needs a newer mobile task editor.".into())); }
         change(&store, &mut task)?;
         store.save(&mut task)?;
         Ok(task.view()?.into())

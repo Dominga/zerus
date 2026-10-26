@@ -47,6 +47,23 @@ Sessions       Activity                           Inspector
                [Task T-a1b2c3 -> executor]         Open full project overview
 ```
 
+Owner inspector review, 2026-10-26: tabs form the lower pane's first row, with
+Activity/details icons at the right. Assignment is an explicit field with its
+own chooser; it must never open the whole editor. Both description editing and
+comments reuse MessageComposer, including attachments, previews and durable
+per-task drafts. Footer workflow actions carry text, and a blocked Start explains
+its reason in the pane. Switching tasks retains the presented controls until the
+replacement snapshot and comment draft are loaded; handlers retain their exact
+binding while loading, and unchanged icons are reused.
+
+Owner executor decision, 2026-10-26: selecting New session or Subagent saves the
+routing intent. Create the executor only on explicit Start. The first slice uses
+the existing NewSessionDialog and exact launch correlation for new sessions, and
+a coordinator request plus verified native-child registration for subagents.
+Unknown delivery is reserved durably and requires explicit review before another
+launch. This slice does not implement the execution/revision scheduler, true
+per-task pause, automatic native comment delivery, or verified result artifacts.
+
 ## Verified starting point
 
 The inspected task implementation is the PR348 tree, merged as main

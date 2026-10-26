@@ -1,6 +1,11 @@
 #include "TaskInspector.h"
 #include "ActivityView.h"
 #include "TaskDialogs.h"
+#include "TaskContent.h"
+#include "MessageComposer.h"
+#include "AttachmentViewer.h"
+#include <QMenu>
+#include <QWidgetAction>
 #include "TaskRow.h"
 #include "TaskStageFilter.h"
 #include "WorkspaceIcons.h"
@@ -21,6 +26,8 @@
 #include <QScrollArea>
 #include <QSet>
 #include <QTextBrowser>
+#include <QPlainTextEdit>
+#include <QStyle>
 #include <QTabBar>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -40,6 +47,11 @@ protected:
         return {fontMetrics().horizontalAdvance(tabText(index)) + 24, 34};
     }
 };
+void stableIcon(QAbstractButton *button, const QString &name, const QColor &color) {
+    const auto key = name + color.name(QColor::HexArgb);
+    if (button->property("taskIconKey").toString() == key) return;
+    button->setProperty("taskIconKey", key); button->setIcon(workspaceIcon(name, color));
+}
 QString authorLabel(const QJsonObject &actor) {
     if (actor.value("kind") != "agent") return QObject::tr("You");
     const auto name = TaskBoard::sessionLabel(actor.value("host").toString(), actor.value("session").toString());
@@ -100,7 +112,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     auto *details = new QVBoxLayout(m_details); details->setContentsMargins(0, 4, 0, 0); details->setSpacing(4);
     auto *context = new QHBoxLayout;
     m_state = new QLabel; m_state->setObjectName("taskInspectorState"); m_state->setTextFormat(Qt::PlainText);
-    m_state->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); m_state->setFixedHeight(24); context->addWidget(m_state, 1);
+    m_state->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); m_state->setFixedHeight(20);
     m_open = new QPushButton; m_open->setObjectName("taskOpenActivity"); m_open->setAutoDefault(false);
     m_edit = new QPushButton; m_edit->setObjectName("taskInspectorEdit"); m_edit->setAutoDefault(false);
     m_open->setFixedSize(30, 28); m_edit->setFixedSize(30, 28);
@@ -108,23 +120,29 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_open->setToolTip(tr("Open executor Activity")); m_open->setAccessibleName(m_open->toolTip());
     m_edit->setToolTip(tr("Task details")); m_edit->setAccessibleName(m_edit->toolTip());
     connect(m_open, &QPushButton::clicked, this, [this] {
-        if (const auto *found = executor()) emit executorRequested(found->host, found->name, found->id);
+        if (selectionPending()) return;
+        if (const auto *found = executor()) {
+            const auto worker = m_detail.value("worker").toObject();
+            if (!worker.isEmpty()) emit subagentRequested(found->host, found->name, found->id, worker.value("conversation_id").toString(), worker.value("id").toString());
+            else emit executorRequested(found->host, found->name, found->id);
+        }
     });
     connect(m_edit, &QPushButton::clicked, this, [this] {
         openInlineDetails();
     });
-    details->addLayout(context);
     m_detailTabs = new DetailTabs; m_detailTabs->setObjectName("taskDetailTabs"); m_detailTabs->setExpanding(false);
     m_detailTabs->setDocumentMode(true); m_detailTabs->setDrawBase(false); m_detailTabs->setElideMode(Qt::ElideNone);
     m_detailTabs->setUsesScrollButtons(false); QFont tabFont = font(); tabFont.setPixelSize(12); m_detailTabs->setFont(tabFont);
     m_detailTabs->addTab(tr("Description")); m_detailTabs->addTab(tr("Result")); m_detailTabs->addTab(tr("History"));
-    details->addWidget(m_detailTabs);
-    m_assignment = new QPushButton; m_assignment->setObjectName("taskInspectorAssignment"); m_assignment->setFlat(true);
-    m_assignment->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    m_assignment->setToolTip(tr("Change assignment in task details")); details->addWidget(m_assignment);
-    connect(m_assignment, &QPushButton::clicked, this, [this] {
-        openInlineDetails(); if (m_form) if (auto *choice = m_form->findChild<QComboBox *>("taskAssignedTo")) choice->setFocus();
-    });
+    context->insertWidget(0, m_detailTabs, 1); details->addLayout(context);
+    details->addWidget(m_state);
+    m_assignmentRow = new QWidget; auto *assignment = new QHBoxLayout(m_assignmentRow); assignment->setContentsMargins(0, 0, 0, 0);
+    auto *assignedLabel = new QLabel(tr("Run in")); assignedLabel->setObjectName("taskAssignmentLabel"); assignment->addWidget(assignedLabel);
+    m_assignment = new QPushButton; m_assignment->setObjectName("taskInspectorAssignment");
+    m_assignment->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); m_assignment->setAutoDefault(false);
+    m_assignment->setToolTip(tr("Change only the task's executor assignment")); m_assignment->setAccessibleName(tr("Task executor assignment"));
+    assignment->addWidget(m_assignment, 1); details->addWidget(m_assignmentRow);
+    connect(m_assignment, &QPushButton::clicked, this, &TaskInspector::showAssignment);
     m_moreDetail = new QPushButton; m_moreDetail->setObjectName("taskDetailMore"); m_moreDetail->setFlat(true); m_moreDetail->hide();
     auto *historyNavigation = new QHBoxLayout; historyNavigation->addWidget(m_moreDetail, 0, Qt::AlignLeft); historyNavigation->addStretch();
     m_latestHistory = new QPushButton(tr("Latest")); m_latestHistory->setObjectName("taskHistoryLatest"); m_latestHistory->setFlat(true); m_latestHistory->hide();
@@ -142,44 +160,65 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_emptyDetail->setWordWrap(true); m_content->addWidget(m_emptyDetail);
     m_activity = new ActivityView; m_activity->setObjectName("taskDetailActivity");
     m_activity->browser()->setObjectName("taskInspectorDetail"); m_activity->browser()->setAccessibleName(tr("Selected task details"));
-    // Task file references are resolved by the existing task attachment dialog,
-    // never relative to whichever session happens to be open.
+    // Task files are resolved only from their content-addressed private cache.
     connect(m_activity, &ActivityView::fileReferenceActivated, this, [this] {
         openInlineDetails();
     });
-    m_content->addWidget(m_activity); details->addWidget(m_content, 1);
-    auto *noteRow = new QHBoxLayout; noteRow->setSpacing(4);
-    m_note = new QLineEdit; m_note->setObjectName("taskInspectorNote"); m_note->setPlaceholderText(tr("Task note · not sent to executor"));
-    m_saveNote = new QPushButton; m_saveNote->setObjectName("taskInspectorSaveNote"); m_saveNote->setFixedSize(30, 28);
-    m_saveNote->setIconSize(QSize(20, 20)); m_saveNote->setToolTip(tr("Save note in task history")); m_saveNote->setAccessibleName(m_saveNote->toolTip());
-    noteRow->addWidget(m_note, 1); noteRow->addWidget(m_saveNote); details->addLayout(noteRow);
-    m_noteError = new QLabel; m_noteError->setObjectName("taskInspectorNoteError"); m_noteError->setTextFormat(Qt::PlainText); m_noteError->setWordWrap(true); m_noteError->hide(); details->addWidget(m_noteError);
-    connect(m_note, &QLineEdit::textChanged, this, [this](const QString &text) {
-        if (!m_noteKey.isEmpty()) { QSettings settings; if (text.isEmpty()) settings.remove(m_noteKey); else settings.setValue(m_noteKey, text); }
+    connect(m_activity, &ActivityView::attachmentActivated, this, [this](const QJsonObject &file) {
+        if (selectionPending()) return;
+        const auto path = AttachmentFiles::cached(file);
+        if (path.isEmpty()) return;
+        const auto outcome = ExternalFile::open(path, ExternalFile::Origin::OtherMachine);
+        if (outcome == ExternalFile::Outcome::OpenFailed || outcome == ExternalFile::Outcome::RevealFailed) {
+            m_noteError->setText(tr("Could not open this attachment.")); m_noteError->show();
+        }
     });
-    const auto saveNote = [this] {
-        if (m_noteBusy || m_note->text().trimmed().isEmpty() || m_detail.isEmpty()) return;
-        m_noteBusy = true; m_note->setEnabled(false); m_saveNote->setEnabled(false); m_noteError->hide();
-        const auto uuid = m_selected;
-        m_board->saveTaskNote(uuid, m_note->text().trimmed(), [this, uuid] {
-            m_noteBusy = false;
-            if (m_selected == uuid) m_note->clear();
-            else QSettings().remove(QStringLiteral("tasks/noteDraft/%1/%2").arg(m_project, uuid));
-            m_note->setEnabled(true); m_saveNote->setEnabled(true); fetch();
-        }, [this](const QString &error) {
-            m_noteBusy = false; m_note->setEnabled(true); m_saveNote->setEnabled(true); m_noteError->setText(error); m_noteError->show();
+    connect(m_activity, &ActivityView::attachmentPreviewRequested, this, [this](const QString &key, const QJsonObject &file) {
+        const auto path = AttachmentFiles::cached(file); if (path.isEmpty()) return;
+        const auto generation = m_journalGeneration;
+        AttachmentFiles::runAsync<QImage>(this, [path] { return AttachmentLoader::thumbnail(path); }, [this, key, generation](const QImage &image) {
+            if (generation == m_journalGeneration) m_activity->setAttachmentPreview(key, image);
         });
-    };
-    connect(m_saveNote, &QPushButton::clicked, this, saveNote); connect(m_note, &QLineEdit::returnPressed, this, saveNote);
+    });
+    m_content->addWidget(m_activity); details->addWidget(m_content, 1);
+    m_commentComposer = new MessageComposer; m_commentComposer->setObjectName("taskCommentComposer");
+    m_commentComposer->setTaskMode(true); m_commentComposer->setDraftCacheLimit(2);
+    m_commentComposer->setSendLabel(tr("Add comment")); m_commentComposer->setPlaceholder(tr("Comment on this task…"));
+    m_commentComposer->editor()->setObjectName("taskCommentInput"); m_commentComposer->editor()->installEventFilter(this);
+    details->addWidget(m_commentComposer);
+    m_noteError = new QLabel; m_noteError->setObjectName("taskInspectorNoteError"); m_noteError->setTextFormat(Qt::PlainText); m_noteError->setWordWrap(true); m_noteError->hide(); details->addWidget(m_noteError);
+    connect(m_commentComposer, &MessageComposer::draftLoaded, this, [this](const QString &key) {
+        if (m_pendingDetail.isEmpty()) return;
+        if (key == QStringLiteral("task-comment\n%1\n%2").arg(m_project, m_pendingDetail.value("uuid").toString())) publishDetail(m_pendingDetail);
+    });
+    connect(m_commentComposer, &MessageComposer::sendRequested, this, [this](const QString &key, const QString &text, const QList<MessageAttachment> &files) {
+        if (selectionPending() || m_noteBusy || key != m_commentComposer->sessionKey()) return;
+        const auto uuid = m_detail.value("uuid").toString();
+        m_commentComposer->prepareSendingAsync(key, false, [this, key, uuid, text, files](bool ready) {
+            if (!ready) return;
+            m_noteBusy = true; m_noteError->hide(); QPointer<TaskInspector> guard(this);
+            m_board->saveTaskNote(uuid, text, files, [guard, key] {
+                if (!guard) return;
+                guard->m_noteBusy = false; guard->m_commentComposer->deliveryFinished(key, true); guard->fetch();
+            }, [guard, key](const QString &error) {
+                if (!guard) return;
+                guard->m_noteBusy = false; guard->m_commentComposer->deliveryFinished(key, false, error);
+                guard->m_noteError->setText(error); guard->m_noteError->show();
+            });
+        });
+    });
+    m_blocker = new QLabel; m_blocker->setObjectName("taskStartReason"); m_blocker->setWordWrap(true); m_blocker->setTextFormat(Qt::PlainText); m_blocker->hide(); details->addWidget(m_blocker);
+    m_reviewLaunch = new QPushButton(tr("Review executor launch")); m_reviewLaunch->setObjectName("taskExecutorLaunchReview"); m_reviewLaunch->hide(); details->addWidget(m_reviewLaunch, 0, Qt::AlignRight);
+    connect(m_reviewLaunch, &QPushButton::clicked, this, [this] { if (!selectionPending()) m_board->reviewExecutorLaunch(m_selected); });
     m_commands = new QWidget; m_commands->setObjectName("taskInspectorActions");
     m_commandLayout = new QHBoxLayout(m_commands); m_commandLayout->setContentsMargins(0, 2, 0, 2); m_commandLayout->setSpacing(4);
     m_commands->setFixedHeight(36); m_commandLayout->addStretch();
     for (const auto action : {TaskAction::ToBacklog, TaskAction::Top, TaskAction::ToTodo, TaskAction::Cancel,
                              TaskAction::BackToTodo, TaskAction::Accept, TaskAction::SendNow, TaskAction::Pause}) {
-        auto *button = new QToolButton; button->setObjectName(QStringLiteral("taskInspectorAction:") + TaskRow::actionKey(action));
-        button->setIconSize(QSize(20, 20)); button->setFixedSize(34, 32); button->setAutoRaise(true);
+        auto *button = new QPushButton; button->setAutoDefault(false); button->setObjectName(QStringLiteral("taskInspectorAction:") + TaskRow::actionKey(action));
+        button->setIconSize(QSize(20, 20)); button->setFixedHeight(34); button->setText(TaskBoard::actionLabel(action));
         button->setAccessibleName(TaskBoard::actionLabel(action)); button->hide();
-        connect(button, &QToolButton::clicked, this, [this, action] {
+        connect(button, &QPushButton::clicked, this, [this, action] {
             if (!m_detail.isEmpty() && m_detail.value("uuid").toString() == m_selected) m_board->actOnTask(TaskBoard::item(labels(m_detail)), action);
         });
         m_commandLayout->addWidget(button); m_commandButtons.insert(int(action), button);
@@ -221,15 +260,18 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
         }
         for (int i = qMax(0, end - VisibleHistory); i < end; ++i) recent.append(log.at(i));
         task["log_total"] = log.size(); task["history_end"] = end; task["start_confirmed"] = started; task["log"] = recent;
-        if (task != m_detail) { m_detail = task; renderDetail(); }
-        if (m_inlineRequested == m_selected) openInlineDetails();
+        m_pendingDetail = task;
+        const auto key = QStringLiteral("task-comment\n%1\n%2").arg(m_project, m_selected);
+        m_commentComposer->ensureDraftLoaded(key);
+        if (!m_commentComposer->isDraftLoading(key)) publishDetail(task);
     });
     connect(m_client, &HgsClient::taskFailed, this, [this](quint64 id, const QString &error) {
         if (id != m_request) return;
         const auto generation = property("requestGeneration").toULongLong(); m_request = 0;
         if (generation != m_generation) { fetch(); return; }
-        m_detail = {}; renderDetail(); m_state->setText(tr("Task could not be read: %1").arg(error));
+        m_noteError->setText(tr("Task could not be read: %1").arg(error)); m_noteError->show();
     });
+    for (auto *child : m_details->findChildren<QWidget *>()) child->installEventFilter(this);
     setTheme(true);
 }
 
@@ -255,7 +297,6 @@ void TaskInspector::hideEvent(QHideEvent *event) {
 
 void TaskInspector::selectTask(const QString &uuid) {
     if (m_selected != uuid && !canLeaveDetails()) return;
-    if (m_selected != uuid) closeInlineDetails();
     const auto board = m_board->displayBoard();
     for (const auto &task : board.tasks) if (task.uuid == uuid) {
         m_stage = task.stage;
@@ -264,7 +305,7 @@ void TaskInspector::selectTask(const QString &uuid) {
         break;
     }
     if (m_selected != uuid) {
-        m_selected = uuid; m_inlineRequested.clear(); ++m_generation; m_historyVisible = 8; m_historyBefore = {};
+        m_noteError->hide(); m_pendingDetail = {}; m_selected = uuid; m_inlineRequested.clear(); ++m_generation; m_historyVisible = 8; m_historyBefore = {};
         const QSignalBlocker blocker(m_detailTabs); m_detailTabs->setCurrentIndex(0);
     }
     refresh(); fetch();
@@ -376,6 +417,9 @@ void TaskInspector::endListDrag() { m_autoScroll.stop(); m_overList = false; m_s
 
 bool TaskInspector::eventFilter(QObject *watched, QEvent *event) {
     const auto type = event->type();
+    const auto *widget = qobject_cast<QWidget *>(watched);
+    if (selectionPending() && widget && m_details->isAncestorOf(widget)
+        && (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonRelease || type == QEvent::KeyPress || type == QEvent::InputMethod || type == QEvent::Drop)) return true;
     if (type != QEvent::DragEnter && type != QEvent::DragMove && type != QEvent::DragLeave && type != QEvent::Drop)
         return QWidget::eventFilter(watched, event);
     if (watched == m_listPage) {
@@ -420,6 +464,7 @@ QJsonObject TaskInspector::labels(QJsonObject task) const {
         return key;
     };
     for (const auto *key : {"target", "session", "author"}) if (task.value(key).isObject()) task[key] = resolve(task.value(key).toObject());
+    if (task.value("target").toObject().contains("parent")) { auto target = task.value("target").toObject(); target["parent"] = resolve(target.value("parent").toObject()); task["target"] = target; }
     auto log = task.value("log").toArray();
     for (auto it = log.begin(); it != log.end(); ++it) {
         auto entry = it->toObject();
@@ -442,29 +487,36 @@ const TaskSession *TaskInspector::executor() const {
 
 void TaskInspector::renderDetail() {
     if (!m_activity) return;
-    // Keep the previous document and fixed controls during an asynchronous
-    // selection read. Publish the new task once, when its exact reply arrives.
-    if (!m_selected.isEmpty() && m_detail.value("uuid").toString() != m_selected) {
-        m_open->setEnabled(false); m_edit->setEnabled(false); m_assignment->setEnabled(false);
-        m_note->setEnabled(false); m_saveNote->setEnabled(false); m_detailTabs->setEnabled(false);
-        for (auto *button : std::as_const(m_commandButtons)) button->setEnabled(false);
-        m_commandsKey.clear(); m_state->setText(tr("Loading selected task…")); return;
-    }
+    // Retain the entire presented task while a new selection is loading. Input
+    // handlers guard the binding; visual enabled states never cycle through false.
+    if (selectionPending()) return;
     const auto data = labels(m_detail); auto task = TaskBoard::item(data);
     for (const auto &listed : m_board->board().tasks) if (listed.uuid == task.uuid) { task.queue = listed.queue; break; }
     m_open->setEnabled(!m_detail.isEmpty() && executor()); m_edit->setEnabled(!m_detail.isEmpty());
     m_detailTabs->setEnabled(!m_detail.isEmpty()); m_moreDetail->hide(); m_moreDetail->setEnabled(true);
     m_latestHistory->setVisible(!m_detail.isEmpty() && m_detailTabs->currentIndex() == 2 && !m_historyBefore.isEmpty());
-    renderCommands(task);
-    m_assignment->setVisible(!m_detail.isEmpty() && m_detailTabs->currentIndex() == 0 && !m_form);
-    const auto assigned = task.targetSession.isEmpty() ? tr("Any session") : TaskBoard::sessionLabel(task.targetHost, task.targetSession);
-    m_assignment->setText(tr("Assigned to: %1").arg(assigned));
+    renderCommands(task); m_reviewLaunch->setVisible(m_board->hasExecutorLaunch(task.uuid));
+    m_assignmentRow->setVisible(!m_detail.isEmpty() && m_detailTabs->currentIndex() == 0);
+    const auto assigned = task.targetSession.isEmpty() ? tr("Any available session") : TaskBoard::sessionLabel(task.targetHost, task.targetSession);
+    const bool main = task.targetHost == m_host && (!task.targetId.isEmpty() ? task.targetId == m_sessionId : task.targetSession == m_session);
+    const auto targetLabel = task.targetKind == QLatin1String("new_session") ? tr("New session · create when started")
+        : task.targetKind == QLatin1String("subagent") ? tr("Subagent · coordinate through %1").arg(assigned)
+        : main ? tr("Main session · %1").arg(assigned) : assigned;
+    m_assignment->setText(targetLabel + QStringLiteral("  ▾"));
     m_assignment->setEnabled(task.writable && (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog")));
-    m_note->setEnabled(!m_detail.isEmpty() && task.writable && !m_noteBusy); m_saveNote->setEnabled(m_note->isEnabled());
-    const auto noteKey = m_selected.isEmpty() ? QString() : QStringLiteral("tasks/noteDraft/%1/%2").arg(m_project, m_selected);
-    if (m_noteKey != noteKey) { m_noteKey.clear(); m_note->setText(QSettings().value(noteKey).toString()); m_noteKey = noteKey; m_noteError->hide(); }
+    const auto noteKey = m_selected.isEmpty() ? QString() : QStringLiteral("task-comment\n%1\n%2").arg(m_project, m_selected);
+    if (m_noteKey != noteKey) {
+        m_commentComposer->setSessionKey(noteKey); m_noteKey = noteKey; m_noteError->hide();
+        m_commentComposer->setDraftLabel(tr("Comment · %1").arg(task.id));
+        const auto legacyKey = QStringLiteral("tasks/noteDraft/%1/%2").arg(m_project, m_selected);
+        const auto legacy = QSettings().value(legacyKey).toString();
+        if (!legacy.isEmpty() && m_commentComposer->offerDraft(noteKey, legacy)) QSettings().remove(legacyKey);
+    }
+    m_commentComposer->setAvailability(!m_detail.isEmpty() && task.writable);
+    m_commentComposer->setSessionStatus(task.writable ? tr("Comment is saved in task history") : tr("Update Zerus to comment on this task"), false, !task.writable);
     if (m_form && m_detailTabs->currentIndex() == 0) { m_content->setCurrentWidget(m_formScroll); return; }
     const auto empty = [this](const QString &text) {
+        ++m_journalGeneration; m_journalKey.clear(); m_journalSource = {};
         m_activity->setTaskJournal({}, {}); m_emptyDetail->setText(text); m_content->setCurrentWidget(m_emptyDetail);
     };
     if (m_detail.isEmpty()) {
@@ -480,13 +532,15 @@ void TaskInspector::renderDetail() {
             : task.stage == QLatin1String("active") ? tr("Executor: %1").arg(worker) : tr("Last executor: %1").arg(worker);
     } else context = tr("Assigned: %1").arg(task.targetSession.isEmpty() ? tr("Any session") : TaskBoard::sessionLabel(task.targetHost, task.targetSession));
     if (task.stage == QLatin1String("todo")) context += tr(" · #%1 in queue").arg(task.queue);
+    if (!task.worker.isEmpty()) context = tr("Subagent: %1 · coordinated by %2").arg(task.worker.value("name").toString(), TaskBoard::sessionLabel(task.sessionHost, task.sessionName));
+    else if (task.targetKind == QLatin1String("subagent") && task.stage == QLatin1String("active")) context = tr("Subagent requested · coordinator %1 · child unconfirmed").arg(TaskBoard::sessionLabel(task.sessionHost, task.sessionName));
+    m_state->setVisible(task.stage == QLatin1String("active") || task.stage == QLatin1String("review"));
     m_state->setText(context); m_state->setToolTip(QStringLiteral("%1 · %2\n%3").arg(task.id, TaskBoard::stageLabel(task.stage), context));
     QJsonArray entries;
     switch (m_detailTabs->currentIndex()) {
     case 0: {
-        entries.append(journalEntry("description", data.value("author").toObject(), tr("Description"), task.text, data.value("created_at").toDouble()));
-        const int files = data.value("attachments").toArray().size();
-        m_moreDetail->setVisible(files > 0); m_moreDetail->setText(tr("Open attachments (%1)").arg(files));
+        auto entry = journalEntry("description", data.value("author").toObject(), tr("Description"), task.text, data.value("created_at").toDouble());
+        entry["attachments"] = data.value("attachments"); entries.append(entry);
         break;
     }
     case 1: {
@@ -510,24 +564,115 @@ void TaskInspector::renderDetail() {
         for (int i = first; i < log.size(); ++i) {
             const auto entry = log.at(i).toObject(); const auto kind = entry.value("kind").toString();
             const bool message = kind == QLatin1String("comment") || kind == QLatin1String("report");
-            entries.append(journalEntry(QString::number(data.value("history_end").toInt() - log.size() + i), entry.value("actor").toObject(),
+            auto messageEntry = journalEntry(QString::number(data.value("history_end").toInt() - log.size() + i), entry.value("actor").toObject(),
                 kind == QLatin1String("report") ? tr("Report") : tr("Comment"),
-                message ? entry.value("text").toString() : taskHistoryAction(entry), entry.value("at").toDouble(), !message));
+                message ? entry.value("text").toString() : taskHistoryAction(entry), entry.value("at").toDouble(), !message);
+            messageEntry["attachments"] = entry.value("attachments"); entries.append(messageEntry);
         }
         if (log.isEmpty()) { empty(tr("No history yet.")); return; }
         break;
     }
     }
     m_content->setCurrentWidget(m_activity);
-    m_activity->setTaskJournal(QStringLiteral("task\n%1\n%2\n%3\n%4").arg(m_project, task.uuid).arg(m_detailTabs->currentIndex()).arg(m_historyVisible), entries,
+    publishJournal(QStringLiteral("task\n%1\n%2\n%3\n%4").arg(m_project, task.uuid).arg(m_detailTabs->currentIndex()).arg(m_historyVisible), entries,
         m_detailTabs->currentIndex() == 2 && m_historyVisible == 8);
 }
 
+void TaskInspector::publishJournal(const QString &key, const QJsonArray &entries, bool followLatest) {
+    if (m_journalKey == key && m_journalSource == entries) return;
+    m_journalKey = key; m_journalSource = entries;
+    const auto generation = ++m_journalGeneration;
+    const auto cacheRoot = AttachmentFiles::root();
+    AttachmentFiles::runAsync<AttachmentFiles::Prepared>(this, [entries, cacheRoot] {
+        AttachmentFiles::Prepared result;
+        qsizetype total = 0;
+        for (const auto &value : entries) {
+            auto entry = value.toObject(); const auto encoded = entry.value("attachments").toArray();
+            const auto files = TaskContent::decode(encoded); QJsonArray metadata;
+            if (files.size() != encoded.size()) { result.error = QObject::tr("Task attachments could not be read."); return result; }
+            for (const auto &file : files) {
+                total += file.data.size();
+                if (total > HgsClient::MaximumAttachmentsBytes) { result.error = QObject::tr("Task attachments exceed the size limit."); return result; }
+                const auto path = AttachmentFiles::storeAt(cacheRoot, file.name, file.data);
+                if (path.isEmpty()) { result.error = QObject::tr("Could not prepare task attachments."); return result; }
+                metadata.append(QJsonObject{{"name", file.name}, {"mime", file.mime}, {"reference", file.reference}, {"bytes", qint64(file.data.size())}, {"local_path", path}});
+            }
+            entry["attachments"] = metadata; result.files.append(entry);
+        }
+        return result;
+    }, [this, key, generation, followLatest](const AttachmentFiles::Prepared &result) {
+        if (generation != m_journalGeneration || selectionPending()) return;
+        if (!result.error.isEmpty()) { m_noteError->setText(result.error); m_noteError->show(); return; }
+        m_activity->setTaskJournal(key, result.files, followLatest);
+    });
+}
+
+bool TaskInspector::selectionPending() const {
+    return !m_selected.isEmpty() && m_detail.value("uuid").toString() != m_selected;
+}
+
+void TaskInspector::publishDetail(QJsonObject task) {
+    if (task.value("uuid").toString() != m_selected) return;
+    if (m_detail.value("uuid") != task.value("uuid")) closeInlineDetails();
+    // Take the snapshot by value: draftLoaded may pass m_pendingDetail itself.
+    m_pendingDetail = {};
+    if (task != m_detail) { m_detail = task; renderDetail(); }
+    if (m_inlineRequested == m_selected) openInlineDetails();
+}
+
+void TaskInspector::showAssignment() {
+    if (m_detail.isEmpty() || selectionPending()) return;
+    auto *menu = new QMenu(m_assignment); menu->setObjectName("taskAssignmentMenu"); menu->setAttribute(Qt::WA_DeleteOnClose);
+    const auto task = TaskBoard::item(labels(m_detail)); const auto project = m_project;
+    const auto assign = [this, task, project](const TaskTarget &target) {
+        if (selectionPending() || task.uuid != m_selected || project != m_project) return;
+        m_board->saveTaskAssignment(task, target, [this] { fetch(); }, [this](const QString &error) { m_noteError->setText(error); m_noteError->show(); });
+    };
+    auto *main = menu->addAction(tr("Main session · %1").arg(TaskBoard::sessionLabel(m_host, m_session)));
+    connect(main, &QAction::triggered, this, [this, assign] { assign({false, m_host, m_session, m_sessionId}); });
+    menu->addSection(tr("New executor · created when the task starts"));
+    auto *child = menu->addAction(tr("Subagent"));
+    connect(child, &QAction::triggered, this, [this, assign] { assign({false, m_host, m_session, m_sessionId, "subagent"}); });
+    auto *fresh = menu->addAction(tr("New session"));
+    connect(fresh, &QAction::triggered, this, [this, assign] { assign({false, m_host, m_session, m_sessionId, "new_session"}); });
+    auto *any = menu->addAction(tr("Any session · use the selected session at start"));
+    connect(any, &QAction::triggered, this, [assign] { assign({}); });
+    auto *existing = menu->addMenu(tr("Specific session"));
+    auto *searchAction = new QWidgetAction(existing); auto *search = new QLineEdit;
+    search->setPlaceholderText(tr("Find a session…")); search->setObjectName("taskAssignmentSearch");
+    searchAction->setDefaultWidget(search); existing->addAction(searchAction);
+    auto *list = new QWidget; auto *listLayout = new QVBoxLayout(list); listLayout->setContentsMargins(4, 2, 4, 2);
+    auto *scroller = new QScrollArea; scroller->setWidgetResizable(true); scroller->setMaximumHeight(320); scroller->setMinimumWidth(280);
+    scroller->setWidget(list); auto *listAction = new QWidgetAction(existing); listAction->setDefaultWidget(scroller); existing->addAction(listAction);
+    const auto sessions = m_sessions;
+    auto *navigation = new QWidget; auto *navigationLayout = new QHBoxLayout(navigation);
+    navigationLayout->setContentsMargins(4, 0, 4, 2);
+    auto *previous = new QPushButton(tr("Previous")); auto *next = new QPushButton(tr("Next"));
+    navigationLayout->addWidget(previous); navigationLayout->addWidget(next);
+    auto *navigationAction = new QWidgetAction(existing); navigationAction->setDefaultWidget(navigation); existing->addAction(navigationAction);
+    auto page = std::make_shared<int>(0);
+    const auto populate = [sessions, search, list, listLayout, next, previous, page, assign, menu] {
+        while (auto *item = listLayout->takeAt(0)) { delete item->widget(); delete item; }
+        QList<TaskSession> matches;
+        for (const auto &session : sessions) if (session.name.contains(search->text(), Qt::CaseInsensitive) || session.host.contains(search->text(), Qt::CaseInsensitive)) matches.append(session);
+        *page = qBound(0, *page, qMax(0, (int(matches.size()) - 1) / 50));
+        const int first = *page * 50;
+        for (int i = first; i < qMin(first + 50, int(matches.size())); ++i) {
+            const auto session = matches.at(i);
+            auto *button = new QPushButton(session.name + (session.host.isEmpty() ? QString() : QStringLiteral(" @") + session.host), list);
+            button->setFlat(true); button->setEnabled(!session.id.isEmpty()); listLayout->addWidget(button);
+            QObject::connect(button, &QPushButton::clicked, menu, [assign, session, menu] { assign({false, session.host, session.name, session.id}); menu->close(); });
+        }
+        previous->setEnabled(first > 0); next->setEnabled(first + 50 < matches.size());
+    };
+    connect(search, &QLineEdit::textChanged, menu, [page, populate] { *page = 0; populate(); });
+    connect(next, &QPushButton::clicked, menu, [page, populate] { ++*page; populate(); });
+    connect(previous, &QPushButton::clicked, menu, [page, populate] { --*page; populate(); }); populate();
+    menu->popup(m_assignment->mapToGlobal(QPoint(0, m_assignment->height())));
+}
+
 bool TaskInspector::canLeaveDetails() {
-    if (m_noteBusy || (m_form && m_form->isBusy())) return false;
-    if (!m_form || !m_form->hasEdits()) return true;
-    return QMessageBox::question(this, tr("Unsaved task changes"), tr("Discard the unsaved description, attachment and assignment changes?"),
-        QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Discard;
+    return !m_noteBusy && !m_commentComposer->isSending(m_commentComposer->sessionKey()) && !m_commentComposer->isPreparingSending(m_commentComposer->sessionKey()) && !(m_form && m_form->isBusy());
 }
 
 void TaskInspector::closeInlineDetails() {
@@ -536,13 +681,14 @@ void TaskInspector::closeInlineDetails() {
 }
 
 void TaskInspector::openInlineDetails() {
-    if (m_detail.isEmpty() || m_detail.value("uuid").toString() != m_selected) return;
+    if (m_detail.isEmpty() || selectionPending()) return;
     m_inlineRequested.clear();
     m_detailTabs->setCurrentIndex(0);
     if (!m_form) {
         const auto task = TaskBoard::item(labels(m_detail));
         m_form = new TaskForm(labels(m_detail), m_sessions,
             [this, task](const TaskTarget &target) { return m_board->taskSendBlocker(task, target); }, m_dark, m_content, true);
+        for (auto *child : m_form->findChildren<QWidget *>()) child->installEventFilter(this);
         m_formScroll = new QScrollArea; m_formScroll->setObjectName("taskInlineEditor"); m_formScroll->setWidgetResizable(true);
         m_formScroll->setFrameShape(QFrame::NoFrame); m_formScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         m_formScroll->setWidget(m_form); m_content->addWidget(m_formScroll);
@@ -550,11 +696,11 @@ void TaskInspector::openInlineDetails() {
         QPointer<TaskForm> guard(m_form);
         connect(m_form, &TaskForm::saveRequested, this, [this, task, guard](const TaskEdits &edits) {
             m_board->saveTaskEdits(task, edits, [this, guard] {
-                if (guard && guard == m_form) { closeInlineDetails(); m_detail = {}; ++m_generation; renderDetail(); fetch(); }
+                if (guard && guard == m_form) { guard->completeSave(); closeInlineDetails(); m_detail = {}; ++m_generation; renderDetail(); fetch(); }
             }, [guard](const QString &error) { if (guard) guard->setError(error); });
         });
     }
-    m_content->setCurrentWidget(m_formScroll); m_assignment->hide(); m_commandsKey.clear(); renderCommands(TaskBoard::item(labels(m_detail)));
+    m_content->setCurrentWidget(m_formScroll); m_commandsKey.clear(); renderCommands(TaskBoard::item(labels(m_detail)));
 }
 
 void TaskInspector::renderCommands(const TaskItem &task) {
@@ -563,28 +709,38 @@ void TaskInspector::renderCommands(const TaskItem &task) {
     for (auto i = state.blocked.cbegin(); i != state.blocked.cend(); ++i) key += QString::number(i.key()) + i.value();
     if (m_commandsKey == key) return;
     m_commandsKey = key;
-    auto actions = m_detail.isEmpty() ? QList<TaskAction>() : TaskBoard::actions(task.stage); actions.removeAll(TaskAction::Edit);
+    auto actions = m_detail.isEmpty() ? QList<TaskAction>() : TaskBoard::actions(task.stage); actions.removeAll(TaskAction::Edit); actions.removeAll(TaskAction::Top);
     const auto primary = TaskBoard::primaryAction(task.stage);
     if (!m_detail.isEmpty() && !actions.contains(primary)) actions << primary;
+    const auto primaryReason = state.blocked.value(int(primary));
+    m_blocker->setText(primary == TaskAction::SendNow && !primaryReason.isEmpty() ? tr("Cannot start: %1").arg(primaryReason) : primaryReason);
+    m_blocker->setVisible(!m_detail.isEmpty() && !primaryReason.isEmpty());
     for (auto it = m_commandButtons.cbegin(); it != m_commandButtons.cend(); ++it) {
         const auto action = TaskAction(it.key()); auto *button = it.value();
         button->setVisible(actions.contains(action));
-        button->setIcon(workspaceIcon(TaskBoard::actionIcon(action), action == primary ? TaskColors::of(m_dark).accent : TaskColors::of(m_dark).muted));
+        stableIcon(button, TaskBoard::actionIcon(action), action == primary ? TaskColors::of(m_dark).accent : TaskColors::of(m_dark).muted);
         const auto why = m_form ? tr("Save or discard description changes first") : state.blocked.value(int(action));
         button->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why); button->setEnabled(why.isEmpty());
-        button->setProperty("primaryAction", action == primary);
+        if (button->property("primaryAction").toBool() != (action == primary)) {
+            button->setProperty("primaryAction", action == primary); button->style()->unpolish(button); button->style()->polish(button);
+        }
     }
 }
 
-void TaskInspector::setContentScale(double scale) { m_activity->setContentScale(scale); }
+void TaskInspector::setContentScale(double scale) { m_activity->setContentScale(scale); m_commentComposer->setContentScale(scale); }
 
 void TaskInspector::setTheme(bool dark) {
-    m_dark = dark; if (!m_cards) return;
+    if (property("taskThemeApplied").toBool() && m_dark == dark) return;
+    setProperty("taskThemeApplied", true); m_dark = dark; if (!m_cards) return;
     const auto colors = TaskColors::of(dark);
     setWorkspaceStyle(this, QStringLiteral("#taskInspector{background:%2;color:%1;}"
         "#taskInspector QLabel{color:%1;}QScrollArea,#taskInspectorCards{background:%2;border:0;}"
         "#taskDetailsPane{border-top:1px solid %3;}"
         "#taskInspectorState,#taskDetailEmpty{color:%4;font-size:11px;}"
+        "#taskDetailsPane QPushButton{color:%1;background:%2;border:1px solid %3;border-radius:7px;padding:5px 9px;}"
+        "#taskDetailsPane QPushButton:disabled{color:%4;}"
+        "#taskDetailsPane #taskOpenActivity,#taskDetailsPane #taskInspectorEdit{padding:0;border:0;background:transparent;}"
+        "#taskDetailsPane QPushButton[primaryAction=\"true\"]{color:%5;border-color:%5;}"
         "#taskDetailTabs::tab{font-size:12px;color:%4;padding:6px 10px;border:0;border-bottom:2px solid transparent;}"
         "#taskDetailTabs::tab:selected{color:%1;border-bottom-color:%5;}"
         "#taskInspectorSplit::handle{background:%3;}"
@@ -593,9 +749,10 @@ void TaskInspector::setTheme(bool dark) {
     m_activity->setTheme(dark);
     m_commandsKey.clear();
     setWorkspaceStyle(m_dropLine, QStringLiteral("background:%1;border-radius:1px;").arg(colors.accent.name()));
-    m_saveNote->setIcon(workspaceIcon("task-check", colors.muted));
+    m_commentComposer->setTheme(dark);
+    m_blocker->setStyleSheet(QStringLiteral("color:%1;font-size:12px;").arg(colors.warn.name()));
     m_noteError->setStyleSheet(QStringLiteral("color:%1;").arg(QStringLiteral("#e06c75")));
-    m_open->setIcon(workspaceIcon("external", colors.muted)); m_edit->setIcon(workspaceIcon("task-list", colors.muted));
+    stableIcon(m_open, "external", colors.muted); stableIcon(m_edit, "task-list", colors.muted);
     for (auto *button : {m_open, m_edit}) setWorkspaceStyle(button,
         QStringLiteral("QPushButton{border:0;border-radius:5px;background:transparent;}QPushButton:hover{background:%1;}").arg(colors.hover.name()));
     refresh();

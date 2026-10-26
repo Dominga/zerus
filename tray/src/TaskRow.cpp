@@ -189,10 +189,16 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
                           : text.toHtmlEscaped();
     };
     QStringList meta{QStringLiteral("<span style=\"font-family:'%1';font-size:10.5px\">%2</span>").arg(monospaceFamily(), task.id.toHtmlEscaped())};
-    if (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog")) {
+    if (task.targetKind == QLatin1String("new_session") && (task.stage == "todo" || task.stage == "backlog")) meta << tr("→ new session when started");
+    else if (task.targetKind == QLatin1String("subagent") && (task.stage == "todo" || task.stage == "backlog")) meta << tr("→ new subagent");
+    else if (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog")) {
         meta << (task.targetSession.isEmpty()
             ? QStringLiteral("→ any session") + (state.anyNow.isEmpty() ? QString() : QStringLiteral(" · now ") + state.anyNow.toHtmlEscaped())
             : who(QStringLiteral("→ ") + TaskBoard::sessionLabel(task.targetHost, task.targetSession)));
+    } else if (!task.worker.isEmpty()) {
+        meta << tr("Subagent: %1").arg(task.worker.value("name").toString()).toHtmlEscaped();
+    } else if (task.targetKind == QLatin1String("subagent") && !task.sessionName.isEmpty()) {
+        meta << tr("coordinator %1 · child unconfirmed").arg(TaskBoard::sessionLabel(task.sessionHost, task.sessionName)).toHtmlEscaped();
     } else if (!task.sessionName.isEmpty()) {
         meta << who(TaskBoard::sessionLabel(task.sessionHost, task.sessionName));
     }
@@ -234,6 +240,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
                 const QString why = button->property("blockedReason").toString();
                 if (why.isEmpty()) return emit actionRequested(action);
                 // A blocked action says why beside it, as a blocked message send does.
+                if (property("compact").toBool()) emit opened();
                 QToolTip::showText(button->mapToGlobal(QPoint(0, button->height())), why.toHtmlEscaped(), button, {}, 5000);
             });
             button->installEventFilter(this);
@@ -242,7 +249,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     }
     const int actionCount = m_buttons.size();
     m_actions->setFixedWidth(compact ? 70 : actionCount * 34 + qMax(0, actionCount - 1) * 2);
-    m_more->setIcon(workspaceIcon("more", colors.muted));
+    if (m_more->property("iconColor") != colors.muted) { m_more->setProperty("iconColor", colors.muted); m_more->setIcon(workspaceIcon("more", colors.muted)); }
     setWorkspaceStyle(m_more, QStringLiteral("QToolButton{border:0;border-radius:6px;background:transparent;}"
         "QToolButton::menu-indicator{image:none;width:0;height:0;}QToolButton:hover{background:%1;}").arg(colors.hover.name()));
     if (menuChanged && !m_menu->isVisible()) rebuildMenu();
@@ -251,7 +258,10 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         // A blocked action stays clickable, dimmed, so a click can say why it does nothing.
         QColor icon = action == TaskBoard::primaryAction(task.stage) ? colors.accent : colors.muted;
         if (!why.isEmpty()) icon.setAlphaF(0.45);
-        it.value()->setIcon(workspaceIcon(TaskBoard::actionIcon(action), icon));
+        const auto iconKey = TaskBoard::actionIcon(action) + icon.name(QColor::HexArgb);
+        if (it.value()->property("taskIconKey").toString() != iconKey) {
+            it.value()->setProperty("taskIconKey", iconKey); it.value()->setIcon(workspaceIcon(TaskBoard::actionIcon(action), icon));
+        }
         it.value()->setProperty("blockedReason", why); it.value()->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why);
         it.value()->setAccessibleName(TaskBoard::actionLabel(action));
         it.value()->setAccessibleDescription(why);
@@ -303,7 +313,7 @@ void TaskRow::showActions(bool shown) {
     for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it) {
         const bool primary = TaskAction(it.key()) == TaskBoard::primaryAction(m_task.stage);
         it.value()->setVisible(compact ? primary : shown);
-        it.value()->setEnabled(!compact || !primary || m_state.blocked.value(it.key()).isEmpty());
+        it.value()->setEnabled(true);
     }
     m_more->setVisible(compact);
 }

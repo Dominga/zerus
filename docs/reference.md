@@ -2403,8 +2403,10 @@ hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
 hgs task stage orchard/T-a1b2c3 backlog|todo|done
 hgs task move orchard/T-a1b2c3 --top|--before REF|--after REF
 hgs task edit orchard/T-a1b2c3 < prompt.txt
-hgs task comment orchard/T-a1b2c3 < comment.txt
+hgs task comment orchard/T-a1b2c3 [--content-json] < comment.txt
 hgs task target orchard/T-a1b2c3 codex/api|any [--host ALIAS]
+hgs task target orchard/T-a1b2c3 new-session|subagent --parent codex/api [--host ALIAS] [--session-id ID]
+hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_ID
 hgs task settings --project orchard [--set < settings.json]
 ```
 
@@ -2428,27 +2430,51 @@ use a uniquely retained rename alias; an unresolved identity cannot receive inpu
 
 An agent recording a direct request it is already doing uses `add --start`, or
 `start REF` for a queued task. This records In progress without sending the same
-instruction into its conversation again. Plain `add` remains a queue operation.
+instruction into its conversation again. For a dispatched active task, its exact current agent can acknowledge `start` once without a resend or a new attempt. Plain `add` remains a queue operation.
 A report by the exact pinned agent also moves its unsent queued task to In review;
 a report from another session remains a history note. `handoff` is explicit: only
 the current agent owner (or the person) can transfer an active task, and both its
 pinned target and working session change only after confirmed native submission.
 Failed or uncertain delivery never authorizes an automatic retry.
 
-Desktop task descriptions support attached files, including pasted or dropped
-images. The task dialog previews images, opens retained copies and edits files
-alongside the text in To do and Backlog. Limits match message attachments: up to
-eight files, 10 MiB per file and 20 MiB total. Immutable bytes replicate with the
-task and travel through the ordinary native attachment path when it is sent.
-CLI `add` and `edit` accept `--content-json` with
+The inspector's Description and History use Activity rendering. Description editing
+and task comments use the shared Activity composer, with pasted/dropped images,
+attachment previews and private durable drafts keyed by project and task UUID.
+Clicking **Run in** changes assignment only. Its choices are the main session,
+a subagent, a new session, Any session, and searchable existing sessions. Choosing
+an executor plan stores intent without starting anything. **Start task** for a
+new session opens the standard session dialog; after its explicit launch, delivery
+requires that exact new launch ID, computer, project, and unchanged parent
+computer/session identity. A private record is reserved before task delivery;
+restored reserved or uncertain deliveries are never retried automatically. Use
+**Review executor launch** to inspect a failed or uncertain launch. Explicitly
+releasing a reviewed record neither stops an agent nor sends the task again.
+
+A subagent plan dispatches a creation request to its coordinator only on Start.
+The coordinator creates the native child and records `task worker` with the
+current durable `sent` request ID. Registration verifies its live parent run and
+conversation and the child's presence in that native roster. The card displays
+“child unconfirmed” until registration; the parent remains coordinator and task
+reporter. This is explicit attribution, not the full per-worker scheduler or an
+implementation of per-task Pause.
+
+Descriptions and immutable comments support up to eight attachments per message,
+10 MiB per file, with a cumulative 20 MiB across the task's current description
+and its comment history. Bytes replicate with the document. Description files
+travel through the ordinary native attachment path when the task is sent;
+comments remain in task history and are not automatically delivered as new native
+input. CLI `add`, `edit` and `comment` accept `--content-json` with
 `{"text":"Inspect [Image #1]","attachments":[{"name":"screen.png","mime":"image/png","reference":"[Image #1]","data_base64":"..."}]}`
-on stdin. Omit `attachments` to keep them while editing, or pass an empty array
-to remove them. Listings contain only file metadata; `get` includes the bytes.
-Tasks with immutable session identities or media use task schema 2: older clients
-show their text read-only and cannot send a partial payload. Project documents
-and the paged exchange wire protocol remain schema 1. Mobile attachment pickers
-and previews are not part of the desktop editor; host-side mobile sends retain
-the task's complete attachment payload.
+on stdin. Omit `attachments` to keep description files while editing, or pass an
+empty array to remove them. Listings contain file metadata and omit history;
+`get` includes the retained bytes.
+
+Immutable session identities and description media use task schema 2. Comment
+media, executor plans and native worker bindings require task schema 3. A later
+edit never downgrades that schema. Older readers and the current mobile ABI show
+schema-three tasks read-only. Project documents and the paged exchange protocol
+remain schema 1. Mobile picker/preview and executor-plan presentation are separate
+work; host-side mobile sends keep the complete description attachment payload.
 
 `--host ALIAS` names a session on another computer of the swarm that this
 computer verified itself. A send or cancel for such a session runs on that

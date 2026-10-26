@@ -354,6 +354,9 @@ private slots:
     void sessionRowsHaveNoHoverPopup();
     void subagentGroupsAndUnavailableActivity();
     void inspectorPreservesWorkspaceAndReportsTasks();
+    void taskExecutorStartsOnlyThroughTheLaunchDialog();
+    void restoredTaskLaunchDeliveryIsReservedAndNeverReplayed_data();
+    void restoredTaskLaunchDeliveryIsReservedAndNeverReplayed();
     void tasksTabFollowsTheOpenSessionsProject();
     void tasksDropOnTheirProjectsSessionsAndHeader();
     void tasksPreview();
@@ -1086,6 +1089,81 @@ void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
     window.showSession("mac","claude/infra/review"); QVERIFY(projects->selection().isEmpty()); QCOMPARE(parents(),5);
 }
 
+void TestSessionsWindow::taskExecutorStartsOnlyThroughTheLaunchDialog()
+{
+    SessionOrganization org; const auto project = org.createGroup("Work");
+    org.moveSession(org.observe("arch", "codex/hgs/dashboard", ""), project);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *tasks = window.findChild<TasksView *>(); QVERIFY(tasks);
+    QSignalSpy launches(&window, &SessionsWindow::newSessionRequested);
+    TaskItem task; task.uuid = "task-uuid"; task.targetKind = "new_session"; task.targetSession = "codex/hgs/dashboard";
+    task.targetId = "launch_id:parent"; task.targetMachine = "parent-node";
+    QVERIFY(QSettings().value("tasks/pendingExecutorLaunches").toByteArray().isEmpty()); QCOMPARE(launches.size(), 0);
+    bool submitted = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); if (!dialog) return;
+        const auto close = qScopeGuard([dialog] { dialog->reject(); });
+        QCOMPARE(launches.size(), 0);
+        QVERIFY(QSettings().value("tasks/pendingExecutorLaunches").toByteArray().isEmpty());
+        dialog->launchRequested({}, "codex", "/workspace/project", "task-helper", "native-codex", project, true, {}, {}, {});
+        submitted = true;
+    });
+    tasks->newExecutorRequested(task, project); QVERIFY(submitted); QCOMPARE(launches.size(), 1);
+    const auto records = QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object();
+    QCOMPARE(records.size(), 1); const auto record = records.begin().value().toObject();
+    QCOMPARE(record.value("task").toString(), task.uuid); QCOMPARE(record.value("parent").toString(), QString("parent-node/launch_id:parent"));
+    QCOMPARE(record.value("phase").toString(), QString("waiting"));
+    QVERIFY(tasks->hasExecutorLaunch(task.uuid));
+    const auto token = records.begin().key(); window.newSessionLaunchFailed(token, "Fixture launch failure");
+    const auto failed = QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().value(token).toObject();
+    QCOMPARE(failed.value("phase").toString(), QString("review"));
+}
+
+void TestSessionsWindow::restoredTaskLaunchDeliveryIsReservedAndNeverReplayed_data()
+{
+    QTest::addColumn<bool>("confirmed");
+    QTest::newRow("exact-receipt") << true;
+    QTest::newRow("unconfirmed-reply") << false;
+}
+void TestSessionsWindow::restoredTaskLaunchDeliveryIsReservedAndNeverReplayed()
+{
+    QFETCH(bool, confirmed);
+    const auto token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    SessionOrganization org; const auto project = org.createGroup("Work");
+    org.moveSession(org.observe("arch", "codex/hgs/task-helper", token), project);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    const QJsonObject record{{"task", "task-uuid"}, {"project", project}, {"host", ""}, {"cmd", "codex"}, {"tag", "task-helper"},
+        {"parent", "parent-node/launch_id:parent"}, {"phase", "waiting"}, {"created", QDateTime::currentSecsSinceEpoch()}};
+    QSettings().setValue("tasks/pendingExecutorLaunches", QJsonDocument(QJsonObject{{token, record}}).toJson(QJsonDocument::Compact));
+    const auto fixture = tasksFixture(confirmed ? "task-executor-confirmed" : "task-executor-unconfirmed", {}); QVERIFY(!fixture.isEmpty());
+    if (confirmed) {
+        const QJsonObject task{{"uuid", "task-uuid"}, {"stage", "active"}, {"session", QJsonObject{{"host", ""}, {"session_id", "launch_id:" + token}}},
+            {"log", QJsonArray{QJsonObject{{"kind", "sent"}, {"request_id", "exact-receipt"}}}}};
+        QVERIFY(FakeCli::replace(fixture + ".task-receipt", QJsonDocument(QJsonObject{{"task", task}, {"receipt", QJsonObject{{"request_id", "exact-receipt"}}}}).toJson()));
+    }
+    auto state = fleet(); auto box = state.local(); auto session = box.sessions.first();
+    session.name = "codex/hgs/task-helper"; session.cmd = "codex"; session.launchId = token;
+    box.sessions = {session}; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    {
+        SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(state); window.show();
+        auto *client = window.findChild<HgsClient *>(); QSignalSpy replied(client, &HgsClient::taskReady);
+        // A listing reply cannot be mistaken for a durable exact task-send receipt.
+        if (confirmed) QTRY_VERIFY(!QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().contains(token));
+        else QTRY_VERIFY(QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().value(token).toObject().value("phase") == "review");
+        QFile calls(fixture + ".tasks"); QVERIFY(calls.open(QIODevice::ReadOnly)); const auto text = calls.readAll();
+        QVERIFY(text.contains("--expect-new-session-parent")); QVERIFY(text.contains("parent-node/launch_id:parent"));
+        window.setFleet(state); QTest::qWait(80); window.close();
+    }
+    QFile before(fixture + ".tasks"); QVERIFY(before.open(QIODevice::ReadOnly)); const auto previous = before.readAll(); before.close();
+    {
+        SessionsWindow restored(FakeCli::program(fixture)); keepDetailsPollsOut(restored); restored.setFleet(state); restored.show(); QTest::qWait(120);
+    }
+    QFile after(fixture + ".tasks"); QVERIFY(after.open(QIODevice::ReadOnly)); const auto final = after.readAll();
+    int sends = 0; for (const auto &line : final.split('\n')) if (line.contains("\"send\"")) ++sends;
+    QCOMPARE(sends, 1); QVERIFY(final.startsWith(previous));
+}
+
 void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
 {
     SessionOrganization org; const auto work=org.createGroup("Work");
@@ -1144,7 +1222,7 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
 QString TestSessionsWindow::tasksFixture(const QString &name, const QJsonArray &tasks) const
 {
     QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
-    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':json.loads("
+    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n if a[1:2]==['send'] and __import__('pathlib').Path(__file__+'.task-receipt').exists(): print(open(__file__+'.task-receipt').read())\n else: print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':json.loads("
         + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + "),'damaged':[]}))\n";
     const QString fixture = m_dir->filePath(name);
     return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? fixture : QString();

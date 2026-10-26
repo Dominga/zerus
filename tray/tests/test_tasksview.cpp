@@ -6,6 +6,9 @@
 #include <QSpinBox>
 #include "HgsClient.h"
 #include "MessageComposer.h"
+#include "ComposerDraftStore.h"
+#include "AttachmentViewer.h"
+#include <QBuffer>
 #include "TaskBoard.h"
 #include "SessionStatusBadge.h"
 #include "TasksView.h"
@@ -58,7 +61,7 @@ class TestTasksView : public QObject {
     QTemporaryDir m_settings;
 private slots:
     void initTestCase();
-    void init() { QSettings().remove("tasks"); }
+    void init() { ComposerDraftStore::flushWrites(); QDir(ComposerDraftStore::directory()).removeRecursively(); QSettings().remove("tasks"); }
     void tilesCountAndChooseTheFirstStage();
     void rowsShowTheQueueAndTheOpenSessionsTasks();
     void actionsRunHgsAndRefresh();
@@ -79,6 +82,8 @@ private slots:
     void inspectorFollowsExecutorIdentityAcrossRename();
     void inlineTaskEditingRetainsFailuresAndCommandsStayInTheFooter();
     void selectingAnotherTaskNeverPublishesAnEmptyDetailsFrame();
+    void assignmentOnlyStoresAPlanUntilStart();
+    void commentImagesUseActivityAndDraftsFollowTheTask();
     void inspectorShowsReportsAndBoundsItsTaskList();
     void inspectorDiscardsHistoryAfterLeavingTheProject();
     void inspectorKeepsSelectionInAFixedLowerPane();
@@ -93,22 +98,74 @@ void TestTasksView::selectingAnotherTaskNeverPublishesAnEmptyDetailsFrame() {
     inspector.resize(380, 760); inspector.show(); board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
     inspector.setContext("project-1", "", "codex/api", sessions()); QTRY_COMPARE(inspector.displayedCount(), 2); inspector.selectTask("uuid-1");
     auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail"); QTRY_VERIFY(detail->toPlainText().contains("Task 1"));
-    auto *start = inspector.findChild<QToolButton *>("taskInspectorAction:sendNow"); QVERIFY(start && start->isEnabled());
+    auto *start = inspector.findChild<QPushButton *>("taskInspectorAction:sendNow"); QVERIFY(start && start->isEnabled());
     auto *split = inspector.findChild<QSplitter *>("taskInspectorSplit"); const auto sizes = split->sizes();
+    const auto icon = start->icon().cacheKey();
     QFile delay(dir.filePath("delay-get")); QVERIFY(delay.open(QIODevice::WriteOnly)); delay.write("0.3"); delay.close();
     inspector.selectTask("uuid-2");
-    QVERIFY(detail->toPlainText().contains("Task 1")); QVERIFY(!start->isEnabled()); QCOMPARE(split->sizes(), sizes);
+    QVERIFY(detail->toPlainText().contains("Task 1")); QVERIFY(start->isEnabled()); start->click(); QCOMPARE(split->sizes(), sizes);
+    for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) != "send");
     QElapsedTimer elapsed; elapsed.start();
     while (!detail->toPlainText().contains("Task 2") && elapsed.elapsed() < 3000) {
-        QTest::qWait(5); QVERIFY(!detail->toPlainText().isEmpty());
+        QTest::qWait(5); QVERIFY(!detail->toPlainText().isEmpty()); QVERIFY(start->isEnabled()); QCOMPARE(start->icon().cacheKey(), icon);
     }
     QVERIFY(detail->toPlainText().contains("Task 2"));
-    QCOMPARE(inspector.findChild<QToolButton *>("taskInspectorAction:sendNow"), start);
+    QCOMPARE(inspector.findChild<QPushButton *>("taskInspectorAction:sendNow"), start);
     QVERIFY(start->isEnabled()); QCOMPARE(split->sizes(), sizes); QCOMPARE(detail->verticalScrollBar()->value(), 0);
     // Context Edit waits for the requested task, never editing the previous document.
     board.setOpenInInspector(true); board.actOnTask(TaskBoard::item(FakeTasksCli::task(1, "todo")), TaskAction::Edit);
     QTRY_VERIFY(inspector.findChild<TaskForm *>());
-    QCOMPARE(inspector.findChild<TaskForm *>()->findChild<QPlainTextEdit *>("taskPrompt")->toPlainText(), QString("Task 1"));
+    QTRY_COMPARE(inspector.findChild<TaskForm *>()->findChild<QPlainTextEdit *>("taskPrompt")->toPlainText(), QString("Task 1"));
+}
+
+void TestTasksView::assignmentOnlyStoresAPlanUntilStart() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
+    auto known = sessions(); known[0].id = "launch_id:main";
+    for (int i = 0; i < 70; ++i) { auto extra = known[0]; extra.name = QString("codex/session-%1").arg(i, 3, 10, QLatin1Char('0')); extra.id += QString::number(i); known.append(extra); }
+    inspector.resize(500, 900); inspector.show(); board.setContext("project-1", "orchard", "", "codex/api", "key", known);
+    inspector.setContext("project-1", "", "codex/api", known); QTRY_COMPARE(inspector.displayedCount(), 1); inspector.selectTask("uuid-1");
+    auto *assignment = inspector.findChild<QPushButton *>("taskInspectorAssignment"); QTRY_VERIFY(assignment->isEnabled());
+    assignment->click(); auto *menu = inspector.findChild<QMenu *>("taskAssignmentMenu"); QVERIFY(menu);
+    QVERIFY(!inspector.findChild<TaskForm *>());
+    QAction *newSession = nullptr, *specific = nullptr; int childIndex = -1, newIndex = -1, anyIndex = -1, i = 0;
+    for (auto *entry : menu->actions()) {
+        if (entry->text() == "Subagent") childIndex = i;
+        if (entry->text() == "New session") { newSession = entry; newIndex = i; }
+        if (entry->text().startsWith("Any session")) anyIndex = i;
+        if (entry->text() == "Specific session") specific = entry;
+        ++i;
+    }
+    QVERIFY(childIndex > 0 && newIndex > childIndex && anyIndex > newIndex); QVERIFY(newSession && specific);
+    auto *search = menu->findChild<QLineEdit *>("taskAssignmentSearch"); QVERIFY(search); search->setText("session-069");
+    QVERIFY(menu->findChildren<QPushButton *>().size() < 55);
+    bool foundLast = false; for (auto *entry : menu->findChildren<QPushButton *>()) if (entry->text() == "codex/session-069") foundLast = true;
+    QVERIFY(foundLast); newSession->trigger(); menu->close();
+    QTRY_VERIFY(assignment->text().contains("New session"));
+    QVERIFY(FakeTasksCli::calls(dir.path()).contains({"task", "target", "uuid-1", "new-session", "--parent", "codex/api", "--session-id", "launch_id:main", "--project", "project-1"}));
+    for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) != "send");
+    QSignalSpy starts(&board, &TasksView::newExecutorRequested);
+    inspector.findChild<QPushButton *>("taskInspectorAction:sendNow")->click(); QCOMPARE(starts.size(), 1);
+    QCOMPARE(board.board().tasks.first().stage, QString("todo"));
+}
+
+void TestTasksView::commentImagesUseActivityAndDraftsFollowTheTask() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
+    inspector.resize(500, 900); inspector.show(); board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions()); QTRY_COMPARE(inspector.displayedCount(), 2); inspector.selectTask("uuid-1");
+    auto *composer = inspector.findChild<MessageComposer *>("taskCommentComposer"); QTRY_VERIFY(composer->sessionKey().endsWith("uuid-1"));
+    QImage image(20, 16, QImage::Format_RGB32); image.fill(Qt::green); QByteArray bytes; QBuffer buffer(&bytes); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(image.save(&buffer, "PNG"));
+    composer->editor()->setPlainText("Review this screenshot"); QVERIFY(composer->addAttachment("screenshot.png", "image/png", bytes));
+    inspector.selectTask("uuid-2"); QTRY_VERIFY(composer->sessionKey().endsWith("uuid-2")); QVERIFY(composer->editor()->toPlainText().isEmpty());
+    composer->editor()->setPlainText("Other task"); inspector.selectTask("uuid-1"); QTRY_VERIFY(composer->sessionKey().endsWith("uuid-1"));
+    QVERIFY(composer->editor()->toPlainText().contains("Review this screenshot")); QCOMPARE(composer->draftSnapshot().attachments.size(), 1);
+    composer->findChild<QPushButton *>("sendMessage")->click(); QTRY_VERIFY(composer->editor()->toPlainText().isEmpty());
+    inspector.findChild<QTabBar *>("taskDetailTabs")->setCurrentIndex(2);
+    auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail"); QTRY_VERIFY(detail->toPlainText().contains("Review this screenshot"));
+    QTRY_VERIFY(detail->toPlainText().contains("screenshot.png"));
+    bool media = false; for (const auto &call : FakeTasksCli::calls(dir.path())) if (call.value(1) == "comment" && call.contains("--content-json")) media = true;
+    QVERIFY(media);
 }
 
 void TestTasksView::inlineTaskEditingRetainsFailuresAndCommandsStayInTheFooter() {
@@ -122,27 +179,30 @@ void TestTasksView::inlineTaskEditingRetainsFailuresAndCommandsStayInTheFooter()
     QTRY_VERIFY(details->isEnabled()); details->click();
     auto *form = inspector.findChild<TaskForm *>(); QVERIFY(form && form->isVisibleTo(&inspector));
     QVERIFY(inspector.findChildren<TaskDialog *>().isEmpty()); QVERIFY(!form->findChild<QTextBrowser *>("taskHistory"));
+    QVERIFY(!form->findChild<QComboBox *>("taskAssignedTo"));
+    auto *composer = form->findChild<MessageComposer *>("taskDescriptionComposer"); QVERIFY(composer);
+    QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
     auto *prompt = form->findChild<QPlainTextEdit *>("taskPrompt"); prompt->setPlainText("Revised requirement");
-    auto *target = form->findChild<QComboBox *>("taskAssignedTo"); QVERIFY(target); target->setCurrentIndex(1);
     QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("edit"); fail.close();
-    form->findChild<QPushButton *>("saveTask")->click();
+    composer->findChild<QPushButton *>("sendMessage")->click();
     QTRY_VERIFY(form->findChild<QLabel *>("taskDialogError")->isVisibleTo(form)); QCOMPARE(prompt->toPlainText(), QString("Revised requirement"));
-    QVERIFY(fail.remove()); form->findChild<QPushButton *>("saveTask")->click();
+    QVERIFY(fail.remove()); composer->findChild<QPushButton *>("sendMessage")->click();
     QTRY_VERIFY(!inspector.findChild<QScrollArea *>("taskInlineEditor"));
     auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail"); QTRY_VERIFY(detail->toPlainText().contains("Revised requirement"));
-    QVERIFY(FakeTasksCli::calls(dir.path()).contains({"task", "target", "uuid-1", "codex/api", "--project", "project-1"}));
+    for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) != "target");
     auto *tabs = inspector.findChild<QTabBar *>("taskDetailTabs"); auto *footer = inspector.findChild<QWidget *>("taskInspectorActions");
     const auto footerTop = footer->mapTo(&inspector, QPoint());
     for (const int tab : {1, 2, 0}) { tabs->setCurrentIndex(tab); QTest::qWait(20); QCOMPARE(footer->mapTo(&inspector, QPoint()), footerTop); }
-    auto *note = inspector.findChild<QLineEdit *>("taskInspectorNote"); note->setText("Keep this note");
+    auto *notes = inspector.findChild<MessageComposer *>("taskCommentComposer"); QVERIFY(notes);
+    auto *note = notes->editor(); note->setPlainText("Keep this note");
     QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("comment"); fail.close();
-    inspector.findChild<QPushButton *>("taskInspectorSaveNote")->click();
-    QTRY_VERIFY(inspector.findChild<QLabel *>("taskInspectorNoteError")->isVisibleTo(&inspector)); QCOMPARE(note->text(), QString("Keep this note"));
-    QVERIFY(fail.remove()); inspector.findChild<QPushButton *>("taskInspectorSaveNote")->click(); QTRY_VERIFY(note->text().isEmpty());
+    notes->findChild<QPushButton *>("sendMessage")->click();
+    QTRY_VERIFY(inspector.findChild<QLabel *>("taskInspectorNoteError")->isVisibleTo(&inspector)); QCOMPARE(note->toPlainText(), QString("Keep this note"));
+    QVERIFY(fail.remove()); notes->findChild<QPushButton *>("sendMessage")->click(); QTRY_VERIFY(note->toPlainText().isEmpty());
     tabs->setCurrentIndex(2); QTRY_VERIFY(detail->toPlainText().contains("Keep this note"));
-    inspector.findChild<QToolButton *>("taskInspectorAction:sendNow")->click();
+    inspector.findChild<QPushButton *>("taskInspectorAction:sendNow")->click();
     QTRY_COMPARE(inspector.selectedStage(), QString("active"));
-    auto *pause = inspector.findChild<QToolButton *>("taskInspectorAction:pause"); QVERIFY(pause && !pause->isEnabled());
+    auto *pause = inspector.findChild<QPushButton *>("taskInspectorAction:pause"); QVERIFY(pause && !pause->isEnabled());
     QVERIFY(pause->toolTip().contains("individual task"));
     for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) != "cancel");
     const auto preview = qEnvironmentVariable("HGS_TASK_INLINE_PREVIEW");
@@ -308,7 +368,7 @@ void TestTasksView::inspectorPagesOlderHistoryWithoutGrowingItsWindow() {
     auto *latest = inspector.findChild<QPushButton *>("taskHistoryLatest"); QVERIFY(latest->isVisibleTo(&inspector));
     more->click(); QTRY_VERIFY(activity->plainText().contains("EVENT_1_END")); QVERIFY(more->isHidden());
     // A new appended event cannot shift the anchored older page during a poll.
-    bool appended = false; board.saveTaskNote("uuid-1", "EVENT_96_END", [&] { appended = true; }, [](const QString &) {});
+    bool appended = false; board.saveTaskNote("uuid-1", "EVENT_96_END", {}, [&] { appended = true; }, [](const QString &) {});
     QTRY_VERIFY(appended); QTest::qWait(100); QVERIFY(activity->plainText().contains("EVENT_1_END")); QVERIFY(!activity->plainText().contains("EVENT_96_END"));
     latest->click(); QTRY_VERIFY(activity->plainText().contains("EVENT_96_END")); QVERIFY(latest->isHidden());
 }

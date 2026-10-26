@@ -1,9 +1,9 @@
 //! One task as one Loro document: `meta` (identity, set once), `fields`
 //! (last writer wins), `text` (the prompt, merged by character) and `log`
 //! (history, append only).
-use crate::attachment::{check_attachments, TaskAttachment, TASK_SCHEMA};
+use crate::attachment::{check_attachments, TaskAttachment, BASE_TASK_SCHEMA, TASK_SCHEMA};
 use crate::schema::{
-    check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, MAX_DOCUMENT, SCHEMA,
+    check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, TaskWorker, MAX_DOCUMENT, SCHEMA,
 };
 use crate::{ids, rank, Error, Result};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, UpdateOptions, VersionVector};
@@ -76,9 +76,13 @@ impl TaskDoc {
         let uuid = ids::new_uuid();
         let doc = LoroDoc::new();
         let meta = doc.get_map("meta");
+        let planned = matches!(&task.target, Target::NewSession { .. } | Target::Subagent { .. });
+        if let Target::NewSession { parent } | Target::Subagent { parent } = &task.target {
+            if parent.session_id.is_empty() || parent.machine.is_empty() { return Err(Error::new("choose a parent with a confirmed session identity")); }
+        }
         let identified = matches!(&task.target, Target::Session(key) if !key.session_id.is_empty())
             || matches!(&task.author, Actor::Agent(key) if !key.session_id.is_empty());
-        meta.insert("schema", if identified { TASK_SCHEMA } else { SCHEMA })?;
+        meta.insert("schema", if planned { TASK_SCHEMA } else if identified { BASE_TASK_SCHEMA } else { SCHEMA })?;
         meta.insert("uuid", uuid.as_str())?;
         meta.insert("id", task.id)?;
         meta.insert("project", task.project)?;
@@ -217,6 +221,7 @@ impl TaskDoc {
     pub fn view(&self) -> Result<TaskView> {
         let meta = self.meta();
         let fields = self.fields();
+        let writable = self.schema() <= TASK_SCHEMA;
         let mut log = Vec::new();
         let list = self.doc.get_list("log");
         for index in 0..list.len() {
@@ -236,6 +241,13 @@ impl TaskDoc {
                 text: string(&entry, "text").unwrap_or_default(),
                 session: string(&entry, "session").and_then(|s| serde_json::from_str(&s).ok()),
                 request_id: string(&entry, "request_id"),
+                attachments: match string(&entry, "attachments") {
+                    Some(raw) => match serde_json::from_str::<Vec<TaskAttachment>>(&raw).map_err(Error::from).and_then(|files| { check_attachments(&files)?; Ok(files) }) {
+                        Err(_) if !writable => Vec::new(),
+                        files => files?,
+                    }
+                    None => Vec::new(),
+                },
             });
         }
         // A merge orders entries appended on two replicas by peer, not by time;
@@ -244,7 +256,6 @@ impl TaskDoc {
         // A newer schema may encode a field differently: such a task is shown
         // read-only with defaults. In this schema a field that does not decode
         // is damage, and the store sets the task aside.
-        let writable = self.schema() <= TASK_SCHEMA;
         let author = match decode(&meta, "author") {
             Err(_) if !writable => Actor::Person,
             author => author?,
@@ -273,6 +284,10 @@ impl TaskDoc {
             target,
             rank: self.rank(),
             session: self.session(),
+            worker: match string(&fields, "worker").map(|raw| serde_json::from_str(&raw)).transpose() {
+                Err(_) if !writable => None,
+                worker => worker?,
+            },
             summary: string(&fields, "summary").unwrap_or_default(),
             cancelled_at: integer(&fields, "cancelled_at"),
             cancel_reason: string(&fields, "cancel_reason").unwrap_or_default(),
@@ -304,6 +319,23 @@ impl TaskDoc {
         Ok(entry)
     }
 
+    fn upgrade_schema(&self, required: i64) -> Result<()> {
+        if self.schema() < required { self.meta().insert("schema", required)?; }
+        Ok(())
+    }
+
+    fn check_media_budget(&self, description: &[TaskAttachment], extra: &[TaskAttachment]) -> Result<()> {
+        let mut total = 0usize;
+        for file in description.iter().chain(extra) { total += file.bytes()?.len(); }
+        for entry in self.view()?.log {
+            for file in entry.attachments { total += file.bytes()?.len(); }
+        }
+        if total > crate::MAX_ATTACHMENT_TOTAL {
+            return Err(Error::new("task attachments are full: 20 MiB across description and comments"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn writable(&self) -> Result<()> {
         if self.schema() > TASK_SCHEMA {
             return Err(Error::new("Update Zerus to edit this task"));
@@ -331,12 +363,13 @@ impl TaskDoc {
             "attachments can be edited only in Backlog or To do",
         )?;
         check_attachments(files)?;
+        self.check_media_budget(files, &[])?;
         if files == self.attachments()? {
             return Ok(());
         }
         // Never lower this after removal: old binaries must not mutate a task
         // whose media history they cannot preserve or deliver.
-        self.meta().insert("schema", TASK_SCHEMA)?;
+        self.upgrade_schema(BASE_TASK_SCHEMA)?;
         self.fields()
             .insert("attachments", serde_json::to_string(files)?)?;
         self.log("attachments", actor, now, "Updated attachments", None)?;
@@ -354,15 +387,14 @@ impl TaskDoc {
         {
             return Err(Error::new("task session identity changed"));
         }
-        self.meta().insert("schema", TASK_SCHEMA)?;
-        if let Target::Session(target) = decode::<Target>(&self.fields(), "target")? {
-            if &target == old {
-                self.fields().insert(
-                    "target",
-                    serde_json::to_string(&Target::Session(current.clone()))?,
-                )?;
-            }
-        }
+        self.upgrade_schema(BASE_TASK_SCHEMA)?;
+        let target = match decode::<Target>(&self.fields(), "target")? {
+            Target::Session(key) if &key == old => Some(Target::Session(current.clone())),
+            Target::NewSession { parent } if &parent == old => Some(Target::NewSession { parent: current.clone() }),
+            Target::Subagent { parent } if &parent == old => Some(Target::Subagent { parent: current.clone() }),
+            _ => None,
+        };
+        if let Some(target) = target { self.fields().insert("target", serde_json::to_string(&target)?)?; }
         if self.session().as_ref() == Some(old) {
             self.fields()
                 .insert("session", serde_json::to_string(current)?)?;
@@ -453,13 +485,19 @@ impl TaskDoc {
             "the session can be changed only in Backlog or To do",
         )?;
         if matches!(target, Target::Session(key) if !key.session_id.is_empty()) {
-            self.meta().insert("schema", TASK_SCHEMA)?;
+            self.upgrade_schema(BASE_TASK_SCHEMA)?;
+        }
+        if let Target::NewSession { parent } | Target::Subagent { parent } = target {
+            if parent.session_id.is_empty() || parent.machine.is_empty() { return Err(Error::new("choose a parent with a confirmed session identity")); }
+            self.upgrade_schema(TASK_SCHEMA)?;
         }
         self.fields()
             .insert("target", serde_json::to_string(target)?)?;
         let label = match target {
             Target::Any => "any".to_owned(),
             Target::Session(key) => key.session.clone(),
+            Target::NewSession { parent } => format!("new session from {}", parent.session),
+            Target::Subagent { parent } => format!("subagent of {}", parent.session),
         };
         self.log("target", actor, now, &label, None)?;
         self.doc.commit();
@@ -489,12 +527,13 @@ impl TaskDoc {
     ) -> Result<()> {
         self.check_send()?;
         if !session.session_id.is_empty() {
-            self.meta().insert("schema", TASK_SCHEMA)?;
+            self.upgrade_schema(BASE_TASK_SCHEMA)?;
         }
         let fields = self.fields();
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
         fields.insert("session", serde_json::to_string(session)?)?;
+        fields.delete("worker")?;
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
         self.log("sent", actor, now, "", Some(session))?
@@ -539,7 +578,7 @@ impl TaskDoc {
             return Err(Error::new("choose another session for the handoff"));
         }
         if !session.session_id.is_empty() {
-            self.meta().insert("schema", TASK_SCHEMA)?;
+            self.upgrade_schema(BASE_TASK_SCHEMA)?;
         }
         self.fields().insert(
             "target",
@@ -549,6 +588,7 @@ impl TaskDoc {
             .insert("session", serde_json::to_string(session)?)?;
         self.fields().insert("stage_at", now)?;
         self.fields().insert("summary", "")?;
+        self.fields().delete("worker")?;
         self.log("sent", actor, now, "handoff", Some(session))?
             .insert("request_id", request_id)?;
         self.doc.commit();
@@ -582,25 +622,37 @@ impl TaskDoc {
     /// The calling agent explicitly takes an existing task without pasting a
     /// second copy of the instruction into its own active conversation.
     pub fn record_start(&mut self, actor: &Actor, now: i64) -> Result<()> {
-        self.check_send()?;
+        self.writable()?;
         let Actor::Agent(own) = actor else {
             return Err(Error::new(
                 "start is for an agent working in its own session",
             ));
         };
         let view = self.view()?;
+        if view.stage == Stage::Active {
+            if matches!(view.target, Target::Subagent { .. }) && view.worker.is_none() { return Err(Error::new("register the native subagent worker before starting")); }
+            if view.session.as_ref() != Some(own) { return Err(Error::new("the task is active in another session")); }
+            let current = view.log.iter().rev().take_while(|entry| entry.kind != "sent");
+            if current.clone().any(|entry| entry.kind == "started") { return Ok(()); }
+            self.log("started", actor, now, "", Some(own))?; self.doc.commit(); return Ok(());
+        }
+        self.check_send()?;
+        if matches!(view.target, Target::NewSession { .. } | Target::Subagent { .. }) {
+            return Err(Error::new("start this task through its selected executor plan"));
+        }
         if let Target::Session(target) = &view.target {
             if target != own {
                 return Err(Error::new("the task is pinned to another session"));
             }
         }
         if !own.session_id.is_empty() {
-            self.meta().insert("schema", TASK_SCHEMA)?;
+            self.upgrade_schema(BASE_TASK_SCHEMA)?;
         }
         let fields = self.fields();
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
         fields.insert("session", serde_json::to_string(own)?)?;
+        fields.delete("worker")?;
         fields.delete("cancelled_at")?;
         fields.delete("cancel_reason")?;
         self.log("started", actor, now, "", Some(own))?;
@@ -628,15 +680,45 @@ impl TaskDoc {
         Ok(())
     }
 
-    pub fn comment(&mut self, text: &str, actor: &Actor, now: i64) -> Result<()> {
+    pub fn record_worker(&mut self, worker: &TaskWorker, actor: &Actor, now: i64) -> Result<()> {
         self.writable()?;
+        let view = self.view()?;
+        if view.stage != Stage::Active || actor != &Actor::Agent(worker.parent.clone()) || view.session.as_ref() != Some(&worker.parent) {
+            return Err(Error::new("only the task's current coordinator can bind its subagent"));
+        }
+        let sent = view.log.iter().rev().find(|entry| entry.kind == "sent");
+        if sent.and_then(|entry| entry.request_id.as_deref()) != Some(worker.request_id.as_str()) {
+            return Err(Error::new("task dispatch changed; read the current request_id"));
+        }
+        if worker.id.is_empty() || worker.conversation_id.is_empty() || worker.provider.is_empty() {
+            return Err(Error::new("a worker needs its native child and parent conversation identities"));
+        }
+        if view.worker.as_ref() == Some(worker) { return Ok(()); }
+        self.upgrade_schema(TASK_SCHEMA)?;
+        self.fields().insert("worker", serde_json::to_string(worker)?)?;
+        self.log("worker", actor, now, &format!("Delegated to {} ({})", worker.name, worker.id), Some(&worker.parent))?;
+        self.doc.commit(); Ok(())
+    }
+
+    pub fn comment(&mut self, text: &str, actor: &Actor, now: i64) -> Result<()> {
+        self.comment_with_attachments(text, &[], actor, now)
+    }
+
+    pub fn comment_with_attachments(&mut self, text: &str, files: &[TaskAttachment], actor: &Actor, now: i64) -> Result<()> {
+        self.writable()?;
+        check_attachments(files)?;
+        if !files.is_empty() { self.check_media_budget(&self.attachments()?, files)?; }
         check_text(text, "comment")?;
         if self.content_len() + text.len() > MAX_DOCUMENT {
             return Err(Error::new(
                 "this task's history is full; it accepts no more comments",
             ));
         }
-        self.log("comment", actor, now, text, None)?;
+        let entry = self.log("comment", actor, now, text, None)?;
+        if !files.is_empty() {
+            self.upgrade_schema(TASK_SCHEMA)?;
+            entry.insert("attachments", serde_json::to_string(files)?)?;
+        }
         self.doc.commit();
         Ok(())
     }
@@ -852,6 +934,90 @@ mod tests {
         t.set_stage(Stage::Todo, &Actor::Person, 6).unwrap();
         t.record_send(&api(), "r2", &Actor::Person, 7).unwrap();
         assert_eq!(t.view().unwrap().cancelled_at, None);
+    }
+
+    #[test]
+    fn executor_plans_only_store_intent_and_follow_identity() {
+        let parent = SessionKey { session_id: "launch_id:parent".into(), ..api() };
+        for target in [Target::NewSession { parent: parent.clone() }, Target::Subagent { parent: parent.clone() }] {
+            let mut task = task(Stage::Todo);
+            task.set_target(&target, &Actor::Person, 2).unwrap();
+            let before = task.view().unwrap();
+            assert_eq!(before.schema, TASK_SCHEMA);
+            assert_eq!(before.stage, Stage::Todo);
+            assert!(before.session.is_none() && before.worker.is_none());
+            assert_eq!(before.log.last().unwrap().kind, "target");
+            assert!(task.record_start(&Actor::Agent(parent.clone()), 3).is_err());
+            let renamed = SessionKey { session: "codex/renamed".into(), ..parent.clone() };
+            task.bind_session_identity(&parent, &renamed).unwrap();
+            let current = match task.view().unwrap().target { Target::NewSession { parent } | Target::Subagent { parent } => parent, _ => panic!("lost executor plan") };
+            assert_eq!(current.session, renamed.session);
+            assert_eq!(task.schema(), TASK_SCHEMA);
+        }
+    }
+
+    #[test]
+    fn current_dispatch_start_is_acknowledged_once_without_resending() {
+        let mut task = task(Stage::Todo);
+        task.record_send(&api(), "dispatch", &Actor::Person, 2).unwrap();
+        assert!(task.record_start(&agent("codex/other"), 3).is_err());
+        task.record_start(&agent("codex/api"), 4).unwrap();
+        task.record_start(&agent("codex/api"), 5).unwrap();
+        let view = task.view().unwrap();
+        assert_eq!(view.stage_at, 2);
+        assert_eq!(view.log.iter().filter(|entry| entry.kind == "started").count(), 1);
+        assert_eq!(view.log.iter().filter(|entry| entry.kind == "sent").count(), 1);
+    }
+
+    #[test]
+    fn worker_binding_is_scoped_to_the_coordinator_and_dispatch() {
+        let mut task = task(Stage::Todo);
+        let parent = SessionKey { session_id: "launch_id:parent".into(), ..api() };
+        task.set_target(&Target::Subagent { parent: parent.clone() }, &Actor::Person, 2).unwrap();
+        task.record_send(&parent, "dispatch", &Actor::Person, 3).unwrap();
+        let actor = Actor::Agent(parent.clone());
+        assert!(task.record_start(&actor, 4).is_err());
+        let worker = TaskWorker { parent: parent.clone(), conversation_id: "conversation".into(), provider: "codex".into(), id: "child".into(), name: "Builder".into(), request_id: "dispatch".into() };
+        assert!(task.record_worker(&worker, &Actor::Person, 5).is_err());
+        assert!(task.record_worker(&TaskWorker { request_id: "old".into(), ..worker.clone() }, &actor, 5).is_err());
+        task.record_worker(&worker, &actor, 5).unwrap();
+        task.record_worker(&worker, &actor, 6).unwrap();
+        task.record_start(&actor, 7).unwrap();
+        assert_eq!(task.view().unwrap().worker.as_ref(), Some(&worker));
+        assert_eq!(task.view().unwrap().log.iter().filter(|entry| entry.kind == "worker").count(), 1);
+        let other = SessionKey { session: "codex/other".into(), session_id: "launch_id:other".into(), ..api() };
+        task.record_handoff(&other, "next", &actor, 8).unwrap();
+        assert!(task.view().unwrap().worker.is_none());
+        assert!(task.record_worker(&worker, &actor, 9).is_err());
+    }
+
+    #[test]
+    fn comment_media_and_description_share_one_storage_budget() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let mut task = task(Stage::Todo);
+        let file = TaskAttachment { name: "image.bin".into(), mime: "application/octet-stream".into(), data_base64: STANDARD.encode(vec![0; crate::attachment::MAX_ATTACHMENT]), reference: String::new() };
+        task.set_attachments(&[file.clone()], &Actor::Person, 2).unwrap();
+        task.comment_with_attachments("First image", &[file.clone()], &Actor::Person, 3).unwrap();
+        let before = task.view().unwrap().log;
+        assert!(task.comment_with_attachments("Too much", &[file.clone()], &Actor::Person, 4).is_err());
+        assert_eq!(task.view().unwrap().log, before);
+        assert!(task.set_attachments(&[file.clone(), file], &Actor::Person, 5).is_err());
+        assert_eq!(task.attachments().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn comment_media_survives_replication_and_schema_never_downgrades() {
+        let mut task = task(Stage::Todo);
+        let file = TaskAttachment { name: "image.png".into(), mime: "image/png".into(), data_base64: "cG5n".into(), reference: "[Image #1]".into() };
+        task.comment_with_attachments("Inspect [Image #1]", &[file.clone()], &Actor::Person, 2).unwrap();
+        task.set_target(&Target::Session(SessionKey { session_id: "launch_id:parent".into(), ..api() }), &Actor::Person, 3).unwrap();
+        task.set_attachments(&[file.clone()], &Actor::Person, 4).unwrap();
+        assert_eq!(task.schema(), TASK_SCHEMA);
+        let log = task.view().unwrap().log;
+        assert_eq!(log[1].attachments, [file]);
+        let bytes = task.snapshot().unwrap();
+        let restored = TaskDoc::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.view().unwrap().log, log);
     }
 
     #[test]

@@ -1377,8 +1377,78 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // The native plan is separate from the project's durable Zerus tasks.
     m_inspector->addTab(m_children, tr("Plan && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
+    const auto taskLaunchBytes = settings.value("tasks/pendingExecutorLaunches").toByteArray();
+    const auto taskLaunchDoc = taskLaunchBytes.size() <= 65536 ? QJsonDocument::fromJson(taskLaunchBytes) : QJsonDocument();
+    m_taskLaunches = taskLaunchDoc.object();
+    bool validLaunches = taskLaunchBytes.isEmpty() || taskLaunchDoc.isObject();
+    if (m_taskLaunches.size() > 16) validLaunches = false;
+    for (auto it = m_taskLaunches.constBegin(); it != m_taskLaunches.constEnd() && validLaunches; ++it) {
+        const auto record = it.value().toObject();
+        validLaunches = !QUuid(it.key()).isNull() && !record.value("task").toString().isEmpty() && !record.value("project").toString().isEmpty()
+            && !record.value("parent").toString().isEmpty() && !record.value("cmd").toString().isEmpty()
+            && QStringList{"waiting", "reserved", "review"}.contains(record.value("phase").toString());
+    }
+    if (!validLaunches) { m_taskLaunches = {}; m_taskLaunchRecoveryBlocked = true; }
+    m_tasks->setExecutorLaunches(m_taskLaunches);
+    connect(m_tasks, &TasksView::newExecutorRequested, this, [this](const TaskItem &task, const QString &project) {
+        if (task.targetId.isEmpty() || task.targetMachine.isEmpty()) { showNotice(tr("Choose a parent with a confirmed computer and session identity."), true); return; }
+        if (m_taskLaunchRecoveryBlocked) { showNotice(tr("The saved executor launch records could not be read. Review them before creating another task executor."), true); return; }
+        if (m_taskLaunches.size() >= 16) { showNotice(tr("Finish or review the pending task executor launches first."), true); return; }
+        for (const auto &value : m_taskLaunches) if (value.toObject().value("task").toString() == task.uuid) {
+            showNotice(tr("This task already has an executor launch pending. Check its session and task history before starting it again."), true); return;
+        }
+        showNewSession(task.targetSession.section('/', 0, 0), project, task.targetHost, {}, {}, {}, task.uuid, task.targetMachine + QLatin1Char('/') + task.targetId);
+    });
+    connect(m_tasks, &TasksView::executorLaunchReviewRequested, this, [this](const QString &uuid) {
+        for (auto it = m_taskLaunches.constBegin(); it != m_taskLaunches.constEnd(); ++it) {
+            const auto record = it.value().toObject(); if (record.value("task").toString() != uuid) continue;
+            const auto launch = it.key();
+            QMessageBox review(QMessageBox::Information, tr("Task executor launch"),
+                tr("Session: %1\nLaunch: %2\nState: %3\n%4\n\nCheck the task history and this executor before allowing another launch. Releasing the launch record does not stop an agent or retry delivery.")
+                    .arg(record.value("session").toString(record.value("tag").toString()), launch, record.value("phase").toString(), record.value("error").toString()),
+                QMessageBox::Close, this);
+            review.setTextFormat(Qt::PlainText); review.setObjectName("taskExecutorLaunchReviewDialog");
+            auto *release = review.addButton(tr("I reviewed it · allow another launch"), QMessageBox::ActionRole);
+            release->setEnabled(record.value("phase") != "waiting"); review.exec();
+            if (review.clickedButton() == release && m_taskLaunches.value(launch).toObject() == record) {
+                m_taskLaunches.remove(launch);
+                if (!saveTaskLaunches()) { m_taskLaunches[launch] = record; m_tasks->setExecutorLaunches(m_taskLaunches); showNotice(tr("Could not release the executor launch record."), true); }
+            }
+            return;
+        }
+    });
+    connect(&m_client, &HgsClient::taskReady, this, [this](quint64 id, const QJsonObject &reply) {
+        const auto launch = m_taskLaunchRequests.take(id); if (launch.isEmpty()) return;
+        auto record = m_taskLaunches.value(launch).toObject(); const auto task = reply.value("task").toObject();
+        const auto receipt = reply.value("receipt").toObject().value("request_id").toString();
+        QString recorded; for (const auto &value : task.value("log").toArray()) if (value.toObject().value("kind") == "sent") recorded = value.toObject().value("request_id").toString();
+        const auto owner = task.value("session").toObject();
+        if (task.value("uuid").toString() != record.value("task").toString() || task.value("stage") != "active"
+            || owner.value("session_id").toString() != QStringLiteral("launch_id:") + launch || owner.value("host") != record.value("host")
+            || receipt.isEmpty() || recorded != receipt) {
+            record["phase"] = "review"; record["error"] = tr("Task delivery reply did not confirm this exact executor and receipt");
+            m_taskLaunches[launch] = record; saveTaskLaunches();
+            showNotice(record.value("error").toString(), true); return;
+        }
+        m_taskLaunches.remove(launch); saveTaskLaunches(); m_tasks->refresh();
+    });
+    connect(&m_client, &HgsClient::taskFailed, this, [this](quint64 id, const QString &error) {
+        const auto launch = m_taskLaunchRequests.take(id); if (launch.isEmpty()) return;
+        auto record = m_taskLaunches.value(launch).toObject(); record["error"] = error.left(2048); record["phase"] = "review";
+        m_taskLaunches[launch] = record; saveTaskLaunches();
+        showNotice(tr("The executor was created, but task delivery needs review: %1. Check task history before retrying.").arg(error), true);
+    });
     m_taskInspector = new TaskInspector(&m_client, m_tasks);
     m_inspector->addTab(m_taskInspector, tr("Tasks"));
+    connect(m_taskInspector, &TaskInspector::subagentRequested, this, [this](const QString &host, const QString &name, const QString &parentId, const QString &conversation, const QString &child) {
+        for (const auto &entry : std::as_const(m_entries)) {
+            const QString retained = entry.session.launchId.isEmpty() ? QStringLiteral("run_id:") + entry.session.runId : QStringLiteral("launch_id:") + entry.session.launchId;
+            if (entry.host != host || retained != parentId || entry.session.conversationId != conversation) continue;
+            const auto task = m_taskInspector->selectedTask();
+            openRelatedSession(host, entry.session.name, {}); closeSubagent(); openSubagent(child); m_taskInspector->selectTask(task); return;
+        }
+        showNotice(tr("This worker belongs to an earlier or unavailable parent conversation. Open the coordinator's history to inspect it."), true);
+    });
     connect(m_taskInspector, &TaskInspector::executorRequested, this, [this](const QString &host, const QString &name, const QString &id) {
         // Recheck the retained identity before following a mutable display name.
         for (const auto &entry : std::as_const(m_entries)) {
@@ -2630,7 +2700,7 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
     menu->addAction(m_clearArchiveAction);
 }
 
-void SessionsWindow::showNewSession(const QString &agent, const QString &project, const QString &host, const QString &folder, const QString &path, const QString &account)
+void SessionsWindow::showNewSession(const QString &agent, const QString &project, const QString &host, const QString &folder, const QString &path, const QString &account, const QString &taskUuid, const QString &taskParentId)
 {
     QString group = m_organization.defaultProject();
     if (const auto *row = m_sessions->currentItem()) group = row->data(SessionRoles::Group).toString();
@@ -2652,8 +2722,14 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
-        [this,&dialog](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
+        [this,&dialog,taskUuid,taskParentId,launchProject](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            if (!taskUuid.isEmpty()) {
+                if (group != launchProject || taskParentId.isEmpty()) { showNotice(tr("Choose the task's project and a confirmed parent session."), true); return; }
+                m_taskLaunches[id] = QJsonObject{{"task", taskUuid}, {"project", launchProject}, {"host", host}, {"cmd", cmd}, {"tag", name},
+                    {"parent", taskParentId}, {"phase", "waiting"}, {"created", QDateTime::currentSecsSinceEpoch()}};
+                if (!saveTaskLaunches()) { m_taskLaunches.remove(id); showNotice(tr("Could not save the task executor launch. Nothing was started."), true); return; }
+            }
             m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", cmd}, {"tag", name}, {"group", group},
                 {"target", target}, {"implicit_inbox", dialog.implicitInbox()}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
             savePendingLaunches();
@@ -2677,6 +2753,33 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     dialog.exec();
 }
 
+bool SessionsWindow::saveTaskLaunches() {
+    QSettings settings; settings.setValue("tasks/pendingExecutorLaunches", QJsonDocument(m_taskLaunches).toJson(QJsonDocument::Compact));
+    settings.sync();
+    if (m_tasks) m_tasks->setExecutorLaunches(m_taskLaunches);
+    return settings.status() == QSettings::NoError;
+}
+
+void SessionsWindow::dispatchTaskLaunches() {
+    for (auto it = m_taskLaunches.begin(); it != m_taskLaunches.end(); ++it) {
+        auto record = it.value().toObject();
+        if (record.value("phase") != QLatin1String("waiting") || QUuid(it.key()).isNull()) continue;
+        for (const auto &entry : std::as_const(m_entries)) {
+            if (!entry.online || entry.host != record.value("host").toString() || entry.session.launchId != it.key()
+                || entry.session.cmd != record.value("cmd").toString() || entry.session.name.section('/', 2) != record.value("tag").toString()
+                || m_organization.groupFor(entry.identity) != record.value("project").toString()) continue;
+            // Reserve before transport. Restart/uncertain delivery cannot authorize a replay.
+            record["phase"] = "reserved"; record["session"] = entry.session.name; it.value() = record;
+            if (!saveTaskLaunches()) { record["phase"] = "review"; it.value() = record; showNotice(tr("Could not reserve task delivery. Check this task before retrying."), true); break; }
+            QStringList args{"send", record.value("task").toString(), "--project", record.value("project").toString(),
+                "--session", entry.session.name, "--session-id", QStringLiteral("launch_id:") + entry.session.launchId,
+                "--expect-new-session-parent", record.value("parent").toString()};
+            if (!entry.host.isEmpty()) args << "--host" << entry.host;
+            m_taskLaunchRequests.insert(m_client.requestTask(args), it.key()); break;
+        }
+    }
+}
+
 void SessionsWindow::savePendingLaunches()
 {
     QSettings settings; settings.setValue("workspace/pendingLaunches", QJsonDocument(m_pendingLaunches).toJson(QJsonDocument::Compact)); settings.sync();
@@ -2694,6 +2797,10 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
 {
     // A listing that reported the launch ended already showed its reason and last
     // lines. A hidden launch status showed nothing, so its failure still names it.
+    if (m_taskLaunches.contains(launchId)) {
+        auto record = m_taskLaunches.value(launchId).toObject(); record["phase"] = "review"; record["error"] = error.left(2048);
+        m_taskLaunches[launchId] = record; saveTaskLaunches();
+    }
     QJsonObject ended;
     if (takeEndedLaunch(launchId, &ended) && ended.value("show_pending").toBool()) return;
     const QString name = (ended.isEmpty() ? m_pendingLaunches.value(launchId).toObject() : ended).value("tag").toString();
@@ -2741,6 +2848,10 @@ void SessionsWindow::placeLaunchedSessions()
         const auto end = !consumed && box && box->ok ? box->endedLaunches.value(it.key()) : QJsonObject();
         if (!end.isEmpty() && std::none_of(m_entries.cbegin(), m_entries.cend(), [&](const Entry &entry) {
                 return entry.host == host && entry.session.launchId == it.key(); })) {
+            if (m_taskLaunches.contains(it.key())) {
+                auto record = m_taskLaunches.value(it.key()).toObject(); record["phase"] = "review"; record["error"] = tr("Session ended before task delivery");
+                m_taskLaunches[it.key()] = record; saveTaskLaunches();
+            }
             consumed = true; m_endedLaunches.append({it.key(), launch});
             // Terminal launches and launches restored after a restart never
             // report a result, so only the newest ended launches are kept.
@@ -2763,6 +2874,7 @@ void SessionsWindow::placeLaunchedSessions()
         if (consumed) { it = m_pendingLaunches.erase(it); changed = true; } else ++it;
     }
     if (changed) { saveOrganization(); savePendingLaunches(); }
+    dispatchTaskLaunches();
     if (!ended.isEmpty()) showNotice(ended, true);
 }
 
@@ -3660,6 +3772,7 @@ void SessionsWindow::updateTasks(const Entry *entry)
     for (const auto &other : std::as_const(m_entries)) {
         if (other.session.state == "archived" || m_organization.groupFor(other.identity) != projectId) continue;
         TaskSession session{other.host, other.session.name, status(other.session, other.online), {}, true};
+        session.conversation = other.session.conversationId;
         session.id = other.session.launchId.isEmpty() ? (other.session.runId.isEmpty() ? QString() : QStringLiteral("run_id:") + other.session.runId)
                                                      : QStringLiteral("launch_id:") + other.session.launchId;
         session.running = other.online && other.session.state == "running" && other.session.processState != "exited";

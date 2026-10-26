@@ -2,6 +2,7 @@
 #include "TaskStageFilter.h"
 #include "TaskContent.h"
 #include "AttachmentViewer.h"
+#include "AttachmentViewer.h"
 #include "HgsClient.h"
 #include "TaskDialogs.h"
 #include "MessageComposer.h"
@@ -246,6 +247,10 @@ const TaskSession *TasksView::session(const QString &host, const QString &name) 
 
 // Why Send now cannot paste into the session the task would go to, as hgs would say it.
 QString TasksView::sendBlocker(const TaskItem &task) const {
+    if (task.targetKind == QLatin1String("new_session")) {
+        if (task.targetId.isEmpty() || task.targetMachine.isEmpty()) return tr("Choose a parent with a confirmed computer and session identity");
+        return m_executorLaunchBlockers.value(task.uuid);
+    }
     const bool any = task.targetSession.isEmpty();
     const QString host = any ? m_host : task.targetHost, name = any ? m_session : task.targetSession;
     if (name.isEmpty()) return tr("Open the session to send this task to");
@@ -319,10 +324,21 @@ void TasksView::render() {
                                   Qt::QueuedConnection);
 }
 
+void TasksView::setExecutorLaunches(const QJsonObject &launches) {
+    QHash<QString, QString> blockers;
+    for (const auto &value : launches) {
+        const auto record = value.toObject(); const auto task = record.value("task").toString();
+        if (!task.isEmpty()) blockers[task] = record.value("phase") == "waiting" ? tr("The new executor is starting")
+            : tr("The previous executor launch needs review before another launch.");
+    }
+    if (blockers == m_executorLaunchBlockers) return;
+    m_executorLaunchBlockers = blockers; render();
+}
+
 TaskRowState TasksView::rowState(const TaskItem &task) const {
     const auto v = view();
     TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session, v.id); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
-    if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.sessionKnown && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
+    if (const auto *ran = session(task.sessionHost, task.sessionName); task.worker.isEmpty() && ran && task.sessionKnown && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
     if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
         if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
     state.blocked.insert(int(TaskAction::Pause), tr("Pausing an individual task is not available yet"));
@@ -368,12 +384,14 @@ QList<TasksView::Step> TasksView::editSteps(const TaskItem &task, const TaskEdit
     if (edits.attachments) out << Step{withProject({"edit", task.uuid, "--content-json"}), TaskContent::payload(edits.text.value_or(task.text), *edits.attachments)};
     else if (edits.text) out << Step{withProject({"edit", task.uuid}), *edits.text};
     if (edits.target)
-        out << Step{withProject(targetArguments(task.uuid, edits.target->host, edits.target->any ? QString() : edits.target->session, edits.target->id)), {}};
+        out << Step{withProject(targetArguments(task.uuid, edits.target->host, edits.target->any ? QString() : edits.target->session, edits.target->id, edits.target->mode)), {}};
     return out;
 }
 
-QStringList TasksView::targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id) {
-    QStringList arguments{"target", uuid, session.isEmpty() ? QStringLiteral("any") : session};
+QStringList TasksView::targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id, const QString &mode) {
+    const bool planned = mode == QLatin1String("new_session") || mode == QLatin1String("subagent");
+    QStringList arguments{"target", uuid, planned ? (mode == QLatin1String("new_session") ? QStringLiteral("new-session") : mode) : session.isEmpty() ? QStringLiteral("any") : session};
+    if (planned) arguments << "--parent" << session;
     if (!session.isEmpty() && !host.isEmpty()) arguments << "--host" << host;
     if (!session.isEmpty() && !id.isEmpty()) arguments << "--session-id" << id;
     return arguments;
@@ -403,6 +421,7 @@ void TasksView::act(const TaskItem &task, TaskAction action) {
     }
     if (!task.writable || !TaskBoard::actions(task.stage).contains(action)) return;
     if (action == TaskAction::Cancel) return confirmCancel(task);
+    if (action == TaskAction::SendNow && task.targetKind == QLatin1String("new_session")) { emit newExecutorRequested(task, m_projectId); return; }
     if (action == TaskAction::SendNow && !sendBlocker(task).isEmpty()) return;
     run(steps(task, action));
 }
@@ -613,9 +632,21 @@ void TasksView::saveTaskEdits(const TaskItem &task, const TaskEdits &edits,
     run(editSteps(task, edits), saved, refused);
 }
 
-void TasksView::saveTaskNote(const QString &uuid, const QString &text,
+void TasksView::saveTaskAssignment(const TaskItem &task, const TaskTarget &target, std::function<void()> saved, std::function<void(const QString &)> refused) {
+    run({{withProject(targetArguments(task.uuid, target.host, target.any ? QString() : target.session, target.id, target.mode)), {}}}, saved, refused);
+}
+
+void TasksView::saveTaskNote(const QString &uuid, const QString &text, const QList<MessageAttachment> &files,
                              std::function<void()> saved, std::function<void(const QString &)> refused) {
-    run({{withProject({"comment", uuid}), text}}, saved, refused);
+    if (files.isEmpty()) run({{withProject({"comment", uuid}), text}}, saved, refused);
+    else {
+        const auto project = m_projectId;
+        AttachmentFiles::runAsync<QString>(this, [text, files] { return TaskContent::payload(text, TaskContent::encode(files)); },
+            [this, project, uuid, saved, refused](const QString &payload) {
+                if (project != m_projectId) { refused(tr("The selected project changed; the comment draft was kept.")); return; }
+                run({{{"comment", uuid, "--content-json", "--project", project}, payload}}, saved, refused);
+            });
+    }
 }
 
 QString TasksView::taskSendBlocker(const TaskItem &task, const TaskTarget &target) const {

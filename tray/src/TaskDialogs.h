@@ -20,6 +20,7 @@ class QSpinBox;
 class QTextBrowser;
 class QVBoxLayout;
 class QMimeData;
+class MessageComposer;
 struct TaskSession;
 
 // Shared chronological event rendering for the inspector and the edit dialog.
@@ -31,7 +32,8 @@ struct TaskTarget {
     bool any = true;
     QString host, session;
     QString id;
-    bool operator==(const TaskTarget &other) const { return any == other.any && host == other.host &&
+    QString mode;
+    bool operator==(const TaskTarget &other) const { return any == other.any && mode == other.mode && host == other.host &&
         (id.isEmpty() && other.id.isEmpty() ? session == other.session : !id.isEmpty() && id == other.id); }
 };
 
@@ -53,7 +55,8 @@ public:
                bool dark, QWidget *parent = nullptr, bool compact = false);
     TaskEdits edits() const;
     bool hasEdits() const;
-    bool isBusy() const { return m_busy || m_mediaBusy; }
+    bool isBusy() const;
+    void completeSave();
     void setHistory(const QJsonArray &log);
     void clearComment();
     void updateSessionLabels(const QList<TaskSession> &sessions);
@@ -81,6 +84,8 @@ private:
     QLabel *m_error;
     bool m_busy = false;
     QPlainTextEdit *m_prompt;
+    MessageComposer *m_composer = nullptr;
+    QList<MessageAttachment> m_originalFiles;
     QButtonGroup *m_sessions = nullptr;
     QComboBox *m_sessionChoice = nullptr;
     QScrollArea *m_choicesArea = nullptr;

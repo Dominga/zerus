@@ -73,7 +73,7 @@ public:
     void showAttentionSession(const QString &host, const QString &name);
     void showNotificationNotice(const QString &message) { showNotice(message, false); }
     void showProjects(const QString &host = {});
-    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {});
+    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {}, const QString &taskUuid = {}, const QString &taskParentId = {});
     void newSessionLaunchFailed(const QString &launchId, const QString &error = {});
     void setClipboardMode(bool clipboard);
     void setConnectionError(const QString &error);
@@ -126,6 +126,11 @@ private:
     void saveSessionRowPreferences();
     void updateSessionRowPresentation();
     void savePendingLaunches();
+    void dispatchTaskLaunches();
+    bool saveTaskLaunches();
+    QJsonObject m_taskLaunches;
+    bool m_taskLaunchRecoveryBlocked = false;
+    QHash<quint64, QString> m_taskLaunchRequests;
     void placeLaunchedSessions();
     bool takeEndedLaunch(const QString &launchId, QJsonObject *launch = nullptr);
     void createGroup(const QString &session = {});

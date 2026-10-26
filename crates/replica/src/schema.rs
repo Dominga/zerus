@@ -79,6 +79,9 @@ impl Eq for SessionKey {}
 pub enum Target {
     Any,
     Session(SessionKey),
+    #[serde(rename = "new_session")]
+    NewSession { parent: SessionKey },
+    Subagent { parent: SessionKey },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +103,20 @@ pub struct LogEntry {
     /// A send's durable hgs request, for matching it to the paste receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::TaskAttachment>,
+}
+
+/// A coordinator's explicit binding to an observed native child. The parent
+/// conversation and dispatch receipt scope the identity; names remain captions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskWorker {
+    pub parent: SessionKey,
+    pub conversation_id: String,
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub request_id: String,
 }
 
 /// A task as callers read it.
@@ -118,6 +135,8 @@ pub struct TaskView {
     pub target: Target,
     pub rank: String,
     pub session: Option<SessionKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker: Option<TaskWorker>,
     pub summary: String,
     pub cancelled_at: Option<i64>,
     pub cancel_reason: String,

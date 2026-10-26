@@ -1323,6 +1323,37 @@ pub(crate) fn folder_facts(folder: &str) -> (String, String) {
     (project, branch)
 }
 
+/// F1.1: the project an adopted session is filed into: the team's own project
+/// when it names one (a directory_project result), else the project of the
+/// folder; None when neither gives one.
+fn filed_project(team_project: &str, known: &Value) -> Option<String> {
+    let project = if team_project.is_empty() { known["project_id"].as_str().unwrap_or_default() } else { team_project };
+    (!project.is_empty()).then(|| project.to_owned())
+}
+
+/// The request `hgs swarm assign-launch` takes for an adopted member (F1.1).
+fn assign_launch_payload(swarm_id: &str, project_id: &str, session: &SessionRef, directory: &str) -> Value {
+    json!({"request_id":uuid::Uuid::new_v4().to_string(),"name":session.name,"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"swarm_id":swarm_id,"project_id":project_id,"directory":directory})
+}
+
+/// F1.1: files an adopted member's session into the team's project with
+/// `hgs swarm assign-launch`, as the dispatcher's other child hgs calls do. No
+/// catalog, or a folder the catalog does not know, means nothing to do; a
+/// failure never blocks the member.
+fn file_in_project(team_id: &str, project: &str, folder: &str, computer: &str, session: &SessionRef) {
+    let _ = team_id;
+    let Ok(config) = crate::config::Config::load() else { return };
+    let Some(known) = crate::swarm::directory_project(&config, Path::new(folder)) else { return };
+    let Some(project_id) = filed_project(project, &known) else { return };
+    let swarm_id = known["swarm_id"].as_str().unwrap_or_default();
+    if swarm_id.is_empty() {
+        return;
+    }
+    let payload = assign_launch_payload(swarm_id, &project_id, session, folder);
+    let _ = hgs(computer, &["swarm", "assign-launch", "--json"], Some(&payload), Duration::from_secs(15));
+}
+
 /// The folder the member works in: the team's (or its own) folder, or a new
 /// worktree or clone of it, created now.
 fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
@@ -2305,17 +2336,27 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Ok(())
             })
         }
-        Step::Adopt { member, session } => change(store, &team.id, |team, events| {
-            let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
-            let started = found.session.is_none();
-            found.session = Some(session.clone());
-            found.state = MemberState::Active;
-            if started {
-                let role = team.role_of(member);
-                events.push(Event::new("member_started", json!({"member":role,"session":session.name})));
+        Step::Adopt { member, session } => {
+            let mut filing = None;
+            change(store, &team.id, |team, events| {
+                let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
+                let started = found.session.is_none();
+                let computer = found.computer.clone();
+                found.session = Some(session.clone());
+                found.state = MemberState::Active;
+                if started {
+                    let role = team.role_of(member);
+                    events.push(Event::new("member_started", json!({"member":role,"session":session.name})));
+                    // F1.1: the adopted session is filed into the team's project.
+                    filing = Some((team.project.clone(), team.folder.clone(), computer, team.id.clone()));
+                }
+                Ok(())
+            })?;
+            if let Some((project, folder, computer, team_id)) = filing {
+                file_in_project(&team_id, &project, &folder, &computer, session);
             }
             Ok(())
-        }),
+        }
         Step::Launch { member } => {
             let launch_id = uuid::Uuid::new_v4().to_string();
             let mut planned = None;
@@ -4493,8 +4534,34 @@ mod tests {
     }
 
     #[test]
+    fn an_adopted_session_is_filed_with_the_swarm_request() {
+        // F1.1: the team's own project wins; an empty one takes the folder's;
+        // neither means no filing.
+        let known = json!({"schema":1,"swarm_id":"swarm-1","project_id":"checkout"});
+        assert_eq!(filed_project("billing", &known).as_deref(), Some("billing"));
+        assert_eq!(filed_project("", &known).as_deref(), Some("checkout"));
+        assert_eq!(filed_project("", &json!({"schema":1,"swarm_id":"","project_id":""})), None);
+        let session = SessionRef {
+            host: "msi".into(),
+            name: "claude/x/dev".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let payload = assign_launch_payload("swarm-1", "billing", &session, "D:/projects/checkout");
+        assert_eq!(payload["name"], "claude/x/dev");
+        assert_eq!(payload["expected_run_id"], "run-1");
+        assert_eq!(payload["expected_conversation_id"], "conv-1");
+        assert_eq!((payload["swarm_id"].as_str(), payload["project_id"].as_str()), (Some("swarm-1"), Some("billing")));
+        assert_eq!(payload["directory"], "D:/projects/checkout");
+        assert!(payload["request_id"].as_str().is_some_and(|id| id.len() == 36));
+    }
+
+    #[test]
     fn a_folder_that_is_not_the_teams_repository_is_refused() {
         let dir = tempfile::tempdir().unwrap();
+        // Hermetic: a TEMP inside another repository must not make the sibling
+        // look like a repository of its own.
+        std::env::set_var("GIT_CEILING_DIRECTORIES", dir.path());
         let repo = dir.path().join("project");
         std::fs::create_dir(&repo).unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
@@ -4523,6 +4590,7 @@ mod tests {
         assert_eq!(branch, "team/t1/dev");
         assert_eq!(Path::new(&project).file_name().and_then(|name| name.to_str()), Some("project"));
         assert_eq!(folder_facts(""), (String::new(), String::new()));
+        std::env::remove_var("GIT_CEILING_DIRECTORIES");
     }
 
     #[test]

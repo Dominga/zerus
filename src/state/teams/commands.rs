@@ -1110,6 +1110,8 @@ mod tests {
     fn members_carry_their_folder_branch_and_outside_project_flag() {
         use crate::state::teams::model::{Member, Team, TeamStatus};
         let dir = tempfile::tempdir().unwrap();
+        // Hermetic: a TEMP inside another repository must not flag the sibling.
+        std::env::set_var("GIT_CEILING_DIRECTORIES", dir.path());
         let repo = dir.path().join("project");
         std::fs::create_dir(&repo).unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
@@ -1137,6 +1139,7 @@ mod tests {
         team.project = "/elsewhere".into();
         team.members[1].directory.clear();
         assert_eq!(super::view_with(&team, &[], None)["members"][1]["outside_project"], true);
+        std::env::remove_var("GIT_CEILING_DIRECTORIES");
     }
 
     #[test]

@@ -387,14 +387,25 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
         if (!approve->isEnabled()) approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet") : tr("Fix the plan errors first"));
         else if (!team.widenings.isEmpty()) approve->setToolTip(tr("A permission widening needs your confirmation"));
     } else if (team.status == "running") {
-        add(tr("Pause"), "teamWorkspacePause", false, [this] { m_panel->act("pause", {}); });
+        add(tr("Pause"), "teamWorkspacePause", false, [this, team] {
+            const auto impact = subtreeImpact(team, m_teams->teams());
+            if (impact.first > 0 && !m_panel->confirm("teamPauseTreeConfirm", tr("Pause the team tree?"),
+                    tr("Pause %1? It also pauses %2 sub-teams and %3 member sessions in them.").arg(team.name).arg(impact.first).arg(impact.second),
+                    tr("Pause")))
+                return;
+            m_panel->act("pause", {});
+        });
     } else if (team.status == "paused") {
         add(tr("Resume"), "teamWorkspaceResume", true, [this] { m_panel->act("resume", {}); });
     }
     if (team.status == "running" || team.status == "paused") {
-        auto *stop = add(tr("Stop…"), "teamWorkspaceStop", false, [this, name = team.name] {
-            if (m_panel->confirm("teamStopConfirm", tr("Stop team?"), tr("Stop %1? Every open task is cancelled and no task is handed out again. "
-                                                                          "Member sessions keep running; their current turns finish.").arg(name), tr("Stop team")))
+        auto *stop = add(tr("Stop…"), "teamWorkspaceStop", false, [this, name = team.name, team] {
+            const auto impact = subtreeImpact(team, m_teams->teams());
+            QString text = tr("Stop %1? Every open task is cancelled and no task is handed out again. "
+                              "Member sessions keep running; their current turns finish.").arg(name);
+            if (impact.first > 0)
+                text += tr(" It stops %1 sub-teams and affects %2 member sessions in them.").arg(impact.first).arg(impact.second);
+            if (m_panel->confirm("teamStopConfirm", tr("Stop team?"), text, tr("Stop team")))
                 m_panel->act("stop", {});
         });
         stop->setProperty("danger", true);
@@ -1275,7 +1286,14 @@ void TeamWorkspace::assignMenu(const Team &team, const QString &member, const QP
         if (t.finished() || t.assignee == member) continue;
         const bool ready = team.ready.contains(t.id);
         auto *action = menu.addAction(QStringLiteral("#%1 %2%3").arg(t.id).arg(t.title, ready ? tr("  · ready") : QString()));
-        QObject::connect(action, &QAction::triggered, this, [this, task = t.id, member] { m_panel->act("reassign", {{"task", task}, {"member", member}}); });
+        QObject::connect(action, &QAction::triggered, this, [this, team, task = t.id, member] {
+            const auto choice = subteamChoice(this, team, task, tr("Reassign"));
+            if (choice.isEmpty()) return;
+            QJsonObject input{{"task", task}, {"member", member}};
+            const auto *delegated = team.task(task);
+            if (delegated && delegated->subteam.known) input["subteam"] = choice;
+            m_panel->act("reassign", input);
+        });
     }
     if (menu.isEmpty()) menu.addAction(tr("No open task"))->setEnabled(false);
     menu.exec(global);

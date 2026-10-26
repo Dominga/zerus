@@ -595,8 +595,14 @@ void TeamTaskCard::rebuild()
             if (act) act("take-over", {{"task", id}});
     };
     const auto cancelTask = [this, id] {
-        if (!confirm || confirm("teamCancelTaskConfirm", tr("Cancel task?"), tr("Cancel this task? Tasks that depend on it hard never become ready."), tr("Cancel task")))
-            if (act) act("cancel", {{"task", id}});
+        if (confirm && !confirm("teamCancelTaskConfirm", tr("Cancel task?"), tr("Cancel this task? Tasks that depend on it hard never become ready."), tr("Cancel task")))
+            return;
+        const auto choice = subteamChoice(this, m_team, id, tr("Cancel"));
+        if (choice.isEmpty()) return;
+        if (!act) return;
+        QJsonObject input{{"task", id}};
+        if (const auto *t = m_team.task(id); t && t->subteam.known) input["subteam"] = choice;
+        act("cancel", input);
     };
     const auto retry = [this, id, n = task->last() ? task->last()->n : 0] {
         if (n == 0 || !confirm || confirm("teamRetryConfirm", tr("Retry task?"), tr("Revoke attempt %1 and hand the task out again?").arg(n), tr("Retry")))

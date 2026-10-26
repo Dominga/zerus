@@ -3422,10 +3422,48 @@ void SessionsWindow::rebuild()
     for (const auto &entry : visible) visibleIdentities.append(entry.identity);
     auto projectMembers = m_organization.orderedMembers(visibleIdentities);
     // A team's members stand under its lead, in whichever project they were filed.
-    if (m_teams && !m_teams->teams().isEmpty()) {
+    // G1: parents come before their sub-teams, so a sub-team lead is indented
+    // under the lead it works for.
+    QList<Teams::Team> orderedTeams = m_teams ? m_teams->teams() : QList<Teams::Team>{};
+    const auto teamById = [&](const QString &id) -> const Teams::Team * {
+        for (const auto &team : orderedTeams) if (team.id == id) return &team;
+        return nullptr;
+    };
+    const auto depthOf = [&](const Teams::Team &team) {
+        int depth = 0; const Teams::Team *at = &team;
+        QSet<QString> seen;
+        while (at && at->parent.known && depth < 32 && !seen.contains(at->id)) {
+            seen.insert(at->id);
+            at = teamById(at->parent.team);
+            if (!at) break;
+            ++depth;
+        }
+        return depth;
+    };
+    std::stable_sort(orderedTeams.begin(), orderedTeams.end(), [&](const Teams::Team &a, const Teams::Team &b) {
+        return depthOf(a) < depthOf(b);
+    });
+    const auto collapsedDeep = [&](const Teams::Team &team) {
+        const Teams::Team *at = &team; int guard = 0;
+        while (at && guard++ < 32) {
+            if (m_collapsedTeams.contains(at->id) && query.isEmpty()) return true;
+            at = at->parent.known ? teamById(at->parent.team) : nullptr;
+        }
+        return false;
+    };
+    const auto subtreeCounts = [&](const Teams::Team &team, int &sessions, int &open) {
+        sessions = 0; open = 0;
+        std::function<void(const Teams::Team &)> walk = [&](const Teams::Team &current) {
+            for (const auto &member : current.members) if (!member.session.isEmpty()) ++sessions;
+            for (const auto &task : current.tasks) if (!task.finished()) ++open;
+            for (const auto &child : current.children) if (const auto *found = teamById(child.team)) walk(*found);
+        };
+        walk(team);
+    };
+    if (m_teams && !orderedTeams.isEmpty()) {
         QHash<int, QString> groupOf;
         for (auto it = projectMembers.cbegin(); it != projectMembers.cend(); ++it) for (int i : it.value()) groupOf.insert(i, it.key());
-        for (const auto &team : m_teams->teams()) {
+        for (const auto &team : orderedTeams) {
             if (team.status == "archived") continue;
             int lead = -1; QList<int> follow;
             for (int i = 0; i < visible.size(); ++i) {
@@ -3484,7 +3522,7 @@ void SessionsWindow::rebuild()
         // WhiteWh fork: agent teams. A team's members listed here follow its
         // lead, indented; the lead's card carries the team. A folded team
         // keeps only members with a problem.
-        if (m_teams) for (const auto &team : m_teams->teams()) {
+        if (m_teams) for (const auto &team : orderedTeams) {
             if (team.status == "archived") continue;
             int lead = -1; QList<int> follow;
             for (int i : members) {
@@ -3493,6 +3531,8 @@ void SessionsWindow::rebuild()
                 if (member->lead) lead = i; else follow.append(i);
             }
             if (lead < 0 || leadTeams.contains(lead)) continue;
+            // G1: a sub-team's lead sits indented under its parent's lead.
+            if (team.parent.known) subordinateRows.insert(lead);
             const QSet<int> following(follow.cbegin(), follow.cend());
             QList<int> ordered;
             for (int i : members) {
@@ -3502,7 +3542,7 @@ void SessionsWindow::rebuild()
             }
             members = ordered;
             leadTeams.insert(lead, team.id);
-            const bool collapsed = m_collapsedTeams.contains(team.id) && query.isEmpty();
+            const bool collapsed = collapsedDeep(team);
             for (int i : follow) {
                 teamMemberRows.insert(i);
                 const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
@@ -3611,6 +3651,12 @@ void SessionsWindow::rebuild()
             // G6: two compact bars — the phase in work (or the next draft) and
             // the phases — replace one bar over every task of every phase.
             const auto bars = Teams::phaseProgress(*team);
+            // G1: a parent's row rolls up its whole subtree (sessions and open
+            // tasks), not only its own members.
+            int subtreeSessions = 0, subtreeOpen = 0;
+            subtreeCounts(*team, subtreeSessions, subtreeOpen);
+            const QString rollup = team->children.isEmpty() ? QString()
+                : tr("%1 sessions \u00b7 %2 open").arg(subtreeSessions).arg(subtreeOpen);
             teamStrip = {{"id", team->id}, {"name", team->name}, {"status", status}, {"label", Teams::statusLabel(status)},
                          {"tone", int(Teams::statusTone(status))},
                          {"phaseText", bars.phaseText()}, {"phasesText", bars.phasesText()},
@@ -3618,6 +3664,7 @@ void SessionsWindow::rebuild()
                          {"phasesDone", bars.phasesDone}, {"phasesTotal", bars.phasesTotal},
                          {"phaseDraft", bars.draft}, {"phaseNumber", bars.phase},
                          {"progressTooltip", bars.tooltip()},
+                         {"rollup", rollup}, {"openTasks", subtreeOpen}, {"subtreeSessions", subtreeSessions},
                          {"members", QString::number(team->members.size())}, {"answers", Teams::answers(*team, live)}};
         }
         item->setData(SessionRoles::TeamLead, teamStrip.isEmpty() ? QVariant() : QVariant(teamStrip));

@@ -2758,9 +2758,38 @@ void TestTeamsUi::hierarchyInTeamViewsAndMemberCards()
     QVERIFY(node);
     QCOMPARE(node->kind, QStringLiteral("subteam"));
     QCOMPARE(node->subteam, QStringLiteral("child-team"));
+    // G1: the tree impact counts sub-teams and their sessions; Cancel asks
+    // whether the sub-team stops.
+    auto child = t;
+    child["id"] = "child-team";
+    child["parent"] = QJsonObject{{"team", "team-1"}, {"task", 2}};
+    child["children"] = QJsonArray();
+    auto childMembers = child["members"].toArray();
+    if (!childMembers.isEmpty()) {
+        auto member = childMembers[0].toObject();
+        member["session"] = QJsonObject{{"host", ""}, {"name", "claude/child/lead"}};
+        childMembers[0] = member;
+    }
+    child["members"] = childMembers;
+    const auto parsedChild = Teams::parse(child);
+    QCOMPARE(TeamUi::subtreeImpact(parsed, {parsed, parsedChild}), qMakePair(1, 3));
+    QTimer::singleShot(50, [] {
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (auto *box = qobject_cast<QMessageBox *>(widget))
+                for (auto *button : box->buttons())
+                    if (button->text().contains("Stop sub-team")) { button->click(); return; }
+    });
+    QCOMPARE(TeamUi::subteamChoice(&card, parsed, 2, "Cancel"), QStringLiteral("stop"));
     // The member card names its current task's number.
     QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberList"));
     shot(&workspace, "hierarchy-team-view");
+    // The same hierarchy in the light theme.
+    lightPalette();
+    workspace.setTheme(false);
+    card.setTask(parsed, 2, live, false);
+    QTest::qWait(50);
+    lightShot(&workspace, "hierarchy-team-view-light");
+    lightShot(&card, "hierarchy-subteam-light");
 }
 
 #include "test_teamsui.moc"

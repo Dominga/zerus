@@ -156,6 +156,25 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
                 detail: member.error.clone(),
             });
         }
+        // F8: each decided proposal reaches the lead with the decision and the
+        // owner's reason, not only as a feed event.
+        for proposal in team.proposals.iter().filter(|proposal| {
+            matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected"))
+        }) {
+            let id = proposal["id"].as_str().unwrap_or_default().to_owned();
+            let state = proposal["state"].as_str().unwrap_or_default().to_owned();
+            let reason = proposal["reason"].as_str().unwrap_or_default();
+            items.push(Item {
+                kind: "proposal_decided",
+                key: format!("proposal:{id}"),
+                task: None,
+                member: "owner".into(),
+                since: proposal["at"].as_f64().unwrap_or_default(),
+                summary: summary(&format!("The owner {state} your proposal: {reason}")),
+                command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
+                detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
+            });
+        }
         // A member that stopped on its task (C2), unless it waits for an
         // answer: that is the question item above.
         let Some(attempt) = task.open_attempt() else { continue };
@@ -432,6 +451,16 @@ mod tests {
         .unwrap();
         ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
         team
+    }
+
+    #[test]
+    fn a_decided_proposal_reaches_the_lead() {
+        let mut team = team();
+        team.proposals.push(json!({"id":"p1","kind":"add-member","state":"rejected","reason":"needs help","note":"not now","at":10.0}));
+        let items = items(&team);
+        let found = items.iter().find(|item| item.kind == "proposal_decided").unwrap();
+        assert!(found.summary.contains("rejected") && found.summary.contains("needs help"), "{}", found.summary);
+        assert_eq!(found.detail, "not now");
     }
 
     #[test]

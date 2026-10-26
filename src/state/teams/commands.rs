@@ -16,7 +16,7 @@ const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings", "finding",
-    "draft", "propose", "decide-proposal",
+    "draft", "propose",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -529,6 +529,124 @@ fn draft_start_in(store: &mut Store, request: &str, input: &Value) -> anyhow::Re
         let _ = super::dispatcher::send(&session, &uuid::Uuid::new_v4().to_string(), &brief);
     }
     Ok(json!({"team":id,"revision":1}))
+}
+
+/// F7: a done team starts the next goal: the same folder, settings, lead and
+/// members, their live sessions adopted, the old team kept.
+fn next_goal(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id").to_owned();
+    ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
+    let mut store = Store::open(true)?;
+    next_goal_in(&mut store, &request, input)
+}
+
+fn next_goal_in(store: &mut Store, request: &str, input: &Value) -> anyhow::Result<Value> {
+    let old = store.load(text(input, "team"))?.context("Unknown team")?;
+    let caller = actor(&old, "next-goal", input)?;
+    next_goal_as(store, request, input, &caller)
+}
+
+fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor) -> anyhow::Result<Value> {
+    if let Some(receipt) = store.receipt(request, input)? {
+        return Ok(receipt);
+    }
+    let old = store.load(text(input, "team"))?.context("Unknown team")?;
+    ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
+    ensure!(
+        matches!(caller, Actor::Human) || matches!(caller, Actor::Member(member) if *member == old.lead),
+        "Only the lead or you start the next goal"
+    );
+    let goal = text(input, "goal").trim().to_owned();
+    ensure!(!goal.is_empty(), "A next goal needs its goal");
+    ensure!(goal.chars().count() <= 4000, "A goal has at most 4000 characters");
+    let name = text(input, "name").trim().to_owned();
+    ensure!(name.chars().count() <= 80, "A name has at most 80 characters");
+    let next = super::ops::next_team(&old, &goal, &name);
+    let next_id = next.id.clone();
+    store.create(request, input, next, vec![Event::new("next_goal", json!({"team":next_id,"previous":old.id}))])?;
+    store.mutate(None, &old.id, None, |team, events| {
+        team.next = next_id.clone();
+        events.push(Event::new("next_goal_started", json!({"team":next_id})));
+        Ok(Value::Null)
+    })?;
+    Ok(json!({"status":"planned","team":next_id,"previous":old.id}))
+}
+
+/// F8: the owner decides a proposal. An accepted one runs as the owner: an
+/// accepted next goal creates the next team, an accepted swap calls the swap
+/// operation. A decided proposal is idempotent: a replay returns its state.
+fn decide_proposal(input: &Value) -> anyhow::Result<Value> {
+    let store_path = text(input, "request_id").to_owned();
+    ensure!(super::store::canonical_uuid(&store_path), "A canonical request_id is required");
+    let mut store = Store::open(true)?;
+    decide_proposal_in(&mut store, input)
+}
+
+fn decide_proposal_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
+    let team_id = text(input, "team").to_owned();
+    let team = store.load(&team_id)?.context("Unknown team")?;
+    ensure!(matches!(actor(&team, "decide-proposal", input)?, Actor::Human), "Only you decide a proposal");
+    let id = text(input, "proposal").to_owned();
+    let at = team.proposals.iter().position(|proposal| proposal["id"] == id).context("Unknown proposal")?;
+    let state = team.proposals[at]["state"].as_str().unwrap_or_default().to_owned();
+    if state != "open" {
+        return Ok(json!({"status":state,"proposal":id}));
+    }
+    let accept = input["accept"].as_bool() == Some(true);
+    let reason = text(input, "reason").trim().to_owned();
+    ensure!(reason.chars().count() <= 2000, "A reason has at most 2000 characters");
+    if !accept {
+        store.mutate(None, &team_id, None, |team, events| {
+            if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id) {
+                proposal["state"] = json!("rejected");
+                proposal["note"] = json!(reason);
+            }
+            events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":false})));
+            Ok(Value::Null)
+        })?;
+        return Ok(json!({"status":"rejected","proposal":id}));
+    }
+    let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
+    let member = team.proposals[at]["member"].clone();
+    let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
+    let result = match kind.as_str() {
+        "add-member" => {
+            let mut value = member;
+            value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
+            store.mutate(None, &team_id, None, |team, events| {
+                super::ops::apply(team, "add-member", &json!({"member":value}), &Actor::Human, &BTreeSet::new(), events)
+            })?
+        }
+        "remove-member" => {
+            let member_id = member["id"].as_str().or(member.as_str()).unwrap_or_default().to_owned();
+            store.mutate(None, &team_id, None, |team, events| {
+                super::ops::apply(team, "remove-member", &json!({"member":member_id}), &Actor::Human, &BTreeSet::new(), events)
+            })?
+        }
+        "next-goal" => {
+            ensure!(!goal.is_empty(), "The next-goal proposal carries its goal");
+            let fresh = uuid::Uuid::new_v4().to_string();
+            next_goal_in(store, &fresh, &json!({"team":team_id,"goal":goal,"request_id":fresh}))?
+        }
+        "swap-member" => {
+            let mut value = member.clone();
+            value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
+            value["team"] = json!(team_id);
+            store.mutate(None, &team_id, None, |team, events| {
+                super::ops::apply(team, "swap-member", &value, &Actor::Human, &BTreeSet::new(), events)
+            })?
+        }
+        other => bail!("Unknown proposal kind {other}"),
+    };
+    store.mutate(None, &team_id, None, |team, events| {
+        if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id) {
+            proposal["state"] = json!("accepted");
+            proposal["note"] = json!(reason);
+        }
+        events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":true,"kind":kind})));
+        Ok(Value::Null)
+    })?;
+    Ok(json!({"status":"accepted","proposal":id,"result":result}))
 }
 
 fn create(input: &Value) -> anyhow::Result<Value> {
@@ -1060,38 +1178,15 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             _ => {}
         }
     }
+    // F8: a decision may create the next team, so it runs with the store.
+    if op == "decide-proposal" {
+        return decide_proposal(input);
+    }
     match op {
         "create" => create(input),
         "answer" => answer(input),
         "commit" => commit(input),
-        "next-goal" => {
-            // F7: a done team starts the next goal: the same folder, settings,
-            // lead and members, their live sessions adopted, the old team kept.
-            let request = text(input, "request_id").to_owned();
-            ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
-            let mut store = Store::open(true)?;
-            if let Some(receipt) = store.receipt(&request, input)? {
-                return Ok(receipt);
-            }
-            let old = store.load(text(input, "team"))?.context("Unknown team")?;
-            ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
-            let caller = actor(&old, "next-goal", input)?;
-            ensure!(matches!(caller, Actor::Human) || matches!(&caller, Actor::Member(member) if *member == old.lead), "Only the lead or you start the next goal");
-            let goal = text(input, "goal").trim().to_owned();
-            ensure!(!goal.is_empty(), "A next goal needs its goal");
-            ensure!(goal.chars().count() <= 4000, "A goal has at most 4000 characters");
-            let name = text(input, "name").trim().to_owned();
-            ensure!(name.chars().count() <= 80, "A name has at most 80 characters");
-            let next = super::ops::next_team(&old, &goal, &name);
-            let next_id = next.id.clone();
-            store.create(&request, input, next, vec![Event::new("next_goal", json!({"team":next_id,"previous":old.id}))])?;
-            store.mutate(None, &old.id, None, |team, events| {
-                team.next = next_id.clone();
-                events.push(Event::new("next_goal_started", json!({"team":next_id})));
-                Ok(Value::Null)
-            })?;
-            Ok(json!({"status":"planned","team":next_id,"previous":old.id}))
-        }
+        "next-goal" => next_goal(input),
         "leftovers" => {
             let store = Store::open(false)?;
             let teams = store.teams(true, 1000)?;
@@ -1338,6 +1433,61 @@ mod tests {
         // A repeated request returns the first result and creates nothing twice.
         super::draft_start_in(&mut store, request, &input).unwrap();
         assert_eq!(store.teams(true, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn draft_get_returns_the_revision_and_preflight() {
+        use crate::state::teams::store::Store;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams.db"), true).unwrap();
+        let request = "22222222-2222-4222-8222-222222222222";
+        let input = json!({"request_id":request,"folder":dir.path().display().to_string(),"lead":{"agent":"claude"}});
+        let value = super::draft_start_in(&mut store, request, &input).unwrap();
+        let id = value["team"].as_str().unwrap().to_owned();
+        let get = super::draft_get_in(&store, &json!({"team":id})).unwrap();
+        assert_eq!(get["revision"], 1);
+        assert_eq!(get["draft"]["revision"], 1);
+        assert!(get["preflight"]["errors"].is_array());
+    }
+
+    #[test]
+    fn a_done_team_starts_the_next_goal_with_the_same_sessions() {
+        use crate::state::teams::model::{Member, SessionRef, Team, TeamStatus};
+        use crate::state::teams::store::Store;
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams.db"), true).unwrap();
+        let old_id = "33333333-3333-4333-8333-333333333333";
+        let mut done = Team {
+            id: old_id.into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Done,
+            folder: dir.path().display().to_string(),
+            goal: "one".into(),
+            ..Default::default()
+        };
+        done.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        done.members.push(Member {
+            id: "dev".into(),
+            role: "Backend".into(),
+            agent: "claude".into(),
+            session: Some(SessionRef { name: "claude/x/dev".into(), ..Default::default() }),
+            ..Default::default()
+        });
+        store.create("44444444-4444-4444-8444-444444444444", &json!({"id":old_id}), done, Vec::new()).unwrap();
+        let value = super::next_goal_as(
+            &mut store,
+            "55555555-5555-4555-8555-555555555555",
+            &json!({"request_id":"55555555-5555-4555-8555-555555555555","team":old_id,"goal":"two"}),
+            &Actor::Human,
+        )
+        .unwrap();
+        let next_id = value["team"].as_str().unwrap().to_owned();
+        let next = store.load(&next_id).unwrap().unwrap();
+        assert_eq!(next.status, TeamStatus::Planning);
+        assert_eq!((next.previous.as_str(), next.goal.as_str()), (old_id, "two"));
+        assert_eq!(next.member("dev").unwrap().session.as_ref().map(|session| session.name.as_str()), Some("claude/x/dev"));
+        assert_eq!(store.load(old_id).unwrap().unwrap().next, next_id);
     }
 
     #[test]

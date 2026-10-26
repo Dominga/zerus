@@ -1842,7 +1842,10 @@ pub(crate) fn next_team(team: &Team, goal: &str, name: &str) -> Team {
 fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(actor.is_lead(team), "The lead proposes a membership change");
     let kind = text(input, "kind").to_owned();
-    ensure!(["add-member", "remove-member", "next-goal"].contains(&kind.as_str()), "A proposal adds or removes a member, or starts the next goal");
+    ensure!(
+        ["add-member", "remove-member", "swap-member", "next-goal"].contains(&kind.as_str()),
+        "A proposal adds, removes or swaps a member, or starts the next goal"
+    );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
     ensure!(!reason.is_empty(), "A proposal needs its reason");
     ensure!(team.proposals.iter().filter(|proposal| proposal["state"] == "open").count() < 50, "A team keeps at most 50 open proposals");
@@ -4428,6 +4431,19 @@ mod tests {
         apply(&mut team, "decide-proposal", &json!({"proposal":id,"accept":true}), &Actor::Human, &none, &mut events).unwrap();
         assert!(team.member("extra").is_some());
         assert_eq!(team.proposals[0]["state"], "accepted");
+        // F8: a swap-member proposal is stored with the member it changes.
+        let value = apply(
+            &mut team,
+            "propose",
+            &json!({"kind":"swap-member","reason":"replace the session","member":{"id":"dev","agent":"claude","account":"work"}}),
+            &Actor::Member("lead".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        assert!(value["proposal"].as_str().is_some());
+        let swap = team.proposals.last().unwrap();
+        assert_eq!((swap["kind"].as_str(), swap["member"]["agent"].as_str()), (Some("swap-member"), Some("claude")));
     }
 
     #[test]

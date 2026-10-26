@@ -1990,17 +1990,54 @@ mod process {
     }
 }
 
-/// H2: the current process reads this file as stdin (`--json-file`); the
-/// handle stays open for the process lifetime.
-pub fn redirect_stdin(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::io::AsRawHandle;
+struct SendHandle(windows_sys::Win32::Foundation::HANDLE);
+// The writer thread owns the pipe's write end for its whole life.
+unsafe impl Send for SendHandle {}
+impl SendHandle {
+    fn take(self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0
+    }
+}
+
+/// H2: the current process reads `bytes` as stdin through an anonymous pipe,
+/// in memory only: a JSON request may hold a private key and must not land on
+/// disk.
+pub fn stdin_from_bytes(bytes: Vec<u8>) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
     use windows_sys::Win32::System::Console::{SetStdHandle, STD_INPUT_HANDLE};
-    let file = std::fs::File::open(path)?;
-    let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
-    if unsafe { SetStdHandle(STD_INPUT_HANDLE, handle) } == 0 {
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    let mut read: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+    let mut write: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 0,
+    };
+    if unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) } == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    std::mem::forget(file);
+    if unsafe { SetStdHandle(STD_INPUT_HANDLE, read) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let write = SendHandle(write);
+    std::thread::spawn(move || {
+        let write = write.take();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let mut written = 0u32;
+            let chunk = &bytes[offset..];
+            let ok = unsafe {
+                WriteFile(write, chunk.as_ptr() as *const _, chunk.len() as u32, &mut written, std::ptr::null_mut())
+            };
+            if ok == 0 || written == 0 {
+                break;
+            }
+            offset += written as usize;
+        }
+        unsafe { CloseHandle(write) };
+    });
     Ok(())
 }
 

@@ -190,9 +190,16 @@ uncertain messages.
 An unopened conversation immediately shows “Loading conversation…” while its
 messages load. A resolved empty conversation keeps “No messages yet.” during
 background reads instead of returning to the initial placeholder. Opening cached
-messages immediately animates the existing **Refresh** action until the initial
-inspection and history reads settle. Cached messages remain readable, and the
-indicator never inserts a row or moves the transcript. Later background reads
+messages immediately shows a pinned status beneath the session tools, distinguishing
+saved messages from checking activity and loading history. The status remains outside
+the scrolling transcript; its two lines and indicator slot retain their geometry as
+reads settle. The Refresh action remains in place. Opening starts exact-target
+inspection and canonical history independently instead of serializing their relay
+round trips. Either may finish first; a complete page already covered by the opening
+inspection is not immediately fetched again. Cached messages remain readable, and
+only the fresh inspection permits actions. The periodic loop does not start another
+inspection while that verified opening is still waiting for its first history page;
+explicit refresh remains available. Later background reads
 show progress only after five seconds; manual refresh shows it immediately and
 reuses any matching in-flight read. Catalogs retain their thin progress bar.
 Pulling a conversation up past its newest

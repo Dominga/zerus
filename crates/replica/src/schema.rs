@@ -64,11 +64,12 @@ pub struct SessionKey {
 
 impl PartialEq for SessionKey {
     fn eq(&self, other: &Self) -> bool {
-        self.machine == other.machine && if self.session_id.is_empty() && other.session_id.is_empty() {
-            self.session == other.session
-        } else {
-            !self.session_id.is_empty() && self.session_id == other.session_id
-        }
+        self.machine == other.machine
+            && if self.session_id.is_empty() && other.session_id.is_empty() {
+                self.session == other.session
+            } else {
+                !self.session_id.is_empty() && self.session_id == other.session_id
+            }
     }
 }
 impl Eq for SessionKey {}

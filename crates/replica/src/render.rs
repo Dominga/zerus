@@ -168,7 +168,8 @@ mod tests {
             author: Actor::Agent(SessionKey {
                 machine: "m".into(),
                 session: "codex/api".into(),
-            ..Default::default()}),
+                ..Default::default()
+            }),
             rank: "V",
             now: 1,
         })
@@ -177,7 +178,8 @@ mod tests {
             &SessionKey {
                 machine: "m".into(),
                 session: "codex/api".into(),
-            ..Default::default()},
+                ..Default::default()
+            },
             "r",
             &Actor::Person,
             2,

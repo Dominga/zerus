@@ -419,7 +419,8 @@ fn accept(store: &ProjectStore, task: &mut TaskDoc) {
     let session = zerus_replica::SessionKey {
         machine: "m".into(),
         session: "codex/api".into(),
-    ..Default::default()};
+        ..Default::default()
+    };
     task.record_send(&session, "request-1", &Actor::Person, 2)
         .unwrap();
     task.record_report("Done.", &Actor::Agent(session.clone()), 3)

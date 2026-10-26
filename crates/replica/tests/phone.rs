@@ -33,7 +33,8 @@ fn accept(store: &ProjectStore, task: &mut TaskDoc) {
     let session = SessionKey {
         machine: "m".into(),
         session: "codex/api".into(),
-    ..Default::default()};
+        ..Default::default()
+    };
     task.record_send(&session, "request-1", &Actor::Person, 2)
         .unwrap();
     task.record_report("Done.", &Actor::Agent(session.clone()), 3)
@@ -600,7 +601,10 @@ fn a_part_of_a_document_larger_than_any_task_is_refused() {
     let huge = Answer {
         part: Some(zerus_replica::phone::Part {
             task: Some("0b9d6c55-2f5e-4c39-9a51-0d6f3c2a7e11".into()),
-            size: 2 * (zerus_replica::MAX_DOCUMENT + zerus_replica::MAX_ATTACHMENT_TOTAL.div_ceil(3) * 4) + 1,
+            size: 2
+                * (zerus_replica::MAX_DOCUMENT
+                    + zerus_replica::MAX_ATTACHMENT_TOTAL.div_ceil(3) * 4)
+                + 1,
             sha256: "00".repeat(32),
             offset: 0,
             bytes: "bG9ybw==".into(),
@@ -620,10 +624,17 @@ fn task_media_survives_paged_phone_replication_and_reopening() {
     // Incompressible enough to exercise actual update parts, beyond the old
     // text-only document assembly ceiling.
     let mut bytes = Vec::new();
-    for i in 0u64..280000 { bytes.extend_from_slice(&Sha256::digest(i.to_le_bytes())); }
-    let attachment = zerus_replica::TaskAttachment { name: "capture.png".into(), mime: "image/png".into(),
-        data_base64: STANDARD.encode(&bytes), reference: "[Image #1]".into() };
-    task.set_attachments(std::slice::from_ref(&attachment), &Actor::Person, 2).unwrap();
+    for i in 0u64..280000 {
+        bytes.extend_from_slice(&Sha256::digest(i.to_le_bytes()));
+    }
+    let attachment = zerus_replica::TaskAttachment {
+        name: "capture.png".into(),
+        mime: "image/png".into(),
+        data_base64: STANDARD.encode(&bytes),
+        reference: "[Image #1]".into(),
+    };
+    task.set_attachments(std::slice::from_ref(&attachment), &Actor::Person, 2)
+        .unwrap();
     computer.save(&mut task).unwrap();
     let result = settled(run(&phone, &computer, Budget::default()));
     assert!(result.parts > 1);

@@ -1,11 +1,11 @@
 //! One task as one Loro document: `meta` (identity, set once), `fields`
 //! (last writer wins), `text` (the prompt, merged by character) and `log`
 //! (history, append only).
+use crate::attachment::{check_attachments, TaskAttachment, TASK_SCHEMA};
 use crate::schema::{
     check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, MAX_DOCUMENT, SCHEMA,
 };
 use crate::{ids, rank, Error, Result};
-use crate::attachment::{check_attachments, TaskAttachment, TASK_SCHEMA};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, UpdateOptions, VersionVector};
 
 pub struct NewTask<'a> {
@@ -320,14 +320,25 @@ impl TaskDoc {
         Ok(files)
     }
 
-    pub fn set_attachments(&mut self, files: &[TaskAttachment], actor: &Actor, now: i64) -> Result<()> {
-        self.require(&[Stage::Backlog, Stage::Todo], "attachments can be edited only in Backlog or To do")?;
+    pub fn set_attachments(
+        &mut self,
+        files: &[TaskAttachment],
+        actor: &Actor,
+        now: i64,
+    ) -> Result<()> {
+        self.require(
+            &[Stage::Backlog, Stage::Todo],
+            "attachments can be edited only in Backlog or To do",
+        )?;
         check_attachments(files)?;
-        if files == self.attachments()? { return Ok(()); }
+        if files == self.attachments()? {
+            return Ok(());
+        }
         // Never lower this after removal: old binaries must not mutate a task
         // whose media history they cannot preserve or deliver.
         self.meta().insert("schema", TASK_SCHEMA)?;
-        self.fields().insert("attachments", serde_json::to_string(files)?)?;
+        self.fields()
+            .insert("attachments", serde_json::to_string(files)?)?;
         self.log("attachments", actor, now, "Updated attachments", None)?;
         self.doc.commit();
         Ok(())
@@ -337,13 +348,25 @@ impl TaskDoc {
     /// remain hints; subsequent operations and replicas retain the same ID.
     pub fn bind_session_identity(&mut self, old: &SessionKey, current: &SessionKey) -> Result<()> {
         self.writable()?;
-        if old.machine != current.machine || current.session_id.is_empty()
-            || (!old.session_id.is_empty() && old != current) { return Err(Error::new("task session identity changed")); }
+        if old.machine != current.machine
+            || current.session_id.is_empty()
+            || (!old.session_id.is_empty() && old != current)
+        {
+            return Err(Error::new("task session identity changed"));
+        }
         self.meta().insert("schema", TASK_SCHEMA)?;
         if let Target::Session(target) = decode::<Target>(&self.fields(), "target")? {
-            if &target == old { self.fields().insert("target", serde_json::to_string(&Target::Session(current.clone()))?)?; }
+            if &target == old {
+                self.fields().insert(
+                    "target",
+                    serde_json::to_string(&Target::Session(current.clone()))?,
+                )?;
+            }
         }
-        if self.session().as_ref() == Some(old) { self.fields().insert("session", serde_json::to_string(current)?)?; }
+        if self.session().as_ref() == Some(old) {
+            self.fields()
+                .insert("session", serde_json::to_string(current)?)?;
+        }
         self.doc.commit();
         Ok(())
     }
@@ -430,7 +453,9 @@ impl TaskDoc {
             &[Stage::Backlog, Stage::Todo],
             "the session can be changed only in Backlog or To do",
         )?;
-        if matches!(target, Target::Session(key) if !key.session_id.is_empty()) { self.meta().insert("schema", TASK_SCHEMA)?; }
+        if matches!(target, Target::Session(key) if !key.session_id.is_empty()) {
+            self.meta().insert("schema", TASK_SCHEMA)?;
+        }
         self.fields()
             .insert("target", serde_json::to_string(target)?)?;
         let label = match target {
@@ -464,7 +489,9 @@ impl TaskDoc {
         now: i64,
     ) -> Result<()> {
         self.check_send()?;
-        if !session.session_id.is_empty() { self.meta().insert("schema", TASK_SCHEMA)?; }
+        if !session.session_id.is_empty() {
+            self.meta().insert("schema", TASK_SCHEMA)?;
+        }
         let fields = self.fields();
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
@@ -486,23 +513,45 @@ impl TaskDoc {
     }
 
     pub fn check_handoff(&self, actor: &Actor) -> Result<()> {
-        self.require(&[Stage::Active], "only a task In progress can be handed off")?;
+        self.require(
+            &[Stage::Active],
+            "only a task In progress can be handed off",
+        )?;
         if let Actor::Agent(own) = actor {
-            if self.session().as_ref() != Some(own) { return Err(Error::new("only the task's current session can hand it off")); }
+            if self.session().as_ref() != Some(own) {
+                return Err(Error::new(
+                    "only the task's current session can hand it off",
+                ));
+            }
         }
         Ok(())
     }
 
     /// A confirmed delivery transfers both the working session and its pin.
-    pub fn record_handoff(&mut self, session: &SessionKey, request_id: &str, actor: &Actor, now: i64) -> Result<()> {
+    pub fn record_handoff(
+        &mut self,
+        session: &SessionKey,
+        request_id: &str,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<()> {
         self.check_handoff(actor)?;
-        if self.session().as_ref() == Some(session) { return Err(Error::new("choose another session for the handoff")); }
-        if !session.session_id.is_empty() { self.meta().insert("schema", TASK_SCHEMA)?; }
-        self.fields().insert("target", serde_json::to_string(&Target::Session(session.clone()))?)?;
-        self.fields().insert("session", serde_json::to_string(session)?)?;
+        if self.session().as_ref() == Some(session) {
+            return Err(Error::new("choose another session for the handoff"));
+        }
+        if !session.session_id.is_empty() {
+            self.meta().insert("schema", TASK_SCHEMA)?;
+        }
+        self.fields().insert(
+            "target",
+            serde_json::to_string(&Target::Session(session.clone()))?,
+        )?;
+        self.fields()
+            .insert("session", serde_json::to_string(session)?)?;
         self.fields().insert("stage_at", now)?;
         self.fields().insert("summary", "")?;
-        self.log("sent", actor, now, "handoff", Some(session))?.insert("request_id", request_id)?;
+        self.log("sent", actor, now, "handoff", Some(session))?
+            .insert("request_id", request_id)?;
         self.doc.commit();
         Ok(())
     }
@@ -535,12 +584,20 @@ impl TaskDoc {
     /// second copy of the instruction into its own active conversation.
     pub fn record_start(&mut self, actor: &Actor, now: i64) -> Result<()> {
         self.check_send()?;
-        let Actor::Agent(own) = actor else { return Err(Error::new("start is for an agent working in its own session")); };
+        let Actor::Agent(own) = actor else {
+            return Err(Error::new(
+                "start is for an agent working in its own session",
+            ));
+        };
         let view = self.view()?;
         if let Target::Session(target) = &view.target {
-            if target != own { return Err(Error::new("the task is pinned to another session")); }
+            if target != own {
+                return Err(Error::new("the task is pinned to another session"));
+            }
         }
-        if !own.session_id.is_empty() { self.meta().insert("schema", TASK_SCHEMA)?; }
+        if !own.session_id.is_empty() {
+            self.meta().insert("schema", TASK_SCHEMA)?;
+        }
         let fields = self.fields();
         fields.insert("stage", Stage::Active.as_str())?;
         fields.insert("stage_at", now)?;
@@ -599,36 +656,75 @@ mod tests {
 
     #[test]
     fn an_identified_session_keeps_ownership_across_renames() {
-        let one = SessionKey { machine: "m1".into(), session: "codex/old".into(), session_id: "launch_id:one".into() };
-        let renamed = SessionKey { session: "codex/new".into(), ..one.clone() };
+        let one = SessionKey {
+            machine: "m1".into(),
+            session: "codex/old".into(),
+            session_id: "launch_id:one".into(),
+        };
+        let renamed = SessionKey {
+            session: "codex/new".into(),
+            ..one.clone()
+        };
         assert_eq!(one, renamed);
-        assert_ne!(one, SessionKey { session_id: "launch_id:replacement".into(), ..one.clone() });
-        assert_ne!(one, SessionKey { machine: "m2".into(), ..one.clone() });
-        assert_ne!(one, SessionKey { session_id: String::new(), ..one.clone() });
+        assert_ne!(
+            one,
+            SessionKey {
+                session_id: "launch_id:replacement".into(),
+                ..one.clone()
+            }
+        );
+        assert_ne!(
+            one,
+            SessionKey {
+                machine: "m2".into(),
+                ..one.clone()
+            }
+        );
+        assert_ne!(
+            one,
+            SessionKey {
+                session_id: String::new(),
+                ..one.clone()
+            }
+        );
     }
 
     #[test]
     fn handoff_records_the_new_owner_and_preserves_both_receipts() {
         let mut task = task(Stage::Todo);
         let old = api();
-        let new = SessionKey { session: "codex/worker".into(), ..old.clone() };
-        task.record_send(&old, "original-request", &Actor::Person, 2).unwrap();
+        let new = SessionKey {
+            session: "codex/worker".into(),
+            ..old.clone()
+        };
+        task.record_send(&old, "original-request", &Actor::Person, 2)
+            .unwrap();
         let before = task.view().unwrap();
-        assert!(task.record_handoff(&new, "foreign-request", &Actor::Agent(new.clone()), 3).is_err());
+        assert!(task
+            .record_handoff(&new, "foreign-request", &Actor::Agent(new.clone()), 3)
+            .is_err());
         assert_eq!(task.view().unwrap(), before);
-        task.record_handoff(&new, "handoff-request", &Actor::Agent(old), 4).unwrap();
+        task.record_handoff(&new, "handoff-request", &Actor::Agent(old), 4)
+            .unwrap();
         let view = task.view().unwrap();
         assert_eq!(view.stage, Stage::Active);
         assert_eq!(view.session, Some(new.clone()));
         assert_eq!(view.target, Target::Session(new));
-        assert_eq!(view.log.iter().filter_map(|entry| entry.request_id.as_deref()).collect::<Vec<_>>(), ["original-request", "handoff-request"]);
+        assert_eq!(
+            view.log
+                .iter()
+                .filter_map(|entry| entry.request_id.as_deref())
+                .collect::<Vec<_>>(),
+            ["original-request", "handoff-request"]
+        );
     }
 
     fn agent(session: &str) -> Actor {
         Actor::Agent(SessionKey {
             machine: "m1".into(),
             session: session.into(),
-        ..Default::default()})
+            ..Default::default()
+        })
     }
 
     fn task(stage: Stage) -> TaskDoc {
@@ -649,7 +745,8 @@ mod tests {
         SessionKey {
             machine: "m1".into(),
             session: "codex/api".into(),
-        ..Default::default()}
+            ..Default::default()
+        }
     }
 
     #[test]

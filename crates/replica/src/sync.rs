@@ -235,10 +235,15 @@ impl ProjectStore {
             .into_iter()
             .filter(|(_, (stage, _, sent))| {
                 *stage == Stage::Done
-                    && session.is_none_or(|session| sent.as_ref().is_some_and(|sent| {
-                        if session.session_id.is_empty() { sent.machine == session.machine && sent.session == session.session }
-                        else { sent == session }
-                    }))
+                    && session.is_none_or(|session| {
+                        sent.as_ref().is_some_and(|sent| {
+                            if session.session_id.is_empty() {
+                                sent.machine == session.machine && sent.session == session.session
+                            } else {
+                                sent == session
+                            }
+                        })
+                    })
             })
             .map(|(uuid, (_, at, _))| (at, uuid))
             .collect();

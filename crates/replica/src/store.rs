@@ -463,7 +463,8 @@ mod tests {
         SessionKey {
             machine: "m".into(),
             session: "codex/api".into(),
-        ..Default::default()}
+            ..Default::default()
+        }
     }
 
     fn comments(task: &TaskDoc) -> Vec<String> {

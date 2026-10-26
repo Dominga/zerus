@@ -1303,7 +1303,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             }) {
                 Ok(receipt) => receipt,
                 Err(error) if op == "report" && read_only(&error) => return drop_report(input),
-                Err(error) => return Err(error),
+                Err(error) => return Err(super::store::write_error(error)),
             };
             if starts_worker(op) {
                 // The dispatcher runs while any team runs; it exits by itself.

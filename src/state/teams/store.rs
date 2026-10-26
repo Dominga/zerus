@@ -41,6 +41,18 @@ pub(crate) fn canonical_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
 }
 
+/// U20: a member's write the sandbox blocks says what to do, not a bare SQLite
+/// error. Everything else is passed through unchanged.
+pub(crate) fn write_error(error: impl std::fmt::Display) -> anyhow::Error {
+    let text = error.to_string();
+    if text.contains("readonly database") || text.contains("read-only database") {
+        return anyhow::anyhow!(
+            "the sandbox blocks the team store: ask for permission to run hgs team report (or ask/commit), then retry"
+        );
+    }
+    anyhow::anyhow!(text)
+}
+
 /// A member in a sandbox runs at Low integrity (DeepSeek's confined shell),
 /// which may not write files of the usual Medium label: its `hgs team
 /// report` could not record the report. The team folder and what it holds
@@ -288,6 +300,14 @@ fn record(transaction: &rusqlite::Transaction, id: &str, input: &Value, receipt:
 mod tests {
     use super::super::model::{TeamStatus};
     use super::*;
+
+    #[test]
+    fn a_sandbox_blocked_write_says_what_to_do() {
+        let error = write_error("attempt to write a readonly database").to_string();
+        assert!(error.contains("the sandbox blocks the team store"), "{error}");
+        assert!(error.contains("hgs team report"), "{error}");
+        assert_eq!(write_error("disk I/O error").to_string(), "disk I/O error");
+    }
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();

@@ -105,6 +105,7 @@ void TestTasksView::inspectorShowsReportsAndBoundsItsTaskList() {
     TaskInspector inspector(&client, &board); inspector.resize(400, 700); inspector.show();
     board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
     inspector.setContext("project-1", "", "codex/api", sessions());
+    QTRY_COMPARE(inspector.findChild<QListWidget *>("taskInspectorList")->count(), 100);
     inspector.selectTask("uuid-1");
     auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
     QTRY_VERIFY(detail->toPlainText().contains("Committed <abc123>; installation pending."));

@@ -1,4 +1,9 @@
 #include "FakeTasksCli.h"
+#include "ActivityView.h"
+#include "TaskDialogs.h"
+#include <QSplitter>
+#include <QScrollBar>
+#include <QSpinBox>
 #include "HgsClient.h"
 #include "MessageComposer.h"
 #include "TaskBoard.h"
@@ -69,8 +74,9 @@ private slots:
     void inspectorFollowsExecutorIdentityAcrossRename();
     void inspectorShowsReportsAndBoundsItsTaskList();
     void inspectorDiscardsHistoryAfterLeavingTheProject();
-    void inspectorBoardFiltersAdaptAndDetailsExpandUnderTheCard();
+    void inspectorKeepsSelectionInAFixedLowerPane();
     void sixLongReviewTasksStayCompactAndRevealOneDetailSection();
+    void inspectorHistoryShowsEarlierEntriesWithoutMovingTheBoard();
 };
 
 void TestTasksView::inspectorFollowsExecutorIdentityAcrossRename() {
@@ -96,7 +102,7 @@ void TestTasksView::inspectorFollowsExecutorIdentityAcrossRename() {
     // A different session reusing the label must never become the executor.
     known[0].id = "launch_id:replacement";
     inspector.setContext("project-1", "", "codex/new", known);
-    inspector.findChild<QCheckBox *>("taskInspectorOnlySession")->setChecked(false);
+    inspector.findChild<QToolButton *>("taskOnlySession")->setChecked(false);
     QTRY_VERIFY(!inspector.findChild<QPushButton *>("taskOpenActivity")->isEnabled());
     const auto preview = qEnvironmentVariable("HGS_TASK_INSPECTOR_PREVIEW");
     if (!preview.isEmpty()) { inspector.resize(430, 760); QTest::qWait(50); QVERIFY(inspector.grab().save(preview)); }
@@ -119,9 +125,9 @@ void TestTasksView::inspectorShowsReportsAndBoundsItsTaskList() {
     QTRY_VERIFY(detail->toPlainText().contains("Keep <script> literal"));
     QVERIFY(!detail->toPlainText().contains("Committed <abc123>"));
     auto *sections = inspector.findChild<QTabBar *>("taskDetailTabs"); sections->setCurrentIndex(1);
-    QVERIFY(detail->toPlainText().contains("Committed <abc123>; installation pending."));
+    QTRY_VERIFY(detail->toPlainText().contains("Committed <abc123>; installation pending."));
     QVERIFY(!detail->toPlainText().contains("Keep <script> literal"));
-    sections->setCurrentIndex(2); QVERIFY(detail->toPlainText().contains("Please keep the history."));
+    sections->setCurrentIndex(2); QTRY_VERIFY(detail->toPlainText().contains("Please keep the history."));
     inspector.selectTask("uuid-2");
     QTRY_VERIFY(inspector.findChild<QLabel *>("taskInspectorState")->text().contains("start unconfirmed"));
     inspector.selectTask("uuid-3");
@@ -155,8 +161,6 @@ void TestTasksView::sixLongReviewTasksStayCompactAndRevealOneDetailSection() {
     board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
     inspector.setContext("project-1", "", "codex/api", sessions());
     QTRY_COMPARE(inspector.displayedCount(), 6);
-    auto *scroll = inspector.findChild<QScrollArea *>("taskInspectorList");
-    auto *last = inspector.findChild<TaskRow *>("taskInspectorRow:T-000006"); QVERIFY(last);
     for (const int width : {560, 380}) {
         inspector.resize(width, 760); QTest::qWait(30);
         for (auto *row : inspector.findChildren<TaskRow *>()) {
@@ -164,24 +168,29 @@ void TestTasksView::sixLongReviewTasksStayCompactAndRevealOneDetailSection() {
             QVERIFY(!row->findChild<QLabel *>("taskSummary")->isVisibleTo(row));
             QVERIFY(row->findChild<QLabel *>("taskSummary")->text().isEmpty());
         }
-        QVERIFY(last->y() + last->height() <= scroll->viewport()->height());
     }
     const auto preview = qEnvironmentVariable("HGS_TASK_DENSITY_PREVIEW");
     if (!preview.isEmpty()) for (const bool dark : {true, false}) {
         inspector.setTheme(dark); inspector.resize(560, 900); QTest::qWait(50);
         QVERIFY(inspector.grab().save(preview + (dark ? "-dark.png" : "-light.png")));
     }
+    auto *split = inspector.findChild<QSplitter *>("taskInspectorSplit");
+    auto *list = inspector.findChild<QScrollArea *>("taskInspectorList");
+    QTest::qWait(30); const auto splitSizes = split->sizes(); const auto listRect = list->geometry();
     inspector.selectTask("uuid-1");
     auto *detail = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
     auto *sections = inspector.findChild<QTabBar *>("taskDetailTabs");
     QTRY_VERIFY(!detail->toPlainText().isEmpty());
+    QCOMPARE(split->sizes(), splitSizes); QCOMPARE(list->geometry(), listRect);
     QCOMPARE(sections->currentIndex(), 0); QVERIFY(!detail->toPlainText().contains("REPORT_BODY_1"));
     QVERIFY(!detail->toPlainText().contains("HISTORY_BODY"));
-    sections->setCurrentIndex(1); QCOMPARE(detail->toPlainText(), tasks.first().toObject().value("summary").toString());
-    QVERIFY(detail->height() <= 360);
-    sections->setCurrentIndex(2); QVERIFY(detail->toPlainText().contains("HISTORY_BODY"));
+    sections->setCurrentIndex(1); QTRY_VERIFY(detail->toPlainText().simplified().contains(tasks.first().toObject().value("summary").toString().simplified()));
+    QTRY_COMPARE(detail->verticalScrollBar()->value(), 0);
+    QCOMPARE(split->sizes(), splitSizes); QCOMPARE(list->geometry(), listRect);
+    sections->setCurrentIndex(2); QTRY_VERIFY(detail->toPlainText().contains("HISTORY_BODY"));
     if (!preview.isEmpty()) {
-        inspector.setTheme(true); sections->setCurrentIndex(1); QTest::qWait(50);
+        inspector.setTheme(true); sections->setCurrentIndex(1); QTest::qWait(100);
+        QCOMPARE(split->sizes(), splitSizes); QCOMPARE(list->geometry(), listRect);
         QVERIFY(inspector.grab().save(preview + "-result.png"));
     }
     auto *first = inspector.findChild<TaskRow *>("taskInspectorRow:T-000001");
@@ -189,6 +198,27 @@ void TestTasksView::sixLongReviewTasksStayCompactAndRevealOneDetailSection() {
     auto *accept = more->menu()->findChild<QAction *>("taskMenuAction:accept"); QVERIFY(accept && accept->isEnabled());
     accept->trigger();
     QTRY_COMPARE(inspector.findChild<QAbstractButton *>("taskTile:done")->property("count").toInt(), 1);
+}
+
+void TestTasksView::inspectorHistoryShowsEarlierEntriesWithoutMovingTheBoard() {
+    QJsonArray history;
+    for (int n = 1; n <= 18; ++n) history.append(QJsonObject{{"kind", "comment"}, {"actor", QJsonObject{{"kind", "person"}}},
+        {"at", 1791018000000.0 + n * 1000}, {"text", QString("COMMENT_%1_END with **Markdown** and `code`.").arg(n)}});
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "review", {{"log", history}})}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(340, 760); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions());
+    QTRY_COMPARE(inspector.displayedCount(), 1); inspector.selectTask("uuid-1");
+    auto *tabs = inspector.findChild<QTabBar *>("taskDetailTabs"); QTRY_VERIFY(tabs->isEnabled()); tabs->setCurrentIndex(2);
+    auto *activity = inspector.findChild<ActivityView *>("taskDetailActivity");
+    QTRY_VERIFY(activity->plainText().contains("COMMENT_18_END")); QVERIFY(!activity->plainText().contains("COMMENT_1_END"));
+    auto *split = inspector.findChild<QSplitter *>("taskInspectorSplit"); const auto sizes = split->sizes();
+    auto *more = inspector.findChild<QPushButton *>("taskDetailMore"); QVERIFY(more->isVisible()); more->click();
+    QTRY_VERIFY(activity->plainText().contains("COMMENT_3_END")); QVERIFY(!activity->plainText().contains("COMMENT_1_END"));
+    QTRY_COMPARE(activity->browser()->verticalScrollBar()->value(), 0); QCOMPARE(split->sizes(), sizes);
+    more->click(); QTRY_VERIFY(activity->plainText().contains("COMMENT_1_END")); QVERIFY(more->isHidden());
+    QTRY_COMPARE(activity->browser()->verticalScrollBar()->value(), 0); QCOMPARE(split->sizes(), sizes);
 }
 
 void TestTasksView::inspectorDiscardsHistoryAfterLeavingTheProject() {
@@ -206,7 +236,7 @@ void TestTasksView::inspectorDiscardsHistoryAfterLeavingTheProject() {
     QVERIFY(!inspector.findChild<QPushButton *>("taskOpenActivity")->isEnabled());
 }
 
-void TestTasksView::inspectorBoardFiltersAdaptAndDetailsExpandUnderTheCard() {
+void TestTasksView::inspectorKeepsSelectionInAFixedLowerPane() {
     QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo"),
         FakeTasksCli::task(3, "active", {{"session", FakeTasksCli::pinned("codex/api")}, {"stage_at", now()}})}));
     HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
@@ -218,15 +248,40 @@ void TestTasksView::inspectorBoardFiltersAdaptAndDetailsExpandUnderTheCard() {
     QVERIFY(todo->property("compact").toBool()); QCOMPARE(todo->property("count").toInt(), 2);
     auto *first = inspector.findChild<TaskRow *>("taskInspectorRow:T-000001");
     auto *second = inspector.findChild<TaskRow *>("taskInspectorRow:T-000002"); QVERIFY(first && second);
-    auto *details = inspector.findChild<QWidget *>("taskInlineDetails"); QVERIFY(details->isHidden());
-    QTest::mouseClick(first, Qt::LeftButton, {}, QPoint(65, 45));
-    QTRY_VERIFY(details->isVisible());
-    auto *cards = inspector.findChild<QWidget *>("taskInspectorCards")->layout();
-    QCOMPARE(cards->indexOf(details), cards->indexOf(first) + 1);
-    QTRY_VERIFY(second->y() >= details->y() + details->height());
-    QTest::mouseClick(first, Qt::LeftButton, {}, QPoint(65, 45)); QVERIFY(details->isHidden());
+    auto *details = inspector.findChild<QWidget *>("taskDetailsPane"); QVERIFY(details->isVisible());
+    auto *split = inspector.findChild<QSplitter *>("taskInspectorSplit"); QVERIFY(split); QCOMPARE(split->count(), 2);
+    auto *scroll = inspector.findChild<QScrollArea *>("taskInspectorList");
+    QTest::qWait(30); const auto sizes = split->sizes(); const auto firstRect = first->geometry(); const auto secondRect = second->geometry();
+    const auto listRect = scroll->geometry(); const auto detailTop = details->mapTo(&inspector, QPoint());
+    QTest::mouseClick(first, Qt::LeftButton, {}, QPoint(65, 25));
+    QTRY_COMPARE(inspector.selectedTask(), QString("uuid-1"));
+    QTRY_VERIFY(inspector.findChild<QTextBrowser *>("taskInspectorDetail")->toPlainText().contains("Task 1"));
+    QCOMPARE(split->sizes(), sizes); QCOMPARE(first->geometry(), firstRect); QCOMPARE(second->geometry(), secondRect);
+    QCOMPARE(scroll->geometry(), listRect); QCOMPARE(details->mapTo(&inspector, QPoint()), detailTop);
+    auto *sections = inspector.findChild<QTabBar *>("taskDetailTabs");
+    for (int n = 0; n < sections->count(); ++n) {
+        QVERIFY(sections->tabRect(n).width() >= sections->fontMetrics().horizontalAdvance(sections->tabText(n)) + 16);
+        QVERIFY(sections->rect().contains(sections->tabRect(n)));
+    }
+    QCOMPARE(sections->elideMode(), Qt::ElideNone);
+    sections->setCurrentIndex(2); QCOMPARE(split->sizes(), sizes); QCOMPARE(second->geometry(), secondRect);
+    QTest::mouseClick(second, Qt::LeftButton, {}, QPoint(65, 25));
+    QTRY_COMPARE(inspector.selectedTask(), QString("uuid-2")); QCOMPARE(split->sizes(), sizes);
+    QTest::mouseClick(second, Qt::LeftButton, {}, QPoint(65, 25)); QCOMPARE(inspector.selectedTask(), QString("uuid-2"));
+    QVERIFY(!inspector.findChild<QPushButton *>("taskProjectBoard"));
+    auto *scope = inspector.findChild<QToolButton *>("taskOnlySession"); QVERIFY(scope && scope->isVisible());
+    scope->click(); QVERIFY(board.onlyThisSession()); scope->click(); QVERIFY(!board.onlyThisSession());
+    inspector.findChild<QToolButton *>("taskSettings")->click();
+    QPointer<TaskSettingsDialog> settings; QTRY_VERIFY((settings = board.findChild<TaskSettingsDialog *>()));
+    settings->findChild<QSpinBox *>("agentLimit")->setValue(3); settings->findChild<QPushButton *>("saveTaskSettings")->click();
+    QTRY_VERIFY(!settings || !settings->isVisible());
+    bool saved = false;
+    for (const auto &call : FakeTasksCli::calls(dir.path())) if (call.contains("settings") && call.contains("--set")) saved = true;
+    QVERIFY(saved);
     inspector.resize(960, 760); QTRY_VERIFY(!todo->property("compact").toBool());
-    inspector.resize(380, 760); QTRY_VERIFY(todo->property("compact").toBool());
+    inspector.resize(280, 760); QTRY_VERIFY(todo->property("compact").toBool());
+    for (int n = 0; n < sections->count(); ++n) QVERIFY(sections->rect().contains(sections->tabRect(n)));
+    inspector.resize(380, 760);
     // Card actions invoke the same guarded command as on the project board.
     action(second, "sendNow")->click();
     QTRY_COMPARE(inspector.findChild<QAbstractButton *>("taskTile:active")->property("count").toInt(), 2);

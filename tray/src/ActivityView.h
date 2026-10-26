@@ -38,6 +38,10 @@ public:
                      const QString &fallbackPrompt = {}, bool tracked = true);
     void setTimeline(const QJsonObject &details, const QJsonArray &events,
                      const QJsonArray &localMessages, const QString &fallbackPrompt = {}, bool tracked = true);
+    // Read-only task records using the same Markdown, message cards and copy UI.
+    // Entries: id, at (milliseconds), author, label, role (person/agent/event), text.
+    // These presentation records never become native session lifecycle events.
+    void setTaskJournal(const QString &key, const QJsonArray &entries, bool followLatest = true);
     // The owner reconciles these local acknowledgements with arriving hooks.
     // Items: id, text, submitted_at, status, attachments (file references), error.
     void setLocalMessages(const QJsonArray &messages);

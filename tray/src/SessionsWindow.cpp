@@ -1379,7 +1379,6 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     m_taskInspector = new TaskInspector(&m_client, m_tasks);
     m_inspector->addTab(m_taskInspector, tr("Tasks"));
-    connect(m_taskInspector, &TaskInspector::boardRequested, this, [this] { m_detailTabs->setCurrentWidget(m_tasks); });
     connect(m_taskInspector, &TaskInspector::executorRequested, this, [this](const QString &host, const QString &name, const QString &id) {
         // Recheck the retained identity before following a mutable display name.
         for (const auto &entry : std::as_const(m_entries)) {
@@ -1834,6 +1833,7 @@ void SessionsWindow::applyContentScale()
 {
     const double scale = ContentScale::factor();
     for (auto *view : {m_activityView, m_subagentView}) view->setContentScale(scale);
+    m_taskInspector->setContentScale(scale);
     for (auto *composer : {m_composer, m_subagentComposer}) composer->setContentScale(scale);
     m_question->setContentScale(scale); m_terminal->setContentScale(scale);
     applyActivityWidth();

@@ -23,6 +23,7 @@ struct TaskSession;
 
 // Shared chronological event rendering for the inspector and the edit dialog.
 QString taskHistoryLine(const QJsonObject &entry);
+QString taskHistoryAction(const QJsonObject &entry);
 
 // The session a task is pinned to; any is Any session.
 struct TaskTarget {

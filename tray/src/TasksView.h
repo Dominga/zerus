@@ -13,6 +13,7 @@
 class HgsClient;
 class MessageComposer;
 class QAbstractButton;
+class QBoxLayout;
 class QDrag;
 class QLabel;
 class QPushButton;
@@ -82,6 +83,10 @@ public:
     void actOnTask(const TaskItem &task, TaskAction action) { act(task, action); }
     TaskRowState rowState(const TaskItem &task) const;
     QString selectedStage() const { return m_stage; }
+    // The Activity sidebar hosts the board's existing scope/settings controls.
+    void moveControlsTo(QBoxLayout *toolbar);
+    bool onlyThisSession() const;
+    void setOnlyThisSession(bool only);
     MessageComposer *composer() const { return m_composer; }
 signals:
     // The project's tasks in In review and in To do, for the tab label.

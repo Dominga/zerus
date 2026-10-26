@@ -1894,10 +1894,11 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     };
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
     const auto editorPixels = [composer] { return QFontInfo(composer->editor()->font()).pixelSize(); };
-    const QStringList chrome{"sessionList", "search", "detailTitle", "sessionInspector", "sessionInfo", "terminalStatus", "sendMessage"};
+    const QStringList chrome{"sessionList", "search", "detailTitle", "sessionInspector", "sessionInfo", "terminalStatus", "sendMessage", "taskDetailTabs"};
     QMap<QString, int> before; for (const auto &name : chrome) { before.insert(name, pixels(name)); QVERIFY2(before.value(name) > 0, qPrintable(name)); }
     const int tabs = QFontInfo(window.findChild<QTabWidget *>("sessionDetailTabs")->tabBar()->font()).pixelSize();
     QCOMPARE(pixels("activity"), 13); QCOMPARE(pixels("terminalScreen"), 13); QCOMPARE(editorPixels(), 13);
+    QCOMPARE(pixels("taskInspectorDetail"), 13);
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *settings = window.findChild<QWidget *>("settingsPage"); QVERIFY(settings && settings->isVisible());
     auto *slider = settings->findChild<QSlider *>("workspaceContentScale"); QVERIFY(slider && slider->isVisible());
@@ -1908,6 +1909,7 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     QCOMPARE(settings->findChild<QLabel *>("workspaceContentScaleValue")->text(), QString("75%"));
     QTRY_COMPARE(editorPixels(), 10);
     QCOMPARE(pixels("activity"), 10); QCOMPARE(pixels("subagentJournal"), 10); QCOMPARE(pixels("terminalScreen"), 10);
+    QCOMPARE(pixels("taskInspectorDetail"), 10);
     for (const auto &name : chrome) QCOMPARE(pixels(name), before.value(name));
     QCOMPARE(QFontInfo(window.findChild<QTabWidget *>("sessionDetailTabs")->tabBar()->font()).pixelSize(), tabs);
     QVERIFY(preview("content-scale-75.png"));
@@ -1919,6 +1921,7 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     if (!qEnvironmentVariable("HGS_PREVIEW_DIR").isEmpty())
         QVERIFY(window.grab().save(qEnvironmentVariable("HGS_PREVIEW_DIR") + "/content-scale-settings.png"));
     QCOMPARE(pixels("activity"), 26); QCOMPARE(pixels("subagentJournal"), 26); QCOMPARE(pixels("terminalScreen"), 26);
+    QCOMPARE(pixels("taskInspectorDetail"), 26);
     for (const auto &name : chrome) QCOMPARE(pixels(name), before.value(name));
     QCOMPARE(QFontInfo(window.findChild<QTabWidget *>("sessionDetailTabs")->tabBar()->font()).pixelSize(), tabs);
     // Theme changes rebuild workspace styles without dropping the preference.

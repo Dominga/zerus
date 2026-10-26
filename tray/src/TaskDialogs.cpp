@@ -74,8 +74,7 @@ QString actor(const QJsonObject &actor) {
 }
 }
 
-// One history line: who, when and what happened.
-QString taskHistoryLine(const QJsonObject &entry) {
+QString taskHistoryAction(const QJsonObject &entry) {
     const QString kind = entry.value("kind").toString(), text = entry.value("text").toString();
     QString what;
     if (kind == QLatin1String("created")) what = QObject::tr("created the task");
@@ -90,8 +89,13 @@ QString taskHistoryLine(const QJsonObject &entry) {
     else if (kind == QLatin1String("comment")) what = QObject::tr("commented: %1").arg(text);
     else if (kind == QLatin1String("started")) what = QObject::tr("started the task");
     else what = text.isEmpty() ? kind : text;
+    return what;
+}
+
+// One history line: who, when and what happened.
+QString taskHistoryLine(const QJsonObject &entry) {
     return QStringLiteral("<p style='margin:0 0 6px 0'><b>%1</b> <span style='opacity:.7'>%2</span> · %3</p>")
-        .arg(actor(entry.value("actor").toObject()).toHtmlEscaped(), time(qint64(entry.value("at").toDouble())), what.toHtmlEscaped());
+        .arg(actor(entry.value("actor").toObject()).toHtmlEscaped(), time(qint64(entry.value("at").toDouble())), taskHistoryAction(entry).toHtmlEscaped());
 }
 
 TaskDialog::TaskDialog(const QJsonObject &task, const QList<TaskSession> &sessions, std::function<QString(const TaskTarget &)> sendBlocker,

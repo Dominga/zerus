@@ -409,6 +409,10 @@ QString timeText(const QJsonObject &event)
 
 QString messageRole(const QJsonObject &event)
 {
+    if (event.value("source") == "zerus_task" && event.value("type") == "TaskEntry") {
+        const auto role = event.value("task_role").toString();
+        return role == "person" ? QStringLiteral("user") : role == "agent" ? QStringLiteral("assistant") : QString();
+    }
     if (event.value("source") == "hgs_voice" && event.value("voice").isObject()) return "user";
     if (!event.value("agent_id").toString().isEmpty() || (event.value("detail").toString().isEmpty() && event.value("attachments").toArray().isEmpty())) return {};
     // Claude starts a turn for finished background work; nobody wrote it.
@@ -745,7 +749,8 @@ struct ActivityRenderResult {
         agentTheme.chip.setAlphaF(0.33f); pageTheme.chip.setAlphaF(0.33f);
     }
     QString html = QString("<html><head><style>body{color:%1;font-size:13px;}p{margin:6px 0;line-height:135%;}h1,h2,h3,h4{font-size:14px;margin:10px 0 6px;}pre{white-space:pre-wrap;}a{color:%2;text-decoration:none;}li{margin-bottom:4px;}</style></head><body>").arg(fg, accent);
-    html += QString("<p style='font-size:10px;color:%1;margin-bottom:12px;'>%2</p>").arg(muted, searching ? tr("SEARCH RESULT — Saved message") : tr("RECORDED ACTIVITY — Messages and tool excerpts"));
+    if (!details.value("task_journal").toBool())
+        html += QString("<p style='font-size:10px;color:%1;margin-bottom:12px;'>%2</p>").arg(muted, searching ? tr("SEARCH RESULT — Saved message") : tr("RECORDED ACTIVITY — Messages and tool excerpts"));
     if (details.value("history_truncated").toBool())
         html += QString("<p style='color:%1;font-size:11px;'>%2</p>").arg(muted, tr("Older events have expired from the journal."));
     if (searching && m_searchResult.value("content_truncated").toBool())
@@ -912,6 +917,12 @@ struct ActivityRenderResult {
     m_toggleKeys.clear();m_processLinks.clear();
     for (int i = 0; i < events.size();) {
         const auto event = events[i]; const auto role = messageRole(event);
+        const bool taskEntry = event.value("source") == "zerus_task" && event.value("type") == "TaskEntry";
+        if (taskEntry && role.isEmpty()) {
+            html += QString("<p style='font-size:11px;color:%1;margin:10px 0;'><span>%2</span> &nbsp; <b>%3</b> · %4</p>")
+                .arg(muted, escaped(timeText(event)), escaped(event.value("task_author").toString()), escaped(event.value("detail").toString()));
+            ++i; continue;
+        }
         if (event.value("type") == "SessionCleared") {
             // Earlier activity stays readable above; the agent no longer has it.
             html += card(eventKey(event), tr("Session cleared"), timeText(event),
@@ -1007,7 +1018,8 @@ struct ActivityRenderResult {
                 html+=card(eventKey(event),video.isEmpty()?tr("You (voice)"):tr("You (video)"),{},body,true,false,false,{},false,metadata);
                 ++i;continue;
             }
-            const QString label = role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
+            const QString label = taskEntry ? event.value("task_author").toString() + QStringLiteral(" · ") + event.value("task_label").toString()
+                : role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
                 event.value("type") == "QuestionAnswered" || !replies.isEmpty() ? tr("You (answer)") : tr("You")) : tr("Agent");
             auto stamp=timeText(event);
             // OpenCode reports its inbox: a waiting message is queued, and after
@@ -1015,7 +1027,7 @@ struct ActivityRenderResult {
             const auto delivery=role=="user"?event.value("delivery_state").toString():QString();
             const bool inbox=delivery=="queued"||delivery=="not_delivered";
             if (inbox) stamp += "  " + (delivery == "queued" ? tr("Queued") : tr("Not delivered"));
-            else if (role == "user" && event["type"] != "LocalMessage") {
+            else if (role == "user" && event["type"] != "LocalMessage" && !taskEntry) {
                 bool accepted = event["type"] != "UserPromptQueued";
                 if (!accepted) for (int j=i+1;j<events.size();++j) {
                     const auto next = events[j];
@@ -1025,6 +1037,10 @@ struct ActivityRenderResult {
             }
             auto body = role == "user" ? (replies.isEmpty() ? userMessage(text) : questionReplyBody(replies, muted, accent, codeSurface, border))
                                        : markdown(text, agentTheme, m_fileLinks);
+            if (taskEntry && role == "user") {
+                auto theme = MarkdownTheme::github(m_dark, QColor(userSurface), m_scale); theme.subtle = QColor(codeSurface);
+                body = markdown(text, theme, m_fileLinks);
+            }
             if(event.value("type")=="LocalMessage") {
                 const auto state=event.value("status").toString();stamp=state=="sending"?tr("Sending…"):state=="error"?tr("Not sent"):tr("Submitted to terminal");
                 if(state=="error" && event.value("uncertain").toBool())stamp=tr("Delivery not confirmed");
@@ -1362,6 +1378,21 @@ void ActivityView::setTimeline(const QJsonObject &details, const QJsonArray &eve
     // inputs together so the document never contains both generations.
     if (m_localMessages != localMessages) { m_localMessages = localMessages; m_activityInput = {}; }
     setActivity(details, events, fallbackPrompt, tracked);
+}
+
+void ActivityView::setTaskJournal(const QString &key, const QJsonArray &entries, bool followLatest)
+{
+    const bool changed = key != m_sessionKey;
+    setSessionKey(key);
+    if (changed && !followLatest) { m_initial = false; m_followLatest = false; }
+    QJsonArray events;
+    for (const auto &value : entries) {
+        const auto entry = value.toObject();
+        events.append(QJsonObject{{"source", "zerus_task"}, {"type", "TaskEntry"}, {"activity_key", entry.value("id")},
+            {"at", entry.value("at").toDouble() / 1000.0}, {"detail", entry.value("text")},
+            {"task_author", entry.value("author")}, {"task_label", entry.value("label")}, {"task_role", entry.value("role")}});
+    }
+    setActivity({{"task_journal", true}}, events);
 }
 
 void ActivityView::setTheme(bool dark)

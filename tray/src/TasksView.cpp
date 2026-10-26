@@ -157,6 +157,13 @@ void TasksView::setInspectorVisible(bool visible) {
     if (visible) refresh(); else schedule();
 }
 
+void TasksView::moveControlsTo(QBoxLayout *toolbar) {
+    toolbar->addWidget(m_only); toolbar->addWidget(m_settings);
+}
+
+bool TasksView::onlyThisSession() const { return m_only->isChecked(); }
+void TasksView::setOnlyThisSession(bool only) { m_only->setChecked(only); }
+
 void TasksView::showEvent(QShowEvent *event) { QWidget::showEvent(event); applyComposerKey(); if (m_loaded) refresh(); }
 
 void TasksView::hideEvent(QHideEvent *event) { QWidget::hideEvent(event); applyComposerKey(); schedule(); }

@@ -2518,20 +2518,25 @@ To do and Backlog rows can be dragged: onto the other list's tile to move them
 there, within To do to reorder it, onto a session of the project in the session
 list to pin them to it, or onto the project's header to make them Any session.
 
-The **Tasks** inspector shows the current session's tasks by default; uncheck
-**This session** to see the project. It uses the same stage filters and task cards
-as the project board. Stage labels appear when the panel is wide enough; narrow
-filters keep their icons, counts, tooltips and accessible names. Clicking a card
-expands its details directly underneath it, inside the board; click again to
-collapse. Card actions use the same guarded commands as the project board.
+The **Tasks** inspector hosts the board's session filter and project settings
+buttons. The funnel switches between this session and all project tasks and keeps
+its saved setting. It uses the same stage filters and task cards as the project
+board. Stage labels appear when the panel is wide enough; narrow filters keep
+their icons, counts, tooltips and accessible names. The board occupies the upper
+pane; selecting a card updates the permanent lower details pane without moving
+cards or changing the list viewport. Drag the divider to resize these panes; its
+position is saved. Card actions use the same guarded commands as the project board.
 Collapsed inspector cards show a short title and worker; their action menu keeps
 the controls within one compact row. Full reports and cancellations appear only
-after opening a task. Its **Description**, **Result** and **History** sections are
-separate, with only the selected section visible. History opens with eight recent
-events and offers earlier entries explicitly. Owner highlighting stays subtle;
+after selecting a task. Its **Description**, **Result** and **History** sections are
+separate, with complete tab captions. Task text, reports and comments use the same
+Markdown and message-card renderer as Activity, retaining authors and timestamps.
+Descriptions and results open at the beginning; history opens at its latest entry.
+History starts with eight recent events and offers earlier entries explicitly.
+Owner highlighting stays subtle;
 the selected task has the accent outline.
 It retains at most 100 listed tasks and 80 selected-task history entries; the full
-history is available through **Edit / actions**.
+history is available through the task actions menu.
 **Assigned to** identifies routing; **Executor** requires a recorded start.
 An unconfirmed start is labelled explicitly. **Agent report** is the saved report,
 not proof that a commit was merged or a build installed. **Open Activity** follows

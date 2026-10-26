@@ -12,10 +12,15 @@ right inspector beside **Plan & agents**, **Details**, and **Worktrees**. It
 contains the task board, with the current task, actual executor, queue, expected
 result and verified delivery milestones. Owner live review, 2026-10-26: reuse the
 board's stage filters and cards; show stage labels when width permits and icons
-with counts on narrow panels. A card expands its details immediately underneath
-it in the same scrolling board and collapses on a second click. Opening a task's
-conversation uses the central Activity
-renderer and composer, with an explicit task context. Do not put another full
+with counts on narrow panels. Owner layout correction, 2026-10-26: the upper pane
+contains the board and the permanent lower pane contains the selected task's
+details. Selection never inserts content into the list, moves cards, changes its
+viewport or changes the divider position. Keep the divider adjustable and saved.
+Remove the Project board shortcut; move the board's existing scope and settings
+buttons into the inspector toolbar. Detail tab captions must remain complete on
+macOS and narrow panels. Reports and comments use Activity's Markdown, author,
+timestamp and message-card presentation. Opening a task's conversation uses the
+central Activity renderer and composer, with an explicit task context. Do not put another full
 conversation inside a narrow inspector or require a modal task window to work.
 
 Owner density correction, 2026-10-26: collapsed cards must remain short regardless

@@ -3,10 +3,11 @@
 #include <QJsonObject>
 #include <QWidget>
 
-class QCheckBox;
 class QLabel;
 class QPushButton;
-class QTextBrowser;
+class ActivityView;
+class QSplitter;
+class QStackedWidget;
 class QScrollArea;
 class QVBoxLayout;
 class TaskTile;
@@ -20,12 +21,12 @@ public:
     TaskInspector(HgsClient *client, TasksView *board, QWidget *parent = nullptr);
     void setContext(const QString &project, const QString &host, const QString &session, const QList<TaskSession> &sessions);
     void setTheme(bool dark);
+    void setContentScale(double scale);
     void selectTask(const QString &uuid);
     QString selectedTask() const { return m_selected; }
     QString selectedStage() const { return m_stage; }
     int displayedCount() const { return m_rows.size(); }
 signals:
-    void boardRequested();
     void executorRequested(const QString &host, const QString &name, const QString &id);
 protected:
     void showEvent(QShowEvent *event) override;
@@ -36,7 +37,6 @@ private:
     void fetch();
     void renderDetail();
     void updateFilters();
-    void updateDetailHeight();
     QJsonObject labels(QJsonObject task) const;
     const TaskSession *executor() const;
     HgsClient *m_client;
@@ -46,14 +46,17 @@ private:
     QJsonObject m_detail;
     quint64 m_request = 0, m_generation = 0;
     QLabel *m_scope, *m_state;
-    QCheckBox *m_only;
-    QWidget *m_filters = nullptr, *m_listPage = nullptr, *m_expansion = nullptr;
+    QWidget *m_filters = nullptr, *m_listPage = nullptr, *m_details = nullptr;
     QScrollArea *m_scroll = nullptr;
     QVBoxLayout *m_cards = nullptr;
     QHash<QString, TaskTile *> m_tiles;
     QHash<QString, TaskRow *> m_rows;
     QPushButton *m_older;
-    QTextBrowser *m_description;
+    ActivityView *m_activity;
+    QSplitter *m_splitter;
+    QStackedWidget *m_content;
+    QLabel *m_emptyDetail;
+    QPushButton *m_moreDetail;
     QPushButton *m_open, *m_edit;
     QTabBar *m_detailTabs;
     bool m_dark = true;

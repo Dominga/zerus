@@ -1390,6 +1390,9 @@ mod tests {
                     }
                     Err(error) => panic!("fixture accept failed: {error}"),
                 };
+                // Accepted sockets may inherit the listener's nonblocking mode on BSD.
+                // The bounded fixture reader below deliberately uses blocking reads.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();

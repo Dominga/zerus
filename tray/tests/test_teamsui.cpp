@@ -1460,11 +1460,9 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
         if (task["id"].toInt() != 4) continue;
         task["kind"] = "check";
         task["check"] = QJsonObject{{"command", "cargo test --locked --bin hgs teams"}, {"expect_exit", 0}, {"timeout_minutes", 30}};
-        auto attempts = task["attempts"].toArray();
-        if (attempts.isEmpty()) attempts.append(QJsonObject{});
-        auto attempt = attempts[0].toObject();
-        attempt["check"] = QJsonObject{{"exit", 0}, {"tail", "120 passed"}, {"at", 1792868400.0}};
-        attempts[0] = attempt; task["attempts"] = attempts; tasks[i] = task;
+        // A finished check task: one attempt with the check it ran.
+        task["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "backend"}, {"state", "reported"},
+            {"check", QJsonObject{{"exit", 0}, {"tail", "120 passed"}, {"at", 1792868400.0}}}}}; tasks[i] = task;
     }
     team["tasks"] = tasks;
     auto members = team["members"].toArray();

@@ -298,6 +298,7 @@ private slots:
     void preflightWarningsShowInThePlanCard();
     void leadLoadViewsShowInTheDesktop();
     void followUpsShowThePermissionAnswerAndPlanFixes();
+    void folderPolicyKeepsAutoWhileTyping();
     void severalDraftPhasesRenderAndApproveInOrder();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
@@ -1450,6 +1451,50 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
 // N8: the plan footer's Approve asks for the widening confirmation; N9: a
 // phase approved on the owner's word shows the quote; QA: the plan approval
 // view lists every check command.
+// N10: the folder policy keeps auto while the path is typed; a finished non-Git
+// path forces shared, and editing again returns to auto. Dialog and tab.
+void TestTeamsUi::folderPolicyKeepsAutoWhileTyping()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;   // not a Git repository
+    const QList<TeamNewDialog::Computer> computers{{QString(), "this computer", true}, {"msi-old", "msi-old", false}};
+    TeamNewDialog dialog(&controller, &client, computers, {{QString(), "claude/checkout/main", "claude"}},
+                         QDir::toNativeSeparators(folder.path()), "Checkout");
+    dialog.show();
+    auto *edit = dialog.findChild<QLineEdit *>("teamNewFolder");
+    auto *policy = dialog.findChild<QComboBox *>("teamNewFolderPolicy");
+    QVERIFY(edit && policy);
+    // A finished non-Git folder is shared.
+    QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+    // While the path is typed, auto stays.
+    edit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/sub"));
+    QCOMPARE(policy->currentData().toString(), QStringLiteral("auto"));
+    // Finishing the path forces shared.
+    QMetaObject::invokeMethod(edit, "editingFinished");
+    QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+    // Editing again returns to auto.
+    edit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/sub2"));
+    QCOMPARE(policy->currentData().toString(), QStringLiteral("auto"));
+    shot(&dialog, "new-team-folder-policy-typing");
+    // The same in the workspace tab.
+    const QList<TeamNewTab::Computer> tabComputers{{QString(), "this computer", true}, {"msi-old", "msi-old", false}};
+    TeamNewTab tab(&controller, &client, tabComputers, TeamNewTab::Coordinator{}, QStringLiteral("Checkout"));
+    tab.resize(700, 900); tab.show();
+    auto *tabEdit = tab.findChild<QLineEdit *>("teamNewFolder");
+    auto *tabPolicy = tab.findChild<QComboBox *>("teamNewFolderPolicy");
+    QVERIFY(tabEdit && tabPolicy);
+    tabEdit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/one"));
+    QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("auto"));
+    QMetaObject::invokeMethod(tabEdit, "editingFinished");
+    QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("shared"));
+    tabEdit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/two"));
+    QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("auto"));
+    shot(&tab, "new-team-tab-folder-policy-typing");
+}
+
 void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
 {
     auto team = phasedTeam();
@@ -1486,25 +1531,56 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
     QTRY_VERIFY(card.findChild<QLabel *>("teamCheckResult"));
     QCOMPARE(card.findChild<QLabel *>("teamCheckResult")->text(), QStringLiteral("exit 0"));
     QVERIFY(card.findChild<QLabel *>("teamCheckTail"));
-    // QA/N9: the approval footer lists the check command and the phase word.
-    QTRY_VERIFY(panel.findChild<QWidget *>("teamPlanFooter"));
-    QVERIFY(panel.findChild<QLabel *>("teamPlanCheck"));
-    QVERIFY(panel.findChild<QLabel *>("teamPlanCheck")->text().contains(QStringLiteral("cargo test --locked --bin hgs teams")));
-    QVERIFY(panel.findChild<QLabel *>("teamPhaseOwnerWord"));
-    QVERIFY(panel.findChild<QLabel *>("teamPhaseOwnerWord")->text().contains(QStringLiteral("план принят")));
-    shot(&panel, "permission-answer-plan-checks");
+    // QA/N9: the approval footer lists the check command and the phase word,
+    // and both are really visible inside the panel - not merely findable.
+    TeamPanel planPanel(&controller);
+    planPanel.resize(480, 1100); planPanel.show();
+    planPanel.showTeam("team-1");
+    const auto visibleLabel = [](QWidget *root, const char *name) -> QLabel * {
+        for (auto *label : root->findChildren<QLabel *>(name))
+            if (label->isVisible() && !label->geometry().isEmpty()) return label;
+        return nullptr;
+    };
+    QTRY_VERIFY(([&] { controller.refresh(); return visibleLabel(&planPanel, "teamPlanCheck") != nullptr; })());
+    auto *checkLine = visibleLabel(&planPanel, "teamPlanCheck");
+    QVERIFY(checkLine->text().contains(QStringLiteral("cargo test --locked --bin hgs teams")));
+    QVERIFY(planPanel.rect().contains(checkLine->mapTo(&planPanel, QPoint(0, 0))));
+    QTRY_VERIFY(visibleLabel(&planPanel, "teamPhaseOwnerWord"));
+    auto *ownerLine = visibleLabel(&planPanel, "teamPhaseOwnerWord");
+    QVERIFY(ownerLine->text().contains(QStringLiteral("план принят")));
+    QVERIFY(planPanel.rect().contains(ownerLine->mapTo(&planPanel, QPoint(0, 0))));
+    darkPalette(); planPanel.setTheme(true); planPanel.showTeam("team-1"); QTest::qWait(200);
+    shot(&planPanel, "permission-answer-plan-checks-dark");
+    // A second panel themed before its first render, so the light shot is light.
+    TeamPanel lightPanel(&controller);
+    lightPalette(); lightPanel.setTheme(false);
+    lightPanel.resize(480, 1100); lightPanel.show(); lightPanel.showTeam("team-1");
+    QTRY_VERIFY(([&] { controller.refresh(); return visibleLabel(&lightPanel, "teamPlanCheck") != nullptr; })());
+    auto *lightCheck = visibleLabel(&lightPanel, "teamPlanCheck");
+    QVERIFY(lightCheck->text().contains(QStringLiteral("cargo test --locked --bin hgs teams")));
+    QVERIFY(lightPanel.rect().contains(lightCheck->mapTo(&lightPanel, QPoint(0, 0))));
+    QTRY_VERIFY(visibleLabel(&lightPanel, "teamPhaseOwnerWord"));
+    QVERIFY(visibleLabel(&lightPanel, "teamPhaseOwnerWord")->text().contains(QStringLiteral("план принят")));
+    // Let the pinned footer lay out before the grab, and check it really is on
+    // screen: the finding was labels that existed while the user saw nothing.
+    auto *lightFooter = lightPanel.findChild<QWidget *>("teamPlanFooter");
+    QTRY_VERIFY(lightFooter && lightFooter->isVisible() && lightFooter->height() > 24);
+    QCoreApplication::processEvents(); QTest::qWait(300);
+    QVERIFY(visibleLabel(&lightPanel, "teamPlanCheck")->mapTo(&lightPanel, QPoint(0, 0)).y() < lightPanel.height());
+    shot(&lightPanel, "permission-answer-plan-checks");
+    planPanel.setTheme(true); darkPalette(); planPanel.showTeam("team-1"); QTest::qWait(200);
     // N8: the footer's Approve asks for the widening confirmation.
-    auto *approve = panel.findChild<QPushButton *>("teamApprove");
+    auto *approve = planPanel.findChild<QPushButton *>("teamApprove");
     QVERIFY(approve);
-    QTimer::singleShot(0, &panel, [&panel] { if (auto *box = panel.findChild<QMessageBox *>("teamWideningConfirm")) box->button(QMessageBox::Cancel)->click(); });
+    QTimer::singleShot(0, &planPanel, [&planPanel] { if (auto *box = planPanel.findChild<QMessageBox *>("teamWideningConfirm")) box->button(QMessageBox::Cancel)->click(); });
     approve->click();
     QTest::qWait(150);
     QCOMPARE(calls(script(), "approve").size(), 0);
-    QTimer::singleShot(0, &panel, [&panel] {
-        if (auto *box = panel.findChild<QMessageBox *>("teamWideningConfirm"))
+    QTimer::singleShot(0, &planPanel, [&planPanel] {
+        if (auto *box = planPanel.findChild<QMessageBox *>("teamWideningConfirm"))
             for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Confirm and approve")) { b->click(); break; }
     });
-    panel.findChild<QPushButton *>("teamApprove")->click();
+    planPanel.findChild<QPushButton *>("teamApprove")->click();
     QTRY_VERIFY(calls(script(), "approve").size() >= 1);
     QCOMPARE(calls(script(), "approve").last()["confirm_widening"].toBool(), true);
     // C4: a member's question becomes a permission card; Allow sends the exact

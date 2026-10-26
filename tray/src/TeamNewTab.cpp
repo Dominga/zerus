@@ -166,7 +166,15 @@ TeamNewTab::TeamNewTab(TeamController *teams, HgsClient *client, const QList<Com
     m_folderPolicy->setToolTip(tr("Auto lets the lead choose the folder each member works in"));
     // N10: typing a path keeps auto; a finished non-Git path forces shared.
     QObject::connect(m_folder, &QLineEdit::editingFinished, this, [this] { m_folderCommitted = true; validate(); });
-    QObject::connect(m_folder, &QLineEdit::textChanged, this, [this] { m_folderCommitted = false; });
+    QObject::connect(m_folder, &QLineEdit::textChanged, this, [this] {
+        m_folderCommitted = false;
+        // N10: resuming the path cancels the rule that forced shared.
+        if (m_forcedShared) {
+            m_forcedShared = false;
+            const QSignalBlocker block(m_folderPolicy);
+            m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("auto")));
+        }
+    });
     QObject::connect(m_folderPolicy, &QComboBox::currentIndexChanged, this, [this] {
         m_worktrees->setChecked(m_folderPolicy->currentData().toString() != QStringLiteral("shared"));
         validate();
@@ -612,6 +620,7 @@ void TeamNewTab::validate()
         const QSignalBlocker block(m_folderPolicy);
         m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
         m_worktrees->setChecked(false);
+        m_forcedShared = true;
     }
     m_gitNote->setVisible(!folder.isEmpty() && !git);
     const QString name = m_name->text().trimmed();

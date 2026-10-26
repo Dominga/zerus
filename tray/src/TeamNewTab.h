@@ -88,6 +88,8 @@ private:
     class QComboBox *m_folderPolicy = nullptr;
     // N10: the path is finished (focus out or Enter); typing keeps auto.
     bool m_folderCommitted = true;
+    // N10: the shared choice came from the non-Git folder rule.
+    bool m_forcedShared = false;
     QWidget *m_planning;
     QString m_planningValue = QStringLiteral("lead");
     QSpinBox *m_max;

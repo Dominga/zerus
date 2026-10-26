@@ -10,12 +10,12 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
-    "retry", "check", "expect", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings",
+    "retry", "check", "expect", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings", "finding",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -358,6 +358,16 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             entry["outside_project"] = json!(!team_project.is_empty() && !project.is_empty() && project != team_project);
         }
     }
+    // D2: the findings summary and the newest page of findings (50).
+    let open = |severity: &str| {
+        team.findings
+            .iter()
+            .filter(|finding| finding.severity == severity && matches!(finding.state.as_str(), "open" | "reopened" | "urgent"))
+            .count()
+    };
+    let deferred = team.findings.iter().filter(|finding| finding.state == "deferred").count();
+    value["findings_summary"] = json!({"open":{"critical":open("critical"),"normal":open("normal"),"later":open("later")},"deferred":deferred});
+    value["findings"] = json!(team.findings.iter().rev().take(50).collect::<Vec<_>>());
     value
 }
 

@@ -538,6 +538,29 @@ pub(crate) struct Finish {
     pub at: f64,
 }
 
+/// D2: a finding a report filed, kept until it is fixed or dropped.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Finding {
+    /// f1, f2, ... in filing order.
+    pub id: String,
+    pub from_task: u32,
+    pub severity: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub scenario: String,
+    /// The task that caused it, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<u32>,
+    pub state: String,
+    pub by: String,
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Report {
     pub text: String,
@@ -721,6 +744,12 @@ pub(crate) struct Task {
     pub decided_by: Option<Decider>,
     #[serde(default)]
     pub decision_reason: String,
+    /// D2: what a reopen replaced, newest last (an accepted task's decision).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<Value>,
+    /// D2: the finding text a reopened task hands out with its next attempt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reopen_note: String,
 }
 
 impl Task {
@@ -786,6 +815,10 @@ pub(crate) struct Phase {
     /// owner's diff view (F10): {"kind":"added|removed|changed|moved", ...}.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<serde_json::Value>,
+    /// D2: an urgent phase runs at once (no approval under review, no barrier)
+    /// and its tasks are handed out before other pending ones.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub urgent: bool,
 }
 
 impl Phase {
@@ -829,6 +862,12 @@ pub(crate) struct Team {
     /// confirms them before the plan can be approved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profile_widening: Vec<serde_json::Value>,
+    /// D2: findings filed by accepted reports, oldest first (at most 1000).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
+    /// D2: the last finding number given; ids stay unique for the team's life.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub findings_seq: u64,
     #[serde(default)]
     pub revision: u64,
     /// F11: the revision that last changed draft phase or task numbers; a

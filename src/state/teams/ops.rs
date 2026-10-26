@@ -510,12 +510,16 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         }
     };
     let approval = phase_approval(team);
+    // D2: an urgent phase runs at once: no approval under review, no barrier,
+    // and its tasks are handed out first.
+    let urgent = input["urgent"].as_bool() == Some(true);
     // Several drafts may queue, in order; a phase added while an earlier one is
     // still a Draft is a Draft too, whatever the approval says (F9).
-    let drafting = target.is_some()
-        || team.status == TeamStatus::Planning
-        || team.phases.iter().any(|phase| phase.state == PhaseState::Draft)
-        || approval == Approval::Review;
+    let drafting = !urgent
+        && (target.is_some()
+            || team.status == TeamStatus::Planning
+            || team.phases.iter().any(|phase| phase.state == PhaseState::Draft)
+            || approval == Approval::Review);
     let title = clean(text(input, "phase_title").trim(), 120, "A phase title")?;
     let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
     // Ids continue after the highest live number: a discarded draft frees its
@@ -560,7 +564,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
             }
         }
     }
-    let barrier = input["barrier"].as_bool() == Some(true);
+    let barrier = !urgent && input["barrier"].as_bool() == Some(true);
     let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
     let by = actor.label(team);
     let state = if drafting { PhaseState::Draft } else { PhaseState::Approved };
@@ -615,6 +619,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         decided_at: None,
         owner_word: None,
         changes: Vec::new(),
+        urgent,
     });
     events.push(Event::new(
         "phase_added",
@@ -1098,6 +1103,16 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(!summary.is_empty(), "A summary is required");
     let open = team.tasks.iter().filter(|task| !task.status.finished()).count();
     ensure!(open == 0, "{open} task(s) are not decided: decide or cancel them first");
+    // D2: a critical finding that is still open blocks a finish; the owner may
+    // force it.
+    let critical = team
+        .findings
+        .iter()
+        .any(|finding| finding.severity == "critical" && matches!(finding.state.as_str(), "open" | "reopened" | "urgent"));
+    ensure!(
+        input["force"].as_bool() == Some(true) || !critical,
+        "A critical finding is open: fix it or finish with \"force\": true"
+    );
     let by = actor.label(team);
     let accepted = team.tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
     let summary_chars = summary.chars().count();
@@ -1555,6 +1570,111 @@ fn release(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     Ok(json!({"status":"released","task":id}))
 }
 
+/// D2: files a report's findings; later ones are deferred at once.
+fn file_findings(team: &mut Team, from: u32, report: &Value, by: &str) -> anyhow::Result<(usize, usize)> {
+    let findings = report["findings"].as_array().cloned().unwrap_or_default();
+    ensure!(team.findings.len() + findings.len() <= 1000, "A team keeps at most 1000 findings");
+    let mut deferred = 0usize;
+    for finding in &findings {
+        let severity = finding["severity"].as_str().unwrap_or("normal").to_owned();
+        ensure!(["critical", "normal", "later"].contains(&severity.as_str()), "A finding is critical, normal or later");
+        let title = clean(finding["title"].as_str().unwrap_or_default().trim(), 200, "A finding title")?;
+        ensure!(!title.is_empty(), "A finding needs a title");
+        let scenario = clean(finding["scenario"].as_str().unwrap_or_default().trim(), 2000, "A finding scenario")?;
+        ensure!(!scenario.is_empty(), "A finding needs its scenario");
+        let file = clean(finding["file"].as_str().unwrap_or_default().trim(), 500, "A finding file")?;
+        let task = finding["task"].as_u64().map(|n| n as u32);
+        if let Some(task) = task {
+            ensure!(team.task(task).is_some(), "A finding names unknown task #{task}");
+        }
+        let state = if severity == "later" {
+            deferred += 1;
+            "deferred"
+        } else {
+            "open"
+        };
+        team.findings_seq += 1;
+        team.findings.push(Finding {
+            id: format!("f{}", team.findings_seq),
+            from_task: from,
+            severity,
+            title,
+            file,
+            line: finding["line"].as_u64().map(|line| line as u32),
+            scenario,
+            task,
+            state: state.into(),
+            by: by.into(),
+            at: now(),
+            note: String::new(),
+        });
+    }
+    Ok((findings.len(), deferred))
+}
+
+/// D2: the lead or owner acts on a finding: reopen, urgent, replan, fix_phase,
+/// defer, fixed or dropped.
+fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you act on a finding");
+    let id = text(input, "finding").to_owned();
+    let at = team.findings.iter().position(|finding| finding.id == id).with_context(|| format!("Unknown finding {id}"))?;
+    let action = text(input, "action").to_owned();
+    let note = clean(text(input, "note").trim(), 2000, "A finding note")?;
+    let severity = team.findings[at].severity.clone();
+    let state = match action.as_str() {
+        "reopen" => {
+            let task_id = input["task"].as_u64().map(|n| n as u32).or(team.findings[at].task).context("A reopen names its task")?;
+            let text = format!(
+                "Finding {} ({}): {}\n{}",
+                team.findings[at].id, severity, team.findings[at].title, team.findings[at].scenario
+            );
+            let task = team.task_mut(task_id).context("Unknown task")?;
+            ensure!(task.status == TaskStatus::Accepted, "A reopen needs an accepted task");
+            task.history.push(json!({"decided_by":task.decided_by,"reason":task.decision_reason,"at":now()}));
+            task.pinned = true;
+            task.reopen_note = text;
+            task.status = TaskStatus::Pending;
+            task.decided_by = None;
+            task.decision_reason = String::new();
+            "reopened"
+        }
+        "urgent" => {
+            let mut quick = input.clone();
+            quick["urgent"] = json!(true);
+            extend(team, &quick, actor, offline, events)?;
+            "urgent"
+        }
+        "replan" => {
+            ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+            let proposal = clean(text(input, "proposal").trim(), 4000, "A proposal")?;
+            ensure!(!proposal.is_empty(), "A replan carries the owner's proposal");
+            team.status = TeamStatus::Paused;
+            events.push(Event::new("replan_proposed", json!({"by":actor.label(team),"finding":id,"proposal":proposal})));
+            "replan"
+        }
+        "fix_phase" => {
+            let phase = input["phase"].as_u64().context("fix_phase names its phase")? as u32;
+            ensure!(
+                team.phases.iter().any(|found| found.n == phase && found.state == PhaseState::Draft),
+                "Phase {phase} is not a draft"
+            );
+            "fix_phase"
+        }
+        "defer" => {
+            ensure!(severity != "critical" || matches!(actor, Actor::Human), "Only you defer a critical finding");
+            "deferred"
+        }
+        "fixed" => "fixed",
+        "dropped" => "dropped",
+        _ => bail!("A finding action is reopen, urgent, replan, fix_phase, defer, fixed or dropped"),
+    };
+    team.findings[at].state = state.into();
+    team.findings[at].by = actor.label(team);
+    team.findings[at].note = note;
+    events.push(Event::new("finding_action", json!({"finding":id,"action":action,"state":state})));
+    Ok(json!({"status":action,"finding":id,"state":state}))
+}
+
 fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let human = matches!(actor, Actor::Human);
@@ -1592,7 +1712,25 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     task.decided_by = Some(if human { Decider::Human } else { Decider::Lead });
     task.decision_reason = reason.clone();
     let title = task.title.clone();
-    // Mark done manually: your acceptance without (or despite) a report.
+    // D2: accepting the report files its findings; later ones are deferred and
+    // the owner hears about them once.
+    if accept {
+        let structured = team
+            .task(id)
+            .and_then(|task| task.attempts.iter().find(|attempt| Some(attempt.n) == n))
+            .and_then(|attempt| attempt.report.as_ref())
+            .and_then(|report| report.structured.clone());
+        if let Some(report) = structured {
+            let (filed, deferred) = file_findings(team, id, &report, &label)?;
+            if filed > 0 {
+                events.push(Event::new("findings_filed", json!({"task":id,"count":filed,"deferred":deferred})));
+                if deferred > 0 {
+                    events.push(Event::new("findings_deferred", json!({"count":deferred,
+                        "notice":format!("{deferred} findings deferred")})));
+                }
+            }
+        }
+    }
     let manual = accept && human && input["manual"].as_bool() == Some(true);
     events.push(Event::new(
         if accept { "accepted" } else { "rejected" },
@@ -1711,6 +1849,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "settings" => settings(team, input, actor, events),
+        "finding" => finding(team, input, actor, offline, events),
         "finish" => finish(team, input, actor, events),
         "approve" => {
             // B5: a wider permissions profile needs the owner's word.
@@ -3661,6 +3800,95 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("without a session"), "{error}");
+    }
+
+    #[test]
+    fn findings_are_filed_reopened_and_decided() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"},{"id":"qa","role":"Tester","agent":"claude"}],
+                "tasks":[{"id":1,"title":"A","assignee":"dev"},{"id":2,"title":"B","assignee":"qa","deps":[{"task":1,"kind":"hard"}]}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        approve(&mut team, &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let attempt = hand_out(&mut team, 1);
+        report(
+            &mut team,
+            &json!({"task":1,"attempt":attempt,"report":{"summary":"Done","findings":[
+                {"severity":"critical","title":"Lost write","scenario":"two saves at once","task":1},
+                {"severity":"normal","title":"Slow","scenario":"big log"},
+                {"severity":"later","title":"Polish","scenario":"later"}]}}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap();
+        // D2: nothing is filed until the report is accepted.
+        assert!(team.findings.is_empty());
+        apply(&mut team, "accept", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.findings.len(), 3);
+        assert_eq!(
+            (team.findings[0].id.as_str(), team.findings[0].severity.as_str(), team.findings[0].state.as_str()),
+            ("f1", "critical", "open")
+        );
+        assert_eq!(team.findings[2].state, "deferred");
+        assert!(events.iter().any(|event| event.kind == "findings_deferred"));
+        // A critical finding is deferred only by the owner; fixed closes it.
+        let error = apply(&mut team, "finding", &json!({"finding":"f1","action":"defer"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Only you defer a critical finding"), "{error}");
+        apply(&mut team, "finding", &json!({"finding":"f1","action":"fixed","note":"fixed"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.findings[0].state, "fixed");
+        // Reopen: the accepted task returns, pinned, with the finding as its note.
+        apply(&mut team, "finding", &json!({"finding":"f1","action":"reopen"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let task = team.task(1).unwrap();
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(task.pinned);
+        assert!(task.reopen_note.contains("Lost write"), "{}", task.reopen_note);
+        assert_eq!((task.history.len(), task.decided_by), (1, None));
+        // Urgent: a new approved phase with no barrier, handed out first.
+        apply(
+            &mut team,
+            "finding",
+            &json!({"finding":"f2","action":"urgent","phase_title":"Fix","tasks":[{"id":3,"title":"Fix fast","assignee":"qa"}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        let phase = team.phases.last().unwrap();
+        assert_eq!((phase.state, phase.urgent, phase.barrier), (PhaseState::Approved, true, false));
+        assert_eq!(plan::ready(&team)[0], 3);
+        // Replan pauses the team with the owner's proposal.
+        apply(&mut team, "finding", &json!({"finding":"f2","action":"replan","proposal":"Split the phase"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.status, TeamStatus::Paused);
+        assert!(events.iter().any(|event| event.kind == "replan_proposed"));
+    }
+
+    #[test]
+    fn a_critical_finding_blocks_the_finish_unless_forced() {
+        let mut team = running_team();
+        let mut events = Vec::new();
+        for id in [1, 2] {
+            apply(&mut team, "accept", &json!({"task":id}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        }
+        team.findings.push(Finding {
+            id: "f1".into(),
+            from_task: 1,
+            severity: "critical".into(),
+            title: "Lost write".into(),
+            scenario: "two saves at once".into(),
+            state: "open".into(),
+            ..Default::default()
+        });
+        let error = apply(&mut team, "finish", &json!({"summary":"Done"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+        assert!(error.contains("critical finding"), "{error}");
+        apply(&mut team, "finish", &json!({"summary":"Done","force":true}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(team.status, TeamStatus::Done);
     }
 
     #[test]

@@ -28,7 +28,26 @@ const AUTHORIZATION_RETRY: Duration = Duration::from_millis(100);
 
 enum Failure {
     Retry,
+    CachePressure,
     Fatal(JournalError),
+}
+impl Failure {
+    fn request_retry_wait(&self, network_delay: &mut u64) -> Option<Duration> {
+        match self {
+            Self::CachePressure => {
+                // Each bounded journal turn commits its safe frontier. Continue
+                // that local work at the normal poll cadence, without treating
+                // it as a failed network request or spinning without a yield.
+                *network_delay = 1;
+                Some(Duration::from_millis(250))
+            }
+            Self::Retry => {
+                *network_delay = (*network_delay * 2).min(60);
+                Some(Duration::from_secs(*network_delay))
+            }
+            Self::Fatal(_) => None,
+        }
+    }
 }
 impl std::fmt::Debug for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,7 +61,7 @@ fn checked<T>(value: crypto::Result<T>) -> Result<T> {
 fn journal<T>(value: crate::journal::Result<T>) -> Result<T> {
     value.map_err(|error| match error {
         JournalError::Refused(ref refusal) if refusal.message() == crate::error::RETAINED_LIMIT => {
-            Failure::Retry
+            Failure::CachePressure
         }
         other => Failure::Fatal(other),
     })
@@ -219,7 +238,9 @@ impl<N: Native + 'static> Engine<'_, N> {
             match refreshed {
                 Ok(profile) => return Ok(profile),
                 Err(Failure::Fatal(error)) => return Err(Failure::Fatal(error)),
-                Err(Failure::Retry) => self.authorization_pause(deadline).await?,
+                Err(Failure::Retry | Failure::CachePressure) => {
+                    self.authorization_pause(deadline).await?
+                }
             }
         }
     }
@@ -597,7 +618,7 @@ impl<N: Native + 'static> Engine<'_, N> {
             match self.heartbeat().await {
                 Ok(()) => {}
                 Err(Failure::Fatal(e)) => return Err(Failure::Fatal(e)),
-                Err(Failure::Retry) => runtime::log(
+                Err(Failure::Retry | Failure::CachePressure) => runtime::log(
                     "WARNING",
                     "Encrypted workspace refresh is unavailable; private transport remains closed",
                 ),
@@ -889,27 +910,25 @@ impl<N: Native + 'static> Engine<'_, N> {
                 }
                 self.flush(&profile).await
             };
-            match iteration.await {
-                Ok(()) => delay = 1,
-                Err(Failure::Fatal(e)) => return Err(Failure::Fatal(e)),
-                Err(Failure::Retry) => {
-                    runtime::log("WARNING","Encrypted request delivery is unavailable; stored identities are preserved");
-                    delay = (delay * 2).min(60);
+            let wait = match iteration.await {
+                Ok(()) => {
+                    delay = 1;
+                    Duration::from_millis(250)
                 }
-            }
+                Err(error) => {
+                    let Some(wait) = error.request_retry_wait(&mut delay) else {
+                        return Err(error);
+                    };
+                    runtime::log("WARNING","Encrypted request delivery is unavailable; stored identities are preserved");
+                    wait
+                }
+            };
             if self.connector.stopping.is_set() {
                 return Ok(());
             }
-            if runtime::until_stopped(
-                &self.connector.stopping,
-                tokio::time::sleep(Duration::from_millis(if delay == 1 {
-                    250
-                } else {
-                    delay * 1000
-                })),
-            )
-            .await
-            .is_none()
+            if runtime::until_stopped(&self.connector.stopping, tokio::time::sleep(wait))
+                .await
+                .is_none()
             {
                 return Ok(());
             }

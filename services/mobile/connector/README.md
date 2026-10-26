@@ -453,7 +453,10 @@ Paused clients can lose an old Read response; ordinary supported refresh creates
 a fresh safe Read identity. Mutation and Control requests are never resent or
 shortened by this policy. All-too-young, protected or unprovable caches can still
 exhaust the bound; the connector then retains the pending native receipt and
-backs off while its publisher heartbeat continues.
+continues bounded local pressure turns at the normal 250 ms poll cadence while
+its publisher heartbeat continues. Local quota pressure does not accumulate the
+network retry delay. Transport failures retain their exponential backoff, capped
+at 60 seconds; storage and identity conflicts remain fatal.
 
 Legacy adoption uses the journal's existing authenticated-admission contract:
 `receive_before` authenticates/decrypts the request before `encrypted_reserve`,

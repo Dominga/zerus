@@ -108,7 +108,8 @@ mod read_pressure {
                     saved = Some(value);
                     break;
                 }
-                Err(Failure::Retry) => {}
+                Err(Failure::CachePressure) => {}
+                Err(Failure::Retry) => panic!("local cache pressure is not a network retry"),
                 Err(Failure::Fatal(_)) => {
                     panic!("completed Read cache pressure must not stop the publisher")
                 }
@@ -326,7 +327,7 @@ mod read_pressure {
             .unwrap());
         assert!(reopened.encrypted_pending().unwrap().is_empty());
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn quota_retry_keeps_heartbeat_wait_alive_but_storage_is_fatal() {
         let f = Fixture::new();
         for error in [crate::error::CONFLICT, crate::error::JOURNAL_UNAVAILABLE] {
@@ -345,20 +346,34 @@ mod read_pressure {
             journal::<()>(Err(JournalError::Io(std::io::Error::other("synthetic")))),
             Err(Failure::Fatal(_))
         ));
-        for _ in 0..3 {
-            assert!(matches!(
-                journal::<()>(Err(JournalError::Refused(
-                    crate::error::ConnectorError::new(crate::error::RETAINED_LIMIT)
-                ))),
-                Err(Failure::Retry)
-            ));
-            assert!(runtime::until_stopped(
-                &f.connector.stopping,
-                tokio::time::sleep(Duration::from_millis(1))
-            )
-            .await
-            .is_some());
+        let mut network_delay = 1;
+        for seconds in [2, 4, 8, 16, 32, 60, 60] {
+            assert_eq!(
+                Failure::Retry.request_retry_wait(&mut network_delay),
+                Some(Duration::from_secs(seconds))
+            );
         }
+        let start = tokio::time::Instant::now();
+        for _ in 0..32 {
+            let error = journal::<()>(Err(JournalError::Refused(
+                crate::error::ConnectorError::new(crate::error::RETAINED_LIMIT),
+            )))
+            .unwrap_err();
+            assert!(matches!(error, Failure::CachePressure));
+            let wait = error.request_retry_wait(&mut network_delay).unwrap();
+            assert_eq!(wait, Duration::from_millis(250));
+            assert!(
+                runtime::until_stopped(&f.connector.stopping, tokio::time::sleep(wait))
+                    .await
+                    .is_some()
+            );
+        }
+        assert_eq!(tokio::time::Instant::now() - start, Duration::from_secs(8));
+        assert_eq!(network_delay, 1);
+        assert_eq!(
+            Failure::Retry.request_retry_wait(&mut network_delay),
+            Some(Duration::from_secs(2))
+        );
         assert!(!f.connector.stopping.is_set());
         assert!(f.connector.native.calls.borrow().is_empty());
     }

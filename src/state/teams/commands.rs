@@ -250,6 +250,8 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     value["health"] = json!(&validation.health);
     // C7 refinement: each phase's own health, at the top and on the phase.
     value["phases_health"] = json!(&validation.phases_health);
+    // Section 10.2: the workspace header rows (G9).
+    value["phase_summary"] = json!(plan::phase_summary(team));
     if let Some(phases) = value["phases"].as_array_mut() {
         for (phase, value) in team.phases.iter().zip(phases) {
             if let Some(health) = validation.phases_health.get(&phase.n.to_string()) {
@@ -1745,6 +1747,12 @@ mod tests {
         // Old fields stay: the plan health still names tasks and a path.
         assert_eq!(value["health"]["tasks"], 2);
         assert!(value["health"].get("critical_path").is_some());
+        // Section 10.2: the workspace header rows.
+        let summary = value["phase_summary"].as_array().unwrap();
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[0]["n"], 1);
+        assert_eq!(summary[0]["status"], "in_work");
+        assert_eq!(summary[1]["status"], "draft");
     }
 
     #[test]

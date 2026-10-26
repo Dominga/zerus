@@ -487,6 +487,63 @@ fn health_of(team: &Team, scope: &[Task]) -> Health {
     health
 }
 
+/// The plan's phases for the workspace header (section 10.2, G9): each
+/// non-discarded phase in display order with its derived status, counts and
+/// the short health line.
+pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
+    let mut phases: Vec<(u32, u32)> = team.tasks.iter().map(|task| (task.phase, task.phase)).collect();
+    phases.extend(
+        team.phases
+            .iter()
+            .filter(|phase| phase.state != PhaseState::Discarded)
+            .map(|phase| (phase.n, phase.order())),
+    );
+    phases.push((1, 1));
+    phases.sort_by_key(|(n, order)| (*order, *n));
+    phases.dedup_by_key(|(n, _)| *n);
+    let paused = team.status == super::model::TeamStatus::Paused;
+    phases
+        .into_iter()
+        .map(|(n, _)| {
+            let record = team.phases.iter().find(|phase| phase.n == n);
+            let tasks: Vec<&Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
+            let open = tasks.iter().filter(|task| !task.status.finished()).count();
+            let done = tasks.len() - open;
+            let blocked = record.is_some_and(|phase| phase.barrier)
+                && team.tasks.iter().any(|task| task.phase < n && !task.status.finished());
+            let approved = n == 1 || record.is_some_and(|phase| phase.state == PhaseState::Approved);
+            let status = if !approved || record.is_some_and(|phase| phase.state == PhaseState::Draft) {
+                "draft"
+            } else if open == 0 {
+                "done"
+            } else if blocked {
+                "approved"
+            } else if paused {
+                "paused"
+            } else {
+                "in_work"
+            };
+            let health = phase_health(team, n);
+            let mut line = format!("path {} \u{b7} par {:.1}", health.critical_path, health.parallelism);
+            if !health.warnings.is_empty() {
+                line += &format!(
+                    " \u{b7} {} warning{}",
+                    health.warnings.len(),
+                    if health.warnings.len() == 1 { "" } else { "s" }
+                );
+            }
+            serde_json::json!({
+                "n": n,
+                "title": record.map(|phase| phase.title.clone()).filter(|title| !title.is_empty()).unwrap_or_else(|| if n == 1 { "Phase 1".into() } else { format!("Phase {n}") }),
+                "status": status,
+                "done": done,
+                "total": tasks.len(),
+                "barrier": record.is_some_and(|phase| phase.barrier),
+                "health_line": line,
+            })
+        })
+        .collect()
+}
 /// Whether a phase is waiting for the owner's approval (U9): phase 1 is
 /// approved with the plan, a later phase only by its own record.
 fn phase_draft(team: &Team, n: u32) -> bool {
@@ -799,6 +856,42 @@ mod tests {
         assert_eq!(found.health.totals, Totals { tasks: 6, decided: 2 });
         assert!((found.health.parallelism - 4.0 / 3.0).abs() < 1e-9);
         assert_eq!(found.health.per_member["dev"].tasks, 3);
+    }
+
+    #[test]
+    fn the_phase_summary_names_the_four_states_and_the_health_line() {
+        use super::super::model::TeamStatus;
+        let mut t = team(vec![
+            task(1, &[], Accepted),
+            task(2, &[], Pending),
+            task(3, &[], Pending),
+            task(4, &[], Pending),
+            task(5, &[], Draft),
+        ]);
+        t.status = TeamStatus::Running;
+        t.tasks[0].phase = 1;
+        t.tasks[1].phase = 2;
+        t.tasks[2].phase = 2;
+        t.tasks[3].phase = 3;
+        t.tasks[4].phase = 4;
+        t.phases = vec![
+            Phase { n: 2, order: 2, title: "Work".into(), state: PhaseState::Approved, tasks: vec![2, 3], ..Default::default() },
+            Phase { n: 3, order: 3, title: "Behind".into(), barrier: true, state: PhaseState::Approved, tasks: vec![4], ..Default::default() },
+            Phase { n: 4, order: 4, title: "Later".into(), state: PhaseState::Draft, tasks: vec![5], ..Default::default() },
+        ];
+        let summary = phase_summary(&t);
+        let statuses: Vec<&str> = summary.iter().map(|phase| phase["status"].as_str().unwrap()).collect();
+        assert_eq!(statuses, ["done", "in_work", "approved", "draft"]);
+        assert_eq!((summary[0]["done"].as_u64(), summary[0]["total"].as_u64()), (Some(1), Some(1)));
+        assert_eq!((summary[1]["done"].as_u64(), summary[1]["total"].as_u64()), (Some(0), Some(2)));
+        // The header line: schedule length and parallelism, no warnings here.
+        assert_eq!(summary[1]["health_line"], "path 2 \u{b7} par 1.0");
+        assert!(summary[2]["barrier"].as_bool().unwrap());
+        // Paused turns the in-work phase into paused; the others keep their state.
+        t.status = TeamStatus::Paused;
+        let paused_summary = phase_summary(&t);
+        let paused: Vec<&str> = paused_summary.iter().map(|phase| phase["status"].as_str().unwrap()).collect();
+        assert_eq!(paused, ["done", "paused", "approved", "draft"]);
     }
 
     #[test]

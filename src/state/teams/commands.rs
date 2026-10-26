@@ -343,6 +343,21 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             value["left_running"] = json!(left_running(team, teams, sessions));
         }
     }
+    // F1.6: every member's folder facts, read from git once per view; a member
+    // whose folder is another repository is flagged, not silently accepted.
+    if let Some(members) = value["members"].as_array_mut() {
+        for (member, entry) in team.members.iter().zip(members.iter_mut()) {
+            if member.state == MemberState::Removed {
+                continue;
+            }
+            let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
+            let (project, branch) = super::dispatcher::folder_facts(&folder);
+            entry["project"] = json!(&project);
+            entry["branch"] = json!(branch);
+            let team_project = team.project.replace('\\', "/");
+            entry["outside_project"] = json!(!team_project.is_empty() && !project.is_empty() && project != team_project);
+        }
+    }
     value
 }
 
@@ -1081,6 +1096,39 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn members_carry_their_folder_branch_and_outside_project_flag() {
+        use crate::state::teams::model::{Member, Team, TeamStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
+        assert!(git(&["init", "-q"]).success());
+        assert!(git(&["config", "user.email", "t@example.com"]).success());
+        assert!(git(&["config", "user.name", "T"]).success());
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        assert!(git(&["add", "a.txt"]).success());
+        assert!(git(&["commit", "-qm", "one"]).success());
+        assert!(git(&["switch", "-qc", "team/t1/dev"]).success());
+        let folder = repo.display().to_string();
+        let mut team = Team { id: "t1".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, folder: folder.clone(), project: folder.clone(), ..Default::default() };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
+        let value = super::view_with(&team, &[], None);
+        assert_eq!(value["members"][1]["branch"], "team/t1/dev");
+        assert_eq!(value["members"][1]["outside_project"], false);
+        let normalized = folder.replace('\\', "/");
+        assert_eq!(value["members"][1]["project"].as_str(), Some(normalized.as_str()));
+        // A member whose folder is another repository is flagged.
+        team.members[1].directory = dir.path().join("sibling").display().to_string();
+        std::fs::create_dir(dir.path().join("sibling")).unwrap();
+        assert_eq!(super::view_with(&team, &[], None)["members"][1]["outside_project"], false);
+        assert_eq!(super::view_with(&team, &[], None)["members"][1]["project"], "");
+        team.project = "/elsewhere".into();
+        team.members[1].directory.clear();
+        assert_eq!(super::view_with(&team, &[], None)["members"][1]["outside_project"], true);
+    }
+
     #[test]
     fn leftovers_lists_running_sessions_of_finished_teams() {
         use crate::state::teams::dispatcher::Seen;

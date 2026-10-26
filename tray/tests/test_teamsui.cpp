@@ -271,6 +271,27 @@ void lightPalette()
     p.setColor(QPalette::PlaceholderText, QColor("#627082"));
     QApplication::setPalette(p);
 }
+
+// True when the grab is really light: the average pixel lightness is well above
+// the dark theme's. A "light" shot of a dark widget is a lie, so it fails.
+bool looksLight(QWidget *widget)
+{
+    const auto image = widget->grab().toImage();
+    if (image.isNull()) return false;
+    qint64 sum = 0; int count = 0;
+    for (int y = 0; y < image.height(); y += 5)
+        for (int x = 0; x < image.width(); x += 5) { sum += image.pixelColor(x, y).lightness(); ++count; }
+    return count > 0 && sum / count > 150;
+}
+
+// The light half of a shot, asserted to be light before it is saved.
+void lightShot(QWidget *widget, const QString &name)
+{
+    lightPalette();
+    QTest::qWait(200);
+    QVERIFY2(looksLight(widget), qPrintable(QStringLiteral("the light shot is dark: ") + name));
+    shot(widget, name);
+}
 }
 
 class TestTeamsUi : public QObject {
@@ -1668,13 +1689,30 @@ void TestTeamsUi::leadLoadViewsShowInTheDesktop()
     TeamController controller(&client);
     TeamPanel panel(&controller);
     panel.resize(460, 1100); panel.show(); panel.showTeam("team-1");
-    auto planning = load; planning["status"] = "planning"; setTeam(planning);
+    auto planning = load; planning["status"] = "planning";
+    // L6: the same starved member twice and a warning that names it must not
+    // become three lines.
+    planning["validation"] = load["validation"].toObject();
+    auto planningHealth = planning["validation"].toObject()["health"].toObject();
+    planningHealth["starved"] = QJsonArray{
+        QJsonObject{{"member", "tester"}, {"role", "Tester"}, {"minutes", 25}, {"blocking", QJsonArray{4}}},
+        QJsonObject{{"member", "tester"}, {"role", "Tester"}, {"minutes", 25}, {"blocking", QJsonArray{4}}}};
+    planningHealth["warnings"] = QJsonArray{"Tester has been starved for 25 min", "Parallelism is below 1.5"};
+    auto planningValidation = planning["validation"].toObject(); planningValidation["health"] = planningHealth;
+    planning["validation"] = planningValidation;
+    setTeam(planning);
     QTRY_VERIFY(([&] { controller.refresh(); return panel.findChild<QWidget *>("teamPlanHealth") != nullptr; })());
     QVERIFY(panel.findChild<QLabel *>("teamPlanHealthNumbers")->text().contains(QStringLiteral("critical path 3")));
     QVERIFY(panel.findChild<QLabel *>("teamPlanStarved"));
+    QCOMPARE(panel.findChildren<QLabel *>("teamPlanStarved").size(), 1);
+    QVERIFY(panel.findChild<QLabel *>("teamPlanHealthWarning"));
+    QVERIFY(!panel.findChild<QLabel *>("teamPlanHealthWarning")->text().contains(QStringLiteral("starved")));
     QVERIFY(panel.findChild<QLabel *>("teamOwnerWord"));
     QVERIFY(panel.findChild<QLabel *>("teamOwnerWord")->text().contains(QStringLiteral("план принят, делай")));
     shot(&panel, "lead-load-plan");
+    panel.setTheme(false);
+    lightShot(&panel, "lead-load-plan-light");
+    panel.setTheme(true); darkPalette(); QTest::qWait(50);
     // The workspace: F12 wording on the draft, services and budget on the
     // member, and the attention strip.
     setTeam(load);
@@ -1689,6 +1727,14 @@ void TestTeamsUi::leadLoadViewsShowInTheDesktop()
     QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberBudget"));
     QVERIFY(workspace.findChild<QFrame *>("teamAttentionStrip"));
     shot(&workspace, "lead-load-workspace");
+    // The light halves of the lead-load views: card, plan and workspace.
+    card.setTask(parsed, 2, live, false);
+    QTest::qWait(100);
+    lightShot(&card, "lead-load-card-light");
+    workspace.setTheme(false);
+    lightShot(&workspace, "lead-load-workspace-light");
+    workspace.setTheme(true); darkPalette();
+    QTest::qWait(50);
 }
 
 void TestTeamsUi::preflightWarningsShowInThePlanCard()
@@ -1710,6 +1756,9 @@ void TestTeamsUi::preflightWarningsShowInThePlanCard()
         return false;
     })());
     shot(&panel, "preflight-warning-dark");
+    panel.setTheme(false);
+    lightShot(&panel, "preflight-warning-light");
+    panel.setTheme(true); darkPalette();
 }
 
 void TestTeamsUi::permissionCardsAndGraphOrder()
@@ -1805,6 +1854,9 @@ void TestTeamsUi::permissionCardsAndGraphOrder()
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWideningStrip"));
     QVERIFY(workspace.findChild<QWidget *>("teamWideningStrip")->findChild<QLabel *>("teamWideningText")->text().contains("read → build"));
     shot(&workspace, "widening-strip-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "widening-strip-light");
+    workspace.setTheme(true); darkPalette();
     auto *approve = workspace.findChild<QPushButton *>("teamWorkspaceApprove");
     QVERIFY(approve && approve->isEnabled());
     // Declining the confirmation sends nothing; confirming sends approve with confirm_widening.

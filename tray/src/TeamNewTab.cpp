@@ -614,6 +614,10 @@ void TeamNewTab::validate()
     const bool git = !folder.isEmpty() && QDir(folder).exists(QStringLiteral(".git"));
     m_worktrees->setEnabled(git);
     if (!git && m_worktrees->isChecked()) { const QSignalBlocker block(m_worktrees); m_worktrees->setChecked(false); }
+    // N10: a Git path with auto or worktree policy brings the worktree rows back.
+    else if (git && !m_worktrees->isChecked() && m_folderPolicy
+             && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
+        m_worktrees->setChecked(true);
     // B6/N10: typing a path keeps auto; a finished non-Git path forces shared.
     if (m_folderPolicy && !git && m_folderCommitted && m_folderPolicy->currentData().toString() != "shared") {
         // No signals: currentIndexChanged would call validate() again inside this one.

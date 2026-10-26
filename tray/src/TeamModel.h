@@ -31,6 +31,10 @@ struct Question {
     double at = 0, answeredAt = 0;
     QString tool, command, commandSource, reason, decision;
     QString hash;
+    // C4: the native answer this card needs: the card's own question id and the
+    // option ids for allow and deny, as status sends them in question.answer.
+    struct NativeAnswer { QString questionId, allow, deny; bool known = false; };
+    NativeAnswer native;
     bool answered() const { return answeredAt > 0 || !answer.isEmpty(); }
     bool permission() const { return !tool.isEmpty() || !command.isEmpty() || !reason.isEmpty(); }
 };

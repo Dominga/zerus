@@ -297,6 +297,11 @@ void TeamNewDialog::validate()
     const bool git = !folder.isEmpty() && QDir(folder).exists(QStringLiteral(".git"));
     m_worktrees->setEnabled(git);
     if (!git) m_worktrees->setChecked(false);
+    // N10: a path that is Git again with auto or worktree policy brings the
+    // worktree rows back, so members are created with worktrees.
+    else if (!m_worktrees->isChecked() && m_folderPolicy
+             && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
+        m_worktrees->setChecked(true);
     // B6: without a Git folder only a shared folder makes sense; the worktree
     // entry is greyed out and the note says why.
     if (m_folderPolicy) {

@@ -163,27 +163,11 @@ void TeamTaskCard::rebuild()
                     reason->setWordWrap(true);
                     b->addWidget(reason);
                 }
-                auto *decideRow = row(6);
-                auto *reasonEdit = new QLineEdit; reasonEdit->setObjectName("teamPermissionDenyReason");
-                reasonEdit->setProperty("question", asked.id);
-                reasonEdit->setPlaceholderText(tr("Why deny? The member receives this"));
-                decideRow->addWidget(reasonEdit, 1);
-                auto *deny = button(tr("Deny"), "teamPermissionDeny");
-                deny->setProperty("question", asked.id);
-                deny->setProperty("danger", true);
-                deny->setToolTip(tr("Deny this request; the reason reaches the member as a message"));
-                const auto decide = [this, id = asked.id](const QString &decision, const QString &text) {
-                    if (act) act("answer", {{"question", id}, {"decision", decision}, {"text", text}});
-                };
-                QObject::connect(deny, &QPushButton::clicked, this, [reasonEdit, decide] {
-                    decide(QStringLiteral("deny"), reasonEdit->text().trimmed());
-                });
-                auto *allow = button(tr("Allow"), "teamPermissionAllow", true);
-                allow->setProperty("question", asked.id);
-                allow->setToolTip(tr("Allow exactly this request"));
-                QObject::connect(allow, &QPushButton::clicked, this, [decide] { decide(QStringLiteral("allow"), {}); });
-                decideRow->addWidget(deny); decideRow->addWidget(allow);
-                b->addLayout(decideRow);
+                // C4: the answer needs the card's own question and option ids,
+                // which only the member's question carries; the card does not
+                // guess them - the member card answers with the exact payload.
+                b->addWidget(label(tr("Answer this in the member card: it sends the card's own question and option ids"),
+                                   c.text3, 10, false, "teamPermissionWhere"));
                 v->addWidget(box);
                 continue;
             }

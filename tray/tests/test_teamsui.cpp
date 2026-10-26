@@ -320,6 +320,7 @@ private slots:
     void leadLoadViewsShowInTheDesktop();
     void followUpsShowThePermissionAnswerAndPlanFixes();
     void folderPolicyKeepsAutoWhileTyping();
+    void typoThenGitCreatesWorktrees();
     void severalDraftPhasesRenderAndApproveInOrder();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
@@ -1472,6 +1473,15 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
 // N8: the plan footer's Approve asks for the widening confirmation; N9: a
 // phase approved on the owner's word shows the quote; QA: the plan approval
 // view lists every check command.
+// The backend's own status fixture: one real member question from
+// `hgs team status --json`, saved by the C4 backend task.
+QJsonObject memberQuestionFixture()
+{
+    QFile file(QFileInfo(QString::fromUtf8(__FILE__)).dir().filePath(QStringLiteral("fixtures/hgs-team-member-question.json")));
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    return QJsonDocument::fromJson(file.readAll()).object();
+}
+
 // N10: the folder policy keeps auto while the path is typed; a finished non-Git
 // path forces shared, and editing again returns to auto. Dialog and tab.
 void TestTeamsUi::folderPolicyKeepsAutoWhileTyping()
@@ -1514,6 +1524,77 @@ void TestTeamsUi::folderPolicyKeepsAutoWhileTyping()
     tabEdit->setText(QDir::toNativeSeparators(folder.path()) + QStringLiteral("/two"));
     QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("auto"));
     shot(&tab, "new-team-tab-folder-policy-typing");
+}
+
+// N10: a typo path that is not a Git folder keeps auto with no worktrees; fixing
+// it to a Git folder restores the worktrees, and the created members get them.
+void TestTeamsUi::typoThenGitCreatesWorktrees()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir root;
+    const QString gitFolder = root.filePath("repo");
+    QVERIFY(QDir().mkpath(gitFolder + QStringLiteral("/.git")));
+    const QString typo = root.filePath("rep");   // a typo: not a Git folder
+    const QList<TeamNewDialog::Computer> computers{{QString(), "this computer", true}, {"msi-old", "msi-old", false}};
+    TeamNewDialog dialog(&controller, &client, computers, {{QString(), "claude/checkout/main", "claude"}},
+                         gitFolder, "Checkout");
+    dialog.show();
+    auto *edit = dialog.findChild<QLineEdit *>("teamNewFolder");
+    auto *policy = dialog.findChild<QComboBox *>("teamNewFolderPolicy");
+    auto *worktrees = dialog.findChild<QCheckBox *>("teamNewWorktrees");
+    QVERIFY(edit && policy && worktrees);
+    // It starts as a Git folder with worktrees; the typo finished forces shared
+    // with no worktrees.
+    QCOMPARE(policy->currentData().toString(), QStringLiteral("auto"));
+    QVERIFY(worktrees->isChecked());
+    edit->setText(typo);
+    QMetaObject::invokeMethod(edit, "editingFinished");
+    QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+    QVERIFY(!worktrees->isChecked());
+    // Fixing the path to the repository returns auto and the worktrees.
+    edit->setText(gitFolder);
+    QMetaObject::invokeMethod(edit, "editingFinished");
+    QCOMPARE(policy->currentData().toString(), QStringLiteral("auto"));
+    QVERIFY(worktrees->isEnabled());
+    QVERIFY(worktrees->isChecked());
+    // Create: every member works in its own worktree. The fake catalog really has
+    // the "feature" template with its roster, so its rows must exist.
+    auto *templ = dialog.findChild<QComboBox *>("teamNewTemplate");
+    QVERIFY(templ);
+    const int feature = templ->findData(QStringLiteral("feature"));
+    QVERIFY(feature >= 0);
+    templ->setCurrentIndex(feature);
+    QTRY_VERIFY(dialog.findChildren<QComboBox *>("teamNewComputer").size() >= 2);   // the template's member rows
+    dialog.findChild<QLineEdit *>("teamNewName")->setText(QStringLiteral("Checkout redesign"));
+    auto *create = dialog.findChild<QPushButton *>("teamNewCreate");
+    QTRY_VERIFY(create->isEnabled());
+    create->click();
+    QTRY_COMPARE(dialog.result(), int(QDialog::Accepted));
+    const auto input = calls(script(), "create").last();
+    QCOMPARE(input["settings"].toObject()["folder_policy"].toString(), QStringLiteral("auto"));
+    QVERIFY2(!input["members"].toArray().isEmpty(), qPrintable(QString::fromUtf8(QJsonDocument(input).toJson(QJsonDocument::Compact))));
+    for (const auto &member : input["members"].toArray())
+        QCOMPARE(member.toObject()["folder"].toString(), QStringLiteral("worktree"));
+    // The same forced-shared-then-auto path in the workspace tab.
+    const QList<TeamNewTab::Computer> tabComputers{{QString(), "this computer", true}, {"msi-old", "msi-old", false}};
+    TeamNewTab tab(&controller, &client, tabComputers, TeamNewTab::Coordinator{}, QStringLiteral("Checkout"));
+    tab.resize(760, 1000); tab.show();
+    auto *tabEdit = tab.findChild<QLineEdit *>("teamNewFolder");
+    auto *tabPolicy = tab.findChild<QComboBox *>("teamNewFolderPolicy");
+    auto *tabWorktrees = tab.findChild<QCheckBox *>("teamNewWorktrees");
+    QVERIFY(tabEdit && tabPolicy && tabWorktrees);
+    tabEdit->setText(typo);
+    QMetaObject::invokeMethod(tabEdit, "editingFinished");
+    QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("shared"));
+    QVERIFY(!tabWorktrees->isChecked());
+    tabEdit->setText(gitFolder);
+    QMetaObject::invokeMethod(tabEdit, "editingFinished");
+    QCOMPARE(tabPolicy->currentData().toString(), QStringLiteral("auto"));
+    QVERIFY(tabWorktrees->isEnabled());
+    QVERIFY(tabWorktrees->isChecked());
 }
 
 void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
@@ -1605,30 +1686,74 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
     QTRY_VERIFY(calls(script(), "approve").size() >= 1);
     QCOMPARE(calls(script(), "approve").last()["confirm_widening"].toBool(), true);
     // C4: a member's question becomes a permission card; Allow sends the exact
-    // hgs team answer payload.
+    // C4: the answer carries the card's own ids. The Claude question comes from
+    // the backend's real status fixture; a DeepSeek card follows; a question
+    // without an answer shape disables the buttons with the reason.
+    const auto claudeQuestion = memberQuestionFixture();
+    QVERIFY(!claudeQuestion.isEmpty());
+    QCOMPARE(claudeQuestion.value("question_id").toString(), QStringLiteral("claude-approval:6f2b0e3a"));
     members = team["members"].toArray(); backend = members[1].toObject();
-    backend["question"] = QJsonObject{{"question_id", "toolu_1"}, {"tool", "Bash"}, {"command", "npm run migrate --force"},
-        {"command_source", "tool_input"}, {"reason", "the migration is not reversible"}, {"asked_at", 1792868400.0}, {"question_hash", "h1"}};
+    backend["question"] = claudeQuestion;
     backend["permission_answers"] = QJsonArray{QJsonObject{{"question_id", "q0"}, {"decision", "deny"}, {"by", "lead"},
         {"at", 1792868300.0}, {"reason", "not now"}}};
     members[1] = backend; team["members"] = members;
     setTeam(team); workspace.showTeam("team-1");
     QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QLabel *>("teamMemberPermissionCommand") != nullptr; })());
-    QCOMPARE(workspace.findChild<QLabel *>("teamMemberPermissionCommand")->text(), QStringLiteral("npm run migrate --force"));
+    QCOMPARE(workspace.findChild<QLabel *>("teamMemberPermissionCommand")->text(), QStringLiteral("cargo test --locked"));
     QVERIFY(workspace.findChild<QLabel *>("teamMemberPermissionReason"));
+    const auto claudeAnswer = [&] { return calls(script(), "answer").last(); };
     auto *allow = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
     QVERIFY(allow);
     allow->click();
     QTRY_COMPARE(calls(script(), "answer").size(), 1);
-    const auto answer = calls(script(), "answer").last();
-    QCOMPARE(answer["member"].toString(), QStringLiteral("backend"));
-    QCOMPARE(answer["question_id"].toString(), QStringLiteral("toolu_1"));
-    QCOMPARE(answer["expected_question_hash"].toString(), QStringLiteral("h1"));
-    const auto native = answer["answers"].toArray()[0].toObject();
+    QCOMPARE(claudeAnswer()["member"].toString(), QStringLiteral("backend"));
+    QCOMPARE(claudeAnswer()["question_id"].toString(), QStringLiteral("claude-approval:6f2b0e3a"));
+    QCOMPARE(claudeAnswer()["expected_question_hash"].toString(), QStringLiteral("6f2b0e3a"));
+    auto native = claudeAnswer()["answers"].toArray()[0].toObject();
+    QCOMPARE(native["question_id"].toString(), QStringLiteral("approval"));
+    QCOMPARE(native["selected_option_ids"].toArray()[0].toString(), QStringLiteral("1"));
+    // Deny sends the card's deny option and the reason as the text.
+    auto *deny = workspace.findChild<QPushButton *>("teamMemberPermissionDeny");
+    QVERIFY(deny);
+    workspace.findChild<QLineEdit *>("teamMemberPermissionDenyReason")->setText(QStringLiteral("not this command"));
+    deny->click();
+    QTRY_COMPARE(calls(script(), "answer").size(), 2);
+    native = claudeAnswer()["answers"].toArray()[0].toObject();
+    QCOMPARE(native["question_id"].toString(), QStringLiteral("approval"));
+    QCOMPARE(native["selected_option_ids"].toArray()[0].toString(), QStringLiteral("2"));
+    QCOMPARE(native["text"].toString(), QStringLiteral("not this command"));
+    QVERIFY(workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
+    shot(&workspace, "permission-answer-claude");
+    // A DeepSeek card: its own question id and allow/deny native ids.
+    members = team["members"].toArray(); backend = members[1].toObject();
+    backend["question"] = QJsonObject{{"question_id", "deepseek-approval:9c1d"}, {"question_hash", "9c1d"}, {"tool", "Terminal"},
+        {"command", "make test"}, {"command_source", "tool_input"}, {"reason", "run the suite"}, {"asked_at", 1792868400.0},
+        {"answer", QJsonObject{{"question_id", "decision"}, {"allow", "allow"}, {"deny", "deny"}}}};
+    backend["permission_answers"] = QJsonArray{};
+    members[1] = backend; team["members"] = members;
+    setTeam(team); workspace.showTeam("team-1");
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QLabel *>("teamMemberPermissionCommand")
+                       && workspace.findChild<QLabel *>("teamMemberPermissionCommand")->text() == QStringLiteral("make test"); })());
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")->isEnabled());
+    workspace.findChild<QPushButton *>("teamMemberPermissionAllow")->click();
+    QTRY_COMPARE(calls(script(), "answer").size(), 3);
+    QCOMPARE(claudeAnswer()["question_id"].toString(), QStringLiteral("deepseek-approval:9c1d"));
+    QCOMPARE(claudeAnswer()["expected_question_hash"].toString(), QStringLiteral("9c1d"));
+    native = claudeAnswer()["answers"].toArray()[0].toObject();
     QCOMPARE(native["question_id"].toString(), QStringLiteral("decision"));
     QCOMPARE(native["selected_option_ids"].toArray()[0].toString(), QStringLiteral("allow"));
-    QVERIFY(workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
-    shot(&workspace, "permission-answer");
+    shot(&workspace, "permission-answer-deepseek");
+    // No answer shape: the buttons are disabled and say why.
+    members = team["members"].toArray(); backend = members[1].toObject();
+    backend["question"] = QJsonObject{{"question_id", "old:h"}, {"question_hash", "h"}, {"tool", "Bash"}, {"command", "rm -rf build"},
+        {"command_source", "tool_input"}, {"reason", "clean"}, {"asked_at", 1792868400.0}};
+    backend["permission_answers"] = QJsonArray{};
+    members[1] = backend; team["members"] = members;
+    setTeam(team); workspace.showTeam("team-1");
+    QTRY_VERIFY(([&] { controller.refresh(); auto *b = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
+                       return b && !b->isEnabled(); })());
+    QVERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")->toolTip().contains(QStringLiteral("no answer ids")));
+    QCOMPARE(calls(script(), "answer").size(), 3);
 }
 
 void TestTeamsUi::leadLoadViewsShowInTheDesktop()
@@ -1798,16 +1923,8 @@ void TestTeamsUi::permissionCardsAndGraphOrder()
     QVERIFY(card.findChild<QLabel *>("teamPermissionNoCommand"));   // the second request has none
     auto *allow = card.findChild<QPushButton *>("teamPermissionAllow");
     auto *deny = card.findChild<QPushButton *>("teamPermissionDeny");
-    QVERIFY(allow && deny);
-    // Allow sends the decision; deny sends its reason as the text.
-    allow->click();
-    QTRY_COMPARE(answers.size(), 1);
-    QVERIFY(answers.last().contains("allow"));
-    card.findChild<QLineEdit *>("teamPermissionDenyReason")->setText("Stop-Process kills every ninja");
-    deny->click();
-    QTRY_COMPARE(answers.size(), 2);
-    QVERIFY(answers.last().contains("deny"));
-    QVERIFY(answers.last().contains("Stop-Process kills every ninja"));
+    QVERIFY(!allow && !deny);
+    QVERIFY(card.findChild<QLabel *>("teamPermissionWhere"));
     // Who answered: the deny names the owner and its reason, the allow the lead.
     const auto answered = card.findChildren<QLabel *>("teamPermissionAnswered");
     QCOMPARE(answered.size(), 2);

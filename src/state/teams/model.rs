@@ -122,6 +122,9 @@ pub(crate) enum MemberState {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MemberFolder {
     Worktree,
+    /// A full clone with its own `.git`, so commit, merge and fetch work
+    /// inside a sandboxed member's folder (B4/B6).
+    Clone,
     #[default]
     Shared,
 }
@@ -139,8 +142,14 @@ pub(crate) struct Member {
     pub model: String,
     #[serde(default)]
     pub effort: String,
+    /// The permissions profile the role asked for (B5): read, write, build,
+    /// commit or network; empty when the agent has none.
     #[serde(default)]
     pub permissions: String,
+    /// The lead's or owner's answers to this member's permission requests,
+    /// newest last, at most 20 (B1): {question_id, decision, by, at, reason}.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permission_answers: Vec<serde_json::Value>,
     /// SSH alias of the computer; empty for the lead's computer.
     #[serde(default)]
     pub computer: String,
@@ -181,6 +190,22 @@ pub(crate) struct Member {
     /// derives `stopped` from it without a listing of its own (L3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen: Option<MemberSeen>,
+    /// The permission request the lead last heard about (B1): the exact
+    /// command, where it came from and the agent's reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<serde_json::Value>,
+}
+
+/// One commit Zerus made for an attempt (B4).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct CommitRef {
+    pub sha: String,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub files: usize,
 }
 
 /// A member's session as the dispatcher last saw it in the live listing.
@@ -413,6 +438,9 @@ pub(crate) struct Attempt {
     /// attempt's member instead (a free member with the same role).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rebalanced_from: String,
+    /// Commits Zerus made for this attempt (B4), newest last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<CommitRef>,
 }
 
 impl Attempt {

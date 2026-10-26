@@ -6,14 +6,14 @@ use super::super::*;
 use super::model::*;
 use super::ops::{self, Actor};
 use super::plan;
-use super::store::{self, canonical_uuid, Store, PAGE};
+use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|discard|pause|resume|stop|archive|status|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
-    "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "discard", "pause", "resume", "stop",
+    "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
     "retry", "check", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member",
 ];
@@ -89,7 +89,7 @@ fn resolve_actor(
     if let Some(member) = dsh_member(team, dsh.unwrap_or_default()) {
         return Ok(Actor::Member(member));
     }
-    if matches!(op, "report" | "ask") && text(input, "by") != "human" {
+    if matches!(op, "report" | "ask" | "commit") && text(input, "by") != "human" {
         let attempt = text(input, "attempt");
         if let Some(member) = attempt_member(team, attempt) {
             return Ok(Actor::Member(member));
@@ -228,6 +228,9 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     if let Some(members) = value["members"].as_array_mut() {
         for (member, value) in team.members.iter().zip(members) {
             value["queue"] = json!(member_queue(team, &member.id));
+            // B1: the pending permission request and the answers so far.
+            value["question"] = member.permission.clone().unwrap_or(Value::Null);
+            value["permission_answers"] = json!(member.permission_answers);
         }
     }
     // Done and Stopped teams say which of their members still run (F7).
@@ -250,7 +253,8 @@ fn summary(team: &Team) -> Value {
         .filter(|m| m.state != MemberState::Removed)
         .map(|m| {
             json!({"id":m.id,"role":team.role_of(&m.id),"agent":m.agent,"model":m.model,"computer":m.computer,
-                "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id)})
+                "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
+                "question":m.permission})
         })
         .collect();
     let tasks: Vec<Value> = team
@@ -304,25 +308,125 @@ fn create(input: &Value) -> anyhow::Result<Value> {
 
 /// The lead (or you) answers a member's question or permission request in the
 /// member's session, by its exact id and hash.
+/// Whether a native option label is the deny answer (B2).
+fn denies(label: &str) -> bool {
+    let label = label.trim().to_lowercase();
+    label.starts_with("deny") || label.starts_with("no") || label == "reject"
+}
+
 fn answer(input: &Value) -> anyhow::Result<Value> {
     let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
     let by = actor(&team, "answer", input)?;
     ensure!(matches!(&by, Actor::Human) || matches!(&by, Actor::Member(id) if *id == team.lead), "Only the lead answers a member's question");
-    let member = team.member(text(input, "member")).context("Unknown member")?;
-    let session = member.session.as_ref().context("The member has no session")?;
-    let (question, hash) = (text(input, "question_id"), text(input, "expected_question_hash"));
+    let member_id = text(input, "member").to_owned();
+    let member = team.member(&member_id).context("Unknown member")?;
+    let session = member.session.clone().context("The member has no session")?;
+    let (question, hash) = (text(input, "question_id").to_owned(), text(input, "expected_question_hash").to_owned());
     ensure!(!question.is_empty() && !hash.is_empty() && input["answers"].is_array(), "question_id, expected_question_hash and answers are required");
     let inspected = super::dispatcher::hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, std::time::Duration::from_secs(45))?;
     ensure!(inspected.status.success(), "{}", String::from_utf8_lossy(&inspected.stderr).trim());
     let record: Value = serde_json::from_slice(&inspected.stdout).context("invalid inspect output")?;
-    record["pending_questions"].as_array().into_iter().flatten()
-        .find(|card| card["question_id"] == question && card["question_hash"] == hash)
+    let card = record["pending_questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|card| card["question_id"] == question.as_str() && card["question_hash"] == hash.as_str())
+        .cloned()
         .context("This question changed or is no longer pending")?;
     let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"question_id":question,"expected_question_hash":hash,"answers":input["answers"]});
     let output = super::dispatcher::hgs(&session.host, &["answer", &session.name, "--json"], Some(&request), std::time::Duration::from_secs(120))?;
     ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    // B2: a denied permission's text reaches the member as one message, and
+    // B1: the lead's or owner's answer is recorded with its reason.
+    let selected: Vec<&str> = input["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|answer| answer["selected_option_ids"].as_array().into_iter().flatten())
+        .filter_map(|id| id.as_str())
+        .collect();
+    let deny = card["questions"].as_array().into_iter().flatten().any(|item| {
+        item["options"].as_array().into_iter().flatten().any(|option| {
+            option["id"].as_str().is_some_and(|id| selected.contains(&id))
+                && option["label"].as_str().is_some_and(denies)
+        })
+    });
+    let tool = card["questions"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["header"].as_str())
+        .or_else(|| card["tool"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let reason = text(input, "text").trim().to_owned();
+    if deny && !reason.is_empty() {
+        super::dispatcher::send_denial(&session, &tool, &reason)?;
+    }
+    let decision = if deny { "deny" } else { "allow" };
+    let who = if matches!(&by, Actor::Human) { "owner" } else { "lead" };
+    let mut store = Store::open(true)?;
+    store.mutate(None, &team.id, None, |team, events| {
+        let member = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        if member.permission.as_ref().is_some_and(|pending| pending["question_id"] == question.as_str()) {
+            member.permission = None;
+        }
+        member.permission_answers.push(json!({"question_id":question,"decision":decision,"by":who,"at":now(),"reason":reason}));
+        let excess = member.permission_answers.len().saturating_sub(20);
+        member.permission_answers.drain(..excess);
+        events.push(Event::new(
+            "permission_answered",
+            json!({"member":team.role_of(&member_id),"question_id":question,"decision":decision,"by":who}),
+        ));
+        Ok(Value::Null)
+    })?;
     Ok(serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!({"status":"answered"})))
+}
+
+/// B4: commits the member's own work in its own folder, on its team branch.
+/// Zerus runs git; it never pushes, amends or changes branches.
+fn commit(input: &Value) -> anyhow::Result<Value> {
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let by = actor(&team, "commit", input)?;
+    let Actor::Member(member_id) = by else { bail!("Only a member commits its work") };
+    ensure!(member_id != team.lead, "The lead does not commit a member's task");
+    let member = team.member(&member_id).context("Unknown member")?;
+    let message = text(input, "message").trim().to_owned();
+    ensure!(!message.is_empty() && message.chars().count() <= 4000, "A commit message is required (at most 4000 characters)");
+    let folder = super::dispatcher::member_folder_path(&team, member)?;
+    ensure!(!folder.is_empty() && folder != team.folder, "Zerus commits in the member's own folder, not the team's");
+    let branch = format!("team/{}/{}", &team.id[..8.min(team.id.len())], super::dispatcher::tag(&member.id));
+    let paths: Vec<String> = input["paths"].as_array().into_iter().flatten().filter_map(|path| path.as_str()).map(str::to_owned).collect();
+    for path in &paths {
+        ensure!(!path.is_empty() && !path.starts_with('/') && !path.split(['/', '\\']).any(|part| part == ".."), "A commit path must stay inside the member's folder");
+    }
+    let result = super::dispatcher::commit_in(&folder, &branch, &message, &paths)?;
+    if result["status"] != "committed" {
+        return Ok(result);
+    }
+    let sha = result["sha"].as_str().unwrap_or_default().to_owned();
+    let files = result["files"].as_u64().unwrap_or(0);
+    let attempt_id = text(input, "attempt").to_owned();
+    let mut store = Store::open(true)?;
+    store.mutate(None, &team.id, None, |team, events| {
+        let role = team.role_of(&member_id);
+        let task = team.tasks.iter_mut().find(|task| {
+            task.open_attempt().is_some_and(|attempt| {
+                (!attempt_id.is_empty() && attempt.id == attempt_id) || (attempt_id.is_empty() && attempt.member == member_id)
+            })
+        });
+        let Some(task) = task else { bail!("The member has no open attempt to record the commit on") };
+        let task_id = task.id;
+        let attempt = task.open_attempt_mut().context("the attempt ended")?;
+        let n = attempt.n;
+        attempt.commits.push(CommitRef { sha: sha.clone(), at: now(), by: "Zerus".into(), files: files as usize });
+        let excess = attempt.commits.len().saturating_sub(20);
+        attempt.commits.drain(..excess);
+        events.push(Event::new("committed", json!({"member":role,"task":task_id,"attempt":n,"sha":sha,"files":files})));
+        Ok(Value::Null)
+    })?;
+    Ok(result)
 }
 
 /// What `hgs team current` answers for one member of a team (spec section 5):
@@ -671,6 +775,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
         "answer" => answer(input),
+        "commit" => commit(input),
         "list" => {
             let path = store::path();
             if !path.exists() {
@@ -1031,6 +1136,24 @@ mod tests {
         assert_eq!(error, "Zerus could not verify the calling session");
         // Outside every session, the owner may act.
         assert_eq!(resolve_actor(&team, "stop", &human, None, None, None).unwrap(), Actor::Human);
+    }
+
+    #[test]
+    fn a_members_permission_and_answers_show_in_status() {
+        let mut team = running_team();
+        let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        member.permission = Some(json!({"question_id":"toolu_1","tool":"Bash","command":"rm -rf build",
+            "command_source":"tool_input","reason":"clean the build","asked_at":30.0}));
+        member.permission_answers = vec![json!({"question_id":"q0","decision":"deny","by":"lead","at":25.0,"reason":"not now"})];
+        let value = view_with(&team, &[], None);
+        let question = &value["members"][1]["question"];
+        assert_eq!(
+            (question["tool"].as_str(), question["command"].as_str(), question["command_source"].as_str()),
+            (Some("Bash"), Some("rm -rf build"), Some("tool_input"))
+        );
+        assert_eq!(value["members"][1]["permission_answers"][0]["by"], "lead");
+        assert_eq!(value["members"][1]["permission_answers"][0]["decision"], "deny");
+        assert!(denies("No") && denies("Deny") && !denies("Allow"));
     }
 
     #[test]

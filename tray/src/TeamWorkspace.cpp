@@ -544,51 +544,46 @@ void TeamWorkspace::approveTeam(const Team &team)
 }
 
 // G9: the band header's Approve, confirmed once, then sent through the same
-// operation the draft strip used.
-bool TeamWorkspace::phaseDecided(const Team &team, int phase) const
+// operation the draft strip used. Returns false when nothing was sent (a
+// cancelled confirmation or a decision already in flight), so the header keeps
+// its buttons usable.
+bool TeamWorkspace::approvePhase(const Team &team, int phase)
 {
-    return m_decidedRevision == team.revision && m_phaseDecided == QStringLiteral("%1/%2").arg(team.id).arg(phase);
-}
-
-void TeamWorkspace::approvePhase(const Team &team, int phase)
-{
-    if (m_phaseAct || phaseDecided(team, phase)) return;
+    if (m_phaseAct) return false;
     int count = 0;
     for (const auto &group : phaseGroups(team)) if (group.n == phase) count = group.tasks.size();
     if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
                           tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
                           tr("Approve phase")))
-        return;
+        return false;
     m_phaseAct = phase;
-    m_phaseDecided = QStringLiteral("%1/%2").arg(team.id).arg(phase);
-    m_decidedRevision = team.revision;
     m_error.clear();
     m_panel->act("approve-phase", {{"team", team.id}, {"phase", phase}},
                  [this](bool ok, const QString &message) {
                      m_phaseAct = 0;
-                     if (!ok) { m_phaseDecided.clear(); m_decidedRevision = -1; m_error = message; }
+                     if (!ok) m_error = message;
                      scheduleRender();
                  });
+    return true;
 }
 
-void TeamWorkspace::discardPhase(const Team &team, int phase)
+bool TeamWorkspace::discardPhase(const Team &team, int phase)
 {
-    if (m_phaseAct || phaseDecided(team, phase)) return;
+    if (m_phaseAct) return false;
     int count = 0;
     for (const auto &group : phaseGroups(team)) if (group.n == phase) count = group.tasks.size();
     if (!m_panel->confirm("teamDiscardPhaseConfirm", tr("Discard phase?"),
                           tr("Discard phase %1 and its %2 tasks?").arg(phase).arg(count), tr("Discard phase")))
-        return;
+        return false;
     m_phaseAct = phase;
-    m_phaseDecided = QStringLiteral("%1/%2").arg(team.id).arg(phase);
-    m_decidedRevision = team.revision;
     m_error.clear();
     m_panel->act("discard-phase", {{"team", team.id}, {"phase", phase}},
                  [this](bool ok, const QString &message) {
                      m_phaseAct = 0;
-                     if (!ok) { m_phaseDecided.clear(); m_decidedRevision = -1; m_error = message; }
+                     if (!ok) m_error = message;
                      scheduleRender();
                  });
+    return true;
 }
 
 void TeamWorkspace::movePhase(const Team &team, int phase, int to, const QString &position)
@@ -763,9 +758,6 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
 QWidget *TeamWorkspace::canvas(const Team &team)
 {
     const Colors c = colorsFor(m_dark);
-    // A new revision means the store has taken (or replaced) a phase decision:
-    // the header's in-flight guard lets go with it.
-    if (m_phaseAct && team.revision != m_decidedRevision) m_phaseAct = 0;
     if (m_view == "board") return board(team);
     const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
     QSet<int> problemTasks; QMap<int, Tone> problemTone;
@@ -777,9 +769,6 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     view->chain = [team](int id) { return Teams::chain(team, id); };
     view->cycle = team.cycle;
     view->bands = phaseBands(team, [this, &team](const PhaseGroup &group) { return m_panel->phaseOpen(team, group); });
-    // G9: a decision already sent keeps its header control off until the store's
-    // revision moves.
-    for (const auto &band : view->bands) if (phaseDecided(team, band.n)) view->decided.insert(band.n);
     const bool grouped = !view->bands.isEmpty();
     view->phaseToggled = [this, id = team.id](int phase) {
         if (const auto *current = currentTeam(id)) m_panel->togglePhase(*current, phase);
@@ -788,10 +777,12 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     // G9: the band header carries a draft's Approve and Discard (confirmed)
     // and the F10 move arrows.
     view->phaseApprove = [this, id = team.id](int phase) {
-        if (const auto *current = currentTeam(id)) approvePhase(*current, phase);
+        const auto *current = currentTeam(id);
+        return current && approvePhase(*current, phase);
     };
     view->phaseDiscard = [this, id = team.id](int phase) {
-        if (const auto *current = currentTeam(id)) discardPhase(*current, phase);
+        const auto *current = currentTeam(id);
+        return current && discardPhase(*current, phase);
     };
     view->phaseMoveUp = [this, id = team.id](int phase) {
         const auto *current = currentTeam(id);

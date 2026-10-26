@@ -493,8 +493,11 @@ public:
     // toggles call phaseToggled; the caller re-renders with the new collapse.
     QList<PhaseBand> bands;
     std::function<void(int phase)> phaseToggled;
-    // G9: the draft decisions from the band header, and the F10 reorder.
-    std::function<void(int phase)> phaseApprove, phaseDiscard, phaseMoveUp, phaseMoveDown;
+    // G9: the draft decisions from the band header, and the F10 reorder. A
+    // decision returns true only when it was really sent (the owner confirmed),
+    // so a cancelled confirmation leaves the header usable.
+    std::function<bool(int phase)> phaseApprove, phaseDiscard;
+    std::function<void(int phase)> phaseMoveUp, phaseMoveDown;
     // G9: a decision goes out once; the header control stays off until a new
     // render builds a new view.
     QSet<int> decided;
@@ -1100,14 +1103,15 @@ protected:
                 if (it.value().contains(point)) {
                     const auto *band = bandOf(it.key());
                     if (band && band->blocked.isEmpty() && !decided.contains(it.key()) && phaseApprove) {
-                        decided.insert(it.key()); update();
-                        phaseApprove(it.key());
+                        if (phaseApprove(it.key())) { decided.insert(it.key()); update(); }
                     }
                     return;
                 }
             for (auto it = m_discard.cbegin(); it != m_discard.cend(); ++it)
                 if (it.value().contains(point)) {
-                    if (!decided.contains(it.key()) && phaseDiscard) { decided.insert(it.key()); update(); phaseDiscard(it.key()); }
+                    if (!decided.contains(it.key()) && phaseDiscard) {
+                        if (phaseDiscard(it.key())) { decided.insert(it.key()); update(); }
+                    }
                     return;
                 }
             for (auto it = m_moveUp.cbegin(); it != m_moveUp.cend(); ++it)

@@ -2282,4 +2282,734 @@ mod encrypted_read_retention_controls {
             .is_empty());
         store.db.close().await;
     }
+
+    mod pressure_controls {
+        use super::*;
+
+        struct Cached {
+            id: String,
+            prepared: zerus_relay::store::EncryptedSubmission,
+            request: EncryptedEnvelope,
+            result: EncryptedEnvelope,
+        }
+        fn request(
+            phone: &Identity,
+            computer: &Identity,
+            state: &MembershipState,
+            node: &Credential,
+            bytes: usize,
+        ) -> (
+            String,
+            zerus_relay::store::EncryptedSubmission,
+            EncryptedEnvelope,
+        ) {
+            let id = id();
+            let mut header = retention_envelope(
+                phone,
+                computer,
+                state,
+                &node.id,
+                &id,
+                (PayloadKind::Request, OperationClass::Read),
+                b"template",
+            )
+            .header;
+            header.expires_at = now() as u64 + 300;
+            let request =
+                crypto::seal(phone, computer.public(), header, &vec![b'q'; bytes]).unwrap();
+            let prepared = zerus_relay::store::EncryptedSubmission::new(
+                json!({"envelope":request}),
+                phone.public().clone(),
+            )
+            .unwrap();
+            (id, prepared, request)
+        }
+        async fn complete(
+            store: &Store,
+            identities: (&Identity, &Identity),
+            state: &MembershipState,
+            node: &Credential,
+            device: &Credential,
+            classes: (OperationClass, OperationClass),
+            bytes: usize,
+        ) -> Option<Cached> {
+            let (computer, phone) = identities;
+            let id = id();
+            let mut q_header = retention_envelope(
+                phone,
+                computer,
+                state,
+                &node.id,
+                &id,
+                (PayloadKind::Request, classes.0),
+                b"template",
+            )
+            .header;
+            q_header.expires_at = now() as u64 + 300;
+            let q =
+                crypto::seal(phone, computer.public(), q_header, b"synthetic operation").unwrap();
+            let prepared = zerus_relay::store::EncryptedSubmission::new(
+                json!({"envelope":q}),
+                phone.public().clone(),
+            )
+            .unwrap();
+            match store.encrypted_submit(device, &prepared).await {
+                Ok(_) => {}
+                Err(error) => {
+                    assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+                    return None;
+                }
+            }
+            assert_eq!(
+                store.encrypted_claim(node).await.unwrap()["requests"][0]["header"]["request_id"],
+                id
+            );
+            let mut header = retention_envelope(
+                computer,
+                phone,
+                state,
+                &node.id,
+                &id,
+                (PayloadKind::Result, classes.1),
+                b"template",
+            )
+            .header;
+            // Match the actual retained connector's result expiry, separately
+            // from the 300-second request and two-minute cache-delivery grace.
+            header.expires_at = now() as u64 + 23 * 3600;
+            let r = crypto::seal(computer, phone.public(), header, &vec![b'r'; bytes]).unwrap();
+            let output = zerus_relay::store::EncryptedSubmission::new(
+                json!({"envelope":r}),
+                computer.public().clone(),
+            )
+            .unwrap();
+            store.encrypted_result(node, &id, &output).await.unwrap();
+            Some(Cached {
+                id,
+                prepared,
+                request: q,
+                result: r,
+            })
+        }
+        async fn fill(
+            store: &Store,
+            computer: &Identity,
+            phone: &Identity,
+            state: &MembershipState,
+            node: &Credential,
+            device: &Credential,
+            class: OperationClass,
+        ) -> Vec<Cached> {
+            let mut rows = Vec::new();
+            for _ in 0..20 {
+                match complete(
+                    store,
+                    (computer, phone),
+                    state,
+                    node,
+                    device,
+                    (class, class),
+                    700 * 1024,
+                )
+                .await
+                {
+                    Some(row) => rows.push(row),
+                    None => break,
+                }
+            }
+            assert!(!rows.is_empty() && rows.len() < 20);
+            rows
+        }
+        async fn age(store: &Store, rows: &[Cached]) {
+            for row in rows {
+                store
+                    .db
+                    .exec(
+                        "UPDATE encrypted_requests SET updated=? WHERE id=?",
+                        args![now() - 180.0, &row.id],
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        async fn row(store: &Store, id: &str) -> Value {
+            store.db.one("SELECT id,state,payload_class,body_bytes,result_bytes,reserved_bytes,metadata_bytes,body_hash,result_hash,updated,expires FROM encrypted_requests WHERE id=?",args![id]).await.unwrap().unwrap()
+        }
+        async fn accounting(store: &Store, device: &Credential) -> (Value, i64, i64) {
+            let usage = retention_usage(store, device).await;
+            let shard = store
+                .db
+                .one(
+                    "SELECT payload_bytes FROM payload_shards WHERE id=?",
+                    args![store.db.shard(&device.workspace)],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let rows=store.db.one("SELECT CAST(COALESCE(SUM(body_bytes+result_bytes+reserved_bytes+metadata_bytes),0) AS BIGINT) AS bytes FROM encrypted_requests WHERE workspace_id=?",args![&device.workspace]).await.unwrap().unwrap();
+            (usage, i(&shard, "payload_bytes"), i(&rows, "bytes"))
+        }
+        fn retained_identity(before: &Value, after: &Value) {
+            for key in [
+                "id",
+                "state",
+                "payload_class",
+                "metadata_bytes",
+                "body_hash",
+                "result_hash",
+                "updated",
+                "expires",
+            ] {
+                assert_eq!(before[key], after[key], "permanent receipt field {key}");
+            }
+        }
+
+        #[tokio::test]
+        async fn completed_read_cache_pressure_admits_inside_one_hour_without_replay() {
+            let mut cfg = config();
+            cfg.max_queue_bytes = 8 * 1024 * 1024;
+            let backend = Backend::new(cfg).await;
+            let store = backend.store().await;
+            let peer = if backend.is_postgres() {
+                backend.store().await
+            } else {
+                store.clone()
+            };
+            let (computer, _, mut state, node) = create(&store).await;
+            let (phone, _, device) =
+                enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+            let cached = fill(
+                &store,
+                &computer,
+                &phone,
+                &state,
+                &node,
+                &device,
+                OperationClass::Read,
+            )
+            .await;
+            age(&store, &cached[..cached.len() - 1]).await;
+            let mut original = Vec::new();
+            for r in &cached {
+                original.push(row(&store, &r.id).await);
+            }
+            let before = accounting(&store, &device).await;
+            assert_eq!(i(&before.0, "active"), 0);
+            assert!(backend.cfg.max_queue_bytes - i(&before.0, "payload_bytes") < 2 * 1024 * 1024);
+            let frontier=store.db.one("SELECT COUNT(*) AS n FROM encrypted_requests WHERE workspace_id=? AND payload_class IN (0,3)",args![&device.workspace]).await.unwrap().unwrap();
+            assert_eq!(i(&frontier, "n"), 0);
+            assert!(original
+                .iter()
+                .all(|r| now() - r["updated"].as_f64().unwrap() < 3600.0
+                    && r["expires"].as_f64().unwrap() > now()));
+            let (next, prepared, wire) = request(&phone, &computer, &state, &node, 8);
+            let result = peer.encrypted_submit(&device, &prepared).await;
+            assert!(result.is_ok(),"completed authenticated Read cache must release byte pressure inside one hour with active=0");
+            let after = accounting(&store, &device).await;
+            assert_eq!(
+                i(&after.0, "payload_bytes") - i(&before.0, "payload_bytes"),
+                after.1 - before.1
+            );
+            assert_eq!(
+                i(&after.0, "payload_bytes") - i(&before.0, "payload_bytes"),
+                after.2 - before.2
+            );
+            let mut refunded = 0;
+            for (index, c) in cached.iter().enumerate() {
+                let current = row(&store, &c.id).await;
+                retained_identity(&original[index], &current);
+                refunded += i(&original[index], "body_bytes") + i(&original[index], "result_bytes")
+                    - i(&current, "body_bytes")
+                    - i(&current, "result_bytes");
+                if i(&current, "result_bytes") == 0 {
+                    let duplicate = peer.encrypted_submit(&device, &c.prepared).await.unwrap().1;
+                    assert_eq!(duplicate["state"], "completed");
+                    assert!(duplicate["envelope"].is_null());
+                    let output = zerus_relay::store::EncryptedSubmission::new(
+                        json!({"envelope":c.result}),
+                        computer.public().clone(),
+                    )
+                    .unwrap();
+                    peer.encrypted_result(&node, &c.id, &output).await.unwrap();
+                    assert_eq!(current["body_hash"], c.request.digest().unwrap());
+                    assert_eq!(current["result_hash"], c.result.digest().unwrap());
+                }
+            }
+            assert!(refunded > 0);
+            let new_charge =
+                serde_json::to_vec(&wire).unwrap().len() as i64 + 2 * 1024 * 1024 + 1024;
+            assert_eq!(
+                i(&after.0, "payload_bytes"),
+                i(&before.0, "payload_bytes") + new_charge - refunded
+            );
+            assert_eq!(
+                row(&store, &cached.last().unwrap().id).await,
+                *original.last().unwrap(),
+                "last completed response is still in its grace"
+            );
+            assert_eq!(
+                accounting(&store, &device).await,
+                after,
+                "duplicate result never restores ciphertext or refunds twice"
+            );
+            assert_eq!(
+                peer.encrypted_claim(&node).await.unwrap()["requests"][0]["header"]["request_id"],
+                next
+            );
+            assert!(peer.encrypted_claim(&node).await.unwrap()["requests"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            peer.db.close().await;
+            store.db.close().await;
+        }
+
+        #[tokio::test]
+        async fn pressure_preserves_young_ambiguous_mutation_control_and_inflight_payloads() {
+            let mut cfg = config();
+            cfg.max_queue_bytes = 12 * 1024 * 1024;
+            let backend = Backend::new(cfg).await;
+            let store = backend.store().await;
+            let (computer, _, mut state, node) = create(&store).await;
+            let (phone, _, device) =
+                enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+            let (worker, _, worker_node) =
+                enroll(&store, &computer, &node, &mut state, DeviceRole::Computer).await;
+            let mut protected = Vec::new();
+            for classes in [
+                (OperationClass::Mutation, OperationClass::Mutation),
+                (OperationClass::Control, OperationClass::Control),
+                (OperationClass::Read, OperationClass::Mutation),
+                (OperationClass::Mutation, OperationClass::Read),
+                (OperationClass::Read, OperationClass::Read),
+                (OperationClass::Read, OperationClass::Read),
+            ] {
+                protected.push(
+                    complete(
+                        &store,
+                        (&computer, &phone),
+                        &state,
+                        &node,
+                        &device,
+                        classes,
+                        1024,
+                    )
+                    .await
+                    .unwrap(),
+                );
+            }
+            for (offset, class) in [(4_usize, 0_i64), (5_usize, 3_i64)] {
+                store
+                    .db
+                    .exec(
+                        "UPDATE encrypted_requests SET payload_class=? WHERE id=?",
+                        args![class, &protected[offset].id],
+                    )
+                    .await
+                    .unwrap();
+            }
+            age(&store, &protected).await;
+            let (claimed_id, claimed, _) = request(&phone, &computer, &state, &node, 8);
+            store.encrypted_submit(&device, &claimed).await.unwrap();
+            store.encrypted_claim(&node).await.unwrap();
+            let (queued_id, queued, _) = request(&phone, &computer, &state, &node, 8);
+            store.encrypted_submit(&device, &queued).await.unwrap();
+            let cached = fill(
+                &store,
+                &worker,
+                &phone,
+                &state,
+                &worker_node,
+                &device,
+                OperationClass::Read,
+            )
+            .await;
+            let before = accounting(&store, &device).await;
+            let mut preserved = Vec::new();
+            for c in &protected {
+                preserved.push(row(&store, &c.id).await);
+            }
+            preserved.push(row(&store, &claimed_id).await);
+            preserved.push(row(&store, &queued_id).await);
+            let (_, prepared, _) = request(&phone, &worker, &state, &worker_node, 8);
+            assert_eq!(
+                store
+                    .encrypted_submit(&device, &prepared)
+                    .await
+                    .unwrap_err()
+                    .0,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            assert_eq!(
+                accounting(&store, &device).await,
+                before,
+                "all Read caches are too young: no eviction"
+            );
+            age(&store, &cached).await;
+            assert!(store.encrypted_submit(&device, &prepared).await.is_ok());
+            for (index, c) in protected.iter().enumerate() {
+                assert_eq!(row(&store, &c.id).await, preserved[index]);
+            }
+            assert_eq!(row(&store, &claimed_id).await, preserved[protected.len()]);
+            assert_eq!(
+                row(&store, &queued_id).await,
+                preserved[protected.len() + 1]
+            );
+            store.db.close().await;
+        }
+
+        #[tokio::test]
+        async fn small_cache_batches_commit_progress_even_when_the_new_read_still_cannot_fit() {
+            let mut cfg = config();
+            cfg.max_queue_bytes = 8 * 1024 * 1024;
+            let backend = Backend::new(cfg).await;
+            let store = backend.store().await;
+            let (computer, _, mut state, node) = create(&store).await;
+            let (phone, _, device) =
+                enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+            let mut tiny = Vec::new();
+            for _ in 0..64 {
+                tiny.push(
+                    complete(
+                        &store,
+                        (&computer, &phone),
+                        &state,
+                        &node,
+                        &device,
+                        (OperationClass::Read, OperationClass::Read),
+                        128,
+                    )
+                    .await
+                    .unwrap(),
+                );
+            }
+            let durable = fill(
+                &store,
+                &computer,
+                &phone,
+                &state,
+                &node,
+                &device,
+                OperationClass::Mutation,
+            )
+            .await;
+            age(&store, &tiny).await;
+            let (next, prepared, _) = request(&phone, &computer, &state, &node, 2 * 1024 * 1024);
+            let mut remaining = 64_i64;
+            for _ in 0..64 {
+                let before = accounting(&store, &device).await;
+                assert_eq!(
+                    store
+                        .encrypted_submit(&device, &prepared)
+                        .await
+                        .unwrap_err()
+                        .0,
+                    StatusCode::TOO_MANY_REQUESTS
+                );
+                let n=store.db.one("SELECT COUNT(*) AS n FROM encrypted_requests WHERE workspace_id=? AND payload_class=2 AND result_bytes>0",args![&device.workspace]).await.unwrap().unwrap();
+                let left = i(&n, "n");
+                let after = accounting(&store, &device).await;
+                assert!(
+                    left < remaining && remaining - left <= 32,
+                    "bounded cache prefix must commit despite truthful BUSY"
+                );
+                assert!(i(&after.0, "payload_bytes") < i(&before.0, "payload_bytes"));
+                assert_eq!(
+                    i(&after.0, "payload_bytes") - i(&before.0, "payload_bytes"),
+                    after.1 - before.1
+                );
+                assert_eq!(
+                    i(&after.0, "payload_bytes") - i(&before.0, "payload_bytes"),
+                    after.2 - before.2
+                );
+                assert_eq!(i(&after.0, "mutations"), i(&before.0, "mutations"));
+                remaining = left;
+                if left == 0 {
+                    break;
+                }
+            }
+            assert_eq!(remaining, 0);
+            assert!(store
+                .db
+                .one("SELECT id FROM encrypted_requests WHERE id=?", args![&next])
+                .await
+                .unwrap()
+                .is_none());
+            for c in &durable {
+                assert!(i(&row(&store, &c.id).await, "result_bytes") > 0);
+            }
+            let before = accounting(&store, &device).await;
+            store.db.close().await;
+            drop(store);
+            let reopened = backend.store().await;
+            assert_eq!(
+                reopened
+                    .encrypted_submit(&device, &prepared)
+                    .await
+                    .unwrap_err()
+                    .0,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            assert_eq!(accounting(&reopened, &device).await, before);
+            for c in tiny {
+                let exact = reopened
+                    .encrypted_submit(&device, &c.prepared)
+                    .await
+                    .unwrap()
+                    .1;
+                assert_eq!(exact["state"], "completed");
+                assert!(exact["envelope"].is_null());
+                let r = row(&reopened, &c.id).await;
+                assert_eq!(r["body_hash"], c.request.digest().unwrap());
+                assert_eq!(r["result_hash"], c.result.digest().unwrap());
+            }
+            assert!(reopened.encrypted_claim(&node).await.unwrap()["requests"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            reopened.db.close().await;
+        }
+
+        #[tokio::test]
+        async fn concurrent_workers_refund_shared_cache_once_and_keep_restart_identity() {
+            let mut cfg = config();
+            cfg.max_queue_bytes = 8 * 1024 * 1024;
+            cfg.quota_shards = 1;
+            let backend = Backend::new(cfg).await;
+            let store = backend.store().await;
+            let peer = if backend.is_postgres() {
+                backend.store().await
+            } else {
+                store.clone()
+            };
+            let (computer, _, mut state, node) = create(&store).await;
+            let (phone, _, device) =
+                enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+            let cached = fill(
+                &store,
+                &computer,
+                &phone,
+                &state,
+                &node,
+                &device,
+                OperationClass::Read,
+            )
+            .await;
+            age(&store, &cached).await;
+            let (foreign_computer, _, mut foreign_state, foreign_node) = create(&store).await;
+            let (foreign_phone, _, foreign_device) = enroll(
+                &store,
+                &foreign_computer,
+                &foreign_node,
+                &mut foreign_state,
+                DeviceRole::Phone,
+            )
+            .await;
+            let foreign = complete(
+                &store,
+                (&foreign_computer, &foreign_phone),
+                &foreign_state,
+                &foreign_node,
+                &foreign_device,
+                (OperationClass::Read, OperationClass::Read),
+                1024,
+            )
+            .await
+            .unwrap();
+            age(&store, std::slice::from_ref(&foreign)).await;
+            let foreign_row = row(&store, &foreign.id).await;
+            let foreign_usage = retention_usage(&store, &foreign_device).await;
+            let before = accounting(&store, &device).await;
+            let (a, pa, _) = request(&phone, &computer, &state, &node, 8);
+            let (b, pb, _) = request(&phone, &computer, &state, &node, 8);
+            let (ra, rb) = tokio::join!(
+                store.encrypted_submit(&device, &pa),
+                peer.encrypted_submit(&device, &pb)
+            );
+            assert!(ra.is_ok() || rb.is_ok());
+            for r in [&ra, &rb] {
+                if let Err(e) = r {
+                    assert_eq!(e.0, StatusCode::TOO_MANY_REQUESTS);
+                }
+            }
+            let admitted = i64::from(ra.is_ok()) + i64::from(rb.is_ok());
+            let after = accounting(&store, &device).await;
+            assert_eq!(
+                i(&after.0, "payload_bytes") - i(&before.0, "payload_bytes"),
+                after.1 - before.1
+            );
+            assert_eq!(
+                i(&after.0, "payload_bytes") - i(&before.0, "payload_bytes"),
+                after.2 - before.2
+            );
+            assert_eq!(i(&after.0, "active"), admitted);
+            assert_eq!(
+                i(&after.0, "mutations"),
+                i(&before.0, "mutations") + admitted
+            );
+            assert_eq!(
+                row(&store, &foreign.id).await,
+                foreign_row,
+                "never reclaim another workspace's cache on the same shard"
+            );
+            assert_eq!(
+                retention_usage(&store, &foreign_device).await,
+                foreign_usage
+            );
+            if ra.is_ok() {
+                peer.encrypted_submit(&device, &pa).await.unwrap();
+            }
+            if rb.is_ok() {
+                store.encrypted_submit(&device, &pb).await.unwrap();
+            }
+            assert_eq!(accounting(&store, &device).await, after);
+            peer.db.close().await;
+            store.db.close().await;
+            drop(peer);
+            drop(store);
+            let reopened = backend.store().await;
+            assert_eq!(accounting(&reopened, &device).await, after);
+            for c in cached {
+                let r = row(&reopened, &c.id).await;
+                assert_eq!(r["state"], "completed");
+                assert_eq!(r["body_hash"], c.request.digest().unwrap());
+                assert_eq!(r["result_hash"], c.result.digest().unwrap());
+            }
+            let mut observed = Vec::new();
+            for _ in 0..2 {
+                let page = reopened.encrypted_claim(&node).await.unwrap();
+                if let Some(r) = page["requests"].as_array().unwrap().first() {
+                    observed.push(r["header"]["request_id"].as_str().unwrap().to_owned());
+                }
+            }
+            assert_eq!(observed.len() as i64, admitted);
+            assert!(observed.iter().all(|id| id == &a || id == &b));
+            assert!(reopened.encrypted_claim(&node).await.unwrap()["requests"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            reopened.db.close().await;
+        }
+
+        #[tokio::test]
+        async fn failed_insert_and_cancelled_pg_insert_roll_back_uncommitted_cache_refund() {
+            let mut cfg = config();
+            cfg.max_queue_bytes = 8 * 1024 * 1024;
+            let backend = Backend::new(cfg).await;
+            let store = backend.store().await;
+            let (computer, _, mut state, node) = create(&store).await;
+            let (phone, _, device) =
+                enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+            let cached = fill(
+                &store,
+                &computer,
+                &phone,
+                &state,
+                &node,
+                &device,
+                OperationClass::Read,
+            )
+            .await;
+            age(&store, &cached).await;
+            let before = accounting(&store, &device).await;
+            let mut originals = Vec::new();
+            for c in &cached {
+                originals.push(row(&store, &c.id).await);
+            }
+            let (next, prepared, _) = request(&phone, &computer, &state, &node, 8);
+            if backend.is_postgres() {
+                store.db.exec(&format!("CREATE FUNCTION fixture_pressure_abort() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id='{next}' THEN RAISE EXCEPTION 'synthetic insert fault'; END IF; RETURN NEW; END; $$"),&[]).await.unwrap();
+                store.db.exec("CREATE TRIGGER fixture_pressure_abort BEFORE INSERT ON encrypted_requests FOR EACH ROW EXECUTE FUNCTION fixture_pressure_abort()",&[]).await.unwrap();
+            } else {
+                store.db.exec(&format!("CREATE TRIGGER fixture_pressure_abort BEFORE INSERT ON encrypted_requests WHEN NEW.id='{next}' BEGIN SELECT RAISE(ABORT,'synthetic insert fault'); END"),&[]).await.unwrap();
+            }
+            assert_eq!(
+                store
+                    .encrypted_submit(&device, &prepared)
+                    .await
+                    .unwrap_err()
+                    .0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert_eq!(accounting(&store, &device).await, before);
+            for (i, c) in cached.iter().enumerate() {
+                assert_eq!(row(&store, &c.id).await, originals[i]);
+            }
+            if backend.is_postgres() {
+                store
+                    .db
+                    .exec(
+                        "DROP TRIGGER fixture_pressure_abort ON encrypted_requests",
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                store
+                    .db
+                    .exec("DROP TRIGGER fixture_pressure_abort", &[])
+                    .await
+                    .unwrap();
+            }
+            // SQLite proves the post-trim SQL error rollback above. The actual
+            // cancellation boundary is additionally exercised on private PG,
+            // with a fixture-only trigger pausing AFTER trim but BEFORE insert.
+            if backend.is_postgres() {
+                use sqlx::Connection;
+                let key = (Uuid::new_v4().as_u128() as u64 & i64::MAX as u64) as i64;
+                store.db.exec(&format!("CREATE OR REPLACE FUNCTION fixture_pressure_abort() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id='{next}' THEN PERFORM pg_advisory_xact_lock({key}); END IF; RETURN NEW; END; $$"),&[]).await.unwrap();
+                store.db.exec("CREATE TRIGGER fixture_pressure_abort BEFORE INSERT ON encrypted_requests FOR EACH ROW EXECUTE FUNCTION fixture_pressure_abort()",&[]).await.unwrap();
+                let mut blocker =
+                    sqlx::PgConnection::connect(backend.cfg.database_url.as_deref().unwrap())
+                        .await
+                        .unwrap();
+                sqlx::query("SELECT pg_advisory_lock($1)")
+                    .bind(key)
+                    .execute(&mut blocker)
+                    .await
+                    .unwrap();
+                let worker = store.clone();
+                let credential = device.clone();
+                let task =
+                    tokio::spawn(
+                        async move { worker.encrypted_submit(&credential, &prepared).await },
+                    );
+                let mut at_insert = false;
+                for _ in 0..50 {
+                    let waits=store.db.one("SELECT COUNT(*) AS n FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())",&[]).await.unwrap().unwrap();
+                    if i(&waits, "n") == 1 {
+                        at_insert = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                assert!(
+                    at_insert,
+                    "fixture reached post-trim/pre-insert cancellation boundary"
+                );
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                sqlx::query("SELECT pg_advisory_unlock($1)")
+                    .bind(key)
+                    .execute(&mut blocker)
+                    .await
+                    .unwrap();
+                blocker.close().await.unwrap();
+            }
+            store.db.close().await;
+            drop(store);
+            let reopened = backend.store().await;
+            assert_eq!(accounting(&reopened, &device).await, before);
+            for (i, c) in cached.iter().enumerate() {
+                assert_eq!(row(&reopened, &c.id).await, originals[i]);
+            }
+            assert!(reopened
+                .db
+                .one("SELECT id FROM encrypted_requests WHERE id=?", args![&next])
+                .await
+                .unwrap()
+                .is_none());
+            reopened.db.close().await;
+        }
+    }
 }

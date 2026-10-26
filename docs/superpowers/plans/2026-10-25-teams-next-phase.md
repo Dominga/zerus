@@ -438,6 +438,17 @@ answered; a denial cannot carry an explanation.
   shared fixtures and docs: this is the owner's explicit direction to change
   it; keep all of them aligned. Owner: yes, first, with C7 in the nearest phase.
 
+- **G8. The team's two bars count the right things (owner, urgent).** Seen
+  2026-10-26: the session row showed "32/64" tasks and "0/1" phases. Rules:
+  - the tasks bar counts only the phase in work (approved, with open tasks);
+    with none in work, the next phase after the last finished one (the first
+    draft); never tasks of several phases;
+  - the phases bar is finished / all: every phase that is not discarded counts,
+    phase 1, approved and drafts alike; finished means approved with every task
+    decided. This team after phase 31: 2/5.
+  Same numbers in the session row, the Teams panel and the workspace header,
+  with a tooltip naming the phase. Owner: yes, as soon as possible.
+
 ## H. Operations
 
 - **H1. Resume after usage limits.** A flag on the lead (or session): when a
@@ -486,6 +497,14 @@ answered; a denial cannot carry an explanation.
   transcript's last turn with the session's last recorded event; when the
   transcript is behind, do not resume silently: warn and offer the missing
   dialogue from the events. Owner: yes, in the next phase.
+
+- **U4. Members stopped by a reboot stay stopped (seen 2026-10-26).** After the
+  reboot, Backend, Frontend, QA and Reviewer were stopped; their ready tasks
+  (#288, #292) stayed Pending with no word to the lead, until the lead resumed
+  the sessions by hand. The dispatcher must notice a member whose session is
+  stopped while it has a ready or open task, tell the lead once, and resume it
+  (hgs resume -d) when the team setting allows it (default on for team
+  members; never for the lead's own session). Owner: to be confirmed.
 
 ## Order of work (proposal)
 

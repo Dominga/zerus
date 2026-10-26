@@ -215,3 +215,13 @@ Events: `permission_answered`, `committed`, `held_for_widening`,
 `background_red_minutes`. Status: `members[].question`,
 `members[].services`, `tasks[].waits`, `attempts[].permissions`,
 `attempts[].commits`, `health`.
+
+## 11. The team's two bars (G8, added on the owner's request)
+
+Owner: frontend, first thing in task 292. The tasks bar counts only the phase
+in work (approved, with open tasks); with none in work, the first draft after
+the last finished phase; never several phases. The phases bar is finished /
+all non-discarded phases (phase 1, approved and drafts); finished = approved
+with every task decided. The same numbers in the session row, the Teams panel
+and the workspace header; the tooltip names the phase ("Phase 32 Permissions
+and lead load: 1/11"). Team 528aebfe after phase 31 reads 2/5 phases.

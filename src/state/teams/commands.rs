@@ -265,14 +265,21 @@ fn summary(team: &Team) -> Value {
         .iter()
         .map(|t| {
             let attempt = t.attempts.last();
-            json!({"id":t.id,"title":t.title,"status":t.status,"assignee":t.assignee,
+            json!({"id":t.id,"title":t.title,"status":t.status,"assignee":t.assignee,"phase":t.phase,
                 "attempt":attempt.map(|a| json!({"n":a.n,"state":a.state,"no_report":a.no_report,
                     "phase":ops::attempt_phase(t, stopped(team, t))}))})
         })
         .collect();
+    // G8: the session row counts the phase in work and every phase, so it needs
+    // each task's phase and the phase records (without their change history).
+    let phases: Vec<Value> = team
+        .phases
+        .iter()
+        .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,"state":p.state,"tasks":p.tasks}))
+        .collect();
     json!({
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
-        "lead":team.lead,"members":members,"tasks":tasks,
+        "lead":team.lead,"members":members,"tasks":tasks,"phases":phases,
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "revision":team.revision,"updated":team.updated,
         "waiting_for_lead":waiting_for_lead(team),"pending_phase":pending_phase(team),
@@ -827,6 +834,18 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_list_summary_carries_task_phases_and_phase_records() {
+        let mut team = crate::state::teams::model::Team::default();
+        team.tasks.push(crate::state::teams::model::Task { id: 1, phase: 1, ..Default::default() });
+        team.tasks.push(crate::state::teams::model::Task { id: 2, phase: 2, ..Default::default() });
+        team.phases.push(crate::state::teams::model::Phase { n: 2, title: "Fixes".into(), tasks: vec![2], ..Default::default() });
+        let value = super::summary(&team);
+        assert_eq!(value["tasks"][1]["phase"], 2);
+        assert_eq!(value["phases"][0]["n"], 2);
+        assert_eq!(value["phases"][0]["tasks"][0], 2);
+        assert!(value["phases"][0].get("changes").is_none());
+    }
     use super::super::dispatcher::Seen;
     use super::*;
 

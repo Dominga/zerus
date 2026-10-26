@@ -984,6 +984,15 @@ pub(crate) fn permission_record(pending: &PendingQuestion) -> Value {
         "command_source":source,"reason":reason,"asked_at":pending.at})
 }
 
+/// N5: what Zerus records when a pending question vanished without an hgs team
+/// answer (the desktop answered it, or it is gone): by unknown, newest 20 kept.
+pub(crate) fn permission_lost(answers: &mut Vec<Value>, question_id: &str, at: f64) -> Value {
+    answers.push(json!({"question_id":question_id,"decision":"unknown","by":"unknown","at":at,"reason":""}));
+    let excess = answers.len().saturating_sub(20);
+    answers.drain(..excess);
+    json!({"question_id":question_id,"decision":"unknown","by":"unknown","at":at})
+}
+
 /// B1: the line that names the exact command a permission request asks about.
 pub(crate) fn permission_command_line(card: &Value) -> String {
     match permission_command(card) {
@@ -1638,12 +1647,9 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 // desktop answered it, or it is gone) is still recorded, by
                 // unknown, never dropped.
                 if let Some(pending) = found.pending.take() {
-                    found.permission_answers.push(json!({"question_id":pending.question_id,"decision":"unknown",
-                        "by":"unknown","at":now(),"reason":""}));
-                    let excess = found.permission_answers.len().saturating_sub(20);
-                    found.permission_answers.drain(..excess);
+                    let answer = permission_lost(&mut found.permission_answers, &pending.question_id, now());
                     events.push(Event::new("permission_answered", json!({"member":role,
-                        "question_id":pending.question_id,"decision":"unknown","by":"unknown"})));
+                        "question_id":answer["question_id"],"decision":answer["decision"],"by":answer["by"]})));
                 }
                 found.permission = None;
             }
@@ -4199,6 +4205,22 @@ mod tests {
         assert_eq!(profile_mode("claude", "read"), Some("plan"));
         assert_eq!(profile_mode("codex", "read"), None);
         assert_eq!(profile_mode("claude", "network"), None);
+    }
+
+    #[test]
+    fn a_vanished_question_is_recorded_as_unknown() {
+        let mut answers = Vec::new();
+        for index in 0..25 {
+            answers.push(json!({"question_id":format!("q{index}"),"decision":"allow"}));
+        }
+        let answer = permission_lost(&mut answers, "q25", 30.0);
+        assert_eq!(
+            (answer["decision"].as_str(), answer["by"].as_str(), answer["at"].as_f64()),
+            (Some("unknown"), Some("unknown"), Some(30.0))
+        );
+        assert_eq!(answers.len(), 20);
+        assert_eq!(answers.last().unwrap()["decision"], "unknown");
+        assert_eq!(answers.last().unwrap()["question_id"], "q25");
     }
 
     #[test]

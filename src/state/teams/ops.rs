@@ -1217,6 +1217,13 @@ fn decide_check(team: &mut Team, id: u32, n: u32, events: &mut Vec<Event>) -> an
         }
         revoke(task, "check failed");
         task.status = TaskStatus::Pending;
+        // N6: the failed check waits for the lead; Zerus never reruns it on its
+        // own. Release gives it another attempt, cancel ends it.
+        task.hold = Some(Hold {
+            by: "Zerus".into(),
+            at: now(),
+            reason: format!("check failed: exit {exit}, expected {}", expected.expect_exit),
+        });
         task.decided_by = None;
         task.decision_reason = format!("check failed: exit {exit}, expected {}", expected.expect_exit);
         events.push(Event::new(
@@ -2561,6 +2568,13 @@ mod tests {
         assert_eq!(task.decision_reason, "check failed: exit 101, expected 0");
         assert_eq!(task.attempts.last().unwrap().check.as_ref().unwrap().exit, 101);
         assert_eq!(events.last().unwrap().kind, "check_failed");
+        // The failed check waits for the lead: ready never hands it out again.
+        assert!(!plan::ready(&failed_team).contains(&1));
+        let held = failed_team.task(1).unwrap().hold.as_ref().unwrap();
+        assert_eq!((held.by.as_str(), held.reason.as_str()), ("Zerus", "check failed: exit 101, expected 0"));
+        // A release gives it another attempt; cancel still ends it.
+        apply(&mut failed_team, "release", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert!(plan::ready(&failed_team).contains(&1));
         let again = hand_out(&mut failed_team, 1);
         assert_ne!(again, attempt);
         apply(&mut failed_team, "cancel", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();

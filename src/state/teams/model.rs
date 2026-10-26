@@ -1,6 +1,7 @@
 //! WhiteWh fork: the agent team record (docs/superpowers/specs/2026-10-24-agent-teams-core-design.md).
 //! One team is stored whole as JSON; these types are its schema.
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +64,21 @@ pub(crate) struct Settings {
     /// Background work before the lead is told once (N5).
     #[serde(default = "default_blocked_timeout")]
     pub blocked_timeout_seconds: u64,
+    /// At most one inbox message reaches the lead per this many seconds (C2).
+    #[serde(default = "default_inbox_interval")]
+    pub inbox_interval_seconds: u64,
+    /// Minutes an undecided report waits before the lead is reminded once;
+    /// 0 turns the reminder off (C4).
+    #[serde(default = "default_remind_lead")]
+    pub remind_lead_minutes: u64,
+    /// Minutes before that report shows on the owner's attention list in the
+    /// desktop; 0 turns it off (C4).
+    #[serde(default = "default_remind_owner")]
+    pub remind_owner_minutes: u64,
+    /// Minutes a Background job without a declared budget may run before the
+    /// lead hears it is red (C12).
+    #[serde(default = "default_background_red")]
+    pub background_red_minutes: u64,
     /// A project that forbids worktrees and clones (B6): members then work in
     /// the shared or their own existing folder only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -81,6 +97,18 @@ fn default_start_timeout() -> u64 {
 fn default_blocked_timeout() -> u64 {
     1800
 }
+fn default_inbox_interval() -> u64 {
+    120
+}
+fn default_remind_lead() -> u64 {
+    15
+}
+fn default_remind_owner() -> u64 {
+    60
+}
+fn default_background_red() -> u64 {
+    30
+}
 fn default_phase() -> u32 {
     1
 }
@@ -96,6 +124,10 @@ impl Default for Settings {
             report_timeout_seconds: default_report_timeout(),
             start_timeout_seconds: default_start_timeout(),
             blocked_timeout_seconds: default_blocked_timeout(),
+            inbox_interval_seconds: default_inbox_interval(),
+            remind_lead_minutes: default_remind_lead(),
+            remind_owner_minutes: default_remind_owner(),
+            background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
         }
     }
@@ -188,6 +220,32 @@ pub(crate) struct Member {
     /// hash; the most recent ones only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<String>,
+    /// The permission request the lead's inbox names while it waits for an
+    /// answer (C2): the member's session question as Zerus read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingQuestion>,
+    /// The first tick that saw this member idle without a ready task while
+    /// tasks were open (C7); cleared when it gets work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starved_since: Option<f64>,
+    /// The lead was told once about this starvation episode (C7).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub starved_told: bool,
+    /// The member's declared time budget for its background work (C12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Budget>,
+    /// The first tick that saw Background work in this member's session; the
+    /// default red time counts from here (C12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_since: Option<f64>,
+    /// The lead heard once that this Background work passed the default red
+    /// time (C12).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background_told: bool,
+    /// The MCP servers and services the member's session runs: they live with
+    /// the session and are not Background work (G7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<MemberService>,
     /// The conversation whose notifications the dispatcher muted: a member
     /// works for the lead, so its replies do not call the owner. Muted once
     /// per conversation; the owner may unmute it.
@@ -229,6 +287,112 @@ impl Member {
     }
 }
 
+/// The owner's own sentence that let the lead approve a plan or a phase (F13):
+/// the exact text, its time and the event it came from.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct OwnerWord {
+    pub text: String,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub event: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
+}
+
+/// An MCP server or service a member's session runs (G7): shown on the member
+/// card and never counted as Background work.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberService {
+    pub name: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub since: f64,
+}
+
+/// A member's pending native question as Zerus read it (C2): the lead answers
+/// it with `hgs team answer` by this exact id and hash, as before, but now the
+/// inbox lists it with the rest instead of a message of its own.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PendingQuestion {
+    pub question_id: String,
+    pub question_hash: String,
+    #[serde(default)]
+    pub approval: bool,
+    #[serde(default)]
+    pub at: f64,
+    /// The card the answer command is built from: header, question and options.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub card: serde_json::Value,
+}
+
+/// The lead's last inbox message (C2): when it went and which items it named,
+/// so one coalesced message replaces the per-item messages and a reminder can
+/// still reach the lead later.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Inbox {
+    #[serde(default)]
+    pub told_at: f64,
+    /// Item keys already named, oldest first, bounded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told: Vec<String>,
+}
+
+impl Inbox {
+    /// An empty record adds no key to an old team's JSON.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.told_at == 0.0 && self.told.is_empty()
+    }
+}
+
+/// The Background job a member's time budget is tied to (C12): its command and
+/// when it started.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct JobRef {
+    #[serde(default)]
+    pub command: String,
+    pub since: f64,
+}
+
+/// A member's declared time budget for its newest Background job (C12). The
+/// budget never stops anything; it only says when the work is overdue.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Budget {
+    pub label: String,
+    pub minutes: u32,
+    pub red_minutes: u32,
+    pub declared_at: f64,
+    /// Filled when the dispatcher ties the budget to live Background work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobRef>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub amber_told: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub red_told: bool,
+}
+
+impl Budget {
+    /// How long the job has run, from its start or from the declaration.
+    pub(crate) fn elapsed(&self, now: f64) -> f64 {
+        now - self.job.as_ref().map(|job| job.since).unwrap_or(self.declared_at)
+    }
+
+    /// `ok`, `amber` (past the estimate) or `red` (past the red time) (C12).
+    pub(crate) fn state(&self, now: f64) -> &'static str {
+        let elapsed = self.elapsed(now);
+        if elapsed >= self.red_minutes as f64 * 60.0 {
+            "red"
+        } else if elapsed >= self.minutes as f64 * 60.0 {
+            "amber"
+        } else {
+            "ok"
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DependencyKind {
@@ -244,6 +408,47 @@ pub(crate) struct Dependency {
     pub task: u32,
     #[serde(default)]
     pub kind: DependencyKind,
+}
+
+/// A task of the plan's work, or a check that runs a command in the member's
+/// own folder and is decided by its exit code (C5).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TaskKind {
+    #[default]
+    Task,
+    Check,
+}
+
+impl TaskKind {
+    /// An ordinary task keeps the old JSON shape: `kind` is skipped.
+    pub(crate) fn is_task(&self) -> bool {
+        matches!(self, Self::Task)
+    }
+}
+
+/// The command a check task runs, its expected exit code and its time limit.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Check {
+    pub command: String,
+    #[serde(default)]
+    pub expect_exit: i32,
+    #[serde(default = "default_check_timeout")]
+    pub timeout_minutes: u32,
+}
+
+fn default_check_timeout() -> u32 {
+    30
+}
+
+/// What the member's check ran and printed: the last lines go to the report
+/// and the decision is the exit code (C5).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct CheckResult {
+    pub exit: i32,
+    #[serde(default)]
+    pub tail: String,
+    pub at: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -425,6 +630,13 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// The lead was reminded once that this report still waits for a decision
+    /// (C4); absent until it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reminded_at: Option<f64>,
+    /// The check this attempt ran, when its task is a check task (C5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckResult>,
     #[serde(default)]
     pub report: Option<Report>,
     /// Questions this attempt asked the lead, oldest first (A3).
@@ -467,6 +679,12 @@ pub(crate) struct Task {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    /// A plan task, or a check that runs a command (C5).
+    #[serde(default, skip_serializing_if = "TaskKind::is_task")]
+    pub kind: TaskKind,
+    /// The check a check task runs; absent on a plan task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<Check>,
     #[serde(default)]
     pub criteria: Vec<String>,
     #[serde(default)]
@@ -496,6 +714,10 @@ impl Task {
     }
     pub(crate) fn open_attempt_mut(&mut self) -> Option<&mut Attempt> {
         self.attempts.iter_mut().rev().find(|attempt| attempt.state.open())
+    }
+    /// A check task is decided by the exit code of its command (C5).
+    pub(crate) fn is_check(&self) -> bool {
+        self.kind == TaskKind::Check
     }
 }
 
@@ -542,6 +764,9 @@ pub(crate) struct Phase {
     pub decided_by: String,
     #[serde(default)]
     pub decided_at: Option<f64>,
+    /// The owner's sentence when the lead approved this phase on its word (F13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_word: Option<OwnerWord>,
     /// The lead's edits to this draft since it was added, newest last, for the
     /// owner's diff view (F10): {"kind":"added|removed|changed|moved", ...}.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -604,6 +829,15 @@ pub(crate) struct Team {
     /// The "all tasks decided" message to the lead: sent once per such state.
     #[serde(default, skip_serializing_if = "Notice::is_none")]
     pub idle: Notice,
+    /// The lead's coalesced inbox message (C2).
+    #[serde(default, skip_serializing_if = "Inbox::is_empty")]
+    pub inbox: Inbox,
+    /// Who approved the plan: "You", or "Lead" on the owner's word (F13).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub approved_by: String,
+    /// The owner's sentence the lead approved the plan on (F13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_word: Option<OwnerWord>,
     /// Who finished the team and with what summary; set by `finish`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<Finish>,
@@ -750,23 +984,42 @@ mod tests {
     fn an_old_attempt_loads_with_the_new_fields_at_their_defaults() {
         let team: Team = serde_json::from_value(old_attempt_team()).unwrap();
         assert_eq!(team.settings.start_timeout_seconds, 180);
+        // The lead's load settings (C2, C4, C12) default; an old team has no inbox.
+        assert_eq!(
+            (team.settings.inbox_interval_seconds, team.settings.remind_lead_minutes, team.settings.remind_owner_minutes),
+            (120, 15, 60)
+        );
+        assert_eq!(team.settings.background_red_minutes, 30);
+        assert!(team.inbox.told.is_empty() && team.inbox.told_at == 0.0);
+        assert!(team.members.iter().all(|member| member.pending.is_none()));
+        assert!(team.approved_by.is_empty() && team.owner_word.is_none());
         let attempt = &team.tasks[0].attempts[0];
         assert_eq!((attempt.started_at, attempt.start_warned), (None, false));
+        assert!(attempt.reminded_at.is_none());
+        assert!(attempt.check.is_none());
         assert!(attempt.turn_reply.is_empty());
         assert!(attempt.questions.is_empty());
         assert_eq!(attempt.open_question(), None);
         assert_eq!(team.tasks[0].hold, None);
+        // An ordinary plan task keeps the old shape (C5: no kind, no check).
+        assert_eq!(team.tasks[0].kind, TaskKind::Task);
+        assert!(team.tasks[0].check.is_none());
         let report = attempt.report.as_ref().unwrap();
         assert!(!report.captured);
         assert!(report.replaced.is_empty());
-        // Writing it back adds only the default start timeout to the settings;
-        // the new fields stay absent so an old binary reads the file.
+        // Writing it back adds only the default timeouts to the settings; the
+        // new fields stay absent so an old binary reads the file.
         let value = serde_json::to_value(&team).unwrap();
         assert_eq!(value["settings"]["start_timeout_seconds"], json!(180));
+        assert_eq!(value["settings"]["background_red_minutes"], json!(30));
+        assert!(value.get("inbox").is_none() && value.get("pending").is_none());
+        assert!(value.get("approved_by").is_none() && value.get("owner_word").is_none());
+        assert!(value["tasks"][0].get("kind").is_none() && value["tasks"][0].get("check").is_none());
         let attempt = &value["tasks"][0]["attempts"][0];
-        for key in ["started_at", "start_warned", "turn_reply", "questions"] {
+        for key in ["started_at", "start_warned", "turn_reply", "questions", "reminded_at"] {
             assert!(attempt.get(key).is_none(), "{key} should be skipped when empty");
         }
+        assert!(value["members"][1].get("pending").is_none());
         assert!(value["tasks"][0].get("hold").is_none());
         let report = &attempt["report"];
         assert!(report.get("captured").is_none() && report.get("replaced").is_none());

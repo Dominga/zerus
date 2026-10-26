@@ -48,6 +48,7 @@ mod service_worker;
 mod session_limits;
 mod provider_messages;
 mod processes;
+mod services;
 mod prompt_suggestion;
 mod question_terminal;
 mod questions;

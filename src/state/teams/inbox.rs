@@ -1,0 +1,610 @@
+//! WhiteWh fork: the lead's load (C1-C4). A report, question, permission
+//! request, the lead's own task and a stopped member go to one inbox, not to
+//! one message each; status says what every open task waits for; an undecided
+//! report reminds the lead once and then shows on the owner's attention list.
+use super::model::*;
+use super::plan;
+use serde_json::{json, Value};
+
+/// The most items the inbox reports at once.
+const ITEM_LIMIT: usize = 100;
+/// The most items one coalesced message lists, with the rest named by count.
+const MESSAGE_ITEMS: usize = 10;
+/// The most characters of a summary the inbox keeps.
+const SUMMARY_CHARS: usize = 300;
+
+/// One thing on the lead's desk. `key` names it across ticks, so the coalesced
+/// message never names it twice.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Item {
+    /// `report`, `question`, `permission`, `lead_task`, `stalled` or `budget`.
+    pub kind: &'static str,
+    pub key: String,
+    pub task: Option<u32>,
+    pub member: String,
+    pub since: f64,
+    pub summary: String,
+    pub command: String,
+    /// Extra lines the message shows under the item: B1 puts the exact
+    /// permission command and its source here (4000 characters cut).
+    pub detail: String,
+}
+
+impl Item {
+    /// The item as `hgs team inbox --json` lists it.
+    pub(crate) fn value(&self) -> Value {
+        let mut value = json!({"kind":self.kind,"task":self.task,"member":self.member,"since":self.since,
+            "summary":self.summary,"command":self.command});
+        if !self.detail.is_empty() {
+            value["detail"] = json!(self.detail);
+        }
+        value
+    }
+}
+
+/// One line of a text, never a paragraph: the inbox message stays readable.
+fn summary(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
+    let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > SUMMARY_CHARS {
+        flat.chars().take(SUMMARY_CHARS - 1).collect::<String>() + "\u{2026}"
+    } else {
+        flat
+    }
+}
+
+/// The request id the lead replaces when it runs a command from a message.
+const PLACEHOLDER: &str = "UUID";
+
+/// The report command of a task, with the attempt when there is one.
+fn report_command(team: &Team, task: &Task, attempt: Option<&Attempt>, accept: bool) -> String {
+    let mut body = json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"text":"..."});
+    if let Some(attempt) = attempt {
+        body["attempt"] = json!(attempt.id);
+    }
+    if accept {
+        body["accept"] = json!(true);
+    }
+    format!("{body} | hgs team report --json")
+}
+
+/// The decision command of a report: the lead accepts or rejects it.
+fn decide_command(team: &Team, task: &Task, accept: bool) -> String {
+    format!(
+        "{} | hgs team {} --json",
+        json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id}),
+        if accept { "accept" } else { "reject" }
+    )
+}
+
+/// The items waiting for the lead, oldest first, at most `ITEM_LIMIT`.
+pub(crate) fn items(team: &Team) -> Vec<Item> {
+    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+        return Vec::new();
+    }
+    let mut items: Vec<Item> = Vec::new();
+    for task in &team.tasks {
+        // A report to decide (C2).
+        if task.status == TaskStatus::Submitted {
+            if let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) {
+                if let Some(report) = &attempt.report {
+                    items.push(Item {
+                        kind: "report",
+                        key: format!("report:{}:{}", task.id, attempt.id),
+                        task: Some(task.id),
+                        member: team.role_of(&attempt.member),
+                        since: report.at,
+                        summary: summary(&report.text),
+                        command: decide_command(team, task, true),
+                        detail: String::new(),
+                    });
+                }
+            }
+        }
+        for attempt in &task.attempts {
+            // A member's question the lead answers with `reply` (C2).
+            for question in attempt.questions.iter().filter(|question| question.open()) {
+                items.push(Item {
+                    kind: "question",
+                    key: format!("question:{}", question.id),
+                    task: Some(task.id),
+                    member: team.role_of(&attempt.member),
+                    since: question.at,
+                    summary: summary(&question.text),
+                    command: format!(
+                        "{} | hgs team reply --json",
+                        json!({"request_id":PLACEHOLDER,"team":team.id,"question":question.id,"text":"..."})
+                    ),
+                    detail: String::new(),
+                });
+            }
+        }
+        // The lead's own task: handed out without a message, reported and
+        // accepted in one step (C1).
+        if task.status == TaskStatus::InProgress {
+            if let Some(attempt) = task.open_attempt().filter(|attempt| attempt.member == team.lead) {
+                items.push(Item {
+                    kind: "lead_task",
+                    key: format!("lead_task:{}:{}", task.id, attempt.id),
+                    task: Some(task.id),
+                    member: "Lead".into(),
+                    since: attempt.delivered_at.unwrap_or(attempt.sent_at),
+                    summary: summary(&format!("#{} {}", task.id, task.title)),
+                    command: report_command(team, task, Some(attempt), true),
+                    detail: String::new(),
+                });
+            }
+        }
+        // A member that stopped on its task (C2), unless it waits for an
+        // answer: that is the question item above.
+        let Some(attempt) = task.open_attempt() else { continue };
+        if attempt.member == team.lead || task.status.finished() || attempt.open_question().is_some() {
+            continue;
+        }
+        let member = team.member(&attempt.member);
+        let kind = if attempt.no_report {
+            Some("no_report")
+        } else if member.and_then(|member| member.seen).is_some_and(|seen| !seen.live) {
+            Some("stopped")
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            let role = team.role_of(&attempt.member);
+            let what = if kind == "no_report" {
+                format!("{role} ended its turn on #{} with neither a report nor a reply", task.id)
+            } else {
+                format!("{role}'s session stopped on #{}", task.id)
+            };
+            items.push(Item {
+                kind: "stalled",
+                key: format!("stalled:{}:{}:{kind}", task.id, attempt.id),
+                task: Some(task.id),
+                member: role,
+                since: attempt.turn_ended_at.or(attempt.delivered_at).unwrap_or(attempt.sent_at),
+                summary: summary(&format!("{what}: {}", task.title)),
+                command: format!(
+                    "{} | hgs team retry --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
+                ),
+                detail: String::new(),
+            });
+        }
+    }
+    // The permission requests the dispatcher read from the members' sessions
+    // (C2): each is answerable by its own question id and hash.
+    for member in &team.members {
+        let Some(pending) = &member.pending else { continue };
+        let asked = pending.card_question();
+        items.push(Item {
+            kind: "permission",
+            key: format!("permission:{}:{}", member.id, pending.question_id),
+            task: None,
+            member: team.role_of(&member.id),
+            since: pending.at,
+            summary: if asked.is_empty() { "asks for permission".into() } else { summary(&asked) },
+            command: pending.answer_command(team, &member.id),
+            // B1: the exact command the permission asks about and its source.
+            detail: super::dispatcher::permission_command_line(&pending.card).trim_end().to_owned(),
+        });
+    }
+    items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
+    items.truncate(ITEM_LIMIT);
+    items
+}
+
+impl PendingQuestion {
+    /// The first question of the card and its option ids, as the inbox
+    /// summarizes it: the lead picks one of these ids in its answer.
+    fn card_question(&self) -> String {
+        let mut text = String::new();
+        for item in self.card["questions"].as_array().into_iter().flatten() {
+            if let Some(header) = item["header"].as_str().filter(|header| !header.is_empty()) {
+                text += &format!("{header}: ");
+            }
+            text += item["question"].as_str().unwrap_or_default();
+            for option in item["options"].as_array().into_iter().flatten() {
+                text += &format!(
+                    " [{}] {}",
+                    option["id"].as_str().unwrap_or_default(),
+                    option["label"].as_str().unwrap_or_default()
+                );
+            }
+        }
+        text
+    }
+
+    /// The answer command for the lead: the exact id, hash and answers `hgs
+    /// team answer` expects, with the option ids to replace.
+    fn answer_command(&self, team: &Team, member: &str) -> String {
+        let answers: Vec<Value> = self.card["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|item| json!({"question_id":item["id"],"selected_option_ids":["<option id>"],"text":""}))
+            .collect();
+        format!(
+            "{} | hgs team answer --json",
+            json!({"request_id":PLACEHOLDER,"team":team.id,"member":member,
+                "question_id":self.question_id,"expected_question_hash":self.question_hash,"answers":answers})
+        )
+    }
+}
+
+impl std::fmt::Display for Item {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{}", self.kind.replace('_', " "))
+    }
+}
+
+/// How long an item has waited, as the message says it.
+fn age(now: f64, since: f64) -> String {
+    let minutes = ((now - since).max(0.0) / 60.0).round() as u64;
+    match minutes {
+        0 => "just now".into(),
+        1 => "1 min".into(),
+        minutes => format!("{minutes} min"),
+    }
+}
+
+/// The single message that lists the lead's new items (C2).
+pub(crate) fn text(team: &Team, items: &[Item], now: f64) -> String {
+    let mut text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} inbox]\nTeam: {}. {} item(s) wait for you, oldest first:\n",
+        team.name,
+        items.len()
+    );
+    for (index, item) in items.iter().take(MESSAGE_ITEMS).enumerate() {
+        let task = item.task.map(|task| format!("task #{task} \u{b7} ")).unwrap_or_default();
+        text += &format!(
+            "\n{}. {} \u{b7} {task}{} \u{b7} {}\n   {}\n",
+            index + 1,
+            item,
+            item.member,
+            age(now, item.since),
+            item.summary
+        );
+        // B1: a permission item carries the exact command and its source.
+        if !item.detail.is_empty() {
+            for line in item.detail.lines() {
+                text += &format!("   {line}\n");
+            }
+        }
+        text += &format!("   {}\n", item.command);
+    }
+    if items.len() > MESSAGE_ITEMS {
+        text += &format!("\n[{} more item(s); hgs team inbox --json lists them all]\n", items.len() - MESSAGE_ITEMS);
+    }
+    text += &format!(
+        "\nAll items: {} | hgs team inbox --json\n\
+         A report is not decided by reading it: accept or reject each one. One message lists the new items, \
+         at most once per {} s.",
+        json!({"team":team.id}),
+        team.settings.inbox_interval_seconds
+    );
+    text
+}
+
+/// What one open task waits for and which action unblocks it (C3).
+pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
+    if task.status.finished() {
+        return None;
+    }
+    if let Some(hold) = &task.hold {
+        return Some(json!({"for":"hold","on":[hold.by],"unblock":format!("release #{}", task.id)}));
+    }
+    if task.status == TaskStatus::Submitted {
+        return Some(json!({
+            "for":"lead","on":[team.role_of(&team.lead)],"unblock":format!("accept #{}", task.id)
+        }));
+    }
+    if let Some(attempt) = task.open_attempt() {
+        let role = team.role_of(&attempt.member);
+        if let Some(question) = attempt.open_question() {
+            return Some(json!({"for":"lead","on":[role],"unblock":format!("answer {}", question.id)}));
+        }
+        return Some(json!({"for":"member","on":[role],"unblock":format!("wait for {role}")}));
+    }
+    if task.status == TaskStatus::Draft {
+        return Some(json!({
+            "for":"owner","on":[format!("phase {}", task.phase)],
+            "unblock":format!("approve phase {}", task.phase)
+        }));
+    }
+    // A pending task: the dependency that is not satisfied names the action.
+    let unmet: Vec<u32> = task.deps.iter().filter(|dep| !plan::satisfied(team, dep.task, dep.kind)).map(|dep| dep.task).collect();
+    if !unmet.is_empty() {
+        let first = unmet[0];
+        let hard = team.settings.all_hard
+            || task.deps.iter().find(|dep| dep.task == first).is_some_and(|dep| dep.kind == DependencyKind::Hard);
+        return Some(json!({
+            "for":"deps","on":unmet,
+            "unblock":format!("{} #{}", if hard { "accept" } else { "start" }, first)
+        }));
+    }
+    if !ready {
+        let blockers = plan::barrier_blockers(team, task);
+        if let Some(first) = blockers.first() {
+            return Some(json!({
+                "for":"deps","on":blockers,"unblock":format!("finish #{}", first)
+            }));
+        }
+    }
+    let role = team.role_of(&task.assignee);
+    Some(json!({"for":"member","on":[role],"unblock":format!("wait for {role}")}))
+}
+
+/// The reports the owner's attention list shows: undecided for at least
+/// `remind_owner_minutes` (C4); 0 turns the list off.
+pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
+    let minutes = team.settings.remind_owner_minutes;
+    if minutes == 0 || !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+        return Vec::new();
+    }
+    let mut out: Vec<Value> = team
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Submitted)
+        .filter_map(|task| {
+            let attempt = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported)?;
+            let report = attempt.report.as_ref()?;
+            let waited = (now - report.at).max(0.0);
+            (waited >= minutes as f64 * 60.0).then(|| {
+                json!({"kind":"report","task":task.id,"member":team.role_of(&attempt.member),
+                    "since":report.at,"minutes":(waited / 60.0).round() as u64})
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a["since"].as_f64().unwrap_or_default().total_cmp(&b["since"].as_f64().unwrap_or_default()));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::ops::{self, Actor};
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn team() -> Team {
+        let (mut team, _) = ops::create(
+            "t",
+            &json!({"name":"Checkout","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
+        )
+        .unwrap();
+        ops::apply(
+            &mut team,
+            "plan",
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","session":{"name":"codex/x/dev","run_id":"r1"}}],
+                "tasks":[{"id":1,"title":"API","assignee":"dev"},{"id":2,"title":"Tests","assignee":"dev","deps":[{"task":1}]}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        team
+    }
+
+    fn delivered(team: &mut Team, id: u32) {
+        let task = team.task_mut(id).unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: format!("00000000-0000-4000-8000-{id:012}"),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            started_at: Some(11.0),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+    }
+
+    fn submitted(team: &mut Team, id: u32, at: f64) {
+        delivered(team, id);
+        let attempt = team.task_mut(id).unwrap().attempts.last_mut().unwrap();
+        attempt.state = AttemptState::Reported;
+        attempt.report = Some(Report { text: "Done and checked".into(), at, ..Default::default() });
+        team.task_mut(id).unwrap().status = TaskStatus::Submitted;
+    }
+
+    #[test]
+    fn the_inbox_lists_reports_questions_lead_tasks_and_stalled_work_oldest_first() {
+        let mut team = team();
+        // #1 waits for a decision since 100; #2 has a question since 200.
+        submitted(&mut team, 1, 100.0);
+        delivered(&mut team, 2);
+        {
+            let attempt = team.task_mut(2).unwrap().attempts.last_mut().unwrap();
+            attempt.questions.push(Question {
+                id: "q1".into(),
+                text: "Which database?".into(),
+                at: 200.0,
+                ..Default::default()
+            });
+        }
+        // The lead's own task, handed out without a message (C1).
+        team.tasks.push(Task { id: 3, title: "Plan review".into(), assignee: "lead".into(), status: TaskStatus::InProgress, ..Default::default() });
+        team.task_mut(3).unwrap().attempts.push(Attempt {
+            n: 1,
+            id: "L3".into(),
+            member: "lead".into(),
+            state: AttemptState::Delivered,
+            sent_at: 150.0,
+            delivered_at: Some(150.0),
+            started_at: Some(150.0),
+            ..Default::default()
+        });
+        // A stopped member's open task.
+        team.tasks.push(Task { id: 4, title: "Docs".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+        team.task_mut(4).unwrap().attempts.push(Attempt {
+            n: 1,
+            id: "S4".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 50.0,
+            delivered_at: Some(50.0),
+            ..Default::default()
+        });
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 60.0, live: false });
+        let items = super::items(&team);
+        let kinds: Vec<&str> = items.iter().map(|item| item.kind).collect();
+        // Oldest first: the stopped task at 50, the report at 100, the lead's
+        // task at 150, the question at 200.
+        assert_eq!(kinds, ["stalled", "report", "lead_task", "question"]);
+        assert_eq!(items[1].task, Some(1));
+        assert_eq!(items[1].member, "Backend");
+        assert!(items[1].summary.contains("Done and checked"));
+        assert!(items[1].command.contains("hgs team accept --json"), "{}", items[1].command);
+        assert!(items[3].command.contains("\"question\":\"q1\"") && items[3].command.contains("hgs team reply --json"));
+        assert!(items[2].command.contains("\"accept\":true") && items[2].command.contains("hgs team report --json"));
+        assert!(items[0].command.contains("hgs team retry --json"));
+        // `hgs team inbox --json` shows the same fields.
+        let value = items[1].value();
+        assert_eq!((value["kind"].as_str(), value["task"].as_u64(), value["since"].as_f64()), (Some("report"), Some(1), Some(100.0)));
+        // A paused team still has a lead to decide; a finished one does not.
+        team.status = TeamStatus::Paused;
+        assert!(!super::items(&team).is_empty());
+        team.status = TeamStatus::Done;
+        assert!(super::items(&team).is_empty());
+    }
+
+    #[test]
+    fn a_permission_request_is_answerable_from_the_inbox() {
+        let mut team = team();
+        let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        member.pending = Some(PendingQuestion {
+            question_id: "q9".into(),
+            question_hash: "h9".into(),
+            approval: true,
+            at: 20.0,
+            card: json!({"questions":[{"id":"decision","header":"Bash","question":"Run the build?",
+                "options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}]}]}),
+        });
+        let items = super::items(&team);
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!((item.kind, item.member.as_str(), item.task), ("permission", "Backend", None));
+        assert!(item.summary.contains("Bash: Run the build?"), "{}", item.summary);
+        // The option ids the answer needs are in the summary.
+        assert!(item.summary.contains("[allow] Allow") && item.summary.contains("[deny] Deny"), "{}", item.summary);
+        assert!(item.command.contains("\"question_id\":\"q9\"") && item.command.contains("\"expected_question_hash\":\"h9\""));
+        assert!(item.command.contains("hgs team answer --json") && item.command.contains("\"question_id\":\"decision\""));
+        // No stored request, no item.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().pending = None;
+        assert!(super::items(&team).is_empty());
+    }
+
+    #[test]
+    fn the_coalesced_message_names_each_new_item_with_its_age_and_command() {
+        let mut team = team();
+        submitted(&mut team, 1, 600.0);
+        delivered(&mut team, 2);
+        team.task_mut(2).unwrap().attempts.last_mut().unwrap().questions.push(Question {
+            id: "q1".into(),
+            text: "Which database?".into(),
+            at: 900.0,
+            ..Default::default()
+        });
+        let items = super::items(&team);
+        let text = super::text(&team, &items, 1200.0);
+        assert!(text.contains("from: Zerus \u{b7} inbox") && text.contains("2 item(s)"), "{text}");
+        assert!(text.contains("1. report") && text.contains("2. question"), "{text}");
+        assert!(text.contains("10 min") && text.contains("5 min"), "{text}");
+        assert!(text.contains("Done and checked") && text.contains("Which database?"), "{text}");
+        assert!(text.contains("hgs team accept --json") && text.contains("hgs team reply --json"), "{text}");
+        assert!(text.contains("hgs team inbox --json"), "{text}");
+        // A long list is summarized, never sent whole.
+        let mut many = team.clone();
+        for id in 10..40u32 {
+            many.tasks.push(Task {
+                id,
+                title: format!("Task {id}"),
+                assignee: "dev".into(),
+                status: TaskStatus::Submitted,
+                attempts: vec![Attempt {
+                    n: 1,
+                    id: format!("A{id}"),
+                    member: "dev".into(),
+                    state: AttemptState::Reported,
+                    report: Some(Report { text: "Done".into(), at: id as f64, ..Default::default() }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        let text = super::text(&many, &super::items(&many), 40.0);
+        assert!(text.contains("[20 more item(s)") || text.contains("more item(s)"), "{text}");
+    }
+
+    #[test]
+    fn every_open_task_says_what_it_waits_for() {
+        let mut team = team();
+        // #1 waits for a free member; #2 waits for #1.
+        let tasks = team.tasks.clone();
+        assert_eq!(waits(&team, &tasks[0], true).unwrap(), json!({"for":"member","on":["Backend"],"unblock":"wait for Backend"}));
+        assert_eq!(waits(&team, &tasks[1], false).unwrap(), json!({"for":"deps","on":[1],"unblock":"accept #1"}));
+        // A soft dependency still pending names the start that frees it.
+        team.task_mut(2).unwrap().deps[0].kind = DependencyKind::Soft;
+        assert_eq!(waits(&team, &team.task(2).unwrap().clone(), false).unwrap()["unblock"], "start #1");
+        team.task_mut(2).unwrap().deps[0].kind = DependencyKind::Hard;
+        // A hard dependency that is in progress still waits for acceptance.
+        delivered(&mut team, 1);
+        assert_eq!(waits(&team, &team.task(2).unwrap().clone(), false).unwrap()["unblock"], "accept #1");
+        // A report waits for the lead, a question too.
+        submitted(&mut team, 1, 20.0);
+        assert_eq!(waits(&team, &team.task(1).unwrap().clone(), true).unwrap()["for"], "lead");
+        assert_eq!(waits(&team, &team.task(1).unwrap().clone(), true).unwrap()["unblock"], "accept #1");
+        delivered(&mut team, 2);
+        team.task_mut(2).unwrap().attempts.last_mut().unwrap().questions.push(Question {
+            id: "q3".into(),
+            text: "Which?".into(),
+            at: 30.0,
+            ..Default::default()
+        });
+        assert_eq!(waits(&team, &team.task(2).unwrap().clone(), false).unwrap(), json!({"for":"lead","on":["Backend"],"unblock":"answer q3"}));
+        // A held task, a draft phase and a finished task.
+        let mut held = team.task(1).unwrap().clone();
+        held.status = TaskStatus::Pending;
+        held.hold = Some(Hold { by: "Lead".into(), at: 1.0, reason: "Later".into() });
+        assert_eq!(waits(&team, &held, false).unwrap()["for"], "hold");
+        assert_eq!(waits(&team, &held, false).unwrap()["unblock"], "release #1");
+        let draft = Task { id: 9, title: "Later".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() };
+        assert_eq!(waits(&team, &draft, false).unwrap()["for"], "owner");
+        assert_eq!(waits(&team, &draft, false).unwrap()["unblock"], "approve phase 2");
+        let mut done = team.task(1).unwrap().clone();
+        done.status = TaskStatus::Accepted;
+        assert!(waits(&team, &done, true).is_none());
+    }
+
+    #[test]
+    fn a_barrier_phase_waits_for_the_earlier_tasks() {
+        let mut team = team();
+        team.phases.push(Phase { n: 2, title: "QA".into(), barrier: true, approval: Approval::Auto, state: PhaseState::Approved, ..Default::default() });
+        team.tasks.push(Task { id: 3, title: "Verify".into(), phase: 2, assignee: "dev".into(), ..Default::default() });
+        delivered(&mut team, 1);
+        team.task_mut(2).unwrap().status = TaskStatus::Cancelled;
+        let wait = waits(&team, &team.task(3).unwrap().clone(), false).unwrap();
+        assert_eq!(wait["for"], "deps");
+        assert_eq!(wait["on"], json!([1]));
+        assert!(wait["unblock"].as_str().unwrap().starts_with("finish #"), "{wait}");
+    }
+
+    #[test]
+    fn an_owner_attention_item_appears_after_the_owner_reminder_time() {
+        let mut team = team();
+        submitted(&mut team, 1, 1000.0);
+        // Before the default 60 minutes: nothing for the owner.
+        assert!(attention(&team, 1000.0 + 59.0 * 60.0).is_empty());
+        let listed = attention(&team, 1000.0 + 60.0 * 60.0);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0], json!({"kind":"report","task":1,"member":"Backend","since":1000.0,"minutes":60}));
+        // 0 turns the owner's list off.
+        team.settings.remind_owner_minutes = 0;
+        assert!(attention(&team, 100_000.0).is_empty());
+        // A decided report leaves it.
+        team.settings.remind_owner_minutes = 60;
+        team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+        assert!(attention(&team, 100_000.0).is_empty());
+    }
+}

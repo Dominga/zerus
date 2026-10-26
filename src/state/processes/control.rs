@@ -116,10 +116,14 @@ impl WorkSample {
         let first = current.iter().map(|pid| &rows[pid])
             .min_by(|a,b| a.started.total_cmp(&b.started));
         json!({"count":current.len(),"started_at":first.map(|p|p.started),
-            "command":first.map(|p|journal::clipped(&json!(p.command),240)).unwrap_or_default(),"sampled_at":now()})
+            "command":first.map(|p|journal::clipped(&json!(p.command),240)).unwrap_or_default(),"sampled_at":now(),
+            // G7: services are listed here, never counted as Background work.
+            "services":services_of(record, &rows)})
     }
 }
-fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
+/// Every process the agent started that is work or a candidate service: a
+/// shell, its own process group or a direct child (G7).
+fn candidates(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
     let root = record["pid"].as_u64().unwrap_or(0) as u32;
     let Some(agent) = rows.get(&root) else {
         return vec![];
@@ -160,6 +164,41 @@ fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
             !candidates
                 .iter()
                 .any(|other| pid != other && descendant(*pid, *other, rows))
+        })
+        .collect()
+}
+
+fn configured_services(record: &Value) -> Vec<crate::state::services::Service> {
+    crate::state::services::configured(string(record, "agent"), string(record, "cwd"))
+}
+
+fn service_of(services: &[crate::state::services::Service], process: &Process) -> Option<String> {
+    services
+        .iter()
+        .find(|service| crate::state::services::is_service(std::slice::from_ref(*service), &process.executable, &process.command))
+        .map(|service| service.name.clone())
+}
+
+/// The work of the session: processes the agent started, without the MCP
+/// servers and services it keeps alive (G7).
+fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
+    let services = configured_services(record);
+    candidates(record, rows)
+        .into_iter()
+        .filter(|pid| service_of(&services, &rows[pid]).is_none())
+        .collect()
+}
+
+/// The MCP servers and services the session runs, with their names and the
+/// time they started (G7).
+fn services_of(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<Value> {
+    let services = configured_services(record);
+    candidates(record, rows)
+        .into_iter()
+        .filter_map(|pid| {
+            let name = service_of(&services, &rows[&pid])?;
+            Some(json!({"name":name,"command":journal::clipped(&json!(rows[&pid].command),240),
+                "since":rows[&pid].started,"os_pid":pid}))
         })
         .collect()
 }

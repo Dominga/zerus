@@ -158,7 +158,7 @@ pub(crate) fn chain(tasks: &[Task], id: u32) -> BTreeSet<u32> {
 
 /// Whether one dependency lets its dependent start: a hard one needs the
 /// dependency Accepted, a soft one only started.
-fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
+pub(crate) fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
     let Some(dep) = team.task(task) else { return false };
     let hard = team.settings.all_hard || kind == DependencyKind::Hard;
     if hard {
@@ -168,19 +168,55 @@ fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
     }
 }
 
+/// Every task that depends on `id`, directly or through another task (C6).
+pub(crate) fn dependants_count(tasks: &[Task], id: u32) -> usize {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![id];
+    while let Some(task) = pending.pop() {
+        for dependent in dependents(tasks, task) {
+            if seen.insert(dependent) {
+                pending.push(dependent);
+            }
+        }
+    }
+    seen.len()
+}
+
+/// The order the dispatcher hands ready tasks to members (C6): the task with
+/// the most transitive dependants first, then the lowest number. Each member
+/// takes at most one task per tick, so this decides which of its ready tasks
+/// goes first and never starves a task that unblocks the most work.
+pub(crate) fn dispatch_order(team: &Team, ready: Vec<u32>) -> Vec<u32> {
+    let mut ordered = ready;
+    ordered.sort_by_key(|id| (std::cmp::Reverse(dependants_count(&team.tasks, *id)), *id));
+    ordered
+}
+
+/// The earlier-phase tasks a barrier phase still waits for (C3): a barrier
+/// task starts only once every task of a lower phase is finished.
+pub(crate) fn barrier_blockers(team: &Team, task: &Task) -> Vec<u32> {
+    let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return Vec::new() };
+    if !phase.barrier {
+        return Vec::new();
+    }
+    let target = phase.order();
+    let order_of = |n: u32| team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order());
+    let mut blockers: Vec<u32> = team
+        .tasks
+        .iter()
+        .filter(|other| other.phase != task.phase && order_of(other.phase) < target && !other.status.finished())
+        .map(|other| other.id)
+        .collect();
+    blockers.sort_unstable();
+    blockers
+}
+
 /// A barrier phase's tasks wait until every task of a lower phase is finished:
 /// accepted, rejected or cancelled. A Draft task left in an earlier phase also
 /// holds the barrier. "Lower" follows the display and approval order (F10), so
 /// a moved draft keeps its barrier semantics with its new place.
 fn barrier_holds(team: &Team, task: &Task) -> bool {
-    let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return false };
-    if !phase.barrier {
-        return false;
-    }
-    let target = phase.order();
-    // A phase without a record (the approved plan's phase 1) keeps its number.
-    let order_of = |n: u32| team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order());
-    team.tasks.iter().any(|other| other.phase != task.phase && order_of(other.phase) < target && !other.status.finished())
+    !barrier_blockers(team, task).is_empty()
 }
 
 /// Pending tasks whose dependencies and phase barrier are satisfied, in id order.
@@ -217,6 +253,183 @@ pub(crate) struct Finding {
 pub(crate) struct Validation {
     pub errors: Vec<Finding>,
     pub warnings: Vec<Finding>,
+    /// The plan's shape while it is being drawn and while it runs (C7).
+    pub health: Health,
+}
+
+/// What a member carries of the plan (C7).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct MemberLoad {
+    pub tasks: usize,
+    pub on_critical_path: usize,
+}
+
+/// A task that waits for a review, QA or acceptance task (C7).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct FanIn {
+    pub task: u32,
+    pub waits_for: Vec<u32>,
+    pub kind: String,
+}
+
+/// A member idle without ready work while tasks are open (C7).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct Starved {
+    pub member: String,
+    pub role: String,
+    pub minutes: u64,
+    /// The open tasks and what they wait for, the blocking chain.
+    pub blocking: Vec<u32>,
+}
+
+/// The plan-health numbers the lead reads before asking for approval and the
+/// owner sees in the GUI (C7).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct Health {
+    pub tasks: usize,
+    pub critical_path: usize,
+    pub parallelism: f64,
+    pub per_member: BTreeMap<String, MemberLoad>,
+    pub widest_ready: usize,
+    pub fan_in: Vec<FanIn>,
+    pub warnings: Vec<String>,
+    /// Filled by status while the team runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub starved: Vec<Starved>,
+}
+
+/// The longest path to a task with no dependent, cutting cycle back edges
+/// (C7): the height of a node in the dependency DAG.
+fn heights(tasks: &[Task]) -> BTreeMap<u32, u32> {
+    fn height(tasks: &[Task], id: u32, memo: &mut BTreeMap<u32, u32>, visiting: &mut BTreeSet<u32>) -> u32 {
+        if let Some(&found) = memo.get(&id) {
+            return found;
+        }
+        if !visiting.insert(id) {
+            return 0;
+        }
+        let found = dependents(tasks, id)
+            .into_iter()
+            .map(|dependent| height(tasks, dependent, memo, visiting).saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        visiting.remove(&id);
+        memo.insert(id, found);
+        found
+    }
+    let mut memo = BTreeMap::new();
+    for task in tasks {
+        height(tasks, task.id, &mut memo, &mut BTreeSet::new());
+    }
+    memo
+}
+
+/// A review, QA or acceptance task, by the role of its assignee and then its
+/// title (C7): the tasks a fan-in barrier usually waits for.
+fn review_kind(role: &str, title: &str) -> Option<&'static str> {
+    let classify = |haystack: &str| {
+        let haystack = haystack.to_lowercase();
+        if haystack.contains("accept") {
+            Some("accept")
+        } else if haystack.contains("qa") || haystack.contains("test") || haystack.contains("verif") {
+            Some("qa")
+        } else if haystack.contains("review") {
+            Some("review")
+        } else {
+            None
+        }
+    };
+    classify(role).or_else(|| classify(title))
+}
+
+/// The plan-health block (C7): the critical path, expected parallelism, each
+/// member's share, the widest ready layer, fan-in barriers and the warnings a
+/// planning lead must read before asking for approval.
+pub(crate) fn health(team: &Team) -> Health {
+    let tasks = &team.tasks;
+    let mut health = Health { tasks: tasks.len(), ..Default::default() };
+    if tasks.is_empty() {
+        return health;
+    }
+    let depth = layers(tasks);
+    let height = heights(tasks);
+    let longest: BTreeMap<u32, u32> = tasks
+        .iter()
+        .map(|task| (task.id, depth.get(&task.id).copied().unwrap_or(0) + height.get(&task.id).copied().unwrap_or(0) + 1))
+        .collect();
+    health.critical_path = longest.values().copied().max().unwrap_or(0) as usize;
+    health.parallelism = if health.critical_path == 0 { 0.0 } else { tasks.len() as f64 / health.critical_path as f64 };
+    health.widest_ready = depth.values().fold(BTreeMap::<u32, usize>::new(), |mut layers, layer| {
+        *layers.entry(*layer).or_default() += 1;
+        layers
+    }).values().copied().max().unwrap_or(0);
+    for task in tasks {
+        let load = health.per_member.entry(task.assignee.clone()).or_default();
+        load.tasks += 1;
+        if longest.get(&task.id).copied().unwrap_or(0) as usize == health.critical_path {
+            load.on_critical_path += 1;
+        }
+    }
+    for task in tasks {
+        let mut waits_for = Vec::new();
+        let mut kind = None;
+        for dep in task.deps.iter().filter(|dep| dep.kind == DependencyKind::Hard || team.settings.all_hard) {
+            let Some(found) = team.task(dep.task) else { continue };
+            let role = team.member(&found.assignee).map(|member| member.role.as_str()).unwrap_or_default();
+            if let Some(found_kind) = review_kind(role, &found.title) {
+                waits_for.push(dep.task);
+                kind.get_or_insert(found_kind);
+            }
+        }
+        if let Some(kind) = kind {
+            health.fan_in.push(FanIn { task: task.id, waits_for: waits_for.clone(), kind: kind.to_owned() });
+            health.warnings.push(format!(
+                "Task #{} waits for the {} task #{} without naming what it needs (C10)",
+                task.id,
+                kind,
+                waits_for[0]
+            ));
+        }
+    }
+    let active = team.members.iter().filter(|member| member.state != MemberState::Removed).count();
+    if active >= 3 && health.parallelism < 1.5 {
+        health.warnings.push(format!(
+            "parallelism {:.1}: {} tasks over a critical path of {}; {} members will idle",
+            health.parallelism, health.tasks, health.critical_path, active
+        ));
+    }
+    for (member, load) in &health.per_member {
+        if health.critical_path > 1 && load.on_critical_path * 2 > health.critical_path {
+            health.warnings.push(format!(
+                "{} holds {} of the {} critical-path tasks",
+                team.role_of(member),
+                load.on_critical_path,
+                health.critical_path
+            ));
+        }
+    }
+    health
+}
+
+/// Members idle without a ready task while tasks are open (C7), for status.
+pub(crate) fn starved(team: &Team, now: f64) -> Vec<Starved> {
+    let open: Vec<u32> = team.tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();
+    if open.is_empty() || !matches!(team.status, super::model::TeamStatus::Running | super::model::TeamStatus::Paused) {
+        return Vec::new();
+    }
+    team.members
+        .iter()
+        .filter(|member| member.id != team.lead && member.state != MemberState::Removed)
+        .filter_map(|member| {
+            let since = member.starved_since?;
+            Some(Starved {
+                member: member.id.clone(),
+                role: team.role_of(&member.id),
+                minutes: ((now - since).max(0.0) / 60.0).round() as u64,
+                blocking: open.iter().copied().take(5).collect(),
+            })
+        })
+        .collect()
 }
 
 /// Plan errors block Approve & Run; warnings do not. `offline` lists the
@@ -311,6 +524,7 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             ));
         }
     }
+    found.health = health(team);
     found
 }
 
@@ -448,5 +662,82 @@ mod tests {
         // Cancelled tasks need no assignee.
         t.tasks[0].status = Cancelled;
         assert!(validate(&t, &BTreeSet::new()).errors.iter().all(|f| f.task != Some(1)));
+    }
+
+    #[test]
+    fn the_dispatcher_hands_out_the_task_with_the_most_transitive_dependants() {
+        // #1 unblocks nothing, #2 unblocks #4 and through it #5, #3 unblocks
+        // #6; #7 and #8 tie, so the lower number goes first (C6).
+        let t = team(vec![
+            task(1, &[], Pending),
+            task(2, &[], Pending),
+            task(3, &[], Pending),
+            task(4, &[(2, Hard)], Pending),
+            task(5, &[(4, Hard)], Pending),
+            task(6, &[(3, Hard)], Pending),
+            task(7, &[], Pending),
+            task(8, &[], Pending),
+        ]);
+        assert_eq!(dependants_count(&t.tasks, 2), 2);
+        assert_eq!(dependants_count(&t.tasks, 4), 1);
+        assert_eq!(dependants_count(&t.tasks, 1), 0);
+        assert_eq!(dispatch_order(&t, vec![1, 2, 3, 7, 8]), vec![2, 3, 1, 7, 8]);
+    }
+
+    #[test]
+    fn the_health_block_names_the_critical_path_and_the_fan_in() {
+        let mut t = team(vec![
+            task(1, &[], Pending),
+            task(2, &[(1, Hard)], Pending),
+            task(3, &[(2, Hard)], Pending),
+            task(4, &[], Pending),
+            task(5, &[], Pending),
+        ]);
+        t.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        t.tasks[4].assignee = "qa".into();
+        t.tasks[4].title = "QA review".into();
+        t.tasks[2].deps.push(Dependency { task: 5, kind: Hard });
+        let found = validate(&t, &BTreeSet::new());
+        let health = &found.health;
+        // The chain 1 -> 2 -> 3 is the critical path; the widest layer is the
+        // three independent tasks at depth 0.
+        assert_eq!((health.tasks, health.critical_path), (5, 3));
+        assert!((health.parallelism - 5.0 / 3.0).abs() < 1e-9);
+        assert_eq!(health.widest_ready, 3);
+        assert_eq!(health.per_member["dev"], MemberLoad { tasks: 4, on_critical_path: 3 });
+        assert_eq!(health.per_member["qa"], MemberLoad { tasks: 1, on_critical_path: 0 });
+        // A hard dependency on the QA task is a fan-in barrier.
+        assert_eq!(health.fan_in, vec![FanIn { task: 3, waits_for: vec![5], kind: "qa".into() }]);
+        assert!(health.warnings.iter().any(|warning| warning.contains("#3 waits for the qa task #5")), "{:?}", health.warnings);
+        // One member holding more than half the critical path is a warning.
+        assert!(health.warnings.iter().any(|warning| warning.contains("Backend holds 3 of the 3")), "{:?}", health.warnings);
+        // Status carries the same block.
+        let value = serde_json::to_value(&found).unwrap();
+        assert_eq!(value["health"]["critical_path"], 3);
+        assert_eq!(value["health"]["per_member"]["dev"]["on_critical_path"], 3);
+    }
+
+    #[test]
+    fn low_parallelism_and_a_long_chain_warn_the_planning_lead() {
+        // Ten tasks in one chain: one task at a time, so three members idle.
+        let mut tasks: Vec<Task> = (1..=10u32).map(|id| task(id, &[], Pending)).collect();
+        for id in 2..=10u32 {
+            tasks[(id - 1) as usize].deps.push(Dependency { task: id - 1, kind: Hard });
+        }
+        let mut t = team(tasks);
+        t.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        let health = &validate(&t, &BTreeSet::new()).health;
+        assert_eq!((health.critical_path, health.widest_ready), (10, 1));
+        assert!((health.parallelism - 1.0).abs() < 1e-9);
+        assert!(health.warnings.iter().any(|warning| warning.contains("parallelism 1.0")), "{:?}", health.warnings);
+    }
+
+    #[test]
+    fn a_barrier_blocker_is_named_for_the_wait() {
+        let mut t = team(vec![task(1, &[], InProgress), task(2, &[], Accepted), task(3, &[], Pending)]);
+        t.tasks[2].phase = 2;
+        t.phases = vec![Phase { n: 2, barrier: true, ..Default::default() }];
+        assert_eq!(barrier_blockers(&t, &t.tasks[2]), vec![1]);
+        assert!(barrier_blockers(&t, &t.tasks[0]).is_empty());
     }
 }

@@ -4,7 +4,9 @@
 pub(crate) mod catalog;
 pub(crate) mod commands;
 pub(crate) mod dispatcher;
+pub(crate) mod inbox;
 pub(crate) mod model;
 pub(crate) mod ops;
+pub(crate) mod owner_word;
 pub(crate) mod plan;
 pub(crate) mod store;

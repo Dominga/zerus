@@ -3,6 +3,7 @@
 //! to free members and forwards reports to the lead. A hand-off is recorded
 //! before it is sent and never sent again once it may have arrived.
 use super::super::*;
+use super::inbox;
 use super::model::*;
 use super::ops;
 use super::plan;
@@ -18,6 +19,9 @@ const TICK: Duration = Duration::from_secs(3);
 const IDLE_EXIT: Duration = Duration::from_secs(300);
 /// After a refused hand-off the member gets no new one for this long.
 const REFUSAL_PAUSE: f64 = 30.0;
+/// How long a member may sit idle without ready work before the lead hears
+/// once that the plan starves it (C7).
+const STARVED_AFTER: f64 = 20.0 * 60.0;
 /// The worker's session listing is bounded, so a stop request is never far away.
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The worker's log keeps at most this much before it starts over.
@@ -56,6 +60,11 @@ pub(crate) struct Seen {
     /// Its own jobs run in the background: work in progress, not a finished
     /// turn (`process_work.count > 0`, or activity `background`) (A2).
     pub background: bool,
+    /// The newest Background job: its command and when it started (C12).
+    pub work: Option<SeenWork>,
+    /// The MCP servers and services it runs, which are not Background work
+    /// (G7).
+    pub services: Vec<SeenService>,
     /// Waiting on an answer: a question or a permission request.
     pub asking: bool,
     /// Its process or native session runs.
@@ -67,6 +76,21 @@ pub(crate) struct Seen {
     /// (None when the host does not know it).
     pub muted: bool,
     pub notify_revision: Option<u64>,
+}
+
+/// The newest Background job of a session (C12).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeenWork {
+    pub command: String,
+    pub started_at: f64,
+}
+
+/// An MCP server or service of a session (G7).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeenService {
+    pub name: String,
+    pub command: String,
+    pub since: f64,
 }
 
 /// Every session of this computer and its peers from one listing.
@@ -90,8 +114,31 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 && record["send_available"] != false;
             // Background work is not a finished turn, whatever the activity
             // says: a long command, a watcher or a native job still runs (A2).
-            let background = record["process_work"]["count"].as_u64().is_some_and(|count| count > 0)
-                || activity == "background";
+            // C12: its command and start let a declared budget tell the lead
+            // when the job is overdue.
+            let work = record["process_work"]
+                .as_object()
+                .filter(|work| work.get("count").and_then(|count| count.as_u64()).is_some_and(|count| count > 0))
+                .map(|work| SeenWork {
+                    command: work.get("command").and_then(|command| command.as_str()).unwrap_or_default().to_owned(),
+                    started_at: work.get("started_at").and_then(|started| started.as_f64()).unwrap_or(0.0),
+                });
+            let background = work.is_some() || activity == "background";
+            // G7: MCP servers and services ride along with the session and are
+            // not Background work.
+            let services: Vec<SeenService> = record["process_work"]["services"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|service| {
+                    let name = service["name"].as_str().unwrap_or_default();
+                    (!name.is_empty()).then(|| SeenService {
+                        name: name.to_owned(),
+                        command: service["command"].as_str().unwrap_or_default().to_owned(),
+                        since: service["since"].as_f64().unwrap_or(0.0),
+                    })
+                })
+                .collect();
             sessions.push(Seen {
                 host: host.clone(),
                 name: field("name").to_owned(),
@@ -106,6 +153,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 activity,
                 phase: field("phase").to_owned(),
                 background,
+                work,
+                services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 live,
                 cwd: field("cwd").to_owned(),
@@ -130,8 +179,37 @@ pub(crate) enum Step {
     StartLate { task: u32 },
     /// Tells the free lead once that a hand-out has not started (A1).
     TellStartLate { task: u32 },
-    /// Tells the free lead about a member's question, with the reply command (A3).
-    LeadQuestion { task: u32, question: String },
+    /// Reads a member's native question or permission request into the inbox;
+    /// clears it once the member no longer asks (C2).
+    Permission { member: String },
+    /// The member no longer asks: its stored permission request leaves the
+    /// inbox (C2).
+    ClearPermission { member: String },
+    /// The one coalesced message that lists the lead's new inbox items (C2).
+    Inbox,
+    /// Reminds the free lead once that a report still waits for a decision (C4).
+    RemindReport { task: u32 },
+    /// The member is idle without a ready task while tasks are open (C7).
+    Starving { member: String },
+    /// The member got work again or nothing is open: the episode ends (C7).
+    StarvedEnded { member: String },
+    /// Idle without work for too long: tell the free lead once (C7).
+    PlanStarved { member: String },
+    /// The member's Background work appeared; its default red time starts now
+    /// (C12).
+    BackgroundStart { member: String },
+    /// Its Background work ended: the budget ends with the job (C12).
+    BackgroundEnd { member: String },
+    /// Tie a declared budget to the live Background job (C12).
+    BudgetTie { member: String, command: String, since: f64 },
+    /// The job passed its estimate (C12).
+    BudgetAmber { member: String },
+    /// The job passed its red time: tell the lead once (C12).
+    BudgetRed { member: String },
+    /// Background work without a budget passed the default red time (C12).
+    BackgroundRed { member: String, command: String, since: f64 },
+    /// The MCP servers and services the member's session runs changed (G7).
+    Services { member: String, services: Vec<SeenService> },
     /// Gives the member the lead's answer as a message (A3).
     AnswerQuestion { task: u32, question: String },
     TurnEnded { task: u32, at: f64, reply: String },
@@ -148,18 +226,12 @@ pub(crate) enum Step {
     /// `stopped` from it without a listing of its own (L3).
     Liveness { member: String, live: bool },
     NoReport { task: u32 },
-    NotifyLead { task: u32 },
     /// The planning brief of a team created from the desktop.
     Brief,
     /// Tells the lead once that every task is decided: extend or finish.
     AllDecided,
     /// A DeepSeek member's model and effort, before its first message.
     Settings { member: String },
-    /// A member's question for the lead to answer.
-    Question { member: String },
-    /// Tells the lead about a member that stopped on its task (its session
-    /// ended, paused or is gone; or its turn ended with neither report nor reply).
-    Stalled { task: u32, kind: String },
     /// Gives a ready task to a free member with the assignee's role: the
     /// assignee is busy, or failed the task's last attempt.
     Rebalance { task: u32, from: String, to: String },
@@ -251,10 +323,15 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         }
         return steps;
     }
-    let ready = plan::ready(team);
     // Turn ends, No report and reports for the lead, for open work.
     for task in &team.tasks {
         let Some(attempt) = task.attempts.last() else { continue };
+        // C1: the lead's own task is never a delivered turn and its replies
+        // are no report; it appears in the inbox and the lead reports and
+        // accepts it in one step.
+        if attempt.member == team.lead {
+            continue;
+        }
         if attempt.state == AttemptState::Delivered {
             let found = team.member(&attempt.member).and_then(|m| session_of(m, seen));
             let delivered = attempt.delivered_at.unwrap_or(attempt.sent_at);
@@ -327,14 +404,6 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                 (None, None) => {}
             }
         }
-        // Only a report that still waits for a decision: one the lead (or you)
-        // already decided from the status needs no message.
-        if attempt.state == AttemptState::Reported && attempt.notice == Notice::Pending && task.status == TaskStatus::Submitted {
-            let lead = team.member(&team.lead).and_then(|m| session_of(m, seen));
-            if lead.is_some_and(|lead| lead.free) {
-                steps.push(Step::NotifyLead { task: task.id });
-            }
-        }
     }
     // Each tick lists the sessions: a member's liveness is recorded when it
     // changes, so status derives `stopped` without a listing of its own (L3).
@@ -343,6 +412,16 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
         if member.seen.is_none_or(|recorded| recorded.live != found.live) {
             steps.push(Step::Liveness { member: member.id.clone(), live: found.live });
+        }
+        // G7: services ride with the session; status shows them on the member.
+        let changed = member.services.len() != found.services.len()
+            || member
+                .services
+                .iter()
+                .zip(&found.services)
+                .any(|(old, new)| old.name != new.name || old.command != new.command || old.since != new.since);
+        if changed {
+            steps.push(Step::Services { member: member.id.clone(), services: found.services.clone() });
         }
     }
     // A hand-out that never started: the lead hears once, when free (A1).
@@ -359,20 +438,19 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             }
         }
     }
-    // A member's question waits for the lead: one message per question, with
-    // the reply command, once the lead is free (A3).
-    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
-        'questions: for task in &team.tasks {
-            for attempt in &task.attempts {
-                for question in &attempt.questions {
-                    if question.open()
-                        && !attempt.told_lead.iter().any(|kind| kind == &format!("question:{}", question.id))
-                    {
-                        steps.push(Step::LeadQuestion { task: task.id, question: question.id.clone() });
-                        break 'questions;
-                    }
-                }
-            }
+    // A member's native question or permission request goes to the mailbox,
+    // not to a message of its own (C2); one already answered is cleared.
+    for member in &team.members {
+        if member.id == team.lead || member.state == MemberState::Removed {
+            continue;
+        }
+        let Some(session) = member.session.as_ref() else { continue };
+        let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
+        let stale = member.pending.as_ref().is_some_and(|pending| now - pending.at > 60.0);
+        if !found.asking && member.pending.is_some() {
+            steps.push(Step::ClearPermission { member: member.id.clone() });
+        } else if found.asking && found.live && (member.pending.is_none() || stale) {
+            steps.push(Step::Permission { member: member.id.clone() });
         }
     }
     // The lead's answer reaches the member as a message, once its session is
@@ -404,36 +482,41 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             }
         }
     }
+    // C4: a report undecided for `remind_lead_minutes` reminds the free lead
+    // once; the owner sees it in status after `remind_owner_minutes`.
+    let lead_free = team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free);
+    if lead_free && team.settings.remind_lead_minutes > 0 {
+        let after = team.settings.remind_lead_minutes as f64 * 60.0;
+        for task in &team.tasks {
+            if task.status != TaskStatus::Submitted {
+                continue;
+            }
+            let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) else { continue };
+            if attempt.reminded_at.is_some() || attempt.report.as_ref().is_none_or(|report| now - report.at < after) {
+                continue;
+            }
+            steps.push(Step::RemindReport { task: task.id });
+            break;
+        }
+    }
+    // C2: one message lists the new items, at most once per interval.
+    if lead_free {
+        let new = inbox::items(team).into_iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
+        let interval = team.settings.inbox_interval_seconds as f64;
+        if new > 0 && (team.inbox.told_at == 0.0 || now - team.inbox.told_at >= interval) {
+            steps.push(Step::Inbox);
+        }
+    }
     if team.status != TeamStatus::Running {
         return steps;
     }
     // The lead hears once that every task is decided; the next work re-arms it.
-    if team.idle == Notice::Pending
-        && team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free)
-    {
+    if team.idle == Notice::Pending && lead_free {
         steps.push(Step::AllDecided);
-    }
-    // A member that stopped on its task: the lead hears once, when free.
-    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
-        for task in &team.tasks {
-            let Some(attempt) = task.open_attempt() else { continue };
-            let Some(member) = team.member(&attempt.member).filter(|m| m.id != team.lead && m.session.is_some()) else { continue };
-            let kind = if attempt.no_report {
-                "no_report"
-            } else if !session_of(member, seen).is_some_and(|s| s.live) {
-                "stopped"
-            } else {
-                continue;
-            };
-            if !attempt.told_lead.iter().any(|k| k == kind) {
-                steps.push(Step::Stalled { task: task.id, kind: kind.to_owned() });
-                break;
-            }
-        }
     }
     // Open tasks Zerus gave to another member with the same role, in one
     // message to the free lead.
-    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
+    if lead_free {
         let tasks: Vec<u32> = team
             .tasks
             .iter()
@@ -444,16 +527,6 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             steps.push(Step::Rebalanced { tasks });
         }
     }
-    // A member asks the lead, not the owner, once the lead is free; one at a
-    // time. Its permission requests go to the lead as well (the owner's
-    // choice); the lead asks the owner when it should not decide.
-    if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
-        if let Some(member) = team.members.iter().find(|m| {
-            m.id != team.lead && m.state != MemberState::Removed && session_of(m, seen).is_some_and(|s| s.asking)
-        }) {
-            steps.push(Step::Question { member: member.id.clone() });
-        }
-    }
     // Members busy with an open attempt, or handed one in this tick.
     let mut busy: BTreeSet<&str> = team
         .tasks
@@ -461,6 +534,88 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         .filter_map(|task| task.open_attempt())
         .map(|attempt| attempt.member.as_str())
         .collect();
+    // C7: a member idle without a ready task while tasks are open starves the
+    // plan. The lead hears once after 20 minutes; the episode ends with work.
+    let ready_ids = plan::ready(team);
+    let staging_open = team.tasks.iter().any(|task| !task.status.finished());
+    for member in &team.members {
+        if member.id == team.lead || matches!(member.state, MemberState::Removed | MemberState::Paused) {
+            continue;
+        }
+        let Some(session) = member.session.as_ref() else { continue };
+        let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
+        let has_work = busy.contains(member.id.as_str())
+            || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
+        if !staging_open || has_work || !(found.free && found.live) {
+            if member.starved_since.is_some() {
+                steps.push(Step::StarvedEnded { member: member.id.clone() });
+            }
+        } else if member.starved_since.is_none() {
+            steps.push(Step::Starving { member: member.id.clone() });
+        } else if !member.starved_told
+            && now - member.starved_since.unwrap_or(now) >= STARVED_AFTER
+        {
+            steps.push(Step::PlanStarved { member: member.id.clone() });
+        }
+    }
+    // C12: Background work and the budgets declared for it. A job without a
+    // budget gets the default red time; a budget ends with its job and never
+    // stops anything.
+    for member in &team.members {
+        if member.state == MemberState::Removed {
+            continue;
+        }
+        let found = session_of(member, seen);
+        let background = found.is_some_and(|found| found.background);
+        let work = found.and_then(|found| found.work.clone());
+        if !background {
+            let stale_budget = member.budget.as_ref().is_some_and(|budget| budget.job.is_some() || now - budget.declared_at > 60.0);
+            if member.background_since.is_some() || stale_budget {
+                steps.push(Step::BackgroundEnd { member: member.id.clone() });
+            }
+            continue;
+        }
+        if member.background_since.is_none() {
+            steps.push(Step::BackgroundStart { member: member.id.clone() });
+        }
+        match &member.budget {
+            None => {
+                let since = member.background_since.unwrap_or(now);
+                if !member.background_told
+                    && team.settings.background_red_minutes > 0
+                    && now - since >= team.settings.background_red_minutes as f64 * 60.0
+                {
+                    steps.push(Step::BackgroundRed {
+                        member: member.id.clone(),
+                        command: work.map(|work| work.command).unwrap_or_default(),
+                        since,
+                    });
+                }
+            }
+            Some(budget) => {
+                if budget.job.is_none() {
+                    if now - budget.declared_at <= 60.0 {
+                        if let Some(work) = work {
+                            steps.push(Step::BudgetTie {
+                                member: member.id.clone(),
+                                command: work.command,
+                                since: if work.started_at > 0.0 { work.started_at } else { now },
+                            });
+                        }
+                    } else {
+                        steps.push(Step::BackgroundEnd { member: member.id.clone() });
+                    }
+                } else {
+                    let state = budget.state(now);
+                    if state == "red" && !budget.red_told {
+                        steps.push(Step::BudgetRed { member: member.id.clone() });
+                    } else if state != "ok" && !budget.amber_told {
+                        steps.push(Step::BudgetAmber { member: member.id.clone() });
+                    }
+                }
+            }
+        }
+    }
     let mut launching = BTreeSet::new();
     let refused_recently = |member: &Member| {
         team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.member == member.id && a.state == AttemptState::Refused && now - a.sent_at < REFUSAL_PAUSE)
@@ -473,13 +628,32 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             && !refused_recently(member)
             && session_of(member, seen).is_some_and(|s| s.free && !s.run_id.is_empty())
     };
+    // C6: among a member's ready tasks the one with the most transitive
+    // dependants goes first, then the lowest number.
+    let ready = plan::dispatch_order(team, ready_ids);
     for id in ready {
         let Some(task) = team.task(id) else { continue };
         let Some(member) = team.member(&task.assignee) else { continue };
+        // C1: the lead's own task is handed out without a message; it goes to
+        // the inbox and never waits for the lead to be idle.
+        if member.id == team.lead {
+            if matches!(member.state, MemberState::Removed | MemberState::Paused) || busy.contains(member.id.as_str()) {
+                continue;
+            }
+            if member.session.is_none() {
+                if member.launch_id.is_empty() && member.error.is_empty() && launching.insert(member.id.clone()) {
+                    steps.push(Step::Launch { member: member.id.clone() });
+                }
+                continue;
+            }
+            busy.insert(member.id.as_str());
+            steps.push(Step::HandOut { task: id, member: member.id.clone() });
+            continue;
+        }
         // Members with one role do the same work: a ready task goes to a free
         // one when its assignee is busy, and a retry to one that did not fail
         // it (a fresh context). The lead's or your choice stays.
-        if !task.pinned && member.id != team.lead {
+        if !task.pinned {
             let failed = |m: &Member| task.attempts.iter().any(|a| a.member == m.id && matches!(a.state, AttemptState::Rejected | AttemptState::Refused));
             let assignee_fits = available(member, &busy) && !failed(member);
             if !assignee_fits {
@@ -517,13 +691,14 @@ fn coalesce_lead(steps: Vec<Step>) -> Vec<Step> {
     let lead_message = |step: &Step| {
         matches!(
             step,
-            Step::NotifyLead { .. }
+            Step::Inbox
+                | Step::RemindReport { .. }
+                | Step::PlanStarved { .. }
+                | Step::BudgetRed { .. }
+                | Step::BackgroundRed { .. }
                 | Step::TellStartLate { .. }
-                | Step::LeadQuestion { .. }
                 | Step::BlockedLate { .. }
-                | Step::Stalled { .. }
                 | Step::Rebalanced { .. }
-                | Step::Question { .. }
                 | Step::AllDecided
         )
     };
@@ -671,7 +846,20 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
         text += &format!("\nAttempt {} was rejected: {}\n", previous.n, task.decision_reason);
     }
+    if let Some(check) = task.check.as_ref().filter(|_| task.is_check()) {
+        // C5: the member runs the exact command; Zerus decides by its exit code.
+        text += &format!(
+            "\nThis is a check task: run exactly this command in your folder, change nothing else, and report its exit code:\n  {}\n\
+             Expected exit code: {} (timeout {} min).\n",
+            check.command, check.expect_exit, check.timeout_minutes
+        );
+    }
     let at = if member_host.is_empty() { String::new() } else { format!("@{report_host} ") };
+    let mut report = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."});
+    if task.is_check() {
+        report["text"] = json!("");
+        report["check"] = json!({"exit":0,"tail":"the last 40 lines"});
+    }
     // H5: every hand-out names the question route, the current-attempt route
     // and the report command.
     text += &format!(
@@ -683,7 +871,7 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
          the report as your last message: Zerus gives it to the lead. A blocker goes to the lead too: ask it, not the owner.",
         ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."}),
         current = json!({"attempt":attempt.id}),
-        report = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
+        report = report
     );
     text
 }
@@ -725,8 +913,12 @@ pub(crate) fn brief_text(team: &Team) -> String {
          Keep these members unless the goal needs others; nothing runs until the owner approves. \
          Once it runs, answer a member's question with hgs team reply --json, keep a returned task back with \
          hgs team hold --json and give it out again with hgs team release --json; new work goes in a new phase and \
-         you finish the team (hgs guide team-lead).\n\
+         you finish the team (hgs guide team-lead). \
+         Reports, questions, permission requests and your own tasks wait in one inbox \
+         ({{\"team\":\"{}\"}} | hgs team inbox --json): decide a report with hgs team accept --json, and report \
+         and accept your own task in one step with \"accept\":true in hgs team report --json.\n\
          {{\"request_id\":\"{}\",\"team\":\"{}\",\"members\":{},\"tasks\":{}}}",
+        team.id,
         uuid::Uuid::new_v4(),
         team.id,
         serde_json::to_string(&members).unwrap_or_default(),
@@ -794,6 +986,9 @@ pub(crate) fn permission_command_line(card: &Value) -> String {
     }
 }
 
+/// The message a per-item permission used to be (B1's tests read this): the
+/// coalesced inbox message carries the same command line now.
+#[cfg(test)]
 pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> String {
     let role = team.role_of(&member.id);
     let approval = card["approval"] == true;
@@ -836,22 +1031,6 @@ pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> Strin
             "expected_question_hash":card["question_hash"],"answers":answers})
     );
     text
-}
-
-/// The message that tells the lead about a report.
-pub(crate) fn notice_text(team: &Team, task: &Task, attempt: &Attempt) -> String {
-    let report = attempt.report.as_ref().map(|r| r.text.as_str()).unwrap_or_default();
-    format!(
-        "[Zerus team \u{b7} from: {} \u{b7} task: #{} \u{b7} attempt: {}]\nReport for task #{} {}:\n\n{}\n\n\
-         Decide with hgs team accept --json or reject --json (with a reason):\n  {}",
-        team.role_of(&attempt.member),
-        task.id,
-        attempt.n,
-        task.id,
-        task.title,
-        report,
-        json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id})
-    )
 }
 
 /// Runs this hgs with JSON on stdin; the child is no session's own.
@@ -1205,55 +1384,6 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     })
 }
 
-fn notify_lead(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result<()> {
-    let notice_id = uuid::Uuid::new_v4().to_string();
-    let mut message = None;
-    change(store, team_id, |team, _| {
-        let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
-        let task = team.task(task_id).context("unknown task")?;
-        let attempt = task.attempts.last().filter(|a| a.notice == Notice::Pending).context("nothing to forward")?;
-        message = Some((lead, notice_text(team, task, attempt)));
-        let attempt = team.task_mut(task_id).unwrap().attempts.last_mut().unwrap();
-        attempt.notice = Notice::Sending;
-        attempt.notice_id = notice_id.clone();
-        Ok(())
-    })?;
-    let (lead, text) = message.unwrap();
-    let outcome = send(&lead, &notice_id, &text);
-    change(store, team_id, |team, events| {
-        let task = team.task_mut(task_id).context("unknown task")?;
-        let Some(attempt) = task.attempts.iter_mut().find(|a| a.notice_id == notice_id && a.notice == Notice::Sending) else {
-            return Ok(());
-        };
-        let n = attempt.n;
-        attempt.notice = match &outcome {
-            Sent::Delivered => Notice::Sent,
-            Sent::Refused(_) => Notice::Pending,
-            Sent::Uncertain(_) => Notice::Unconfirmed,
-        };
-        if attempt.notice == Notice::Unconfirmed {
-            events.push(Event::new("notice_unconfirmed", json!({"task":task_id,"attempt":n})));
-        }
-        Ok(())
-    })
-}
-
-/// The message that tells the lead a member stopped on its task.
-pub(crate) fn stalled_text(team: &Team, task: &Task, attempt: &Attempt, kind: &str) -> String {
-    let role = team.role_of(&attempt.member);
-    let what = if kind == "no_report" {
-        format!("{role} ended its turn on task #{} {} with neither a report nor a reply.", task.id, task.title)
-    } else {
-        format!("{role}'s session stopped (ended, paused or gone) while on task #{} {}.", task.id, task.title)
-    };
-    format!(
-        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} member stopped]\n{what}\n\
-         Look at it and decide: send it a message to go on, retry or reassign the task (hgs guide team), \
-         or ask the owner if it needs them (a relaunch, a sign-in).",
-        task.id
-    )
-}
-
 /// The message that tells the lead a hand-out never started (A1). Zerus never
 /// re-sends the hand-out and never presses keys: the input may still be waiting
 /// in the member's terminal.
@@ -1265,23 +1395,6 @@ pub(crate) fn start_late_text(team: &Team, task: &Task, attempt: &Attempt, now: 
          #{} was delivered to {role} {minutes} min ago and has not started; its input may be waiting in the terminal.\n\
          Zerus does not re-send a hand-off: check its session, then message it or retry the task (hgs guide team).",
         task.id, task.id
-    )
-}
-
-/// The message that gives the lead a member's question, with the reply
-/// command (A3).
-pub(crate) fn question_to_lead_text(team: &Team, task: &Task, attempt: &Attempt, question: &Question) -> String {
-    let role = team.role_of(&attempt.member);
-    format!(
-        "[Zerus team \u{b7} from: {role} \u{b7} task: #{} \u{b7} question {}]\n\
-         {role} asks about task #{} {}:\n\n{}\n\n\
-         Answer with hgs team reply --json:\n  {}",
-        task.id,
-        question.id,
-        task.id,
-        task.title,
-        question.text,
-        json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"question":question.id,"text":"..."})
     )
 }
 
@@ -1370,23 +1483,6 @@ fn tell_lead_rebalanced(store: &mut Store, team: &Team, tasks: &[u32]) -> anyhow
     })
 }
 
-fn tell_lead_stalled(store: &mut Store, team: &Team, task_id: u32, kind: &str) -> anyhow::Result<()> {
-    let task = team.task(task_id).context("unknown task")?;
-    let attempt = task.open_attempt().context("no open attempt")?.clone();
-    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
-    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &stalled_text(team, task, &attempt, kind));
-    if matches!(outcome, Sent::Refused(_)) {
-        return Ok(());
-    }
-    change(store, &team.id, |team, events| {
-        let role = team.role_of(&attempt.member);
-        let found = team.task_mut(task_id).and_then(|t| t.attempts.iter_mut().find(|a| a.id == attempt.id)).context("unknown attempt")?;
-        found.told_lead.push(kind.to_owned());
-        events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":kind})));
-        Ok(())
-    })
-}
-
 /// Tells the free lead once that a hand-out has not started (A1).
 fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<()> {
     let task = team.task(task_id).context("unknown task")?;
@@ -1401,46 +1497,6 @@ fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow:
         let found = team.task_mut(task_id).and_then(|t| t.attempts.iter_mut().find(|a| a.id == attempt.id)).context("unknown attempt")?;
         found.told_lead.push("start_late".to_owned());
         events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":"start_late"})));
-        Ok(())
-    })
-}
-
-/// Tells the free lead about a member's open question, once (A3).
-fn tell_lead_question(store: &mut Store, team: &Team, task_id: u32, question_id: &str) -> anyhow::Result<()> {
-    let task = team.task(task_id).context("unknown task")?;
-    let (attempt, question) = task
-        .attempts
-        .iter()
-        .rev()
-        .find_map(|attempt| {
-            attempt
-                .questions
-                .iter()
-                .find(|question| question.id == question_id && question.open())
-                .map(|question| (attempt, question))
-        })
-        .context("the question is no longer open")?;
-    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
-    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &question_to_lead_text(team, task, attempt, question));
-    if matches!(outcome, Sent::Refused(_)) {
-        return Ok(());
-    }
-    change(store, &team.id, |team, events| {
-        let role = team
-            .task(task_id)
-            .and_then(|task| {
-                task.attempts.iter().rev().find(|attempt| attempt.questions.iter().any(|question| question.id == question_id))
-            })
-            .map(|attempt| team.role_of(&attempt.member))
-            .unwrap_or_default();
-        let Some(attempt) = team
-            .task_mut(task_id)
-            .and_then(|task| task.attempts.iter_mut().rev().find(|attempt| attempt.questions.iter().any(|question| question.id == question_id)))
-        else {
-            return Ok(());
-        };
-        attempt.told_lead.push(format!("question:{question_id}"));
-        events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":"question","question":question_id})));
         Ok(())
     })
 }
@@ -1484,10 +1540,13 @@ fn send_answer(store: &mut Store, team: &Team, task_id: u32, question_id: &str) 
     })
 }
 
-/// Gives the lead the member's first question or permission request it has not
-/// had. Inspection runs at most every 20 seconds per member.
-fn forward_question(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+/// Reads a member's native question or permission request into the inbox
+/// (C2). Nothing is sent: the coalesced inbox message carries it. Inspection
+/// runs at most every 20 seconds per member; a session that no longer asks
+/// clears the stored request.
+fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
     static CHECKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> = std::sync::OnceLock::new();
+    let member = team.member(member_id).context("unknown member")?;
     let key = format!("{}\n{member_id}", team.id);
     {
         let mut checked = CHECKED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
@@ -1496,37 +1555,290 @@ fn forward_question(store: &mut Store, team: &Team, member_id: &str) -> anyhow::
         }
         checked.insert(key, now());
     }
-    let member = team.member(member_id).context("unknown member")?;
     let session = member.session.as_ref().context("the member has no session")?;
-    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
     let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
-    let Some(card) = record["pending_questions"].as_array().into_iter().flatten().find(|card| {
-        card["can_answer"] != false
-            && !member.asked.contains(&format!("{}:{}", card["question_id"].as_str().unwrap_or_default(), card["question_hash"].as_str().unwrap_or_default()))
-    }) else {
-        return Ok(());
+    let cards = record["pending_questions"].as_array().cloned().unwrap_or_default();
+    let same = member.pending.as_ref().and_then(|pending| {
+        cards
+            .iter()
+            .find(|card| {
+                card["question_id"].as_str() == Some(pending.question_id.as_str())
+                    && card["question_hash"].as_str() == Some(pending.question_hash.as_str())
+            })
+            .cloned()
+    });
+    let ask = if same.is_some() {
+        None
+    } else {
+        cards
+            .iter()
+            .find(|card| {
+                card["can_answer"] != false
+                    && !member.asked.contains(&format!(
+                        "{}:{}",
+                        card["question_id"].as_str().unwrap_or_default(),
+                        card["question_hash"].as_str().unwrap_or_default()
+                    ))
+            })
+            .map(|card| PendingQuestion {
+                question_id: card["question_id"].as_str().unwrap_or_default().to_owned(),
+                question_hash: card["question_hash"].as_str().unwrap_or_default().to_owned(),
+                approval: card["approval"] == true,
+                at: now(),
+                card: card.clone(),
+            })
     };
-    let asked = format!("{}:{}", card["question_id"].as_str().unwrap_or_default(), card["question_hash"].as_str().unwrap_or_default());
-    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &question_text(team, member, card));
+    let answered = ask.is_none() && same.is_none();
+    if ask.is_none() && !answered {
+        return Ok(());
+    }
+    let role = team.role_of(member_id);
+    change(store, &team.id, |team, events| {
+        let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
+        match &ask {
+            Some(pending) => {
+                found.asked.push(format!("{}:{}", pending.question_id, pending.question_hash));
+                let excess = found.asked.len().saturating_sub(50);
+                found.asked.drain(..excess);
+                found.pending = Some(pending.clone());
+                // B1: the lead's answer and status carry the exact request:
+                // its tool, the command and the source of that command.
+                let tool = pending.card["questions"][0]["header"]
+                    .as_str()
+                    .or_else(|| pending.card["tool"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let (command, source) = permission_command(&pending.card);
+                let reason: String =
+                    pending.card["questions"][0]["body"].as_str().unwrap_or_default().chars().take(2000).collect();
+                found.permission = Some(json!({"question_id":pending.question_id,"tool":tool,"command":command,
+                    "command_source":source,"reason":reason,"asked_at":pending.at}));
+                events.push(Event::new("question_forwarded", json!({"member":role,"approval":pending.approval})));
+            }
+            None if answered && found.pending.is_some() => {
+                found.pending = None;
+                found.permission = None;
+            }
+            None => {}
+        }
+        Ok(())
+    })
+}
+
+/// Hands the lead its own task without a message (C1): the attempt exists, so
+/// `hgs team current` names it and the inbox lists it to report and accept.
+fn lead_hand_out(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result<()> {
+    change(store, team_id, |team, events| {
+        anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
+        let lead = team.lead.clone();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let task = team.task_mut(task_id).context("unknown task")?;
+        anyhow::ensure!(task.assignee == lead, "not the lead's task");
+        let n = task.attempts.len() as u32 + 1;
+        task.attempts.push(Attempt {
+            n,
+            id: attempt_id,
+            member: lead,
+            state: AttemptState::Delivered,
+            sent_at: now(),
+            delivered_at: Some(now()),
+            // The lead works when it suits: no start warning for its own task.
+            started_at: Some(now()),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        events.push(Event::new("handed_out", json!({"by":"Zerus","task":task_id,"to":"Lead","attempt":n,"no_message":true})));
+        Ok(())
+    })
+}
+
+/// Sends the one coalesced inbox message and remembers which items it named
+/// (C2). A refusal leaves everything pending for the next interval.
+fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let items = inbox::items(team);
+    let new: Vec<inbox::Item> = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).cloned().collect();
+    anyhow::ensure!(!new.is_empty(), "no new inbox items");
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &inbox::text(team, &new, now()));
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());
     }
     change(store, &team.id, |team, events| {
-        let role = team.role_of(member_id);
-        let tool = card["questions"][0]["header"].as_str().or_else(|| card["tool"].as_str()).unwrap_or_default().to_owned();
-        let (command, source) = permission_command(card);
-        let reason: String = card["questions"][0]["body"].as_str().unwrap_or_default().chars().take(2000).collect();
-        let found = team.members.iter_mut().find(|m| m.id == member_id).context("unknown member")?;
-        found.asked.push(asked);
-        let excess = found.asked.len().saturating_sub(50);
-        found.asked.drain(..excess);
-        // B1: the lead's answer and status carry the exact request.
-        found.permission = Some(json!({"question_id":card["question_id"],"tool":tool,"command":command,
-            "command_source":source,"reason":reason,"asked_at":now()}));
-        let kind = if matches!(outcome, Sent::Uncertain(_)) { "question_unconfirmed" } else { "question_forwarded" };
-        events.push(Event::new(kind, json!({"member":role})));
+        let named = new.len();
+        for item in &new {
+            if !team.inbox.told.contains(&item.key) {
+                team.inbox.told.push(item.key.clone());
+            }
+        }
+        // Bounded: an old key that comes back is named again, never unbounded.
+        let excess = team.inbox.told.len().saturating_sub(200);
+        team.inbox.told.drain(..excess);
+        team.inbox.told_at = now();
+        events.push(Event::new("inbox_told", json!({"items":named})));
+        Ok(())
+    })
+}
+
+/// Reminds the free lead once that a report still waits for a decision (C4).
+fn remind_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported)
+        .context("the task has no report")?
+        .clone();
+    let report = attempt.report.as_ref().context("the attempt has no report")?;
+    let minutes = (((now() - report.at) / 60.0).round() as u64).max(1);
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} report waiting {minutes} min]\n\
+         {}'s report on #{} {} has waited {minutes} min for your decision.\n\
+         Decide with hgs team accept --json or reject --json, or look at the whole inbox:\n  \
+         {} | hgs team inbox --json",
+        task.id,
+        team.role_of(&attempt.member),
+        task.id,
+        task.title,
+        json!({"team":team.id})
+    );
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let attempt_id = attempt.id.clone();
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt_id)) else {
+            return Ok(());
+        };
+        found.reminded_at = Some(now());
+        events.push(Event::new("reminded", json!({"task":task_id,"attempt":found.n,"to":"Lead","minutes":minutes})));
+        Ok(())
+    })
+}
+
+/// The message that tells the lead a member starves on the plan (C7), with the
+/// blocking chain of the open tasks.
+pub(crate) fn starved_text(team: &Team, member: &Member, now: f64) -> String {
+    let minutes = (((now - member.starved_since.unwrap_or(now)).max(0.0)) / 60.0).round() as u64;
+    let role = team.role_of(&member.id);
+    let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
+    let open: Vec<&Task> = team.tasks.iter().filter(|task| !task.status.finished()).collect();
+    let mut chain = String::new();
+    for task in open.iter().take(5) {
+        if let Some(wait) = inbox::waits(team, task, ready.contains(&task.id)) {
+            let on: Vec<String> = wait["on"].as_array().into_iter().flatten().map(|value| {
+                value.as_str().map(str::to_owned).or_else(|| value.as_u64().map(|id| format!("#{id}"))).unwrap_or_default()
+            }).collect();
+            chain += &format!("  #{} {}: {} {}\n", task.id, task.title, wait["for"].as_str().unwrap_or_default(), on.join(", "));
+        }
+    }
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} starved]\n{role} has had no ready task for {minutes} min while {} task(s) are open.\n\
+         Blocking:\n{chain}\
+         Give it work, release a held task or change the plan (hgs guide team-lead).",
+        open.len()
+    )
+}
+
+/// Tells the free lead once that a member starves on the plan (C7).
+fn tell_lead_starved(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let member = team.member(member_id).context("unknown member")?.clone();
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &starved_text(team, &member, now()));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let role = team.role_of(member_id);
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else {
+            return Ok(());
+        };
+        found.starved_told = true;
+        let minutes = (((now() - found.starved_since.unwrap_or(now())).max(0.0)) / 60.0).round() as u64;
+        events.push(Event::new("plan_starved", json!({"member":role,"minutes":minutes})));
+        Ok(())
+    })
+}
+
+/// The last lines of a job's output, bounded (C12).
+fn output_tail(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(12)..].join("\n");
+    if tail.is_empty() {
+        "(no output captured; check its session with hgs inspect)".into()
+    } else if tail.chars().count() > 1000 {
+        tail.chars().take(1000).collect::<String>() + "\n[cut]"
+    } else {
+        tail
+    }
+}
+
+/// The message that tells the lead a Background job passed its red time (C12).
+pub(crate) fn budget_text(team: &Team, member: &Member, command: &str, since: f64, now: f64, last_output: &str) -> String {
+    let role = team.role_of(&member.id);
+    let minutes = (((now - since).max(0.0)) / 60.0).round() as u64;
+    let command = if command.is_empty() { "(command not reported)" } else { command };
+    match member.budget.as_ref() {
+        Some(budget) => format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} budget red]\n{role}: \"{}\" expected {} min, red after {} min; {minutes} min now.\n\
+             Command: {command}\nLast output:\n{last_output}\n\
+             Check whether the job hangs or died; a budget never stops it (hgs guide team-lead).",
+            budget.label, budget.minutes, budget.red_minutes
+        ),
+        None => format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} budget red]\n{role}'s Background work has run {minutes} min without a declared budget \
+             (red after {} min).\nCommand: {command}\nLast output:\n{last_output}\n\
+             Check whether the job hangs or died (hgs guide team-lead).",
+            team.settings.background_red_minutes
+        ),
+    }
+}
+
+/// Tells the free lead once that a job is red, with its command and last
+/// output lines (C12).
+fn tell_lead_budget_red(
+    store: &mut Store,
+    team: &Team,
+    member_id: &str,
+    default: bool,
+    command: String,
+    since: f64,
+) -> anyhow::Result<()> {
+    let member = team.member(member_id).context("unknown member")?.clone();
+    let session = member.session.clone().context("the member has no session")?;
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let last_output = last_reply(&session).unwrap_or_default();
+    let start = if since > 0.0 { since } else { member.budget.as_ref().map(|budget| budget.elapsed(now())).map(|elapsed| now() - elapsed).unwrap_or(now()) };
+    let command = if command.is_empty() { member.budget.as_ref().and_then(|budget| budget.job.as_ref()).map(|job| job.command.clone()).unwrap_or_default() } else { command };
+    let text = budget_text(team, &member, &command, start, now(), &output_tail(&last_output));
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let role = team.role_of(member_id);
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else { return Ok(()) };
+        let mut label = String::new();
+        if default {
+            if found.background_told {
+                return Ok(());
+            }
+            found.background_told = true;
+        } else if let Some(budget) = found.budget.as_mut() {
+            if budget.red_told {
+                return Ok(());
+            }
+            budget.red_told = true;
+            label = budget.label.clone();
+        } else {
+            return Ok(());
+        }
+        let minutes = (((now() - start).max(0.0)) / 60.0).round() as u64;
+        events.push(Event::new("budget_red", json!({"member":role,"label":label,"default":default,"minutes":minutes})));
         Ok(())
     })
 }
@@ -1648,6 +1960,7 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
 fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, expected_reply: &str) -> anyhow::Result<()> {
     change(store, team_id, |team, events| {
         let task = team.task(task_id).context("unknown task")?;
+        anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
         let attempt = task.attempts.last().context("the task has no attempt")?;
         // The gate was checked before the reply was read, which can take up to
         // 45 s: re-check it here, including the reply identity (N1).
@@ -1673,8 +1986,82 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
     match step {
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),
-        Step::Question { member } => forward_question(store, team, member),
-        Step::Stalled { task, kind } => tell_lead_stalled(store, team, *task, kind),
+        Step::Permission { member } => sync_permission(store, team, member),
+        Step::ClearPermission { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                found.pending = None;
+            }
+            Ok(())
+        }),
+        Step::Inbox => tell_lead_inbox(store, team),
+        Step::RemindReport { task } => remind_report(store, team, *task),
+        Step::Starving { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if found.starved_since.is_none() {
+                    found.starved_since = Some(now());
+                    found.starved_told = false;
+                }
+            }
+            Ok(())
+        }),
+        Step::StarvedEnded { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                found.starved_since = None;
+                found.starved_told = false;
+            }
+            Ok(())
+        }),
+        Step::PlanStarved { member } => tell_lead_starved(store, team, member),
+        Step::BackgroundStart { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if found.background_since.is_none() {
+                    found.background_since = Some(now());
+                    found.background_told = false;
+                }
+            }
+            Ok(())
+        }),
+        Step::BackgroundEnd { member } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                // C12: a budget ends with the job, and one that never met a job
+                // within its minute is dropped.
+                found.background_since = None;
+                found.background_told = false;
+                found.budget = None;
+            }
+            Ok(())
+        }),
+        Step::BudgetTie { member, command, since } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if let Some(budget) = found.budget.as_mut() {
+                    if budget.job.is_none() {
+                        budget.job = Some(JobRef { command: command.clone(), since: *since });
+                    }
+                }
+            }
+            Ok(())
+        }),
+        Step::BudgetAmber { member } => change(store, &team.id, |team, events| {
+            let role = team.role_of(member);
+            let mut told = None;
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if let Some(budget) = found.budget.as_mut() {
+                    if !budget.amber_told {
+                        budget.amber_told = true;
+                        told = Some((budget.label.clone(), budget.minutes, budget.red_minutes));
+                    }
+                }
+            }
+            if let Some((label, minutes, red)) = told {
+                events.push(Event::new(
+                    "budget_amber",
+                    json!({"member":role,"label":label,"minutes":minutes,"red_minutes":red}),
+                ));
+            }
+            Ok(())
+        }),
+        Step::BudgetRed { member } => tell_lead_budget_red(store, team, member, false, String::new(), 0.0),
+        Step::BackgroundRed { member, command, since } => tell_lead_budget_red(store, team, member, true, command.clone(), *since),
         Step::Quiet { member, session, muted, revision } => {
             if !*muted {
                 let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id,"muted":true,"expected_revision":revision});
@@ -1736,7 +2123,13 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }
-        Step::HandOut { task, member } => hand_out(store, &team.id, *task, member, None, host),
+        Step::HandOut { task, member } => {
+            if *member == team.lead {
+                lead_hand_out(store, &team.id, *task)
+            } else {
+                hand_out(store, &team.id, *task, member, None, host)
+            }
+        }
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
@@ -1795,6 +2188,19 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             found.seen = Some(MemberSeen { at: now(), live: *live });
             Ok(())
         }),
+        Step::Services { member, services } => change(store, &team.id, |team, _| {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                found.services = services
+                    .iter()
+                    .map(|service| MemberService {
+                        name: service.name.clone(),
+                        command: service.command.clone(),
+                        since: service.since,
+                    })
+                    .collect();
+            }
+            Ok(())
+        }),
         Step::Started { task } => change(store, &team.id, |team, events| {
             let Some(member) = team.task(*task).and_then(|t| t.attempts.last()).map(|a| a.member.clone()) else {
                 return Ok(());
@@ -1821,7 +2227,6 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }),
         Step::TellStartLate { task } => tell_lead_start_late(store, team, *task),
-        Step::LeadQuestion { task, question } => tell_lead_question(store, team, *task, question),
         Step::AnswerQuestion { task, question } => send_answer(store, team, *task, question),
         Step::NoReport { task } => {
             // The report timeout passed with the capture gate holding (A2): the
@@ -1869,7 +2274,6 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
             })
         }
-        Step::NotifyLead { task } => notify_lead(store, &team.id, *task),
     }
 }
 
@@ -2319,9 +2723,11 @@ mod tests {
         assert!(brief.contains("Ship it") && brief.contains("Your role: Plan well") && brief.contains("\"assignee\":\"dev\""));
         assert!(brief.contains("Team protocol:\nRun the waves in order"));
         assert!(brief.contains("(hgs guide team-lead)"));
-        // The brief names the reply, hold and release routes (H5).
+        // The brief names the reply, hold and release routes (H5), and the
+        // inbox with the lead's own report-and-accept route (C1, C2).
         assert!(brief.contains("hgs team reply --json"), "{brief}");
         assert!(brief.contains("hgs team hold --json") && brief.contains("hgs team release --json"), "{brief}");
+        assert!(brief.contains("hgs team inbox --json") && brief.contains("\"accept\":true"), "{brief}");
         team.brief = Notice::Sent;
         assert!(steps(&team, &[session("claude/x/lead", "r0", true)], 1.0).is_empty());
     }
@@ -2610,7 +3016,7 @@ mod tests {
         let question = &team.task(1).unwrap().attempts[0].questions[0];
         assert!(!question.open() && question.answer.is_empty() && question.answered_at.is_some());
         let sent = steps(&team, &[session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)], 100.0);
-        assert!(!sent.iter().any(|step| matches!(step, Step::LeadQuestion { .. } | Step::AnswerQuestion { .. })), "{sent:?}");
+        assert!(!sent.iter().any(|step| matches!(step, Step::AnswerQuestion { .. } | Step::Inbox)), "{sent:?}");
     }
 
     #[test]
@@ -2673,7 +3079,7 @@ mod tests {
     }
 
     #[test]
-    fn the_free_lead_gets_at_most_one_message_per_tick() {
+    fn the_free_lead_gets_one_coalesced_inbox_message_and_no_more() {
         let mut team = team();
         // A report to decide and an open question are both pending.
         {
@@ -2697,51 +3103,63 @@ mod tests {
         }
         let lead = session("claude/x/lead", "r0", true);
         let dev = session("codex/x/dev", "r1", false);
-        let count = |steps: &[Step]| {
-            steps
-                .iter()
-                .filter(|step| {
-                    matches!(
-                        step,
-                        Step::NotifyLead { .. }
-                            | Step::TellStartLate { .. }
-                            | Step::LeadQuestion { .. }
-                            | Step::BlockedLate { .. }
-                            | Step::Stalled { .. }
-                            | Step::Rebalanced { .. }
-                            | Step::Question { .. }
-                            | Step::AllDecided
-                    )
-                })
-                .count()
-        };
+        // Both items reach the lead in one step, never one message per item.
         let found = steps(&team, &[lead.clone(), dev.clone()], 20.0);
-        assert_eq!(count(&found), 1);
-        // The report is the one that goes first; the question waits its turn.
-        assert!(found.iter().any(|step| matches!(step, Step::NotifyLead { .. })), "{found:?}");
-        team.task_mut(1).unwrap().attempts[0].notice = Notice::Sent;
-        let next = steps(&team, &[lead, dev], 20.0);
-        assert_eq!(count(&next), 1);
-        assert!(next.iter().any(|step| matches!(step, Step::LeadQuestion { .. })), "{next:?}");
+        assert_eq!(found.iter().filter(|step| matches!(step, Step::Inbox)).count(), 1, "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::TellStartLate { .. } | Step::BlockedLate { .. } | Step::Rebalanced { .. } | Step::AllDecided)));
+        // A busy lead gets it later.
+        assert!(!steps(&team, &[session("claude/x/lead", "r0", false), dev.clone()], 20.0).iter().any(|step| matches!(step, Step::Inbox)));
+        // Told once: no repeat within the interval (120 s by default).
+        let mut told = team.clone();
+        told.inbox.told = super::inbox::items(&told).into_iter().map(|item| item.key).collect();
+        told.inbox.told_at = 20.0;
+        assert!(!steps(&told, &[lead.clone(), dev.clone()], 21.0).iter().any(|step| matches!(step, Step::Inbox)));
+        // A new item is told it, but not before the interval passes.
+        let mut later = told.clone();
+        later.inbox.told_at = 150.0;
+        later.tasks.push(Task {
+            id: 9,
+            title: "New".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::Submitted,
+            attempts: vec![Attempt {
+                n: 1,
+                id: "A9".into(),
+                member: "dev".into(),
+                state: AttemptState::Reported,
+                report: Some(Report { text: "New work".into(), at: 150.0, ..Default::default() }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(!steps(&later, &[lead.clone(), dev.clone()], 200.0).iter().any(|step| matches!(step, Step::Inbox)));
+        assert!(steps(&later, &[lead, dev], 280.0).iter().any(|step| matches!(step, Step::Inbox)));
     }
 
     #[test]
     fn a_report_reaches_the_lead_once_it_is_free_and_a_launch_is_adopted() {
         let mut team = team();
         let task = team.task_mut(1).unwrap();
-        task.attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Reported, notice: Notice::Pending, ..Default::default() });
+        task.attempts.push(Attempt {
+            n: 1,
+            member: "dev".into(),
+            state: AttemptState::Reported,
+            notice: Notice::Pending,
+            report: Some(Report { text: "Done".into(), at: 5.0, ..Default::default() }),
+            ..Default::default()
+        });
         task.status = TaskStatus::Submitted;
         team.members[2].launch_id = "L".into();
         let mut started = session("kimi/x/qa", "r2", true);
         started.launch_id = "L".into();
         let busy_lead = steps(&team, &[session("claude/x/lead", "r0", false), started.clone()], 1.0);
-        assert!(!busy_lead.contains(&Step::NotifyLead { task: 1 }));
+        assert!(!busy_lead.iter().any(|step| matches!(step, Step::Inbox)));
         assert!(busy_lead.iter().any(|s| matches!(s, Step::Adopt { member, .. } if member == "qa")));
-        assert!(steps(&team, &[session("claude/x/lead", "r0", true)], 1.0).contains(&Step::NotifyLead { task: 1 }));
+        assert!(steps(&team, &[session("claude/x/lead", "r0", true)], 1.0).iter().any(|step| matches!(step, Step::Inbox)));
         // Decided before the lead heard of it: no message.
         let mut decided = team.clone();
         decided.task_mut(1).unwrap().status = TaskStatus::Accepted;
-        assert!(!steps(&decided, &[session("claude/x/lead", "r0", true)], 1.0).contains(&Step::NotifyLead { task: 1 }));
+        assert!(!steps(&decided, &[session("claude/x/lead", "r0", true)], 1.0).iter().any(|step| matches!(step, Step::Inbox)));
     }
 
     #[test]
@@ -2897,16 +3315,16 @@ mod tests {
         let lead = session("claude/x/lead", "r0", true);
         let dev = session("codex/x/dev", "r1", false);
         let found = steps(&team, &[lead.clone(), dev.clone()], 20.0);
-        assert!(found.contains(&Step::LeadQuestion { task: 1, question: "q1".into() }), "{found:?}");
+        // The question is one inbox item, not a message of its own (C2).
+        assert!(found.contains(&Step::Inbox), "{found:?}");
+        let items = super::inbox::items(&team);
+        assert_eq!(items[0].kind, "question");
+        assert!(items[0].summary.contains("Must I keep the old field?"), "{}", items[0].summary);
+        assert!(items[0].command.contains("\"question\":\"q1\"") && items[0].command.contains("hgs team reply --json"));
         // The lead hears once per question.
-        team.task_mut(1).unwrap().attempts[0].told_lead.push("question:q1".into());
-        assert!(!steps(&team, &[lead.clone(), dev.clone()], 20.0).iter().any(|s| matches!(s, Step::LeadQuestion { .. })));
-        // The message names the task, the asker, the question and the reply command.
-        let task = team.task(1).unwrap();
-        let attempt = &task.attempts[0];
-        let text = question_to_lead_text(&team, task, attempt, &attempt.questions[0]);
-        assert!(text.contains("#1") && text.contains("Backend") && text.contains("Must I keep"), "{text}");
-        assert!(text.contains("hgs team reply --json") && text.contains("\"question\":\"q1\""), "{text}");
+        team.inbox.told.push(items[0].key.clone());
+        team.inbox.told_at = 20.0;
+        assert!(!steps(&team, &[lead.clone(), dev.clone()], 21.0).iter().any(|s| matches!(s, Step::Inbox)));
         // The answer closes the question and waits for the live member.
         ops::apply(&mut team, "reply", &json!({"question":"q1","text":"Yes, keep it."}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
         let question = &team.task(1).unwrap().attempts[0].questions[0];
@@ -2934,16 +3352,247 @@ mod tests {
         let lead = session("claude/x/lead", "r0", true);
         let mut gone = session("codex/x/dev", "r1", false);
         gone.live = false;
-        // A member with an open attempt whose session stopped.
+        // A member with an open attempt whose session stopped; the dispatcher
+        // recorded the stop on its previous tick (L3).
         let task = team.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
         task.attempts.push(Attempt { n: 1, id: "A".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
         let id = task.id;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 0.5, live: false });
         let steps_now = steps(&team, &[lead.clone(), gone.clone()], 1.0);
-        assert!(steps_now.contains(&Step::Stalled { task: id, kind: "stopped".into() }), "{steps_now:?}");
-        let text = stalled_text(&team, team.task(id).unwrap(), team.task(id).unwrap().attempts.last().unwrap(), "stopped");
-        assert!(text.contains("member stopped") && text.contains("Backend's session stopped"), "{text}");
-        team.task_mut(id).unwrap().attempts.last_mut().unwrap().told_lead.push("stopped".into());
-        assert!(!steps(&team, &[lead, gone], 1.0).iter().any(|s| matches!(s, Step::Stalled { .. })));
+        // The stopped member is one inbox item, not a message of its own (C2).
+        assert!(steps_now.contains(&Step::Inbox), "{steps_now:?}");
+        let items = super::inbox::items(&team);
+        assert_eq!(items[0].kind, "stalled");
+        assert!(items[0].summary.contains("Backend's session stopped"), "{}", items[0].summary);
+        assert_eq!(items[0].task, Some(id));
+        team.inbox.told.push(items[0].key.clone());
+        team.inbox.told_at = 1.0;
+        assert!(!steps(&team, &[lead, gone], 2.0).iter().any(|s| matches!(s, Step::Inbox)));
+    }
+
+    #[test]
+    fn a_lead_task_goes_to_the_lead_without_a_message_or_an_idle_lead() {
+        let mut team = team();
+        team.tasks.push(Task { id: 4, title: "Plan review".into(), assignee: "lead".into(), status: TaskStatus::Pending, ..Default::default() });
+        // The lead is busy with its members: its own task still reaches it,
+        // because no message is sent (C1).
+        let lead = session("claude/x/lead", "r0", false);
+        let found = steps(&team, std::slice::from_ref(&lead), 10.0);
+        assert!(found.contains(&Step::HandOut { task: 4, member: "lead".into() }), "{found:?}");
+        // A busy lead's task is listed in the inbox once the attempt exists.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+        lead_hand_out(&mut store, &team.id, 4).unwrap();
+        let saved = store.load(&team.id).unwrap().unwrap();
+        let task = saved.task(4).unwrap();
+        let attempt = task.attempts.last().unwrap();
+        assert_eq!((attempt.member.as_str(), task.status), ("lead", TaskStatus::InProgress));
+        // The lead works when it suits: started, never a start warning.
+        assert!(attempt.started_at.is_some() && !attempt.start_warned);
+        let items = super::inbox::items(&saved);
+        assert!(items.iter().any(|item| item.kind == "lead_task" && item.task == Some(4)), "{items:?}");
+        // The hand-out is recorded as Zerus's, without a message (C1).
+        let events = store.events(&team.id, None, 10).unwrap();
+        assert!(
+            events["items"].as_array().unwrap().iter().any(|event| event["kind"] == "handed_out" && event["detail"]["no_message"] == true),
+            "{events}"
+        );
+    }
+
+    #[test]
+    fn an_undecided_report_reminds_the_lead_once_after_the_configured_minutes() {
+        let mut team = team();
+        {
+            let task = team.task_mut(1).unwrap();
+            task.attempts.push(Attempt {
+                n: 1,
+                id: "A1".into(),
+                member: "dev".into(),
+                state: AttemptState::Reported,
+                report: Some(Report { text: "Done and checked".into(), at: 1000.0, ..Default::default() }),
+                ..Default::default()
+            });
+            task.status = TaskStatus::Submitted;
+        }
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", false);
+        let after = team.settings.remind_lead_minutes as f64 * 60.0;
+        // The default is 15 minutes; not a second earlier.
+        assert_eq!(after, 900.0);
+        assert!(!steps(&team, &[lead.clone(), dev.clone()], 1000.0 + after - 1.0).iter().any(|s| matches!(s, Step::RemindReport { .. })));
+        assert!(steps(&team, &[lead.clone(), dev.clone()], 1000.0 + after).iter().any(|s| matches!(s, Step::RemindReport { task: 1 })));
+        // Once: the attempt records the reminder.
+        team.task_mut(1).unwrap().attempts.last_mut().unwrap().reminded_at = Some(1000.0 + after);
+        assert!(!steps(&team, &[lead.clone(), dev.clone()], 1000.0 + after + 60.0).iter().any(|s| matches!(s, Step::RemindReport { .. })));
+        // 0 turns the reminder off.
+        team.settings.remind_lead_minutes = 0;
+        team.task_mut(1).unwrap().attempts.last_mut().unwrap().reminded_at = None;
+        assert!(!steps(&team, &[lead, dev], 100_000.0).iter().any(|s| matches!(s, Step::RemindReport { .. })));
+    }
+
+    #[test]
+    fn the_dispatcher_hands_out_the_task_with_the_most_dependants_first() {
+        let mut team = team();
+        // #4 unblocks #5 and #6, more than #1 unblocks #3 (C6).
+        team.tasks.push(Task { id: 4, title: "Base".into(), assignee: "dev".into(), status: TaskStatus::Pending, ..Default::default() });
+        team.tasks.push(Task {
+            id: 5,
+            title: "Next".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::Pending,
+            deps: vec![Dependency { task: 4, kind: DependencyKind::Hard }],
+            ..Default::default()
+        });
+        team.tasks.push(Task {
+            id: 6,
+            title: "Later".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::Pending,
+            deps: vec![Dependency { task: 4, kind: DependencyKind::Hard }],
+            ..Default::default()
+        });
+        let dev = session("codex/x/dev", "r1", true);
+        let found = steps(&team, &[session("claude/x/lead", "r0", false), dev.clone()], 10.0);
+        assert!(found.contains(&Step::HandOut { task: 4, member: "dev".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 1, .. })), "{found:?}");
+    }
+
+    #[test]
+    fn a_check_hand_out_names_the_command_and_its_exit_code() {
+        let mut team = team();
+        team.tasks.push(Task {
+            id: 4,
+            title: "Build".into(),
+            assignee: "dev".into(),
+            kind: TaskKind::Check,
+            check: Some(Check { command: "cargo test --locked".into(), expect_exit: 0, timeout_minutes: 30 }),
+            status: TaskStatus::Pending,
+            ..Default::default()
+        });
+        let attempt = Attempt { n: 1, id: "A4".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+        let text = hand_off_text(&team, team.task(4).unwrap(), &attempt, "", "");
+        assert!(text.contains("This is a check task"), "{text}");
+        assert!(text.contains("cargo test --locked") && text.contains("Expected exit code: 0"), "{text}");
+        // The report command carries the check result the member fills in.
+        assert!(text.contains("\"check\":{\"exit\":0"), "{text}");
+        // A plan task's hand-out has no check section.
+        let normal = hand_off_text(&team, team.task(1).unwrap(), &attempt, "", "");
+        assert!(!normal.contains("This is a check task"), "{normal}");
+    }
+
+    #[test]
+    fn a_member_with_no_ready_work_starves_the_plan_and_the_lead_hears_once() {
+        let mut team = team();
+        // All ready work belongs to qa; dev sits idle while tasks are open.
+        for id in [1, 2] {
+            team.task_mut(id).unwrap().assignee = "qa".into();
+        }
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", true);
+        let qa = session("kimi/x/qa", "r2", true);
+        let seen = [lead.clone(), dev.clone(), qa.clone()];
+        // The first idle tick opens the episode.
+        assert!(steps(&team, &seen, 10.0).contains(&Step::Starving { member: "dev".into() }));
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = Some(10.0);
+        // Not before 20 minutes, then once.
+        assert!(!steps(&team, &seen, 10.0 + 20.0 * 60.0 - 1.0).iter().any(|step| matches!(step, Step::PlanStarved { .. })));
+        let late = steps(&team, &seen, 10.0 + 20.0 * 60.0);
+        assert!(late.contains(&Step::PlanStarved { member: "dev".into() }), "{late:?}");
+        let member = team.member("dev").unwrap().clone();
+        let text = starved_text(&team, &member, 10.0 + 20.0 * 60.0);
+        assert!(text.contains("starved") && text.contains("Backend") && text.contains("20 min"), "{text}");
+        assert!(text.contains("#1") && text.contains("hgs guide team-lead"), "{text}");
+        // Told once per episode.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_told = true;
+        assert!(!steps(&team, &seen, 10.0 + 30.0 * 60.0).iter().any(|step| matches!(step, Step::PlanStarved { .. })));
+        // Getting work ends the episode.
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_told = false;
+        team.task_mut(2).unwrap().assignee = "dev".into();
+        assert!(steps(&team, &seen, 10.0 + 30.0 * 60.0).contains(&Step::StarvedEnded { member: "dev".into() }));
+        // A busy leader is not starving: it has work.
+        team.task_mut(1).unwrap().assignee = "qa".into();
+        team.task_mut(2).unwrap().assignee = "qa".into();
+        let busy_dev = session("codex/x/dev", "r1", false);
+        assert!(!steps(&team, &[lead, busy_dev, qa], 10.0 + 30.0 * 60.0).iter().any(|step| matches!(step, Step::Starving { .. })));
+    }
+
+    #[test]
+    fn a_declared_budget_ties_to_the_job_and_turns_amber_then_red() {
+        let mut team = team();
+        let lead = session("claude/x/lead", "r0", true);
+        let mut dev = session("codex/x/dev", "r1", true);
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().budget = Some(Budget {
+            label: "install".into(),
+            minutes: 15,
+            red_minutes: 30,
+            declared_at: 100.0,
+            ..Default::default()
+        });
+        // Without Background work the budget waits for its job (up to a minute).
+        let idle = steps(&team, &[lead.clone(), dev.clone()], 110.0);
+        assert!(!idle.iter().any(|step| matches!(step, Step::BudgetRed { .. } | Step::BudgetAmber { .. })), "{idle:?}");
+        // The job appears: the budget is tied to it and the episode starts.
+        dev.background = true;
+        dev.work = Some(SeenWork { command: "npm install".into(), started_at: 140.0 });
+        let tied = steps(&team, &[lead.clone(), dev.clone()], 150.0);
+        assert!(tied.contains(&Step::BackgroundStart { member: "dev".into() }), "{tied:?}");
+        assert!(
+            tied.contains(&Step::BudgetTie { member: "dev".into(), command: "npm install".into(), since: 140.0 }),
+            "{tied:?}"
+        );
+        // Tied and running: amber at 15 minutes, red at 30, once each.
+        let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        member.background_since = Some(140.0);
+        member.budget.as_mut().unwrap().job = Some(JobRef { command: "npm install".into(), since: 140.0 });
+        let amber = steps(&team, &[lead.clone(), dev.clone()], 140.0 + 15.0 * 60.0);
+        assert!(amber.contains(&Step::BudgetAmber { member: "dev".into() }), "{amber:?}");
+        assert!(!amber.iter().any(|step| matches!(step, Step::BudgetRed { .. })));
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().budget.as_mut().unwrap().amber_told = true;
+        let red = steps(&team, &[lead.clone(), dev.clone()], 140.0 + 30.0 * 60.0);
+        assert!(red.contains(&Step::BudgetRed { member: "dev".into() }), "{red:?}");
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().budget.as_mut().unwrap().red_told = true;
+        assert!(!steps(&team, &[lead.clone(), dev.clone()], 140.0 + 40.0 * 60.0).iter().any(|step| matches!(step, Step::BudgetRed { .. })));
+        // The message names the label, the estimate, the command and the output.
+        let member = team.member("dev").unwrap().clone();
+        let text = budget_text(&team, &member, "npm install", 140.0, 140.0 + 34.0 * 60.0, "npm ERR! build failed");
+        assert!(text.contains("install") && text.contains("expected 15 min, red after 30 min"), "{text}");
+        assert!(text.contains("npm install") && text.contains("npm ERR! build failed"), "{text}");
+        // Background work without a budget is red at the default 30 minutes.
+        let mut plain = team.clone();
+        plain.members.iter_mut().find(|member| member.id == "dev").unwrap().budget = None;
+        plain.members.iter_mut().find(|member| member.id == "dev").unwrap().background_since = Some(0.0);
+        let late = steps(&plain, &[lead.clone(), dev.clone()], 31.0 * 60.0);
+        assert!(
+            late.contains(&Step::BackgroundRed { member: "dev".into(), command: "npm install".into(), since: 0.0 }),
+            "{late:?}"
+        );
+        // The job ends: the budget ends with it.
+        dev.background = false;
+        dev.work = None;
+        let ended = steps(&team, &[lead, dev], 140.0 + 41.0 * 60.0);
+        assert!(ended.contains(&Step::BackgroundEnd { member: "dev".into() }), "{ended:?}");
+    }
+
+    #[test]
+    fn mcp_services_are_listed_on_the_member_and_not_background_work() {
+        let listing = json!([{"sessions":[
+            {"name":"codex/x/dev","process_state":"running","activity":"idle","phase":"idle",
+             "process_work":{"count":0,"services":[{"name":"socraticode","command":"node socraticode.js","since":5.0}]}}]}]);
+        let found = seen(&listing);
+        assert_eq!(
+            found[0].services,
+            vec![SeenService { name: "socraticode".into(), command: "node socraticode.js".into(), since: 5.0 }]
+        );
+        // G7: a session that only keeps its MCP server alive is not Background.
+        assert!(!found[0].background && found[0].free);
+        // The member carries its services for status.
+        let team = team();
+        let steps_now = steps(&team, &[session("claude/x/lead", "r0", true), found[0].clone()], 10.0);
+        assert!(
+            steps_now.iter().any(|step| matches!(step, Step::Services { member, services } if member == "dev" && services.len() == 1)),
+            "{steps_now:?}"
+        );
     }
 
     /// The team with a second Backend member, dev2, free and started.
@@ -3144,29 +3793,35 @@ mod tests {
     }
 
     #[test]
-    fn a_members_question_goes_to_the_free_lead() {
-        let team = team();
+    fn a_members_permission_request_is_read_into_the_inbox() {
+        let mut team = team();
         let mut asking = session("codex/x/dev", "r1", false);
         asking.asking = true;
         let lead = session("claude/x/lead", "r0", true);
         let steps_now = steps(&team, &[lead.clone(), asking.clone()], 1.0);
-        assert!(steps_now.contains(&Step::Question { member: "dev".into() }), "{steps_now:?}");
-        // A busy lead gets it later.
+        // Read once, whether the lead is free or not: the inbox message waits.
+        assert!(steps_now.contains(&Step::Permission { member: "dev".into() }), "{steps_now:?}");
         let busy = session("claude/x/lead", "r0", false);
-        assert!(!steps(&team, &[busy, asking], 1.0).iter().any(|s| matches!(s, Step::Question { .. })));
+        assert!(steps(&team, &[busy, asking.clone()], 1.0).iter().any(|s| matches!(s, Step::Permission { .. })));
+        // While the stored request is fresh, no inspect runs again.
+        team.members.iter_mut().find(|m| m.id == "dev").unwrap().pending = Some(PendingQuestion {
+            question_id: "q1".into(),
+            question_hash: "h1".into(),
+            approval: true,
+            at: now(),
+            card: json!({"questions":[{"id":"0","header":"Access","question":"How should I proceed?"}]}),
+        });
+        assert!(!steps(&team, &[lead.clone(), asking.clone()], now()).iter().any(|s| matches!(s, Step::Permission { .. })));
+        // A member that stopped asking clears the stored request.
+        let mut working = session("codex/x/dev", "r1", false);
+        working.phase = "working".into();
+        assert!(steps(&team, &[lead.clone(), working], now()).contains(&Step::ClearPermission { member: "dev".into() }));
         // DeepSeek reports questions and permission requests as input; the others say which.
         let listing = json!([{"sessions":[{"name":"dsh/x/a","state":"running","activity":"attention","phase":"input"},
             {"name":"codex/x/b","process_state":"running","activity":"idle","phase":"question"},
             {"name":"codex/x/c","process_state":"running","activity":"idle","phase":"approval"}]}]);
         let asked: Vec<bool> = seen(&listing).iter().map(|s| s.asking).collect();
         assert_eq!(asked, [true, true, true]);
-        let member = team.member("dev").unwrap();
-        let card = json!({"question_id":"q1","question_hash":"h1","questions":[{"id":"0","header":"Access","question":"How should I proceed?",
-            "options":[{"id":"0","label":"Full access","description":"no disk changes"},{"id":"1","label":"Stop"}],"allow_other":true}]});
-        let text = question_text(&team, member, &card);
-        assert!(text.starts_with("[Zerus team \u{b7} from: Backend \u{b7} question]"), "{text}");
-        assert!(text.contains("Access: How should I proceed?") && text.contains("  0) Full access \u{2014} no disk changes") && text.contains("  1) Stop\n"));
-        assert!(text.contains("\"expected_question_hash\":\"h1\"") && text.contains("hgs team answer --json"));
     }
 
     #[test]

@@ -1109,6 +1109,83 @@ pub(super) struct StartPlan {
     previous_generation: Option<String>,
     already_running: bool,
 }
+
+/// An explicit, revision-bound recovery is separate from ordinary Start. An
+/// unknown reservation is never retried merely because its journal is free.
+pub(super) async fn recover_failed_start(
+    store: &Store,
+    record: &mut Record,
+    expected: &str,
+) -> Result<()> {
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || Store::revision(store.read(RECORD).map_err(|_| refused())?.as_deref()) != expected
+        || !record.start_reserved
+        || record.phase != "stopped"
+        || record.transfer.is_some()
+    {
+        return Err(refused());
+    }
+    let detail = details(record)?;
+    let current = unit().await?;
+    if !detail.definition_verified
+        || detail.managed.is_some()
+        || get(&current, "ActiveState")? != "inactive"
+        || get(&current, "SubState")? != "dead"
+        || get(&current, "MainPID")? != "0"
+        || !matches!(get(&current, "Result")?, "success" | "exit-code")
+        || get(&current, "ExecMainStatus")? != "1"
+    {
+        return Err(refused());
+    }
+    definition_shape(&detail, &current)?;
+    let (cfg, revision) = workspace_cli::read_config(&detail.config)?;
+    if record.activated_revision.as_deref() != Some(&revision)
+        || record.managed_node_id.is_none()
+        || record.binding.config != detail.config
+    {
+        return Err(refused());
+    }
+    let state = Path::new(cfg["state_dir"].as_str().ok_or_else(refused)?);
+    fsguard::check_private_directory(state).map_err(|_| refused())?;
+    let control =
+        workspace_cli::read_private(state, "workspace-control.json")?.ok_or_else(refused)?;
+    let control: Value = serde_json::from_slice(&control).map_err(|_| refused())?;
+    let generation = control["generation"].as_str().ok_or_else(refused)?;
+    let pid = control["pid"]
+        .as_u64()
+        .filter(|p| (2..=i32::MAX as u64).contains(p))
+        .ok_or_else(refused)?;
+    if control.as_object().map(|o| o.len()) != Some(3)
+        || control["version"] != 1
+        || generation.len() != 32
+        || !generation.bytes().all(|b| b.is_ascii_hexdigit())
+        || Path::new(&format!("/proc/{pid}"))
+            .try_exists()
+            .map_err(|_| refused())?
+        || !matches!(
+            fsguard::probe_lock(&state.join(journal::LOCK)),
+            fsguard::LockState::Free | fsguard::LockState::Absent
+        )
+    {
+        return Err(refused());
+    }
+    // Keep an immutable proof before consuming this exact failed reservation.
+    // A lost response cannot reuse its old revision or repeat this operation.
+    let name = format!("failed-start-recovery-{expected}.json");
+    let proof = serde_json::to_vec(&json!({"version":1,"previous_record_revision":expected,
+        "failed_invocation":get(&current,"InvocationID")?,"control":control,
+        "config_revision":revision,"reason":"explicit-unobserved-failed-start"}))
+    .map_err(|_| refused())?;
+    store
+        .replace(&name, &Store::revision(None), &proof)
+        .map_err(|_| refused())?;
+    record.start_reserved = false;
+    save(store, record)
+}
+
 async fn refresh_start_definition(
     store: &Store,
     record: &mut Record,

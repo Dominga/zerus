@@ -495,3 +495,27 @@ conflicts, SQLite and I/O failures remain fatal. Reclaim does not shrink the
 SQLite file, change its journal mode, run VACUUM, decrypt stored result payloads
 or restore evicted ciphertext. An older executable ignores the additive column
 but cannot restore released Read caches.
+
+### Explicit recovery after an unobserved failed Start
+
+Ordinary Start never repeats an unknown managed-service reservation. On Linux,
+an operator may pass `failed_start_revision` to `--workspace start`: it must be
+the SHA256 of the exact current private `legacy-service-handover.json` record,
+in addition to the existing `expected_revision` configuration guard. This is a
+separate explicit recovery request, not an automatic retry or a UI fallback.
+
+Recovery requires the same verified unit and marked definition, an inactive/dead
+unit with MainPID zero and exit status 1, no previously observed managed
+generation, no pending identity transfer, a valid control record whose PID is
+absent, and a free matching receipt-directory lock. A running, activating,
+changed, cleanly stopped or ambiguous service remains refused. Any cancellation
+of an existing manager restart job must be coordinated separately; this operation
+submits no stop/restart/kill job.
+
+Before consuming that exact reservation, the connector durably records a
+`failed-start-recovery-<revision>.json` proof. The original revision cannot be
+reused after a lost response. Normal Start then updates only its marked
+definition when needed and establishes a new verified process/generation.
+Profiles, phone identity, native receipts, request IDs and the journal stay in
+place. Storage failure or incomplete recovery requires reconciliation; it never
+authorizes another automatic attempt.

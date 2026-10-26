@@ -888,6 +888,143 @@ async fn unknown_start_reservation_never_submits_another_start() {
     assert_eq!(value(&f.path("manager.json"))["starts"], 0);
 }
 
+async fn failed_reservation() -> (Fixture, String, String) {
+    let mut f = Fixture::new().await;
+    f.drain().await;
+    f.finish().await;
+    assert!(f.drain().await.is_none());
+    assert_eq!(
+        value(&f.private.join("legacy-service-handover.json"))["phase"],
+        "stopped",
+        "fixture must establish the verified managed path before recovery"
+    );
+    let revision = f.activate();
+    let record = f.private.join("legacy-service-handover.json");
+    let mut data = value(&record);
+    data["start_reserved"] = json!(true);
+    save(&record, &data);
+    let (cfg, _) = workspace_cli::read_config(&f.config).unwrap();
+    let state = PathBuf::from(cfg["state_dir"].as_str().unwrap());
+    zerus_mobile_connector::fsguard::create_directory(&state).unwrap();
+    write(
+        &state.join("workspace-control.json"),
+        &serde_json::to_vec(&json!({
+            "version":1,"generation":"0123456789abcdef0123456789abcdef","pid":f.child.id()
+        }))
+        .unwrap(),
+        0o600,
+    );
+    f.mutate(|v| v["properties"] = json!({"Result":"exit-code","ExecMainStatus":"1"}));
+    let expected = Store::revision(Some(&std::fs::read(record).unwrap()));
+    (f, revision, expected)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_failed_start_recovery_is_revision_bound_and_audited() {
+    let (f, revision, expected) = failed_reservation().await;
+    service::test_scope(
+        f.paths(),
+        service::test_failed_start_recovery(&f.private, &expected),
+    )
+    .await
+    .unwrap();
+    let record = value(&f.private.join("legacy-service-handover.json"));
+    assert_eq!(record["start_reserved"], false);
+    assert!(record["details"]["managed"].is_null());
+    let proof = value(
+        &f.private
+            .join(format!("failed-start-recovery-{expected}.json")),
+    );
+    assert_eq!(proof["previous_record_revision"], expected);
+    assert_eq!(proof["config_revision"], revision);
+    assert_eq!(value(&f.path("manager.json"))["starts"], 0);
+    assert!(service::test_scope(
+        f.paths(),
+        service::test_failed_start_recovery(&f.private, &expected)
+    )
+    .await
+    .is_err());
+    f.mutate(|v| v["properties"] = json!({}));
+    let status = f.start(NODE, &revision).await;
+    assert_eq!(value(&f.path("manager.json"))["starts"], 1);
+    f.cooperative_stop(&revision, status["generation"].as_str().unwrap())
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_failed_start_recovery_refuses_unknown_or_live_state() {
+    for case in [
+        "revision",
+        "clean",
+        "activating",
+        "live-control",
+        "held-journal",
+        "observed",
+        "definition",
+    ] {
+        let (f, _, expected) = failed_reservation().await;
+        let before = std::fs::read(f.private.join("legacy-service-handover.json")).unwrap();
+        let mut supplied = expected.clone();
+        let mut held = None;
+        match case {
+            "revision" => supplied = "0".repeat(64),
+            "clean" => f.mutate(|v| v["properties"]["ExecMainStatus"] = json!("0")),
+            "activating" => f.mutate(|v| v["properties"]["ActiveState"] = json!("activating")),
+            "live-control" => {
+                let (cfg, _) = workspace_cli::read_config(&f.config).unwrap();
+                let path =
+                    Path::new(cfg["state_dir"].as_str().unwrap()).join("workspace-control.json");
+                let mut data = value(&path);
+                data["pid"] = json!(std::process::id());
+                save(&path, &data);
+            }
+            "observed" => {
+                // Malformed or unknown saved proof must fail closed as well.
+                let path = f.private.join("legacy-service-handover.json");
+                let mut data = value(&path);
+                data["details"]["managed"] = json!({});
+                save(&path, &data);
+                supplied = Store::revision(Some(&std::fs::read(path).unwrap()));
+            }
+            "held-journal" => {
+                let (cfg, _) = workspace_cli::read_config(&f.config).unwrap();
+                let lock = Path::new(cfg["state_dir"].as_str().unwrap()).join("connector.lock");
+                write(&lock, b"", 0o600);
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(lock)
+                    .unwrap();
+                zerus_mobile_connector::fsguard::lock_exclusive(&file).unwrap();
+                held = Some(file);
+            }
+            "definition" => f.mutate(|v| v["properties"]["KillMode"] = json!("control-group")),
+            _ => unreachable!(),
+        }
+        assert!(
+            service::test_scope(
+                f.paths(),
+                service::test_failed_start_recovery(&f.private, &supplied)
+            )
+            .await
+            .is_err(),
+            "{case}"
+        );
+        if case != "observed" {
+            assert_eq!(
+                std::fs::read(f.private.join("legacy-service-handover.json")).unwrap(),
+                before
+            );
+        }
+        assert_eq!(value(&f.path("manager.json"))["starts"], 0);
+        assert!(!f
+            .private
+            .join(format!("failed-start-recovery-{supplied}.json"))
+            .exists());
+        drop(held);
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn inactive_remapped_service_never_receives_start() {
     for key in [

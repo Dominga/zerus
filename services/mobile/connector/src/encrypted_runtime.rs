@@ -75,12 +75,7 @@ fn accepted_read_cache(
     header: &str,
     result: &str,
 ) -> bool {
-    if !crate::pyvalue::canonical_uuid(id)
-        || digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
+    if !crate::pyvalue::canonical_uuid(id) || crypto::decode_fixed::<32>(digest).is_err() {
         return false;
     }
     let Ok(request) = serde_json::from_str::<Header>(header) else {

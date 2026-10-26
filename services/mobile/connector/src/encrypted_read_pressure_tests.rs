@@ -139,6 +139,16 @@ mod read_pressure {
         assert!(accepted_read_cache(
             &profile, &p.id, &p.digest, &p.header, &p.result
         ));
+        for malformed in [
+            String::new(),
+            "a".repeat(64),
+            format!("{}=", p.digest),
+            "!".repeat(43),
+        ] {
+            assert!(!accepted_read_cache(
+                &profile, &p.id, &malformed, &p.header, &p.result
+            ));
+        }
         for class in [OperationClass::Mutation, OperationClass::Control] {
             let other = pair(&f, &profile, 6001, class, 128);
             assert!(!accepted_read_cache(

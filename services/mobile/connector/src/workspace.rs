@@ -679,6 +679,14 @@ pub async fn manage(
         return Err(fail("Create or join an encrypted workspace first"));
     }
     if action == "start" {
+        let failed_start = input
+            .get("failed_start_revision")
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| fail("Invalid failed Start revision"))
+            })
+            .transpose()?;
         let profile = load_record(&private_dir)?;
         profile.validate()?;
         if let Some(status) = crate::workspace_service::start(
@@ -686,6 +694,7 @@ pub async fn manage(
             &private_dir,
             &profile.identity.device.device_id,
             &revision,
+            failed_start,
         )
         .await?
         {
@@ -1013,7 +1022,8 @@ pub async fn manage(
             result["config_revision"].as_str(),
         ) {
             if let Some(lifecycle) =
-                crate::workspace_service::start(config_path, &private_dir, node, revision).await?
+                crate::workspace_service::start(config_path, &private_dir, node, revision, None)
+                    .await?
             {
                 result["connector_state"] = lifecycle["state"].clone();
                 result["running"] = lifecycle["running"].clone();

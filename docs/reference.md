@@ -1164,6 +1164,10 @@ For Claude and Kimi messages ending in a literal backslash, the paste includes a
 final newline so the single Enter submits the unchanged message instead of
 activating the agent's backslash-Enter line continuation. This is verified
 against native history; no second Enter is sent as an automatic retry.
+Codex messages ending in an `@mention` likewise include a final pasted newline
+to move the cursor outside file/mention completion before the single Enter.
+Codex trims that newline on submission; the message and receipt retain the
+literal mention, including a recipient that matches an existing filename.
 Confirmed receipts are idempotent by request ID. An uncertain result is never
 retried automatically; inspect the native UI before submitting again. A session
 change or stale request cannot send into another conversation. Busy-session queue

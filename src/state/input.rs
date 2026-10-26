@@ -799,8 +799,15 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
     // Claude and Kimi treat a trailing backslash plus the next Enter as line
     // continuation. Paste a final newline with the literal text so our single
     // Enter submits it; never retry Enter, which could answer a subsequently
-    // opened dialog.
-    let pasted = if matches!(string(&record, "agent"), "claude" | "kimi") && text.ends_with('\\') {
+    // opened dialog. Codex also needs that newline after a trailing @ token:
+    // Enter would otherwise select its file/mention completion instead of
+    // submitting. A space still has token affinity; a newline moves the cursor
+    // off the token. Native submission trims the newline; receipts keep `text`.
+    let agent = string(&record, "agent");
+    let pasted = if (matches!(agent, "claude" | "kimi") && text.ends_with('\\'))
+        || (agent == "codex"
+            && text.split_whitespace().next_back().is_some_and(|token| token.starts_with('@')))
+    {
         format!("{text}\n")
     } else {
         text.clone()

@@ -693,6 +693,29 @@ for kind in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'S
                 self.assertEqual(self.received(), b"\x1b[200~" + text.encode() + final + b"\x1b[201~\r")
                 self.assertEqual(receipt["submitted_text"], text)
 
+    def test_trailing_codex_at_mention_cannot_consume_the_submit_key(self):
+        prompts = dict(codex=("\x1b[2J\x1b[H› ", "2:0"), claude=("\x1b[2J\x1b[H❯ ", "2:0"),
+                       kimi=("\x1b[2J\x1b[H ╭──────────────╮\r\n │ >          │\r\n ╰──────────────╯\x1b[2;6H", "5:1"))
+        for agent, (screen, cursor) in prompts.items():
+            for text, completion in [('Send a test to @reviewer', True), ('Review @', True),
+                                     ('Первая строка\nОтветь @рецензент', True),
+                                     ('Use @reviewer in this sentence.', False),
+                                     ('Email reviewer@example.com', False), ('Read "@reviewer"', False)]:
+                with self.subTest(agent=agent, text=text):
+                    (self.root / 'received').unlink(missing_ok=True)
+                    self.record['agent'] = agent
+                    self.write_record()
+                    self.screen(screen, cursor)
+                    payload = self.payload(text=text)
+                    receipt = self.send(payload)
+                    self.wait_for(lambda: self.received().endswith(b'\r'))
+                    suffix = b'\n' if agent == 'codex' and completion else b''
+                    expected = b'\x1b[200~' + text.encode() + suffix + b'\x1b[201~\r'
+                    self.assertEqual(self.received(), expected)
+                    self.assertEqual(receipt['submitted_text'], text)
+                    self.assertEqual(self.send(payload), receipt)
+                    self.assertEqual(self.received(), expected)
+
     def test_attachments_transferred_privately_and_referenced_on_agent_host(self):
         data = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
         payload = self.payload(attachments=[dict(name="../../screen shot.png", mime="image/png",

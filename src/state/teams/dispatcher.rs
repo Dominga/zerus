@@ -1001,8 +1001,14 @@ pub(crate) fn permission_answer(card: &Value) -> Option<Value> {
     let question_id = question["id"].as_str().filter(|id| !id.is_empty())?;
     let options = question["options"].as_array()?;
     let mut answer = json!({"question_id":question_id});
+    // Only a one-time option answers a request: a broader one would change a
+    // persistent permission, which stays manual. An option without a scope
+    // (DeepSeek's allow once / reject) is one-time.
     let by_label = |deny: bool| {
         options.iter().find_map(|option| {
+            if option["scope"].as_str().is_some_and(|scope| scope != "once") {
+                return None;
+            }
             let label = option["label"].as_str()?;
             if super::commands::denies(label) != deny {
                 return None;
@@ -1989,9 +1995,17 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
             "This repository configures {key}; Zerus commits without it"
         );
     }
-    // C2: an included config could define a filter or hook; refuse it.
-    let includes = git(&["config", "--local", "--get-regexp", "^(include\\.path|includeIf\\.)"])?;
-    anyhow::ensure!(includes.stdout.is_empty(), "This repository includes another Git config; Zerus commits without it");
+    // C2: an included config could define a filter or hook; refuse it. Git
+    // stores section names in lowercase (`includeif.onbranch:...`), so the keys
+    // are compared after listing them, not with a case-sensitive pattern.
+    let keys = git(&["config", "--local", "--name-only", "--list"])?;
+    anyhow::ensure!(
+        !String::from_utf8_lossy(&keys.stdout)
+            .lines()
+            .map(str::to_lowercase)
+            .any(|key| key.starts_with("include.") || key.starts_with("includeif.")),
+        "This repository includes another Git config; Zerus commits without it"
+    );
     let filters = git(&["config", "--local", "--get-regexp", "^filter\\."])?;
     anyhow::ensure!(filters.stdout.is_empty(), "This repository configures a Git filter; Zerus commits without it");
     let current = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
@@ -3999,6 +4013,18 @@ mod tests {
             card: deepseek,
         };
         assert_eq!(permission_record(&pending)["answer"], json!({"question_id":"decision","allow":"allow","deny":"deny"}));
+        // Claude's outside-read card lists broader options first; only the
+        // one-time ones answer, never a persistent setting.
+        let outside = json!({"questions":[{"id":"approval","options":[
+            {"id":"1","label":"Yes, and keep allowing any reads outside the working directories","scope":"broader"},
+            {"id":"2","label":"No, and block reads outside the working directories from now on","scope":"broader"},
+            {"id":"3","label":"No, and ask again next time","scope":"once"},
+            {"id":"4","label":"Yes, but ask again next time","scope":"once"}]}]});
+        assert_eq!(permission_answer(&outside), Some(json!({"question_id":"approval","allow":"4","deny":"3"})));
+        // A card whose options are all broader offers no answer.
+        let broader = json!({"questions":[{"id":"approval","options":[
+            {"id":"1","label":"Yes, and always allow","scope":"broader"}]}]});
+        assert_eq!(permission_answer(&broader), None);
         // A card without options has no answer shape to offer.
         let pending = PendingQuestion {
             question_id: "q0".into(),
@@ -4325,6 +4351,11 @@ mod tests {
         let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
         assert!(error.contains("includes another Git config"), "{error}");
         run(&["config", "--local", "--unset", "include.path"]);
+        // Git stores a conditional include in lowercase; it is refused too.
+        run(&["config", "--local", "includeIf.onbranch:team/**.path", "included.config"]);
+        let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
+        assert!(error.contains("includes another Git config"), "{error}");
+        run(&["config", "--local", "--remove-section", "includeIf.onbranch:team/**"]);
         // C2: a call with more than 1 MB of output finishes without blocking:
         // git show --name-only prints every file of this commit.
         for index in 0..6000 {

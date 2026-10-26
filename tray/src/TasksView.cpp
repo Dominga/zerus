@@ -1,4 +1,6 @@
 #include "TasksView.h"
+#include "TaskContent.h"
+#include "AttachmentViewer.h"
 #include "HgsClient.h"
 #include "TaskDialogs.h"
 #include "MessageComposer.h"
@@ -55,8 +57,8 @@ protected:
         if (property("dropTarget").toBool()) {
             p.setPen(QPen(color, 2, Qt::DashLine)); p.setBrush(Qt::NoBrush); p.drawRoundedRect(QRectF(rect()).adjusted(3, 3, -3, -3), 7, 7);
         }
-        p.setPen(Qt::NoPen); p.setBrush(alpha(color, 0.18)); p.drawEllipse(QRectF(10, 6, 22, 22));
-        workspaceIcon(TaskBoard::stageIcon(m_stage), color).paint(&p, QRect(14, 10, 14, 14));
+        p.setPen(Qt::NoPen); p.setBrush(alpha(color, 0.18)); p.drawEllipse(QRectF(8, 4, 26, 26));
+        workspaceIcon(TaskBoard::stageIcon(m_stage), color).paint(&p, QRect(11, 7, 20, 20));
         QFont count = font(); count.setPixelSize(15); count.setBold(true); p.setFont(count); p.setPen(m_colors.fg);
         const QString number = QString::number(property("count").toInt());
         const int numberWidth = QFontMetrics(count).horizontalAdvance(number);
@@ -113,7 +115,7 @@ TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_cl
         connect(tile, &QAbstractButton::clicked, this, [this, stage] { selectStage(stage); });
     }
     const auto square = [this](const QString &name) {
-        auto *button = new QToolButton(this); button->setObjectName(name); button->setFixedSize(34, 34); button->setIconSize(QSize(17, 17));
+        auto *button = new QToolButton(this); button->setObjectName(name); button->setFixedSize(34, 34); button->setIconSize(QSize(20, 20));
         button->setCursor(Qt::PointingHandCursor); return button;
     };
     m_only = square("taskOnlySession"); m_only->setCheckable(true);
@@ -153,7 +155,7 @@ TasksView::TasksView(HgsClient *client, QWidget *parent) : QWidget(parent), m_cl
     connect(m_older, &QPushButton::clicked, this, [this] { m_showOlder = !m_showOlder; render(); });
     layout->addWidget(m_older, 0, Qt::AlignLeft);
     m_composer = new MessageComposer(this); m_composer->setObjectName("taskComposer"); m_composer->setTaskMode(true);
-    connect(m_composer, &MessageComposer::sendRequested, this, [this](const QString &key, const QString &text) { addTask(key, text); });
+    connect(m_composer, &MessageComposer::sendRequested, this, &TasksView::addTask);
     layout->addWidget(m_composer);
     connect(m_client, &HgsClient::taskReady, this, [this](quint64 id, const QJsonObject &result) {
         const auto pending = m_pending.take(id); if (pending.first) pending.first(result);
@@ -172,6 +174,7 @@ void TasksView::setContext(const QString &projectId, const QString &projectName,
     // The window passes the context on every update; only a change is drawn again.
     if (!project && projectName == m_projectName && host == m_host && session == m_session && sessionKey == m_sessionKey && sessions == m_sessions) return;
     m_projectName = projectName; m_host = host; m_session = session; m_sessions = sessions;
+    for (auto *dialog : findChildren<TaskDialog *>()) dialog->updateSessionLabels(sessions);
     if (project) {
         m_projectId = projectId; ++m_generation; m_board = {}; m_loaded = false; m_failing = false; m_error.clear(); m_showOlder = false;
         m_stage = QStringLiteral("todo");
@@ -242,7 +245,31 @@ void TasksView::received(const QJsonObject &listing, quint64 generation) {
     schedule();
 }
 
-TaskBoard::View TasksView::view() const { return {m_host, m_session, m_only->isChecked(), QDateTime::currentMSecsSinceEpoch()}; }
+TaskBoard::View TasksView::view() const {
+    const auto *current = session(m_host, m_session);
+    return {m_host, m_session, m_only->isChecked(), QDateTime::currentMSecsSinceEpoch(), current ? current->id : QString()};
+}
+
+TaskBoard TasksView::projectedBoard() const {
+    auto board = m_board;
+    for (auto &task : board.tasks) {
+        const auto resolve = [this](const QString &host, const QString &id, QString &name, bool &known) {
+            if (id.isEmpty()) return;
+            const TaskSession *found = nullptr;
+            for (const auto &candidate : m_sessions) {
+                if (candidate.host != host || candidate.id != id) continue;
+                if (found) { known = false; return; }
+                found = &candidate;
+            }
+            if (found) { name = found->name; known = true; }
+            else known = false;
+        };
+        resolve(task.targetHost, task.targetId, task.targetSession, task.targetKnown);
+        resolve(task.sessionHost, task.sessionId, task.sessionName, task.sessionKnown);
+        bool authorKnown = true; resolve(task.authorHost, task.authorId, task.author, authorKnown);
+    }
+    return board;
+}
 
 const TaskSession *TasksView::session(const QString &host, const QString &name) const {
     for (const auto &session : m_sessions) if (session.host == host && session.name == name) return &session;
@@ -254,7 +281,9 @@ QString TasksView::sendBlocker(const TaskItem &task) const {
     const bool any = task.targetSession.isEmpty();
     const QString host = any ? m_host : task.targetHost, name = any ? m_session : task.targetSession;
     if (name.isEmpty()) return tr("Open the session to send this task to");
-    if (!any && !task.targetKnown) return tr("%1 is on a computer this one has not verified").arg(TaskBoard::sessionLabel(host, name));
+    if (!any && !task.targetKnown) return task.targetId.isEmpty()
+        ? tr("%1 is on a computer this one has not verified").arg(TaskBoard::sessionLabel(host, name))
+        : tr("%1 no longer has a confirmed session identity — choose another session").arg(TaskBoard::sessionLabel(host, name));
     // A session on another computer takes the task there; hgs refuses when it cannot be reached.
     const auto *found = session(host, name);
     if (!found) return tr("%1 no longer exists — choose another session").arg(TaskBoard::sessionLabel(host, name));
@@ -268,16 +297,17 @@ void TasksView::selectStage(const QString &stage) {
 
 void TasksView::render() {
     const auto v = view(); const auto colors = TaskColors::of(m_dark);
+    const auto board = projectedBoard();
     for (const auto &stage : TaskBoard::stages()) {
-        auto *tile = m_tiles.value(stage); tile->setCount(m_board.count(stage, v)); tile->setChecked(stage == m_stage);
+        auto *tile = m_tiles.value(stage); tile->setCount(board.count(stage, v)); tile->setChecked(stage == m_stage);
     }
     m_errorLabel->setText(tr("Tasks could not be read: %1").arg(m_error)); m_errorLabel->setVisible(!m_error.isEmpty());
     m_damaged->setText(m_board.damaged == 1 ? tr("1 task file of %1 could not be read.").arg(m_projectName)
                                             : tr("%1 task files of %2 could not be read.").arg(m_board.damaged).arg(m_projectName));
     m_damaged->setVisible(m_board.damaged > 0 && m_error.isEmpty());
     const bool done = m_stage == QLatin1String("done");
-    QList<TaskItem> rows = m_error.isEmpty() ? m_board.rows(m_stage, v) : QList<TaskItem>();
-    const auto older = done && m_error.isEmpty() ? m_board.rows(m_stage, v, true) : QList<TaskItem>();
+    QList<TaskItem> rows = m_error.isEmpty() ? board.rows(m_stage, v) : QList<TaskItem>();
+    const auto older = done && m_error.isEmpty() ? board.rows(m_stage, v, true) : QList<TaskItem>();
     if (m_showOlder) rows += older;
     QSet<QString> shown; int index = 0;
     for (const auto &task : std::as_const(rows)) {
@@ -289,8 +319,8 @@ void TasksView::render() {
             connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { startDrag(row, hotSpot); });
         }
         row->setObjectName(QStringLiteral("taskRow:") + task.id);
-        TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
-        if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
+        TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session, v.id); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
+        if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.sessionKnown && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
         if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
             if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
         if (!task.writable)
@@ -357,20 +387,23 @@ QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action)
 
 QList<TasksView::Step> TasksView::editSteps(const TaskItem &task, const TaskEdits &edits) const {
     QList<Step> out;
-    if (edits.text) out << Step{withProject({"edit", task.uuid}), *edits.text};
+    if (edits.attachments) out << Step{withProject({"edit", task.uuid, "--content-json"}), TaskContent::payload(edits.text.value_or(task.text), *edits.attachments)};
+    else if (edits.text) out << Step{withProject({"edit", task.uuid}), *edits.text};
     if (edits.target)
-        out << Step{withProject(targetArguments(task.uuid, edits.target->host, edits.target->any ? QString() : edits.target->session)), {}};
+        out << Step{withProject(targetArguments(task.uuid, edits.target->host, edits.target->any ? QString() : edits.target->session, edits.target->id)), {}};
     return out;
 }
 
-QStringList TasksView::targetArguments(const QString &uuid, const QString &host, const QString &session) {
+QStringList TasksView::targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id) {
     QStringList arguments{"target", uuid, session.isEmpty() ? QStringLiteral("any") : session};
     if (!session.isEmpty() && !host.isEmpty()) arguments << "--host" << host;
+    if (!session.isEmpty() && !id.isEmpty()) arguments << "--session-id" << id;
     return arguments;
 }
 
 void TasksView::retarget(const TaskDrag &task, const QString &host, const QString &session) {
-    run({{targetArguments(task.uuid, host, session) << QStringLiteral("--project") << task.projectId, {}}});
+    const auto *target = this->session(host, session);
+    run({{targetArguments(task.uuid, host, session, target ? target->id : QString()) << QStringLiteral("--project") << task.projectId, {}}});
 }
 
 void TasksView::run(QList<Step> steps, std::function<void()> finished, std::function<void(const QString &)> failed) {
@@ -390,17 +423,23 @@ void TasksView::act(const TaskItem &task, TaskAction action) {
     run(steps(task, action));
 }
 
-void TasksView::addTask(const QString &key, const QString &text) {
+void TasksView::addTask(const QString &key, const QString &text, const QList<MessageAttachment> &attachments) {
     if (key != m_composer->sessionKey() || m_projectId.isEmpty() || m_session.isEmpty()) return;
     const QString stage = m_stage == QLatin1String("backlog") ? QStringLiteral("backlog") : QStringLiteral("todo");
     QStringList arguments{"add", "--project", m_projectId, "--target", m_session};
+    if (const auto *target = session(m_host, m_session); target && !target->id.isEmpty()) arguments << "--session-id" << target->id;
     if (!m_host.isEmpty()) arguments << "--host" << m_host;
     if (stage == QLatin1String("backlog")) arguments << "--backlog";
-    m_composer->prepareSendingAsync(key, false, [this, key, arguments, text, stage](bool ready) {
+    if (!attachments.isEmpty()) arguments << "--content-json";
+    m_composer->prepareSendingAsync(key, false, [this, key, arguments, text, attachments, stage](bool ready) {
         if (!ready) return;
-        request(arguments, text,
-            [this, key, stage](const QJsonObject &) { m_composer->deliveryFinished(key, true); selectStage(stage); refresh(); },
-            [this, key](const QString &error) { m_composer->deliveryFinished(key, false, error); emit notice(error, true); });
+        AttachmentFiles::runAsync<QString>(this, [text, attachments] {
+            return attachments.isEmpty() ? text : TaskContent::payload(text, TaskContent::encode(attachments));
+        }, [this, key, arguments, stage](const QString &input) {
+            request(arguments, input,
+                [this, key, stage](const QJsonObject &) { m_composer->deliveryFinished(key, true); selectStage(stage); refresh(); },
+                [this, key](const QString &error) { m_composer->deliveryFinished(key, false, error); emit notice(error, true); });
+        });
     });
 }
 
@@ -511,15 +550,34 @@ bool TasksView::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void TasksView::openTask(const TaskItem &task) {
-    request(withProject({"get", task.uuid}), {}, [this, task](const QJsonObject &reply) {
+    request(withProject({"get", task.uuid}), {}, [this](const QJsonObject &reply) {
         for (auto *open : findChildren<TaskDialog *>()) open->reject();
-        // Send now follows the session chosen in the dialog.
+        auto shown = reply.value("task").toObject();
+        const auto label = [this](QJsonObject key) {
+            const QString id = key.value("session_id").toString();
+            if (id.isEmpty() || key.value("host").isNull()) return key;
+            for (const auto &candidate : m_sessions) if (candidate.host == key.value("host").toString() && candidate.id == id) {
+                key["session"] = candidate.name; break;
+            }
+            return key;
+        };
+        for (const auto &key : {"target", "session", "author"}) if (shown.value(key).isObject()) shown[key] = label(shown.value(key).toObject());
+        auto log = shown.value("log").toArray();
+        for (auto it = log.begin(); it != log.end(); ++it) {
+            auto entry = it->toObject();
+            for (const auto &key : {"session", "actor"}) if (entry.value(key).isObject()) entry[key] = label(entry.value(key).toObject());
+            *it = entry;
+        }
+        shown["log"] = log;
+        const auto task = TaskBoard::item(shown);
+        // Edits start with the freshly fetched description, including when the
+        // listing changed before the dialog opened.
         const auto blocker = [this, task](const TaskTarget &target) {
-            if (target == TaskTarget{task.targetSession.isEmpty(), task.targetHost, task.targetSession}) return sendBlocker(task);
-            auto chosen = task; chosen.targetSession = target.any ? QString() : target.session; chosen.targetHost = target.host; chosen.targetKnown = true;
+            if (target == TaskTarget{task.targetSession.isEmpty(), task.targetHost, task.targetSession, task.targetId}) return sendBlocker(task);
+            auto chosen = task; chosen.targetSession = target.any ? QString() : target.session; chosen.targetHost = target.host; chosen.targetId = target.id; chosen.targetKnown = true;
             return sendBlocker(chosen);
         };
-        auto *dialog = new TaskDialog(reply.value("task").toObject(), m_sessions, blocker, m_dark, this);
+        auto *dialog = new TaskDialog(shown, m_sessions, blocker, m_dark, this);
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         // The dialog closes once hgs took everything; a refusal keeps it, and the edits, open.
         QPointer<TaskDialog> guard(dialog);

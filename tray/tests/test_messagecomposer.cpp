@@ -188,7 +188,7 @@ class TestMessageComposer : public QObject {
     Q_OBJECT
 private slots:
     void unsupportedAttachmentsPreserveTextAndAllowExplicitRemoval();
-    void taskModeAddsTextOnlyWithTheStageButton();
+    void taskModeAddsAttachmentsWithTheStageButton();
     void initTestCase();
     void voiceInsertionRequiresUnchangedDraftAndNavigation();
     void init() { ComposerDraftStore::flushWrites(); QVERIFY(QDir(ComposerDraftStore::directory()).removeRecursively()); QSettings().remove("workspace/messageEditorHeight"); }
@@ -591,7 +591,7 @@ void TestMessageComposer::unsupportedAttachmentsPreserveTextAndAllowExplicitRemo
     composer.setRecording(true);QVERIFY(!send->isEnabled());composer.setRecording(false);QVERIFY(send->isEnabled());
 }
 
-void TestMessageComposer::taskModeAddsTextOnlyWithTheStageButton()
+void TestMessageComposer::taskModeAddsAttachmentsWithTheStageButton()
 {
     // Saved drafts names a task prompt by the session it is for.
     const auto owner=ComposerDraftStore::owner("task-draft\nmac\ncodex/api");
@@ -599,15 +599,17 @@ void TestMessageComposer::taskModeAddsTextOnlyWithTheStageButton()
     MessageComposer composer;composer.setTaskMode(true);composer.setSendLabel("Backlog");composer.setPlaceholder("Task prompt for orchard / codex/api…");
     composer.resize(600,160);composer.show();
     composer.setSessionKey("task-draft\n\ncodex/api");QTRY_VERIFY(!composer.isDraftLoading(composer.sessionKey()));composer.setAvailability(true);
-    QVERIFY(composer.toolbar()->isHidden());
-    for(const char *name:{"attachMessageFile","sessionModelSettings","interruptAgent"})QVERIFY2(composer.findChild<QPushButton *>(name)->isHidden(),name);
+    QVERIFY(!composer.toolbar()->isHidden());
+    for(const char *name:{"sessionModelSettings","interruptAgent"})QVERIFY2(composer.findChild<QPushButton *>(name)->isHidden(),name);
     auto *send=composer.findChild<QPushButton *>("sendMessage");QCOMPARE(send->text(),QString("Backlog"));QVERIFY(!send->isEnabled());
     QCOMPARE(composer.editor()->placeholderText(),QString("Task prompt for orchard / codex/api…"));
-    QVERIFY(!composer.canAttachFiles());QVERIFY(!composer.addAttachment("a.txt","text/plain","x"));
+    QVERIFY(composer.canAttachFiles());QVERIFY(composer.addAttachment("image.png","image/png","image data"));
+    QVERIFY(composer.findChild<QPushButton *>("attachMessageFile")->isVisible());
     QSignalSpy requested(&composer,&MessageComposer::sendRequested);
     composer.editor()->setFocus();QTest::keyClicks(composer.editor(),"Add rate limiting");QVERIFY(send->isEnabled());
     QTest::keyClick(composer.editor(),Qt::Key_Return);
-    QTRY_COMPARE(requested.size(),1);QCOMPARE(requested[0][1].toString(),QString("Add rate limiting"));
+    QTRY_COMPARE(requested.size(),1);QVERIFY(requested[0][1].toString().contains("Add rate limiting"));
+    QCOMPARE(requested[0][2].value<QList<MessageAttachment>>().size(),1);
 }
 
 void TestMessageComposer::initTestCase()

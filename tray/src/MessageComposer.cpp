@@ -563,9 +563,9 @@ void MessageComposer::updatePlaceholder()
 void MessageComposer::setTaskMode(bool taskMode)
 {
     m_taskMode = taskMode;
-    m_toolbar->setVisible(!taskMode);
+    m_toolbar->setVisible(true);
     m_editor->setAccessibleName(taskMode ? tr("Task prompt") : tr("Message to selected agent"));
-    setAttachmentAvailability(!taskMode, taskMode ? tr("A task is text only.") : QString());
+    setAttachmentAvailability(true);
     updateControls();
 }
 
@@ -1146,7 +1146,7 @@ void MessageComposer::updateControls()
         : m_attachmentsAvailable ? tr("Attach files, paste an image, or drop files onto this session") : m_attachmentsReason);
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
-    m_attach->setVisible(!m_taskMode);
+    m_attach->setVisible(true);
     m_send->setText(draft.sending ? (m_taskMode ? tr("Adding…") : tr("Sending…")) : waiting ? tr("Waiting to send…")
         : m_taskMode ? m_sendLabel : tr("Send"));
     m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_taskMode ? tr("Add the task: Enter; new line: Shift+Enter")

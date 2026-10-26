@@ -730,11 +730,18 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 }
 
 /// Plain text for the session's current run and conversation (task prompts).
-pub(super) fn submit_text(name: &str, text: &str) -> Result<Value> {
+pub(super) fn submit_task(session: &zerus_replica::SessionKey, text: &str, attachments: &[Value]) -> Result<Value> {
+    let name = session.session.as_str();
     let record = read(name)?;
+    if !session.session_id.is_empty() {
+        let key = if string(&record, "launch_id").is_empty() { "run_id" } else { "launch_id" };
+        if session.session_id != format!("{key}:{}", string(&record, key)) {
+            return Err("task session identity changed; refresh the task".into());
+        }
+    }
     let request = json!({"request_id": uuid::Uuid::new_v4().to_string(), "text": text,
         "expected_run_id": string(&record, "run_id"),
-        "expected_conversation_id": string(&record, "conversation_id"), "attachments": []});
+        "expected_conversation_id": string(&record, "conversation_id"), "attachments": attachments});
     submit(name, request.to_string().as_bytes(), None)
 }
 

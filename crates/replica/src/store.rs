@@ -6,7 +6,7 @@
 //! Updates are folded into a fresh snapshot when they grow, and once when a
 //! task is accepted (its Done compaction). One process at a time holds a project.
 use crate::project::ProjectDoc;
-use crate::schema::{Actor, Stage, SCHEMA};
+use crate::schema::{Actor, Stage};
 use crate::task::TaskDoc;
 use crate::{ids, rank, Error, Result};
 use fs2::FileExt;
@@ -405,7 +405,7 @@ impl ProjectStore {
             .find(|r| low.as_ref().is_none_or(|l| r > l));
         let placed = rank::between(low.as_deref(), high.as_deref());
         if placed.as_ref().is_ok_and(|r| r.len() <= RENUMBER_AT)
-            || list.iter().any(|t| t.schema() > SCHEMA)
+            || list.iter().any(|t| t.schema() > crate::TASK_SCHEMA)
         {
             return placed;
         }
@@ -463,7 +463,7 @@ mod tests {
         SessionKey {
             machine: "m".into(),
             session: "codex/api".into(),
-        }
+        ..Default::default()}
     }
 
     fn comments(task: &TaskDoc) -> Vec<String> {

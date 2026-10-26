@@ -1,6 +1,7 @@
 #pragma once
 #include "TaskBoard.h"
 #include "TaskRow.h"
+#include "HgsClient.h"
 #include <QDialog>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -16,19 +17,24 @@ class QPushButton;
 class QScrollArea;
 class QSpinBox;
 class QTextBrowser;
+class QVBoxLayout;
+class QMimeData;
 struct TaskSession;
 
 // The session a task is pinned to; any is Any session.
 struct TaskTarget {
     bool any = true;
     QString host, session;
-    bool operator==(const TaskTarget &other) const { return any == other.any && host == other.host && session == other.session; }
+    QString id;
+    bool operator==(const TaskTarget &other) const { return any == other.any && host == other.host &&
+        (id.isEmpty() && other.id.isEmpty() ? session == other.session : !id.isEmpty() && id == other.id); }
 };
 
 // Unsaved changes in the task settings: only what the person changed.
 struct TaskEdits {
     std::optional<QString> text;
     std::optional<TaskTarget> target;
+    std::optional<QJsonArray> attachments;
 };
 
 // A task's settings: its prompt and session (editable in To do and Backlog), its
@@ -46,6 +52,7 @@ public:
     TaskEdits edits() const;
     void setHistory(const QJsonArray &log);
     void clearComment();
+    void updateSessionLabels(const QList<TaskSession> &sessions);
     void setError(const QString &error);
 signals:
     void saveRequested(const TaskEdits &edits);
@@ -58,6 +65,10 @@ private:
     // Each button's state: busy, an empty prompt, a newer task, and Send now's
     // reason for the session chosen now.
     void refreshButtons();
+    bool insertMedia(const QMimeData *source);
+    void addFiles(const QStringList &paths);
+    void addAttachments(const QList<MessageAttachment> &files);
+    void refreshAttachments();
     TaskTarget chosenTarget() const;
     TaskItem m_task;
     TaskTarget m_target;
@@ -71,6 +82,11 @@ private:
     QTextBrowser *m_history;
     QLineEdit *m_comment;
     bool m_editable;
+    bool m_mediaBusy = false;
+    QList<MessageAttachment> m_attachments;
+    QJsonArray m_originalAttachments;
+    QJsonArray m_log;
+    QVBoxLayout *m_attachmentRows = nullptr;
 };
 
 // Confirms a Cancel: the task moves to In review and its session gets the cancel

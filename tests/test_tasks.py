@@ -2,6 +2,7 @@
 """`hgs task` through the real CLI: an isolated catalog and state; sends go to
 a scripted agent on a private tmux socket."""
 import datetime
+import base64
 import fcntl
 import hashlib
 import json
@@ -154,6 +155,60 @@ class Fixture(unittest.TestCase):
 
 
 class TaskCommands(Fixture):
+    def test_task_identity_survives_rename_and_name_reuse(self):
+        launch = str(uuid.uuid4())
+        old = agent_record(self.state, self.env, "codex/api", "run-1", launch_id=launch)
+        task = self.add("Keep the link", "--target", "codex/api")
+        self.assertEqual(task["target"]["session_id"], "launch_id:" + launch)
+        record = json.loads(old.read_text()); old.unlink()
+        record["name"] = "codex/api-renamed"; record["journal_name"] = "codex/api"
+        current = self.state / (hashlib.sha256(record["name"].encode()).hexdigest() + ".json")
+        current.write_text(json.dumps(record))
+        agent_record(self.state, self.env, "codex/api", "replacement", launch_id=str(uuid.uuid4()))
+        shown = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(shown["target"]["session"], "codex/api-renamed")
+        self.assertEqual(shown["target"]["session_id"], task["target"]["session_id"])
+        current.unlink()
+        missing = self.hgs("get", task["ref"])["task"]
+        self.assertFalse(missing["target"]["resolved"])
+        self.assertIn("no longer exists", self.hgs("send", task["ref"], ok=False))
+
+    def test_an_agent_explicitly_starts_work_without_sending_it(self):
+        queued = self.add("For later", session="codex/api")
+        self.assertEqual(queued["stage"], "todo")
+        started = self.hgs("start", queued["ref"], "--json", session="codex/api")["task"]
+        self.assertEqual(started["stage"], "active")
+        self.assertEqual(started["session"]["session_id"], started["target"]["session_id"])
+        self.assertEqual([e["kind"] for e in started["log"]], ["created", "started"])
+        immediate = self.add("Doing this direct request", "--start", session="codex/api")
+        self.assertEqual(immediate["stage"], "active")
+        other = self.add("Owned elsewhere", session="codex/web")
+        self.assertIn("another session", self.hgs("start", other["ref"], session="codex/api", ok=False))
+        own = self.add("Already done during this turn", session="codex/api")
+        report = self.hgs("report", own["ref"], "--json", text="Checked and finished.", session="codex/api")
+        self.assertTrue(report["moved_to_review"])
+        self.assertEqual(report["task"]["stage"], "review")
+        foreign = self.hgs("report", other["ref"], "--json", text="A review note.", session="codex/api")
+        self.assertFalse(foreign["moved_to_review"])
+        self.assertEqual(foreign["task"]["stage"], "todo")
+
+    def test_media_is_persisted_but_not_expanded_in_listings(self):
+        file = dict(name="screen.png", mime="image/png", reference="[Image #1]",
+                    data_base64=base64.b64encode(b"immutable image bytes").decode())
+        task = self.add(json.dumps(dict(text="Look here [Image #1]", attachments=[file])), "--content-json")
+        self.assertEqual(task["attachments"], [file])
+        self.assertEqual(task["schema"], 2)
+        listed = self.hgs("list", "--project", "orchard")["tasks"][0]["attachments"][0]
+        self.assertNotIn("data_base64", listed)
+        self.assertEqual(listed["sha256"], hashlib.sha256(b"immutable image bytes").hexdigest())
+        self.hgs("edit", task["ref"], text="Updated text [Image #1]")
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["attachments"], [file])
+        removed = self.hgs("edit", task["ref"], "--content-json", text=json.dumps(dict(text="Updated text", attachments=[])))["task"]
+        self.assertFalse(removed.get("attachments"))
+        bad = dict(file, data_base64="%%%")
+        self.assertIn("base64", self.hgs("edit", task["ref"], "--content-json", text=json.dumps(dict(text="Bad", attachments=[bad])), ok=False))
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["text"], "Updated text")
+
     def test_add_list_and_get(self):
         task = self.add("Add rate limiting")
         self.assertRegex(task["id"], r"^T-[0-9a-z]{6}$")
@@ -474,6 +529,54 @@ class DeliveryFixture(Fixture):
         self.hgs("settings", "--project", "orchard", "--set", text=json.dumps(settings))
 
 class TaskDelivery(DeliveryFixture):
+    def test_a_renamed_task_is_delivered_to_the_same_native_run(self):
+        task = self.add("Follow the immutable run", "--target", self.name)
+        old = self.name
+        renamed = "codex/task-renamed"
+        self.tmux("rename-session", "-t", "=" + old + ":", renamed)
+        record = json.loads(self.record_path.read_text())
+        record.update(name=renamed, journal_name=old)
+        self.record_path.unlink()
+        self.record_path = self.state / (hashlib.sha256(renamed.encode()).hexdigest() + ".json")
+        self.record_path.write_text(json.dumps(record))
+        self.name = renamed; self.runs[renamed] = self.run_id
+        sent = self.hgs("send", task["ref"])
+        self.assertEqual(sent["task"]["session"]["session"], renamed)
+        self.assertEqual(sent["task"]["session"]["session_id"], task["target"]["session_id"])
+        self.assertEqual(sent["receipt"]["status"], "submitted")
+        self.wait_received("Follow the immutable run")
+
+    def test_handoff_transfers_the_task_pin_and_working_session(self):
+        task = self.add("Check the new owner", "--start", session="codex/source")
+        before = self.hgs("get", task["ref"])["task"]
+        self.hgs("handoff", task["ref"], "--session", "codex/missing", session="codex/source", ok=False)
+        self.assertEqual(self.hgs("get", task["ref"])["task"], before)
+        handed = self.hgs("handoff", task["ref"], "--session", self.name, "--json", session="codex/source")
+        new = handed["task"]
+        self.assertEqual(new["stage"], "active")
+        self.assertEqual(new["session"]["session"], self.name)
+        self.assertEqual(new["target"]["session"], self.name)
+        self.assertEqual(new["session"]["session_id"], new["target"]["session_id"])
+        self.assertEqual(handed["receipt"]["status"], "submitted")
+        entry = new["log"][-1]
+        self.assertEqual((entry["kind"], entry["text"], entry["request_id"]), ("sent", "handoff", handed["receipt"]["request_id"]))
+        self.wait_received("Check the new owner")
+        self.assertIn("only the task's current session", self.hgs("handoff", task["ref"], "--session", "codex/another", session="codex/source", ok=False))
+        report = json.loads(self.as_agent("report", task["ref"], "--json", text="Ownership checked."))
+        self.assertTrue(report["moved_to_review"])
+        self.assertEqual(report["task"]["stage"], "review")
+
+    def test_task_images_reach_native_attachment_storage(self):
+        data = b"\x89PNG\r\n\x1a\nsynthetic fixture"
+        file = dict(name="screen.png", mime="image/png", reference="[Image #1]", data_base64=base64.b64encode(data).decode())
+        task = self.add(json.dumps(dict(text="Inspect [Image #1]", attachments=[file])), "--content-json", "--target", self.name)
+        sent = self.hgs("send", task["ref"])
+        self.assertEqual(sent["task"]["stage"], "active")
+        self.assertEqual(sent["receipt"]["status"], "submitted")
+        path = Path(sent["receipt"]["attachments"][0]["path"])
+        self.assertEqual(path.read_bytes(), data)
+        self.wait_received(str(path))
+
     def test_send_report_and_a_second_send(self):
         task = self.add("Add rate limiting", "--target", self.name)
         sent = self.hgs("send", task["ref"])

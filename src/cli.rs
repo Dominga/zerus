@@ -142,7 +142,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] resume <session> --fresh [-d] [--expected-run-id ID]   same settings, new conversation
        hgs notify [--bell] <session> [text]   event for the tray (no tray = no-op)
        hgs project ls [--json] | add <name> <dir> | set <name> <dir> | rm <name>
-       hgs task list|get|add|edit|move|stage|target|send|cancel|report|comment|settings …   project tasks (JSON; agents read one line)
+       hgs task list|get|add|edit|move|stage|target|start|send|handoff|cancel|report|comment|settings …   project tasks (JSON; agents read one line)
        hgs task exchange|digests --json                 the phone's task exchange (mobile)
        hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)

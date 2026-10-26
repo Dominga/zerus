@@ -3,6 +3,9 @@
 #include "TaskDialogs.h"
 #include "SessionStatusBadge.h"
 #include "TasksView.h"
+#include "TaskContent.h"
+#include <QBuffer>
+#include <QClipboard>
 #include <QFontInfo>
 #include <QTextDocumentFragment>
 #include <QAbstractButton>
@@ -49,6 +52,8 @@ private slots:
     void aRefusedSaveKeepsTheDialogAndItsEdits();
     void sendNowFollowsTheChosenSession();
     void anEmptyPromptCannotBeApplied();
+    void imagesStayWithTheDescriptionUntilExplicitSave();
+    void sessionRenamePreservesOpenDialogEdits();
 };
 
 void TestTaskDialogs::initTestCase() {
@@ -56,6 +61,47 @@ void TestTaskDialogs::initTestCase() {
     QCoreApplication::setOrganizationName("hgs-tests"); QCoreApplication::setApplicationName("task-dialogs");
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
+}
+
+void TestTaskDialogs::imagesStayWithTheDescriptionUntilExplicitSave() {
+    QImage image(8, 8, QImage::Format_ARGB32); image.fill(Qt::red);
+    QByteArray bytes; QBuffer buffer(&bytes); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(image.save(&buffer, "PNG"));
+    const auto files = TaskContent::encode({MessageAttachment{"screen.png", "image/png", bytes, "[Image #1]"}});
+    const auto task = FakeTasksCli::task(1, "todo", {{"text", "Original description [Image #1]"}, {"attachments", files}});
+    TaskDialog dialog(task, sessions(), {}, true); dialog.show();
+    auto *prompt = dialog.findChild<QPlainTextEdit *>("taskPrompt");
+    QTRY_VERIFY(!prompt->isReadOnly());
+    QCOMPARE(dialog.findChildren<QPushButton *>("openTaskAttachment").size(), 1);
+    QVERIFY(!dialog.edits().attachments.has_value());
+    prompt->setPlainText("Updated description [Image #1]");
+    QVERIFY(!dialog.edits().attachments.has_value());
+    dialog.findChild<QPushButton *>("removeTaskAttachment")->click();
+    QVERIFY(dialog.edits().attachments.has_value()); QVERIFY(dialog.edits().attachments->isEmpty());
+    QCOMPARE(prompt->toPlainText().trimmed(), QString("Updated description"));
+    QGuiApplication::clipboard()->setImage(image); prompt->paste();
+    QTRY_VERIFY(!prompt->isReadOnly());
+    QTRY_COMPARE(dialog.edits().attachments.value_or(QJsonArray()).size(), 1);
+    const auto added = TaskContent::decode(*dialog.edits().attachments);
+    QCOMPARE(added.size(), 1); QCOMPARE(added.first().mime, QString("image/png"));
+    QVERIFY(!QImage::fromData(added.first().data).isNull());
+    QVERIFY(prompt->toPlainText().contains("[Image #1]"));
+    QSignalSpy saved(&dialog, &TaskDialog::saveRequested);
+    dialog.findChild<QPushButton *>("saveTask")->click(); QCOMPARE(saved.size(), 1);
+    const auto edits = saved.first().first().value<TaskEdits>();
+    QCOMPARE(edits.attachments->size(), 1); QVERIFY(edits.text->contains("Updated description"));
+    QGuiApplication::clipboard()->clear();
+}
+
+void TestTaskDialogs::sessionRenamePreservesOpenDialogEdits() {
+    auto target = FakeTasksCli::pinned("codex/api"); target["session_id"] = "launch_id:one";
+    auto known = sessions(); known[0].id = "launch_id:one";
+    TaskDialog dialog(FakeTasksCli::task(1, "todo", {{"target", target}}), known, {}, true); dialog.show();
+    auto *prompt = dialog.findChild<QPlainTextEdit *>("taskPrompt"); prompt->setPlainText("Unsaved text");
+    auto cursor = prompt->textCursor(); cursor.setPosition(2); cursor.setPosition(6, QTextCursor::KeepAnchor); prompt->setTextCursor(cursor);
+    known[0].name = "codex/renamed"; dialog.updateSessionLabels(known);
+    QCOMPARE(prompt->toPlainText(), QString("Unsaved text")); QCOMPARE(prompt->textCursor().selectedText(), QString("save"));
+    const auto *chip = dialog.findChild<QPushButton *>("taskSession:/codex/api"); QVERIFY(chip->isChecked()); QCOMPARE(chip->text(), QString("renamed"));
+    QVERIFY(!dialog.edits().target.has_value()); QCOMPARE(dialog.edits().text.value_or(QString()), QString("Unsaved text"));
 }
 
 void TestTaskDialogs::theTaskDialogEditsAListedTaskAndShowsItsHistory() {

@@ -2372,6 +2372,8 @@ hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS
 hgs task list --project orchard [--stage todo]
 hgs task get orchard/T-a1b2c3
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
+hgs task handoff orchard/T-a1b2c3 --session codex/worker [--host ALIAS]
+hgs task start orchard/T-a1b2c3
 hgs task report orchard/T-a1b2c3 < summary.txt
 hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
 hgs task stage orchard/T-a1b2c3 backlog|todo|done
@@ -2393,6 +2395,36 @@ shows In progress is not sent again. Run inside a session (`HGS_SESSION` and
 for that session, and the project settings can keep agents to their own
 session or limit how many tasks they start per hour. `settings --set` reads a
 JSON object and changes only the fields it names.
+
+Task links retain the computer and immutable launch identity (a run identity for
+older bindings). The session name is a display and routing hint: renaming changes
+the shown label and keeps current-session emphasis and filtering. A different
+session reusing the old name does not inherit the task. Name-only older tasks can
+use a uniquely retained rename alias; an unresolved identity cannot receive input.
+
+An agent recording a direct request it is already doing uses `add --start`, or
+`start REF` for a queued task. This records In progress without sending the same
+instruction into its conversation again. Plain `add` remains a queue operation.
+A report by the exact pinned agent also moves its unsent queued task to In review;
+a report from another session remains a history note. `handoff` is explicit: only
+the current agent owner (or the person) can transfer an active task, and both its
+pinned target and working session change only after confirmed native submission.
+Failed or uncertain delivery never authorizes an automatic retry.
+
+Desktop task descriptions support attached files, including pasted or dropped
+images. The task dialog previews images, opens retained copies and edits files
+alongside the text in To do and Backlog. Limits match message attachments: up to
+eight files, 10 MiB per file and 20 MiB total. Immutable bytes replicate with the
+task and travel through the ordinary native attachment path when it is sent.
+CLI `add` and `edit` accept `--content-json` with
+`{"text":"Inspect [Image #1]","attachments":[{"name":"screen.png","mime":"image/png","reference":"[Image #1]","data_base64":"..."}]}`
+on stdin. Omit `attachments` to keep them while editing, or pass an empty array
+to remove them. Listings contain only file metadata; `get` includes the bytes.
+Tasks with immutable session identities or media use task schema 2: older clients
+show their text read-only and cannot send a partial payload. Project documents
+and the paged exchange wire protocol remain schema 1. Mobile attachment pickers
+and previews are not part of the desktop editor; host-side mobile sends retain
+the task's complete attachment payload.
 
 `--host ALIAS` names a session on another computer of the swarm that this
 computer verified itself. A send or cancel for such a session runs on that

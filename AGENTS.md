@@ -24,6 +24,10 @@ text in English; conversations may use the user's preferred language.
 
 Use the `beads` skill in `.agents/skills/beads/SKILL.md` and run `bd prime` at
 session start and after compaction. Use `bd` for all durable tasks and blockers.
+Zerus product tasks received through `hgs task` are separate from Beads engineering
+tracking. For a direct request already being worked on, agents use `hgs task add
+--start` or `hgs task start REF`; plain add queues work for later. Reports by the
+exact pinned agent move its unsent queued task to In review as well.
 Use `bd remember --key <key> "<decision>"` for concise, shareable project memory.
 Do not create separate TODO or MEMORY files. Read current source before carrying
 forward a historical limitation.

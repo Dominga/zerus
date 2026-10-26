@@ -21,6 +21,7 @@ fn accepted(root: &tempfile::TempDir, text: &str) -> String {
     let session = SessionKey {
         machine: "m".into(),
         session: "codex/api".into(),
+        ..Default::default()
     };
     task.record_send(&session, "request-1", &Actor::Person, 2)
         .unwrap();

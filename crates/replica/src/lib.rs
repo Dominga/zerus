@@ -2,6 +2,7 @@
 //! that imports `loro`: hgs and the mobile apps use its typed operations, so
 //! a Loro upgrade or a schema change happens here once.
 mod error;
+mod attachment;
 pub mod ids;
 mod ops;
 pub mod phone;
@@ -14,6 +15,7 @@ mod sync;
 mod task;
 
 pub use error::{Error, ErrorKind, Result};
+pub use attachment::{TaskAttachment, MAX_ATTACHMENTS, MAX_ATTACHMENT, MAX_ATTACHMENT_TOTAL, TASK_SCHEMA};
 pub use project::{ProjectDoc, Settings};
 pub use render::{cancel_message, task_prompt, Tools};
 pub use schema::{

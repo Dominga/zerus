@@ -440,6 +440,7 @@ private slots:
     void launchNameFollowsRenameRules();
     void openCodeModelLaunchUsesNativeAccountAndActivity();
     void openCodeCapabilitiesPreserveDraftWithoutTerminal();
+    void externalQueueSurvivesDurableDraftRecheck();
     void openCodeAllModelsReadsTheSessionFolderCatalog();
     void openCodeAnotherFolderStartsThePickerAfresh();
     void openCodeAnswersFromBeforeLeavingASessionStayThere();
@@ -10251,6 +10252,32 @@ void TestSessionsWindow::openCodeNativeTerminalIsExplicitAndKeepsDraft()
     terminal->disconnectSession();
     QVERIFY(!terminal->isConnected());
     QCOMPARE(composer->editor()->toPlainText(), QString("Keep the Activity draft while opening the native TUI"));
+}
+
+void TestSessionsWindow::externalQueueSurvivesDurableDraftRecheck()
+{
+    const QString name="external/project/chat",run="external-run",conversation="external-conversation";
+    const QJsonObject source{{"schema_version",1},{"kind","chatgpt_work"},{"evidence","explicit_registration"}};
+    const QJsonObject details{{"name",name},{"cmd","external"},{"agent","external"},{"tracked",true},{"state","running"},
+        {"run_id",run},{"conversation_id",conversation},{"phase","idle"},{"activity","unknown"},{"process_state","external"},{"runtime_state","external"},
+        {"backend","external-workstream"},{"external_protocol","cooperative-inbox-v1"},{"send_delivery","cooperative_inbox"},
+        {"external_cloud_control",false},{"client_context",source},{"send_supported",true},{"send_available",true},
+        {"terminal_supported",false},{"attachments_supported",false},{"allowed_actions",QJsonArray{}},{"events",QJsonArray{}},{"cursor",0}};
+    const auto fake=programInspecting("external-queue",details);QVERIFY(!fake.isEmpty());
+    auto state=fleet();auto box=state.local();SessionInfo session;session.name=name;session.cmd="external";session.runId=run;session.conversationId=conversation;
+    session.tracked=true;session.activity="unknown";session.phase="idle";session.processState="external";session.runtimeState="external";
+    session.clientContext=source;session.terminalSupported=false;session.actionsReported=true;box.sessions={session};state.setLocal(box,QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(fake);window.setFleet(state);window.show();window.showSession({},name);
+    auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
+    settleSelectedInspection(composer,client,{},name,details);setComposerText(composer,"Check this scoped instruction");
+    auto *button=composer->findChild<QPushButton *>("sendMessage");QTRY_VERIFY(button->isEnabled());QCOMPARE(button->text(),QString("Queue"));
+    QSignalSpy sent(client,&HgsClient::messageSent);QSignalSpy failed(client,&HgsClient::messageFailed);
+    QTest::mouseClick(button,Qt::LeftButton);
+    // FakeCli need not execute a real action: reaching either native callback
+    // proves the asynchronous draft guard did not mistake an inbox for a dead process.
+    QTRY_VERIFY_WITH_TIMEOUT(!sent.isEmpty()||!failed.isEmpty(),10000);
+    const auto result=!sent.isEmpty()?sent.first():failed.first();
+    QCOMPARE(result[2].toString(),name);
 }
 
 void TestSessionsWindow::openCodeCapabilitiesPreserveDraftWithoutTerminal()

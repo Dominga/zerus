@@ -118,6 +118,11 @@ fn db(config: &Config, write: bool) -> anyhow::Result<Option<Connection>> {
         platform::verify_private(&directory, platform::Private::Directory)?,
         "External directory must be private, owned and not redirected"
     );
+    // macOS /var and /tmp are system ancestor aliases. Resolve only the
+    // already verified private directory, never the database leaf. SQLite's
+    // NOFOLLOW then still protects the exact regular private database file.
+    #[cfg(unix)]
+    let path = fs::canonicalize(&directory)?.join("workstreams.sqlite3");
     if write && !path.try_exists()? {
         match platform::private_open(fs::OpenOptions::new().write(true).create_new(true))
             .open(&path)

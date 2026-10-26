@@ -1075,9 +1075,9 @@ class ApprovalHarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             project = ios.generate(ROOT, Path(folder) / "new")
             body = (project / "project.pbxproj").read_text()
-            self.assertIn(str(ROOT / "mobile/ios/Zerus/Conversation/QuestionCard.swift"), body)
-            self.assertIn(str(ROOT / "mobile/ios/Zerus/Common/MarkdownView.swift"), body)
-            self.assertIn(str(ROOT / "mobile/ios/ZerusKit"), body)
+            self.assertIn(json.dumps(str(ROOT / "mobile/ios/Zerus/Conversation/QuestionCard.swift")), body)
+            self.assertIn(json.dumps(str(ROOT / "mobile/ios/Zerus/Common/MarkdownView.swift")), body)
+            self.assertIn(json.dumps(str(ROOT / "mobile/ios/ZerusKit")), body)
             self.assertNotIn("App/ZerusApp.swift", body)
             self.assertNotIn("App/AppModel.swift", body)
             self.assertNotIn("CODE_SIGNING_ALLOWED = YES", body)
@@ -1176,7 +1176,7 @@ class ApprovalHarnessTests(unittest.TestCase):
 
     def test_hosted_apple_environment_preserves_only_valid_required_account_values(self):
         ios = module("ios_approval_ui", "scripts/ci/ios-approval-ui.py")
-        valid = {"HOME": "/tmp/example-home", "TMPDIR": "/private/tmp/example-hosted/", "USER": "hosted", "LOGNAME": "hosted"}
+        valid = {"HOME": str(ROOT / "example-home"), "TMPDIR": str(ROOT / "example-hosted"), "USER": "hosted", "LOGNAME": "hosted"}
         self.assertEqual(ios.hosted_user_environment({**valid, "UNRELATED": "discarded"}), valid)
         for key in valid:
             missing = dict(valid); missing.pop(key)

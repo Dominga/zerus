@@ -203,6 +203,8 @@ and are not silently enabled by this guide.
 Windows: in that desktop's Settings -> Mobile connection, enter the private
 `https://pc-a.YOUR_TAILNET.ts.net` URL and **that computer's** node credential,
 Save, inspect the read-only configuration check, then Start connector explicitly.
+Use the Settings save operation to create the owner-private Windows configuration
+and management state; do not hand-copy a JSON file into an arbitrary shared folder.
 The connector should use the same HGS/profile as the desktop and workstream
 adapter. Do not reuse one node token for four computers.
 
@@ -287,3 +289,10 @@ Sources: Microsoft Windows OpenSSH first-use documentation; Tailscale Serve and
 HTTPS certificate documentation; this source's mobile-deployment.md,
 windows-wsl.md, fork-candidates.md and external-workstreams.md. Recheck vendor
 commands when installing a newer platform version.
+
+## Vendor references checked for this guide
+
+- Tailscale Serve: https://tailscale.com/docs/features/tailscale-serve
+- Serve command flags: https://tailscale.com/docs/reference/tailscale-cli/serve
+- Windows OpenSSH setup: https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse
+- Windows SSH key ownership: https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_keymanagement

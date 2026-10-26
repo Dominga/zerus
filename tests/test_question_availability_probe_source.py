@@ -74,7 +74,29 @@ def reverse_reviewed_patch(name, source, fixture, fixture_sha):
     return source
 
 
+def reverse_fork_presentation(name, source):
+    """Remove only four reviewed fork presentation additions; keep policy pins.
+
+    No question policy, verification writer or send admission is projected out.
+    Requiring each exact replacement once makes drift/duplicate additions fail.
+    """
+    if name != "MainActivity.kt":
+        return source
+    edits = (
+        ('mutableStateOf(BuildConfig.DEFAULT_RELAY_URL)', 'mutableStateOf("https://relay.zerus.dev")'),
+        ('    val cooperative = ConversationSource.cooperative(model.activity ?: session.raw)\n', ''),
+        ('placeholder = if(cooperative) "Queue instruction" else "Message"', 'placeholder = "Message"'),
+        ('if(cooperative) "Queue instruction for external agent" else "Send message"', '"Send message"'),
+    )
+    for current, original in edits:
+        if source.count(current) != 1:
+            raise AssertionError("reviewed fork presentation hunk is missing, changed or duplicated")
+        source = source.replace(current, original, 1)
+    return source
+
+
 def reverse_reviewed_updates(name, source):
+    source = reverse_fork_presentation(name, source)
     source = reverse_reviewed_patch(name, source, WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
     return reverse_reviewed_patch(name, source, UPDATES, UPDATES_SHA)
 
@@ -95,9 +117,20 @@ class QuestionAvailabilityProbeSourceTests(unittest.TestCase):
     def test_workspace_projection_matches_reviewed_current_main_exactly(self):
         for name, digest in WORKSPACE_BASE_SHA.items():
             with self.subTest(source=name):
-                projected = reverse_reviewed_patch(name, (MAIN / name).read_text(),
+                projected = reverse_reviewed_patch(name, reverse_fork_presentation(name, (MAIN / name).read_text()),
                                                   WORKSPACE_UPDATES, WORKSPACE_UPDATES_SHA)
                 self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(), digest)
+
+    def test_fork_projection_is_exact_and_does_not_hide_question_policy_changes(self):
+        source=(MAIN / "MainActivity.kt").read_text()
+        for old,new in [('ConversationSource.cooperative(model.activity ?: session.raw)','true'),
+                        ('"Queue instruction"','"Send silently"'),
+                        ('model.activityVerified || model.demo','true')]:
+            with self.subTest(change=old):
+                self.assertIn(old,source)
+                self.assertFalse(original_source("MainActivity.kt",source.replace(old,new,1)))
+        changed=source+"\n    val cooperative = ConversationSource.cooperative(model.activity ?: session.raw)\n"
+        self.assertFalse(original_source("MainActivity.kt",changed))
 
     def test_original_model_and_main_reconstruct_including_every_policy_and_assignment(self):
         for name, digest in [("ZerusViewModel.kt", MODEL_SHA), ("MainActivity.kt", MAIN_SHA)]:

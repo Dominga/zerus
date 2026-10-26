@@ -89,6 +89,27 @@ class ExternalWorkstreams(unittest.TestCase):
         self.assertTrue(all(v==results[0] for v in results))
         read={k:v for k,v in self.scope(row,name=row['name']).items() if k!='request_id'}
         self.assertEqual(len(self.hgs('external','inbox','--json',payload=read)['messages']),1)
+    @unittest.skipIf(os.name=='nt','POSIX ancestor aliases and single-link storage boundary')
+    def test_private_store_under_an_ancestor_alias_is_usable(self):
+        actual=self.root/'real-parent';actual.mkdir(mode=0o700)
+        alias=self.root/'ancestor-alias';alias.symlink_to(actual,target_is_directory=True)
+        state=actual/'state';state.mkdir(mode=0o700)
+        self.env['HGS_STATE_DIR']=str(alias/'state')
+        row=self.register()
+        self.assertEqual(self.hgs('inspect',row['name'])['run_id'],row['run_id'])
+        self.assertTrue((state/'external-workstreams/workstreams.sqlite3').is_file())
+
+    @unittest.skipIf(os.name=='nt','POSIX leaf symlink and hardlink refusal')
+    def test_database_leaf_links_are_refused_without_following_or_repair(self):
+        row=self.register();database=self.root/'state/external-workstreams/workstreams.sqlite3'
+        preserved=database.with_name('preserved.sqlite3');database.rename(preserved)
+        before=preserved.read_bytes();database.symlink_to(preserved)
+        self.hgs('inspect',row['name'],ok=False)
+        self.assertTrue(database.is_symlink());self.assertEqual(preserved.read_bytes(),before)
+        database.unlink();os.link(preserved,database)
+        self.hgs('inspect',row['name'],ok=False)
+        self.assertEqual(database.stat().st_nlink,2);self.assertEqual(preserved.read_bytes(),before)
+
     def test_unknown_schema_is_not_repaired(self):
         row=self.register();database=self.root/'state/external-workstreams/workstreams.sqlite3'
         db=sqlite3.connect(database)

@@ -150,7 +150,9 @@ QString fileReferenceContext(const SessionInfo &session, const QJsonObject &deta
 QJsonObject sendEvidence(const QJsonObject &data)
 {
     QJsonObject result;
-    for (const auto *field : {"run_id", "conversation_id", "runtime_state", "process_state", "pending_questions", "cache_hint"})
+    for (const auto *field : {"run_id", "conversation_id", "runtime_state", "process_state", "pending_questions", "cache_hint",
+            "agent", "backend", "external_protocol", "send_delivery", "external_cloud_control", "client_context",
+            "tracked", "send_available", "send_supported"})
         result.insert(QString::fromLatin1(field), data.value(QString::fromLatin1(field)));
     result.insert("session_usage", QJsonObject{{"prompt_cache", data.value("session_usage").toObject().value("prompt_cache")}});
     return result;
@@ -5262,7 +5264,8 @@ void SessionsWindow::deliverMessage(const QString &key, const QString &host, con
                 || !current->online || isTerminating(*current)) return false;
             if (!evidence.isEmpty() && (evidence.value("run_id").toString() != runId
                 || evidence.value("conversation_id").toString() != conversationId
-                || evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running")) return false;
+                || (target.session.cmd=="external" ? !ConversationSource::cooperative(evidence)
+                    : evidence.value("runtime_state") != "live" || evidence.value("process_state") != "running"))) return false;
             if (m_pending || !m_renameKey.isEmpty() || (key == m_clearKey && m_clearRequest)
                 || (key == m_settingsKey && m_settingsRequest)) return false;
             if (!retryId.isEmpty()) {

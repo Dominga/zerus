@@ -290,13 +290,51 @@ QWidget *TeamPanel::planFooter(const Team &team)
     auto *v = new QVBoxLayout(box); v->setContentsMargins(10, 8, 10, 10); v->setSpacing(6);
     if (!team.errors.isEmpty())
         v->addWidget(new StatusMark(tr("Fix %n plan error(s) to run", nullptr, int(team.errors.size())), c.warn, "stuck"));
+    // QA: the approval view lists every check command the plan will run, so the
+    // owner approves the exact commands, not just their tasks.
+    QStringList checkCommands;
+    for (const auto &task : team.tasks) if (task.isCheck() && !task.check.command.isEmpty()) checkCommands << task.check.command;
+    if (!checkCommands.isEmpty()) {
+        v->addWidget(label(tr("Checks"), c.text3, 12, true, "teamPlanChecksTitle"));
+        for (const auto &command : checkCommands) {
+            auto *line = label(QStringLiteral("• ") + command, c.text2, 11, false, "teamPlanCheck");
+            line->setFont(NewSessionDense::mono(11));
+            line->setWordWrap(true);
+            v->addWidget(line);
+        }
+    }
+    // N9: a phase approved on the owner's word shows the sentence too.
+    for (const auto &phase : team.phases) {
+        if (phase.ownerWord.isEmpty()) continue;
+        auto *word = label(tr("Phase %1 approved by Lead on your word: “%2”").arg(phase.n).arg(phase.ownerWord), c.accent, 11, false, "teamPhaseOwnerWord");
+        word->setWordWrap(true);
+        v->addWidget(word);
+    }
     auto *buttons = row(6);
     auto *approve = button(tr("Approve && Run"), "teamApprove", true);
     approve->setEnabled(team.errors.isEmpty() && !team.tasks.isEmpty());
     approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet")
                         : team.errors.isEmpty() ? tr("Start the members and hand out the first tasks")
                                                 : tr("Fix %n plan error(s) to run", nullptr, int(team.errors.size())));
-    QObject::connect(approve, &QPushButton::clicked, this, [this] { act("approve", {}); });
+    QObject::connect(approve, &QPushButton::clicked, this, [this, team] {
+        // N8: a plan that widens a role's profile needs the owner's explicit
+        // confirmation here too, as on the workspace's Approve & Run.
+        if (!team.widenings.isEmpty()) {
+            QStringList lines;
+            for (const auto &widening : team.widenings) {
+                const QString who = widening.role.isEmpty() ? widening.member : widening.role;
+                lines << tr("%1: %2 → %3").arg(who, widening.from, widening.to);
+            }
+            if (!confirm("teamWideningConfirm", tr("Widen permissions?"),
+                         tr("This plan widens the permissions of its members beyond the template:\n\n%1\n\n"
+                            "Approve it only if they need it.").arg(lines.join(QStringLiteral("\n"))),
+                         tr("Confirm and approve")))
+                return;
+            act("approve", {{"confirm_widening", true}});
+            return;
+        }
+        act("approve", {});
+    });
     auto *sendBack = button(tr("Send back to lead"), "teamSendBack");
     sendBack->setCheckable(true); sendBack->setChecked(m_sendBack);
     QObject::connect(sendBack, &QPushButton::toggled, this, [this](bool on) { m_sendBack = on; scheduleRender(); });

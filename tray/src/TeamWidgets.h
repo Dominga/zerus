@@ -1067,6 +1067,25 @@ inline QLabel *label(const QString &text, const QColor &color, int pixels = 12, 
     return l;
 }
 
+// QA: a label that keeps its whole text (for tests and tooltips) and paints it
+// elided with an ellipsis when the row is narrower than the text.
+class ElidingLabel : public QLabel {
+public:
+    explicit ElidingLabel(const QString &text, QWidget *parent = nullptr) : QLabel(text, parent)
+    {
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        setMinimumWidth(20);
+    }
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setPen(palette().color(QPalette::WindowText));
+        p.drawText(rect(), Qt::AlignVCenter | Qt::AlignLeft,
+                   fontMetrics().elidedText(text(), Qt::ElideRight, width()));
+    }
+};
+
 inline QLabel *elided(const QString &text, const QColor &color, int pixels = 12)
 {
     auto *l = label(text, color, pixels);

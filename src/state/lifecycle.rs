@@ -681,9 +681,124 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     Ok(0)
 }
 
+/// U3: the newest user or assistant entry time in the last part of a native
+/// transcript, or None when it has none.
+pub(super) fn transcript_last_turn(path: &std::path::Path) -> Option<f64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(256 * 1024))).ok()?;
+    let mut text = String::new();
+    file.take(256 * 1024).read_to_string(&mut text).ok()?;
+    let mut newest = 0.0_f64;
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if !matches!(event["type"].as_str(), Some("user") | Some("assistant")) {
+            continue;
+        }
+        if let Some(at) = event["timestamp"]
+            .as_str()
+            .map(|text| super::search::timestamp(&serde_json::json!(text)))
+            .filter(|at| *at > 0.0)
+            .or_else(|| event["timestamp"].as_f64())
+        {
+            newest = newest.max(at);
+        }
+    }
+    (newest > 0.0).then_some(newest)
+}
+
+/// U3: how far the transcript is behind the events Zerus recorded; behind by
+/// more than two minutes is a silent resume that would drop dialogue.
+pub(super) fn transcript_lag(transcript_at: f64, events_at: f64) -> Option<f64> {
+    (transcript_at > 0.0 && events_at > 0.0 && events_at - transcript_at > 120.0).then_some(events_at - transcript_at)
+}
+
+/// U3: the dialogue Zerus recorded after the transcript's last turn, oldest
+/// first, from a sessions events index (read-only, bounded to the newest 4000
+/// rows; task notifications are not dialogue).
+pub(super) fn read_events(path: &std::path::Path, journal: &str, since: f64) -> Vec<serde_json::Value> {
+    if journal.is_empty() || !path.exists() {
+        return Vec::new();
+    }
+    let Ok(db) = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return Vec::new();
+    };
+    let Ok(mut statement) = db.prepare("SELECT payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 4000") else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map([journal], |row| row.get::<_, String>(0)) else {
+        return Vec::new();
+    };
+    let mut found: Vec<serde_json::Value> = rows
+        .flatten()
+        .filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(|payload| {
+            matches!(payload["type"].as_str(), Some("UserPromptSubmit") | Some("Stop"))
+                && payload["at"].as_f64().unwrap_or(0.0) > since
+                && payload["origin"] != "task_notification"
+        })
+        .collect();
+    found.sort_by(|a, b| {
+        a["at"].as_f64().unwrap_or(0.0).total_cmp(&b["at"].as_f64().unwrap_or(0.0))
+    });
+    found.truncate(400);
+    found
+}
+
+/// U3: the state's sessions events index.
+fn events_index() -> std::path::PathBuf {
+    super::root().join("sessions").join("events.sqlite3")
+}
+
+/// U3: writes the lost dialogue to the recovered folder; None when Zerus
+/// recorded none. 400 entries / 400 KiB, the oldest cut with a note.
+pub(super) fn write_recovery(dir: &std::path::Path, conversation: &str, events: &[serde_json::Value]) -> Option<std::path::PathBuf> {
+    if events.is_empty() {
+        return None;
+    }
+    std::fs::create_dir_all(dir).ok()?;
+    let mut text = String::from("# Dialogue Zerus recorded after the transcript stopped\n\n");
+    let mut cut = 0usize;
+    for (index, event) in events.iter().enumerate() {
+        let detail = event["detail"].as_str().unwrap_or_default();
+        let entry = format!("## {} {}\n{}\n\n", event["type"].as_str().unwrap_or_default(), event["at"], detail);
+        if text.len() + entry.len() > 400 * 1024 {
+            cut = events.len() - index;
+            break;
+        }
+        text.push_str(&entry);
+    }
+    if cut > 0 {
+        text.push_str(&format!("[cut: the oldest {cut} entries are not shown]\n"));
+    }
+    let path = dir.join(format!("{conversation}-{}.md", super::now().round() as i64));
+    std::fs::write(&path, &text).ok()?;
+    Some(path)
+}
+
+/// U3: the message the resumed session reads first.
+pub(super) fn recovery_message(transcript_at: f64, path: &std::path::Path) -> String {
+    format!(
+        "Your transcript stops at {transcript_at:.0} (unix time); Zerus recorded the dialogue after it: {}. Read it before you go on.",
+        path.display()
+    )
+}
+
 pub(super) fn resume(names: &[String], dry: bool) -> Result<i32> { resume_scoped(names,dry,None) }
 
 pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
+    // U3: the owner may accept a stale transcript explicitly.
+    let mut names = names.to_vec();
+    let mut accept_stale = false;
+    let mut with_lost = false;
+    names.retain(|name| {
+        let flag = matches!(name.as_str(), "--accept-stale" | "--with-lost-dialogue");
+        accept_stale |= flag;
+        with_lost |= name == "--with-lost-dialogue";
+        !flag
+    });
+    let names = names.as_slice();
     if scope.is_none() {archive::reconcile()?;}
     if names.len() == 3 && names[1] == "--archive" {
         return resume_archive(&names[0], &names[2], dry, scope);
@@ -708,6 +823,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         names.to_vec()
     };
     let mut recipes = Vec::new();
+    let mut recovered: std::collections::BTreeMap<String, (std::path::PathBuf, f64)> = std::collections::BTreeMap::new();
     for name in names {
         if let Some(id) = &requested {
             verify_requested(&read(&name)?, &snapshot, id)?;
@@ -717,6 +833,38 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
             continue;
         }
         let record = read(&name)?;
+        // U3: compare the native transcript's last turn with the events Zerus
+        // recorded; a silent resume would drop the dialogue after it.
+        if string(&record, "agent") == "claude" {
+            let transcript = string(&record, "transcript");
+            let transcript_at = (!transcript.is_empty())
+                .then(|| transcript_last_turn(std::path::Path::new(transcript)))
+                .flatten();
+            if let Some(transcript_at) = transcript_at {
+                let journal = string(&record, "journal_name").to_owned();
+                let events = read_events(&events_index(), &journal, transcript_at);
+                let anchor = events
+                    .last()
+                    .and_then(|event| event["at"].as_f64())
+                    .unwrap_or(record["last_event_at"].as_f64().unwrap_or(0.0));
+                if let Some(lag) = transcript_lag(transcript_at, anchor) {
+                    if with_lost {
+                        if let Some(path) = write_recovery(
+                            &super::root().join("sessions").join("recovered"),
+                            string(&record, "conversation_id"),
+                            &events,
+                        ) {
+                            recovered.insert(name.clone(), (path, transcript_at));
+                        }
+                    }
+                    if !accept_stale && !with_lost {
+                        return Err(format!(
+                            "{name}: the native transcript stops {lag:.0} s before the events Zerus recorded (transcript_behind); resume with --accept-stale or --with-lost-dialogue"
+                        ));
+                    }
+                }
+            }
+        }
         if let Some(scope)=scope {scope.check(&record)?;}
         if archive::equivalent(&record, &archived) {
             return Err(format!(
@@ -749,6 +897,17 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
         } else {
             if let Some(scope)=scope {scope.changing();}
             backend::current().start(&spec)?;
+            // U3: the resumed session reads the recovered dialogue first.
+            if let Some((path, transcript_at)) = recovered.get(&name) {
+                let message = recovery_message(*transcript_at, path);
+                if let Ok(executable) = std::env::current_exe() {
+                    let _ = std::process::Command::new(executable)
+                        .args(["send", &name, &message])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            }
             if let Some(scope)=scope {scope.result(&name,&new_run,string(&current,"conversation_id"),None);} else {println!("hgs: resuming {name}");}
         }
     }
@@ -834,5 +993,65 @@ mod tests {
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(codex_daemon_flag(&launcher.to_string_lossy()), Ok(true));
         assert!(!marker.exists());
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn a_transcript_behind_the_events_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"timestamp\":\"2026-10-26T00:10:00Z\"}\n",
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-10-26T00:11:00Z\"}\n",
+                "{\"type\":\"system\",\"timestamp\":\"2026-10-26T04:11:00Z\"}\n"
+            ),
+        )
+        .unwrap();
+        let at = transcript_last_turn(&path).unwrap();
+        let expected = super::super::search::timestamp(&serde_json::json!("2026-10-26T00:11:00Z"));
+        assert!((at - expected).abs() < 1.0, "{at} {expected}");
+        assert!(transcript_lag(at, expected + 3600.0).is_some());
+        assert!(transcript_lag(at, expected + 60.0).is_none());
+        assert!(transcript_lag(0.0, expected + 3600.0).is_none());
+        assert!(transcript_last_turn(&dir.path().join("missing.jsonl")).is_none());
+    }
+
+    #[test]
+    fn the_lost_dialogue_comes_from_the_events_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("events.sqlite3");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);")
+            .unwrap();
+        let insert = |seq: i64, at: f64, kind: &str, detail: &str, origin: &str| {
+            let payload = serde_json::json!({"type":kind,"at":at,"detail":detail,"origin":origin}).to_string();
+            connection
+                .execute(
+                    "INSERT INTO events (seq,name,conversation,payload) VALUES (?1,'claude/x/dev','c',?2)",
+                    rusqlite::params![seq, payload],
+                )
+                .unwrap();
+        };
+        insert(1, 50.0, "UserPromptSubmit", "old", "");
+        insert(2, 200.0, "UserPromptSubmit", "keep going", "");
+        insert(3, 210.0, "Stop", "done", "");
+        insert(4, 220.0, "UserPromptSubmit", "noise", "task_notification");
+        insert(5, 230.0, "PreToolUse", "tool", "");
+        let events = read_events(&db, "claude/x/dev", 100.0);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!((events[0]["detail"].as_str(), events[1]["detail"].as_str()), (Some("keep going"), Some("done")));
+        let path = write_recovery(dir.path(), "c", &events).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("keep going") && text.contains("# Dialogue Zerus recorded"), "{text}");
+        assert!(recovery_message(120.0, &path).contains("Your transcript stops at 120"), "{}", recovery_message(120.0, &path));
+        assert!(read_events(&db, "claude/x/other", 100.0).is_empty());
+        assert!(read_events(&dir.path().join("missing.sqlite3"), "claude/x/dev", 0.0).is_empty());
     }
 }

@@ -674,6 +674,14 @@ answered; a denial cannot carry an explanation.
   a permission unanswered for remind_owner_minutes goes to the owner's
   attention and notification, answerable there. Owner: yes, in the fixes phase.
 
+- **U19. Confirm subagents (owner, 2026-10-27).** A session may start subagents
+  on its own and the owner has no say. A global setting in Settings > Sessions,
+  'Ask before an agent starts subagents', ON by default: Zerus's pre-tool hook
+  asks before a subagent starts, one request per turn listing how many, which
+  type, model and effort; never auto-approved; a team member's request goes to
+  its lead. Agents that cannot be asked are marked, never blocked.
+  Owner: yes, in the fixes phase.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

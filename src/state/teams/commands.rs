@@ -383,6 +383,104 @@ fn summary(team: &Team) -> Value {
     })
 }
 
+/// Who creates a sub-team for a parent task (section 9.1): the assignee's own
+/// session, the parent lead on its behalf, or the owner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ParentCaller {
+    Assignee,
+    ParentLead,
+    Owner,
+}
+
+/// The proven caller of a sub-team create: a session record (name and run),
+/// else the parent member's dsh conversation, else the owner only when no
+/// session env can name another caller and the request says it is you.
+fn parent_caller(
+    team: &Team,
+    assignee: &str,
+    record: Option<&Value>,
+    dsh: Option<&str>,
+    env: Option<&str>,
+    by: &str,
+) -> anyhow::Result<ParentCaller> {
+    let resolved = if let Some(record) = record {
+        Some(
+            calling_member(team, record)
+                .with_context(|| format!("This session is not a member of team {}", team.name))?,
+        )
+    } else {
+        dsh_member(team, dsh.unwrap_or_default())
+    };
+    match resolved.as_deref() {
+        Some(id) if id == assignee => Ok(ParentCaller::Assignee),
+        Some(id) if id == team.lead => Ok(ParentCaller::ParentLead),
+        Some(_) => bail!("A sub-team is created from the parent task's assignee, the parent lead or you"),
+        None => {
+            ensure!(env.is_none(), "Zerus could not verify the calling session");
+            ensure!(
+                by == "human",
+                "A sub-team is created from the parent task's assignee, the parent lead or you"
+            );
+            Ok(ParentCaller::Owner)
+        }
+    }
+}
+
+/// Loads the tree around a team by id: its ancestors (at most 32 links, enough
+/// to find the master) and, from the master, its children down to the master's
+/// declared depth, at most 32 per team. A flat team reads nothing extra, and
+/// no call ever lists every team (C1).
+fn tree_around(team: &Team, load: &mut dyn FnMut(&str) -> anyhow::Result<Option<Team>>) -> anyhow::Result<Vec<Team>> {
+    let mut loaded = vec![team.clone()];
+    let mut ids: BTreeSet<String> = [team.id.clone()].into_iter().collect();
+    let mut current = team.clone();
+    let mut links = 0;
+    while let Some(parent) = current.parent.clone() {
+        if links >= 32 || !ids.insert(parent.team.clone()) {
+            break;
+        }
+        match load(&parent.team)? {
+            Some(next) => {
+                loaded.push(next.clone());
+                current = next;
+                links += 1;
+            }
+            None => {
+                ids.remove(&parent.team);
+                break;
+            }
+        }
+    }
+    // The topmost loaded team is the master; the depth budget is its own.
+    let master = loaded
+        .iter()
+        .rev()
+        .find(|candidate| candidate.parent.is_none())
+        .cloned()
+        .unwrap_or_else(|| team.clone());
+    let mut queue: Vec<(Team, u32)> = vec![(master.clone(), 0)];
+    while let Some((current, depth)) = queue.pop() {
+        if depth >= master.settings.tree_depth.max(1) {
+            continue;
+        }
+        for child in current.children.iter().take(32) {
+            if !ids.insert(child.clone()) {
+                continue;
+            }
+            match load(child)? {
+                Some(next) => {
+                    loaded.push(next.clone());
+                    queue.push((next, depth + 1));
+                }
+                None => {
+                    ids.remove(child);
+                }
+            }
+        }
+    }
+    Ok(loaded)
+}
+
 /// Section 9.1: creates a sub-team from its parent task. The assignee's
 /// session becomes the sub-team's lead; the caller must be that session, the
 /// parent lead, or the owner. Returns (parent team, task) for the link.
@@ -413,17 +511,14 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
         .session
         .clone()
         .with_context(|| format!("{} has no session to lead a sub-team", member.id))?;
-    let caller = caller_record();
-    let parent_lead = parent.member(&parent.lead).and_then(|lead| lead.session.clone());
-    let by_assignee = caller.as_ref().is_some_and(|record| record["name"].as_str() == Some(session.name.as_str()));
-    let by_parent_lead = caller
-        .as_ref()
-        .is_some_and(|record| parent_lead.as_ref().is_some_and(|lead| record["name"].as_str() == Some(lead.name.as_str())));
-    let by_owner = caller.is_none() && text(input, "by") == "human";
-    ensure!(
-        by_assignee || by_parent_lead || by_owner,
-        "A sub-team is created from the parent task's assignee, the parent lead or you"
-    );
+    parent_caller(
+        &parent,
+        &member.id,
+        caller_record().as_ref(),
+        nonempty_env("DSH_SESSION_ID").as_deref(),
+        nonempty_env("HGS_SESSION").as_deref(),
+        text(input, "by"),
+    )?;
     // The assignee's session becomes the sub-team's lead.
     filled["lead"] = json!({
         "id":member.id,"role":if member.role.is_empty(){"Lead"}else{member.role.as_str()},"agent":member.agent,
@@ -478,13 +573,12 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     // Section 9.2: depth, children and tree sessions are checked at create.
     if let Some((parent_id, _)) = &parent_link {
         let store = Store::open(false)?;
-        let all = store.teams(false, 10_000)?;
-        let parent = all
-            .iter()
-            .find(|candidate| candidate.id == *parent_id)
-            .context("The parent team is no longer active")?;
-        let master = ops::root_of(parent, &all);
-        ops::ensure_tree_create(parent, &master, &all, &team)?;
+        let parent = store.load(parent_id)?.context("The parent team is no longer active")?;
+        // Bounded: the parent's chain by id and its children down to the
+        // master's depth; this never lists every team.
+        let tree = tree_around(&parent, &mut |id| store.load(id))?;
+        let master = ops::root_of(&parent, &tree);
+        ops::ensure_tree_create(&parent, &master, &tree, &team)?;
     }
     let start = team.brief == Notice::Pending;
     // The request's identity is what the caller sent, so a replay matches.
@@ -1120,7 +1214,9 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             // checked for a tree already over it).
             if matches!(op, "add-member" | "swap-member" | "extend") {
                 let team = store.load(team_id)?.context("Unknown team")?;
-                let all = store.teams(false, 10_000)?;
+                // Bounded: ancestors by id and children by id; a flat team
+                // reads nothing beyond the team itself.
+                let tree = tree_around(&team, &mut |id| store.load(id))?;
                 let added = match op {
                     "add-member" => usize::from(filled["member"]["session"].is_object()),
                     "swap-member" => usize::from(
@@ -1129,7 +1225,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                     ),
                     _ => 0,
                 };
-                ops::ensure_tree_sessions(&team, &all, added)?;
+                ops::ensure_tree_sessions(&team, &tree, added)?;
             }
             if matches!(op, "approve" | "approve-phase") {
                 // F13: the lead approves only on the owner's exact sentence,
@@ -1842,6 +1938,90 @@ mod tests {
         assert_eq!(view["children"], json!([{"team":"child","name":"Child","status":"running","done":1,"total":2}]));
         // The parent's plan health counts only its own tasks.
         assert_eq!(view["health"]["tasks"], 1);
+    }
+
+    #[test]
+    fn a_subteam_caller_is_the_assignee_parent_lead_or_owner() {
+        let mut parent = Team {
+            id: "t".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            ..Default::default()
+        };
+        let session = |name: &str, run: &str, conversation: &str| SessionRef {
+            name: name.into(),
+            run_id: run.into(),
+            conversation_id: conversation.into(),
+            host: String::new(),
+        };
+        parent.members = vec![
+            Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), session: Some(session("claude/x/lead", "r0", "")), ..Default::default() },
+            Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), session: Some(session("codex/x/dev", "r1", "")), ..Default::default() },
+            Member {
+                id: "dshdev".into(),
+                role: "Backend".into(),
+                agent: "dsh".into(),
+                session: Some(session("dsh/x/dshdev", "r2", "conv-dev")),
+                ..Default::default()
+            },
+            Member {
+                id: "dshqa".into(),
+                role: "Tester".into(),
+                agent: "dsh".into(),
+                session: Some(session("dsh/x/dshqa", "r3", "conv-qa")),
+                ..Default::default()
+            },
+        ];
+        // A DeepSeek assignee is proven by its conversation id, not by an hgs
+        // session record.
+        assert_eq!(parent_caller(&parent, "dshdev", None, Some("conv-dev"), None, "").unwrap(), ParentCaller::Assignee);
+        // A dsh non-assignee cannot pass by:human as the owner.
+        let error = parent_caller(&parent, "dshdev", None, Some("conv-qa"), None, "human")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("assignee"), "{error}");
+        // The owner path still needs no session env and says it is you.
+        assert_eq!(parent_caller(&parent, "dev", None, None, None, "human").unwrap(), ParentCaller::Owner);
+        let error = parent_caller(&parent, "dev", None, None, Some("HGS"), "human")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("could not verify"), "{error}");
+        // A session record is checked against the parent team: the assignee
+        // and the parent lead are accepted, a stranger is refused.
+        let dev = json!({"name":"codex/x/dev","run_id":"r1"});
+        assert_eq!(parent_caller(&parent, "dev", Some(&dev), None, Some(""), "").unwrap(), ParentCaller::Assignee);
+        let lead = json!({"name":"claude/x/lead","run_id":"r0"});
+        assert_eq!(parent_caller(&parent, "dev", Some(&lead), None, None, "").unwrap(), ParentCaller::ParentLead);
+        let stranger = json!({"name":"codex/x/other","run_id":"r9"});
+        assert!(parent_caller(&parent, "dev", Some(&stranger), None, None, "").is_err());
+    }
+
+    #[test]
+    fn a_flat_team_tree_check_reads_no_teams_and_a_child_reads_by_id() {
+        let flat = running_team();
+        assert!(flat.parent.is_none() && flat.children.is_empty());
+        let mut reads = 0;
+        let loaded = tree_around(&flat, &mut |_| {
+            reads += 1;
+            Ok(None)
+        })
+        .unwrap();
+        assert_eq!(reads, 0, "a flat team reads nothing extra");
+        assert_eq!(loaded.len(), 1);
+        // A parent with one child reads that child by id, never the full list.
+        let mut parent = flat.clone();
+        parent.children = vec!["child".into()];
+        let mut child = Team { id: "child".into(), name: "Child".into(), lead: "dev".into(), ..Default::default() };
+        child.parent = Some(Parent { team: parent.id.clone(), task: 1, lead: "lead".into(), member: "dev".into() });
+        let mut reads = 0;
+        let loaded = tree_around(&parent, &mut |id| {
+            reads += 1;
+            Ok((id == "child").then(|| child.clone()))
+        })
+        .unwrap();
+        assert_eq!(reads, 1);
+        assert_eq!(loaded.len(), 2);
     }
 
     #[test]

@@ -484,6 +484,13 @@ Team parse(const QJsonObject &v)
     team.approvedBy = str(v, "approved_by");
     const auto word = v.value("owner_word");
     team.ownerWord = word.isObject() ? str(word.toObject(), "text") : word.toString();
+    // F5: the draft's own fields (spec 3).
+    team.goal = str(v, "goal"); team.leadProtocol = str(v, "lead_protocol");
+    team.folderPolicy = str(settings, "folder_policy");
+    team.maxMembers = settings.value("max_members").toInt();
+    const auto draft = v.value("draft").toObject();
+    team.draftRevision = draft.value("revision").toInteger();
+    for (const auto &field : draft.value("unseen").toArray()) team.draftUnseen << field.toString();
     return team;
 }
 
@@ -563,6 +570,10 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
     const auto make = [](const QString &kind, const QString &text, const QString &shortText, Tone tone, int task = 0, bool problem = false) {
         Status s; s.kind = kind; s.text = text; s.shortText = shortText; s.tone = tone; s.task = task; s.problem = problem; return s;
     };
+    // F5: nothing but the lead exists while the team is a draft.
+    if (team.status == "draft")
+        return member.session.isEmpty() ? make("not_created", tr("Created with the team"), tr("Draft"), Tone::Dim)
+                                        : make("planning", tr("Drafting the team"), tr("Drafting"), Tone::Planning);
     if (team.status == "planning")
         return member.session.isEmpty() ? make("not_created", tr("Created on approval"), tr("Planned"), Tone::Dim)
                                         : make("planning", tr("Planning"), tr("Planning"), Tone::Planning);
@@ -661,6 +672,7 @@ QString displayStatus(const Team &team, const LiveLookup &live)
 
 QString statusLabel(const QString &status)
 {
+    if (status == "draft") return tr("Draft");
     if (status == "planning") return tr("Planning");
     if (status == "running") return tr("Running");
     if (status == "paused") return tr("Paused");

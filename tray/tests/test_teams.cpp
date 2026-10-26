@@ -147,6 +147,7 @@ private slots:
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
     void oldStatusJsonStillParses();
+    void aDraftTeamReadsItsRevisionUnseenFieldsAndGoal();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
@@ -996,6 +997,40 @@ void TestTeams::finishedRevokedAndRefusedAttemptsHaveNoPhase()
         const auto derived = parse(older);
         QCOMPARE(lastPhase(*derived.task(1)), QString());
     }
+}
+
+// F5 (spec 3): a team in status "draft" carries the draft block, its goal,
+// the protocol addendum and the settings the form edits; nothing but the lead
+// exists yet. A team without a draft block reads as before.
+void TestTeams::aDraftTeamReadsItsRevisionUnseenFieldsAndGoal()
+{
+    auto value = checkout();
+    value["status"] = "draft";
+    value["goal"] = "Ship the checkout";
+    value["lead_protocol"] = "Two waves";
+    value["settings"] = QJsonObject{{"folder_policy", "auto"}, {"approval", "review"}, {"max_members", 5}};
+    value["draft"] = QJsonObject{{"revision", 7}, {"unseen", QJsonArray{"members", "goal"}}, {"owner_edited", QJsonArray{"settings"}}};
+    const auto team = parse(value);
+    QVERIFY(team.draft());
+    QCOMPARE(team.draftRevision, qint64(7));
+    QCOMPARE(team.draftUnseen, (QStringList{"members", "goal"}));
+    QCOMPARE(team.goal, QStringLiteral("Ship the checkout"));
+    QCOMPARE(team.leadProtocol, QStringLiteral("Two waves"));
+    QCOMPARE(team.folderPolicy, QStringLiteral("auto"));
+    QCOMPARE(team.maxMembers, 5);
+    QCOMPARE(statusLabel("draft"), QStringLiteral("Draft"));
+    QCOMPARE(statusTone("draft"), Tone::Dim);
+    // The lead drafts with its session; the members are created with the team.
+    const auto *lead = team.member(team.lead);
+    QVERIFY(lead);
+    QCOMPARE(memberStatus(team, *lead, Live{}).text, QStringLiteral("Drafting the team"));
+    for (const auto &member : team.members)
+        if (member.id != team.lead && member.session.isEmpty()) QCOMPARE(memberStatus(team, member, Live{}).shortText, QStringLiteral("Draft"));
+    // An older team file has no draft block.
+    const auto old = parse(checkout());
+    QVERIFY(!old.draft());
+    QCOMPARE(old.draftRevision, qint64(0));
+    QVERIFY(old.draftUnseen.isEmpty());
 }
 
 void TestTeams::oldStatusJsonStillParses()

@@ -1,4 +1,5 @@
 #pragma once
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
@@ -252,6 +253,15 @@ struct Team {
     QList<Attention> attention;
     // F13: "approved by Lead on the owner's word" and the sentence.
     QString approvedBy, ownerWord;
+    // F5: a team in status "draft" is edited by the owner and the lead before
+    // it exists: its goal, protocol addendum, folder policy and limit, the
+    // draft revision every update carries and the fields the lead changed that
+    // the owner has not seen yet.
+    QString goal, leadProtocol, folderPolicy;
+    int maxMembers = 0;
+    qint64 draftRevision = 0;
+    QStringList draftUnseen;
+    bool draft() const { return status == QLatin1String("draft"); }
     const Member *member(const QString &id) const;
     const Member *memberOfSession(const QString &host, const QString &session) const;
     const Task *task(int id) const;
@@ -357,11 +367,21 @@ struct Problem {
 };
 QList<Problem> problems(const Team &team, const LiveLookup &live);
 
-// planning, running, paused, stuck, done, stopped, archived. Stuck: a running
+// draft, planning, running, paused, stuck, done, stopped, archived. Stuck: a running
 // team where no open task can move without you.
 QString displayStatus(const Team &team, const LiveLookup &live);
 QString statusLabel(const QString &status);
 Tone statusTone(const QString &status);
+// F4: the one Team designer conversation hgs starts (`catalog designer`). It
+// keeps its fixed name and colour, and the desktop files no other work in it:
+// it never leads or joins a team.
+inline bool isDesignerSession(const QString &host, const QString &session)
+{
+    return host.isEmpty() && session.endsWith(QLatin1String("/team-designer"));
+}
+// Its card's fixed title and colour, whatever project the folder falls in.
+inline QString designerTitle() { return QCoreApplication::translate("Teams", "Team designer"); }
+inline QString designerColor() { return QStringLiteral("#a46ee0"); }
 // "Next: #4, #5 wait for #3 Saved cards API" or "Ready: #4 Payment storage".
 QString nextLine(const Team &team);
 // One tone per task, in task order, for the segmented progress bar.

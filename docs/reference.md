@@ -2936,6 +2936,19 @@ episodes; already scheduled episodes retain their delays and session-limit mode.
 cancels automatic continuation. Uncertain delivery stops the episode rather than
 sending Enter again.
 
+A fully submitted Codex recovery continuation can wait up to ten minutes from
+its original dispatch for the native agent to acknowledge it. The durable
+terminal receipt must match the exact request, conversation and continuation;
+the receipt alone never establishes native acceptance. During this bounded wait
+the UI shows **Waiting for delivery confirmation**, no additional input is sent,
+and input, policy and identity cancellation guards remain active. The account's
+single recovery slot is retained until acknowledgement and progress, cancellation
+or expiry. Other providers and unproven, partial or interrupted deliveries keep
+the 30-second confirmation cutoff; legacy uncertain episodes remain stopped.
+The native hook confirms the latest submitted continuation text, not a request
+UUID embedded in that text: it cannot distinguish identical text independently
+typed in Terminal. Zerus never uses transcript text alone to acknowledge delivery.
+
 An independent `hgs-recovery.service` / `com.hgdev.hgs-recovery` worker runs without
 GUI. Custom installs can run `hgs recovery worker`. Episodes and receipts live on
 the agent host under `sessions/recovery/`, guarded by policy revision and a single

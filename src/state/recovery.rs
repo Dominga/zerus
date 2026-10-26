@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 pub(super) const CONTINUATION: &str = "[HGS automatic recovery] The previous turn stopped with a temporary provider error. Continue the current task from the existing conversation. Check any uncertain operation before repeating it.";
+const CODEX_ACKNOWLEDGEMENT_WINDOW: f64 = 600.0;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -377,6 +378,42 @@ fn occupies(job: &Value, s: &Value) -> bool {
         _ => false,
     }
 }
+/// A completed terminal submission may wait behind Codex's native work. Keep
+/// its existing, nondispatchable episode alive for at most ten minutes, with
+/// all active cancellation guards. The receipt is not native acceptance;
+/// acknowledgement still uses the existing authoritative main-agent
+/// accepted-input observation.
+fn acknowledgement_window(job: &Value, s: &Value, time: f64) -> f64 {
+    use sha2::{Digest, Sha256};
+    let receipt = &job["receipt"];
+    let sent = seconds(job, "sent_at");
+    let submitted = seconds(receipt, "submitted_at");
+    let request_id = string(job, "request_id");
+    let valid_id = uuid::Uuid::parse_str(request_id)
+        .is_ok_and(|id| !id.is_nil() && id.to_string() == request_id);
+    if s["agent"] != "codex" || job["agent"] != "codex"
+        || job["action"] != "continue_message" || job["identity"] != identity(s)
+        || string(s, "name").is_empty() || job["name"] != s["name"]
+        || string(s, "run_id").is_empty() || string(s, "conversation_id").is_empty()
+        || !valid_id || receipt["request_id"] != job["request_id"]
+        || receipt["name"] != s["name"] || receipt["run_id"] != s["run_id"]
+        || receipt["conversation_id"] != s["conversation_id"]
+        || receipt["status"] != "submitted" || receipt["transport"] != "terminal"
+        || receipt["first_message"] != false
+        || receipt["text"] != CONTINUATION || receipt["submitted_text"] != CONTINUATION
+        || !receipt["attachments"].as_array().is_some_and(Vec::is_empty)
+        || sent <= 0.0 || sent < seconds(job, "started_at") || submitted < sent || submitted > time
+    {
+        return 30.0;
+    }
+    let request = json!({"request_id":request_id,"text":CONTINUATION,
+        "expected_run_id":s["run_id"],"expected_conversation_id":s["conversation_id"]});
+    if string(receipt, "digest") != format!("{:x}", Sha256::digest(request.to_string().as_bytes())) {
+        return 30.0;
+    }
+    // Anchor the bound to the original dispatch, never the latest observation.
+    CODEX_ACKNOWLEDGEMENT_WINDOW
+}
 fn schedule(job: &mut Value, s: &Value, time: f64) {
     job["action"] = json!(adapter(s));
     let category = class(&s["provider_error"]);
@@ -460,7 +497,12 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
             }
             job["schedules"]["session_limit"] = json!(delays_for(p, "session_limit"));
         }
-        if own_input {
+        // A native acknowledgement observed late may still have occurred
+        // inside the bound. A marker actually accepted after expiry cannot
+        // extend the account reservation when no intervening poll ran.
+        if own_input && !(job["state"] == "retrying" && job["acknowledged"] != true
+            && acknowledgement_window(&job, s, time) == CODEX_ACKNOWLEDGEMENT_WINDOW
+            && user_at > seconds(&job, "sent_at") + CODEX_ACKNOWLEDGEMENT_WINDOW) {
             job["acknowledged"] = json!(true);
             job["user_at"] = json!(user_at);
         }
@@ -504,7 +546,8 @@ fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
                 } else {
                     schedule(&mut job, s, time);
                 }
-            } else if job["acknowledged"] != true && time > seconds(&job, "sent_at") + 30.0 {
+            } else if job["acknowledged"] != true
+                && time > seconds(&job, "sent_at") + acknowledgement_window(&job, s, time) {
                 stop(
                     &mut job,
                     "uncertain",
@@ -1603,5 +1646,173 @@ mod tests {
         let fresh = advance(job.clone(), &s, &on(), 51.0);
         assert_ne!(fresh["id"], job["id"]);
         assert_eq!(fresh["attempt"], 0);
+    }
+
+    fn submitted_codex_continuation() -> (Value, Value) {
+        use sha2::{Digest, Sha256};
+        let s = snapshot("codex");
+        let mut job = advance(Value::Null, &s, &on(), 11.0);
+        job["state"] = json!("retrying");
+        job["sent_at"] = json!(20.0);
+        job["attempt"] = json!(1);
+        job["attempts"]["service"] = json!(1);
+        job["class_attempt"] = json!(1);
+        job["acknowledged"] = json!(false);
+        job["request_id"] = json!("11111111-1111-4111-8111-111111111111");
+        let request = json!({"request_id":job["request_id"],"text":CONTINUATION,
+            "expected_run_id":s["run_id"],"expected_conversation_id":s["conversation_id"]});
+        job["receipt"] = json!({"request_id":job["request_id"],"name":s["name"],
+            "run_id":s["run_id"],"conversation_id":s["conversation_id"],
+            "status":"submitted","transport":"terminal","first_message":false,
+            "submitted_at":20.25,"text":CONTINUATION,"submitted_text":CONTINUATION,
+            "attachments":[],"digest":format!("{:x}",Sha256::digest(request.to_string().as_bytes()))});
+        (job, s)
+    }
+
+    #[test]
+    fn a_submitted_codex_continuation_waits_for_the_native_ack_without_another_attempt() {
+        let (job, mut s) = submitted_codex_continuation();
+        for time in [51.0, 100.0, 400.0] {
+            let pending = advance(job.clone(), &s, &on(), time);
+            assert_eq!(pending["state"], "retrying", "a submitted continuation is still awaiting its native acknowledgement");
+            assert_eq!(pending, job, "waiting must not change the request or consume another attempt");
+            assert!(occupies(&pending, &s), "the same account remains serialized while waiting");
+            assert!(!resumed(&pending, &s));
+        }
+        // The authoritative main-agent input fields, not transcript messages.
+        s["recovery_user_at"] = json!(401.0); // 381 seconds after dispatch.
+        s["recovery_user_text"] = json!(CONTINUATION);
+        s["turn_started"] = json!(401.0);
+        s["phase"] = json!("working");
+        s["provider_error"] = Value::Null;
+        s["provider_status_at"] = json!(401.0);
+        let accepted = advance(job.clone(), &s, &on(), 401.1);
+        assert_eq!(accepted["acknowledged"], true);
+        assert_eq!(accepted["user_at"], 401.0);
+        assert!(occupies(&accepted, &s), "a turn-start alone is not provider progress");
+        let mut done = s.clone(); done["phase"] = json!("idle");
+        done["recovery_success_at"] = json!(402.0);
+        assert_eq!(advance(accepted.clone(), &done, &on(), 403.0)["state"], "succeeded");
+        s["phase"] = json!("error");
+        s["provider_error"] = json!({"source":"native","message_id":"error-2","at":402.0,
+            "error_kind":"capacity","detail":"Selected model is at capacity. Please try a different model."});
+        let following = advance(accepted, &s, &on(), 403.0);
+        assert_eq!(following["state"], "waiting");
+        for key in ["id", "request_id", "receipt", "attempt", "attempts", "class_attempt", "schedules"] {
+            assert_eq!(following[key], job[key], "preserve {key} across the later failure");
+        }
+        assert!(seconds(&following, "due_at") >= 433.0, "use the second delay from the existing consumed budget");
+    }
+
+    #[test]
+    fn submitted_codex_ack_wait_expires_on_the_original_finite_deadline() {
+        let (job, mut s) = submitted_codex_continuation();
+        assert_eq!(advance(job.clone(), &s, &on(), 620.0)["state"], "retrying");
+        let expired = advance(job.clone(), &s, &on(), 620.1);
+        assert_eq!(expired["state"], "uncertain");
+        assert!(!occupies(&expired, &s), "expiry releases the account for its other sessions");
+        assert_eq!(expired["attempt"], job["attempt"]);
+        s["recovery_user_at"] = json!(650.0);
+        s["recovery_user_text"] = json!(CONTINUATION);
+        s["provider_error"]["at"] = json!(660.0);
+        s["provider_error"]["message_id"] = json!("too-late");
+        assert_eq!(advance(expired.clone(), &s, &on(), 661.0), expired);
+        let without_intervening_poll = advance(job.clone(), &s, &on(), 661.0);
+        assert_eq!(without_intervening_poll["state"], "uncertain");
+        assert_eq!(without_intervening_poll["acknowledged"], false);
+        assert_eq!(without_intervening_poll["attempt"], job["attempt"]);
+    }
+
+    #[test]
+    fn unproven_codex_receipts_and_other_providers_keep_the_thirty_second_cutoff() {
+        let (job, s) = submitted_codex_continuation();
+        for (key, value) in [
+            ("request_id", json!("22222222-2222-4222-8222-222222222222")),
+            ("name", json!("other")), ("run_id", json!("other")), ("conversation_id", json!("other")),
+            ("status", json!("in_progress")), ("status", json!("confirmed")),
+            ("transport", json!("other")), ("first_message", json!(true)),
+            ("text", json!("other")), ("submitted_text", json!("other")),
+            ("attachments", json!([{}])), ("digest", json!("wrong")),
+            ("submitted_at", json!(0.0)), ("submitted_at", json!(19.0)),
+            ("submitted_at", json!(52.0)), ("submitted_at", json!("20.25")),
+        ] {
+            let mut changed = job.clone(); changed["receipt"][key] = value;
+            assert_eq!(advance(changed, &s, &on(), 51.0)["state"], "uncertain", "reject receipt {key}");
+        }
+        for key in ["receipt", "request_id"] {
+            let mut changed = job.clone(); changed.as_object_mut().unwrap().remove(key);
+            assert_eq!(advance(changed, &s, &on(), 51.0)["state"], "uncertain", "reject missing {key}");
+        }
+        let mut changed = job.clone(); changed["started_at"] = json!(21.0);
+        assert_eq!(advance(changed, &s, &on(), 51.0)["state"], "uncertain", "dispatch must follow episode creation");
+        for request_id in ["not-a-uuid", "00000000-0000-0000-0000-000000000000", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"] {
+            use sha2::{Digest, Sha256};
+            let mut changed = job.clone(); changed["request_id"] = json!(request_id);
+            changed["receipt"]["request_id"] = json!(request_id);
+            let request = json!({"request_id":request_id,"text":CONTINUATION,
+                "expected_run_id":s["run_id"],"expected_conversation_id":s["conversation_id"]});
+            changed["receipt"]["digest"] = json!(format!("{:x}",Sha256::digest(request.to_string().as_bytes())));
+            assert_eq!(advance(changed, &s, &on(), 51.0)["state"], "uncertain", "reject noncanonical request identity");
+        }
+        for agent in ["claude", "kimi", "dsh"] {
+            let mut changed = job.clone(); let mut snapshot = s.clone();
+            changed["agent"] = json!(agent); snapshot["agent"] = json!(agent);
+            assert_eq!(advance(changed, &snapshot, &on(), 51.0)["state"], "uncertain", "retain {agent} cutoff");
+        }
+    }
+
+    #[test]
+    fn pending_codex_ack_keeps_input_policy_identity_and_attention_cancellation() {
+        let (job, s) = submitted_codex_continuation();
+        for (key, value) in [
+            ("recovery_user_at", json!(30.0)), ("recovery_cancel_at", json!(30.0)),
+            ("phase", json!("approval")), ("phase", json!("input")),
+            ("process_state", json!("exited")), ("run_id", json!("other")),
+            ("conversation_id", json!("other")), ("model", json!("other")),
+            ("account_id", json!("other")), ("host_generation", json!("other")),
+        ] {
+            let mut changed = s.clone(); changed[key] = value;
+            let cancelled = advance(job.clone(), &changed, &on(), 43.0);
+            assert_eq!(cancelled["state"], "cancelled", "keep {key} boundary");
+            assert_eq!(cancelled["attempt"], job["attempt"]);
+            let mut late = s.clone(); late["recovery_user_at"] = json!(401.0);
+            late["recovery_user_text"] = json!(CONTINUATION);
+            assert_eq!(advance(cancelled.clone(), &late, &on(), 402.0)["state"], "cancelled");
+        }
+        let mut disabled = on(); disabled.enabled = false;
+        let cancelled = advance(job.clone(), &s, &disabled, 43.0);
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(advance(cancelled.clone(), &s, &on(), 44.0), cancelled);
+    }
+
+    #[test]
+    fn pending_codex_receipt_never_acknowledges_a_new_error_or_transcript_text() {
+        let (job, mut s) = submitted_codex_continuation();
+        s["provider_messages"] = json!([{"type":"UserPromptSubmit","detail":CONTINUATION,"at":40.0}]);
+        let pending = advance(job.clone(), &s, &on(), 43.0);
+        assert_eq!(pending, job);
+        assert_eq!(pending["acknowledged"], false);
+        s["provider_error"]["at"] = json!(44.0);
+        s["provider_error"]["message_id"] = json!("unacknowledged-new-error");
+        let stopped = advance(pending, &s, &on(), 45.0);
+        assert_eq!(stopped["state"], "uncertain");
+        assert_eq!(stopped["attempt"], job["attempt"]);
+        assert_eq!(stopped["request_id"], job["request_id"]);
+    }
+
+    #[test]
+    fn legacy_uncertain_and_crashed_dispatch_do_not_gain_a_new_ack_window() {
+        let (job, mut s) = submitted_codex_continuation();
+        s["recovery_user_at"] = json!(401.0);
+        s["recovery_user_text"] = json!(CONTINUATION);
+        s["provider_error"]["at"] = json!(402.0);
+        s["provider_error"]["message_id"] = json!("after-interruption");
+        for reason in ["Delivery was not confirmed; inspect the native agent",
+            "Recovery worker restarted during delivery; inspect the agent",
+            "Native delivery acknowledgement is missing"] {
+            let mut stopped = job.clone(); stopped["state"] = json!("uncertain");
+            stopped["reason"] = json!(reason);
+            assert_eq!(advance(stopped.clone(), &s, &on(), 403.0), stopped);
+        }
     }
 }

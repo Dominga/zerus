@@ -974,6 +974,16 @@ pub(crate) fn permission_command(card: &Value) -> (Option<String>, &'static str)
 /// At most this much of a permission's command the lead reads.
 const PERMISSION_COMMAND_CHARS: usize = 4000;
 
+/// B1: the request status shows: its tool, the command and the source of that
+/// command, and the question hash `hgs team answer` needs to answer it.
+pub(crate) fn permission_record(pending: &PendingQuestion) -> Value {
+    let tool = pending.card["questions"][0]["header"].as_str().or_else(|| pending.card["tool"].as_str()).unwrap_or_default();
+    let (command, source) = permission_command(&pending.card);
+    let reason: String = pending.card["questions"][0]["body"].as_str().unwrap_or_default().chars().take(2000).collect();
+    json!({"question_id":pending.question_id,"question_hash":pending.question_hash,"tool":tool,"command":command,
+        "command_source":source,"reason":reason,"asked_at":pending.at})
+}
+
 /// B1: the line that names the exact command a permission request asks about.
 pub(crate) fn permission_command_line(card: &Value) -> String {
     match permission_command(card) {
@@ -1603,18 +1613,7 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 let excess = found.asked.len().saturating_sub(50);
                 found.asked.drain(..excess);
                 found.pending = Some(pending.clone());
-                // B1: the lead's answer and status carry the exact request:
-                // its tool, the command and the source of that command.
-                let tool = pending.card["questions"][0]["header"]
-                    .as_str()
-                    .or_else(|| pending.card["tool"].as_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                let (command, source) = permission_command(&pending.card);
-                let reason: String =
-                    pending.card["questions"][0]["body"].as_str().unwrap_or_default().chars().take(2000).collect();
-                found.permission = Some(json!({"question_id":pending.question_id,"tool":tool,"command":command,
-                    "command_source":source,"reason":reason,"asked_at":pending.at}));
+                found.permission = Some(permission_record(pending));
                 events.push(Event::new("question_forwarded", json!({"member":role,"approval":pending.approval})));
             }
             None if answered && found.pending.is_some() => {
@@ -3812,6 +3811,10 @@ mod tests {
             card: json!({"questions":[{"id":"0","header":"Access","question":"How should I proceed?"}]}),
         });
         assert!(!steps(&team, &[lead.clone(), asking.clone()], now()).iter().any(|s| matches!(s, Step::Permission { .. })));
+        // Status carries the hash hgs team answer expects with the request.
+        let record = permission_record(team.members.iter().find(|m| m.id == "dev").unwrap().pending.as_ref().unwrap());
+        assert_eq!((record["question_id"].as_str(), record["question_hash"].as_str()), (Some("q1"), Some("h1")), "{record}");
+        assert_eq!(record["tool"], "Access");
         // A member that stopped asking clears the stored request.
         let mut working = session("codex/x/dev", "r1", false);
         working.phase = "working".into();

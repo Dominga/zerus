@@ -1699,14 +1699,9 @@ fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     }
     change(store, &team.id, |team, events| {
         let named = new.len();
-        for item in &new {
-            if !team.inbox.told.contains(&item.key) {
-                team.inbox.told.push(item.key.clone());
-            }
-        }
-        // Bounded: an old key that comes back is named again, never unbounded.
-        let excess = team.inbox.told.len().saturating_sub(200);
-        team.inbox.told.drain(..excess);
+        // L2: keep the keys of items that are still open.
+        let open: BTreeSet<String> = inbox::items(team).into_iter().map(|item| item.key).collect();
+        inbox::mark_told(&mut team.inbox.told, &new, &open);
         team.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":named})));
         Ok(())

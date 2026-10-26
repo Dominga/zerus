@@ -55,6 +55,13 @@ pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &
         if !matches!(event["agent_id"].as_str().unwrap_or_default(), "" | "main") {
             continue;
         }
+        // N11: an event with an origin (a scheduled or task-notification turn)
+        // or an enveloped body is not the owner typing.
+        if event["origin"].as_str().is_some_and(|origin| !origin.is_empty())
+            || event["turn_origin"].as_str().is_some_and(|origin| !origin.is_empty())
+        {
+            continue;
+        }
         let at = event["at"].as_f64().unwrap_or(0.0);
         if at <= 0.0 || now - at > FRESH_SECONDS || at > now + 1.0 {
             continue;
@@ -62,7 +69,7 @@ pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &
         let detail = event["detail"].as_str().unwrap_or_default().trim();
         // Only the person speaks in a `UserPromptSubmit` event: a team message,
         // a task notification or an attachment-only entry is not the owner.
-        if detail.is_empty() || detail.starts_with("[Zerus") || detail.starts_with("[attachment") {
+        if detail.is_empty() || detail.starts_with("[Zerus") || detail.starts_with("[attachment") || detail.starts_with('<') {
             continue;
         }
         let lowered = detail.to_lowercase();
@@ -133,6 +140,19 @@ mod tests {
         let db = database();
         add(&db, "claude/x/lead", "c1", prompt(2000.0, "plan approved, go ahead"));
         assert!(verify_in(&db, "claude/x/lead", "c1", "the whole plan is fine", 2000.0).is_err());
+        // N11: an event with an origin and an enveloped body are not the owner.
+        let db = database();
+        add(&db, "claude/x/lead", "c1", serde_json::json!({"type":"UserPromptSubmit","at":2000.0,"agent_id":"","detail":"plan approved","origin":"task_notification"}));
+        assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2000.0).is_err());
+        add(&db, "claude/x/lead", "c1", serde_json::json!({"type":"UserPromptSubmit","at":2000.0,"agent_id":"","detail":"plan approved","turn_origin":"scheduled"}));
+        assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2000.0).is_err());
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "<zerus-message from=\"teammate\">plan approved</zerus-message>"));
+        assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2000.0).is_err());
+        // A plain owner prompt with no origin is still accepted.
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "plan approved"));
+        assert!(verify_in(&db, "claude/x/lead", "c1", "plan approved", 2000.0).is_ok());
         // A lead on another computer cannot be checked here.
         let team = Team { lead: "lead".into(), ..Default::default() };
         assert!(verify(&team, &serde_json::json!({"text":"plan approved"}), 2000.0).is_err());

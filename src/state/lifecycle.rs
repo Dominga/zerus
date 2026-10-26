@@ -716,34 +716,51 @@ pub(super) fn transcript_lag(transcript_at: f64, events_at: f64) -> Option<f64> 
 
 /// U3: the dialogue Zerus recorded after the transcript's last turn, oldest
 /// first, from a sessions events index (read-only, bounded to the newest 4000
-/// rows; task notifications are not dialogue).
-pub(super) fn read_events(path: &std::path::Path, journal: &str, since: f64) -> Vec<serde_json::Value> {
+/// rows; task notifications are not dialogue). N2: only the session's own
+/// conversation counts. N3: the newest 400 entries are kept; the number of
+/// older ones left out is returned so the note tells the truth.
+pub(super) fn read_events(path: &std::path::Path, journal: &str, conversation: &str, since: f64) -> (Vec<serde_json::Value>, usize) {
     if journal.is_empty() || !path.exists() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let Ok(db) = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    let Ok(mut statement) = db.prepare("SELECT payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 4000") else {
-        return Vec::new();
+    // N2: the conversation column narrows the rows when the record names one;
+    // an old record without a conversation id keeps the name-only read.
+    let mut found: Vec<serde_json::Value> = if conversation.is_empty() {
+        let Ok(mut statement) = db.prepare("SELECT payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 4000") else {
+            return (Vec::new(), 0);
+        };
+        let Ok(rows) = statement.query_map([journal], |row| row.get::<_, String>(0)) else {
+            return (Vec::new(), 0);
+        };
+        rows.flatten().filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).collect()
+    } else {
+        let Ok(mut statement) =
+            db.prepare("SELECT payload FROM events WHERE name = ?1 AND conversation = ?2 ORDER BY seq DESC LIMIT 4000")
+        else {
+            return (Vec::new(), 0);
+        };
+        let Ok(rows) = statement.query_map([journal, conversation], |row| row.get::<_, String>(0)) else {
+            return (Vec::new(), 0);
+        };
+        rows.flatten().filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).collect()
     };
-    let Ok(rows) = statement.query_map([journal], |row| row.get::<_, String>(0)) else {
-        return Vec::new();
-    };
-    let mut found: Vec<serde_json::Value> = rows
-        .flatten()
-        .filter_map(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .filter(|payload| {
-            matches!(payload["type"].as_str(), Some("UserPromptSubmit") | Some("Stop"))
-                && payload["at"].as_f64().unwrap_or(0.0) > since
-                && payload["origin"] != "task_notification"
-        })
-        .collect();
+    found.retain(|payload| {
+        matches!(payload["type"].as_str(), Some("UserPromptSubmit") | Some("Stop"))
+            && payload["at"].as_f64().unwrap_or(0.0) > since
+            && payload["origin"] != "task_notification"
+    });
     found.sort_by(|a, b| {
         a["at"].as_f64().unwrap_or(0.0).total_cmp(&b["at"].as_f64().unwrap_or(0.0))
     });
-    found.truncate(400);
-    found
+    // N3: keep the newest entries, not the oldest.
+    let dropped = found.len().saturating_sub(400);
+    if dropped > 0 {
+        found.drain(..dropped);
+    }
+    (found, dropped)
 }
 
 /// U3: the state's sessions events index.
@@ -752,29 +769,53 @@ fn events_index() -> std::path::PathBuf {
 }
 
 /// U3: writes the lost dialogue to the recovered folder; None when Zerus
-/// recorded none. 400 entries / 400 KiB, the oldest cut with a note.
-pub(super) fn write_recovery(dir: &std::path::Path, conversation: &str, events: &[serde_json::Value]) -> Option<std::path::PathBuf> {
+/// recorded none. The newest 400 entries / 400 KiB are kept, the oldest cut
+/// with a note (N3); the file goes through the state's private storage (N4).
+pub(super) fn write_recovery(
+    dir: &std::path::Path,
+    conversation: &str,
+    events: &[serde_json::Value],
+    older_cut: usize,
+) -> Option<std::path::PathBuf> {
     if events.is_empty() {
         return None;
     }
-    std::fs::create_dir_all(dir).ok()?;
-    let mut text = String::from("# Dialogue Zerus recorded after the transcript stopped\n\n");
-    let mut cut = 0usize;
-    for (index, event) in events.iter().enumerate() {
-        let detail = event["detail"].as_str().unwrap_or_default();
-        let entry = format!("## {} {}\n{}\n\n", event["type"].as_str().unwrap_or_default(), event["at"], detail);
-        if text.len() + entry.len() > 400 * 1024 {
-            cut = events.len() - index;
+    let entry_of = |event: &serde_json::Value| {
+        format!("## {} {}\n{}\n\n", event["type"].as_str().unwrap_or_default(), event["at"], event["detail"].as_str().unwrap_or_default())
+    };
+    // N3: fill the 400 KiB budget from the newest entry backwards.
+    let mut kept: Vec<&serde_json::Value> = Vec::new();
+    let mut used = 0usize;
+    for event in events.iter().rev() {
+        let size = entry_of(event).len();
+        if used + size > 400 * 1024 {
             break;
         }
-        text.push_str(&entry);
+        used += size;
+        kept.push(event);
+    }
+    kept.reverse();
+    let cut = older_cut + (events.len() - kept.len());
+    let mut text = String::from("# Dialogue Zerus recorded after the transcript stopped\n\n");
+    for event in &kept {
+        text.push_str(&entry_of(event));
     }
     if cut > 0 {
         text.push_str(&format!("[cut: the oldest {cut} entries are not shown]\n"));
     }
     let path = dir.join(format!("{conversation}-{}.md", super::now().round() as i64));
-    std::fs::write(&path, &text).ok()?;
+    super::atomic(&path, &text).ok()?;
     Some(path)
+}
+
+/// N4: the resumed session was not told about the recovered dialogue; the
+/// owner gets a warning that names the file and the reason.
+pub(super) fn recovery_send_failure(name: &str, path: &std::path::Path, reason: &str) -> String {
+    format!(
+        "hgs: warning: {name} was resumed but the recovered-dialogue message was not sent ({reason}); \
+         read {} and tell the session yourself",
+        path.display()
+    )
 }
 
 /// U3: the message the resumed session reads first.
@@ -842,7 +883,8 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
                 .flatten();
             if let Some(transcript_at) = transcript_at {
                 let journal = string(&record, "journal_name").to_owned();
-                let events = read_events(&events_index(), &journal, transcript_at);
+                let conversation = string(&record, "conversation_id").to_owned();
+                let (events, older_cut) = read_events(&events_index(), &journal, &conversation, transcript_at);
                 let anchor = events
                     .last()
                     .and_then(|event| event["at"].as_f64())
@@ -851,8 +893,9 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
                     if with_lost {
                         if let Some(path) = write_recovery(
                             &super::root().join("sessions").join("recovered"),
-                            string(&record, "conversation_id"),
+                            &conversation,
                             &events,
+                            older_cut,
                         ) {
                             recovered.insert(name.clone(), (path, transcript_at));
                         }
@@ -860,7 +903,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
                     if !accept_stale && !with_lost {
                         // The desktop reads the times and the count from the JSON tail.
                         let details = serde_json::json!({"error":"transcript_behind","transcript_at":transcript_at,
-                            "events_at":anchor,"missing":events.len()});
+                            "events_at":anchor,"missing":events.len() + older_cut});
                         return Err(format!(
                             "{name}: the native transcript stops {lag:.0} s before the events Zerus recorded (transcript_behind); resume with --accept-stale or --with-lost-dialogue {details}"
                         ));
@@ -904,11 +947,22 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
             if let Some((path, transcript_at)) = recovered.get(&name) {
                 let message = recovery_message(*transcript_at, path);
                 if let Ok(executable) = std::env::current_exe() {
-                    let _ = std::process::Command::new(executable)
+                    let outcome = std::process::Command::new(executable)
                         .args(["send", &name, &message])
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .status();
+                    // N4: a failed send must not leave the file unannounced.
+                    match outcome {
+                        Ok(status) if status.success() => {}
+                        Ok(status) => eprintln!(
+                            "{}",
+                            recovery_send_failure(&name, path, &format!("hgs send exited with {status}"))
+                        ),
+                        Err(error) => eprintln!("{}", recovery_send_failure(&name, path, &error.to_string())),
+                    }
+                } else {
+                    eprintln!("{}", recovery_send_failure(&name, path, "the hgs executable is not known"));
                 }
             }
             if let Some(scope)=scope {scope.result(&name,&new_run,string(&current,"conversation_id"),None);} else {println!("hgs: resuming {name}");}
@@ -1047,14 +1101,81 @@ mod guard_tests {
         insert(3, 210.0, "Stop", "done", "");
         insert(4, 220.0, "UserPromptSubmit", "noise", "task_notification");
         insert(5, 230.0, "PreToolUse", "tool", "");
-        let events = read_events(&db, "claude/x/dev", 100.0);
-        assert_eq!(events.len(), 2, "{events:?}");
+        let (events, cut) = read_events(&db, "claude/x/dev", "c", 100.0);
+        assert_eq!((events.len(), cut), (2, 0), "{events:?}");
         assert_eq!((events[0]["detail"].as_str(), events[1]["detail"].as_str()), (Some("keep going"), Some("done")));
-        let path = write_recovery(dir.path(), "c", &events).unwrap();
+        let path = write_recovery(dir.path(), "c", &events, cut).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("keep going") && text.contains("# Dialogue Zerus recorded"), "{text}");
         assert!(recovery_message(120.0, &path).contains("Your transcript stops at 120"), "{}", recovery_message(120.0, &path));
-        assert!(read_events(&db, "claude/x/other", 100.0).is_empty());
-        assert!(read_events(&dir.path().join("missing.sqlite3"), "claude/x/dev", 0.0).is_empty());
+        assert!(read_events(&db, "claude/x/other", "c", 100.0).0.is_empty());
+        assert!(read_events(&dir.path().join("missing.sqlite3"), "claude/x/dev", "c", 0.0).0.is_empty());
+        // N4: a failed recovery message names the file and the reason.
+        let warning = recovery_send_failure("claude/x/dev", &path, "hgs send exited with exit status: 1");
+        assert!(warning.contains("claude/x/dev") && warning.contains(&path.display().to_string()), "{warning}");
+        assert!(warning.contains("read") && warning.contains("hgs send exited"), "{warning}");
+    }
+
+    #[test]
+    fn the_lost_dialogue_keeps_the_newest_entries_of_the_right_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("events.sqlite3");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);")
+            .unwrap();
+        let insert = |seq: i64, conversation: &str, at: f64, detail: &str| {
+            let payload = serde_json::json!({"type":"UserPromptSubmit","at":at,"detail":detail}).to_string();
+            connection
+                .execute(
+                    "INSERT INTO events (seq,name,conversation,payload) VALUES (?1,'claude/x/dev',?2,?3)",
+                    rusqlite::params![seq, conversation, payload],
+                )
+                .unwrap();
+        };
+        // N2: the same session name ran another conversation later; its rows
+        // must not leak into this conversation's recovery.
+        insert(1, "old", 100.0, "ancient");
+        insert(2, "current", 200.0, "first");
+        insert(3, "other", 300.0, "not mine");
+        insert(4, "current", 400.0, "second");
+        let (events, cut) = read_events(&db, "claude/x/dev", "current", 50.0);
+        assert_eq!(events.iter().map(|event| event["detail"].as_str().unwrap()).collect::<Vec<_>>(), vec!["first", "second"]);
+        assert_eq!(cut, 0);
+        // An old record without a conversation id keeps the name-only read.
+        assert_eq!(read_events(&db, "claude/x/dev", "", 50.0).0.len(), 4);
+        // N3: more than 400 entries keep the newest ones, and the note counts
+        // the oldest that were left out.
+        let db = dir.path().join("many.sqlite3");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);")
+            .unwrap();
+        for index in 0..450 {
+            let payload = serde_json::json!({"type":"UserPromptSubmit","at":index as f64 + 1.0,"detail":format!("entry {index}")}).to_string();
+            connection
+                .execute(
+                    "INSERT INTO events (seq,name,conversation,payload) VALUES (?1,'claude/x/dev','c',?2)",
+                    rusqlite::params![index + 1, payload],
+                )
+                .unwrap();
+        }
+        let (events, cut) = read_events(&db, "claude/x/dev", "c", 0.0);
+        assert_eq!((events.len(), cut), (400, 50));
+        assert_eq!(events.first().map(|event| event["detail"].as_str().unwrap()), Some("entry 50"));
+        assert_eq!(events.last().map(|event| event["detail"].as_str().unwrap()), Some("entry 449"));
+        let path = write_recovery(dir.path(), "c", &events, cut).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("entry 449") && !text.contains("entry 49\n"), "{text}");
+        assert!(text.contains("[cut: the oldest 50 entries are not shown]"), "{text}");
+        // The 400 KiB budget also keeps the newest entries and says how many
+        // were cut.
+        let large: Vec<serde_json::Value> = (0..40)
+            .map(|index| serde_json::json!({"type":"Stop","at":index,"detail":"x".repeat(20_000)}))
+            .collect();
+        let path = write_recovery(&dir.path().join("big"), "c", &large, 0).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.len() <= 400 * 1024 + 200, "{}", text.len());
+        assert!(text.contains("[cut: the oldest "), "{text}");
     }
 }

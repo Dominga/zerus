@@ -172,10 +172,22 @@ fn configured_services(record: &Value) -> Vec<crate::state::services::Service> {
     crate::state::services::configured(string(record, "agent"), string(record, "cwd"))
 }
 
-fn service_of(services: &[crate::state::services::Service], process: &Process) -> Option<String> {
+fn agent_pid(record: &Value) -> u32 {
+    record["pid"].as_u64().unwrap_or(0) as u32
+}
+
+fn service_of(services: &[crate::state::services::Service], process: &Process, agent: u32) -> Option<String> {
     services
         .iter()
-        .find(|service| crate::state::services::is_service(std::slice::from_ref(*service), &process.executable, &process.command))
+        .find(|service| {
+            crate::state::services::is_service(
+                std::slice::from_ref(*service),
+                &process.executable,
+                &process.command,
+                agent,
+                process.parent,
+            )
+        })
         .map(|service| service.name.clone())
 }
 
@@ -183,9 +195,10 @@ fn service_of(services: &[crate::state::services::Service], process: &Process) -
 /// servers and services it keeps alive (G7).
 fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
     let services = configured_services(record);
+    let agent = agent_pid(record);
     candidates(record, rows)
         .into_iter()
-        .filter(|pid| service_of(&services, &rows[pid]).is_none())
+        .filter(|pid| service_of(&services, &rows[pid], agent).is_none())
         .collect()
 }
 
@@ -193,10 +206,11 @@ fn roots(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<u32> {
 /// time they started (G7).
 fn services_of(record: &Value, rows: &BTreeMap<u32, Process>) -> Vec<Value> {
     let services = configured_services(record);
+    let agent = agent_pid(record);
     candidates(record, rows)
         .into_iter()
         .filter_map(|pid| {
-            let name = service_of(&services, &rows[&pid])?;
+            let name = service_of(&services, &rows[&pid], agent)?;
             Some(json!({"name":name,"command":journal::clipped(&json!(rows[&pid].command),240),
                 "since":rows[&pid].started,"os_pid":pid}))
         })

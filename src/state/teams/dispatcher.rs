@@ -1022,9 +1022,16 @@ fn git_continuation(folder: &str, since: f64) -> String {
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
     };
-    let since = format!("@{since:.0}");
+    // A missing or zero start time is no date filter: git 2.55 reads
+    // `--since @0` as "now" and would hide every commit.
+    let since_arg = format!("@{since:.0}");
+    let args: Vec<&str> = if since > 0.0 {
+        vec!["log", "--format=%h %at %s", "--since", &since_arg, "-n", "20"]
+    } else {
+        vec!["log", "--format=%h %at %s", "-n", "20"]
+    };
     let mut text = String::from("\nCommits since the attempt began (at most 20):\n");
-    match run(&["log", "--format=%h %at %s", "--since", &since, "-n", "20"]) {
+    match run(&args) {
         Ok(output) if output.status.success() => {
             let read = String::from_utf8_lossy(&output.stdout);
             let lines: Vec<&str> = read.lines().take(20).collect();
@@ -4754,14 +4761,18 @@ mod tests {
         let mut team = team();
         team.members.iter_mut().find(|member| member.id == "dev").unwrap().limited = Some(MemberLimit {
             at: 100.0,
-            resets_at: Some(200.0),
+            resets_at: Some(1_793_050_000.0),
             detail: "You've hit your session limit".into(),
         });
         let items = inbox::items(&team);
         let limited = items.iter().find(|item| item.kind == "member_limited").expect("a member_limited item");
-        assert!(limited.summary.contains("resets at 200"), "{}", limited.summary);
+        // H1: the lead reads a local date and time, not a raw epoch.
+        assert!(limited.summary.contains("resets at 2026"), "{}", limited.summary);
+        assert!(!limited.summary.contains("1793050000"), "{}", limited.summary);
         assert_eq!(limited.member, "Backend");
         assert!(limited.command.contains("hgs team status --json"), "{}", limited.command);
+        // Status keeps the number.
+        assert_eq!(team.member("dev").unwrap().limited.as_ref().and_then(|limit| limit.resets_at), Some(1_793_050_000.0));
     }
 
     #[test]
@@ -4854,9 +4865,20 @@ mod tests {
         assert!(text.contains("Which database?"), "{text}");
         // H6: the git part names the commits since the attempt and the working
         // tree, both bounded.
-        let git_text = git_continuation(dir.path().to_str().unwrap(), 0.0);
-        assert!(git_text.contains("half way"), "{git_text}");
-        assert!(git_text.contains("Commits since the attempt began") && git_text.contains("Working tree"), "{git_text}");
+        // A real attempt start (a minute before the commit) filters by date;
+        // a zero start time is no filter at all, as on git 2.55 where
+        // `--since @0` means "now".
+        let commit_at: f64 = String::from_utf8_lossy(&git(&["log", "-1", "--format=%ct"]).stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        for since in [0.0, commit_at - 60.0] {
+            let git_text = git_continuation(dir.path().to_str().unwrap(), since);
+            assert!(git_text.contains("half way"), "{since}: {git_text}");
+            assert!(git_text.contains("Commits since the attempt began") && git_text.contains("Working tree"), "{git_text}");
+        }
+        let later = git_continuation(dir.path().to_str().unwrap(), commit_at + 3600.0);
+        assert!(!later.contains("half way"), "{later}");
         assert!(!git_continuation("", 0.0).contains("Commits"));
         // A swapped lead gets a short brief that names the inbox (H6, U8).
         let mut running = team.clone();

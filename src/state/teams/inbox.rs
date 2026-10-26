@@ -194,7 +194,7 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
         let Some(limit) = &member.limited else { continue };
         let role = team.role_of(&member.id);
         let reset = match limit.resets_at {
-            Some(at) => format!("; resets at {at:.0}"),
+            Some(at) => format!("; resets at {}", local_time(at)),
             None => "; reset time unknown".to_owned(),
         };
         items.push(Item {
@@ -265,6 +265,14 @@ fn age(now: f64, since: f64) -> String {
         1 => "1 min".into(),
         minutes => format!("{minutes} min"),
     }
+}
+
+/// A reset time as a person reads it, in this computer's zone; status keeps
+/// the numeric `resets_at`.
+fn local_time(at: f64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(at.round() as i64, 0)
+        .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| format!("{at:.0}"))
 }
 
 /// The single message that lists the lead's new items (C2).

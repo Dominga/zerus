@@ -71,9 +71,13 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     member.id = member_id(&member.id)?;
     member.role = clean(&member.role, 60, "A role")?;
     ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
-    // B5: the profile a role may ask for.
+    // C3: `permissions` is the launch mode, the profile an agent's mode.
     ensure!(
-        member.permissions.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions.as_str()),
+        member.permissions.is_empty() || ["auto", "bypass"].contains(&member.permissions.as_str()),
+        "A permissions mode is auto or bypass"
+    );
+    ensure!(
+        member.permissions_profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions_profile.as_str()),
         "A permissions profile is read, write, build, commit or network"
     );
     member.launch_id.clear();
@@ -323,6 +327,9 @@ fn verified_word(input: &Value) -> anyhow::Result<Option<OwnerWord>> {
 fn approve(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(team.status == TeamStatus::Planning, "Only a plan in Planning can be approved");
     let owner_word = verified_word(input)?;
+    // C1: the owner's word is the lead's route; a member can never approve on
+    // a word the CLI did not verify in the lead's own session.
+    ensure!(owner_word.is_none() || actor.is_lead(team), "Only the lead approves on the owner's word");
     ensure!(
         matches!(actor, Actor::Human)
             || owner_word.is_some()
@@ -375,9 +382,9 @@ fn profile_rank(profile: &str) -> u8 {
 fn widening(team: &Team, members: &[Member]) -> Vec<Value> {
     let mut found = Vec::new();
     for member in members.iter().filter(|member| member.id != team.lead) {
-        let default = team.member(&member.id).map(|old| old.permissions.as_str()).unwrap_or("write");
-        if profile_rank(&member.permissions) > profile_rank(default) {
-            found.push(json!({"member":member.id,"from":default,"to":member.permissions}));
+        let default = team.member(&member.id).map(|old| old.permissions_profile.as_str()).unwrap_or("write");
+        if profile_rank(&member.permissions_profile) > profile_rank(default) {
+            found.push(json!({"member":member.id,"from":default,"to":member.permissions_profile}));
         }
     }
     found
@@ -1652,7 +1659,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(active < team.settings.max_members, "The team already has its {} members", team.settings.max_members);
             let id = member.id.clone();
             let role = member.role.clone();
-            let profile = member.permissions.clone();
+            let profile = member.permissions_profile.clone();
             let adopted = member.session.as_ref().map(|session| session.name.clone());
             team.members.push(member);
             // B5: a profile wider than the role's default waits for the owner.
@@ -3294,7 +3301,7 @@ mod tests {
         let mut events = Vec::new();
         plan(
             &mut team,
-            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions":"commit"}],
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions_profile":"commit"}],
                 "tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
             &Actor::Human,
             &mut events,
@@ -3309,13 +3316,49 @@ mod tests {
         let (mut fresh, _) = create("t2", &json!({"name":"T2","lead":{"id":"lead","agent":"claude"}})).unwrap();
         let error = plan(
             &mut fresh,
-            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions":"root"}]}),
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions_profile":"root"}]}),
             &Actor::Human,
             &mut events,
         )
         .unwrap_err()
         .to_string();
         assert_eq!(error, "A permissions profile is read, write, build, commit or network");
+        // C3: `permissions` stays the launch mode; bypass is accepted.
+        let (mut bypass, _) = create("t3", &json!({"name":"T3","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        plan(
+            &mut bypass,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions":"bypass"}],
+                "tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(bypass.member("dev").unwrap().permissions, "bypass");
+        let (mut fresh, _) = create("t4", &json!({"name":"T4","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let error = plan(
+            &mut fresh,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions":"root"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "A permissions mode is auto or bypass");
+    }
+
+    #[test]
+    fn a_member_cannot_forge_an_approval() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(&mut team, &json!({"tasks":[{"id":1,"title":"A","assignee":"lead"}]}), &Actor::Human, &mut events).unwrap();
+        // C1: a hand-written checked word is refused for anyone but the lead.
+        let forged = json!({"owner_word_checked":{"text":"go ahead","at":1.0}});
+        let error = apply(&mut team, "approve", &forged, &Actor::Member("dev".into()), &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only the lead approves on the owner's word");
+        // The owner's own approval needs no word.
+        apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     }
 
     #[test]

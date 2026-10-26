@@ -1167,7 +1167,18 @@ pub(crate) fn tag(text: &str) -> String {
     tag.chars().take(24).collect()
 }
 
-/// B6: a sandboxed agent's folder is a clone (its `.git` is inside, so commit,
+/// C3/B5: the agent's own permission mode for a role profile, where the agent
+/// has one; None means the profile is advisory.
+pub(crate) fn profile_mode(agent: &str, profile: &str) -> Option<&'static str> {
+    match (agent, profile) {
+        ("claude", "read") => Some("plan"),
+        ("claude", "write") => Some("default"),
+        ("claude", "build" | "commit") => Some("acceptEdits"),
+        _ => None,
+    }
+}
+
+/// B4/F10: a sandboxed agent's folder is a clone (its `.git` is inside, so
 /// merge and fetch work there); other agents get a worktree. Used when a plan
 /// leaves the folder to the team (folder policy auto).
 pub(crate) fn default_folder(agent: &str) -> MemberFolder {
@@ -1238,6 +1249,12 @@ pub(crate) fn launch_args(team: &Team, member: &Member, folder: &str) -> Vec<Str
     }
     if !member.permissions.is_empty() {
         args.extend(["--permissions".into(), member.permissions.clone()]);
+    }
+    // C3/B5: the profile maps to the agent's own mode where it has one.
+    if member.permissions.is_empty() {
+        if let Some(mode) = profile_mode(&member.agent, &member.permissions_profile) {
+            args.extend(["--permission-mode".into(), mode.into()]);
+        }
     }
     if member.agent == "opencode" && !member.model.is_empty() {
         args.extend(["--model".into(), member.model.clone()]);
@@ -1859,13 +1876,50 @@ pub(crate) fn send_denial(session: &SessionRef, tool: &str, reason: &str) -> any
 /// Never pushes, never amends, never changes branches.
 pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[String]) -> anyhow::Result<Value> {
     let git = |args: &[&str]| -> anyhow::Result<std::process::Output> {
-        std::process::Command::new("git")
+        // C2: every git call carries the hardened config and a timeout; the
+        // repository's own hooks, fsmonitor and filters never run.
+        let mut child = std::process::Command::new("git")
             .arg("-C")
             .arg(folder)
+            .args(["-c", "core.hooksPath=", "-c", "core.fsmonitor=false"])
             .args(args)
-            .output()
-            .map_err(|error| anyhow::anyhow!("git did not run: {error}"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| anyhow::anyhow!("git did not run: {error}"))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                anyhow::bail!("git {args:?} timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            std::io::Read::read_to_end(&mut pipe, &mut stdout)?;
+        }
+        if let Some(mut pipe) = child.stderr.take() {
+            std::io::Read::read_to_end(&mut pipe, &mut stderr)?;
+        }
+        let status = child.wait()?;
+        Ok(std::process::Output { status, stdout, stderr })
     };
+    // C2: a repository-local hook, fsmonitor or filter configuration is refused
+    // rather than silently ignored.
+    for key in ["core.hooksPath", "core.fsmonitor"] {
+        let found = git(&["config", "--local", "--get", key])?;
+        anyhow::ensure!(
+            !found.status.success() || String::from_utf8_lossy(&found.stdout).trim().is_empty(),
+            "This repository configures {key}; Zerus commits without it"
+        );
+    }
+    let filters = git(&["config", "--local", "--get-regexp", "^filter\\."])?;
+    anyhow::ensure!(filters.stdout.is_empty(), "This repository configures a Git filter; Zerus commits without it");
     let current = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     anyhow::ensure!(current.status.success(), "{}", String::from_utf8_lossy(&current.stderr).trim());
     let current = String::from_utf8_lossy(&current.stdout).trim().to_owned();
@@ -1883,7 +1937,7 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
     if staged.status.success() {
         return Ok(json!({"status":"clean","files":0}));
     }
-    let committed = git(&["commit", "-m", message])?;
+    let committed = git(&["commit", "--no-verify", "-m", message])?;
     anyhow::ensure!(committed.status.success(), "{}", String::from_utf8_lossy(&committed.stderr).trim());
     let sha = git(&["rev-parse", "HEAD"])?;
     anyhow::ensure!(sha.status.success(), "{}", String::from_utf8_lossy(&sha.stderr).trim());
@@ -4099,6 +4153,21 @@ mod tests {
         run(&["switch", "-qc", "other"]);
         let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
         assert!(error.contains("not team/t-dev"), "{error}");
+        // C2: a repository-local hooks path or filter is refused.
+        run(&["switch", "-q", "team/t-dev"]);
+        run(&["config", "--local", "core.hooksPath", ".githooks"]);
+        let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
+        assert!(error.contains("core.hooksPath"), "{error}");
+        run(&["config", "--local", "--unset", "core.hooksPath"]);
+        run(&["config", "--local", "filter.slow.clean", "cat"]);
+        let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
+        assert!(error.contains("Git filter"), "{error}");
+        run(&["config", "--local", "--remove-section", "filter.slow"]);
+        // C3: a profile maps to the agent's mode, or is advisory.
+        assert_eq!(profile_mode("claude", "build"), Some("acceptEdits"));
+        assert_eq!(profile_mode("claude", "read"), Some("plan"));
+        assert_eq!(profile_mode("codex", "read"), None);
+        assert_eq!(profile_mode("claude", "network"), None);
     }
 
     #[test]

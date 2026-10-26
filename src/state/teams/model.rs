@@ -181,10 +181,14 @@ pub(crate) struct Member {
     pub model: String,
     #[serde(default)]
     pub effort: String,
-    /// The permissions profile the role asked for (B5): read, write, build,
-    /// commit or network; empty when the agent has none.
+    /// The launch permission mode (C3): auto or bypass; empty for the agent's
+    /// default.
     #[serde(default)]
     pub permissions: String,
+    /// The role's permissions profile (B5): read, write, build, commit or
+    /// network, mapped to the agent's own mode where it has one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub permissions_profile: String,
     /// The lead's or owner's answers to this member's permission requests,
     /// newest last, at most 20 (B1): {question_id, decision, by, at, reason}.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

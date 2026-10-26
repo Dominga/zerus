@@ -442,9 +442,12 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
         .unwrap_or_default()
         .to_owned();
     let reason = text(input, "text").trim().to_owned();
-    if deny && !reason.is_empty() {
-        super::dispatcher::send_denial(&session, &tool, &reason)?;
-    }
+    // N5: the answer is recorded even when the denial message cannot be sent.
+    let denial_error = if deny && !reason.is_empty() {
+        super::dispatcher::send_denial(&session, &tool, &reason).err()
+    } else {
+        None
+    };
     let decision = if deny { "deny" } else { "allow" };
     let who = if matches!(&by, Actor::Human) { "owner" } else { "lead" };
     let mut store = Store::open(true)?;
@@ -460,6 +463,12 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
             "permission_answered",
             json!({"member":team.role_of(&member_id),"question_id":question,"decision":decision,"by":who}),
         ));
+        if let Some(error) = &denial_error {
+            events.push(Event::new(
+                "permission_denial_failed",
+                json!({"member":team.role_of(&member_id),"question_id":question,"error":error.to_string()}),
+            ));
+        }
         Ok(Value::Null)
     })?;
     Ok(serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!({"status":"answered"})))
@@ -468,7 +477,13 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
 /// B4: commits the member's own work in its own folder, on its team branch.
 /// Zerus runs git; it never pushes, amends or changes branches.
 fn commit(input: &Value) -> anyhow::Result<Value> {
-    let store = Store::open(false)?;
+    // L1: a repeated request returns the stored receipt, never a second commit.
+    let request = text(input, "request_id");
+    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    let mut store = Store::open(false)?;
+    if let Some(receipt) = store.receipt(request, input)? {
+        return Ok(receipt);
+    }
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
     let by = actor(&team, "commit", input)?;
     let Actor::Member(member_id) = by else { bail!("Only a member commits its work") };
@@ -485,13 +500,15 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     }
     let result = super::dispatcher::commit_in(&folder, &branch, &message, &paths)?;
     if result["status"] != "committed" {
+        // Nothing changed: the receipt still records this request as done.
+        store.mutate(Some((request, input)), &team.id, None, |_, _| Ok(result.clone()))?;
         return Ok(result);
     }
     let sha = result["sha"].as_str().unwrap_or_default().to_owned();
     let files = result["files"].as_u64().unwrap_or(0);
     let attempt_id = text(input, "attempt").to_owned();
     let mut store = Store::open(true)?;
-    store.mutate(None, &team.id, None, |team, events| {
+    store.mutate(Some((request, input)), &team.id, None, |team, events| {
         let role = team.role_of(&member_id);
         let task = team.tasks.iter_mut().find(|task| {
             task.open_attempt().is_some_and(|attempt| {
@@ -924,6 +941,11 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 Err(error) => return Err(error),
             };
             let mut filled = input.clone();
+            // C1: a caller can never hand in a verified owner word; only the
+            // check below fills it, from the lead's own session.
+            if let Some(object) = filled.as_object_mut() {
+                object.remove("owner_word_checked");
+            }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
                 // Without an attempt, the task's open one.
                 let team = store.load(team_id)?.context("Unknown team")?;

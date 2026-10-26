@@ -217,12 +217,21 @@ pub(super) fn now() -> f64 {
         .as_secs_f64()
 }
 
+/// H2: one JSON request from bytes: a leading UTF-8 BOM is dropped (PowerShell
+/// 5.1 adds one) and input that is not UTF-8 is refused with the hint that
+/// does not need a pipe. Every `--json` reader goes through this.
+pub(crate) fn json_request(bytes: &[u8]) -> Result<Value> {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let text = std::str::from_utf8(bytes).map_err(|_| "Input is not UTF-8 (PowerShell 5.1: use --json-file)")?;
+    serde_json::from_str(text).map_err(|e| e.to_string())
+}
+
 pub(super) fn stdin_json() -> Result<Value> {
-    let mut input = String::new();
+    let mut input = Vec::new();
     io::stdin()
-        .read_to_string(&mut input)
+        .read_to_end(&mut input)
         .map_err(|e| e.to_string())?;
-    serde_json::from_str(&input).map_err(|e| e.to_string())
+    json_request(&input)
 }
 
 pub(super) fn nonempty_env(name: &str) -> Option<String> {

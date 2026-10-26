@@ -76,6 +76,8 @@ pub(crate) struct Seen {
     /// (None when the host does not know it).
     pub muted: bool,
     pub notify_revision: Option<u64>,
+    /// H1: its session stopped by a usage limit.
+    pub limited: Option<SeenLimit>,
 }
 
 /// The newest Background job of a session (C12).
@@ -91,6 +93,15 @@ pub(crate) struct SeenService {
     pub name: String,
     pub command: String,
     pub since: f64,
+}
+
+/// H1: a session stopped by a usage limit, with the reset time when the
+/// session reports one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeenLimit {
+    pub at: f64,
+    pub resets_at: Option<f64>,
+    pub detail: String,
 }
 
 /// Every session of this computer and its peers from one listing.
@@ -139,6 +150,26 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                     })
                 })
                 .collect();
+            // H1: a turn stopped by a usage limit; the reset time when the
+            // session reports one.
+            let limited = (field("phase") == "error")
+                .then(|| {
+                    let error = &record["provider_error"];
+                    let text = format!(
+                        "{} {}",
+                        error["error_kind"].as_str().unwrap_or_default(),
+                        error["detail"].as_str().unwrap_or_default()
+                    )
+                    .to_lowercase();
+                    let session_limit = super::super::provider_errors::native_kind(error) == Some("session_limit")
+                        || super::super::session_limits::recognized(&text);
+                    session_limit.then(|| SeenLimit {
+                        at: error["at"].as_f64().unwrap_or(0.0),
+                        resets_at: super::super::session_limits::reset_at(error),
+                        detail: text.chars().take(300).collect(),
+                    })
+                })
+                .flatten();
             sessions.push(Seen {
                 host: host.clone(),
                 name: field("name").to_owned(),
@@ -160,6 +191,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 cwd: field("cwd").to_owned(),
                 muted: record["notification_preferences"]["muted"] == true,
                 notify_revision: record["notification_preferences"]["revision"].as_u64(),
+                limited,
             });
         }
     }
@@ -210,6 +242,16 @@ pub(crate) enum Step {
     BackgroundRed { member: String, command: String, since: f64 },
     /// The MCP servers and services the member's session runs changed (G7).
     Services { member: String, services: Vec<SeenService> },
+    /// H1: the member's session was stopped by a usage limit, or recovered
+    /// from it (None).
+    Limited { member: String, limited: Option<MemberLimit> },
+    /// H1: the team setting asks the recovery service to wait for this
+    /// member's reset and continue it.
+    StartLimitResume { member: String },
+    /// H1: keep the recovery request fresh while the wait lasts.
+    RefreshLimitResume { member: String },
+    /// H1: the limit episode ended or the setting is off: stop waiting.
+    StopLimitResume { member: String },
     /// Gives the member the lead's answer as a message (A3).
     AnswerQuestion { task: u32, question: String },
     TurnEnded { task: u32, at: f64, reply: String },
@@ -272,6 +314,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     if !active && !planning {
         return steps;
     }
+    let mut launching = BTreeSet::new();
     for member in &team.members {
         if member.state == MemberState::Removed {
             continue;
@@ -310,18 +353,71 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             }
         }
     }
-    if planning {
+    // H1: a member stopped by a usage limit is stored, named to the lead once,
+    // and, when the team setting allows it, handed to the recovery service for
+    // the wait until its reset.
+    for member in &team.members {
+        if member.state == MemberState::Removed {
+            // A removed member no longer asks for a reset wait (H1).
+            if member.limit_resume {
+                steps.push(Step::StopLimitResume { member: member.id.clone() });
+            }
+            continue;
+        }
+        let found = session_of(member, seen);
+        let limited = found.and_then(|found| found.limited.as_ref()).map(|limit| MemberLimit {
+            at: limit.at,
+            resets_at: limit.resets_at,
+            detail: limit.detail.clone(),
+        });
+        if member.limited != limited {
+            steps.push(Step::Limited { member: member.id.clone(), limited });
+        }
+        let desired = member.limited.as_ref().is_some_and(|limit| limit.resets_at.is_some())
+            && team.settings.resume_after_limits
+            && member.agent != "dsh"
+            && member.session.is_some()
+            && found.is_some_and(|found| found.live);
+        if desired && !member.limit_resume {
+            steps.push(Step::StartLimitResume { member: member.id.clone() });
+        } else if desired && member.limit_resume {
+            // The request expires if the dispatcher stops refreshing it; a
+            // reset can be hours away.
+            steps.push(Step::RefreshLimitResume { member: member.id.clone() });
+        } else if !desired && member.limit_resume {
+            steps.push(Step::StopLimitResume { member: member.id.clone() });
+        }
+        // H6: a swapped member's new session starts even before work is ready.
+        if member.launch_after_swap
+            && member.session.is_none()
+            && member.launch_id.is_empty()
+            && member.error.is_empty()
+            && launching.insert(member.id.clone())
+        {
+            steps.push(Step::Launch { member: member.id.clone() });
+        }
+    }
+    // H6: a swapped lead is briefed once, also while the team runs.
+    let briefing = matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
+        && matches!(team.brief, Notice::Pending | Notice::Sending);
+    if briefing {
         // A desktop team starts only its lead, then briefs it once.
         if let Some(lead) = team.member(&team.lead) {
             if lead.session.is_none() {
-                if lead.launch_id.is_empty() && lead.error.is_empty() {
+                if planning
+                    && lead.launch_id.is_empty()
+                    && lead.error.is_empty()
+                    && launching.insert(lead.id.clone())
+                {
                     steps.push(Step::Launch { member: lead.id.clone() });
                 }
             } else if team.brief == Notice::Pending && session_of(lead, seen).is_some_and(|s| s.free && !s.run_id.is_empty()) {
                 steps.push(if lead.needs_settings() { Step::Settings { member: lead.id.clone() } } else { Step::Brief });
             }
         }
-        return steps;
+        if planning {
+            return steps;
+        }
     }
     // Turn ends, No report and reports for the lead, for open work.
     for task in &team.tasks {
@@ -538,6 +634,9 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     // plan. The lead hears once after 20 minutes; the episode ends with work.
     let ready_ids = plan::ready(team);
     let staging_open = team.tasks.iter().any(|task| !task.status.finished());
+    // U9: while every open task waits for the owner's phase approval, a
+    // member with nothing ready is expected; no episode starts or continues.
+    let owner_wait = plan::waiting_for_owner(team);
     for member in &team.members {
         if member.id == team.lead || matches!(member.state, MemberState::Removed | MemberState::Paused) {
             continue;
@@ -546,7 +645,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
         let has_work = busy.contains(member.id.as_str())
             || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
-        if !staging_open || has_work || !(found.free && found.live) {
+        if !staging_open || owner_wait || has_work || !(found.free && found.live) {
             if member.starved_since.is_some() {
                 steps.push(Step::StarvedEnded { member: member.id.clone() });
             }
@@ -616,7 +715,6 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             }
         }
     }
-    let mut launching = BTreeSet::new();
     let refused_recently = |member: &Member| {
         team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.member == member.id && a.state == AttemptState::Refused && now - a.sent_at < REFUSAL_PAUSE)
     };
@@ -806,7 +904,21 @@ fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
 }
 
 /// The message that gives a member its task.
+#[cfg(test)]
 pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_host: &str, member_host: &str) -> String {
+    hand_off_text_with(team, task, attempt, report_host, member_host, "")
+}
+
+/// H6: the hand-off of a swapped member carries the previous attempt's partial
+/// report and open questions in `extra`; the git part is read at send time.
+pub(crate) fn hand_off_text_with(
+    team: &Team,
+    task: &Task,
+    attempt: &Attempt,
+    report_host: &str,
+    member_host: &str,
+    extra: &str,
+) -> String {
     let mut text = format!(
         "[Zerus team \u{b7} from: Lead \u{b7} task: #{} \u{b7} attempt: {}]\nTeam: {}. Your role: {}.\n",        task.id,
         attempt.n,
@@ -857,6 +969,10 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
             check.command, check.expect_exit, check.timeout_minutes
         );
     }
+    // H6: a swapped member continues from what its old session had.
+    if !extra.is_empty() {
+        text += extra;
+    }
     let at = if member_host.is_empty() { String::new() } else { format!("@{report_host} ") };
     let mut report = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."});
     if task.is_check() {
@@ -879,9 +995,95 @@ pub(crate) fn hand_off_text(team: &Team, task: &Task, attempt: &Attempt, report_
     text
 }
 
+/// H6: what a swapped member's new session needs from the old attempt.
+fn continuation_extra(task: &Task) -> String {
+    let Some(continuation) = task.continuation.as_ref() else { return String::new() };
+    let mut text = format!(
+        "\nYou continue task #{} after Zerus swapped your session (previous attempt {}).\n",
+        task.id, continuation.n
+    );
+    if !continuation.report.is_empty() {
+        text += &format!("The previous session's partial report:\n{}\n", continuation.report);
+    }
+    if !continuation.questions.is_empty() {
+        text += "Open questions from the previous session:\n";
+        for question in &continuation.questions {
+            text += &format!("- {question}\n");
+        }
+    }
+    text += "The previous session worked in this folder; check the working tree before you continue.\n";
+    text
+}
+
+/// H6: the commits and working-tree changes since the swapped attempt began.
+fn git_continuation(folder: &str, since: f64) -> String {
+    if folder.is_empty() {
+        return String::new();
+    }
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(folder)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+    };
+    // A missing or zero start time is no date filter: git 2.55 reads
+    // `--since @0` as "now" and would hide every commit.
+    let since_arg = format!("@{since:.0}");
+    let args: Vec<&str> = if since > 0.0 {
+        vec!["log", "--format=%h %at %s", "--since", &since_arg, "-n", "20"]
+    } else {
+        vec!["log", "--format=%h %at %s", "-n", "20"]
+    };
+    let mut text = String::from("\nCommits since the attempt began (at most 20):\n");
+    match run(&args) {
+        Ok(output) if output.status.success() => {
+            let read = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = read.lines().take(20).collect();
+            if lines.is_empty() {
+                text += "(none)\n";
+            } else {
+                for line in lines {
+                    text += &format!("{line}\n");
+                }
+            }
+        }
+        _ => text += "(not read)\n",
+    }
+    text += "Working tree (git status --short, at most 50 lines):\n";
+    match run(&["status", "--short"]) {
+        Ok(output) if output.status.success() => {
+            let read = String::from_utf8_lossy(&output.stdout);
+            let lines: Vec<&str> = read.lines().take(50).collect();
+            if lines.is_empty() {
+                text += "(clean)\n";
+            } else {
+                for line in lines {
+                    text += &format!("{line}\n");
+                }
+            }
+        }
+        _ => text += "(not read)\n",
+    }
+    text
+}
+
 /// The planning brief for the lead of a team created from the desktop: the
-/// goal, the members and tasks proposed so far, and how to plan.
+/// goal, the members and tasks proposed so far, and how to plan. A lead
+/// swapped into a running team gets the short brief (H6).
 pub(crate) fn brief_text(team: &Team) -> String {
+    if matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+        return format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} brief]\nYou are now the lead of the team {} ({}). \
+             Its reports, questions, permission requests and your own tasks wait in one inbox: \
+             {{\"team\":\"{}\"}} | hgs team inbox --json. The team state is in hgs team status --json; \
+             hgs guide team-lead has the rest.\n",
+            team.name,
+            if team.status == TeamStatus::Running { "running" } else { "paused" },
+            team.id
+        );
+    }
     let members: Vec<Value> = team
         .members
         .iter()
@@ -1518,10 +1720,37 @@ fn change(store: &mut Store, team: &str, change: impl FnOnce(&mut Team, &mut Vec
     Ok(())
 }
 
+/// H1: asks the recovery service to wait for a member's usage-limit reset (or
+/// to stop). The service keeps the timing, cancellation and text; Zerus only
+/// names the session and its run.
+fn set_limit_resume(store: &mut Store, team: &str, member: &str, on: bool) -> anyhow::Result<()> {
+    let mut session = None;
+    change(store, team, |team, _| {
+        let found = team.members.iter_mut().find(|found| found.id == member).context("unknown member")?;
+        if found.limit_resume == on {
+            return Ok(());
+        }
+        found.limit_resume = on;
+        session = found.session.clone();
+        Ok(())
+    })?;
+    let Some(session) = session else { return Ok(()) };
+    if let Err(error) = super::super::recovery::set_team_override(&session.name, &session.run_id, on) {
+        eprintln!(
+            "hgs: the team could not {} automatic recovery for {}: {error}",
+            if on { "start" } else { "stop" },
+            session.name
+        );
+    }
+    Ok(())
+}
+
 fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, from: Option<&str>, host: &str) -> anyhow::Result<()> {
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
+    let mut extra = String::new();
+    let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
         anyhow::ensure!(team.status == TeamStatus::Running && plan::ready(team).contains(&task_id), "no longer ready");
         let session = team.member(member_id).and_then(|m| m.session.clone()).context("no session")?;
@@ -1552,7 +1781,15 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
         }
         task.status = TaskStatus::Assigned;
         let task = team.task(task_id).unwrap();
-        message = Some((session, hand_off_text(team, task, task.attempts.last().unwrap(), host, &member_host)));
+        extra = continuation_extra(task);
+        if member_host.is_empty() {
+            if let (Some(continuation), Some(member)) = (task.continuation.as_ref(), team.member(member_id)) {
+                if let Ok(folder) = member_folder_path(team, member) {
+                    git_job = Some((folder, continuation.since));
+                }
+            }
+        }
+        message = Some((session, hand_off_text_with(team, task, task.attempts.last().unwrap(), host, &member_host, &extra)));
         // D2: the finding goes with this one hand-out only.
         if !task.reopen_note.is_empty() {
             if let Some(task) = team.task_mut(task_id) {
@@ -1562,7 +1799,10 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
         events.push(Event::new("handed_out", json!({"by":"Lead","task":task_id,"to":team.role_of(member_id),"attempt":n})));
         Ok(())
     })?;
-    let (session, text) = message.unwrap();
+    let (session, mut text) = message.unwrap();
+    if let Some((folder, since)) = git_job {
+        text += &git_continuation(&folder, since);
+    }
     let outcome = send(&session, &attempt_id, &text);
     change(store, team_id, |team, events| {
         let task = team.task_mut(task_id).context("unknown task")?;
@@ -1575,6 +1815,7 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
                 attempt.state = AttemptState::Delivered;
                 attempt.delivered_at = Some(now());
                 task.status = TaskStatus::InProgress;
+                task.continuation = None;
                 events.push(Event::new("delivered", json!({"task":task_id,"attempt":n})));
             }
             Sent::Refused(error) => {
@@ -1586,6 +1827,7 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
             Sent::Uncertain(error) => {
                 attempt.state = AttemptState::Unconfirmed;
                 attempt.error = error.clone();
+                task.continuation = None;
                 events.push(Event::new("unconfirmed", json!({"task":task_id,"attempt":n,"error":error})));
             }
         }
@@ -2398,6 +2640,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 let found = team.members.iter_mut().find(|m| m.id == *member).context("unknown member")?;
                 anyhow::ensure!(found.session.is_none() && found.launch_id.is_empty(), "already started");
                 found.launch_id = launch_id.clone();
+                found.launch_after_swap = false;
                 let found = found.clone();
                 planned = Some((team.clone(), found));
                 Ok(())
@@ -2493,6 +2736,34 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::Limited { member, limited } => change(store, &team.id, |team, events| {
+            let role = team.role_of(member);
+            let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
+            let new_episode = limited.is_some() && found.limited.is_none();
+            if limited.is_none() {
+                found.limit_resume = false;
+            }
+            if let (true, Some(limit)) = (new_episode, limited.as_ref()) {
+                events.push(Event::new(
+                    "member_limited",
+                    json!({"member":role,"resets_at":limit.resets_at,"detail":limit.detail}),
+                ));
+            }
+            found.limited = limited.clone();
+            Ok(())
+        }),
+        Step::StartLimitResume { member } => set_limit_resume(store, &team.id, member, true),
+        Step::RefreshLimitResume { member } => {
+            // No team write: the recovery service ignores a refresh younger
+            // than a minute, so this is cheap.
+            if let Some(session) = team.member(member).and_then(|member| member.session.clone()) {
+                if let Err(error) = super::super::recovery::set_team_override(&session.name, &session.run_id, true) {
+                    eprintln!("hgs: the team could not refresh automatic recovery for {}: {error}", session.name);
+                }
+            }
+            Ok(())
+        }
+        Step::StopLimitResume { member } => set_limit_resume(store, &team.id, member, false),
         Step::Started { task } => change(store, &team.id, |team, events| {
             let Some(member) = team.task(*task).and_then(|t| t.attempts.last()).map(|a| a.member.clone()) else {
                 return Ok(());
@@ -3810,6 +4081,45 @@ mod tests {
     }
 
     #[test]
+    fn starving_stays_quiet_until_the_owner_approves_a_phase() {
+        let mut team = team();
+        // Every open task is in a draft phase: the owner owes an approval.
+        for task in &mut team.tasks {
+            task.phase = 2;
+            task.status = TaskStatus::Draft;
+        }
+        for id in [1, 2] {
+            team.task_mut(id).unwrap().assignee = "qa".into();
+        }
+        team.phases.push(Phase {
+            n: 2,
+            title: "Next".into(),
+            state: PhaseState::Draft,
+            tasks: team.tasks.iter().map(|task| task.id).collect(),
+            ..Default::default()
+        });
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = Some(10.0);
+        let lead = session("claude/x/lead", "r0", true);
+        let dev = session("codex/x/dev", "r1", true);
+        let qa = session("kimi/x/qa", "r2", true);
+        let seen = [lead.clone(), dev.clone(), qa.clone()];
+        // U9: no episode starts or continues; the old one ends.
+        let waiting = steps(&team, &seen, 10.0 + 30.0 * 60.0);
+        assert!(
+            !waiting.iter().any(|step| matches!(step, Step::Starving { .. } | Step::PlanStarved { .. })),
+            "{waiting:?}"
+        );
+        assert!(waiting.contains(&Step::StarvedEnded { member: "dev".into() }), "{waiting:?}");
+        // The phase is approved and its tasks are in work: dev starves again.
+        team.phases[0].state = PhaseState::Approved;
+        for task in &mut team.tasks {
+            task.status = TaskStatus::Pending;
+        }
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = None;
+        assert!(steps(&team, &seen, 10.0).contains(&Step::Starving { member: "dev".into() }));
+    }
+
+    #[test]
     fn a_declared_budget_ties_to_the_job_and_turns_amber_then_red() {
         let mut team = team();
         let lead = session("claude/x/lead", "r0", true);
@@ -4684,5 +4994,149 @@ mod tests {
         assert!(!files.pid_file().exists() && !files.heartbeat_file().exists() && !files.stop_file().exists());
         let log = fs::read_to_string(files.log_file()).unwrap();
         assert!(log.contains("start pid=") && log.contains("stop: stop requested"), "{log}");
+    }
+
+    #[test]
+    fn a_usage_limit_is_read_from_the_listing_and_named_to_the_lead() {
+        let listing = json!([{"sessions":[
+            {"name":"claude/x/dev","run_id":"r1","state":"running","activity":"idle","phase":"error",
+             "provider_error":{"error_kind":"session_limit","detail":"You've hit your session limit. Resets at 18:00.","at":100.0,"reset_at":200.0}},
+            {"name":"codex/x/qa","run_id":"r2","state":"running","activity":"idle","phase":"error",
+             "provider_error":{"error_kind":"network","detail":"connection reset","at":100.0}}
+        ]}]);
+        let seen = seen(&listing);
+        let dev = seen.iter().find(|session| session.name == "claude/x/dev").unwrap();
+        assert_eq!(dev.limited.as_ref().and_then(|limit| limit.resets_at), Some(200.0));
+        assert!(dev.limited.as_ref().is_some_and(|limit| limit.detail.contains("session limit")));
+        assert!(seen.iter().find(|session| session.name == "codex/x/qa").unwrap().limited.is_none());
+        // The stored member shows the episode in the lead's inbox, with its
+        // reset time (H1).
+        let mut team = team();
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().limited = Some(MemberLimit {
+            at: 100.0,
+            resets_at: Some(1_793_050_000.0),
+            detail: "You've hit your session limit".into(),
+        });
+        let items = inbox::items(&team);
+        let limited = items.iter().find(|item| item.kind == "member_limited").expect("a member_limited item");
+        // H1: the lead reads a local date and time, not a raw epoch.
+        assert!(limited.summary.contains("resets at 2026"), "{}", limited.summary);
+        assert!(!limited.summary.contains("1793050000"), "{}", limited.summary);
+        assert_eq!(limited.member, "Backend");
+        assert!(limited.command.contains("hgs team status --json"), "{}", limited.command);
+        // Status keeps the number.
+        assert_eq!(team.member("dev").unwrap().limited.as_ref().and_then(|limit| limit.resets_at), Some(1_793_050_000.0));
+    }
+
+    #[test]
+    fn the_team_setting_starts_resume_for_a_member_and_the_lead_but_not_a_deepseek_host() {
+        let mut base = team();
+        let mut dev = session("codex/x/dev", "r1", true);
+        dev.free = false;
+        dev.phase = "error".into();
+        dev.limited = Some(SeenLimit { at: 100.0, resets_at: Some(200.0), detail: "session limit".into() });
+        let lead = session("claude/x/lead", "r0", true);
+        let stored = MemberLimit { at: 100.0, resets_at: Some(200.0), detail: "session limit".into() };
+        // Before the flag, the episode is stored but recovery is not started.
+        let found = steps(&base, &[lead.clone(), dev.clone()], 300.0);
+        assert!(found.contains(&Step::Limited { member: "dev".into(), limited: Some(stored.clone()) }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::StartLimitResume { .. })));
+        // With the setting on, Zerus asks the recovery service to wait for the
+        // reset; it does not retry on its own.
+        base.settings.resume_after_limits = true;
+        base.members.iter_mut().find(|member| member.id == "dev").unwrap().limited = Some(stored.clone());
+        assert!(steps(&base, &[lead.clone(), dev.clone()], 300.0).contains(&Step::StartLimitResume { member: "dev".into() }));
+        // Once started it is refreshed, not asked again; the end of the
+        // episode stops it.
+        base.members.iter_mut().find(|member| member.id == "dev").unwrap().limit_resume = true;
+        let waiting = steps(&base, &[lead.clone(), dev.clone()], 300.0);
+        assert!(!waiting.iter().any(|step| matches!(step, Step::StartLimitResume { .. })));
+        assert!(waiting.contains(&Step::RefreshLimitResume { member: "dev".into() }), "{waiting:?}");
+        let mut cleared = dev.clone();
+        cleared.limited = None;
+        cleared.free = true;
+        cleared.phase = "idle".into();
+        base.members.iter_mut().find(|member| member.id == "dev").unwrap().limited = None;
+        assert!(steps(&base, &[lead.clone(), cleared], 300.0).contains(&Step::StopLimitResume { member: "dev".into() }));
+        // An unknown reset is the inbox item only: no start.
+        let mut unknown = dev.clone();
+        unknown.limited = Some(SeenLimit { at: 100.0, resets_at: None, detail: "session limit".into() });
+        let mut unknown_team = team();
+        unknown_team.settings.resume_after_limits = true;
+        unknown_team.members.iter_mut().find(|member| member.id == "dev").unwrap().limited =
+            Some(MemberLimit { at: 100.0, resets_at: None, detail: "session limit".into() });
+        assert!(!steps(&unknown_team, &[lead.clone(), unknown], 300.0)
+            .iter()
+            .any(|step| matches!(step, Step::StartLimitResume { .. })));
+        // A DeepSeek host is not resumed; the lead's own session follows the
+        // setting.
+        let mut dsh_team = team();
+        dsh_team.settings.resume_after_limits = true;
+        dsh_team.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "dsh".into();
+        dsh_team.members.iter_mut().find(|member| member.id == "dev").unwrap().limited = Some(stored.clone());
+        assert!(!steps(&dsh_team, &[lead.clone(), dev.clone()], 300.0)
+            .iter()
+            .any(|step| matches!(step, Step::StartLimitResume { member, .. } if member == "dev")));
+        let mut lead_team = team();
+        lead_team.settings.resume_after_limits = true;
+        lead_team.members.iter_mut().find(|member| member.id == "lead").unwrap().limited = Some(stored);
+        let mut lead_limited = lead.clone();
+        lead_limited.free = false;
+        lead_limited.phase = "error".into();
+        lead_limited.limited = Some(SeenLimit { at: 100.0, resets_at: Some(200.0), detail: "session limit".into() });
+        assert!(steps(&lead_team, &[lead_limited, dev], 300.0).contains(&Step::StartLimitResume { member: "lead".into() }));
+    }
+
+    #[test]
+    fn the_hand_off_after_a_swap_carries_the_partial_report_questions_and_git() {
+        let mut team = team();
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").args(args).current_dir(dir.path()).output().unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::write(dir.path().join("work.txt"), "half").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["-c", "user.name=Zerus", "-c", "user.email=z@example.com", "commit", "-qm", "half way"])
+            .status
+            .success());
+        {
+            let task = team.task_mut(1).unwrap();
+            task.continuation = Some(Continuation {
+                attempt: "a1".into(),
+                n: 1,
+                since: 0.0,
+                report: "Half done: the API is next.".into(),
+                questions: vec!["Which database?".into()],
+            });
+        }
+        let extra = continuation_extra(team.task(1).unwrap());
+        let attempt = Attempt { n: 2, id: "a2".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text_with(&team, team.task(1).unwrap(), &attempt, "", "", &extra);
+        assert!(text.contains("after Zerus swapped your session"), "{text}");
+        assert!(text.contains("Half done: the API is next."), "{text}");
+        assert!(text.contains("Which database?"), "{text}");
+        // H6: the git part names the commits since the attempt and the working
+        // tree, both bounded.
+        // A real attempt start (a minute before the commit) filters by date;
+        // a zero start time is no filter at all, as on git 2.55 where
+        // `--since @0` means "now".
+        let commit_at: f64 = String::from_utf8_lossy(&git(&["log", "-1", "--format=%ct"]).stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        for since in [0.0, commit_at - 60.0] {
+            let git_text = git_continuation(dir.path().to_str().unwrap(), since);
+            assert!(git_text.contains("half way"), "{since}: {git_text}");
+            assert!(git_text.contains("Commits since the attempt began") && git_text.contains("Working tree"), "{git_text}");
+        }
+        let later = git_continuation(dir.path().to_str().unwrap(), commit_at + 3600.0);
+        assert!(!later.contains("half way"), "{later}");
+        assert!(!git_continuation("", 0.0).contains("Commits"));
+        // A swapped lead gets a short brief that names the inbox (H6, U8).
+        let mut running = team.clone();
+        running.brief = Notice::Pending;
+        let brief = brief_text(&running);
+        assert!(brief.contains("hgs team inbox --json") && brief.contains(&running.id), "{brief}");
     }
 }

@@ -14,6 +14,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QJsonArray>
+#include <QImage>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
@@ -404,6 +405,8 @@ private slots:
     void templatesAreCompactWithSearchAndFavourites();
     void dialogTemplateListAppliesOnlyWhenChosen();
     void designerSessionKeepsItsNameAndLeadsNoTeam();
+    void reportPreviewsAndFindings();
+    void hierarchyInTeamViewsAndMemberCards();
     void workspaceAddsAMember();
     void designerPageStartsOrOpensTheDesigner();
     void catalogEditorMarksManualEdits();
@@ -3236,6 +3239,164 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
     QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->discardRect(6)));
     QTRY_COMPARE(calls(script(), "discard-phase").size(), 1);
     QCOMPARE(calls(script(), "discard-phase").first()["phase"].toInt(), 6);
+}
+
+void TestTeamsUi::reportPreviewsAndFindings()
+{
+    QTemporaryDir work;
+    QVERIFY(work.isValid());
+    QImage image(8, 8, QImage::Format_RGB32);
+    image.fill(Qt::red);
+    QVERIFY(image.save(work.filePath("shot.png")));
+    QFile page(work.filePath("page.html"));
+    QVERIFY(page.open(QIODevice::WriteOnly));
+    page.write("<html><body><b>HTML evidence</b></body></html>");
+    page.close();
+
+    auto t = team();
+    t["folder"] = work.path();
+    t["settings"] = QJsonObject{{"evidence_folders", QJsonArray{work.path()}}};
+    auto tasks = t["tasks"].toArray();
+    auto task = tasks[1].toObject();
+    auto attempts = task["attempts"].toArray();
+    auto attempt = attempts[0].toObject();
+    attempt["report"] = QJsonObject{
+        {"text", "Form ready"}, {"at", 1300.0},
+        {"structured", QJsonObject{
+             {"summary", "Form ready and checked"}, {"commit", "abc1234"},
+             {"criteria", QJsonArray{QJsonObject{{"n", 1}, {"result", "pass"}, {"evidence", QJsonArray{0}}, {"note", "Validation works"}}}},
+             {"evidence", QJsonArray{
+                  QJsonObject{{"kind", "command"}, {"caption", "tests"}, {"command", "cargo test"}, {"exit", 0}, {"tail", "ok"}},
+                  QJsonObject{{"kind", "image"}, {"caption", "Screenshot"}, {"path", work.filePath("shot.png")}},
+                  QJsonObject{{"kind", "html"}, {"caption", "Report"}, {"path", work.filePath("page.html")}},
+                  QJsonObject{{"kind", "url"}, {"caption", "PR"}, {"url", "https://example.com/pr/1"}}}},
+             {"limits", QJsonArray{"Windows not checked"}}}}};
+    attempts[0] = attempt;
+    task["attempts"] = attempts;
+    tasks[1] = task;
+    t["tasks"] = tasks;
+    t["findings"] = QJsonObject{
+        {"items", QJsonArray{
+             QJsonObject{{"id", "f1"}, {"severity", "critical"}, {"title", "Cache race"}, {"scenario", "Two writers"},
+                         {"file", "src/cache.rs"}, {"line", 42}, {"state", "open"}, {"from_task", "2"}},
+             QJsonObject{{"id", "f2"}, {"severity", "later"}, {"title", "Docs"}, {"state", "deferred"}, {"note", "after v2"}}}},
+        {"next_cursor", ""}};
+    t["findings_summary"] = QJsonObject{{"open", QJsonObject{{"critical", 1}, {"normal", 0}, {"later", 0}}}, {"deferred", 1}};
+    setTeam(t);
+
+    const auto parsed = Teams::parse(t);
+    const auto live = [](const Member &) { Live state; state.known = true; return state; };
+    // D1: the structured report renders criteria, evidence with previews and
+    // its limits.
+    TeamTaskCard card;
+    card.setTask(parsed, 2, live, true);
+    card.resize(760, 1400);
+    card.show();
+    QTRY_VERIFY(card.findChild<QLabel *>("teamReportSummary"));
+    QVERIFY(card.findChild<QWidget *>("teamReportCriteria"));
+    QVERIFY2(card.findChild<QLabel *>("teamReportEvidenceImage"), "the image evidence previews");
+    QVERIFY2(card.findChild<QTextBrowser *>("teamReportEvidenceHtml"), "the HTML evidence previews");
+    QVERIFY(card.findChild<QLabel *>("teamReportLimits"));
+    shot(&card, "report-structured");
+
+    // D2: the header counts findings by severity, and the list offers every
+    // action.
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 900);
+    workspace.show();
+    controller.refresh();
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamBarFindings"));
+    shot(&workspace, "findings-header");
+    auto *pill = dynamic_cast<TeamUi::Pill *>(workspace.findChild<QWidget *>("teamBarFindings"));
+    QVERIFY(pill);
+    QVERIFY2(pill->toolTip().contains("1 critical") && pill->toolTip().contains("1 deferred"), qPrintable(pill->toolTip()));
+    workspace.findChild<QPushButton *>("teamWorkspaceFindings")->click();
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamFindingsDialog"));
+    auto *dialog = workspace.findChild<QWidget *>("teamFindingsDialog");
+    for (const auto &action : {"reopen", "urgent", "replan", "defer", "fixed", "dropped"})
+        QVERIFY2(dialog->findChild<QPushButton *>(QStringLiteral("teamFindingAction_%1").arg(action)), action);
+    shot(dialog, "findings-dialog");
+}
+
+void TestTeamsUi::hierarchyInTeamViewsAndMemberCards()
+{
+    auto t = team();
+    t["parent"] = QJsonObject{{"team", "parent-team"}, {"task", 3}, {"lead", "lead"}, {"member", "backend"}};
+    t["children"] = QJsonArray{QJsonObject{{"team", "child-team"}, {"name", "Child"}, {"status", "running"}, {"done", 1}, {"total", 3}}};
+    auto tasks = t["tasks"].toArray();
+    auto delegated = tasks[1].toObject();
+    delegated["subteam"] = QJsonObject{{"team", "child-team"}, {"status", "running"}, {"done", 1}, {"total", 3}};
+    tasks[1] = delegated;
+    t["tasks"] = tasks;
+    setTeam(t);
+    const auto parsed = Teams::parse(t);
+    const auto live = [](const Member &) { Live state; state.known = true; return state; };
+    // G1 on the card: the sub-team with its rolled-up count and a way in.
+    TeamTaskCard card;
+    card.setTask(parsed, 2, live, true);
+    card.resize(760, 1000); card.show();
+    QTRY_VERIFY(card.findChild<QWidget *>("teamTaskSubteam"));
+    QVERIFY(card.findChild<QPushButton *>("teamTaskOpenSubteam"));
+    shot(&card, "hierarchy-subteam");
+    card.setTask(parsed, 3, live, true);
+    QTRY_VERIFY(card.findChild<QPushButton *>("teamTaskDelegate"));
+    shot(&card, "hierarchy-delegate");
+
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 900); workspace.show();
+    controller.refresh(); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBreadcrumb"));
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceBreadcrumb")->toolTip().contains("task #3"));
+    auto *view = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QVERIFY(view);
+    const auto *node = [&]() -> const TeamUi::TaskView::Node * {
+        for (const auto &n : view->nodes) if (n.id == 2) return &n;
+        return nullptr;
+    }();
+    QVERIFY(node);
+    QCOMPARE(node->kind, QStringLiteral("subteam"));
+    QCOMPARE(node->subteam, QStringLiteral("child-team"));
+    // G1: the tree impact counts sub-teams and their sessions; Cancel asks
+    // whether the sub-team stops.
+    auto child = t;
+    child["id"] = "child-team";
+    child["parent"] = QJsonObject{{"team", "team-1"}, {"task", 2}};
+    child["children"] = QJsonArray();
+    auto childMembers = child["members"].toArray();
+    if (!childMembers.isEmpty()) {
+        auto member = childMembers[0].toObject();
+        member["session"] = QJsonObject{{"host", ""}, {"name", "claude/child/lead"}};
+        childMembers[0] = member;
+    }
+    child["members"] = childMembers;
+    const auto parsedChild = Teams::parse(child);
+    QCOMPARE(TeamUi::subtreeImpact(parsed, {parsed, parsedChild}), qMakePair(1, 3));
+    QTimer::singleShot(50, [] {
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (auto *box = qobject_cast<QMessageBox *>(widget))
+                for (auto *button : box->buttons())
+                    if (button->text().contains("Stop sub-team")) { button->click(); return; }
+    });
+    QCOMPARE(TeamUi::subteamChoice(&card, parsed, 2, "Cancel"), QStringLiteral("stop"));
+    // The member card names its current task's number.
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberList"));
+    shot(&workspace, "hierarchy-team-view");
+    // The same hierarchy in the light theme.
+    lightPalette();
+    workspace.setTheme(false);
+    card.setTask(parsed, 2, live, false);
+    QTest::qWait(50);
+    lightShot(&workspace, "hierarchy-team-view-light");
+    lightShot(&card, "hierarchy-subteam-light");
 }
 
 #include "test_teamsui.moc"

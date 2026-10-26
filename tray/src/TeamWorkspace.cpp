@@ -8,6 +8,9 @@
 #include "TeamTaskCard.h"
 #include "TeamWidgets.h"
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QGridLayout>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMenu>
@@ -110,6 +113,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     m_drawer->back = [this] { m_drawerTask = 0; m_drawer->hide(); };
     m_drawer->act = [this](const QString &operation, const QJsonObject &input) { m_panel->act(operation, input); };
     m_drawer->openTask = [this](int task) { m_drawerTask = task; scheduleRender(); };
+    m_drawer->openTeam = [this](const QString &team) { m_teams->watch(team); showTeam(team); };
     m_drawer->openSession = [this](const QString &host, const QString &session) { if (openSession) openSession(host, session); };
     m_drawer->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return m_panel->confirm(name, title, text, action); };
     m_drawer->reassign = [this](int task, const QPoint &global) { if (const auto *team = m_teams->watched()) m_panel->reassignMenu(*team, task, global); };
@@ -256,7 +260,15 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
     bar->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceBar{border-bottom:1px solid %1;}").arg(c.border.name()));
     auto *h = new QHBoxLayout(bar); h->setContentsMargins(12, 0, 12, 0); h->setSpacing(10);
     auto *icon = new QLabel; icon->setPixmap(workspaceIcon("team", c.fg).pixmap(16, 16)); h->addWidget(icon);
-    auto *name = label(team.name, c.fg, 14, true, "teamWorkspaceName"); h->addWidget(name);
+    auto *name = label(team.name, c.fg, 14, true, "teamWorkspaceName"); if (!team.parent.known) h->addWidget(name);
+    // G1: where this sub-team sits: parent name / this name.
+    if (team.parent.known) {
+        const auto *parent = m_teams->team(team.parent.team);
+        auto *crumb = label(QStringLiteral("%1 / %2").arg(parent ? parent->name : team.parent.team, team.name),
+                            c.muted, 11, false, "teamWorkspaceBreadcrumb");
+        crumb->setToolTip(tr("Sub-team of task #%1 in %2").arg(team.parent.task).arg(parent ? parent->name : team.parent.team));
+        h->addWidget(crumb);
+    }
     h->addWidget(new Pill(statusLabel(status), toneColor(c, statusTone(status)), status, false));
     if (team.pendingPhase > 0) {
         const auto drafts = team.draftPhases();
@@ -274,6 +286,80 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
     // G6: the phase in work (or the next draft) and the phases, not one bar
     // over every task.
     h->addWidget(new PhaseProgressBars(c, phaseProgress(team), true));
+    // D2: findings by severity, with the deferred count, and their actions.
+    const auto openFindings = team.findingsSummary.value("open").toObject();
+    const int critical = openFindings.value("critical").toInt();
+    const int normal = openFindings.value("normal").toInt();
+    const int later = openFindings.value("later").toInt();
+    const int deferred = team.findingsSummary.value("deferred").toInt();
+    if (team.findingsKnown && critical + normal + later + deferred > 0) {
+        auto *pill = new Pill(tr("%1 critical \u00b7 %2 normal \u00b7 %3 later \u00b7 %4 deferred")
+                                  .arg(critical).arg(normal).arg(later).arg(deferred),
+                              critical > 0 ? c.danger : c.warn);
+        pill->setObjectName("teamBarFindings");
+        h->addWidget(pill);
+        auto *findings = button(tr("Findings\u2026"), "teamWorkspaceFindings", false);
+        h->addWidget(findings);
+        QObject::connect(findings, &QPushButton::clicked, this, [this, team] {
+            auto *dialog = new QDialog(this);
+            dialog->setObjectName("teamFindingsDialog");
+            dialog->setAttribute(Qt::WA_DeleteOnClose);
+            dialog->setWindowTitle(tr("Findings \u00b7 %1").arg(team.name));
+            dialog->resize(680, 520);
+            auto *outer = new QVBoxLayout(dialog);
+            auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+            auto *body = new QWidget; body->setObjectName("teamFindingsList");
+            auto *list = new QVBoxLayout(body); list->setContentsMargins(10, 10, 10, 10); list->setSpacing(8);
+            const Colors fc = colorsFor(m_dark);
+            for (const auto &finding : team.findings) {
+                auto *row = new QWidget; row->setObjectName("teamFindingRow");
+                auto *rv = new QVBoxLayout(row); rv->setContentsMargins(0, 0, 0, 0); rv->setSpacing(3);
+                const QColor severity = finding.severity == "critical" ? fc.danger : finding.severity == "normal" ? fc.warn : fc.muted;
+                rv->addWidget(label(QStringLiteral("%1 \u00b7 %2").arg(finding.severity.toUpper(), finding.title), severity, 12, true));
+                if (!finding.scenario.isEmpty()) {
+                    auto *scenario = label(finding.scenario, fc.text2, 11); scenario->setWordWrap(true); rv->addWidget(scenario);
+                }
+                QString where = finding.file;
+                if (!where.isEmpty() && finding.line > 0) where += QStringLiteral(":%1").arg(finding.line);
+                if (!where.isEmpty()) rv->addWidget(label(where, fc.muted, 11));
+                if (!finding.state.isEmpty()) rv->addWidget(label(tr("state: %1%2").arg(finding.state,
+                    finding.note.isEmpty() ? QString() : tr(" \u2014 %1").arg(finding.note)), fc.muted, 11));
+                auto *actions = new QHBoxLayout; actions->setContentsMargins(0, 2, 0, 0); actions->setSpacing(6);
+                // D2: the finding actions; each needs a confirmation.
+                const QList<QPair<QString, QString>> choices{
+                    {QStringLiteral("reopen"), tr("Reopen")}, {QStringLiteral("urgent"), tr("Urgent phase")},
+                    {QStringLiteral("replan"), tr("Replan")}, {QStringLiteral("defer"), tr("Defer")},
+                    {QStringLiteral("fixed"), tr("Fixed")}, {QStringLiteral("dropped"), tr("Dropped")}};
+                for (const auto &choice : choices) {
+                    auto *action = new QPushButton(choice.second);
+                    action->setObjectName(QStringLiteral("teamFindingAction_%1").arg(choice.first));
+                    action->setFlat(true);
+                    QObject::connect(action, &QPushButton::clicked, this, [this, finding, choice] {
+                        if (!m_panel->confirm("teamFindingActionConfirm", choice.second,
+                                              tr("%1 finding \"%2\"?").arg(choice.second, finding.title), choice.second))
+                            return;
+                        QJsonObject input{{"finding", finding.id}, {"action", choice.first}, {"note", QString()}};
+                        bool ok = false;
+                        if (finding.task.toInt(&ok) && ok) input["task"] = finding.task.toInt();
+                        m_teams->act("finding", input);
+                    });
+                    actions->addWidget(action);
+                }
+                actions->addStretch();
+                rv->addLayout(actions);
+                auto *line = new QFrame; line->setFrameShape(QFrame::HLine); line->setStyleSheet(QStringLiteral("color:%1;").arg(fc.border.name()));
+                list->addWidget(row); list->addWidget(line);
+            }
+            if (team.findings.isEmpty()) list->addWidget(label(tr("No findings on this page."), fc.muted, 12));
+            list->addStretch();
+            scroll->setWidget(body);
+            outer->addWidget(scroll, 1);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+            QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+            outer->addWidget(buttons);
+            dialog->show();
+        });
+    }
     if (team.created > 0) h->addWidget(label(duration(QDateTime::currentSecsSinceEpoch() - team.created), c.muted, 11));
     h->addStretch();
     const auto add = [&](const QString &text, const char *objectName, bool primary, const std::function<void()> &run) {
@@ -301,14 +387,25 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
         if (!approve->isEnabled()) approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet") : tr("Fix the plan errors first"));
         else if (!team.widenings.isEmpty()) approve->setToolTip(tr("A permission widening needs your confirmation"));
     } else if (team.status == "running") {
-        add(tr("Pause"), "teamWorkspacePause", false, [this] { m_panel->act("pause", {}); });
+        add(tr("Pause"), "teamWorkspacePause", false, [this, team] {
+            const auto impact = subtreeImpact(team, m_teams->teams());
+            if (impact.first > 0 && !m_panel->confirm("teamPauseTreeConfirm", tr("Pause the team tree?"),
+                    tr("Pause %1? It also pauses %2 sub-teams and %3 member sessions in them.").arg(team.name).arg(impact.first).arg(impact.second),
+                    tr("Pause")))
+                return;
+            m_panel->act("pause", {});
+        });
     } else if (team.status == "paused") {
         add(tr("Resume"), "teamWorkspaceResume", true, [this] { m_panel->act("resume", {}); });
     }
     if (team.status == "running" || team.status == "paused") {
-        auto *stop = add(tr("Stop…"), "teamWorkspaceStop", false, [this, name = team.name] {
-            if (m_panel->confirm("teamStopConfirm", tr("Stop team?"), tr("Stop %1? Every open task is cancelled and no task is handed out again. "
-                                                                          "Member sessions keep running; their current turns finish.").arg(name), tr("Stop team")))
+        auto *stop = add(tr("Stop…"), "teamWorkspaceStop", false, [this, name = team.name, team] {
+            const auto impact = subtreeImpact(team, m_teams->teams());
+            QString text = tr("Stop %1? Every open task is cancelled and no task is handed out again. "
+                              "Member sessions keep running; their current turns finish.").arg(name);
+            if (impact.first > 0)
+                text += tr(" It stops %1 sub-teams and affects %2 member sessions in them.").arg(impact.first).arg(impact.second);
+            if (m_panel->confirm("teamStopConfirm", tr("Stop team?"), text, tr("Stop team")))
                 m_panel->act("stop", {});
         });
         stop->setProperty("danger", true);
@@ -827,6 +924,12 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         node.problem = problemTasks.contains(id);
         node.tone = toneColor(c, node.problem ? problemTone.value(id, Tone::Danger) : status.tone);
         node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
+        if (task->subteam.known && !task->subteam.team.isEmpty()) {
+            // G1: a delegated task is the group node for its sub-team.
+            node.subteam = task->subteam.team;
+            node.kind = QStringLiteral("subteam");
+            node.statusText = tr("Sub-team \u00b7 %1/%2").arg(task->subteam.done).arg(task->subteam.total);
+        }
         // A1: the hovered node's icon names the attempt phase; its tooltip
         // names the state, the time and the next step.
         const auto mark = phaseMark(team, *task);
@@ -849,7 +952,15 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         view->clicked = [this](int id, const QPoint &) { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
         view->linked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, true); };
         view->unlinked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, false); };
-    } else view->clicked = [this](int id, const QPoint &) { m_drawerTask = id; scheduleRender(); };
+    } else view->clicked = [this](int id, const QPoint &) {
+        const auto *team = m_teams->watched();
+        if (team) if (const auto *task = team->task(id); task && task->subteam.known && !task->subteam.team.isEmpty()) {
+            m_teams->watch(task->subteam.team);
+            showTeam(task->subteam.team);
+            return;
+        }
+        m_drawerTask = id; scheduleRender();
+    };
     auto *area = new GraphArea; area->setObjectName("teamWorkspaceCanvas");
     area->setFrameShape(QFrame::NoFrame);
     // Fit starts the graph afresh; otherwise it stays where it was scrolled.
@@ -1270,7 +1381,14 @@ void TeamWorkspace::assignMenu(const Team &team, const QString &member, const QP
         if (t.finished() || t.assignee == member) continue;
         const bool ready = team.ready.contains(t.id);
         auto *action = menu.addAction(QStringLiteral("#%1 %2%3").arg(t.id).arg(t.title, ready ? tr("  · ready") : QString()));
-        QObject::connect(action, &QAction::triggered, this, [this, task = t.id, member] { m_panel->act("reassign", {{"task", task}, {"member", member}}); });
+        QObject::connect(action, &QAction::triggered, this, [this, team, task = t.id, member] {
+            const auto choice = subteamChoice(this, team, task, tr("Reassign"));
+            if (choice.isEmpty()) return;
+            QJsonObject input{{"task", task}, {"member", member}};
+            const auto *delegated = team.task(task);
+            if (delegated && delegated->subteam.known) input["subteam"] = choice;
+            m_panel->act("reassign", input);
+        });
     }
     if (menu.isEmpty()) menu.addAction(tr("No open task"))->setEnabled(false);
     menu.exec(global);

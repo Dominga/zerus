@@ -12,6 +12,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
@@ -461,7 +462,7 @@ inline QColor phaseStatusColor(const Colors &c, const QString &status)
 class TaskView : public QWidget {
 public:
     enum Mode { List, Graph, Wide };
-    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
+    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip, subteam; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -1446,6 +1447,47 @@ inline QWidget *iconSegmented(const QList<std::tuple<QString, QString, QString>>
         buttons[i]->setStyleSheet(QStringLiteral("padding:4px 8px;"));
     }
     return box;
+}
+
+// G1: how many sub-teams and sessions a tree action reaches (the team itself
+// is not counted; the list is the controller's current teams).
+inline QPair<int, int> subtreeImpact(const Team &team, const QList<Team> &all)
+{
+    int subteams = 0, sessions = 0;
+    QSet<QString> seen;
+    std::function<void(const Team &)> walk = [&](const Team &current) {
+        for (const auto &child : current.children) {
+            if (seen.contains(child.team)) continue;
+            seen.insert(child.team);
+            ++subteams;
+            for (const auto &candidate : all) if (candidate.id == child.team) {
+                for (const auto &member : candidate.members) if (!member.session.isEmpty()) ++sessions;
+                walk(candidate);
+                break;
+            }
+        }
+    };
+    walk(team);
+    return {subteams, sessions};
+}
+
+// G1: Cancel or Reassign of a task with a sub-team asks what happens to it;
+// empty means the owner cancelled the action.
+inline QString subteamChoice(QWidget *parent, const Team &team, int task, const QString &verb)
+{
+    const auto *found = team.task(task);
+    if (!found || !found->subteam.known || found->subteam.team.isEmpty()) return QStringLiteral("keep");
+    QMessageBox box(QMessageBox::Question, QCoreApplication::translate("TeamUi", "%1 task #%2?").arg(verb).arg(task),
+                    QCoreApplication::translate("TeamUi", "Task #%1 has the sub-team %2. Stop that sub-team too, or keep it running?")
+                        .arg(task).arg(found->subteam.team),
+                    QMessageBox::NoButton, parent);
+    auto *stop = box.addButton(QCoreApplication::translate("TeamUi", "Stop sub-team"), QMessageBox::DestructiveRole);
+    auto *keep = box.addButton(QCoreApplication::translate("TeamUi", "Keep it running"), QMessageBox::AcceptRole);
+    box.addButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() == stop) return QStringLiteral("stop");
+    if (box.clickedButton() == keep) return QStringLiteral("keep");
+    return QString();
 }
 
 }

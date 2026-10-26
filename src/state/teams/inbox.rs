@@ -228,6 +228,26 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
             detail: super::dispatcher::permission_command_line(&pending.card).trim_end().to_owned(),
         });
     }
+    // H1: a member stopped by a usage limit is one item, with its reset time
+    // when the session reports one.
+    for member in &team.members {
+        let Some(limit) = &member.limited else { continue };
+        let role = team.role_of(&member.id);
+        let reset = match limit.resets_at {
+            Some(at) => format!("; resets at {}", local_time(at)),
+            None => "; reset time unknown".to_owned(),
+        };
+        items.push(Item {
+            kind: "member_limited",
+            key: format!("member_limited:{}:{}", member.id, limit.at),
+            task: None,
+            member: role.clone(),
+            since: limit.at,
+            summary: summary(&format!("{role} stopped by a usage limit{reset}")),
+            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
+        });
+    }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);
     items
@@ -285,6 +305,14 @@ fn age(now: f64, since: f64) -> String {
         1 => "1 min".into(),
         minutes => format!("{minutes} min"),
     }
+}
+
+/// A reset time as a person reads it, in this computer's zone; status keeps
+/// the numeric `resets_at`.
+fn local_time(at: f64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(at.round() as i64, 0)
+        .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| format!("{at:.0}"))
 }
 
 /// The single message that lists the lead's new items (C2).

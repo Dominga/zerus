@@ -95,11 +95,41 @@ struct ReplacedReport {
     double at = 0;
 };
 
+// D1: one criterion and one evidence item of a structured report.
+struct ReportCriterion {
+    int n = 0;
+    QString result, note;      // pass, fail, partial, n/a
+    QList<int> evidence;       // indexes into the evidence list
+};
+struct ReportEvidence {
+    QString kind;              // command, image, html, file, log, url, text
+    QString caption, path, url, command, tail, text;
+    int exit = 0;
+    bool hasExit = false;
+};
+struct StructuredReport {
+    bool present = false;
+    QString summary, commit;
+    QList<ReportCriterion> criteria;
+    QList<ReportEvidence> evidence;
+    QStringList limits;
+};
+
+// D2: one finding as `hgs team status` pages it.
+struct TeamFinding {
+    QString id, fromTask, severity, title, file, scenario, task, state, by, note;
+    int line = 0;
+    double at = 0;
+};
+
 struct Attempt {
     int n = 0;
     QString id, member, state, error, notice, report;
     bool noReport = false;
     double sentAt = 0;
+    // D1: attempts[].report.structured and .unstructured.
+    StructuredReport structured;
+    bool unstructured = false;
     // Delivery and start (A1); zero or false in an older team file.
     double deliveredAt = 0, startedAt = 0, replyAt = 0, turnEndedAt = 0;
     bool startWarned = false;
@@ -127,6 +157,19 @@ struct Attempt {
 
 struct Dep { int task = 0; bool soft = false; };
 
+// G1: the sub-team a task was delegated to (status children[] and
+// tasks[].subteam), and the parent task a team came from.
+struct Subteam {
+    QString team, name, status;
+    int done = 0, total = 0;
+    bool known = false;
+};
+struct ParentLink {
+    QString team, lead, member;
+    int task = 0;
+    bool known = false;
+};
+
 // A task parked by the lead or the owner (A5): pending, but never ready,
 // rebalanced or handed out until `release`.
 struct Hold {
@@ -153,6 +196,8 @@ struct Task {
     Check check;
     struct CheckResult { int exit = 0; QString tail; bool known = false; };
     CheckResult checkResult;
+    // G1: the sub-team delegated from this task.
+    Subteam subteam;
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
@@ -203,6 +248,8 @@ struct LeftRunning {
 
 struct Team {
     QString id, name, status, project, folder, lead;
+    // D1: settings.evidence_folders, where report evidence may be previewed.
+    QStringList evidenceFolders;
     qint64 revision = 0;
     double created = 0, updated = 0;
     bool allHard = false;
@@ -213,6 +260,9 @@ struct Team {
     QList<Member> members;     // removed members are left out
     QList<Task> tasks;
     QList<Phase> phases;       // phase 1 has no record
+    // G1: this team's parent task and its sub-teams, as status sends them.
+    ParentLink parent;
+    QList<Subteam> children;
     bool hasFinish = false;
     Finish finish;
     // `team status` and `team list` derive these; old files are derived here.
@@ -266,6 +316,11 @@ struct Team {
     // C4: the undecided reports on the owner's attention list.
     struct Attention { QString kind, member; int task = 0, minutes = 0; double since = 0; };
     QList<Attention> attention;
+    // D2: findings_* from status (open items and the deferred list).
+    QList<TeamFinding> findings;
+    bool findingsKnown = false;
+    QJsonObject findingsSummary;
+    QString findingsNext;
     // F13: "approved by Lead on the owner's word" and the sentence.
     QString approvedBy, ownerWord;
     // F5: a team in status "draft" is edited by the owner and the lead before

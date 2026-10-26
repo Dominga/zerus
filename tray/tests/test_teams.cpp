@@ -144,6 +144,8 @@ private slots:
     void leadLoadViewsCarryTheirNumbers();
     void permissionRequestFromTheMemberAndItsAnswer();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
+    void modelReadsStructuredReportsAndFindings();
+    void modelReadsTheHierarchy();
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
     void oldStatusJsonStillParses();
@@ -1350,6 +1352,65 @@ void TestTeams::panelShowsProblemsWithTheirActions()
         content->resize(width, content->sizeHint().height());
         content->grab().save(QDir(shots).filePath(QStringLiteral("team-panel-%1.png").arg(QTest::currentDataTag())));
     }
+}
+
+void TestTeams::modelReadsStructuredReportsAndFindings()
+{
+    const auto value = QJsonDocument::fromJson(R"({
+ "id":"t","name":"T","status":"running","lead":"lead","members":[{"id":"lead","role":"Lead","agent":"claude"}],
+ "tasks":[{"id":1,"title":"Work","assignee":"lead","status":"submitted",
+   "attempts":[{"n":1,"id":"a1","member":"lead","state":"reported","report":{"text":"Done","at":1.0,
+     "unstructured":false,
+     "structured":{"summary":"Done and checked","commit":"abc1234",
+       "criteria":[{"n":1,"result":"pass","evidence":[0],"note":"Checked"}],
+       "evidence":[{"kind":"command","caption":"tests","command":"cargo test","exit":0,"tail":"ok"},
+                   {"kind":"image","caption":"Shot","path":"/work/shot.png"},
+                   {"kind":"url","caption":"PR","url":"https://example.com/pr/1"}],
+       "limits":["Windows not checked"]}}}]}],
+ "findings":{"items":[{"id":"f1","from_task":"1","severity":"critical","title":"Race","file":"src/x.rs","line":4,
+   "scenario":"Two writers","task":"1","state":"open","by":"Reviewer","at":2.0,"note":""}],"next_cursor":"cursor-2"},
+ "findings_summary":{"open":{"critical":1,"normal":0,"later":0},"deferred":3}})").object();
+    const auto team = parse(value);
+    QCOMPARE(team.tasks.size(), 1);
+    const auto &attempt = team.tasks[0].attempts[0];
+    QVERIFY(attempt.structured.present);
+    QVERIFY(!attempt.unstructured);
+    QCOMPARE(attempt.structured.summary, QStringLiteral("Done and checked"));
+    QCOMPARE(attempt.structured.commit, QStringLiteral("abc1234"));
+    QCOMPARE(attempt.structured.criteria.size(), 1);
+    QCOMPARE(attempt.structured.criteria[0].result, QStringLiteral("pass"));
+    QCOMPARE(attempt.structured.criteria[0].evidence, QList<int>{0});
+    QCOMPARE(attempt.structured.evidence.size(), 3);
+    QCOMPARE(attempt.structured.evidence[0].command, QStringLiteral("cargo test"));
+    QVERIFY(attempt.structured.evidence[0].hasExit);
+    QCOMPARE(attempt.structured.evidence[1].kind, QStringLiteral("image"));
+    QCOMPARE(attempt.structured.limits, QStringList{QStringLiteral("Windows not checked")});
+    QCOMPARE(team.findings.size(), 1);
+    QCOMPARE(team.findings[0].severity, QStringLiteral("critical"));
+    QCOMPARE(team.findings[0].line, 4);
+    QCOMPARE(team.findingsNext, QStringLiteral("cursor-2"));
+    QCOMPARE(team.findingsSummary.value("deferred").toInt(), 3);
+}
+
+void TestTeams::modelReadsTheHierarchy()
+{
+    const auto value = QJsonDocument::fromJson(R"({
+ "id":"child","name":"Child","status":"running","lead":"lead",
+ "parent":{"team":"parent","task":3,"lead":"lead","member":"backend"},
+ "children":[{"team":"grand","name":"Grand","status":"running","done":1,"total":2}],
+ "members":[{"id":"lead","role":"Lead","agent":"claude"}],
+ "tasks":[{"id":1,"title":"Delegated","assignee":"lead","status":"in_progress",
+   "subteam":{"team":"grand","status":"running","done":1,"total":2}}]})").object();
+    const auto team = parse(value);
+    QVERIFY(team.parent.known);
+    QCOMPARE(team.parent.team, QStringLiteral("parent"));
+    QCOMPARE(team.parent.task, 3);
+    QCOMPARE(team.children.size(), 1);
+    QCOMPARE(team.children[0].team, QStringLiteral("grand"));
+    QCOMPARE(team.children[0].done, 1);
+    QVERIFY(team.tasks[0].subteam.known);
+    QCOMPARE(team.tasks[0].subteam.team, QStringLiteral("grand"));
+    QCOMPARE(team.tasks[0].subteam.total, 2);
 }
 
 QTEST_MAIN(TestTeams)

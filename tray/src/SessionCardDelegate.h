@@ -429,7 +429,7 @@ private:
         QFont small = option.font; small.setPixelSize(11); small.setWeight(QFont::Medium);
         const QFontMetrics sm(small);
         int right = r.right() - 6;
-        const QString members = team.value("members").toString();
+        const QString members = team.value("rollup").toString().isEmpty() ? team.value("members").toString() : team.value("rollup").toString();
         const int membersW = sm.horizontalAdvance(members) + 14;
         p->setFont(small); p->setPen(muted);
         p->drawText(QRect(right - membersW + 13, r.y(), membersW - 13, r.height()), Qt::AlignVCenter | Qt::AlignLeft, members);

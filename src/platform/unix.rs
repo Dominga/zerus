@@ -1663,6 +1663,34 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
     Ok(0)
 }
 
+/// H2: the current process reads `bytes` as stdin through an anonymous pipe,
+/// in memory only: a JSON request may hold a private key and must not land on
+/// disk.
+pub fn stdin_from_bytes(bytes: Vec<u8>) -> std::io::Result<()> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::dup2(fds[0], 0) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    unsafe { libc::close(fds[0]) };
+    std::thread::spawn(move || {
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let written = unsafe {
+                libc::write(fds[1], bytes[offset..].as_ptr() as *const _, bytes.len() - offset)
+            };
+            if written <= 0 {
+                break;
+            }
+            offset += written as usize;
+        }
+        unsafe { libc::close(fds[1]) };
+    });
+    Ok(())
+}
+
 /// Write the script `text` to `path` for a test to run at once. The system
 /// will not execute a file that is open for writing (ETXTBSY), and a child that
 /// another test thread starts while this process writes one keeps that

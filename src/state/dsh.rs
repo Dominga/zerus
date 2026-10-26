@@ -64,6 +64,47 @@ pub(crate) fn account_ui_url(home: &Path) -> Result<String> {
         .map(|m| m.as_str().to_owned())
         .ok_or_else(|| "Native DeepSeek UI is unavailable.".into())
 }
+/// H3: the host serving a member's dsh session: its pid and when it started
+/// (the pid file's time), for team status. Read only.
+pub(crate) fn host_of(name: &str) -> Option<Value> {
+    let record = binding(name).ok()?;
+    let path = host_dir(&record).join("host.pid");
+    let pid: u32 = fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+    let started = fs::metadata(&path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    Some(json!({"pid":pid,"started":started}))
+}
+
+/// H4: the arguments Zerus gives the native DeepSeek host. They never enable
+/// session-log upload (`session-log-deepseek`); only the private overlay,
+/// profile and local socket are set.
+fn host_arguments(overlay: &Path, default_profile: bool) -> Vec<String> {
+    let mut args = vec!["--profile".to_owned(), "hgs".to_owned()];
+    if default_profile {
+        args.extend(["--from-default-profile".to_owned(), "web".to_owned()]);
+    }
+    args.extend([
+        "--patch".to_owned(),
+        overlay.to_string_lossy().into_owned(),
+        "--no-open".to_owned(),
+        "--host".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--port".to_owned(),
+        "0".to_owned(),
+    ]);
+    args
+}
+
+/// H4: the one overlay Zerus writes for the host: its private bridge only.
+fn host_overlay(script: &Path, socket: &Path) -> Value {
+    json!([{"insert":[{"id":"hgs-native-dsh","name":script,"config":{"socket":socket,"recoveryPolicy":recovery::policy_path()}}]}])
+}
+
 fn host_dir(record: &Value) -> PathBuf {
     root().join("dsh/hosts").join(
         &format!(
@@ -218,8 +259,7 @@ fn ensure_host(record: &Value) -> Result<()> {
     let overlay = dir.join("hgs.patch.json");
     atomic(
         &overlay,
-        &json!([{"insert":[{"id":"hgs-native-dsh","name":script,"config":{"socket":socket,"recoveryPolicy":recovery::policy_path()}}]}])
-            .to_string(),
+        &host_overlay(&script, &socket).to_string(),
     )?;
     let log = crate::platform::private_open(OpenOptions::new().create(true).truncate(true).write(true))
         .open(dir.join("host.log"))
@@ -250,19 +290,7 @@ fn ensure_host(record: &Value) -> Result<()> {
                 .env("XDG_RUNTIME_DIR", runtime);
         }
     }
-    command.args(["--profile", "hgs"]);
-    // This flag creates a profile and intentionally rejects existing ones.
-    // Reopening the host must retain the native profile and its settings.
-    if !Path::new(string(record, "agent_home"))
-        .join("profiles/hgs/package.json")
-        .exists()
-    {
-        command.args(["--from-default-profile", "web"]);
-    }
-    command
-        .arg("--patch")
-        .arg(overlay)
-        .args(["--no-open", "--host", "127.0.0.1", "--port", "0"])
+    command.args(host_arguments(&overlay, !Path::new(string(record, "agent_home")).join("profiles/hgs/package.json").exists()))
         .env("DSH_HOME", string(record, "agent_home"))
         .current_dir(home())
         .stdin(Stdio::null())
@@ -1841,5 +1869,25 @@ mod notification_tests {
         assert!(notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" { json!({"generation":"host","pendingQuestions":[{}]}) } else { json!({"generation":"host"}) })).is_err());
         assert!(notification_snapshot_with(&record, |method, _| Ok(if method == "inspect" { json!({"generation":"old","pendingQuestions":[]}) } else { json!({"generation":"new"}) })).is_err());
         assert!(notification_snapshot_with(&record, |_, _| Ok(json!({"generation":"host"}))).is_err());
+    }
+
+    #[test]
+    fn the_deepseek_host_never_enables_session_log_upload() {
+        // H4: member, lead and designer launches all use these arguments and
+        // this overlay; neither may enable session-log-deepseek.
+        let overlay = Path::new("state/dsh/hosts/x/hgs.patch.json");
+        for (default_profile, kind) in [(false, "member"), (false, "lead"), (true, "designer")] {
+            let args = host_arguments(overlay, default_profile).join(" ");
+            let lowered = args.to_lowercase();
+            for forbidden in ["session-log", "sessionlog", "logupload", "upload"] {
+                assert!(!lowered.contains(forbidden), "{kind}: {args}");
+            }
+            assert!(args.contains("--patch") && args.contains("--profile hgs"), "{kind}: {args}");
+        }
+        let overlay = host_overlay(Path::new("state/bridge.mjs"), Path::new("state/socket")).to_string().to_lowercase();
+        assert!(overlay.contains("hgs-native-dsh"), "{overlay}");
+        for forbidden in ["session-log", "sessionlog", "logupload", "upload"] {
+            assert!(!overlay.contains(forbidden), "{overlay}");
+        }
     }
 }

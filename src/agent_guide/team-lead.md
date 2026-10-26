@@ -36,4 +36,4 @@ it (summary at most 4000 characters):
   {"request_id":"UUID","team":"ID","summary":"What was built and checked"} |
     hgs team finish --json
 Cancel tasks with nothing left first. The owner may finish too; the owner's
-stop is final.
+stop is final. Sub-teams: hgs guide team-tree.

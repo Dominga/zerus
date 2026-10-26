@@ -551,6 +551,9 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
 /// it with its tasks (the lead or the owner, F10).
 fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let owner_word = verified_word(input)?;
+    // C1: the owner's word is the lead's route; a member can never approve a
+    // phase on a word the CLI did not verify in the lead's own session.
+    ensure!(owner_word.is_none() || actor.is_lead(team), "Only the lead approves on the owner's word");
     if approve {
         // F13: only the owner approves in person; the lead does it on the
         // owner's exact sentence, checked by the CLI against its session.
@@ -1206,18 +1209,21 @@ fn decide_check(team: &mut Team, id: u32, n: u32, events: &mut Vec<Event>) -> an
         ));
         Ok(json!({"status":"accepted","task":id,"attempt":n,"check":"passed"}))
     } else {
+        // N6: a failed check is a non-final reject: the task returns for
+        // another attempt and only the lead's decision ends it. The attempt
+        // keeps its check result.
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
         }
         revoke(task, "check failed");
-        task.status = TaskStatus::Rejected;
+        task.status = TaskStatus::Pending;
         task.decided_by = None;
         task.decision_reason = format!("check failed: exit {exit}, expected {}", expected.expect_exit);
         events.push(Event::new(
             "check_failed",
-            json!({"task":id,"attempt":n,"exit":exit,"expect":expected.expect_exit,"command":expected.command,"title":title}),
+            json!({"task":id,"attempt":n,"exit":exit,"expect":expected.expect_exit,"command":expected.command,"title":title,"final":false}),
         ));
-        Ok(json!({"status":"rejected","task":id,"attempt":n,"check":"failed"}))
+        Ok(json!({"status":"rejected","task":id,"attempt":n,"check":"failed","final":false}))
     }
 }
 
@@ -2547,21 +2553,18 @@ mod tests {
             &mut events,
         )
         .unwrap();
-        assert_eq!((failed["status"].as_str(), failed["check"].as_str()), (Some("rejected"), Some("failed")));
+        assert_eq!((failed["status"].as_str(), failed["check"].as_str(), failed["final"].as_bool()), (Some("rejected"), Some("failed"), Some(false)));
         let task = failed_team.task(1).unwrap();
-        assert_eq!(task.status, TaskStatus::Rejected);
+        // N6: a failed check is a non-final reject - another attempt - and
+        // only the lead's decision ends it; the check result stays.
+        assert_eq!(task.status, TaskStatus::Pending);
         assert_eq!(task.decision_reason, "check failed: exit 101, expected 0");
         assert_eq!(task.attempts.last().unwrap().check.as_ref().unwrap().exit, 101);
         assert_eq!(events.last().unwrap().kind, "check_failed");
-        // Its report is final: a late one is stale.
-        let late = report(
-            &mut failed_team,
-            &json!({"task":1,"attempt":attempt,"check":{"exit":0,"tail":"now green"}}),
-            &Actor::Member("dev".into()),
-            &mut events,
-        )
-        .unwrap();
-        assert_eq!(late["status"], "stale");
+        let again = hand_out(&mut failed_team, 1);
+        assert_ne!(again, attempt);
+        apply(&mut failed_team, "cancel", &json!({"task":1}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(failed_team.task(1).unwrap().status, TaskStatus::Cancelled);
         // A non-zero expected exit accepts a failing command (a lint check).
         let mut nonzero = check_team("cargo fmt --check", 1);
         let attempt = hand_out(&mut nonzero, 1);
@@ -3359,6 +3362,13 @@ mod tests {
         assert_eq!(error, "Only the lead approves on the owner's word");
         // The owner's own approval needs no word.
         apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        // C1: the same guard for a phase approval.
+        let mut running = running_team();
+        extend(&mut running, &json!({"tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
+        let error = apply(&mut running, "approve-phase", &forged, &Actor::Member("dev".into()), &BTreeSet::new(), &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only the lead approves on the owner's word");
     }
 
     #[test]

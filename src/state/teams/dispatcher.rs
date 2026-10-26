@@ -1634,7 +1634,17 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 events.push(Event::new("question_forwarded", json!({"member":role,"approval":pending.approval})));
             }
             None if answered && found.pending.is_some() => {
-                found.pending = None;
+                // N5: a question that vanished without an hgs team answer (the
+                // desktop answered it, or it is gone) is still recorded, by
+                // unknown, never dropped.
+                if let Some(pending) = found.pending.take() {
+                    found.permission_answers.push(json!({"question_id":pending.question_id,"decision":"unknown",
+                        "by":"unknown","at":now(),"reason":""}));
+                    let excess = found.permission_answers.len().saturating_sub(20);
+                    found.permission_answers.drain(..excess);
+                    events.push(Event::new("permission_answered", json!({"member":role,
+                        "question_id":pending.question_id,"decision":"unknown","by":"unknown"})));
+                }
                 found.permission = None;
             }
             None => {}
@@ -1897,15 +1907,25 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if let Some(mut pipe) = child.stdout.take() {
-            std::io::Read::read_to_end(&mut pipe, &mut stdout)?;
-        }
-        if let Some(mut pipe) = child.stderr.take() {
-            std::io::Read::read_to_end(&mut pipe, &mut stderr)?;
-        }
+        // C2: drain both pipes in threads while git runs; a commit printing a
+        // line per file must not block on the pipe buffer.
+        let out_pipe = child.stdout.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                buf
+            })
+        });
+        let err_pipe = child.stderr.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                buf
+            })
+        });
         let status = child.wait()?;
+        let stdout = out_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
+        let stderr = err_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
         Ok(std::process::Output { status, stdout, stderr })
     };
     // C2: a repository-local hook, fsmonitor or filter configuration is refused
@@ -4166,6 +4186,14 @@ mod tests {
         let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
         assert!(error.contains("Git filter"), "{error}");
         run(&["config", "--local", "--remove-section", "filter.slow"]);
+        // C2: a commit with hundreds of files must not block on the pipe
+        // buffer (a line per file is far more than it holds).
+        for index in 0..300 {
+            fs::write(repo.join(format!("f{index}.txt")), "x").unwrap();
+        }
+        let many = commit_in(folder, "team/t-dev", "many files", &[]).unwrap();
+        assert_eq!(many["status"], "committed");
+        assert_eq!(many["files"], json!(300));
         // C3: a profile maps to the agent's mode, or is advisory.
         assert_eq!(profile_mode("claude", "build"), Some("acceptEdits"));
         assert_eq!(profile_mode("claude", "read"), Some("plan"));

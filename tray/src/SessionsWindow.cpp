@@ -5196,7 +5196,7 @@ void SessionsWindow::resumeBehind(const QString &name, const QString &detail)
     auto *cancel = dialog.addButton(QMessageBox::Cancel);
     dialog.setDefaultButton(lost); dialog.setEscapeButton(cancel);
     dialog.exec();
-    const auto *entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &e) { return e.session.name == name; });
+    const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &e) { return e.session.name == name; });
     const QString host = entry == m_entries.cend() ? QString() : entry->host;
     if (dialog.clickedButton() == lost) { m_pending = true; m_client.resumeSession(host, name, true); }
     else if (dialog.clickedButton() == asIs) { m_pending = true; m_client.resumeSession(host, name, false, true); }

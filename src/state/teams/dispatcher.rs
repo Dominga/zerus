@@ -1269,12 +1269,15 @@ pub(crate) fn launch_args(team: &Team, member: &Member, folder: &str) -> Vec<Str
     if !member.permissions.is_empty() {
         args.extend(["--permissions".into(), member.permissions.clone()]);
     }
-    // C3/B5: the profile maps to the agent's own mode where it has one.
-    if member.permissions.is_empty() {
-        if let Some(mode) = profile_mode(&member.agent, &member.permissions_profile) {
-            args.extend(["--permission-mode".into(), mode.into()]);
-        }
-    }
+    // C3/B5: a profile maps to the agent's own mode where it has one; it is an
+    // agent flag, so it goes after `--`, never among hgs's own options.
+    let profile_args: Vec<String> = if member.permissions.is_empty() {
+        profile_mode(&member.agent, &member.permissions_profile)
+            .map(|mode| vec!["--permission-mode".to_owned(), mode.to_owned()])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if member.agent == "opencode" && !member.model.is_empty() {
         args.extend(["--model".into(), member.model.clone()]);
         if !member.effort.is_empty() {
@@ -1283,6 +1286,7 @@ pub(crate) fn launch_args(team: &Team, member: &Member, folder: &str) -> Vec<Str
     }
     if terminal {
         args.push("--".into());
+        args.extend(profile_args);
         args.extend(agent_args(&member.agent, &member.model, &member.effort));
         // A terminal agent reports its status only once a conversation
         // starts; a short first turn makes the member Ready for its task.
@@ -1891,25 +1895,26 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
         let mut child = std::process::Command::new("git")
             .arg("-C")
             .arg(folder)
-            .args(["-c", "core.hooksPath=", "-c", "core.fsmonitor=false"])
+            .args([
+                "-c",
+                "core.hooksPath=",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "gpg.program=",
+            ])
             .args(args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|error| anyhow::anyhow!("git did not run: {error}"))?;
         let deadline = std::time::Instant::now() + Duration::from_secs(120);
-        loop {
-            if child.try_wait()?.is_some() {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                anyhow::bail!("git {args:?} timed out");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        // C2: drain both pipes in threads while git runs; a commit printing a
-        // line per file must not block on the pipe buffer.
+        // C2: drain both pipes in threads started right after the spawn, while
+        // git runs; otherwise a large output fills the pipe and git blocks
+        // until the timeout. The repository's own hooks, fsmonitor, filters and
+        // signing program never run.
         let out_pipe = child.stdout.take().map(|mut pipe| {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
@@ -1924,6 +1929,17 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
                 buf
             })
         });
+        loop {
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("git {args:?} timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let status = child.wait()?;
         let stdout = out_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
         let stderr = err_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
@@ -1931,13 +1947,16 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
     };
     // C2: a repository-local hook, fsmonitor or filter configuration is refused
     // rather than silently ignored.
-    for key in ["core.hooksPath", "core.fsmonitor"] {
+    for key in ["core.hooksPath", "core.fsmonitor", "gpg.program"] {
         let found = git(&["config", "--local", "--get", key])?;
         anyhow::ensure!(
             !found.status.success() || String::from_utf8_lossy(&found.stdout).trim().is_empty(),
             "This repository configures {key}; Zerus commits without it"
         );
     }
+    // C2: an included config could define a filter or hook; refuse it.
+    let includes = git(&["config", "--local", "--get-regexp", "^(include\\.path|includeIf\\.)"])?;
+    anyhow::ensure!(includes.stdout.is_empty(), "This repository includes another Git config; Zerus commits without it");
     let filters = git(&["config", "--local", "--get-regexp", "^filter\\."])?;
     anyhow::ensure!(filters.stdout.is_empty(), "This repository configures a Git filter; Zerus commits without it");
     let current = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
@@ -1957,7 +1976,7 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
     if staged.status.success() {
         return Ok(json!({"status":"clean","files":0}));
     }
-    let committed = git(&["commit", "--no-verify", "-m", message])?;
+    let committed = git(&["commit", "--no-verify", "--no-gpg-sign", "-m", message])?;
     anyhow::ensure!(committed.status.success(), "{}", String::from_utf8_lossy(&committed.stderr).trim());
     let sha = git(&["rev-parse", "HEAD"])?;
     anyhow::ensure!(sha.status.success(), "{}", String::from_utf8_lossy(&sha.stderr).trim());
@@ -4187,14 +4206,25 @@ mod tests {
         let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
         assert!(error.contains("Git filter"), "{error}");
         run(&["config", "--local", "--remove-section", "filter.slow"]);
-        // C2: a commit with hundreds of files must not block on the pipe
-        // buffer (a line per file is far more than it holds).
-        for index in 0..300 {
-            fs::write(repo.join(format!("f{index}.txt")), "x").unwrap();
+        // C2: a repository gpg program or an included config is refused.
+        run(&["config", "--local", "gpg.program", "false"]);
+        let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
+        assert!(error.contains("gpg.program"), "{error}");
+        run(&["config", "--local", "--unset", "gpg.program"]);
+        let included = repo.join(".git").join("included.config");
+        fs::write(&included, "[filter \"slow\"]\n\tclean = false\n").unwrap();
+        run(&["config", "--local", "include.path", "included.config"]);
+        let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
+        assert!(error.contains("includes another Git config"), "{error}");
+        run(&["config", "--local", "--unset", "include.path"]);
+        // C2: a call with more than 1 MB of output finishes without blocking:
+        // git show --name-only prints every file of this commit.
+        for index in 0..6000 {
+            fs::write(repo.join(format!("{index:04}-{}", "x".repeat(150))), "x").unwrap();
         }
         let many = commit_in(folder, "team/t-dev", "many files", &[]).unwrap();
         assert_eq!(many["status"], "committed");
-        assert_eq!(many["files"], json!(300));
+        assert_eq!(many["files"], json!(6000));
         // C3: a profile maps to the agent's mode, or is advisory.
         assert_eq!(profile_mode("claude", "build"), Some("acceptEdits"));
         assert_eq!(profile_mode("claude", "read"), Some("plan"));
@@ -4216,6 +4246,21 @@ mod tests {
         assert_eq!(answers.len(), 20);
         assert_eq!(answers.last().unwrap()["decision"], "unknown");
         assert_eq!(answers.last().unwrap()["question_id"], "q25");
+    }
+
+    #[test]
+    fn a_profile_launch_puts_the_mode_after_the_separator() {
+        let mut team = team();
+        {
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.agent = "claude".into();
+            member.permissions_profile = "build".into();
+        }
+        let args = launch_args(&team, team.member("dev").unwrap(), "C:/work/project");
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        let mode = args.iter().position(|arg| arg == "--permission-mode").unwrap();
+        assert!(mode > separator, "{args:?}");
+        assert_eq!(args[mode + 1], "acceptEdits");
     }
 
     #[test]

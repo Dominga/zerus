@@ -617,7 +617,13 @@ QWidget *TeamPanel::planning(const Team &team)
             QStringList waits; for (int id : fanIn.waitsFor) waits << QStringLiteral("#%1").arg(id);
             hv->addWidget(label(tr("#%1 waits for %2 · %3").arg(fanIn.task).arg(waits.join(QStringLiteral(", ")), fanIn.kind), c.text2, 11));
         }
+        // L6: a starved member is named once, whatever the length of the list,
+        // and its warning is not repeated as a separate health warning.
+        QStringList starvedShown;
         for (const auto &starved : team.health.starved) {
+            const QString who = starved.member.isEmpty() ? starved.role : starved.member;
+            if (starvedShown.contains(who)) continue;
+            starvedShown << who;
             QStringList blocking; for (int id : starved.blocking) blocking << QStringLiteral("#%1").arg(id);
             auto *line = label(tr("%1 has no ready task for %2 min · blocked by %3").arg(starved.role).arg(starved.minutes).arg(blocking.join(QStringLiteral(", "))),
                                c.warn, 11, true, "teamPlanStarved");
@@ -625,6 +631,10 @@ QWidget *TeamPanel::planning(const Team &team)
             hv->addWidget(line);
         }
         for (const auto &warning : team.health.warnings) {
+            bool repeatsStarved = false;
+            for (const auto &who : starvedShown)
+                if (!who.isEmpty() && warning.contains(who, Qt::CaseInsensitive)) { repeatsStarved = true; break; }
+            if (repeatsStarved) continue;
             auto *line = label(QStringLiteral("⚠ ") + warning, c.warn, 11, false, "teamPlanHealthWarning");
             line->setWordWrap(true);
             hv->addWidget(line);

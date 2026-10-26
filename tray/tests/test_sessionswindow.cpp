@@ -353,6 +353,7 @@ private slots:
     void sessionContextMenuGuardsIdentityAndChanges();
     void sessionServicesAreNotBackgroundWork();
     void resumeBehindOffersTheLostDialogue();
+    void startAndSendSurvivesTheStaleResume();
     void sessionContextMenuSavedAndArchive();
     void sessionContextMenuClearsSession();
     void compactMetadataAndSubagentRoster();
@@ -7068,12 +7069,23 @@ else:print('{}')
     const auto services = list->item(row)->data(SessionRoles::Services).toList();
     QCOMPARE(services.size(), 2);
     QCOMPARE(services[0].toMap().value("name").toString(), QStringLiteral("qdrant"));
-    // The header names the services with their start times.
+    // L4: the header tooltip keeps the metadata and the model and adds the
+    // services (they never replace the rest of the tooltip).
     auto *meta = window.findChild<QLabel *>("sessionMeta");
     QVERIFY(meta);
     QTRY_VERIFY2(meta->text().contains(QStringLiteral("service")), qPrintable(meta->text()));
     QVERIFY2(meta->toolTip().contains(QStringLiteral("qdrant")), qPrintable(meta->toolTip()));
     QVERIFY2(meta->toolTip().contains(QStringLiteral("since")), qPrintable(meta->toolTip()));
+    QVERIFY2(meta->toolTip().contains(QStringLiteral("Services")), qPrintable(meta->toolTip()));
+    QVERIFY2(meta->toolTip().contains(QStringLiteral("codex")), qPrintable(meta->toolTip()));
+    QVERIFY2(meta->toolTip().contains(QStringLiteral("gpt")), qPrintable(meta->toolTip()));
+    // L3: the services chip never overlaps the metadata - it sits left of the
+    // git badge with the text's room kept on its left.
+    const auto rowRect = list->visualItemRect(list->item(row));
+    const auto chip = SessionDelegate::servicesRect(rowRect, list->model()->index(row, 0), list->font(), false);
+    QVERIFY(!chip.isEmpty());
+    QVERIFY(chip.left() > rowRect.x() + 80);
+    QVERIFY(chip.right() <= rowRect.right());
     if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) {
         QTest::qWait(200);
         window.grab().save(QDir(shots).filePath("session-services.png"));
@@ -7183,6 +7195,93 @@ else:print('{}')
     scenario("resumeLostDialogue", true, &sawDefault, "--with-lost-dialogue");
     QVERIFY2(resumes().last().contains("--with-lost-dialogue"), qPrintable(resumes().join(QStringLiteral(" | "))));
     QVERIFY(sawDefault);
+}
+
+// L5: a queued start-and-send survives the stale-resume refusal: after the
+// owner chooses in the dialog, the message is sent once the session is ready.
+void TestSessionsWindow::startAndSendSurvivesTheStaleResume()
+{
+    QTemporaryDir temp; const auto program = temp.filePath("hgs");
+    QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+root=pathlib.Path(__file__).parent
+a=sys.argv[1:]
+if a[0].startswith('@'):a=a[1:]
+def details():
+    name='ready.json' if (root/'ready').exists() else 'details.json'
+    return (root/name).read_text() if (root/name).exists() else '{}'
+if a[0]=='inspect':print(details())
+elif a[0]=='resume':
+    (root/'resume.log').open('a').write(json.dumps(sys.argv[1:])+'\n')
+    forced = any(x in a for x in ('--with-lost-dialogue','--accept-stale'))
+    if (root/'behind').exists() and not forced:
+        print('the native transcript stops 14400 s before the events Zerus recorded (transcript_behind)', file=sys.stderr); sys.exit(1)
+    (root/'behind').unlink(missing_ok=True)
+    (root/'ready').write_text('1')
+    print(json.dumps({'status':'resumed','request_id':'r'}))
+elif a[0]=='send':
+    p=json.load(sys.stdin)
+    (root/'send.log').open('a').write(json.dumps({'name':a[1],'text':p.get('text','')})+'\n')
+    print(json.dumps(dict(request_id=p['request_id'],name=a[1],run_id=p['expected_run_id'],conversation_id=p['expected_conversation_id'],status='submitted')))
+else:print('{}')
+)PY");
+    fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    { QFile behind(temp.filePath("behind")); QVERIFY(behind.open(QIODevice::WriteOnly)); behind.write("1"); }
+    { QFile details(temp.filePath("details.json")); QVERIFY(details.open(QIODevice::WriteOnly));
+      details.write(QJsonDocument(QJsonObject{{"tracked", true}, {"run_id", "run-l5"}, {"conversation_id", "conversation-l5"},
+          {"runtime_state", "saved"}, {"process_state", "exited"}, {"resumable", true}}).toJson()); }
+    { QFile ready(temp.filePath("ready.json")); QVERIFY(ready.open(QIODevice::WriteOnly));
+      // A resume starts a new run in the same conversation.
+      ready.write(QJsonDocument(QJsonObject{{"tracked", true}, {"run_id", "run-l5b"}, {"conversation_id", "conversation-l5"},
+          {"runtime_state", "live"}, {"process_state", "running"}, {"phase", "idle"}, {"activity", "idle"}}).toJson()); }
+    auto state = fleet(); auto box = state.local();
+    for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") { session.state = "paused"; session.runId = "run-l5"; session.conversationId = "conversation-l5"; }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program)); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
+    int row = -1; for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString().endsWith("codex/hgs/dashboard")) row = i;
+    QVERIFY(row >= 0); list->setCurrentRow(row);
+    auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+    QTRY_VERIFY(composer->sessionKey().endsWith("codex/hgs/dashboard"));
+    setComposerText(composer, QStringLiteral("carry on"));
+    auto *send = composer->findChild<QPushButton *>("sendMessage"); QVERIFY(send);
+    QTRY_VERIFY(send->isEnabled());
+    // The start-and-send path can ask up to three times: the start choice, the
+    // other-Windows-session warning, and the stale-resume choice. One poller
+    // answers whichever is up, starting before the click.
+    auto *poll = new QTimer(&window); poll->setInterval(5); auto *age = new QElapsedTimer; age->start();
+    QObject::connect(poll, &QTimer::timeout, &window, [poll, age] {
+        if (auto *modal = QApplication::activeModalWidget()) {
+            for (const char *name : {"resumeAndSend", "launchAnyway", "resumeLostDialogue"})
+                if (auto *button = modal->findChild<QPushButton *>(QString::fromLatin1(name)); button && button->isVisible()) {
+                    button->click();
+                    return;
+                }
+            return;
+        }
+        if (age->elapsed() > 20000) { poll->stop(); poll->deleteLater(); delete age; }
+    });
+    poll->start();
+    send->click();
+    const auto resumeLog = [&] { QFile file(temp.filePath("resume.log")); return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString(); };
+    const auto sendLog = [&] { QFile file(temp.filePath("send.log")); return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString(); };
+    QTRY_VERIFY2(resumeLog().contains("--with-lost-dialogue"), qPrintable(resumeLog()));
+    // L5: the queued message is sent once the session is ready - and only once.
+    QTRY_VERIFY2(resumeLog().contains("--with-lost-dialogue"), qPrintable(resumeLog()));
+    // The resumed session is read now that it is live; the queued draft follows.
+    for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") {
+        session.state = "running"; session.runId = "run-l5b"; session.conversationId = "conversation-l5";
+        session.phase = "idle"; session.activity = "idle"; session.processState = "running";
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    window.showSession({}, QStringLiteral("codex/hgs/dashboard"));
+    QTest::qWait(2500);
+    window.showSession({}, QStringLiteral("codex/hgs/dashboard"));
+    QTest::qWait(1500);
+    auto *status = composer->findChild<QLabel *>("messageStatus");
+    QVERIFY2(sendLog().contains("carry on"), qPrintable(status ? status->text() + QStringLiteral(" | ") + sendLog() : sendLog()));
+    QCOMPARE(sendLog().count(QStringLiteral("carry on")), 1);
 }
 
 void TestSessionsWindow::sessionContextMenuGuardsIdentityAndChanges()

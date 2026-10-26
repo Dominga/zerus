@@ -1881,9 +1881,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             if (ok) offerWorktreeCleanup(); else m_archivedWorktree.clear();
         }
         // U3: hgs refused a stale resume; the owner chooses how to continue.
-        if (!ok && operation.startsWith(QStringLiteral("resume ")) && detail.contains(QStringLiteral("transcript_behind")))
-            resumeBehind(operation.mid(7), detail);
-        if (!ok && (operation == QStringLiteral("resume %1").arg(m_startSend.name) || operation == QStringLiteral("fresh %1").arg(m_startSend.name)))
+        // L5: a queued start-and-send must survive that refusal - the choice's
+        // own resume continues it once the session is ready.
+        const bool behind = !ok && operation.startsWith(QStringLiteral("resume ")) && detail.contains(QStringLiteral("transcript_behind"));
+        if (behind) resumeBehind(operation.mid(7), detail);
+        if (!behind && !ok && (operation == QStringLiteral("resume %1").arg(m_startSend.name) || operation == QStringLiteral("fresh %1").arg(m_startSend.name)))
             cancelStartContinuation(detail);
         if (!m_terminationCommand.isEmpty() && (operation == QStringLiteral("kill %1").arg(m_terminating.value(m_terminationCommand).session.name) || operation == QStringLiteral("terminate %1").arg(m_terminating.value(m_terminationCommand).session.name))) {
             if(ok)m_terminationFinished.insert(m_terminationCommand);
@@ -4197,9 +4199,9 @@ void SessionsWindow::renderDetails()
         if (reason == "clean_exit") meta += '\n' + tr("Session closed normally");
         else if (reason == "user_archived") meta += '\n' + tr("Moved to archive");
     }
-    // G7: the header tooltip also names the services this session runs; they
-    // live with it and are never Background work.
-    QString headerTip = sessionTooltip({meta, m_details.value("model").toString(s.model)}, 420).html;
+    // L4: the header tooltip keeps the metadata, the model and the close reason
+    // and adds the services below them; they live with the session and are never
+    // Background work.
     if (!s.services.isEmpty()) {
         QStringList lines;
         for (const auto &service : s.services) {
@@ -4207,9 +4209,9 @@ void SessionsWindow::renderDetails()
             lines << tr("%1 · since %2").arg(service.name, since) + (service.command.isEmpty() ? QString() : QStringLiteral("\n") + service.command);
         }
         lines << tr("These outlive the session and are not Background work.");
-        headerTip = Qt::convertFromPlainText(lines.join(QLatin1Char('\n')));
+        meta += QStringLiteral("\n\nServices\n") + lines.join(QLatin1Char('\n'));
     }
-    m_meta->setToolTip(headerTip); updateHeaderText();
+    m_meta->setToolTip(sessionTooltip({meta, m_details.value("model").toString(s.model)}, 420).html); updateHeaderText();
     const bool waiting=entry->online && SessionPresentation::waitingIdle(s);
     m_badge->setText(waiting?SessionPresentation::waitingCaption(s):state); const auto color = waiting
         ? QColor(m_dark ? "#edd096" : "#795913")

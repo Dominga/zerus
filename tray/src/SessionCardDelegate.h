@@ -655,7 +655,10 @@ private:
             p->drawText(servicesBadge.adjusted(16, 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft,
                         QString::number(index.data(SessionRoles::Services).toList().size()));
         }
-        const int metadataWidth = qMax(0, (!gitBadge.isEmpty() ? gitBadge.left() : tiles ? right + 8 : machineBadge.left()) - textX - 8);
+        // L3: the metadata stops before the services chip, so the chip never
+        // sits on top of the text.
+        const int textRight = !gitBadge.isEmpty() ? gitBadge.left() : tiles ? right + 8 : machineBadge.left();
+        const int metadataWidth = qMax(0, (!servicesBadge.isEmpty() ? servicesBadge.left() - 6 : textRight) - textX - 8);
         const QString metaIcon = index.data(SessionRoles::MetaIcon).toString();
         const int iconInset = !metaIcon.isEmpty() && metadataWidth >= 32 ? 18 : 0;
         if (iconInset) workspaceIcon(metaIcon, muted).paint(p, QRect(textX, metadataY + 2, 14, 14));

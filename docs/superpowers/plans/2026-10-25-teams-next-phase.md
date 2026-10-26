@@ -438,6 +438,17 @@ answered; a denial cannot carry an explanation.
   shared fixtures and docs: this is the owner's explicit direction to change
   it; keep all of them aligned. Owner: yes, first, with C7 in the nearest phase.
 
+- **G8. The team's two bars count the right things (owner, urgent).** Seen
+  2026-10-26: the session row showed "32/64" tasks and "0/1" phases. Rules:
+  - the tasks bar counts only the phase in work (approved, with open tasks);
+    with none in work, the next phase after the last finished one (the first
+    draft); never tasks of several phases;
+  - the phases bar is finished / all: every phase that is not discarded counts,
+    phase 1, approved and drafts alike; finished means approved with every task
+    decided. This team after phase 31: 2/5.
+  Same numbers in the session row, the Teams panel and the workspace header,
+  with a tooltip naming the phase. Owner: yes, as soon as possible.
+
 ## H. Operations
 
 - **H1. Resume after usage limits.** A flag on the lead (or session): when a

@@ -944,6 +944,95 @@ pub(crate) fn all_decided_text(team: &Team) -> String {
     )
 }
 
+/// A member's question as the lead reads it, with the answer to send back.
+/// B1: the exact command a permission request names, and where it came from:
+/// the tool input for Claude and Codex, the process for DeepSeek, unknown
+/// when the agent did not show it.
+pub(crate) fn permission_command(card: &Value) -> (Option<String>, &'static str) {
+    let input = &card["tool_input"];
+    if let Some(command) = input["command"].as_str().filter(|command| !command.trim().is_empty()) {
+        return (Some(command.to_owned()), "tool_input");
+    }
+    // A patch names its files when there is no single command.
+    if let Some(patch) = input["patch"].as_str().or_else(|| input["input"].as_str()) {
+        let paths: Vec<&str> = patch
+            .lines()
+            .filter_map(|line| ["*** Update File: ", "*** Add File: ", "*** Delete File: "].iter().find_map(|prefix| line.strip_prefix(prefix)))
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .collect();
+        if !paths.is_empty() {
+            return (Some(paths.join(", ")), "tool_input");
+        }
+    }
+    if let Some(command) = card["command"].as_str().filter(|command| !command.trim().is_empty()) {
+        return (Some(command.to_owned()), "process");
+    }
+    (None, "unknown")
+}
+
+/// At most this much of a permission's command the lead reads.
+const PERMISSION_COMMAND_CHARS: usize = 4000;
+
+/// B1: the line that names the exact command a permission request asks about.
+pub(crate) fn permission_command_line(card: &Value) -> String {
+    match permission_command(card) {
+        (Some(command), source) => {
+            let shown: String = command.chars().take(PERMISSION_COMMAND_CHARS).collect();
+            let cut = if command.chars().count() > PERMISSION_COMMAND_CHARS { "\n[cut: shown 4000 characters; read it with hgs inspect]" } else { "" };
+            format!("Command (from the {}):\n{shown}{cut}\n", if source == "process" { "process" } else { "tool input" })
+        }
+        (None, _) => "command not shown by the agent - read it with hgs inspect\n".to_owned(),
+    }
+}
+
+/// The message a per-item permission used to be (B1's tests read this): the
+/// coalesced inbox message carries the same command line now.
+#[cfg(test)]
+pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> String {
+    let role = team.role_of(&member.id);
+    let approval = card["approval"] == true;
+    let mut text = if approval {
+        format!("[Zerus team \u{b7} from: {role} \u{b7} permission]\n{role} asks you, the lead, for a permission instead of the owner. \
+                 You decide: allow what its task needs inside the team's folder; deny what would change other folders, the \
+                 system or permissions, or delete what it cannot restore, and ask the owner only for those. Access only to \
+                 send its report is never needed: deny it, Zerus takes the report from its folder or its last reply.\n")
+    } else {
+        format!("[Zerus team \u{b7} from: {role} \u{b7} question]\n{role} asks you, the lead, instead of the owner:\n")
+    };
+    if approval {
+        text += &permission_command_line(card);
+    }
+    let mut answers = Vec::new();
+    for item in card["questions"].as_array().into_iter().flatten() {
+        let id = item["id"].as_str().unwrap_or_default();
+        text += "\n";
+        if let Some(header) = item["header"].as_str().filter(|h| !h.is_empty()) {
+            text += &format!("{header}: ");
+        }
+        text += &format!("{}\n", item["question"].as_str().unwrap_or_default());
+        if let Some(body) = item["body"].as_str().filter(|b| !b.is_empty()) {
+            text += &format!("{body}\n");
+        }
+        for option in item["options"].as_array().into_iter().flatten() {
+            let description = option["description"].as_str().unwrap_or_default();
+            text += &format!("  {}) {}{}\n", option["id"].as_str().unwrap_or_default(), option["label"].as_str().unwrap_or_default(),
+                if description.is_empty() { String::new() } else { format!(" \u{2014} {description}") });
+        }
+        if item["allow_other"] != false {
+            text += "  or your own words as text\n";
+        }
+        answers.push(json!({"question_id":id,"selected_option_ids":["<option id>"],"text":""}));
+    }
+    text += &format!(
+        "\nAnswer for them once with hgs team answer --json (hgs guide team):\n  {}\n\
+         If the owner should decide, say so in your reply instead.",
+        json!({"team":team.id,"member":member.id,"question_id":card["question_id"],
+            "expected_question_hash":card["question_hash"],"answers":answers})
+    );
+    text
+}
+
 /// Runs this hgs with JSON on stdin; the child is no session's own.
 pub(crate) fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Duration) -> anyhow::Result<Output> {
     let mut command = Command::new(std::env::current_exe()?);
@@ -1066,7 +1155,7 @@ fn send(session: &SessionRef, request_id: &str, text: &str) -> Sent {
     classify(&hgs(&session.host, &["send", &session.name, "--json"], Some(&input), Duration::from_secs(120)))
 }
 
-fn tag(text: &str) -> String {
+pub(crate) fn tag(text: &str) -> String {
     let tag: String = text
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
@@ -1078,12 +1167,24 @@ fn tag(text: &str) -> String {
     tag.chars().take(24).collect()
 }
 
+/// B6: a sandboxed agent's folder is a clone (its `.git` is inside, so commit,
+/// merge and fetch work there); other agents get a worktree. Used when a plan
+/// leaves the folder to the team (folder policy auto).
+pub(crate) fn default_folder(agent: &str) -> MemberFolder {
+    if agent == "dsh" {
+        MemberFolder::Clone
+    } else {
+        MemberFolder::Worktree
+    }
+}
+
 /// The folder the member works in, computed without creating anything: the
-/// team's (or its own) folder, or the worktree path a writing member gets.
-fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result<String> {
+/// team's (or its own) folder, or the worktree/clone path a writing member
+/// gets.
+pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result<String> {
     let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
     anyhow::ensure!(!folder.is_empty(), "The team has no folder");
-    if member.folder != MemberFolder::Worktree {
+    if !matches!(member.folder, MemberFolder::Worktree | MemberFolder::Clone) {
         return Ok(folder);
     }
     let short = &team.id[..8.min(team.id.len())];
@@ -1098,21 +1199,20 @@ fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result<String> {
 }
 
 /// The folder the member works in: the team's (or its own) folder, or a new
-/// worktree of it, created now.
+/// worktree or clone of it, created now.
 fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
     let destination = member_folder_path(team, member)?;
-    if member.folder != MemberFolder::Worktree {
+    if member.folder == MemberFolder::Shared {
         return Ok(destination);
     }
     let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
     let short = &team.id[..8.min(team.id.len())];
     let branch = format!("team/{short}/{}", tag(&member.id));
-    let output = hgs(
-        &member.computer,
-        &["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", "HEAD", "--json"],
-        None,
-        Duration::from_secs(120),
-    )?;
+    let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", "HEAD", "--json"];
+    if member.folder == MemberFolder::Clone {
+        args.insert(2, "--clone");
+    }
+    let output = hgs(&member.computer, &args, None, Duration::from_secs(300))?;
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     Ok(destination)
 }
@@ -1503,10 +1603,23 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                 let excess = found.asked.len().saturating_sub(50);
                 found.asked.drain(..excess);
                 found.pending = Some(pending.clone());
+                // B1: the lead's answer and status carry the exact request:
+                // its tool, the command and the source of that command.
+                let tool = pending.card["questions"][0]["header"]
+                    .as_str()
+                    .or_else(|| pending.card["tool"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let (command, source) = permission_command(&pending.card);
+                let reason: String =
+                    pending.card["questions"][0]["body"].as_str().unwrap_or_default().chars().take(2000).collect();
+                found.permission = Some(json!({"question_id":pending.question_id,"tool":tool,"command":command,
+                    "command_source":source,"reason":reason,"asked_at":pending.at}));
                 events.push(Event::new("question_forwarded", json!({"member":role,"approval":pending.approval})));
             }
             None if answered && found.pending.is_some() => {
                 found.pending = None;
+                found.permission = None;
             }
             None => {}
         }
@@ -1728,6 +1841,56 @@ fn tell_lead_budget_red(
         events.push(Event::new("budget_red", json!({"member":role,"label":label,"default":default,"minutes":minutes})));
         Ok(())
     })
+}
+
+/// B2: the member hears the lead's reason right after a denied permission.
+pub(crate) fn denial_text(tool: &str, reason: &str) -> String {
+    format!("[Zerus team \u{b7} from: Zerus \u{b7} permission denied]\nLead: denied {tool}: {reason}")
+}
+
+pub(crate) fn send_denial(session: &SessionRef, tool: &str, reason: &str) -> anyhow::Result<()> {
+    match send(session, &uuid::Uuid::new_v4().to_string(), &denial_text(tool, reason)) {
+        Sent::Refused(error) => anyhow::bail!("the denial did not reach the member: {error}"),
+        _ => Ok(()),
+    }
+}
+
+/// B4: commits the member's work in its own folder, on its own team branch.
+/// Never pushes, never amends, never changes branches.
+pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[String]) -> anyhow::Result<Value> {
+    let git = |args: &[&str]| -> anyhow::Result<std::process::Output> {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(folder)
+            .args(args)
+            .output()
+            .map_err(|error| anyhow::anyhow!("git did not run: {error}"))
+    };
+    let current = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+    anyhow::ensure!(current.status.success(), "{}", String::from_utf8_lossy(&current.stderr).trim());
+    let current = String::from_utf8_lossy(&current.stdout).trim().to_owned();
+    anyhow::ensure!(current == branch, "This folder is on {current}, not {branch}");
+    if paths.is_empty() {
+        let added = git(&["add", "-A"])?;
+        anyhow::ensure!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr).trim());
+    } else {
+        let mut args: Vec<&str> = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let added = git(&args)?;
+        anyhow::ensure!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr).trim());
+    }
+    let staged = git(&["diff", "--cached", "--quiet"])?;
+    if staged.status.success() {
+        return Ok(json!({"status":"clean","files":0}));
+    }
+    let committed = git(&["commit", "-m", message])?;
+    anyhow::ensure!(committed.status.success(), "{}", String::from_utf8_lossy(&committed.stderr).trim());
+    let sha = git(&["rev-parse", "HEAD"])?;
+    anyhow::ensure!(sha.status.success(), "{}", String::from_utf8_lossy(&sha.stderr).trim());
+    let sha = String::from_utf8_lossy(&sha.stdout).trim().to_owned();
+    let listed = git(&["show", "--name-only", "--pretty=format:"])?;
+    let files = String::from_utf8_lossy(&listed.stdout).lines().filter(|line| !line.trim().is_empty()).count();
+    Ok(json!({"status":"committed","sha":sha,"files":files}))
 }
 
 fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
@@ -3872,6 +4035,70 @@ mod tests {
         assert!(steps(&team, &[stopped], 20.0).contains(&Step::Liveness { member: "dev".into(), live: false }));
         team.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 20.0, live: false });
         assert!(steps(&team, &[session("codex/x/dev", "r1", true)], 20.0).contains(&Step::Liveness { member: "dev".into(), live: true }));
+    }
+
+    #[test]
+    fn a_permission_names_its_command_and_source() {
+        let team = team();
+        let member = team.member("qa").unwrap();
+        let bash = json!({"approval":true,"questions":[{"id":"approval","header":"Bash","question":"Allow?","body":"Bash asks"}],
+            "tool_input":{"command":"rm -rf build"}});
+        assert_eq!(permission_command(&bash), (Some("rm -rf build".to_owned()), "tool_input"));
+        let text = question_text(&team, member, &bash);
+        assert!(text.contains("Command (from the tool input):\nrm -rf build"), "{text}");
+        let patch = json!({"approval":true,"tool_input":{"patch":"*** Begin Patch\n*** Update File: src/a.rs\n*** End Patch"}});
+        assert_eq!(permission_command(&patch), (Some("src/a.rs".to_owned()), "tool_input"));
+        let dsh = json!({"approval":true,"command":"cargo build"});
+        assert_eq!(permission_command(&dsh), (Some("cargo build".to_owned()), "process"));
+        let unknown = json!({"approval":true});
+        assert_eq!(permission_command(&unknown), (None, "unknown"));
+        assert!(question_text(&team, member, &unknown).contains("command not shown by the agent - read it with hgs inspect"));
+        // B2: the member's message names the tool and the reason.
+        assert_eq!(denial_text("Bash", "build only"), "[Zerus team \u{b7} from: Zerus \u{b7} permission denied]\nLead: denied Bash: build only");
+    }
+
+    #[test]
+    fn a_sandboxed_agent_gets_a_clone_folder() {
+        assert_eq!(default_folder("dsh"), MemberFolder::Clone);
+        assert_eq!(default_folder("claude"), MemberFolder::Worktree);
+        let mut team = team();
+        {
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.folder = MemberFolder::Clone;
+            member.directory = "C:/work/project".into();
+        }
+        let member = team.member("dev").unwrap();
+        let path = member_folder_path(&team, member).unwrap();
+        assert!(path.ends_with("project-team-t-dev"), "{path}");
+    }
+
+    #[test]
+    fn a_commit_records_its_sha_and_refuses_another_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        let init = Command::new("git").args(["init", "-q"]).arg(&repo).output().unwrap();
+        assert!(init.status.success());
+        run(&["config", "user.email", "team@example.test"]);
+        run(&["config", "user.name", "Team"]);
+        fs::write(repo.join("a.txt"), "one").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "init"]);
+        run(&["switch", "-qc", "team/t-dev"]);
+        fs::write(repo.join("a.txt"), "two").unwrap();
+        let folder = repo.to_str().unwrap();
+        let committed = commit_in(folder, "team/t-dev", "Fork: change", &[]).unwrap();
+        assert_eq!(committed["status"], "committed");
+        assert!(committed["sha"].as_str().is_some_and(|sha| sha.len() >= 7));
+        assert_eq!(committed["files"], json!(1));
+        assert_eq!(commit_in(folder, "team/t-dev", "again", &[]).unwrap()["status"], "clean");
+        run(&["switch", "-qc", "other"]);
+        let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
+        assert!(error.contains("not team/t-dev"), "{error}");
     }
 
     #[test]

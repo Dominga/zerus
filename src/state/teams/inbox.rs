@@ -25,13 +25,20 @@ pub(crate) struct Item {
     pub since: f64,
     pub summary: String,
     pub command: String,
+    /// Extra lines the message shows under the item: B1 puts the exact
+    /// permission command and its source here (4000 characters cut).
+    pub detail: String,
 }
 
 impl Item {
     /// The item as `hgs team inbox --json` lists it.
     pub(crate) fn value(&self) -> Value {
-        json!({"kind":self.kind,"task":self.task,"member":self.member,"since":self.since,
-            "summary":self.summary,"command":self.command})
+        let mut value = json!({"kind":self.kind,"task":self.task,"member":self.member,"since":self.since,
+            "summary":self.summary,"command":self.command});
+        if !self.detail.is_empty() {
+            value["detail"] = json!(self.detail);
+        }
+        value
     }
 }
 
@@ -89,6 +96,7 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
                         since: report.at,
                         summary: summary(&report.text),
                         command: decide_command(team, task, true),
+                        detail: String::new(),
                     });
                 }
             }
@@ -107,6 +115,7 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
                         "{} | hgs team reply --json",
                         json!({"request_id":PLACEHOLDER,"team":team.id,"question":question.id,"text":"..."})
                     ),
+                    detail: String::new(),
                 });
             }
         }
@@ -122,6 +131,7 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
                     since: attempt.delivered_at.unwrap_or(attempt.sent_at),
                     summary: summary(&format!("#{} {}", task.id, task.title)),
                     command: report_command(team, task, Some(attempt), true),
+                    detail: String::new(),
                 });
             }
         }
@@ -157,6 +167,7 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
                     "{} | hgs team retry --json",
                     json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})
                 ),
+                detail: String::new(),
             });
         }
     }
@@ -173,6 +184,8 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
             since: pending.at,
             summary: if asked.is_empty() { "asks for permission".into() } else { summary(&asked) },
             command: pending.answer_command(team, &member.id),
+            // B1: the exact command the permission asks about and its source.
+            detail: super::dispatcher::permission_command_line(&pending.card).trim_end().to_owned(),
         });
     }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
@@ -244,14 +257,20 @@ pub(crate) fn text(team: &Team, items: &[Item], now: f64) -> String {
     for (index, item) in items.iter().take(MESSAGE_ITEMS).enumerate() {
         let task = item.task.map(|task| format!("task #{task} \u{b7} ")).unwrap_or_default();
         text += &format!(
-            "\n{}. {} \u{b7} {task}{} \u{b7} {}\n   {}\n   {}\n",
+            "\n{}. {} \u{b7} {task}{} \u{b7} {}\n   {}\n",
             index + 1,
             item,
             item.member,
             age(now, item.since),
-            item.summary,
-            item.command
+            item.summary
         );
+        // B1: a permission item carries the exact command and its source.
+        if !item.detail.is_empty() {
+            for line in item.detail.lines() {
+                text += &format!("   {line}\n");
+            }
+        }
+        text += &format!("   {}\n", item.command);
     }
     if items.len() > MESSAGE_ITEMS {
         text += &format!("\n[{} more item(s); hgs team inbox --json lists them all]\n", items.len() - MESSAGE_ITEMS);

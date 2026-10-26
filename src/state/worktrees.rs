@@ -400,7 +400,11 @@ fn create(args: &[String]) -> Result<Value> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--json" | "--mobile" => {}
+            "--json" | "--mobile" | "--clone" => {
+                if args[i] == "--clone" {
+                    options.insert("--clone", "true");
+                }
+            }
             key @ ("--path" | "--destination" | "--branch" | "--base" | "--common-dir" | "--request-id") => {
                 i += 1;
                 let value = args.get(i).ok_or_else(|| format!("{key} needs a value"))?;
@@ -504,6 +508,26 @@ fn create(args: &[String]) -> Result<Value> {
     // destinations. Git accepts this empty directory but never overwrites files.
     if mobile_stopped() || Instant::now() >= total_deadline { return Err("Worktree creation cancelled before checkout".into()); }
     fs::create_dir(&destination).map_err(|e| format!("Cannot reserve destination: {e}"))?;
+    if options.contains_key("--clone") {
+        // B4/F10: a full clone with its own .git, so commit, merge and fetch
+        // work inside a sandboxed member's folder. Never a worktree.
+        let outcome = git(
+            &source,
+            &["clone", "--local", "--no-hardlinks", "--quiet", &source.to_string_lossy(), &destination.to_string_lossy()],
+            total_deadline.min(Instant::now() + Duration::from_secs(if mobile { 15 } else { 300 })),
+        );
+        outcome.map_err(|e| format!("{}\nCheck {} and branch '{branch}' before retrying.", e.detail, destination.display()))?;
+        let switch = git(&destination, &["switch", "--quiet", "-c", branch, &head], deadline);
+        switch.map_err(|e| format!("{}\nCheck {} and branch '{branch}' before retrying.", e.detail, destination.display()))?;
+        let actual_branch = git(&destination, &["symbolic-ref", "--quiet", "HEAD"], deadline).map_err(|e| e.detail)?;
+        if String::from_utf8_lossy(&actual_branch).trim_end_matches('\n') != reference {
+            return Err("Clone creation could not be confirmed. Inspect the destination before retrying.".into());
+        }
+        let upstream = upstream.map(|(remote, merge)| format!("{remote}/{}", merge.strip_prefix("refs/heads/").unwrap_or(&merge)));
+        return Ok(json!({"status":"created", "path":destination, "branch":branch, "base":base, "head":head,
+            "upstream":upstream, "clone":true, "request_id":options.get("--request-id"),
+            "machine":crate::config::Config::load().map_err(|e|e.to_string())?.host()}));
+    }
     let outcome = git(
         &source,
         &[

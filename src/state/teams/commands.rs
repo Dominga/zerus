@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
@@ -200,6 +200,37 @@ fn left_running(team: &Team, teams: &[Team], sessions: &[super::dispatcher::Seen
             (found.live && !busy(session)).then(|| json!({"member":member.id,"role":team.role_of(&member.id),"session":session}))
         })
         .collect()
+}
+
+/// F1.7: sessions still running for teams that are finished, at most 200.
+/// Nothing is stopped here.
+fn leftovers(teams: &[Team], sessions: &[super::dispatcher::Seen]) -> Vec<Value> {
+    let busy = |session: &SessionRef| {
+        teams.iter().filter(|other| matches!(other.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)).any(|other| {
+            let same = |other: &SessionRef| other.host == session.host && other.name == session.name;
+            other.member(&other.lead).and_then(|lead| lead.session.as_ref()).is_some_and(same)
+                || other.members.iter().any(|member| {
+                    member.state != MemberState::Removed && member.session.as_ref().is_some_and(same)
+                })
+        })
+    };
+    let mut items = Vec::new();
+    for team in teams
+        .iter()
+        .filter(|team| matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived))
+    {
+        for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.id != team.lead) {
+            let Some(session) = member.session.as_ref() else { continue };
+            let Some(found) = sessions.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
+            if !found.live || busy(session) {
+                continue;
+            }
+            items.push(json!({"team":team.id,"name":team.name,"member":member.id,"role":team.role_of(&member.id),
+                "session":session,"since":member.seen.as_ref().map(|seen| seen.at)}));
+        }
+    }
+    items.truncate(200);
+    items
 }
 
 /// The team with its live members when the caller listed sessions (F7).
@@ -883,6 +914,12 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
         "create" => create(input),
         "answer" => answer(input),
         "commit" => commit(input),
+        "leftovers" => {
+            let store = Store::open(false)?;
+            let teams = store.teams(true, 1000)?;
+            let sessions = live_sessions()?;
+            Ok(json!({"items":leftovers(&teams, &sessions)}))
+        }
         "list" => {
             let path = store::path();
             if !path.exists() {
@@ -1044,6 +1081,32 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn leftovers_lists_running_sessions_of_finished_teams() {
+        use crate::state::teams::dispatcher::Seen;
+        use crate::state::teams::model::{Member, MemberSeen, SessionRef, Team, TeamStatus};
+        let mut done = Team { id: "t1".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Done, ..Default::default() };
+        done.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        let mut dev = Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() };
+        dev.session = Some(SessionRef { name: "claude/x/dev".into(), ..Default::default() });
+        dev.seen = Some(MemberSeen { at: 30.0, live: true });
+        done.members.push(dev);
+        let sessions = vec![Seen { name: "claude/x/dev".into(), live: true, ..Default::default() }];
+        let items = super::leftovers(std::slice::from_ref(&done), &sessions);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            (items[0]["team"].as_str(), items[0]["member"].as_str(), items[0]["since"].as_f64()),
+            (Some("t1"), Some("dev"), Some(30.0))
+        );
+        // A running team's session is not a leftover; an archived team's is.
+        let mut running = done.clone();
+        running.status = TeamStatus::Running;
+        assert!(super::leftovers(&[running], &sessions).is_empty());
+        let mut archived = done.clone();
+        archived.status = TeamStatus::Archived;
+        assert_eq!(super::leftovers(&[archived], &sessions).len(), 1);
+    }
+
     #[test]
     fn the_list_summary_carries_task_phases_and_phase_records() {
         let mut team = crate::state::teams::model::Team::default();

@@ -613,6 +613,15 @@ answered; a denial cannot carry an explanation.
   owner. Starved notices start again only once a phase is approved and a
   member still has no ready task. Owner: yes.
 
+- **U10. The desktop crashes when a tab shows a terminal (seen 2026-10-26,
+  build 17a8db61).** A tab switch shows an embedded terminal while it is still
+  narrow; `TerminalScreen::updateGrid` resizes it (down to 2x2), and libvterm
+  0.3.3 aborts ("screen_resize failed to update cursor position") when a
+  wrapped line becomes taller than the screen with the cursor on its last row
+  (`resize_buffer`, `old_cursor.row < old_row_end` should be `<=`). Fix the
+  library (local patch, noted in UPSTREAM.md) and keep the terminal's size
+  while it is hidden or tiny. Owner: yes, in the fixes phase after phase 35.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

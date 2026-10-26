@@ -71,6 +71,11 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     member.id = member_id(&member.id)?;
     member.role = clean(&member.role, 60, "A role")?;
     ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
+    // B5: the profile a role may ask for.
+    ensure!(
+        member.permissions.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions.as_str()),
+        "A permissions profile is read, write, build, commit or network"
+    );
     member.launch_id.clear();
     member.error.clear();
     member.prompt = clean(&member.prompt, 8000, "A role prompt")?;
@@ -250,9 +255,13 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
             (old != Some(session)).then(|| (member.id.clone(), session.name.clone()))
         })
         .collect();
+    // B5: a plan that widens a role's permissions waits for the owner's
+    // explicit confirmation.
+    let widening = widening(team, &members);
     team.members = members;
     team.tasks = tasks;
     team.phases = phases;
+    team.profile_widening = widening;
     let validation = plan::validate(team, &BTreeSet::new());
     for (id, session) in adopted {
         events.push(Event::new("member_adopted", json!({"member":team.role_of(&id),"session":session})));
@@ -285,12 +294,37 @@ fn approve(team: &mut Team, actor: &Actor, offline: &BTreeSet<String>, events: &
             task.status = TaskStatus::Pending;
         }
     }
+    // The owner has seen and confirmed the wider permissions.
+    team.profile_widening.clear();
     Ok(set_status(team, TeamStatus::Running, "approved", actor, events))
 }
 
 /// The approval new phases wait for: their own setting, else the plan's.
 fn phase_approval(team: &Team) -> Approval {
     team.settings.phase_approval.unwrap_or(team.settings.approval)
+}
+
+/// B5: the order of permission profiles; a wider one needs the owner.
+fn profile_rank(profile: &str) -> u8 {
+    match profile {
+        "read" => 1,
+        "build" => 3,
+        "commit" => 4,
+        "network" => 5,
+        _ => 2, // write is the default
+    }
+}
+
+/// B5: the members whose profile widens the role's default, for the owner.
+fn widening(team: &Team, members: &[Member]) -> Vec<Value> {
+    let mut found = Vec::new();
+    for member in members.iter().filter(|member| member.id != team.lead) {
+        let default = team.member(&member.id).map(|old| old.permissions.as_str()).unwrap_or("write");
+        if profile_rank(&member.permissions) > profile_rank(default) {
+            found.push(json!({"member":member.id,"from":default,"to":member.permissions}));
+        }
+    }
+    found
 }
 
 /// The validation findings that concern a new phase: those naming one of its
@@ -1331,7 +1365,15 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "finish" => finish(team, input, actor, events),
-        "approve" => approve(team, actor, offline, events),
+        "approve" => {
+            // B5: a wider permissions profile needs the owner's word.
+            ensure!(
+                team.profile_widening.is_empty()
+                    || (matches!(actor, Actor::Human) && input["confirm_widening"].as_bool() == Some(true)),
+                "The owner confirms the wider permissions first: approve with \"confirm_widening\": true"
+            );
+            approve(team, actor, offline, events)
+        }
         "discard" => {
             ensure!(human_or_lead, "Only the lead or you discard a plan");
             ensure!(team.status == TeamStatus::Planning, "Only a plan in Planning can be discarded");
@@ -1421,8 +1463,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(active < team.settings.max_members, "The team already has its {} members", team.settings.max_members);
             let id = member.id.clone();
             let role = member.role.clone();
+            let profile = member.permissions.clone();
             let adopted = member.session.as_ref().map(|session| session.name.clone());
             team.members.push(member);
+            // B5: a profile wider than the role's default waits for the owner.
+            if profile_rank(&profile) > profile_rank("write") {
+                team.profile_widening.push(json!({"member":id,"from":"write","to":profile}));
+            }
             events.push(Event::new("member_added", json!({"by":actor.label(team),"member":role})));
             // F8: the existing session is adopted, not launched (L2).
             if let Some(session) = adopted {
@@ -2722,6 +2769,59 @@ mod tests {
         }
         let (team, _) = create("t", &json!({"name":"T","lead":lead,"settings":{"blocked_timeout_seconds":60}})).unwrap();
         assert_eq!(team.settings.blocked_timeout_seconds, 60);
+    }
+
+    #[test]
+    fn a_wider_profile_waits_for_the_owner() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions":"commit"}],
+                "tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(team.profile_widening[0]["to"], "commit");
+        let error = apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+        assert!(error.contains("confirm_widening"), "{error}");
+        apply(&mut team, "approve", &json!({"confirm_widening":true}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert!(team.profile_widening.is_empty());
+        // An unsupported profile is refused.
+        let (mut fresh, _) = create("t2", &json!({"name":"T2","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        let error = plan(
+            &mut fresh,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","permissions":"root"}]}),
+            &Actor::Human,
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "A permissions profile is read, write, build, commit or network");
+    }
+
+    #[test]
+    fn the_preflight_flags_a_sandboxed_worktree_and_a_forbidden_project() {
+        let mut team = running_team();
+        {
+            let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.agent = "dsh".into();
+            dev.folder = MemberFolder::Worktree;
+        }
+        let validation = plan::validate(&team, &BTreeSet::new());
+        assert!(validation.warnings.iter().any(|finding| finding.text.contains("sandboxed dsh agent in a worktree")), "{:?}", validation.warnings);
+        team.settings.worktrees_forbidden = true;
+        let validation = plan::validate(&team, &BTreeSet::new());
+        assert!(validation.errors.iter().any(|finding| finding.text.contains("forbids worktrees")), "{:?}", validation.errors);
+        team.settings.worktrees_forbidden = false;
+        team.settings.folder_policy = FolderPolicy::Shared;
+        let validation = plan::validate(&team, &BTreeSet::new());
+        assert!(validation.errors.iter().any(|finding| finding.text.contains("shared folder policy")), "{:?}", validation.errors);
+        // Auto allows a member's own folder.
+        team.settings.folder_policy = FolderPolicy::Auto;
+        let validation = plan::validate(&team, &BTreeSet::new());
+        assert!(!validation.errors.iter().any(|finding| finding.text.contains("folder policy")), "{:?}", validation.errors);
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub(crate) enum FolderPolicy {
     /// The lead chooses per member while planning.
     #[default]
     Lead,
+    /// The lead chooses per member: shared, a worktree or a clone (B6).
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -61,6 +63,10 @@ pub(crate) struct Settings {
     /// Background work before the lead is told once (N5).
     #[serde(default = "default_blocked_timeout")]
     pub blocked_timeout_seconds: u64,
+    /// A project that forbids worktrees and clones (B6): members then work in
+    /// the shared or their own existing folder only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worktrees_forbidden: bool,
 }
 
 fn default_max_members() -> usize {
@@ -90,6 +96,7 @@ impl Default for Settings {
             report_timeout_seconds: default_report_timeout(),
             start_timeout_seconds: default_start_timeout(),
             blocked_timeout_seconds: default_blocked_timeout(),
+            worktrees_forbidden: false,
         }
     }
 }
@@ -578,6 +585,10 @@ pub(crate) struct Team {
     /// Phases added by `extend`; the approved initial plan (phase 1) has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<Phase>,
+    /// Permissions a plan widens beyond the role's default (B5): the owner
+    /// confirms them before the plan can be approved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_widening: Vec<serde_json::Value>,
     #[serde(default)]
     pub revision: u64,
     #[serde(default)]

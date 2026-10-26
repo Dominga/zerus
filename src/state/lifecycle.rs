@@ -681,9 +681,51 @@ fn resume_archive(name: &str, id: &str, dry: bool, scope: Option<&session_action
     Ok(0)
 }
 
+/// U3: the newest user or assistant entry time in the last part of a native
+/// transcript, or None when it has none.
+pub(super) fn transcript_last_turn(path: &std::path::Path) -> Option<f64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(256 * 1024))).ok()?;
+    let mut text = String::new();
+    file.take(256 * 1024).read_to_string(&mut text).ok()?;
+    let mut newest = 0.0_f64;
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if !matches!(event["type"].as_str(), Some("user") | Some("assistant")) {
+            continue;
+        }
+        if let Some(at) = event["timestamp"]
+            .as_str()
+            .map(|text| super::search::timestamp(&serde_json::json!(text)))
+            .filter(|at| *at > 0.0)
+            .or_else(|| event["timestamp"].as_f64())
+        {
+            newest = newest.max(at);
+        }
+    }
+    (newest > 0.0).then_some(newest)
+}
+
+/// U3: how far the transcript is behind the events Zerus recorded; behind by
+/// more than two minutes is a silent resume that would drop dialogue.
+pub(super) fn transcript_lag(transcript_at: f64, events_at: f64) -> Option<f64> {
+    (transcript_at > 0.0 && events_at > 0.0 && events_at - transcript_at > 120.0).then_some(events_at - transcript_at)
+}
+
 pub(super) fn resume(names: &[String], dry: bool) -> Result<i32> { resume_scoped(names,dry,None) }
 
 pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_action::Scope>) -> Result<i32> {
+    // U3: the owner may accept a stale transcript explicitly.
+    let mut names = names.to_vec();
+    let mut accept_stale = false;
+    names.retain(|name| {
+        let flag = matches!(name.as_str(), "--accept-stale" | "--with-lost-dialogue");
+        accept_stale |= flag;
+        !flag
+    });
+    let names = names.as_slice();
     if scope.is_none() {archive::reconcile()?;}
     if names.len() == 3 && names[1] == "--archive" {
         return resume_archive(&names[0], &names[2], dry, scope);
@@ -717,6 +759,22 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
             continue;
         }
         let record = read(&name)?;
+        // U3: a native transcript that stops long before the events Zerus
+        // recorded must not be resumed silently: the lost dialogue would never
+        // come back.
+        if !accept_stale && string(&record, "agent") == "claude" {
+            let transcript = string(&record, "transcript");
+            if !transcript.is_empty() {
+                if let Some(transcript_at) = transcript_last_turn(std::path::Path::new(transcript)) {
+                    let events_at = record["last_event_at"].as_f64().unwrap_or(0.0);
+                    if let Some(lag) = transcript_lag(transcript_at, events_at) {
+                        return Err(format!(
+                            "{name}: the native transcript stops {lag:.0} s before the events Zerus recorded (transcript_behind); resume with --accept-stale, or read the dialogue after it with hgs inspect"
+                        ));
+                    }
+                }
+            }
+        }
         if let Some(scope)=scope {scope.check(&record)?;}
         if archive::equivalent(&record, &archived) {
             return Err(format!(
@@ -834,5 +892,32 @@ mod tests {
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(codex_daemon_flag(&launcher.to_string_lossy()), Ok(true));
         assert!(!marker.exists());
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    #[test]
+    fn a_transcript_behind_the_events_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"timestamp\":\"2026-10-26T00:10:00Z\"}\n",
+                "{\"type\":\"assistant\",\"timestamp\":\"2026-10-26T00:11:00Z\"}\n",
+                "{\"type\":\"system\",\"timestamp\":\"2026-10-26T04:11:00Z\"}\n"
+            ),
+        )
+        .unwrap();
+        let at = transcript_last_turn(&path).unwrap();
+        let expected = super::super::search::timestamp(&serde_json::json!("2026-10-26T00:11:00Z"));
+        assert!((at - expected).abs() < 1.0, "{at} {expected}");
+        assert!(transcript_lag(at, expected + 3600.0).is_some());
+        assert!(transcript_lag(at, expected + 60.0).is_none());
+        assert!(transcript_lag(0.0, expected + 3600.0).is_none());
+        assert!(transcript_last_turn(&dir.path().join("missing.jsonl")).is_none());
     }
 }

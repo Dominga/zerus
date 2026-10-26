@@ -622,6 +622,21 @@ answered; a denial cannot carry an explanation.
   library (local patch, noted in UPSTREAM.md) and keep the terminal's size
   while it is hidden or tiny. Owner: yes, in the fixes phase after phase 35.
 
+- **U13. Expert and ProExpert take over work that keeps coming back (owner,
+  2026-10-26).** Two catalog roles: Expert (Claude Opus 5.5, effort high) and
+  ProExpert (Claude Opus 5.5, effort xhigh). When a task has been rejected
+  three times, the lead judges the cause: a small remaining fix stays with its
+  member; a gap beyond the member's model goes to the Expert (reassign, the
+  Expert merges the member's branch and continues from it). The ProExpert is
+  added only when the Expert could not finish it either. After an expert's
+  takeover is accepted, Zerus compacts that expert's context
+  (`hgs compact-context`) so the next takeover starts small. Zerus support:
+  the third rejection shows the lead this choice in the inbox (with the
+  rejection reasons), an expert member does not count against
+  `max_members` or may be added to a full team with the owner's confirmation,
+  and the compaction runs on acceptance of a task that was reassigned to a
+  member tagged `rework`. Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

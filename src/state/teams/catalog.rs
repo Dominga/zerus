@@ -5,6 +5,7 @@
 use super::super::*;
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 
 pub(crate) fn path() -> PathBuf {
@@ -44,6 +45,9 @@ pub(crate) struct Role {
     pub can_message: String,
     #[serde(default)]
     pub dangerous: bool,
+    /// Section 9.8: this role may lead a sub-team.
+    #[serde(default)]
+    pub can_lead_subteam: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -54,6 +58,9 @@ pub(crate) struct Seat {
     /// The seat is filled only when the goal needs it (shown as 0–1).
     #[serde(default)]
     pub optional: bool,
+    /// Section 9.8: the seat's member leads a sub-team from this template.
+    #[serde(default)]
+    pub subteam: String,
 }
 fn one() -> u32 {
     1
@@ -186,7 +193,7 @@ pub(crate) fn builtin() -> Catalog {
         role("integrator", "Integrator", "#a3b1c6", "codex", "", "shared", &format!("You are the Integrator: merge the members' branches, resolve conflicts, run the full checks. {finish}")),
         role("researcher", "Researcher", "#b9d36b", "claude", "", "read_only", &format!("You are the Researcher: find facts and options with sources; change no code. {finish}")),
     ];
-    let seat = |role: &str, count: u32, optional: bool| Seat { role: role.into(), count, optional };
+    let seat = |role: &str, count: u32, optional: bool| Seat { role: role.into(), count, optional, subteam: String::new() };
     let task = |title: &str, role: &str, deps: &[usize]| SkeletonTask { title: title.into(), role: role.into(), deps: deps.to_vec() };
     let templates = vec![
         Template {
@@ -286,6 +293,36 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
         clean_id(&rule.id)?;
         ensure!(templates.contains_key(&rule.template), "Rule {} names unknown template {}", rule.id, rule.template);
     }
+    // Section 9.8: a seat may delegate to a template that exists, and no
+    // template may lead back to itself.
+    for template in &catalog.templates {
+        for seat in template.roster.iter().filter(|seat| !seat.subteam.is_empty()) {
+            ensure!(
+                templates.contains_key(&seat.subteam),
+                "Template {} names unknown sub-team template {}",
+                template.id,
+                seat.subteam
+            );
+        }
+    }
+    fn visit(catalog: &Catalog, id: &str, visiting: &mut BTreeSet<String>, done: &mut BTreeSet<String>) -> anyhow::Result<()> {
+        if done.contains(id) {
+            return Ok(());
+        }
+        ensure!(visiting.insert(id.to_owned()), "Template {} has a sub-team cycle", id);
+        if let Some(template) = catalog.templates.iter().find(|template| template.id == id) {
+            for seat in template.roster.iter().filter(|seat| !seat.subteam.is_empty()) {
+                visit(catalog, &seat.subteam, visiting, done)?;
+            }
+        }
+        visiting.remove(id);
+        done.insert(id.to_owned());
+        Ok(())
+    }
+    let mut done = BTreeSet::new();
+    for template in &catalog.templates {
+        visit(catalog, &template.id, &mut BTreeSet::new(), &mut done)?;
+    }
     Ok(())
 }
 
@@ -354,6 +391,9 @@ pub(crate) fn designer_brief(catalog: &Catalog, goal: &str, project: &str) -> St
          read it with `echo '{{}}' | hgs team catalog get --json`. Ask the owner what they need, then propose.",
         catalog.version
     );
+    // Section 9.8: the designer explains sub-leads: a role may lead one, and a
+    // seat may delegate to another template.
+    text += "\n\nA role with can_lead_subteam may lead a sub-team; a roster seat may name subteam: <template> so that member delegates that template. Unknown templates and template cycles are refused, so keep the catalog acyclic.";
     if !project.trim().is_empty() {
         text += &format!("\n\nThe owner works in the project folder {}.", project.trim());
     }
@@ -546,5 +586,30 @@ mod tests {
         apply_one(&mut catalog, &remove).unwrap();
         // Templates still name the tester: the result is refused.
         assert!(validate(&catalog).is_err());
+    }
+
+    #[test]
+    fn a_sub_team_template_must_exist_and_may_not_cycle() {
+        let mut catalog = builtin();
+        let id = catalog.templates[0].id.clone();
+        let role = catalog.templates[0].roster[0].role.clone();
+        // A seat may name a template that exists.
+        catalog.templates[0].roster[0].subteam = id.clone();
+        assert!(validate(&catalog).is_err(), "a template leading to itself is a cycle");
+        catalog.templates.push(Template { id: "sub".into(), name: "Sub".into(), roster: vec![Seat { role: role.clone(), subteam: id.clone(), ..Default::default() }], ..Default::default() });
+        // A two-template cycle is refused.
+        assert!(validate(&catalog).is_err());
+        // A missing template is refused before any cycle check.
+        catalog.templates[0].roster[0].subteam = "missing".into();
+        let error = validate(&catalog).unwrap_err().to_string();
+        assert!(error.contains("unknown sub-team template"), "{error}");
+        // A valid delegation loads, and the role may say it leads sub-teams.
+        catalog.templates[0].roster[0].subteam = "sub".into();
+        catalog.templates.iter_mut().find(|template| template.id == "sub").unwrap().roster[0].subteam =
+            String::new();
+        assert!(validate(&catalog).is_ok());
+        catalog.roles[0].can_lead_subteam = true;
+        let value = serde_json::to_value(&catalog.roles[0]).unwrap();
+        assert_eq!(value["can_lead_subteam"], true);
     }
 }

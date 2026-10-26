@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
@@ -1151,6 +1151,196 @@ fn inbox_view(team: &Team) -> Value {
     json!({"items": super::inbox::items(team).iter().map(super::inbox::Item::value).collect::<Vec<_>>()})
 }
 
+/// 9.5: files a finished sub-team's summary on its parent task.
+fn file_subteam_report(store: &mut Store, child_id: &str) -> anyhow::Result<()> {
+    let child = store.load(child_id)?.context("Unknown team")?;
+    let Some(link) = child.parent.clone() else { return Ok(()) };
+    if child.status != TeamStatus::Done || store.load(&link.team)?.is_none() {
+        return Ok(());
+    }
+    if store.load(child_id)?.is_some_and(|team| team.status != TeamStatus::Done) {
+        return Ok(());
+    }
+    store.mutate(None, &link.team, None, |parent, events| {
+        let task = ops::file_subteam_report(&child, parent)?;
+        events.push(Event::new("subteam_report", json!({"team":child_id,"task":task})));
+        Ok(Value::Null)
+    })
+    .map(|_| ())
+}
+
+/// 9.5: a rejected sub-team report reopens the sub-team with a Rework draft.
+fn reopen_rejected_subteam(store: &mut Store, parent_id: &str, input: &Value) -> anyhow::Result<()> {
+    let parent = store.load(parent_id)?.context("Unknown team")?;
+    let Some(task) = parent.task(input["task"].as_u64().unwrap_or_default() as u32) else { return Ok(()) };
+    let Some(child) = task.subteam.clone() else { return Ok(()) };
+    if store.load(&child)?.is_none() {
+        return Ok(());
+    }
+    let reason = text(input, "reason").to_owned();
+    store.mutate(None, &child, None, |team, events| {
+        let phase = ops::reopen_subteam(team, &reason)?;
+        events.push(Event::new("subteam_reopened", json!({"team":child,"phase":phase,"reason":reason})));
+        Ok(Value::Null)
+    })
+    .map(|_| ())
+}
+
+/// 9.7: pause, resume or stop of a team reaches its sub-teams, level by level.
+fn cascade_status(store: &mut Store, team_id: &str, op: &str, depth: usize) -> anyhow::Result<()> {
+    if depth >= 8 {
+        return Ok(());
+    }
+    let Some(team) = store.load(team_id)? else { return Ok(()) };
+    for child_id in team.children.iter().take(32) {
+        let Some(child) = store.load(child_id)? else { continue };
+        let applies = match op {
+            "pause" => child.status == TeamStatus::Running,
+            "resume" => child.status == TeamStatus::Paused,
+            "stop" => matches!(child.status, TeamStatus::Running | TeamStatus::Paused | TeamStatus::Planning),
+            _ => false,
+        };
+        if applies {
+            store.mutate(None, child_id, None, |child, events| {
+                ops::apply(child, op, &json!({}), &Actor::Human, &BTreeSet::new(), events)?;
+                events.push(Event::new("cascaded", json!({"parent":team_id,"op":op})));
+                Ok(Value::Null)
+            })?;
+        }
+        cascade_status(store, child_id, op, depth + 1)?;
+    }
+    Ok(())
+}
+
+/// 9.7: a task with a sub-team cannot be cancelled or reassigned without
+/// saying whether the sub-team stops or keeps running.
+fn choose_subteam(store: &mut Store, team: &Team, input: &Value) -> anyhow::Result<()> {
+    let Some(task) = team.task(input["task"].as_u64().unwrap_or_default() as u32) else { return Ok(()) };
+    if !ops::subteam_stop_choice(input, task)? {
+        return Ok(());
+    }
+    let Some(child) = task.subteam.clone() else { return Ok(()) };
+    let Some(found) = store.load(&child)? else { return Ok(()) };
+    if matches!(found.status, TeamStatus::Running | TeamStatus::Paused | TeamStatus::Planning) {
+        store.mutate(None, &child, None, |team, events| {
+            ops::apply(team, "stop", &json!({}), &Actor::Human, &BTreeSet::new(), events)?;
+            events.push(Event::new("subteam_stopped", json!({"task":task.id})));
+            Ok(Value::Null)
+        })?;        cascade_status(store, &child, "stop", 1)?;
+    }
+    Ok(())
+}
+
+/// 9.7: archive only after the children are stopped or done.
+fn ensure_children_closed(store: &Store, team: &Team) -> anyhow::Result<()> {
+    for child_id in team.children.iter().take(32) {
+        let Some(child) = store.load(child_id)? else { continue };
+        ensure!(
+            matches!(child.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived),
+            "The sub-team {} is not stopped or done; stop it before archiving",
+            child.name
+        );
+    }
+    Ok(())
+}
+
+/// 9.6: a sub-lead passes one of its open questions to the parent lead as a
+/// question on the parent task; the parent's reply is copied back down.
+fn escalate(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id");
+    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    let mut store = Store::open(true)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let link = team.parent.clone().context("Only a sub-team escalates a question")?;
+    let by = actor(&team, "escalate", input)?;
+    ensure!(matches!(by, Actor::Human) || by.is_lead(&team), "Only the sub-team lead or you escalate a question");
+    let question_id = text(input, "question");
+    ensure!(!question_id.is_empty(), "A question id is required");
+    let question = team
+        .tasks
+        .iter()
+        .flat_map(|task| &task.attempts)
+        .flat_map(|attempt| &attempt.questions)
+        .find(|question| question.id == question_id && question.open())
+        .cloned()
+        .context("No open question with that id in this sub-team")?;
+    let parent_question = ops::forward_question(&team, &question);
+    let child_name = team.name.clone();
+    let child_id = team.id.clone();
+    store.mutate(None, &child_id, None, |team, events| {
+        for task in &mut team.tasks {
+            for attempt in &mut task.attempts {
+                for question in &mut attempt.questions {
+                    if question.id == question_id {
+                        question.forwarded = parent_question.clone();
+                    }
+                }
+            }
+        }
+        events.push(Event::new("escalated", json!({"question":question_id,"to":parent_question,"parent":link.team})));
+        Ok(Value::Null)
+    })?;
+    store.mutate(None, &link.team, None, |parent, events| {
+        let task = parent.task_mut(link.task).context("The parent task is gone")?;
+        ensure!(!task.status.finished(), "The parent task is already decided");
+        if task.open_attempt().is_none() {
+            let member = if link.member.is_empty() { task.assignee.clone() } else { link.member.clone() };
+            let n = task.attempts.len() as u32 + 1;
+            task.attempts.push(Attempt {
+                n,
+                id: uuid::Uuid::new_v4().to_string(),
+                member,
+                sent_at: now(),
+                delivered_at: Some(now()),
+                state: AttemptState::Delivered,
+                ..Default::default()
+            });
+        }
+        let attempt = task.attempts.iter_mut().rev().find(|attempt| attempt.state.open()).context("The parent task has no open attempt")?;
+        attempt.questions.push(Question {
+            id: parent_question.clone(),
+            text: format!("From the sub-team {child_name} (question {question_id}):\n{}", question.text),
+            at: now(),
+            forwarded: question_id.to_owned(),
+            ..Default::default()
+        });
+        events.push(Event::new("subteam_question", json!({"team":child_id,"question":parent_question,"task":link.task})));
+        Ok(Value::Null)
+    })?;
+    Ok(json!({"status":"escalated","team":child_id,"question":parent_question,"parent":link.team}))
+}
+
+/// 9.6: copies the parent lead's answer into the sub-team's question.
+fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow::Result<()> {
+    let parent = store.load(parent_id)?.context("Unknown team")?;
+    let Some(task) = parent.task(input["task"].as_u64().unwrap_or_default() as u32) else { return Ok(()) };
+    let Some(child) = task.subteam.clone() else { return Ok(()) };
+    let question_id = text(input, "question");
+    let Some(question) = task
+        .attempts
+        .iter()
+        .flat_map(|attempt| &attempt.questions)
+        .find(|question| question.id == question_id)
+    else {
+        return Ok(());
+    };
+    if question.forwarded.is_empty() {
+        return Ok(());
+    }
+    let forwarded = question.forwarded.clone();
+    let answer = text(input, "text").trim().to_owned();
+    if answer.is_empty() || store.load(&child)?.is_none() {
+        return Ok(());
+    }
+    store.mutate(None, &child, None, |child, events| {
+        if ops::answer_forwarded(child, &forwarded, &answer) {
+            events.push(Event::new("answered_from_parent", json!({"question":forwarded})));
+        }
+        Ok(Value::Null)
+    })
+    .map(|_| ())
+}
+
 fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
@@ -1211,6 +1401,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             Store::open(false)?.events(text(input, "team"), before, input["limit"].as_i64().unwrap_or(PAGE))
         }
         "current" => current(input),
+        "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {
             let request = text(input, "request_id");
             ensure!(canonical_uuid(request), "A canonical request_id is required");
@@ -1270,6 +1461,14 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 };
                 ops::ensure_tree_sessions(&team, &tree, added)?;
             }
+            if matches!(op, "cancel" | "reassign") {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                choose_subteam(&mut store, &team, &filled)?;
+            }
+            if op == "archive" {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                ensure_children_closed(&store, &team)?;
+            }
             if matches!(op, "approve" | "approve-phase") {
                 // F13: the lead approves only on the owner's exact sentence,
                 // typed in the lead's own session; the CLI checks it here and
@@ -1302,6 +1501,20 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             }
             if receipt["status"] == "stale" {
                 bail!("This attempt is no longer current for task #{}; the report was not accepted", receipt["task"]);
+            }
+            // Sections 9.5 and 9.7: the tree reacts to a finished, rejected,
+            // paused, resumed or stopped team, and to a parent answer.
+            if op == "finish" {
+                file_subteam_report(&mut store, team_id)?;
+            }
+            if op == "reject" {
+                reopen_rejected_subteam(&mut store, team_id, &filled)?;
+            }
+            if matches!(op, "pause" | "resume" | "stop") {
+                cascade_status(&mut store, team_id, op, 0)?;
+            }
+            if op == "reply" {
+                route_reply_down(&mut store, team_id, &filled)?;
             }
             Ok(receipt)
         }

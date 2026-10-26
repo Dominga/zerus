@@ -25,7 +25,7 @@ impl Actor {
             Actor::Member(id) => team.role_of(id),
         }
     }
-    fn is_lead(&self, team: &Team) -> bool {
+    pub(crate) fn is_lead(&self, team: &Team) -> bool {
         matches!(self, Actor::Member(id) if *id == team.lead)
     }
 }
@@ -590,6 +590,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         decided_at: None,
         owner_word: None,
         changes: Vec::new(),
+        reason: String::new(),
     });
     events.push(Event::new(
         "phase_added",
@@ -1083,6 +1084,98 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         json!({"by":by,"accepted":accepted,"tasks":team.tasks.len(),"summary_chars":summary_chars}),
     ));
     Ok(json!({"status":"finished"}))
+}
+
+/// 9.5: files a finished sub-team's summary (plus its id, 4000 characters) as
+/// the sub-lead's report on the parent task.
+pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Result<u32> {
+    let link = child.parent.as_ref().context("The team is not a sub-team")?;
+    ensure!(child.status == TeamStatus::Done, "The sub-team is not finished");
+    let summary = child.finish.as_ref().map(|finish| finish.summary.clone()).unwrap_or_default();
+    let task = parent.tasks.iter_mut().find(|task| task.id == link.task).context("The parent task is missing")?;
+    ensure!(!task.status.finished(), "The parent task is already decided");
+    let member = if link.member.is_empty() { task.assignee.clone() } else { link.member.clone() };
+    let text: String = format!("[Sub-team {} {}] {}", child.id, child.name, summary).chars().take(4000).collect();
+    let n = task.attempts.len() as u32 + 1;
+    task.attempts.push(Attempt {
+        n,
+        id: uuid::Uuid::new_v4().to_string(),
+        member,
+        sent_at: now(),
+        delivered_at: Some(now()),
+        state: AttemptState::Delivered,
+        report: Some(Report { text, at: now(), ..Default::default() }),
+        ..Default::default()
+    });
+    task.status = TaskStatus::Submitted;
+    Ok(task.id)
+}
+
+/// 9.5: a rejected sub-team report reopens it: Running with a "Rework" draft
+/// that carries the reason for its lead.
+pub(crate) fn reopen_subteam(child: &mut Team, reason: &str) -> anyhow::Result<u32> {
+    ensure!(child.parent.is_some(), "The team is not a sub-team");
+    ensure!(matches!(child.status, TeamStatus::Done | TeamStatus::Stopped), "The sub-team is not finished");
+    let n = child
+        .phases
+        .iter()
+        .map(|phase| phase.n)
+        .chain(child.tasks.iter().map(|task| task.phase))
+        .max()
+        .unwrap_or(1)
+        + 1;
+    child.status = TeamStatus::Running;
+    child.finish = None;
+    child.idle = Notice::None;
+    child.phases.push(Phase {
+        n,
+        title: "Rework".into(),
+        state: PhaseState::Draft,
+        reason: reason.chars().take(500).collect(),
+        added_by: "Lead".into(),
+        added_at: now(),
+        ..Default::default()
+    });
+    Ok(n)
+}
+
+/// 9.6: the parent question id a sub-team question becomes.
+pub(crate) fn forward_question(child: &Team, question: &Question) -> String {
+    format!("sub:{}:{}", child.id, question.id)
+}
+
+/// 9.6: copies the parent lead's answer back into the sub-team question.
+pub(crate) fn answer_forwarded(child: &mut Team, parent_question: &str, answer: &str) -> bool {
+    for task in &mut child.tasks {
+        for attempt in &mut task.attempts {
+            for question in &mut attempt.questions {
+                if question.open() && question.forwarded == parent_question {
+                    question.answer = answer.to_owned();
+                    question.answered_at = Some(now());
+                    question.by = "Lead".into();
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 9.7: cancelling or reassigning a task with a sub-team asks first; "stop"
+/// stops the sub-team, "keep" leaves it running.
+pub(crate) fn subteam_stop_choice(input: &Value, task: &Task) -> anyhow::Result<bool> {
+    if task.subteam.is_none() {
+        return Ok(false);
+    }
+    match text(input, "subteam") {
+        "stop" => Ok(true),
+        "keep" => Ok(false),
+        other => bail!(
+            "Task #{} has a sub-team; pass \"subteam\": \"stop\" or \"keep\" (got \"{}\")",
+            task.id,
+            other
+        ),
+    }
 }
 
 /// The phase of a task's last attempt as `status`, `current` and the desktop
@@ -4139,5 +4232,60 @@ mod tests {
         // Section 9.4: each tree level keeps its own plan health.
         assert_eq!(plan::validate(&parent, &BTreeSet::new()).health.tasks, 2);
         assert_eq!(plan::validate(&child, &BTreeSet::new()).health.tasks, 5);
+    }
+
+    #[test]
+    fn a_finished_subteam_files_its_summary_and_a_reject_reopens_it() {
+        let mut parent = running_team();
+        let mut child = Team {
+            id: "child".into(),
+            name: "Child".into(),
+            lead: "dev".into(),
+            status: TeamStatus::Done,
+            parent: Some(Parent { team: parent.id.clone(), task: 1, lead: "lead".into(), member: "dev".into() }),
+            finish: Some(Finish { by: "Lead".into(), summary: "Sub work is done".into(), at: 10.0 }),
+            ..Default::default()
+        };
+        let task = file_subteam_report(&child, &mut parent).unwrap();
+        assert_eq!(task, 1);
+        let parent_task = parent.task(1).unwrap();
+        assert_eq!(parent_task.status, TaskStatus::Submitted);
+        let report = parent_task.attempts.last().unwrap().report.as_ref().unwrap();
+        assert!(report.text.contains("[Sub-team child Child]") && report.text.contains("Sub work is done"), "{}", report.text);
+        assert_eq!(parent_task.attempts.last().unwrap().member, "dev");
+        // Section 9.5: the rejection reopens the sub-team with a Rework draft
+        // that carries the reason for its lead.
+        let phase = reopen_subteam(&mut child, "Fix the migration").unwrap();
+        assert_eq!(child.status, TeamStatus::Running);
+        assert!(child.finish.is_none());
+        let draft = child.phases.iter().find(|p| p.n == phase).unwrap();
+        assert_eq!((draft.title.as_str(), draft.reason.as_str(), draft.state), ("Rework", "Fix the migration", PhaseState::Draft));
+        // A flat team cannot be reopened.
+        assert!(reopen_subteam(&mut Team::default(), "x").is_err());
+    }
+
+    #[test]
+    fn an_escalated_question_takes_its_parents_answer() {
+        let mut child = Team { id: "child".into(), name: "Child".into(), lead: "dev".into(), ..Default::default() };
+        child.tasks.push(Task { id: 1, title: "Work".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+        let mut attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+        let mut question = Question { id: "q1".into(), text: "Which DB?".into(), at: 1.0, ..Default::default() };
+        question.forwarded = forward_question(&child, &question);
+        attempt.questions.push(question);
+        child.tasks[0].attempts.push(attempt);
+        let forwarded = child.tasks[0].attempts[0].questions[0].forwarded.clone();
+        assert_eq!(forwarded, "sub:child:q1");
+        assert!(answer_forwarded(&mut child, &forwarded, "Postgres"));
+        let question = &child.tasks[0].attempts[0].questions[0];
+        assert_eq!((question.answer.as_str(), question.by.as_str()), ("Postgres", "Lead"));
+        assert!(question.answered_at.is_some());
+        assert!(!answer_forwarded(&mut child, &forwarded, "again"));
+        // Section 9.7: a task with a sub-team asks how to treat it.
+        let mut task = Task { id: 1, title: "Work".into(), assignee: "dev".into(), ..Default::default() };
+        assert!(!subteam_stop_choice(&json!({}), &task).unwrap());
+        task.subteam = Some("child".into());
+        assert!(subteam_stop_choice(&json!({}), &task).is_err());
+        assert!(subteam_stop_choice(&json!({"subteam":"stop"}), &task).unwrap());
+        assert!(!subteam_stop_choice(&json!({"subteam":"keep"}), &task).unwrap());
     }
 }

@@ -666,6 +666,10 @@ pub(crate) struct Question {
     pub notice: Notice,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notice_id: String,
+    /// Section 9.6: the parent question this one was escalated as; the
+    /// parent's answer is copied back here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub forwarded: String,
 }
 
 impl Question {
@@ -873,6 +877,10 @@ pub(crate) struct Phase {
     /// owner's diff view (F10): {"kind":"added|removed|changed|moved", ...}.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<serde_json::Value>,
+    /// Section 9.5: why a "Rework" draft was opened after the parent lead
+    /// rejected the sub-team's report.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 impl Phase {

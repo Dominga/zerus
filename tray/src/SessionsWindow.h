@@ -542,6 +542,7 @@ private:
     QFrame *m_inspectorPanel = nullptr;
     QSplitter *m_workSplitter = nullptr;
     QPushButton *m_inspectorToggle = nullptr;
+    QWidget *m_inspectorCorner = nullptr;
     int m_inspectorWidth = 290;
     struct PendingMessage { QString key, runId, conversationId; };
     QHash<quint64, PendingMessage> m_pendingMessages;

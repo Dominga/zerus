@@ -52,3 +52,17 @@ body, task owner or lifecycle. A title-only card is valid. Creation request UUID
 bind the original title, content, target, initial stage and start intent; replay
 recovers that card without reverting later changes. A different input using the
 same UUID is refused. The rendered worker prompt includes title and description.
+
+Task discussion and delivery
+- `hgs task message REF --request-id UUID --mode queue|send|reopen|note
+  --expect-dispatch ID --content-json` reads {"text":...,"attachments":[...]}.
+  Read get REF first for dispatch_id and the immutable executor. queue stores
+  clarification for the next explicit Start; note is saved without delivery.
+- send addresses the verified current execution; reopen deliberately requests
+  changes from Review/Done and returns to In progress only after submission.
+  The coordinator receives subagent feedback; child delivery is not established
+  by the coordinator's receipt. A task message does not change ownership.
+- Keep the original UUID, mode, execution anchor and content on an interrupted
+  call. Repeating that exact request reads its receipt and NEVER replays a
+  reserved native submission. Submitted means accepted by the input transport,
+  not read or incorporated by the model. Unknown delivery stays unknown.

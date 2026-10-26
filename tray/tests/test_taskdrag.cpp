@@ -250,11 +250,11 @@ void TestTaskDrag::taskContextMenuUsesTheSameGuardedActions() {
     QTRY_COMPARE(inspector.displayedCount(), 1); QVERIFY(called(dir.path(), {"task", "stage", "uuid-2", "backlog", "--project", "project-1"}));
     inspector.selectTask("uuid-1"); auto *edit = inspector.findChild<QPushButton *>("taskInspectorEdit");
     QTRY_VERIFY(edit->isEnabled()); QVERIFY(edit->text().isEmpty());
-    QCOMPARE(edit->accessibleName(), QString("Task details")); const auto iconKey = edit->icon().cacheKey();
+    QCOMPARE(edit->accessibleName(), QString("Edit description")); const auto iconKey = edit->icon().cacheKey();
     board.actOnTask(item(1, "todo"), TaskAction::SendNow);
     QTRY_COMPARE(inspector.selectedStage(), QString("active"));
-    QVERIFY(edit->text().isEmpty()); QCOMPARE(edit->accessibleName(), QString("Task details"));
-    QCOMPARE(edit->icon().cacheKey(), iconKey); QVERIFY(edit->isEnabled());
+    QVERIFY(edit->text().isEmpty()); QCOMPARE(edit->accessibleName(), QString("Edit description"));
+    QCOMPARE(edit->icon().cacheKey(), iconKey); QTRY_VERIFY(!edit->isEnabled());
 }
 
 void TestTaskDrag::theOtherListsTileTakesADroppedTask() {

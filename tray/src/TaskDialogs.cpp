@@ -103,6 +103,11 @@ QString taskHistoryAction(const QJsonObject &entry) {
     } else if (kind == QLatin1String("report")) what = QObject::tr("reported: %1").arg(text);
     else if (kind == QLatin1String("cancelled")) what = QObject::tr("cancelled it");
     else if (kind == QLatin1String("comment")) what = QObject::tr("commented: %1").arg(text);
+    else if (kind == QLatin1String("message_delivery")) {
+        const auto receipt = entry.value("delivery").toObject();
+        what = QObject::tr("message %1 · %2").arg(entry.value("request_id").toString(), receipt.value("state").toString());
+    }
+    else if (kind == QLatin1String("resumed")) what = QObject::tr("requested changes and submitted feedback");
     else if (kind == QLatin1String("started")) what = QObject::tr("started the task");
     else what = text.isEmpty() ? kind : text;
     return what;

@@ -576,6 +576,99 @@ class DeliveryFixture(Fixture):
         self.hgs("settings", "--project", "orchard", "--set", text=json.dumps(settings))
 
 class TaskDelivery(DeliveryFixture):
+    def message(self, task, text, mode="send", identity=None, dispatch=None, **kw):
+        return self.hgs("message", task["ref"], "--content-json", "--mode", mode,
+                        "--request-id", identity or str(uuid.uuid4()), "--expect-dispatch", dispatch or task.get("dispatch_id") or "",
+                        text=json.dumps(dict(text=text, attachments=[])), **kw)
+
+    def test_queued_context_is_included_once_in_first_dispatch(self):
+        task = self.add("Canonical description", "--target", self.name)
+        queued = self.message(task, "Include this clarification", mode="queue")
+        self.assertEqual(queued["message"]["delivery"]["state"], "queued")
+        self.assertEqual(self.received(), "")
+        note = self.message(task, "Private task note", mode="note")
+        sent = self.hgs("send", task["ref"])["task"]
+        self.wait_received("Include this clarification")
+        self.assertNotIn("Private task note", self.received())
+        self.assertEqual(sent["text"], "Canonical description")
+        messages = [e for e in sent["log"] if e["kind"] == "message"]
+        self.assertEqual([e["delivery"]["state"] for e in messages], ["submitted", "note"])
+        self.confirm()
+        self.as_agent("report", task["ref"], text="Ready for review")
+        self.hgs("stage", task["ref"], "todo")
+        self.hgs("send", task["ref"])
+        self.assertEqual(self.received().count("Include this clarification"), 1)
+
+    def test_feedback_has_a_durable_receipt_and_explicit_review_reopening(self):
+        task = self.add("Work on this", "--target", self.name)
+        task = self.hgs("send", task["ref"])["task"]; self.confirm()
+        identity = str(uuid.uuid4())
+        sent = self.message(task, "Active feedback", identity=identity)
+        self.assertEqual(sent["message"]["delivery"]["state"], "submitted")
+        self.wait_received("Active feedback"); self.confirm()
+        again = self.message(task, "Active feedback", identity=identity)
+        self.assertEqual(again["message"]["request_id"], identity)
+        self.assertEqual(self.received().count("Active feedback"), 1)
+        self.assertIn("different content", self.message(task, "Altered feedback", identity=identity, ok=False))
+        self.as_agent("report", task["ref"], text="Result for review")
+        reviewed = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(self.message(reviewed, "Just a note", mode="note")["task"]["stage"], "review")
+        changed = self.message(reviewed, "Please revise", mode="reopen")
+        self.assertEqual(changed["task"]["stage"], "active")
+        self.assertEqual(changed["task"]["session"]["session_id"], task["session"]["session_id"])
+        self.wait_received("Please revise")
+
+    def test_unknown_feedback_is_recovered_without_another_paste(self):
+        task = self.add("Task for crash recovery", "--target", self.name)
+        task = self.hgs("send", task["ref"])["task"]; self.confirm()
+        identity = str(uuid.uuid4())
+        # The isolated shim lets the original paste through, then kills just
+        # its hgs parent before Enter/receipt completion. Never touches live tmux.
+        shim = "#!/usr/bin/env python3\nimport os,signal,subprocess,sys\na=sys.argv[1:]\n"
+        shim += "r=subprocess.run([" + repr(TMUX) + ",'-S'," + repr(str(self.socket)) + ",'-f','/dev/null',*a])\n"
+        shim += "if a and a[0]=='paste-buffer': os.kill(os.getppid(),signal.SIGKILL)\nsys.exit(r.returncode)\n"
+        self.script("tmux", shim)
+        self.message(task, "Never paste twice", identity=identity, ok=False)
+        self.wait_received("Never paste twice")
+        self.script("tmux", '#!/bin/sh\nexec ' + TMUX + ' -S "' + str(self.socket) + '" -f /dev/null "$@"\n')
+        recovered = self.message(task, "Never paste twice", identity=identity)
+        self.assertEqual(recovered["message"]["delivery"]["state"], "uncertain")
+        self.assertEqual(self.received().count("Never paste twice"), 1)
+        self.message(task, "Never paste twice", identity=identity)
+        self.assertEqual(self.received().count("Never paste twice"), 1)
+
+    def test_queued_images_keep_their_message_scoped_references(self):
+        image = dict(name="description.png",mime="image/png",reference="[Image #1]",data_base64=base64.b64encode(b"description-image").decode())
+        task = self.add(json.dumps(dict(text="Description [Image #1]",attachments=[image])), "--content-json", "--target", self.name)
+        queued_image = dict(image,name="clarification.png",data_base64=base64.b64encode(b"clarification-image").decode())
+        self.hgs("message",task["ref"],"--content-json","--mode","queue","--request-id",str(uuid.uuid4()),
+                 text=json.dumps(dict(text="Clarification [Image #1]",attachments=[queued_image])))
+        out = self.hgs("send",task["ref"])
+        self.wait_received("Clarification [Image #2]")
+        self.assertIn("Description [Image #1]",self.received())
+        self.assertEqual([a["reference"] for a in out["receipt"]["attachments"]],["[Image #1]","[Image #2]"])
+        self.assertEqual([Path(a["path"]).read_bytes() for a in out["receipt"]["attachments"]],[b"description-image",b"clarification-image"])
+        self.assertEqual(out["task"]["text"],"Description [Image #1]")
+
+    def test_feedback_follows_renames_but_refuses_a_changed_conversation(self):
+        task = self.add("Owned task", "--target", self.name)
+        task = self.hgs("send",task["ref"])["task"]; self.confirm()
+        old_name=self.name; self.name="codex/renamed-worker"
+        self.tmux("rename-session","-t","="+old_name+":",self.name)
+        record=json.loads(self.record_path.read_text()); self.record_path.unlink(); record["name"]=self.name; record["journal_name"]=old_name
+        self.record_path=self.state/(hashlib.sha256(self.name.encode()).hexdigest()+".json"); self.record_path.write_text(json.dumps(record))
+        sent=self.message(task,"Feedback after rename")
+        self.assertEqual(sent["message"]["delivery"]["state"],"submitted"); self.wait_received("Feedback after rename"); self.confirm()
+        record=json.loads(self.record_path.read_text()); record["conversation_id"]=str(uuid.uuid4()); self.record_path.write_text(json.dumps(record))
+        self.assertIn("conversation changed",self.message(task,"Wrong conversation",ok=False))
+        self.assertNotIn("Wrong conversation",self.received())
+
+    def test_a_recovery_check_without_a_reservation_never_sends(self):
+        task=self.add("Task", "--target",self.name); task=self.hgs("send",task["ref"])["task"]; self.confirm()
+        self.assertIn("check sent nothing",self.hgs("message",task["ref"],"--request-id",str(uuid.uuid4()),"--mode","send","--expect-dispatch",task["dispatch_id"],
+                "--recover-only",text="Do not send this check",ok=False))
+        self.assertNotIn("Do not send this check",self.received())
+
     def test_a_renamed_task_is_delivered_to_the_same_native_run(self):
         task = self.add("Follow the immutable run", "--target", self.name)
         old = self.name

@@ -689,3 +689,146 @@ Task comments still persist in task history only. Verified delivery to an active
 executor, execution-scoped Activity attribution, revision guards, distributed
 claims and true per-task Pause remain the execution workstream; this UI iteration
 must not imply that those contracts have shipped.
+
+
+## Task View UI/UX review after be54a544 (2026-10-26)
+
+Status: approved by the owner; implemented in the next branch iteration below. The owner supplied two screenshots
+of the live Mac preview: the oversized detached-looking composer and the dense
+header with a disabled Run in field and a description rendered as a user message.
+This review supersedes the automatic Description/Comment destination switch in
+the first central-view iteration. A shared widget alone does not establish the
+same input presentation or the same interaction contract as Activity.
+
+### Verified behavior and defects
+
+* The Task View uses MessageComposer directly in a zero-inset detail layout;
+  Activity places its input in ActivityWidth::ColumnLayout. Task-specific rules
+  style every descendant QPushButton, and the composer root is renamed while
+  its transparent-root skin still selects QWidget#messageComposer. These are
+  concrete styling/composition differences; the screenshot's entire input panel
+  cannot be treated as a correctly reused Activity input. Empty-height behavior
+  also needs comparison at the same window size, scale and saved resize setting.
+* Rename, ID, stage and a long title compete in one row. The next rows introduce
+  three content tabs, an executor link, a description-edit glyph, Last executor
+  text and a full-width Run in pseudo-field. The hierarchy does not make the
+  selected task, its current worker or the primary action immediately legible.
+* Run in is a QPushButton that opens an assignment menu. It is disabled outside
+  To do/Backlog, yet still resembles an available dropdown in a review task.
+  Planned assignment and actual/last execution are displayed simultaneously.
+* Description is rendered through the person-message TaskEntry adapter, including
+  You, a timestamp and a green message background. It reads as a chat post. For
+  legacy tasks the header derives its title from the first description line, so
+  a one-line task repeats the same text as both heading and supposed message.
+* A successful comment explicitly selects History. The default task page does
+  not show a continuing discussion, so the person loses the place they wrote in.
+* saveTaskNote invokes hgs task comment, which appends a comment record only.
+  It has no native delivery or scheduled outbox. task_prompt renders title and
+  description; it does not include comment bodies. Only a previously sent task
+  gets an instruction to read history. A saved pre-start comment is therefore
+  not guaranteed to reach the agent even at first dispatch.
+* The input destination changes according to empty description and selected tab.
+  A small Comment label and a generic send arrow do not explain that first input
+  edits a document, later input saves a journal entry, and neither means delivery
+  to an executor. State-transition buttons placed beside that arrow further
+  compete with its meaning.
+
+### Approved information architecture
+
+The right board owns task selection, ordering and filters. One central Task View
+owns the selected task's document, discussion, result and input. Remove the
+secondary Description/Result/History tab barrier from the normal conversation
+flow: the default task view must contain the description and the discussion.
+Keep result and audit access as contextual navigation rather than destinations
+where comments disappear.
+
+1. A task heading may wrap naturally, with Rename in its context menu. A quieter
+   metadata row holds the task ID, a real stage badge and a compact executor chip.
+   The chip states Planned executor, Working in, or Last executor according to
+   actual evidence. Assignment opens a focused picker, and navigation to the
+   worker's Activity has its own unambiguous affordance. Session names are labels;
+   mutations and delivery retain immutable execution/session identity.
+2. The canonical Description is a document: a clear heading, ordinary Markdown,
+   attachment previews and an Edit control. It has no You bubble or chat timestamp.
+   New cards enter an explicit Edit description state. Save/Cancel have document
+   meanings; navigating a tab must not silently repurpose the field. Later comments
+   never rewrite the description automatically.
+3. Discussion sits directly below the document and uses Activity message styling.
+   A newly submitted comment appears here immediately with its persistence and
+   delivery evidence. Agent replies appear only with verified task attribution;
+   neighboring session events cannot be guessed into the task thread.
+4. An available Result is a distinct, reachable block with reported changes and
+   actual commit/build/deployment artifacts when known. Review tasks foreground
+   that result and offer Accept or Request changes. Service history is secondary:
+   stage changes, assignment, handoff and receipts remain accessible in an audit
+   surface without being the only home for conversation.
+5. Input uses Activity's complete layout/width/skin, spacing, resize behavior,
+   attachments, voice preview and send affordance. Task metadata does not apply
+   broad styles to that subtree. Lifecycle actions occupy a separate task action
+   group, not an indistinguishable extension of the message field. The send
+   destination and its effect are readable before pressing Enter.
+
+### Approved message and document contract
+
+| Intent / task state | Person-facing action | Durable effect and executor behavior |
+| --- | --- | --- |
+| Create card | Confirm title | Create one shared card and open explicit description editing; do not launch work. |
+| Edit description | Save description | Save the canonical document; display the changed version in the same task. Active revision delivery needs its own guarded execution contract. |
+| Message in To do/Backlog | Add to task, to be sent on Start | Save discussion and include its bounded original identities in the next explicit dispatch snapshot. |
+| Message in progress | Send to the displayed worker | Persist the task message and reserve its delivery identity, then submit to the verified current execution. Keep failures/uncertain delivery visible; no fallback to another session. |
+| Feedback in review | Request changes and send | Save feedback, reopen through a deliberate action, and record new work only with the appropriate delivery/start evidence. An optional note-only mode leaves the review status intact. |
+| Message on Done | Reopen and send, or Save note | Make the distinction explicit. A thank-you or internal note must not silently start another execution. |
+
+A note-only action is available intentionally. Normal task conversation must not
+silently behave as an internal note. After submission show Saved to task, Waiting
+for Start, Submitted to worker, or Delivery unconfirmed as warranted. Native
+submission does not establish that a model read or incorporated the message.
+
+Delivery is a backend requirement, not a visual label change. Use a durable task
+message identity and guarded outbox, capture the exact target execution, and keep
+its receipt visible in both task discussion and session Activity. Handoff,
+renames, offline targets and unknown native replies must not authorize replay.
+Do not reuse hgs task send for active-task comments or infer ownership from a
+last-session name. The comment CLI remains note-only; the distinct `task message` operation below
+establishes the discussion/delivery contract.
+
+### Acceptance criteria for this iteration
+
+At the same width, theme, content scale and user resize setting, Activity and
+Task View inputs should share alignment, typography and controls. A task should
+show its document, stage and actual/planned executor without competing full-width
+routing fields. Sending must keep the new message visible in the same discussion
+and explain where it went. A first dispatch must include queued clarifications;
+active delivery and review feedback must retain exact identities and honest
+receipts. Saving a note must never look like confirmed agent delivery. Review the
+new document and delivery contract together before another cosmetic-only preview.
+
+### Implemented follow-up
+
+The next branch iteration puts the canonical description, reported result and
+recent discussion on the same central page. Description uses document Markdown,
+without a user bubble or timestamp, with explicit Edit and Save/Cancel. Task
+navigation never silently changes the input destination. A task menu owns Rename,
+Result and History. Header metadata uses a compact executor chip; lifecycle
+controls stay outside message submission. The composer uses ActivityWidth and
+its component skin, including a shared toolbar chip for delivery intent. The
+side-panel toggle uses a padded corner host and neutral checked styling.
+
+Discussion uses a distinct schema-five `task message` operation. Queued context
+and message-scoped media are included once in the next explicit dispatch; image
+labels are flattened without changing the stored document or messages. Notes
+remain note-only. Active feedback reserves an immutable owner/run/conversation
+and input UUID before guarded submission. Reopen moves Review/Done to Active only
+after a confirmed submission. A coordinator receipt never proves child delivery
+or model consumption. Native dispatch receipts refuse a changed run/conversation;
+legacy direct-work acknowledgements retain an owner and explicit start anchor.
+This does not implement distributed leases, revision scheduling, stale-report
+protection or per-task Pause (`zerus-cg5h.4`).
+
+An interrupted desktop request retains its original identity and payload in one
+private file per task, with only a small marker in settings. Content I/O runs on
+a worker. Check uses `--recover-only`: even a missing reservation cannot authorize
+an initial send. A reserved request is never automatically replayed. Releasing a
+local recovery record requires explicit confirmation and neither cancels nor
+resends native input. Existing full-journal CLI reads remain `zerus-cg5h.2`;
+Task View retains only its bounded selected-task window.

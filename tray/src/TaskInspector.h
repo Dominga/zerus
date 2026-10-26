@@ -17,6 +17,8 @@ class QLineEdit;
 class QHBoxLayout;
 class QToolButton;
 class MessageComposer;
+class ToolbarChip;
+namespace ActivityWidth { class ColumnLayout; }
 
 // Session tasks beside Activity. Shares the board's listing, but fetches only
 // the selected task's history. It never infers task execution from native work.
@@ -27,6 +29,7 @@ public:
     void setContext(const QString &project, const QString &host, const QString &session, const QList<TaskSession> &sessions);
     void setTheme(bool dark);
     void setContentScale(double scale);
+    void setColumnWidth(int width);
     void selectTask(const QString &uuid);
     void openTask(const QString &uuid) { selectTask(uuid); if (m_selected == uuid) emit taskViewRequested(); }
     QString selectedTask() const { return m_selected; }
@@ -76,7 +79,12 @@ private:
     QJsonObject m_detail;
     quint64 m_request = 0, m_generation = 0;
     QLabel *m_scope, *m_state;
-    QLabel *m_title, *m_identity, *m_inputMode;
+    QLabel *m_title, *m_identity;
+    ActivityWidth::ColumnLayout *m_headerColumn, *m_inputColumn;
+    ToolbarChip *m_messageMode;
+    QPushButton *m_cancelDescription;
+    QPushButton *m_checkMessage;
+    bool m_noteOnly = false;
     QToolButton *m_add;
     QLineEdit *m_newTitle;
     QLabel *m_createError;

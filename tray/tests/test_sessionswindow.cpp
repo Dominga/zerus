@@ -6745,11 +6745,16 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     QCOMPARE(tabs->tabText(2), QString("Task board")); QCOMPARE(tabs->tabText(3), QString("Native UI"));
     QCOMPARE(tabs->tabText(4),QString("Processes"));QVERIFY(tabs->isTabVisible(4));
     QVERIFY(tabs->isTabVisible(1)); QVERIFY(tabs->isTabVisible(2)); QVERIFY(!tabs->isTabVisible(3));
-    QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle);
+    QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle->parentWidget());
     editor->setPlainText("Keep this draft"); const int originalWidth = tabs->width();
     QTest::mouseClick(toggle, Qt::LeftButton); QTest::qWait(40);
     QVERIFY(inspector->isVisible()); QVERIFY(tabs->width() < originalWidth); QVERIFY(panel->width() >= 240);
-    QVERIFY(!tabs->cornerWidget()); QCOMPARE(inspector->cornerWidget(), toggle);
+    QVERIFY(!tabs->cornerWidget()); QCOMPARE(inspector->cornerWidget(), toggle->parentWidget());
+    auto *corner = inspector->cornerWidget();
+    QVERIFY(toggle->mapTo(corner, QPoint()).y() >= 4);
+    QVERIFY(toggle->mapTo(corner, toggle->rect().bottomRight()).y() <= corner->height() - 5);
+    QVERIFY(toggle->iconSize() == QSize(18, 18));
+
     QCOMPARE(tabs->currentIndex(), 0); QCOMPARE(editor->toPlainText(), QString("Keep this draft"));
     QJsonObject data{{"tracked", true}, {"run_id", "run-1"}, {"conversation_id", "conversation-one"},
         {"subagent_source", "hooks"}, {"subagents", QJsonObject{{"review", QJsonObject{{"name", "Reviewer"}, {"state", "working"}}}}},
@@ -6768,7 +6773,7 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     splitter->setSizes({420, 310});
     QTest::mouseClick(toggle, Qt::LeftButton); QTest::qWait(40);
     QVERIFY(panel->isHidden()); QVERIFY(!toggle->isChecked()); QCOMPARE(editor->toPlainText(), QString("Keep this draft"));
-    QCOMPARE(tabs->cornerWidget(), toggle); QVERIFY(!inspector->cornerWidget()); QVERIFY(toggle->isVisible());
+    QCOMPARE(tabs->cornerWidget(), toggle->parentWidget()); QVERIFY(!inspector->cornerWidget()); QVERIFY(toggle->isVisible());
     tabs->setCurrentIndex(1); QTest::mouseClick(toggle, Qt::LeftButton); QCOMPARE(tabs->currentIndex(), 1);
     QCOMPARE(inspector->currentIndex(), 2);
     data["processes"]=QJsonObject{{"active_count",1},{"items",QJsonArray{

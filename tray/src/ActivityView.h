@@ -74,6 +74,7 @@ public slots:
     void jumpToLatest();
 
 signals:
+    void taskDocumentEditRequested();
     // Files are routed to the session owner, which knows their machine and cwd.
     void fileReferenceActivated(const QString &href);
     void externalLinkActivated(const QUrl &url);

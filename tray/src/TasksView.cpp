@@ -1,7 +1,9 @@
 #include "TasksView.h"
 #include <QInputDialog>
+#include <QUuid>
 #include "TaskStageFilter.h"
 #include "TaskContent.h"
+#include "TaskMessageOutbox.h"
 #include "AttachmentViewer.h"
 #include "AttachmentViewer.h"
 #include "HgsClient.h"
@@ -689,6 +691,54 @@ void TasksView::saveTaskNote(const QString &uuid, const QString &text, const QLi
                 run({{{"comment", uuid, "--content-json", "--project", project}, payload}}, saved, refused);
             });
     }
+}
+
+void TasksView::saveTaskMessage(const QString &uuid, const QString &mode, const QString &dispatch, const QString &text, const QList<MessageAttachment> &files,
+                               std::function<void()> saved, std::function<void(const QString &)> refused) {
+    const auto project = m_projectId;
+    AttachmentFiles::runAsync<TaskMessageOutbox::Request>(this, [project, uuid, mode, dispatch, text, files] {
+        return TaskMessageOutbox::reserve(project, uuid, {{"content", QJsonObject{{"text", text}, {"attachments", TaskContent::encode(files)}}}, {"mode", mode}, {"dispatch", dispatch}});
+    }, [this, project, uuid, saved, refused](const TaskMessageOutbox::Request &request) {
+        if (!request.error.isEmpty()) { refused(request.error); return; }
+        if (project != m_projectId) { refused(tr("The selected project changed; the original message was kept for recovery.")); return; }
+        submitTaskMessage(project, uuid, request.record, request.recovering, saved, refused);
+    });
+}
+
+void TasksView::submitTaskMessage(const QString &project, const QString &uuid, const QJsonObject &record, bool recovery,
+                                std::function<void()> saved, std::function<void(const QString &)> refused) {
+    const auto intent = record.value("intent").toObject(); const auto id = record.value("id").toString();
+    QStringList args{"message", uuid, "--request-id", id, "--mode", intent.value("mode").toString(),
+        "--expect-dispatch", intent.value("dispatch").toString(), "--content-json", "--project", project};
+    if (recovery) args << "--recover-only";
+    request(args, QString::fromUtf8(QJsonDocument(intent.value("content").toObject()).toJson(QJsonDocument::Compact)),
+        [this, project, uuid, id, saved, refused](const QJsonObject &reply) {
+            if (reply.value("task").toObject().value("uuid").toString() != uuid || reply.value("message").toObject().value("request_id").toString() != id) {
+                refused(tr("The message reply did not match its original identity. Recovery data was kept.")); return;
+            }
+            refresh();
+            AttachmentFiles::runAsync<QString>(this, [project, uuid, id] { return TaskMessageOutbox::release(project, uuid, id); }, [saved, refused](const QString &error) {
+                if (error.isEmpty()) saved(); else refused(error);
+            });
+        }, refused);
+}
+
+void TasksView::recoverTaskMessage(const QString &uuid, std::function<void(const QJsonObject &)> checked, std::function<void(const QString &)> refused) {
+    const auto project = m_projectId;
+    AttachmentFiles::runAsync<TaskMessageOutbox::Request>(this, [project, uuid] { return TaskMessageOutbox::read(TaskMessageOutbox::path(project, uuid)); },
+        [this, project, uuid, checked, refused](const TaskMessageOutbox::Request &request) {
+            if (!request.error.isEmpty()) { refused(request.error); return; }
+            if (project != m_projectId) { refused(tr("Return to this project before checking delivery.")); return; }
+            const auto content = request.record.value("intent").toObject().value("content").toObject();
+            submitTaskMessage(project, uuid, request.record, true, [checked, content] { checked(content); }, refused);
+        });
+}
+
+void TasksView::releaseTaskMessage(const QString &uuid, std::function<void()> released, std::function<void(const QString &)> refused) {
+    const auto project = m_projectId; const auto id = QSettings().value(TaskMessageOutbox::key(project, uuid)).toString();
+    AttachmentFiles::runAsync<QString>(this, [project, uuid, id] { return TaskMessageOutbox::release(project, uuid, id); }, [released, refused](const QString &error) {
+        if (error.isEmpty()) released(); else refused(error);
+    });
 }
 
 QString TasksView::taskSendBlocker(const TaskItem &task, const TaskTarget &target) const {

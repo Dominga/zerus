@@ -918,6 +918,14 @@ struct ActivityRenderResult {
     for (int i = 0; i < events.size();) {
         const auto event = events[i]; const auto role = messageRole(event);
         const bool taskEntry = event.value("source") == "zerus_task" && event.value("type") == "TaskEntry";
+        if (taskEntry && event.value("task_role") == "document") {
+            html += QString("<h3 style='color:%1;margin:16px 0 10px;'>%2</h3>")
+                .arg(fg, escaped(event.value("task_label").toString()));
+            html += markdown(event.value("detail").toString(), pageTheme, m_fileLinks);
+            html += attachmentCards(event.value("attachments").toArray(), eventKey(event));
+            if (event.value("task_editable").toBool()) html += QString("<p style='font-size:12px;margin:10px 0 20px;'><a href='hgs-task:edit' style='color:%1;'>%2</a></p>").arg(accent, escaped(tr("Edit description")));
+            ++i; continue;
+        }
         if (taskEntry && role.isEmpty()) {
             html += QString("<p style='font-size:11px;color:%1;margin:10px 0;'><span>%2</span> &nbsp; <b>%3</b> · %4</p>")
                 .arg(muted, escaped(timeText(event)), escaped(event.value("task_author").toString()), escaped(event.value("detail").toString()));
@@ -1022,6 +1030,7 @@ struct ActivityRenderResult {
                 : role == "user" ? (event.value("type") == "UserPromptQueued" ? tr("You (queued)") :
                 event.value("type") == "QuestionAnswered" || !replies.isEmpty() ? tr("You (answer)") : tr("You")) : tr("Agent");
             auto stamp=timeText(event);
+            if (taskEntry && !event.value("task_delivery").toString().isEmpty()) stamp += "  " + event.value("task_delivery").toString();
             // OpenCode reports its inbox: a waiting message is queued, and after
             // Stop it stays there, not delivered, until it is sent or removed.
             const auto delivery=role=="user"?event.value("delivery_state").toString():QString();
@@ -1400,6 +1409,7 @@ void ActivityView::setTaskJournal(const QString &key, const QJsonArray &entries,
         events.append(QJsonObject{{"source", "zerus_task"}, {"type", "TaskEntry"}, {"activity_key", entry.value("id")},
             {"at", entry.value("at").toDouble() / 1000.0}, {"detail", entry.value("text")},
             {"task_author", entry.value("author")}, {"task_label", entry.value("label")}, {"task_role", entry.value("role")},
+            {"task_editable", entry.value("editable")}, {"task_delivery", entry.value("delivery")},
             {"attachments", entry.value("attachments")}});
     }
     setActivity({{"task_journal", true}}, events);
@@ -1726,6 +1736,7 @@ bool ActivityView::eventFilter(QObject *watched, QEvent *event)
 
 void ActivityView::activateLink(const QUrl &url)
 {
+    if (url == QUrl("hgs-task:edit")) { emit taskDocumentEditRequested(); return; }
     if (url.scheme() == "hgs-activity" && m_toggleKeys.contains(url.path())) {
         const auto key = url.path();
         bool follow = false;

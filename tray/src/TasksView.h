@@ -99,6 +99,9 @@ public:
     void saveTaskEdits(const TaskItem &task, const TaskEdits &edits, std::function<void()> saved, std::function<void(const QString &)> refused);
     void saveTaskAssignment(const TaskItem &task, const TaskTarget &target, std::function<void()> saved, std::function<void(const QString &)> refused);
     void saveTaskNote(const QString &uuid, const QString &text, const QList<MessageAttachment> &files, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void saveTaskMessage(const QString &uuid, const QString &mode, const QString &dispatch, const QString &text, const QList<MessageAttachment> &files, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void recoverTaskMessage(const QString &uuid, std::function<void(const QJsonObject &)> checked, std::function<void(const QString &)> refused);
+    void releaseTaskMessage(const QString &uuid, std::function<void()> released, std::function<void(const QString &)> refused);
     QString taskSendBlocker(const TaskItem &task, const TaskTarget &target) const;
     QString selectedStage() const { return m_stage; }
     // The Activity sidebar hosts the board's existing scope/settings controls.
@@ -124,6 +127,7 @@ protected:
     // The platform's drag loop; listings and other events arrive while it runs.
     virtual Qt::DropAction execDrag(QDrag *drag);
 private:
+    void submitTaskMessage(const QString &project, const QString &uuid, const QJsonObject &record, bool recovery, std::function<void()> saved, std::function<void(const QString &)> refused);
     // Every stage can be dragged to reorder; other targets keep their own guards.
     void startDrag(TaskRow *row, const QPoint &hotSpot);
     // A row leaves the list. The row a drag runs from stays, hidden, until the drag

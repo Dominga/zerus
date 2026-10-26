@@ -260,7 +260,7 @@ private:
 
 MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
 {
-    setObjectName("messageComposer");
+    setObjectName("messageComposer"); setProperty("messageComposer", true);
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 4, 0, 0); layout->setSpacing(0);
     m_editorHeight = qBound(DefaultEditorHeight, QSettings().value(EditorHeightSetting, DefaultEditorHeight).toInt(), MaximumEditorHeight);
     auto *handle = new ComposerResizeHandle(this); m_resizeHandle = handle; layout->addWidget(handle);
@@ -1678,7 +1678,7 @@ void MessageComposer::setTheme(bool dark)
         QPlainTextEdit[composerEditor="true"] { background:%1; color:%2; border:1px solid %3; border-radius:9px; padding:%8px; font-size:%9px; selection-background-color:%4; }
         QPlainTextEdit[composerEditor="true"]:focus { border-color:%5; }
         QPlainTextEdit[composerEditor="true"][sessionBlocked="true"] { color:%7; border-color:%3; }
-        QWidget#messageComposer { background:transparent; border:0; }
+        QWidget[messageComposer="true"] { background:transparent; border:0; }
         QWidget#attachmentRow { border-radius:6px; }
         QWidget#attachmentRow:hover, QWidget#attachmentRow:focus { background:%4; }
         QWidget#attachmentsPopover QLabel { font-size:11px; border:0; background:transparent; }

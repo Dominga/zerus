@@ -1483,7 +1483,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_inspectorToggle->setProperty("glyph", "inspector"); m_inspectorToggle->setCheckable(true);
     m_inspectorToggle->setProperty("sessionHeaderAction", true);
     configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show tasks, plan, agents, details and worktrees"), m_dark);
-    tabs->setCornerWidget(m_inspectorToggle);
+    m_inspectorCorner = new QWidget; m_inspectorCorner->setObjectName("inspectorCorner");
+    auto *cornerLayout = new QHBoxLayout(m_inspectorCorner); cornerLayout->setContentsMargins(4, 4, 6, 4);
+    cornerLayout->addWidget(m_inspectorToggle, 0, Qt::AlignVCenter);
+    tabs->setCornerWidget(m_inspectorCorner);
     connect(m_inspectorToggle, &QPushButton::toggled, this, &SessionsWindow::setInspectorVisible);
     connect(m_inspector, &QTabWidget::currentChanged, this, [](int index) { QSettings().setValue("workspace/inspectorTab", index); });
     connect(m_workSplitter, &QSplitter::splitterMoved, this, [this] {
@@ -1923,6 +1926,7 @@ void SessionsWindow::applyActivityWidth()
     const int column = ActivityWidth::column(ContentScale::factor());
     for (auto *view : {m_activityView, m_subagentView}) view->setColumnWidth(column);
     for (auto *layout : m_activityColumns) layout->setColumnWidth(column);
+    m_taskInspector->setColumnWidth(column);
 }
 
 void SessionsWindow::updateWindowPinAppearance()
@@ -2038,6 +2042,8 @@ void SessionsWindow::applyTheme()
         QPushButton[sessionHeaderAction="true"], QPushButton[settingReset="true"] { background:transparent; border:1px solid transparent; border-radius:6px; padding:0; }
         QPushButton[sessionHeaderAction="true"]:hover, QPushButton[settingReset="true"]:hover { background:%7; }
         QPushButton[sessionHeaderAction="true"]:checked, QPushButton[sessionHeaderAction="true"]:pressed, QPushButton[settingReset="true"]:pressed { background:%10; }
+        QPushButton#toggleInspector:checked { background:transparent; border-color:transparent; }
+        QPushButton#toggleInspector:hover { background:%7; }
         QPushButton[sessionHeaderAction="true"]:disabled { background:transparent; border-color:transparent; }
         QPushButton[sessionHeaderAction="true"]:focus[keyboardFocus="true"], QPushButton[settingReset="true"]:focus[keyboardFocus="true"] { border-color:%5; }
         QPushButton[sessionHeaderAction="true"]::menu-indicator { image:none; width:0; }
@@ -2090,6 +2096,9 @@ void SessionsWindow::applyTheme()
         QStackedWidget#detail { background:%3; border:1px solid %4; border-radius:12px; }
         QTabWidget::pane { border:0; border-top:1px solid %4; }
         QTabBar::tab { background:transparent; color:%6; padding:8px 9px; border-bottom:2px solid transparent; }
+        /* Qt sizes corner hosts from the tab size hint, ignoring a bar's
+           minimumHeight. These headers must fit the 34px control and its inset. */
+        QTabWidget#sessionDetailTabs QTabBar::tab, QTabWidget#sessionInspector QTabBar::tab { min-height:26px; }
         QTabBar::tab:selected { color:%2; border-bottom:2px solid %5; }
         QTabBar::tab:focus { color:%5; }
         QTextBrowser { background:transparent; color:%2; border:0; padding-top:12px; selection-background-color:%10; }
@@ -2279,9 +2288,9 @@ void SessionsWindow::setInspectorVisible(bool visible)
     const bool keyboardFocus = m_inspectorToggle->property("keyboardFocus").toBool();
     auto *oldHeader = visible ? m_detailTabs : m_inspector;
     auto *newHeader = visible ? m_inspector : m_detailTabs;
-    if (newHeader->cornerWidget() != m_inspectorToggle) {
+    if (newHeader->cornerWidget() != m_inspectorCorner) {
         oldHeader->setCornerWidget(nullptr);
-        newHeader->setCornerWidget(m_inspectorToggle);
+        newHeader->setCornerWidget(m_inspectorCorner);
     }
     m_inspectorPanel->setVisible(visible);
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
@@ -2289,7 +2298,7 @@ void SessionsWindow::setInspectorVisible(bool visible)
     m_inspectorToggle->setIcon(workspaceIcon(m_inspectorToggle->property("glyph").toString(), QColor(m_muted)));
     m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show tasks, plan, agents, details and worktrees"));
     m_inspectorToggle->setToolTip(ShortcutRegistry::instance().tooltip(m_inspectorToggle->accessibleName(), "panel.toggle"));
-    m_inspectorToggle->show();
+    m_inspectorCorner->show(); m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
     if (visible) {
         // QTabWidget's own minimum width can ignore its full header in document

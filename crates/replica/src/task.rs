@@ -1,7 +1,7 @@
 //! One task as one Loro document: `meta` (identity, set once), `fields`
 //! (last writer wins), `text` (the prompt, merged by character) and `log`
 //! (history, append only).
-use crate::attachment::{check_attachments, TaskAttachment, BASE_TASK_SCHEMA, DISCUSSION_TASK_SCHEMA, TASK_SCHEMA};
+use crate::attachment::{check_attachments, TaskAttachment, BASE_TASK_SCHEMA, DISCUSSION_TASK_SCHEMA, NAMED_TASK_SCHEMA, TASK_SCHEMA};
 use crate::schema::{
     check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, TaskWorker, MAX_DOCUMENT, SCHEMA,
 };
@@ -101,7 +101,7 @@ impl TaskDoc {
         }
         let identified = matches!(&task.target, Target::Session(key) if !key.session_id.is_empty())
             || matches!(&task.author, Actor::Agent(key) if !key.session_id.is_empty());
-        meta.insert("schema", if title.is_some() { TASK_SCHEMA } else if planned { DISCUSSION_TASK_SCHEMA } else if identified { BASE_TASK_SCHEMA } else { SCHEMA })?;
+        meta.insert("schema", if title.is_some() { NAMED_TASK_SCHEMA } else if planned { DISCUSSION_TASK_SCHEMA } else if identified { BASE_TASK_SCHEMA } else { SCHEMA })?;
         meta.insert("uuid", uuid.as_str())?;
         meta.insert("id", task.id)?;
         meta.insert("project", task.project)?;
@@ -199,7 +199,7 @@ impl TaskDoc {
         let list = self.doc.get_list("log");
         let entries: usize = (0..list.len())
             .filter_map(|index| list.get(index)?.into_container().ok()?.into_map().ok())
-            .map(|entry| string(&entry, "text").map_or(0, |text| text.len()))
+            .map(|entry| string(&entry, "text").map_or(0, |text| text.len()) + string(&entry, "delivery").map_or(0, |text| text.len()))
             .sum();
         self.doc.get_text("text").len_utf8() + entries
     }
@@ -223,7 +223,7 @@ impl TaskDoc {
         self.writable()?; check_title(title)?;
         if self.title() == title { return Ok(()); }
         if self.content_len() + title.len() > MAX_DOCUMENT { return Err(Error::new("task history is full")); }
-        self.upgrade_schema(TASK_SCHEMA)?;
+        self.upgrade_schema(NAMED_TASK_SCHEMA)?;
         self.fields().insert("title", title)?;
         self.log("title", actor, now, title, None)?; self.doc.commit(); Ok(())
     }
@@ -275,6 +275,10 @@ impl TaskDoc {
                 text: string(&entry, "text").unwrap_or_default(),
                 session: string(&entry, "session").and_then(|s| serde_json::from_str(&s).ok()),
                 request_id: string(&entry, "request_id"),
+                delivery: match string(&entry, "delivery").map(|raw| serde_json::from_str(&raw)).transpose() {
+                    Err(_) if !writable => None,
+                    delivery => delivery?,
+                },
                 attachments: match string(&entry, "attachments") {
                     Some(raw) => match serde_json::from_str::<Vec<TaskAttachment>>(&raw).map_err(Error::from).and_then(|files| { check_attachments(&files)?; Ok(files) }) {
                         Err(_) if !writable => Vec::new(),
@@ -287,6 +291,42 @@ impl TaskDoc {
         // A merge orders entries appended on two replicas by peer, not by time;
         // the history reads oldest first, keeping the order of equal times.
         log.sort_by_key(|entry| entry.at);
+        // Receipt events refine the original message without rewriting its text.
+        let mut receipts: std::collections::BTreeMap<String, crate::TaskDelivery> = std::collections::BTreeMap::new();
+        let strength = |state: &str| match state { "submitted" => 3, "failed" => 2, "uncertain" => 1, _ => 0 };
+        for entry in log.iter().filter(|e| e.kind == "message_delivery") {
+            if let (Some(id), Some(delivery)) = (&entry.request_id, &entry.delivery) {
+                if receipts.get(id).is_none_or(|old| strength(&delivery.state) >= strength(&old.state)) {
+                    receipts.insert(id.clone(), delivery.clone());
+                }
+            }
+        }
+        for message in log.iter_mut().filter(|e| e.kind == "message") {
+            if let Some(receipt) = message.request_id.as_ref().and_then(|id| receipts.get(id)) {
+                let prompt = message.delivery.as_ref().map(|d| d.prompt.clone()).unwrap_or_default();
+                message.delivery = Some(crate::TaskDelivery { prompt, ..receipt.clone() });
+            }
+        }
+        // Concurrent replicas may append the same queued request. It appears and
+        // dispatches once; a conflicting identity fails closed.
+        let mut messages = std::collections::BTreeMap::new();
+        let mut unique = Vec::with_capacity(log.len());
+        for entry in log {
+            if entry.kind == "message" {
+                if let Some(id) = &entry.request_id {
+                    if let Some(old) = messages.get(id) {
+                        let old: &LogEntry = old;
+                        if old.text != entry.text || old.actor != entry.actor || old.attachments != entry.attachments || old.delivery != entry.delivery {
+                            return Err(Error::new("conflicting task message identity"));
+                        }
+                        continue;
+                    }
+                    messages.insert(id.clone(), entry.clone());
+                }
+            }
+            unique.push(entry);
+        }
+        let log = unique;
         // A newer schema may encode a field differently: such a task is shown
         // read-only with defaults. In this schema a field that does not decode
         // is damage, and the store sets the task aside.
@@ -758,6 +798,88 @@ impl TaskDoc {
         Ok(())
     }
 
+    /// Reserve before transport. Existing identities are read/recovered, never sent again.
+    pub fn reserve_message(&mut self, id: &str, text: &str, files: &[TaskAttachment],
+        delivery: &crate::TaskDelivery, session: Option<&SessionKey>, actor: &Actor, now: i64) -> Result<bool> {
+        self.writable()?;
+        if uuid::Uuid::parse_str(id).map(|id| id.to_string()).ok().as_deref() != Some(id) {
+            return Err(Error::new("message request_id must be a canonical UUID"));
+        }
+        let view = self.view()?;
+        if let Some(old) = view.log.iter().find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id)) {
+            if old.text != text || old.attachments != files || old.actor != *actor
+                || old.delivery.as_ref().map(|d| (&d.mode, &d.dispatch_id)) != Some((&delivery.mode, &delivery.dispatch_id)) {
+                return Err(Error::new("message request_id already identifies different content or execution"));
+            }
+            return Ok(false);
+        }
+        match delivery.mode.as_str() {
+            "queue" if matches!(view.stage, Stage::Todo | Stage::Backlog) && delivery.state == "queued" => {},
+            "note" if delivery.state == "note" => {},
+            "send" | "reopen" if delivery.state == "reserved" => {
+                let expected_stage = if delivery.mode == "send" { view.stage == Stage::Active } else { matches!(view.stage, Stage::Review | Stage::Done) };
+                if !expected_stage || delivery.stage != view.stage.as_str() || delivery.stage_at != view.stage_at
+                    || session.is_none() || session != view.session.as_ref()
+                    || session.is_some_and(|s| s.session_id.is_empty())
+                    || delivery.run_id.is_empty() || delivery.dispatch_id.is_empty()
+                    || view.execution_id().as_deref() != Some(delivery.dispatch_id.as_str()) {
+                    return Err(Error::new("task execution changed; refresh before sending"));
+                }
+            },
+            _ => return Err(Error::new("message mode does not match the task state")),
+        }
+        if !text.is_empty() || files.is_empty() { check_text(text, "message")?; }
+        check_attachments(files)?;
+        self.check_media_budget(&view.attachments, files)?;
+        if self.content_len() + text.len() + serde_json::to_string(delivery)?.len() + 8192 > MAX_DOCUMENT {
+            return Err(Error::new("task discussion is full"));
+        }
+        self.upgrade_schema(TASK_SCHEMA)?;
+        let entry = self.log("message", actor, now, text, session)?;
+        entry.insert("request_id", id)?;
+        entry.insert("delivery", serde_json::to_string(delivery)?)?;
+        if !files.is_empty() { entry.insert("attachments", serde_json::to_string(files)?)?; }
+        self.doc.commit(); Ok(true)
+    }
+
+    pub fn finish_message(&mut self, id: &str, state: &str, error: &str, actor: &Actor, now: i64) -> Result<()> {
+        self.writable()?;
+        if !matches!(state, "submitted" | "failed" | "uncertain") { return Err(Error::new("invalid message receipt")); }
+        let view = self.view()?;
+        let message = view.log.iter().find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id))
+            .ok_or_else(|| Error::new("message reservation is missing"))?;
+        let mut delivery = message.delivery.clone().ok_or_else(|| Error::new("message has no reservation"))?;
+        if delivery.state == "submitted" || delivery.state == state && delivery.error == error { return Ok(()); }
+        if !matches!(delivery.state.as_str(), "reserved" | "uncertain") { return Err(Error::new("message is not awaiting a receipt")); }
+        delivery.state = state.into(); delivery.error = error.chars().take(1000).collect();
+        if state == "submitted" { delivery.submitted_id = id.into(); }
+        delivery.prompt.clear();
+        let entry = self.log("message_delivery", actor, now, "", message.session.as_ref())?;
+        entry.insert("request_id", id)?; entry.insert("delivery", serde_json::to_string(&delivery)?)?;
+        if state == "submitted" && delivery.mode == "reopen" && matches!(view.stage, Stage::Review | Stage::Done)
+            && delivery.stage == view.stage.as_str() && delivery.stage_at == view.stage_at
+            && view.session == message.session
+            && view.execution_id().as_deref() == Some(delivery.dispatch_id.as_str()) {
+            self.fields().insert("stage", Stage::Active.as_str())?;
+            self.fields().insert("stage_at", now)?;
+            self.fields().delete("cancelled_at")?; self.fields().insert("cancel_reason", "")?;
+            self.log("resumed", actor, now, "Changes requested and submitted", message.session.as_ref())?;
+        }
+        self.doc.commit(); Ok(())
+    }
+
+    pub fn record_queued_messages(&mut self, dispatch: &str, actor: &Actor, now: i64) -> Result<()> {
+        self.writable()?;
+        for message in self.view()?.log.into_iter().filter(|e| e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued")) {
+            let mut delivery = message.delivery.expect("queued message");
+            delivery.state = "submitted".into(); delivery.submitted_id = dispatch.into(); delivery.prompt.clear();
+            let entry = self.log("message_delivery", actor, now, "", None)?;
+            entry.insert("request_id", message.request_id.unwrap_or_default())?;
+            entry.insert("delivery", serde_json::to_string(&delivery)?)?;
+        }
+        self.doc.commit(); Ok(())
+    }
+
     /// A line Zerus adds to the history, such as a refused cancel message.
     pub fn note(&mut self, text: &str, actor: &Actor, now: i64) -> Result<()> {
         self.log("note", actor, now, text, None)?;
@@ -863,6 +985,47 @@ mod tests {
             session: "codex/api".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn message_intent_survives_dispatch_receipts_and_changed_stages() {
+        let mut task = task(Stage::Todo);
+        let id = uuid::Uuid::new_v4().to_string();
+        let delivery = crate::TaskDelivery { mode:"queue".into(),state:"queued".into(),stage:"todo".into(),stage_at:1,dispatch_id:String::new(),submitted_id:String::new(),
+            run_id:String::new(),conversation_id:String::new(),prompt:String::new(),error:String::new() };
+        assert!(task.reserve_message(&id,"Clarification",&[],&delivery,None,&Actor::Person,2).unwrap());
+        task.record_send(&api(),"dispatch",&Actor::Person,3).unwrap();
+        task.record_queued_messages("dispatch",&Actor::Person,4).unwrap();
+        assert!(!task.reserve_message(&id,"Clarification",&[],&delivery,None,&Actor::Person,5).unwrap());
+        assert!(task.reserve_message(&id,"Changed",&[],&delivery,None,&Actor::Person,6).is_err());
+        let view = task.view().unwrap();
+        let message = view.log.iter().find(|e| e.kind=="message").unwrap();
+        assert_eq!(message.delivery.as_ref().unwrap().state,"submitted");
+        assert_eq!(message.delivery.as_ref().unwrap().submitted_id,"dispatch");
+    }
+
+    #[test]
+    fn unconfirmed_feedback_cannot_reopen_or_change_owner() {
+        let mut task = task(Stage::Todo);
+        let owner = SessionKey { session_id:"launch_id:one".into(), ..api() };
+        task.record_send(&owner,"dispatch",&Actor::Person,2).unwrap();
+        task.record_report("Review",&Actor::Agent(owner.clone()),3).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let delivery = crate::TaskDelivery { mode:"reopen".into(),state:"reserved".into(),stage:"review".into(),stage_at:3,dispatch_id:"dispatch".into(),submitted_id:String::new(),
+            run_id:"run-one".into(),conversation_id:"conversation-one".into(),prompt:"[Task feedback]".into(),error:String::new() };
+        task.reserve_message(&id,"Revise",&[],&delivery,Some(&owner),&Actor::Person,4).unwrap();
+        task.finish_message(&id,"uncertain","Check receipt",&Actor::Person,50).unwrap();
+        assert_eq!(task.stage().unwrap(),Stage::Review);
+        let snapshot = task.snapshot().unwrap();
+        let mut accepted = TaskDoc::from_bytes(&snapshot).unwrap();
+        accepted.set_stage(Stage::Done, &Actor::Person, 6).unwrap();
+        accepted.finish_message(&id,"submitted","",&Actor::Person,7).unwrap();
+        assert_eq!(accepted.stage().unwrap(),Stage::Done, "a late receipt cannot undo acceptance");
+        task.finish_message(&id,"submitted","",&Actor::Person,6).unwrap();
+        assert_eq!(task.stage().unwrap(),Stage::Active);
+        assert_eq!(task.session(),Some(owner));
+        assert_eq!(task.view().unwrap().log.iter().find(|e| e.kind=="message").unwrap().delivery.as_ref().unwrap().state,"submitted", "clock changes cannot downgrade a native receipt");
+        assert_eq!(task.view().unwrap().log.iter().find(|e| e.kind=="message").unwrap().delivery.as_ref().unwrap().prompt,"[Task feedback]");
     }
 
     #[test]

@@ -2439,11 +2439,16 @@ the current agent owner (or the person) can transfer an active task, and both it
 pinned target and working session change only after confirmed native submission.
 Failed or uncertain delivery never authorizes an automatic retry.
 
-The inspector's Description and History use Activity rendering. Description editing
-and task comments use the shared Activity composer, with pasted/dropped images,
-attachment previews and private durable drafts keyed by project and task UUID.
-Clicking **Run in** changes assignment only. Its choices are the main session,
-a subagent, a new session, Any session, and searchable existing sessions. Choosing
+The central Task View shows a canonical description document followed by
+Activity-style discussion. The task menu opens the result and audit history;
+Review foregrounds the result on the main page. Explicit **Edit description**
+uses Save/Cancel; ordinary messages never rewrite the document. Task input uses
+Activity's centered column, composer skin, attachments, voice preview and private
+durable drafts keyed by project and task UUID. Lifecycle controls are separate
+from message submission. The compact executor field distinguishes planned,
+current and last execution. Clicking planned assignment changes only that field.
+Its choices are the main session, a subagent, a new session, searchable existing
+sessions and Any session. Choosing
 an executor plan stores intent without starting anything. **Start task** for a
 new session opens the standard session dialog; after its explicit launch, delivery
 requires that exact new launch ID, computer, project, and unchanged parent
@@ -2451,6 +2456,32 @@ computer/session identity. A private record is reserved before task delivery;
 restored reserved or uncertain deliveries are never retried automatically. Use
 **Review executor launch** to inspect a failed or uncertain launch. Explicitly
 releasing a reviewed record neither stops an agent nor sends the task again.
+
+`hgs task message REF --request-id UUID --mode queue|send|reopen|note
+--expect-dispatch ID --content-json` is a distinct discussion operation. `get`
+returns the current `dispatch_id` (a native send receipt or an explicit direct-work
+acknowledgement). Queue messages wait for the next explicit Start; their original
+IDs, text and files are included in that dispatch, within the native text/media
+limits. Exceeding those limits refuses the dispatch rather than dropping context.
+Notes remain saved without delivery. In-progress feedback addresses the immutable
+owner and captures its current run/conversation before transport. A native dispatch
+receipt, when present, must match that live run and any recorded conversation.
+Review/Done feedback explicitly uses reopen; only a confirmed submission returns
+the task to In progress. Submission does not establish model consumption.
+
+The replicated schema-five outbox is reserved durably before native input. A
+repeated request verifies the original content, mode and execution and reads the
+receipt; it never retries a reserved native send, even if no receipt survived.
+SSH failures retain the desktop's original request for **Check previous message**.
+That check uses `--recover-only` and cannot initiate a missing send. Original
+payloads are private per-task files read and written off the UI thread; settings
+contain only small markers. Explicitly releasing a local recovery record neither
+cancels nor resends native input.
+Handoff cannot retarget a reserved message. Failed and unknown outcomes remain
+visible in the same discussion. This is transport attribution, not a distributed
+lease, per-task pause or a revision scheduler. Legacy direct-work acknowledgements
+have an immutable owner and acknowledgement anchor, but no historical native-run
+receipt; a message captures that owner's current verified run explicitly.
 
 A subagent plan dispatches a creation request to its coordinator only on Start.
 The coordinator creates the native child and records `task worker` with the
@@ -2489,8 +2520,9 @@ title until an explicit Rename gives them an independent one.
 
 Immutable session identities and description media use task schema 2. Comment
 media, executor plans and native worker bindings require task schema 3. Independent
-titles and title-only creation require task schema 4. A later edit never downgrades that schema. Older readers and the current mobile ABI show
-schema-three and schema-four tasks read-only; named cards keep a visible title in
+titles and title-only creation require task schema 4. Durable discussion identities
+and delivery reservations require task schema 5. A later edit never downgrades that schema. Older readers and the current mobile ABI show
+tasks newer than schema two read-only; named cards keep a visible title in
 the existing text field. Project documents and the paged exchange protocol
 remain schema 1. Mobile picker/preview and executor-plan presentation are separate
 work; host-side mobile sends keep the complete description attachment payload.

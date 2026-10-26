@@ -745,6 +745,47 @@ pub(super) fn submit_task(session: &zerus_replica::SessionKey, text: &str, attac
     submit(name, request.to_string().as_bytes(), None)
 }
 
+pub(super) fn task_reply(session: &zerus_replica::SessionKey, dispatch: &str, id: &str, text: &str, attachments: &[Value]) -> Result<Value> {
+    let record = read(&session.session)?;
+    let key = if string(&record, "launch_id").is_empty() { "run_id" } else { "launch_id" };
+    if session.session_id.is_empty() || session.session_id != format!("{key}:{}", string(&record, key)) {
+        return Err("task execution identity changed; refresh before sending".into());
+    }
+    if let Ok(dispatch) = uuid::Uuid::parse_str(dispatch) {
+        let bytes = fs::read(absolute_root()?.join("input_receipts").join(format!("{dispatch}.json")))
+            .map_err(|_| "the task dispatch receipt is unavailable; delivery is not authorized")?;
+        let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if receipt["status"] != "submitted" || string(&receipt,"run_id") != string(&record,"run_id")
+            || !string(&receipt,"conversation_id").is_empty() && receipt["conversation_id"] != record["conversation_id"] {
+            return Err("the task's dispatched run or conversation changed; refresh or hand off the task explicitly".into());
+        }
+    }
+    let request = json!({"request_id":id,"text":text,"attachments":attachments,
+        "expected_run_id":string(&record,"run_id"),"expected_conversation_id":string(&record,"conversation_id")});
+    let parsed: Request = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
+    validate(&parsed)?;
+    Ok(request)
+}
+
+/// Recovery is read-only, even when no receipt exists. Absence after a crash
+/// does not authorize another terminal submission.
+pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
+    let parsed: Request = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
+    uuid::Uuid::parse_str(&parsed.request_id).map_err(|_| "invalid message identity")?;
+    let path = absolute_root()?.join("input_receipts").join(format!("{}.json", parsed.request_id));
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));
+    if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
+        return Err("message receipt identity or content does not match".into());
+    }
+    Ok(Some(receipt))
+}
+
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     let request: Request =
         serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;

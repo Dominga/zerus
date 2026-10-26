@@ -22,7 +22,8 @@ with open(here/'calls.jsonl','a') as f: f.write(json.dumps({'argv':a,'stdin':tex
 fail=here/'fail'
 if a[:1]!=['task']: print('unexpected command',file=sys.stderr); sys.exit(2)
 want=fail.read_text().split() if fail.exists() else []
-if want and a[1]==want[0] and all(w in a for w in want[1:]): print('hgs refused: '+a[1],file=sys.stderr); sys.exit(1)
+failed=bool(want and a[1]==want[0] and all(w in a for w in want[1:]))
+if failed and a[1]!='message': print('hgs refused: '+a[1],file=sys.stderr); sys.exit(1)
 state=here/'tasks.json'
 data=json.loads(state.read_text()) if state.exists() else {}
 data.setdefault('tasks',[]); data.setdefault('next',1)
@@ -39,7 +40,7 @@ order=['review','active','todo','backlog','done']
 cmd=a[1]
 if cmd=='get' and (here/'delay-get').exists(): time.sleep(min(.5,float((here/'delay-get').read_text())))
 content={}
-if cmd in ('add','edit','comment') and '--content-json' in a:
+if cmd in ('add','edit','comment','message') and '--content-json' in a:
     content=json.loads(text); text=content['text']
 if cmd=='list':
     tasks=sorted(data['tasks'],key=lambda t: order.index(t['stage']))
@@ -83,11 +84,21 @@ elif cmd=='target':
     if opt('--session-id'): target['session_id']=opt('--session-id')
     t['target']={'kind':'any'} if a[3]=='any' else {'kind':a[3].replace('-','_'),'parent':target} if a[3] in ('new-session','subagent') else target
     log(t,'target',a[3])
+elif cmd=='message':
+    old=next((e for e in t.get('log',[]) if e.get('request_id')==opt('--request-id')),None)
+    if not old and '--recover-only' in a: print('no reservation; check sent nothing',file=sys.stderr); sys.exit(1)
+    if not old:
+        log(t,'message',text); old=t['log'][-1]; old['request_id']=opt('--request-id')
+        old['attachments']=content.get('attachments',[])
+        old['delivery']={'mode':opt('--mode'),'state':{'queue':'queued','note':'note'}.get(opt('--mode'),'submitted')}
+        if opt('--mode')=='reopen': t['stage']='active'
 elif cmd=='comment':
     log(t,'comment',text)
     if 'attachments' in content: t['log'][-1]['attachments']=content['attachments']
 else: print('unknown task command '+cmd,file=sys.stderr); sys.exit(2)
-save(); out({'task':t})
+save()
+if failed: print('response lost after message reservation',file=sys.stderr); sys.exit(1)
+out({'task':t,'message':old} if cmd=='message' else {'task':t})
 )PY";
 }
 

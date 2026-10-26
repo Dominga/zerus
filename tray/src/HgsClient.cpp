@@ -572,7 +572,7 @@ quint64 HgsClient::requestSwarm(const QStringList &arguments, const QJsonObject 
 
 int HgsClient::taskTimeoutMs(const QStringList &arguments) {
     const QString action = arguments.value(0);
-    return action == QLatin1String("send") || action == QLatin1String("cancel") ? 90000 : 30000;
+    return action == QLatin1String("send") || action == QLatin1String("cancel") || action == QLatin1String("message") ? 90000 : 30000;
 }
 
 quint64 HgsClient::requestTask(const QStringList &arguments, const QString &input)

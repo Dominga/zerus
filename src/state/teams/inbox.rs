@@ -135,6 +135,27 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
                 });
             }
         }
+        // F1.4: a member whose launch failed (the folder check) is an item.
+        for member in team
+            .members
+            .iter()
+            .filter(|member| member.state != MemberState::Removed && !member.error.is_empty() && member.session.is_none())
+        {
+            let role = team.role_of(&member.id);
+            items.push(Item {
+                kind: "member_error",
+                key: format!("member_error:{}", member.id),
+                task: None,
+                member: role.clone(),
+                since: crate::state::now(),
+                summary: summary(&format!("{role} was not started: {}", member.error)),
+                command: format!(
+                    "{} | hgs team relaunch --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
+                ),
+                detail: member.error.clone(),
+            });
+        }
         // A member that stopped on its task (C2), unless it waits for an
         // answer: that is the question item above.
         let Some(attempt) = task.open_attempt() else { continue };
@@ -402,6 +423,21 @@ mod tests {
         .unwrap();
         ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
         team
+    }
+
+    #[test]
+    fn a_failed_launch_is_a_member_error_item() {
+        let mut team = team();
+        {
+            let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.session = None;
+            dev.error = "/x belongs to another repository".into();
+        }
+        let items = items(&team);
+        let found = items.iter().find(|item| item.kind == "member_error").unwrap();
+        assert!(found.summary.contains("was not started"), "{}", found.summary);
+        assert!(found.command.contains("relaunch"), "{}", found.command);
+        assert_eq!(found.detail, "/x belongs to another repository");
     }
 
     fn delivered(team: &mut Team, id: u32) {

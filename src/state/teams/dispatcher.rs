@@ -1269,22 +1269,85 @@ pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result
         .to_string())
 }
 
+/// F1.4/F1.6: one git read in a folder, trimmed; None when git says nothing.
+fn git_at(folder: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").arg("-C").arg(folder).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// F1.4: the reason a member's folder cannot be started in, or None when it
+/// can: it exists, it is the team folder or the same repository (a worktree,
+/// clone or sibling of the team folder), and a worktree/clone sits on the
+/// member's branch. A folder of another repository is refused, never filed as
+/// General and never silently used.
+pub(crate) fn folder_problem(folder: &str, source: &str, branch: Option<&str>) -> Option<String> {
+    let path = Path::new(folder);
+    if !path.exists() {
+        return Some(format!("{folder} does not exist"));
+    }
+    let repo_of = |at: &str| git_at(at, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).or_else(|| git_at(at, &["rev-parse", "--git-common-dir"]));
+    if let Some(source_repo) = repo_of(source) {
+        let Some(folder_repo) = repo_of(folder) else {
+            return Some(format!("{folder} is not a repository like {source}"));
+        };
+        if Path::new(&folder_repo) != Path::new(&source_repo) {
+            return Some(format!("{folder} belongs to another repository"));
+        }
+    }
+    if let Some(branch) = branch {
+        if let Some(current) = git_at(folder, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+            if current != branch {
+                return Some(format!("{folder} is on {current}, not {branch}"));
+            }
+        }
+    }
+    None
+}
+
+/// F1.6: the folder's repository and branch, read from git; empty when unknown.
+pub(crate) fn folder_facts(folder: &str) -> (String, String) {
+    if folder.is_empty() {
+        return (String::new(), String::new());
+    }
+    let project = git_at(folder, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .or_else(|| git_at(folder, &["rev-parse", "--git-common-dir"]))
+        .map(|dir| {
+            let path = Path::new(&dir);
+            path.parent().map(|parent| parent.display().to_string()).unwrap_or(dir)
+        })
+        .unwrap_or_default();
+    let branch = git_at(folder, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+    (project, branch)
+}
+
 /// The folder the member works in: the team's (or its own) folder, or a new
 /// worktree or clone of it, created now.
 fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
     let destination = member_folder_path(team, member)?;
     if member.folder == MemberFolder::Shared {
+        // F1.4: a shared folder must exist and belong to the team's repository.
+        if let Some(problem) = folder_problem(&destination, &team.folder, None) {
+            anyhow::bail!("{problem}");
+        }
         return Ok(destination);
     }
     let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
     let short = &team.id[..8.min(team.id.len())];
     let branch = format!("team/{short}/{}", tag(&member.id));
+    anyhow::ensure!(!Path::new(&destination).exists(), "{destination} already exists");
     let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", "HEAD", "--json"];
     if member.folder == MemberFolder::Clone {
         args.insert(2, "--clone");
     }
     let output = hgs(&member.computer, &args, None, Duration::from_secs(300))?;
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    // F1.4: the new folder is the repository's, on the member's branch.
+    if let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) {
+        anyhow::bail!("{problem}");
+    }
     Ok(destination)
 }
 
@@ -4427,6 +4490,39 @@ mod tests {
         let mode = args.iter().position(|arg| arg == "--permission-mode").unwrap();
         assert!(mode > separator, "{args:?}");
         assert_eq!(args[mode + 1], "acceptEdits");
+    }
+
+    #[test]
+    fn a_folder_that_is_not_the_teams_repository_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
+        assert!(git(&["init", "-q"]).success());
+        assert!(git(&["config", "user.email", "t@example.com"]).success());
+        assert!(git(&["config", "user.name", "T"]).success());
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        assert!(git(&["add", "a.txt"]).success());
+        assert!(git(&["commit", "-qm", "one"]).success());
+        assert!(git(&["switch", "-qc", "team/t1/dev"]).success());
+        let source = repo.display().to_string();
+        // The team folder on the member's branch passes.
+        assert_eq!(folder_problem(&source, &source, Some("team/t1/dev")), None);
+        // A sibling folder without a repository is refused, never General.
+        let sibling = dir.path().join("sibling");
+        std::fs::create_dir(&sibling).unwrap();
+        let problem = folder_problem(&sibling.display().to_string(), &source, None).unwrap();
+        assert!(problem.contains("is not a repository"), "{problem}");
+        // A wrong branch and a missing folder are named too.
+        let wrong = folder_problem(&source, &source, Some("main")).unwrap();
+        assert!(wrong.contains("is on team/t1/dev, not main"), "{wrong}");
+        let missing = folder_problem(&dir.path().join("missing").display().to_string(), &source, None).unwrap();
+        assert!(missing.contains("does not exist"), "{missing}");
+        // Facts: the repository and branch of a folder (F1.6).
+        let (project, branch) = folder_facts(&source);
+        assert_eq!(branch, "team/t1/dev");
+        assert_eq!(Path::new(&project).file_name().and_then(|name| name.to_str()), Some("project"));
+        assert_eq!(folder_facts(""), (String::new(), String::new()));
     }
 
     #[test]

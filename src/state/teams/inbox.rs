@@ -271,6 +271,13 @@ pub(crate) fn text(team: &Team, items: &[Item], now: f64) -> String {
             }
         }
         text += &format!("   {}\n", item.command);
+        // N7: the lead must be able to read the whole report, not only the
+        // summary line.
+        if item.kind == "report" {
+            if let Some(task) = item.task {
+                text += &format!("   Full report: task #{task} in {} | hgs team status --json\n", json!({"team":team.id}));
+            }
+        }
     }
     if items.len() > MESSAGE_ITEMS {
         text += &format!("\n[{} more item(s); hgs team inbox --json lists them all]\n", items.len() - MESSAGE_ITEMS);
@@ -332,6 +339,18 @@ pub(crate) fn waits(team: &Team, task: &Task, ready: bool) -> Option<Value> {
     }
     let role = team.role_of(&task.assignee);
     Some(json!({"for":"member","on":[role],"unblock":format!("wait for {role}")}))
+}
+
+/// Records the items a coalesced message named, and L2: keeps the key of an
+/// item that is still open. A closed item's key leaves at once, so a later
+/// re-tell only covers what is genuinely new.
+pub(crate) fn mark_told(told: &mut Vec<String>, named: &[Item], open: &std::collections::BTreeSet<String>) {
+    for item in named {
+        if !told.iter().any(|key| key == &item.key) {
+            told.push(item.key.clone());
+        }
+    }
+    told.retain(|key| open.contains(key));
 }
 
 /// The reports the owner's attention list shows: undecided for at least
@@ -513,6 +532,8 @@ mod tests {
         assert!(text.contains("10 min") && text.contains("5 min"), "{text}");
         assert!(text.contains("Done and checked") && text.contains("Which database?"), "{text}");
         assert!(text.contains("hgs team accept --json") && text.contains("hgs team reply --json"), "{text}");
+        // N7: the message says how to read the whole report.
+        assert!(text.contains("Full report: task #1") && text.contains("hgs team status --json"), "{text}");
         assert!(text.contains("hgs team inbox --json"), "{text}");
         // A long list is summarized, never sent whole.
         let mut many = team.clone();
@@ -535,6 +556,54 @@ mod tests {
         }
         let text = super::text(&many, &super::items(&many), 40.0);
         assert!(text.contains("[20 more item(s)") || text.contains("more item(s)"), "{text}");
+    }
+
+    #[test]
+    fn the_told_keys_keep_still_open_items() {
+        use std::collections::BTreeSet;
+        let mut team = team();
+        submitted(&mut team, 1, 100.0);
+        delivered(&mut team, 2);
+        team.task_mut(2).unwrap().attempts.last_mut().unwrap().questions.push(Question {
+            id: "q1".into(),
+            text: "Which database?".into(),
+            at: 200.0,
+            ..Default::default()
+        });
+        let items = super::items(&team);
+        assert_eq!(items.len(), 2);
+        let mut told = Vec::new();
+        let open: BTreeSet<String> = items.iter().map(|item| item.key.clone()).collect();
+        mark_told(&mut told, &items, &open);
+        assert_eq!(told.len(), 2);
+        // A decided report's key leaves; the still-open question's key stays,
+        // so the question is never told twice (L2).
+        team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+        let items = super::items(&team);
+        let open: BTreeSet<String> = items.iter().map(|item| item.key.clone()).collect();
+        mark_told(&mut told, &[], &open);
+        assert_eq!(told, vec![items[0].key.clone()], "{told:?}");
+        // A new item is added beside the still-open one.
+        team.tasks.push(Task {
+            id: 9,
+            title: "New".into(),
+            assignee: "dev".into(),
+            status: TaskStatus::Submitted,
+            attempts: vec![Attempt {
+                n: 1,
+                id: "A9".into(),
+                member: "dev".into(),
+                state: AttemptState::Reported,
+                report: Some(Report { text: "New work".into(), at: 300.0, ..Default::default() }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let items = super::items(&team);
+        let open: BTreeSet<String> = items.iter().map(|item| item.key.clone()).collect();
+        mark_told(&mut told, &items, &open);
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert!(items.iter().all(|item| told.contains(&item.key)));
     }
 
     #[test]

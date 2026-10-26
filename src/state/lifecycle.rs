@@ -858,8 +858,11 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
                         }
                     }
                     if !accept_stale && !with_lost {
+                        // The desktop reads the times and the count from the JSON tail.
+                        let details = serde_json::json!({"error":"transcript_behind","transcript_at":transcript_at,
+                            "events_at":anchor,"missing":events.len()});
                         return Err(format!(
-                            "{name}: the native transcript stops {lag:.0} s before the events Zerus recorded (transcript_behind); resume with --accept-stale or --with-lost-dialogue"
+                            "{name}: the native transcript stops {lag:.0} s before the events Zerus recorded (transcript_behind); resume with --accept-stale or --with-lost-dialogue {details}"
                         ));
                     }
                 }

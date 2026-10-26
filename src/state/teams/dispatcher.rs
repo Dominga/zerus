@@ -282,10 +282,20 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             // tick that first saw the gate open, not from the reply.
             match (attempt.turn_ended_at, found) {
                 (None, Some(found)) => {
+                    let replied = found.reply_at.filter(|at| *at > delivered);
                     if capture_open(found) && attempt.open_question().is_none() {
-                        if let Some(at) = found.reply_at.filter(|at| *at > delivered) {
+                        if let Some(at) = replied {
                             steps.push(Step::TurnEnded { task: task.id, at, reply: found.reply_id.clone() });
                         }
+                    } else if found.live && found.idle && replied.is_some() && attempt.blocked_since.is_none() {
+                        // The usual order: the member asks (or leaves Background
+                        // work running) and ends its turn. No turn end is
+                        // recorded, but the block starts now, so a question
+                        // answered in prose or a job that never ends still
+                        // reaches the lead (N5).
+                        steps.push(Step::GateClosed { task: task.id });
+                    } else if attempt.blocked_since.is_some() && found.live && !found.idle {
+                        steps.push(Step::WorkResumed { task: task.id });
                     }
                 }
                 (Some(ended), found) => {
@@ -1646,7 +1656,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
                 if attempt.state == AttemptState::Delivered {
                     attempt.report_ready_at = None;
-                    if attempt.turn_ended_at.is_some() && attempt.blocked_since.is_none() {
+                    if attempt.blocked_since.is_none() {
                         attempt.blocked_since = Some(now());
                     }
                 }
@@ -2521,6 +2531,34 @@ mod tests {
         let text = blocked_text(&team, task, &task.attempts[0], 50.0 + timeout);
         assert!(text.contains("Which database?") && text.contains("hgs team reply --json"), "{text}");
         assert!(text.contains("min"), "{text}");
+    }
+
+    #[test]
+    fn a_question_before_the_turn_end_starts_the_block() {
+        let mut team = team();
+        delivered(&mut team);
+        // The lead was already told of the question.
+        team.task_mut(1).unwrap().attempts[0].questions.push(Question { id: "q1".into(), text: "Which database?".into(), at: 40.0, ..Default::default() });
+        team.task_mut(1).unwrap().attempts[0].told_lead.push("question:q1".into());
+        // The member asked, then ended its turn: idle, with a reply after the hand-off.
+        let mut asked = session("codex/x/dev", "r1", true);
+        asked.reply_at = Some(50.0);
+        asked.reply_id = "r7".into();
+        let lead = session("claude/x/lead", "r0", true);
+        let first = steps(&team, &[lead.clone(), asked.clone()], 60.0);
+        assert!(first.contains(&Step::GateClosed { task: 1 }), "{first:?}");
+        assert!(!first.iter().any(|s| matches!(s, Step::TurnEnded { .. })));
+        // Once the block is recorded, a long wait reaches the lead.
+        let timeout = team.settings.blocked_timeout_seconds as f64;
+        team.task_mut(1).unwrap().attempts[0].blocked_since = Some(60.0);
+        assert!(!steps(&team, &[lead.clone(), asked.clone()], 59.0 + timeout).iter().any(|s| matches!(s, Step::BlockedLate { .. })));
+        let late = steps(&team, &[lead.clone(), asked.clone()], 60.0 + timeout);
+        assert!(late.contains(&Step::BlockedLate { task: 1 }), "{late:?}");
+        // Working again clears it.
+        let mut busy = asked.clone();
+        busy.idle = false;
+        busy.free = false;
+        assert!(steps(&team, &[lead, busy], 70.0).contains(&Step::WorkResumed { task: 1 }));
     }
 
     #[test]

@@ -174,7 +174,12 @@ The lead's brief names `hgs team reply`, `hold`/`release` and
   holds for every team, old or new: approved phases run in order, so a team
   stored with one draft approves it only after the phase before it ended. The
   earlier "at most one draft" compatibility exception is gone (N6). `discard-phase N`
-  discards N only; numbers are never reused.
+  discards N only. A draft that was never approved burns no number: discarding
+  or moving drafts renumbers the drafts after it (phases and their Draft task
+  ids, deps inside the drafts follow) and records phase_renumbered; approved
+  phases and their tasks are never renumbered. A lead that edits draft tasks
+  re-reads status after a phase_renumbered (a guard against stale ids is
+  planned for the next phase).
 
 ## 11. Desktop
 

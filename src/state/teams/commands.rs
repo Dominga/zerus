@@ -465,6 +465,28 @@ fn live_sessions() -> anyhow::Result<Vec<super::dispatcher::Seen>> {
     Ok(super::dispatcher::seen(&listing))
 }
 
+/// How long a finished team's status reuses one live listing (C1, NEW-2): the
+/// desktop polls the watched team every 3 s, and a full listing may take 15 s.
+const LISTING_REUSE: f64 = 30.0;
+
+/// The live sessions for a finished team's left_running, from a listing at
+/// most LISTING_REUSE old: polling a Done team never runs hgs ls each time.
+fn recent_sessions() -> anyhow::Result<Vec<super::dispatcher::Seen>> {
+    let path = root().join("teams/left-running-listing.json");
+    let now = super::super::now();
+    if let Some(cached) = std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
+        if cached["at"].as_f64().is_some_and(|at| at <= now && now - at < LISTING_REUSE) {
+            return Ok(super::dispatcher::seen(&cached["listing"]));
+        }
+    }
+    let output = super::dispatcher::hgs("", &["ls", "--json", "--no-archives"], None, std::time::Duration::from_secs(15))?;
+    ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
+    // Best effort: a failed write only means the next poll lists again.
+    let _ = std::fs::write(&path, serde_json::to_vec(&json!({"at":now,"listing":listing})).unwrap_or_default());
+    Ok(super::dispatcher::seen(&listing))
+}
+
 /// Where a member works when it adopts an existing session (F8): the session's
 /// own folder, stored as `directory`, and whether it keeps its worktree.
 #[derive(Debug)]
@@ -675,7 +697,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             // Only a finished team reads the live listing, for its members left
             // running (F7); a watched running team is polled often and must not
             // spawn one (C1, L3).
-            let sessions = if status_lists_sessions(team.status) { live_sessions().ok() } else { None };
+            let sessions = if status_lists_sessions(team.status) { recent_sessions().ok() } else { None };
             // Only the teams that still run, from the indexed query, so a
             // finished team's status never reads every team (C1).
             let teams = if finished { active_team_records(&store)? } else { Vec::new() };

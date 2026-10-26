@@ -2788,6 +2788,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun openProject(project: ProjectSummary) { selectedProject = project }
     fun clearProject() { selectedProject = null }
     fun open(session: Session, preserveProject: Boolean = false) {
+        RelayReadTiming.point(RelayReadTiming.Stage.OpenConversation)
         contextNotice="";actionResultNotice="";firstUnreadEventId="";unreadBoundaryCaptured=false;restoreHistoryAttempt="";pendingHistoryPosition="";pendingHistoryPublication="";lastHistoryObservation=0L;lastHistoryReadCompletedAt=0L
         hasOlder=false;hasNewer=false;historyEpoch="";historyIndexing=false;historyComplete=false;olderError=""
         if(session.target.agentId.isBlank()) parentSelection=null

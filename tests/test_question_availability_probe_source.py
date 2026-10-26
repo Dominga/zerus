@@ -28,9 +28,9 @@ WORKSPACE_UPDATES_SHA = "ff2e0ae7ccf5f14a49be075a38978757f453e59f2461fda329d3d8b
 # Exact 86aeab6d -> 53170eee feature delta; policy and baseline pins stay fixed.
 TASK_TRACKER_UPDATES = ROOT / "tests/fixtures/question-availability-task-tracker-updates.patch"
 TASK_TRACKER_UPDATES_SHA = "5cb5f076e3f176069d8e57d945f1286cea7763fcf37c3dbfb6f61383cf5c1e34"
-# Exact PR360 visible-refresh delta; reverse it before historical reconstruction.
+# Exact visible-refresh, foreground priority and frame-observer delta; keep historical policy pins.
 VISIBLE_REFRESH_UPDATES = ROOT / "tests/fixtures/question-availability-visible-refresh-updates.patch"
-VISIBLE_REFRESH_UPDATES_SHA = "b3fcdfae8a661c61fc5c0903e60d0c521613e3a126c6145a67a93a9ea05ef60c"
+VISIBLE_REFRESH_UPDATES_SHA = "c36e286b2dd15f9e257bfc9dc2d61f392b87977245d923e9f9b238968bcf7d72"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",

@@ -70,6 +70,18 @@ const Phase *Team::phase(int n) const
     return nullptr;
 }
 
+const Team::PhaseSummary *Team::phaseSummaryOf(int n) const
+{
+    for (const auto &summary : phaseSummary) if (summary.n == n) return &summary;
+    return nullptr;
+}
+
+const Team::Health *Team::phaseHealthOf(int n) const
+{
+    const auto it = phasesHealth.constFind(n);
+    return it == phasesHealth.constEnd() ? nullptr : &it.value();
+}
+
 const LeftRunning *Team::leftOf(const QString &member) const
 {
     for (const auto &left : leftRunning) if (left.member == member) return &left;
@@ -154,6 +166,41 @@ const Question *question(const Task &task, const QString &id)
     if (const auto *attempt = task.last())
         for (const auto &item : attempt->questions) if (item.id == id) return &item;
     return nullptr;
+}
+
+// C7: the plan-health numbers, with the starving members while running.
+// Shared by the plan health and the G9 per-phase health.
+Team::Health parseHealth(const QJsonObject &h)
+{
+    Team::Health health;
+    if (h.isEmpty()) return health;
+    health.known = true;
+    health.tasks = h.value("tasks").toInt();
+    health.criticalPath = h.value("critical_path").toInt();
+    health.widestReady = h.value("widest_ready").toInt();
+    health.parallelism = h.value("parallelism").toDouble();
+    const auto members = h.value("per_member").toObject();
+    for (auto it = members.begin(); it != members.end(); ++it) {
+        const auto load = it.value().toObject();
+        health.perMember.append({it.key(), {load.value("tasks").toInt(), load.value("on_critical_path").toInt()}});
+    }
+    for (const auto &value : h.value("fan_in").toArray()) {
+        const auto entry = value.toObject();
+        Team::Health::FanIn fanIn;
+        fanIn.task = entry.value("task").toInt(); fanIn.kind = str(entry, "kind");
+        for (const auto &id : entry.value("waits_for").toArray()) fanIn.waitsFor.append(id.toInt());
+        health.fanIn.append(fanIn);
+    }
+    for (const auto &value : h.value("warnings").toArray()) health.warnings.append(value.toString());
+    for (const auto &value : h.value("starved").toArray()) {
+        const auto entry = value.toObject();
+        Team::Health::Starved starved;
+        starved.member = str(entry, "member"); starved.role = str(entry, "role");
+        starved.minutes = entry.value("minutes").toInt();
+        for (const auto &id : entry.value("blocking").toArray()) starved.blocking.append(id.toInt());
+        health.starved.append(starved);
+    }
+    return health;
 }
 
 Team parse(const QJsonObject &v)
@@ -465,6 +512,27 @@ Team parse(const QJsonObject &v)
                 for (const auto &id : entry.value("blocking").toArray()) starved.blocking.append(id.toInt());
                 team.health.starved.append(starved);
             }
+        }
+        // G9 (spec 10.2): the phase headers, in display order, phase 1 included.
+        for (const auto &value : v.value("phase_summary").toArray()) {
+            const auto entry = value.toObject();
+            Team::PhaseSummary summary;
+            summary.n = entry.value("n").toInt();
+            summary.title = str(entry, "title");
+            summary.status = str(entry, "status");
+            summary.healthLine = str(entry, "health_line");
+            summary.done = entry.value("done").toInt();
+            summary.total = entry.value("total").toInt();
+            summary.barrier = entry.value("barrier").toBool();
+            if (summary.n > 0) team.phaseSummary.append(summary);
+        }
+        // G9 (spec 10.1): each phase's own plan health, keyed by phase number.
+        const auto phaseHealth = v.value("phases_health").toObject();
+        for (auto it = phaseHealth.begin(); it != phaseHealth.end(); ++it) {
+            const int n = it.key().toInt();
+            if (n <= 0 || !it.value().isObject()) continue;
+            const auto health = parseHealth(it.value().toObject());
+            if (health.known) team.phasesHealth.insert(n, health);
         }
     } else {
         team.layers = computeLayers(team);

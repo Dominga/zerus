@@ -247,6 +247,33 @@ void shot(QWidget *widget, const QString &name)
     if (!widget->grab().save(path)) qWarning() << "screenshot not saved:" << path;
 }
 
+// A point in a TaskView's widget coordinates: its painted rects are in graph
+// coordinates, which the view scales by its zoom.
+QPoint viewPoint(const TeamUi::TaskView *view, const QRectF &rect)
+{
+    return QPoint(int(std::round(rect.center().x() * view->zoom)), int(std::round(rect.center().y() * view->zoom)));
+}
+
+// Arms the owner's confirmation on the next modal dialog: `cancel` clicks the
+// reject (Cancel) button, otherwise the destructive action button. The dialog
+// runs its own event loop inside the click, so a zero timer lands inside it; the
+// retry covers a timer that fires before the dialog is up.
+void armConfirm(TeamPanel *panel, bool cancel, int tries = 300)
+{
+    QTimer::singleShot(0, panel, [panel, cancel, tries] {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        if (!box) {
+            if (tries > 0) QTimer::singleShot(10, panel, [panel, cancel, tries] { armConfirm(panel, cancel, tries - 1); });
+            return;
+        }
+        for (auto *button : box->buttons())
+            if (cancel ? box->buttonRole(button) == QMessageBox::RejectRole
+                       : box->buttonRole(button) == QMessageBox::DestructiveRole) { button->click(); return; }
+        for (auto *button : box->buttons())
+            if (!button->text().contains(QStringLiteral("Cancel"))) { button->click(); return; }
+    });
+}
+
 void darkPalette()
 {
     if (qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) return;
@@ -322,6 +349,7 @@ private slots:
     void folderPolicyKeepsAutoWhileTyping();
     void typoThenGitCreatesWorktrees();
     void severalDraftPhasesRenderAndApproveInOrder();
+    void phaseBandsStackWithStatusDecisionAndHealth();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
     void catalogEditorCarriesNewPhaseApproval();
@@ -676,35 +704,37 @@ void TestTeamsUi::draftReorderSendsMovePhase()
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
-    QTRY_COMPARE(workspace.findChildren<QFrame *>("teamWorkspaceDraftPhase").size(), 7);
-    auto *membersList = workspace.findChild<QWidget *>("teamWorkspaceMemberList");
-    QVERIFY(membersList && membersList->isAncestorOf(workspace.findChildren<QFrame *>("teamWorkspaceDraftPhase").first()));
-    // The live numbers, in the store's order.
-    QStringList headings;
-    for (auto *label : workspace.findChildren<QLabel *>("teamDraftPhaseHeading")) headings << label->text();
-    QCOMPARE(headings, (QStringList{"Phase 2", "Phase 3", "Phase 4", "Phase 5", "Phase 6", "Phase 7", "Phase 8"}));
+    // G9: the drafts are bands stacked in the graph, each header with its own
+    // Approve, Discard and move arrows.
+    TeamUi::TaskView *graph = nullptr;
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph != nullptr; })());
+    workspace.render();
+    QTest::qWait(100);
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QVERIFY(graph);
+    graph->grab();
+    QTRY_COMPARE(graph->bands.size(), 8);
+    for (int i = 0; i < graph->bands.size(); ++i) QCOMPARE(graph->bands[i].n, i + 1);
+    QVERIFY(graph->bands[1].heading.startsWith(QStringLiteral("Phase 2")));
+    QVERIFY(graph->bands[1].heading.contains(QStringLiteral("QA fixes")));
     // The first draft cannot go up, the last cannot go down.
-    auto ups = workspace.findChildren<QPushButton *>("teamMovePhaseUp");
-    QCOMPARE(ups.size(), 7);
-    QVERIFY(!ups.first()->isEnabled());
-    QVERIFY(ups.last()->isEnabled());
-    ups[1]->click();
+    QVERIFY(graph->moveUpRect(2).width() > 0);
+    QVERIFY(graph->moveDownRect(2).width() > 0);
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->moveUpRect(3)));
     QTRY_COMPARE(calls(script(), "move-phase").size(), 1);
     auto moved = calls(script(), "move-phase").first();
     QCOMPARE(moved["team"].toString(), QStringLiteral("team-1"));
     QCOMPARE(moved["phase"].toInt(), 3);
     QCOMPARE(moved["to"].toInt(), 2);
     QCOMPARE(moved["position"].toString(), QStringLiteral("before"));
-    QTRY_VERIFY(workspace.findChildren<QPushButton *>("teamMovePhaseDown").size() == 7);
-    auto downs = workspace.findChildren<QPushButton *>("teamMovePhaseDown");
-    QVERIFY(!downs.last()->isEnabled());
-    downs.first()->click();
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph != nullptr && graph->moveDownRect(2).width() > 0; })());
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->moveDownRect(2)));
     QTRY_COMPARE(calls(script(), "move-phase").size(), 2);
     moved = calls(script(), "move-phase")[1];
     QCOMPARE(moved["phase"].toInt(), 2);
     QCOMPARE(moved["to"].toInt(), 3);
     QCOMPARE(moved["position"].toString(), QStringLiteral("after"));
-    // The store renumbers the drafts after a move: the rows follow the live
+    // The store renumbers the drafts after a move: the bands follow the live
     // numbers and titles it sends, not positions cached when the canvas was built.
     auto renumbered = seven;
     renumbered["phases"] = QJsonArray{
@@ -718,18 +748,19 @@ void TestTeamsUi::draftReorderSendsMovePhase()
     setTeam(renumbered);
     QTRY_VERIFY(([&] {
         controller.refresh();
-        const auto headings = workspace.findChildren<QLabel *>("teamDraftPhaseHeading");
-        const auto titles = workspace.findChildren<QLabel *>("teamDraftPhaseTitle");
-        return headings.size() == 7 && titles.size() == 7 && headings[0]->text() == QStringLiteral("Phase 2")
-               && headings[6]->text() == QStringLiteral("Phase 8") && titles[0]->text() == QStringLiteral("Polish");
+        auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+        return v && v->bands.size() == 8 && v->bands[1].n == 2 && v->bands[1].title == QStringLiteral("Polish")
+               && v->bands.last().n == 8;
     })());
     // QA fixes now waits for the draft that moved before it, at phase 2.
-    QCOMPARE(workspace.findChildren<QLabel *>("teamDraftPhaseReason")[0]->text(), QStringLiteral("after phase 2"));
+    auto *renumberedGraph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QVERIFY(renumberedGraph->bandOf(3));
+    QVERIFY(renumberedGraph->bandOf(3)->blocked.contains(QStringLiteral("after phase 2")));
     shot(&workspace, "phases-7-drafts-dark");
     lightPalette();
     workspace.setTheme(false);
     workspace.render();
-    QTRY_VERIFY(workspace.findChildren<QFrame *>("teamWorkspaceDraftPhase").size() == 7);
+    QTest::qWait(250);
     shot(&workspace, "phases-7-drafts-light");
     darkPalette();
     workspace.setTheme(true);
@@ -1185,84 +1216,88 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
-    // The team header says the phase waits; the draft waits in the members
-    // column, as one compact line with the two owner decisions (G5).
+    // The team bar says the phase waits; the draft's band header carries the
+    // status chip, progress and health, and the two owner decisions (G9).
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamBarPendingPhase"));
-    QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseHeading")->text(), QStringLiteral("Phase 3"));
-    auto *membersList = workspace.findChild<QWidget *>("teamWorkspaceMemberList");
-    QVERIFY(membersList);
-    auto *draft = workspace.findChild<QFrame *>("teamWorkspaceDraftPhase");
-    QVERIFY(draft);
-    // It sits in the members column, not in the rows above the canvas, and the
-    // canvas gets that height back.
-    QVERIFY(membersList->isAncestorOf(draft));
-    QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceTop")->isAncestorOf(draft));
-    QVERIFY(draft->height() <= 40);
-    QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseTitle")->text(), QStringLiteral("Polish"));
-    QVERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
-    QVERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
-    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceFinish"));   // tasks are still open
+    auto *graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QTRY_VERIFY(([&] { auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return v && v->bands.size() >= 3; })());
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QCOMPARE(graph->bands.last().n, 3);
+    workspace.render();
+    QTest::qWait(100);
     shot(&workspace, "d3-phases-draft");
-    // G5: the Phases block folds and the members fold as well; each header stays.
-    auto *phasesToggle = workspace.findChild<QToolButton *>("teamPhasesToggle");
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QVERIFY(graph);
+    QVERIFY(graph->approveRect(3).width() > 0);
+    QVERIFY(graph->discardRect(3).width() > 0);
+    QVERIFY(graph->bandTooltip(3).isEmpty());   // the draft is ready
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceFinish"));   // tasks are still open
+    // G9: clicking the band header folds it to the header row, and the header
+    // stays; the members column folds independently.
     auto *membersToggle = workspace.findChild<QToolButton *>("teamMembersToggle");
-    QVERIFY(phasesToggle && membersToggle);
-    phasesToggle->click();
-    QTRY_VERIFY(!workspace.findChild<QFrame *>("teamWorkspaceDraftPhase"));
-    QVERIFY(workspace.findChild<QToolButton *>("teamPhasesToggle"));
+    QVERIFY(membersToggle);
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->bandRect(3)));
+    QTRY_VERIFY(([&] { auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+                       return v && v->bandOf(3) && v->bandOf(3)->collapsed; })());
     shot(&workspace, "d3-phases-folded");
-    workspace.findChild<QToolButton *>("teamPhasesToggle")->click();
-    QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceDraftPhase"));
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QVERIFY(graph);
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->bandRect(3)));
+    QTRY_VERIFY(([&] { auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+                       return v && v->bandOf(3) && !v->bandOf(3)->collapsed; })());
     membersToggle = workspace.findChild<QToolButton *>("teamMembersToggle");
     membersToggle->click();
     QTRY_VERIFY(!workspace.findChild<QFrame *>("teamWorkspaceMember"));
-    QVERIFY(workspace.findChild<QFrame *>("teamWorkspaceDraftPhase"));   // the phases stay
     shot(&workspace, "d3-members-folded");
     workspace.findChild<QToolButton *>("teamMembersToggle")->click();
     QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceMember"));
-    // Opened, the draft shows its tasks and, when the store reports them, the
-    // lead's changes as a diff.
-    workspace.findChild<QToolButton *>("teamDraftOpen")->click();
-    QTRY_VERIFY(workspace.findChild<QFrame *>("teamDraftDetail"));
-    auto *detail = workspace.findChild<QFrame *>("teamDraftDetail");
-    QVERIFY(detail->findChildren<QLabel *>().size() >= 2);   // the task and its state
     shot(&workspace, "d3-phases-draft-open");
-    // The same one-draft column in the light theme.
+    // The same draft band in the light theme.
     lightPalette();
     workspace.setTheme(false);
     workspace.render();
-    QTRY_VERIFY(workspace.findChild<QFrame *>("teamDraftDetail"));
+    QTest::qWait(250);
     shot(&workspace, "d3-phases-draft-light");
     darkPalette();
     workspace.setTheme(true);
     workspace.render();
-    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
-    // Approve sends the owner's decision once, with the phase. The buttons are
-    // disabled at once, so a second click cannot send it again.
-    auto *approve = workspace.findChild<QPushButton *>("teamApprovePhase");
-    approve->click();
-    QVERIFY(!approve->isEnabled());
-    QVERIFY(!workspace.findChild<QPushButton *>("teamDiscardPhase")->isEnabled());
+    // Approve asks the owner first, then sends once with the phase; a second
+    // click before the poll sends nothing.
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QTRY_VERIFY(graph);
+    graph->grab();
+    armConfirm(&panel, false);
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->approveRect(3)));
     QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
     QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 3);
     QCOMPARE(calls(script(), "approve-phase").first()["team"].toString(), QStringLiteral("team-1"));
     QCOMPARE(calls(script(), "approve-phase").first()["by"].toString(), QStringLiteral("human"));
-    // Discard asks to confirm first: "Discard phase N and its K tasks?".
-    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
-    // Cancelling the confirmation sends nothing.
-    QTimer::singleShot(0, &panel, [&panel] {
-        if (auto *box = panel.findChild<QMessageBox *>("teamDiscardPhaseConfirm"))
-            for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Cancel")) { b->click(); break; }
-    });
-    workspace.findChild<QPushButton *>("teamDiscardPhase")->click();
+    // A second click on the header, before the poll, sends nothing.
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QTRY_VERIFY(graph);
+    graph->grab();
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->approveRect(3)));
+    QTest::qWait(80);
+    QCOMPARE(calls(script(), "approve-phase").size(), 1);
+    // The store's next revision reopens the header for the same phase; the
+    // Discard test runs on it.
+    auto decidedTeam = ready;
+    decidedTeam["revision"] = decidedTeam["revision"].toInt(1) + 1;
+    setTeam(decidedTeam);
+    QTRY_VERIFY(([&] { controller.refresh(); auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return v && v->bandOf(3); })());
+    // Discard asks to confirm: Cancel sends nothing, the confirmation sends once.
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QTRY_VERIFY(graph);
+    graph->grab();
+    armConfirm(&panel, true);
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->discardRect(3)));
     QTest::qWait(100);
     QCOMPARE(calls(script(), "discard-phase").size(), 0);
-    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamDiscardPhase"));
-    QTimer::singleShot(0, &panel, [&panel] {
-        if (auto *box = panel.findChild<QMessageBox *>("teamDiscardPhaseConfirm"))
-            for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Discard phase")) { b->click(); break; }
-    });
-    workspace.findChild<QPushButton *>("teamDiscardPhase")->click();
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QTRY_VERIFY(graph);
+    graph->grab();
+    armConfirm(&panel, false);
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->discardRect(3)));
     QTRY_COMPARE(calls(script(), "discard-phase").size(), 1);
     QCOMPARE(calls(script(), "discard-phase").first()["phase"].toInt(), 3);
     // All tasks decided: the header waits for the lead and Finish asks for a
@@ -1845,9 +1880,18 @@ void TestTeamsUi::leadLoadViewsShowInTheDesktop()
     workspace.setLive(live);
     workspace.resize(1300, 900); workspace.show();
     workspace.showTeam("team-1");
-    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QFrame *>("teamWorkspaceDraftPhase") != nullptr; })());
-    QVERIFY(workspace.findChild<QLabel *>("teamDraftPhaseReason"));
-    QCOMPARE(workspace.findChild<QLabel *>("teamDraftPhaseReason")->text(), QStringLiteral("Waiting for the previous phase to be ready"));
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+        return v && v->bandOf(3);
+    })());
+    auto *loadGraph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QVERIFY(loadGraph);
+    QVERIFY(loadGraph->bandOf(3));
+    // F12: the draft band's header carries the whole waiting sentence, and the
+    // details stay in its tooltip.
+    QCOMPARE(loadGraph->bandOf(3)->blocked, QStringLiteral("Waiting for the previous phase to be ready"));
+    QVERIFY(loadGraph->bandTooltip(3).contains(QStringLiteral("is not ready")));
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberServices"));
     QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberBudget"));
     QVERIFY(workspace.findChild<QFrame *>("teamAttentionStrip"));
@@ -2081,24 +2125,27 @@ void TestTeamsUi::severalDraftPhasesRenderAndApproveInOrder()
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
-    // Spec 10: three drafts, each with its own strip; only the next one opens.
-    auto strips = workspace.findChildren<QFrame *>("teamWorkspaceDraftPhase");
-    QCOMPARE(strips.size(), 3);
+    // Spec 10: three drafts, one band each; only the next one can be approved.
     QCOMPARE(workspace.findChild<QWidget *>("teamBarPendingPhase")->toolTip(), QStringLiteral("phases 2, 3, 4 pending approval"));
-    QList<QPushButton *> approves = workspace.findChildren<QPushButton *>("teamApprovePhase");
-    QCOMPARE(approves.size(), 3);
-    QCOMPARE(approves[0]->property("phase").toInt(), 2);
-    QVERIFY(approves[0]->isEnabled());
-    QVERIFY(!approves[1]->isEnabled());
-    QVERIFY(approves[1]->toolTip().contains(QStringLiteral("Phase 3 opens after phase 2 is approved")));
-    QVERIFY(!approves[2]->isEnabled());
-    // QA: the nearest open phase is named, not the first draft of the plan.
-    QVERIFY(approves[2]->toolTip().contains(QStringLiteral("Phase 4 opens after phase 3 is approved")));
     // Several drafts render in the graph, the layers and the board.
     auto *graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
     QVERIFY(graph);
     QCOMPARE(graph->bands.size(), 4);
     for (int i = 1; i < graph->bands.size(); ++i) QVERIFY(graph->bands[i].draft);
+    QVERIFY(graph->bandOf(2)->blocked.isEmpty());
+    QCOMPARE(graph->bandOf(3)->blocked, QStringLiteral("after phase 2"));
+    QVERIFY(graph->bandOf(3)->blockedTip.contains(QStringLiteral("Phase 3 opens after phase 2 is approved")));
+    QCOMPARE(graph->bandOf(4)->blocked, QStringLiteral("after phase 3"));
+    QVERIFY(graph->bandOf(4)->blockedTip.contains(QStringLiteral("Phase 4 opens after phase 3 is approved")));
+    // The graph stacks the bands top to bottom, one header row each.
+    double lastTop = -1;
+    for (const auto &band : graph->bands) {
+        const QRectF r = graph->bandRect(band.n);
+        QVERIFY(r.isValid() && r.width() > 100);
+        QVERIFY(r.top() > lastTop);
+        QCOMPARE(int(r.left()), int(graph->bandRect(1).left()));
+        lastTop = r.top();
+    }
     // G4: every band keeps the alternating layer stripes and a small label.
     const auto bandLayers = graph->bandLayers();
     QVERIFY(!bandLayers.isEmpty());
@@ -2115,13 +2162,14 @@ void TestTeamsUi::severalDraftPhasesRenderAndApproveInOrder()
     lightPalette();
     workspace.setTheme(false);
     workspace.render();
-    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QTest::qWait(200);
     auto *lightGraph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
     QVERIFY(lightGraph && !lightGraph->bandLayers().isEmpty());
     shot(&workspace, "roadmap-graph-light");
     darkPalette();
     workspace.setTheme(true);
     workspace.render();
+    QTest::qWait(150);
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
     for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
         if (b->property("segment") == "layers") { b->click(); break; }
@@ -2147,19 +2195,22 @@ void TestTeamsUi::severalDraftPhasesRenderAndApproveInOrder()
         nextTasks[i] = task;
     }
     next["tasks"] = nextTasks;
+    // Back to the graph for the header check.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "graph") { b->click(); break; }
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
     setTeam(next);
     QTRY_VERIFY(([&] {
         controller.refresh();
-        const auto buttons = workspace.findChildren<QPushButton *>("teamApprovePhase");
-        return buttons.size() == 2 && buttons[0]->property("phase").toInt() == 3 && buttons[0]->isEnabled()
-               && !buttons[1]->isEnabled();
+        auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+        return v && v->bandOf(3) && v->bandOf(3)->blocked.isEmpty()
+               && v->bandOf(4) && v->bandOf(4)->blocked == QStringLiteral("after phase 3");
     })());
-    QVERIFY(workspace.findChildren<QPushButton *>("teamApprovePhase")[1]->toolTip().contains(QStringLiteral("Phase 4 opens after phase 3 is approved")));
     // Light theme.
     lightPalette();
     workspace.setTheme(false);
     workspace.render();
-    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceDraftPhase"));
+    QTRY_VERIFY(([&] { auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return v && v->bandOf(3); })());
     shot(&workspace, "roadmap-drafts-light");
     darkPalette();
     workspace.setTheme(true);
@@ -2314,7 +2365,7 @@ void TestTeamsUi::lightThemeShots()
     controller.refresh();
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
-    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamApprovePhase"));
+    QTRY_VERIFY(([&] { auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return v && v->bands.size() > 2; })());
     // The coordinator's empty Activity text is light-theme text, not a dark
     // document left over from before the theme switch.
     auto *conversation = workspace.findChild<QWidget *>("teamConversationActivity");
@@ -2628,6 +2679,207 @@ void TestTeamsUi::catalogEditorMarksManualEdits()
     QTRY_VERIFY(editor.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 unsaved change"));
     QVERIFY(editor.findChild<QPushButton *>("teamCatalogSave")->isEnabled());
     shot(&editor, "d1-manual-edits");
+}
+
+// G9: the workspace graph stacks phase bands top to bottom; each band's header
+// carries the phase status, progress, health and a draft's decisions (spec
+// 10.2). Shots: every status, collapsed and expanded, light and dark.
+void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
+{
+    auto t = phasedTeam();
+    t["status"] = "running";
+    t["pending_phase"] = QJsonValue();
+    t["pending_phases"] = QJsonArray{5};
+    t["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"barrier", true}, {"state", "approved"}, {"tasks", QJsonArray{3, 4}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "approved"}, {"tasks", QJsonArray{5}}},
+        QJsonObject{{"n", 4}, {"title", "Review"}, {"barrier", true}, {"state", "approved"}, {"tasks", QJsonArray{6}}},
+        QJsonObject{{"n", 5}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{7}},
+                    {"waiting", QJsonObject{{"text", "Waiting for the previous phase to be ready"}, {"phase", 4},
+                                            {"open", QJsonArray{6}}}}}};
+    t["tasks"] = QJsonArray{
+        QJsonObject{{"id", 1}, {"phase", 1}, {"title", "Requirements"}, {"assignee", "lead"}, {"status", "accepted"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "lead"}, {"state", "reported"}}}}},
+        QJsonObject{{"id", 2}, {"phase", 1}, {"title", "Checkout design"}, {"assignee", "backend"}, {"status", "accepted"}},
+        QJsonObject{{"id", 3}, {"phase", 2}, {"title", "Address form UI"}, {"assignee", "backend"}, {"status", "accepted"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a3"}, {"member", "backend"}, {"state", "reported"}}}}},
+        QJsonObject{{"id", 4}, {"phase", 2}, {"title", "Unit tests"}, {"assignee", "tester"}, {"status", "accepted"}},
+        QJsonObject{{"id", 5}, {"phase", 3}, {"title", "Code review"}, {"assignee", "backend"}, {"status", "in_progress"},
+                    {"attempts", QJsonArray{QJsonObject{{"n", 1}, {"id", "a5"}, {"member", "backend"}, {"state", "delivered"}}}}},
+        QJsonObject{{"id", 6}, {"phase", 4}, {"title", "Release notes"}, {"assignee", "backend"}, {"status", "assigned"}},
+        QJsonObject{{"id", 7}, {"phase", 5}, {"title", "Screenshots"}, {"assignee", "tester"}, {"status", "draft"}}};
+    t["phase_summary"] = QJsonArray{
+        QJsonObject{{"n", 1}, {"title", QString()}, {"status", "done"}, {"done", 2}, {"total", 2}, {"barrier", false}, {"health_line", "path 2 · par 1.0"}},
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"status", "done"}, {"done", 2}, {"total", 2}, {"barrier", true}, {"health_line", "path 2 · par 1.0 · 1 warning"}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"status", "in_work"}, {"done", 0}, {"total", 1}, {"barrier", false}, {"health_line", "path 1 · par 1.0"}},
+        QJsonObject{{"n", 4}, {"title", "Review"}, {"status", "approved"}, {"done", 0}, {"total", 1}, {"barrier", true}, {"health_line", "path 1 · par 1.0"}},
+        QJsonObject{{"n", 5}, {"title", "Docs"}, {"status", "draft"}, {"done", 0}, {"total", 1}, {"barrier", false}, {"health_line", ""}}};
+    t["phases_health"] = QJsonObject{
+        {"1", QJsonObject{{"tasks", 2}, {"critical_path", 2}, {"parallelism", 1.0}, {"warnings", QJsonArray()}}},
+        {"2", QJsonObject{{"tasks", 2}, {"critical_path", 2}, {"parallelism", 1.0}, {"warnings", QJsonArray{"Backend holds 2 of 2"}}}},
+        {"3", QJsonObject{{"tasks", 1}, {"critical_path", 1}, {"parallelism", 1.0}, {"warnings", QJsonArray()}}},
+        {"4", QJsonObject{{"tasks", 1}, {"critical_path", 1}, {"parallelism", 1.0}, {"warnings", QJsonArray()}}},
+        {"5", QJsonObject{{"tasks", 1}, {"critical_path", 1}, {"parallelism", 1.0}, {"warnings", QJsonArray()}}}};
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 1000); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    auto graph = [&]() -> TeamUi::TaskView * {
+        return dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    };
+    QTRY_VERIFY(([&] { auto *v = graph(); return v && v->bands.size() == 5; })());
+    workspace.render();
+    QTest::qWait(100);
+    // Every status the spec names reads from phase_summary.
+    const auto status = [&](int n) { return graph()->bandOf(n) ? graph()->bandOf(n)->status : QString(); };
+    QCOMPARE(status(1), QStringLiteral("done"));
+    QCOMPARE(status(2), QStringLiteral("done"));
+    QCOMPARE(status(3), QStringLiteral("in_work"));
+    QCOMPARE(status(4), QStringLiteral("approved"));
+    QCOMPARE(status(5), QStringLiteral("draft"));
+    QCOMPARE(graph()->bandOf(3)->healthLine, QStringLiteral("path 1 · par 1.0"));
+    QVERIFY(graph()->bandOf(2)->healthTip.contains(QStringLiteral("Backend holds 2 of 2")));
+    QCOMPARE(graph()->bandOf(4)->done, 0);
+    QCOMPARE(graph()->bandOf(4)->total, 1);
+    // The bands stack: same left edge, increasing top.
+    double lastTop = -1;
+    for (int n = 1; n <= 5; ++n) {
+        const QRectF r = graph()->bandRect(n);
+        QVERIFY(r.isValid() && r.width() > 200);
+        QVERIFY(r.top() > lastTop);
+        QCOMPARE(int(r.left()), int(graph()->bandRect(1).left()));
+        lastTop = r.top();
+    }
+    // The blocked draft says the F12 sentence, and its Approve is painted but
+    // does not send anything (the F12 guard).
+    QCOMPARE(graph()->bandOf(5)->blocked, QStringLiteral("Waiting for the previous phase to be ready"));
+    graph()->grab();
+    QVERIFY(graph()->approveRect(5).width() > 0);
+    QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->approveRect(5)));
+    QTest::qWait(80);
+    QCOMPARE(calls(script(), "approve-phase").size(), 0);
+    // Default: finished phases start collapsed; the rest are open (both states
+    // in one picture, dark and light).
+    QVERIFY(graph()->bandOf(1)->collapsed);
+    QVERIFY(graph()->bandOf(2)->collapsed);
+    QVERIFY(!graph()->bandOf(3)->collapsed);
+    shot(&workspace, "g9-statuses-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "g9-statuses-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // All expanded.
+    for (int n = 1; n <= 2; ++n) {
+        QTRY_VERIFY(([&] { auto *v = graph(); return v && v->bandOf(n) && v->bandOf(n)->collapsed; })());
+        QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->bandRect(n)));
+        QTRY_VERIFY(([&] { auto *v = graph(); return v && v->bandOf(n) && !v->bandOf(n)->collapsed; })());
+    }
+    shot(&workspace, "g9-statuses-expanded-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "g9-statuses-expanded-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // All collapsed: one compact header row per band.
+    for (int n = 3; n <= 5; ++n) {
+        QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->bandRect(n)));
+        QTRY_VERIFY(([&] { auto *v = graph(); return v && v->bandOf(n) && v->bandOf(n)->collapsed; })());
+    }
+    QVERIFY(graph()->summaryRect(3).isNull());
+    QVERIFY(graph()->bandRect(3).height() <= 40);
+    shot(&workspace, "g9-statuses-collapsed-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "g9-statuses-collapsed-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // The paused phase: the team is Paused, so its in-work phase says Paused.
+    auto paused = t;
+    paused["status"] = "paused";
+    auto summary = paused["phase_summary"].toArray();
+    auto pausedSummary = summary[2].toObject(); pausedSummary["status"] = "paused"; summary[2] = pausedSummary;
+    paused["phase_summary"] = summary;
+    setTeam(paused);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        auto *v = graph();
+        return v && v->bandOf(3) && v->bandOf(3)->status == QStringLiteral("paused");
+    })());
+    shot(&workspace, "g9-paused-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "g9-paused-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // A ready draft: Approve and Discard ask the owner first, then send once.
+    auto ready = t;
+    ready["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"barrier", true}, {"state", "approved"}, {"tasks", QJsonArray{3, 4}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "approved"}, {"tasks", QJsonArray{5}}},
+        QJsonObject{{"n", 4}, {"title", "Review"}, {"state", "approved"}, {"tasks", QJsonArray{6}}},
+        QJsonObject{{"n", 5}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{7}}},
+        QJsonObject{{"n", 6}, {"title", "Screenshots"}, {"state", "draft"}, {"tasks", QJsonArray{8}}}};
+    auto readyTasks = ready["tasks"].toArray();
+    for (int i = 0; i < readyTasks.size(); ++i) {
+        auto task = readyTasks[i].toObject();
+        if (task["phase"].toInt(1) < 5) task["status"] = "accepted";
+        readyTasks[i] = task;
+    }
+    readyTasks.append(QJsonObject{{"id", 8}, {"phase", 6}, {"title", "Screenshots"}, {"assignee", "tester"}, {"status", "draft"}});
+    ready["tasks"] = readyTasks;
+    auto readySummary = ready["phase_summary"].toArray();
+    auto readyFourth = readySummary[3].toObject(); readyFourth["status"] = "done"; readyFourth["done"] = 1; readySummary[3] = readyFourth;
+    auto readyLast = readySummary[4].toObject(); readyLast["status"] = "draft"; readySummary[4] = readyLast;
+    ready["phase_summary"] = readySummary;
+    setTeam(ready);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        auto *v = graph();
+        return v && v->bandOf(5) && v->bandOf(5)->blocked.isEmpty();
+    })());
+    workspace.repaint();
+    QTest::qWait(120);
+    graph()->grab();
+    QVERIFY(graph()->approveRect(5).width() > 0);
+    armConfirm(&panel, false);
+    QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->approveRect(5)));
+    QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
+    QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 5);
+    // Discard on the other draft band: Cancel sends nothing, the confirmation
+    // sends once with phase 6.
+    QVERIFY(graph()->bandOf(6) && graph()->bandOf(6)->draft);
+    QVERIFY(graph()->discardRect(6).width() > 0);
+    armConfirm(&panel, true);
+    QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->discardRect(6)));
+    QTest::qWait(100);
+    QCOMPARE(calls(script(), "discard-phase").size(), 0);
+    armConfirm(&panel, false);
+    QTest::mouseClick(graph(), Qt::LeftButton, {}, viewPoint(graph(), graph()->discardRect(6)));
+    QTRY_COMPARE(calls(script(), "discard-phase").size(), 1);
+    QCOMPARE(calls(script(), "discard-phase").first()["phase"].toInt(), 6);
 }
 
 #include "test_teamsui.moc"

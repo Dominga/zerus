@@ -53,6 +53,11 @@ private:
     QWidget *wideningStrip(const Teams::Team &team);
     void approveTeam(const Teams::Team &team);
     // C2/C4: the lead's inbox and the owner's attention list.
+    // G9: the phase band header's decisions. Approve and Discard ask for the
+    // owner's confirmation; the F10 arrows move a draft among the drafts.
+    void approvePhase(const Teams::Team &team, int phase);
+    void discardPhase(const Teams::Team &team, int phase);
+    void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
     QWidget *attentionStrip(const Teams::Team &team);
     QWidget *errorStrip();
@@ -79,6 +84,13 @@ private:
     QString m_team, m_view = QStringLiteral("graph"), m_filter = QStringLiteral("all"), m_focus;
     QString m_error;
     bool m_dark = true, m_pending = false, m_feedOpen = false, m_fit = true;
+    // G9: one phase decision is in flight at a time; a second click on a header
+    // before the answer arrives sends nothing. After an answer, that phase stays
+    // decided until the team's revision moves (the store has taken the decision).
+    int m_phaseAct = 0;
+    QString m_phaseDecided;
+    qint64 m_decidedRevision = -1;
+    bool phaseDecided(const Teams::Team &team, int phase) const;
     // G5: the two blocks of the members column fold independently, and the
     // owner's choice survives a restart; one draft at a time opens.
     bool m_phasesOpen = true, m_membersOpen = true;

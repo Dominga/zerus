@@ -251,6 +251,7 @@ private slots:
     void socratiCodeIsAnOptionalExtension();
     void subordinateSessionsFollowTheirLead();
     void agentTeamsGroupTheirSessions();
+    void teamTreeShowsSubteamsAndRollsUp();
     void teamRowBarsCountThePhaseInWork();
     void teamLeftoverStopAsksTheRealAction();
     void readmeScreenshots();
@@ -1280,6 +1281,53 @@ else:out({})
 // task's phase and the phase records. A team like 528aebfe - phase 1 and 31
 // finished, 32 in work, 33 and 34 drafts - reads the phase-32 tasks bar and
 // 2/5 phases on the row, and the shot shows it.
+void TestSessionsWindow::teamTreeShowsSubteamsAndRollsUp()
+{
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/collapsedTeams"); });
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    // G1: the child's lead session is also the parent's delegate, so the child
+    // lead row must sit indented under the parent lead and fold with it.
+    const QByteArray teams = R"({"items":[
+      {"id":"team-1","name":"Parent","status":"running","lead":"lead","revision":3,
+       "children":[{"team":"team-2","name":"Child","status":"running","done":0,"total":1}],
+       "members":[{"id":"lead","role":"Lead","agent":"codex","state":"active","session":{"host":"","name":"codex/hgs/dashboard"}},
+                  {"id":"childlead","role":"Tester","agent":"kimi","state":"active","session":{"host":"","name":"kimi/hgs/tester"}}],
+       "tasks":[{"id":1,"title":"API","status":"in_progress","assignee":"lead","attempt":{"n":1,"state":"delivered"}},
+                {"id":2,"title":"Tests","status":"pending","assignee":"childlead","subteam":{"team":"team-2","status":"running","done":0,"total":1}}]},
+      {"id":"team-2","name":"Child","status":"running","lead":"childlead","revision":1,
+       "parent":{"team":"team-1","task":2,"lead":"lead","member":"childlead"},
+       "members":[{"id":"childlead","role":"Tester","agent":"kimi","state":"active","session":{"host":"","name":"kimi/hgs/tester"}}],
+       "tasks":[{"id":1,"title":"Child work","status":"pending","assignee":"childlead"}]}]})";
+    const QByteArray answer = "elif c=='team' and a[1:2]==['list']:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument::fromJson(teams).toJson(QJsonDocument::Compact))) + ")\n"
+                              "elif c=='team':print('{}')\n";
+    const QString fixture = m_dir->filePath("hgs-tree");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    auto state = fleet(); auto box = state.local();
+    SessionInfo tester = box.sessions.value(1); tester.name = "kimi/hgs/tester"; tester.project = "hgs"; tester.tag = "tester";
+    box.sessions.append(tester); state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList");
+    const auto rowOf = [&](const QString &key) { for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key) == key) return i; return -1; };
+    auto *controller = window.findChild<TeamController *>();
+    QVERIFY(controller);
+    QTRY_COMPARE(controller->teams().size(), 2);
+    QTRY_VERIFY(rowOf("\ncodex/hgs/dashboard") >= 0 && rowOf("\nkimi/hgs/tester") >= 0);
+    const int parentRow = rowOf("\ncodex/hgs/dashboard");
+    const int childRow = rowOf("\nkimi/hgs/tester");
+    // The sub-team lead is indented under its parent's lead and carries no team
+    // strip of the parent; the parent row rolls up the whole subtree.
+    QCOMPARE(childRow, parentRow + 1);
+    QVERIFY(list->item(childRow)->data(SessionRoles::Subordinate).toBool());
+    const auto strip = list->item(parentRow)->data(SessionRoles::TeamLead).toMap();
+    QCOMPARE(strip.value("rollup").toString(), QStringLiteral("2 sessions \u00b7 3 open"));
+    QCOMPARE(strip.value("openTasks").toInt(), 3);
+    if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty())
+        { QTest::qWait(200); window.grab().save(QDir(shots).filePath("team-tree.png")); }
+    // Folding the parent folds the whole subtree, including the child's lead.
+    emit list->childrenToggled(QStringLiteral("\ncodex/hgs/dashboard"));
+    QTRY_VERIFY(list->item(childRow)->isHidden());
+}
+
 void TestSessionsWindow::teamRowBarsCountThePhaseInWork()
 {
     QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));

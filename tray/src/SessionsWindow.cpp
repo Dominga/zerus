@@ -3453,8 +3453,13 @@ void SessionsWindow::rebuild()
     };
     const auto subtreeCounts = [&](const Teams::Team &team, int &sessions, int &open) {
         sessions = 0; open = 0;
+        QSet<QString> seenSessions;
         std::function<void(const Teams::Team &)> walk = [&](const Teams::Team &current) {
-            for (const auto &member : current.members) if (!member.session.isEmpty()) ++sessions;
+            for (const auto &member : current.members)
+                if (!member.session.isEmpty() && !seenSessions.contains(member.session)) {
+                    seenSessions.insert(member.session);
+                    ++sessions;
+                }
             for (const auto &task : current.tasks) if (!task.finished()) ++open;
             for (const auto &child : current.children) if (const auto *found = teamById(child.team)) walk(*found);
         };

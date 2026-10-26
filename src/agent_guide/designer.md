@@ -22,4 +22,6 @@ Propose (whole objects; ids use letters, digits, - and _):
   | hgs team catalog propose --json
   kind is role, template or rule; action add, change (the whole new object)
   or remove (no value). Explain each change in reason, in one or two lines.
+  Check every role prompt against the team goal and the built-in protocol and
+  name each correction in "notes":[{"role","change","why"}] (at most 20).
 Check a goal's template: {"goal":"..."} | hgs team catalog route --json

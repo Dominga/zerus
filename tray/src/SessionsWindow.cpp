@@ -30,6 +30,7 @@
 #include "ActivityView.h"
 #include "ProcessView.h"
 #include "TasksView.h"
+#include "TaskInspector.h"
 #include "AttachmentViewer.h"
 #include "NativeBrowserPlugin.h"
 #include "NativeUiView.h"
@@ -1318,7 +1319,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_info = browser(); m_info->setObjectName("sessionInfo"); m_info->setAccessibleName(tr("Session details"));
     tabs->addTab(m_activityStack, tr("Activity")); tabs->addTab(m_terminal, tr("Terminal"));
     // The open session's project tasks; the label counts In review and To do.
-    m_tasks = new TasksView(&m_client); tabs->addTab(m_tasks, tr("Tasks"));
+    m_tasks = new TasksView(&m_client); tabs->addTab(m_tasks, tr("Task board"));
+    m_tasks->setOpenInInspector(true);
     m_tasksBadge = new TaskTabBadge; tabs->tabBar()->setTabButton(tabs->indexOf(m_tasks), QTabBar::RightSide, m_tasksBadge);
     connect(m_tasks, &TasksView::countsChanged, this, [this](int review, int todo) {
         m_tasksBadge->setCounts(review, todo);
@@ -1371,9 +1373,30 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_detailsClear->setToolTip(tr("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     connect(m_detailsClear,&QPushButton::clicked,this,&SessionsWindow::clearContext);
     contextRow->addWidget(m_detailsContext,1);contextRow->addWidget(m_detailsClear);detailsLayout->addLayout(contextRow);
-    // The agent's own plan, not the project's Zerus tasks (the Tasks tab).
+    // Keep the existing inspector indexes for saved preferences and shortcuts.
+    // The native plan is separate from the project's durable Zerus tasks.
     m_inspector->addTab(m_children, tr("Plan && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
+    m_taskInspector = new TaskInspector(&m_client, m_tasks);
+    m_inspector->addTab(m_taskInspector, tr("Tasks"));
+    connect(m_taskInspector, &TaskInspector::boardRequested, this, [this] { m_detailTabs->setCurrentWidget(m_tasks); });
+    connect(m_taskInspector, &TaskInspector::executorRequested, this, [this](const QString &host, const QString &name, const QString &id) {
+        // Recheck the retained identity before following a mutable display name.
+        for (const auto &entry : std::as_const(m_entries)) {
+            const QString retained = entry.session.launchId.isEmpty()
+                ? (entry.session.runId.isEmpty() ? QString() : QStringLiteral("run_id:") + entry.session.runId)
+                : QStringLiteral("launch_id:") + entry.session.launchId;
+            if (entry.host != host || (id.isEmpty() ? entry.session.name != name : retained != id)) continue;
+            const QString task = m_taskInspector->selectedTask();
+            openRelatedSession(entry.host, entry.session.name, {}); closeSubagent();
+            m_detailTabs->setCurrentWidget(m_activityStack); m_taskInspector->selectTask(task); return;
+        }
+        showNotice(tr("The task's session identity is no longer available."), true);
+    });
+    connect(m_tasks, &TasksView::taskSelected, this, [this](const QString &uuid) {
+        m_detailTabs->setCurrentWidget(m_activityStack); setInspectorVisible(true);
+        m_inspector->setCurrentWidget(m_taskInspector); m_taskInspector->selectTask(uuid);
+    });
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
     m_workSplitter->addWidget(m_inspectorPanel);
@@ -1381,7 +1404,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_inspectorToggle = new QPushButton; m_inspectorToggle->setObjectName("toggleInspector");
     m_inspectorToggle->setProperty("glyph", "inspector"); m_inspectorToggle->setCheckable(true);
     m_inspectorToggle->setProperty("sessionHeaderAction", true);
-    configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show plan, agents, details and worktrees"), m_dark);
+    configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show tasks, plan, agents, details and worktrees"), m_dark);
     tabs->setCornerWidget(m_inspectorToggle);
     connect(m_inspectorToggle, &QPushButton::toggled, this, &SessionsWindow::setInspectorVisible);
     connect(m_inspector, &QTabWidget::currentChanged, this, [](int index) { QSettings().setValue("workspace/inspectorTab", index); });
@@ -2035,7 +2058,7 @@ void SessionsWindow::applyTheme()
     m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_accountFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
-    m_tasks->setTheme(m_dark); m_tasksBadge->setTheme(m_dark);
+    m_tasks->setTheme(m_dark); m_tasksBadge->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
 }
 
@@ -2185,7 +2208,7 @@ void SessionsWindow::setInspectorVisible(bool visible)
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
     m_inspectorToggle->setProperty("glyph", visible ? "collapse-panel" : "inspector");
     m_inspectorToggle->setIcon(workspaceIcon(m_inspectorToggle->property("glyph").toString(), QColor(m_muted)));
-    m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show plan, agents, details and worktrees"));
+    m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show tasks, plan, agents, details and worktrees"));
     m_inspectorToggle->setToolTip(ShortcutRegistry::instance().tooltip(m_inspectorToggle->accessibleName(), "panel.toggle"));
     m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
@@ -3626,7 +3649,9 @@ template<typename Control> void explainContextAction(Control *control, const QSt
 
 void SessionsWindow::updateTasks(const Entry *entry)
 {
-    if (!entry || entry->session.state == "archived") { m_tasks->setContext({}, {}, {}, {}, {}, {}); return; }
+    if (!entry || entry->session.state == "archived") {
+        m_tasks->setContext({}, {}, {}, {}, {}, {}); m_taskInspector->setContext({}, {}, {}, {}); return;
+    }
     // Sessions outside every catalog project have no tasks.
     const QString projectId = m_organization.groupFor(entry->identity);
     const auto *project = m_organization.group(projectId);
@@ -3650,6 +3675,7 @@ void SessionsWindow::updateTasks(const Entry *entry)
         sessions << session;
     }
     m_tasks->setContext(real ? projectId : QString(), real ? project->name : QString(), entry->host, entry->session.name, entry->key, sessions);
+    m_taskInspector->setContext(real ? projectId : QString(), entry->host, entry->session.name, sessions);
 }
 
 void SessionsWindow::renderDetails()

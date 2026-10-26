@@ -501,6 +501,7 @@ private:
     ActivityView *m_activityView = nullptr;
     class ProcessView *m_processes = nullptr;
     class TasksView *m_tasks = nullptr;
+    class TaskInspector *m_taskInspector = nullptr;
     class TaskTabBadge *m_tasksBadge = nullptr;
     QWidget *m_nativeSignIn = nullptr;
     // A stopped OpenCode service: started only by this explicit action.

@@ -196,6 +196,12 @@ void TasksView::setPolling(bool polling) {
 
 void TasksView::setRefreshIntervals(int visibleMs, int hiddenMs) { m_visibleMs = visibleMs; m_hiddenMs = hiddenMs; schedule(); }
 
+void TasksView::setInspectorVisible(bool visible) {
+    if (visible == m_inspectorVisible) return;
+    m_inspectorVisible = visible;
+    if (visible) refresh(); else schedule();
+}
+
 void TasksView::showEvent(QShowEvent *event) { QWidget::showEvent(event); applyComposerKey(); if (m_loaded) refresh(); }
 
 void TasksView::hideEvent(QHideEvent *event) { QWidget::hideEvent(event); applyComposerKey(); schedule(); }
@@ -209,7 +215,7 @@ void TasksView::applyComposerKey() {
 
 // A project hgs cannot list is retried at the slow pace until a listing succeeds.
 void TasksView::schedule() {
-    if (m_polling && !m_projectId.isEmpty() && !m_listing) m_timer.start(isVisible() && !m_failing ? m_visibleMs : m_hiddenMs);
+    if (m_polling && !m_projectId.isEmpty() && !m_listing) m_timer.start((isVisible() || m_inspectorVisible) && !m_failing ? m_visibleMs : m_hiddenMs);
 }
 
 QStringList TasksView::withProject(QStringList arguments) const { return arguments << QStringLiteral("--project") << m_projectId; }
@@ -315,7 +321,9 @@ void TasksView::render() {
         if (!row) {
             row = new TaskRow(m_listHost); m_rows.insert(task.uuid, row);
             connect(row, &TaskRow::actionRequested, this, [this, row](TaskAction action) { act(row->task(), action); });
-            connect(row, &TaskRow::opened, this, [this, row] { openTask(row->task()); });
+            connect(row, &TaskRow::opened, this, [this, row] {
+                if (m_openInInspector) emit taskSelected(row->task().uuid); else openTask(row->task());
+            });
             connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { startDrag(row, hotSpot); });
         }
         row->setObjectName(QStringLiteral("taskRow:") + task.id);
@@ -346,6 +354,7 @@ void TasksView::render() {
     m_only->setAccessibleName(m_only->toolTip());
     m_settings->setToolTip(tr("Task settings for %1").arg(m_projectName)); m_settings->setAccessibleName(m_settings->toolTip());
     updateComposer();
+    emit boardChanged();
     // A listing during a drag moves the rows under a resting pointer: the line
     // follows them once they are laid out.
     if (m_overList)

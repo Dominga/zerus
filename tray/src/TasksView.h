@@ -74,12 +74,19 @@ public:
     // Any session for an empty session.
     void retarget(const TaskDrag &task, const QString &host, const QString &session);
     const TaskBoard &board() const { return m_board; }
+    TaskBoard displayBoard() const { return projectedBoard(); }
+    // The inspector shares this listing and polling loop with the project board.
+    void setInspectorVisible(bool visible);
+    void setOpenInInspector(bool enabled) { m_openInInspector = enabled; }
+    void editTask(const TaskItem &task) { openTask(task); }
     QString selectedStage() const { return m_stage; }
     MessageComposer *composer() const { return m_composer; }
 signals:
     // The project's tasks in In review and in To do, for the tab label.
     void countsChanged(int review, int todo);
     void notice(const QString &text, bool error);
+    void boardChanged();
+    void taskSelected(const QString &uuid);
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
@@ -155,4 +162,5 @@ private:
     quint64 m_generation = 0, m_listing = 0;
     int m_visibleMs = 2500, m_hiddenMs = 15000;
     bool m_polling = true, m_dark = true, m_showOlder = false, m_loaded = false, m_failing = false;
+    bool m_inspectorVisible = false, m_openInInspector = false;
 };

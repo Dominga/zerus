@@ -900,7 +900,7 @@ application and window switchers.
 | Rename session | F2 | F2 |
 | Search sessions | Ctrl+F | ⌘F |
 | Refresh | Ctrl+R, F5 | ⌘R, F5 |
-| Next / previous tab (Activity, Terminal, Tasks, Native UI, Processes) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
+| Next / previous tab (Activity, Terminal, Task board, Native UI, Processes) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
 | Switch between Activity and Terminal | Ctrl+` | ⌃` |
 | Show or hide the side panel | Ctrl+I | ⌘I |
 | Next / previous area (list, conversation, message field, side panel) | F6 / Shift+F6 | F6 / ⇧F6 |
@@ -1703,10 +1703,10 @@ Claude's recorded compaction boundary replaces the earlier context size with its
 reported summary size. It invalidates the earlier prompt cache estimate; a new
 warm countdown requires fresh native usage with a reported TTL.
 
-**Plan & agents**, **Details** and **Worktrees** occupy the resizable inspector.
+**Tasks**, **Plan & agents**, **Details** and **Worktrees** occupy the resizable inspector.
 Its width, tab and open state are local; toggling it preserves Activity, drafts and
 Terminal attachment. Plan & agents shows the agent's own plan, not the project's
-Zerus tasks (the Tasks tab). Successful native task/plan tools supply recorded pending,
+Zerus tasks. Successful native task/plan tools supply recorded pending,
 in-progress and completed items. Tool failures and Stop do not complete tasks.
 There are up to 100 items per list and 65 lists, with truncation disclosed.
 Old data shows **Last recorded**; unavailable history is not reconstructed.
@@ -2504,18 +2504,31 @@ task list from Zerus's SessionStart hook; `hgs guide tasks` lists the commands.
 There is no MCP server; sessions without bypassed permissions are not covered
 (Claude Code asks first, Codex's sandbox blocks the task store and SSH).
 
-In the desktop, the **Tasks** tab beside Activity and Terminal shows the open
+In the desktop, the **Task board** tab beside Activity and Terminal shows the open
 session's project. Stage tiles (In review, In progress, To do, Backlog, Done)
 filter one list; the funnel tile keeps only the open session's tasks and the Any
 session tasks it can take, and the gear opens the project's task settings. A row
-shows its actions on hover, and a click opens the task: its prompt and session
-(editable in To do and Backlog), history and comments. The input below files a
+shows its actions on hover, and a click returns to Activity with that task selected
+in the right **Tasks** inspector. **Edit / actions** opens its prompt and session
+(editable in To do and Backlog), attachments, history and comments. The input below files a
 task for the open session in To do, or in Backlog while Backlog is open. The tab
 label counts the tasks In review and in To do. Done lists the last 7 days, and
 Show older adds the rest. A session outside every project has no tasks.
 To do and Backlog rows can be dragged: onto the other list's tile to move them
 there, within To do to reorder it, onto a session of the project in the session
 list to pin them to it, or onto the project's header to make them Any session.
+
+The **Tasks** inspector shows the current session's tasks by default; uncheck
+**This session** to see the project. In progress and In review precede the ordered
+To do and Backlog lists. It retains at most 100 listed tasks and 80 selected-task
+history entries; the full history is available through **Edit / actions**.
+**Assigned to** identifies routing; **Executor** requires a recorded start.
+An unconfirmed start is labelled explicitly. **Agent report** is the saved report,
+not proof that a commit was merged or a build installed. **Open Activity** follows
+the retained executor identity, including after a rename. This first inspector
+slice shares the existing board poll; To do still starts through **Send now**.
+Automatic dispatch, task-scoped Activity discussion and verified result milestones
+are specified in `superpowers/specs/2026-10-26-activity-task-execution-design.md`.
 
 ## Machines and accounts
 

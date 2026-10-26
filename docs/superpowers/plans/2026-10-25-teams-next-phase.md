@@ -376,6 +376,23 @@ answered; a denial cannot carry an explanation.
   draft task ids after a renumber: draft-task operations carry the team
   revision they read, refused when a phase_renumbered came after it. (2) L9
   rest: a Paused team's lead messages are coalesced too.
+- **F12. Approval in order, said plainly (owner).** Phases run 1 -> 2 -> 3 ->
+  4; the owner cannot approve a phase while the one before it is not ready.
+  The desktop says just that on the waiting draft: "Waiting for the previous
+  phase to be ready" (the detail - which phase, how many tasks open - stays in
+  the tooltip).
+- **F13. The lead approves on the owner's explicit word (owner).** The lead may
+  approve the plan or the next phase itself only when the owner said so
+  explicitly in the lead's session, with a key phrase: "план принят" / "plan
+  approved" or "план на следующую фазу принят" / "next phase plan approved".
+  The lead sends `hgs team approve-phase` (or `approve`) with
+  `"owner_word": {"text": "<the owner's exact sentence>", "at": <time>}`. Zerus
+  checks that a message typed by the owner in the lead's own session (not a
+  team message, a pasted block or an agent's text) contains that sentence and a
+  key phrase, and that it is recent (for example 30 min); otherwise it refuses.
+  The event and the GUI say "Approved by Lead on your word" with the quote. The
+  ordering rule (F12) still applies: the lead cannot open a phase whose
+  predecessor is not ready.
 - **F10. Editable drafts.** Seen in use: an urgent fix could not be put before
   the queued drafts (a new phase always goes last), a draft cannot take one more
   task, and only the owner may discard. Proposal: until a draft is approved the

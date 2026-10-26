@@ -38,7 +38,7 @@ impl MobileSignals {
         Self
     }
 }
-fn mobile_stopped() -> bool { MOBILE_STOP.load(std::sync::atomic::Ordering::Relaxed) }
+fn mobile_stopped() -> bool { MOBILE_STOP.load(std::sync::atomic::Ordering::Relaxed) || super::worktree_requests::cancelled() }
 
 
 pub(super) struct GitError {
@@ -310,12 +310,16 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
             .and_then(|b| String::from_utf8(b).ok())
             .map(|p| json!(canonical(p.trim_end_matches('\n'))))
             .unwrap_or(Value::Null);
+        snapshot["selected_branch"] = git(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"], deadline)
+            .ok().and_then(|bytes|String::from_utf8(bytes).ok())
+            .map(|branch|json!(branch.trim_end_matches('\n'))).unwrap_or(Value::Null);
         snapshot["path"] = json!(path);
         snapshot["stale"] = json!(false);
         Ok::<_, GitError>(snapshot)
     })();
     match result {
-        Ok(snapshot) => {
+        Ok(mut snapshot) => {
+            snapshot["creation_receipts_v1"] = json!(true);
             let _ = atomic(&path_cache, &snapshot.to_string());
             snapshot
         }
@@ -338,9 +342,11 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
-    if let Some(action @ ("create" | "review" | "inspect" | "remove" | "policy" | "sweep")) = action {
+    if let Some(action @ ("create" | "status" | "cancel" | "review" | "inspect" | "remove" | "policy" | "sweep")) = action {
         let value = match action {
+            "create" if args.iter().any(|arg| arg == "--receipt") => super::worktree_requests::create(&args[1..])?,
             "create" => create(&args[1..])?,
+            "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,
             "inspect" => super::worktree_inspection::command(&args[1..])?,
             "policy" => super::worktree_maintenance::command(&args[1..])?,
@@ -365,6 +371,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     let mut path = None;
     let mut refresh = false;
+    let mut creation=false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -373,6 +380,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
                 path = Some(PathBuf::from(args.get(i).ok_or("--path needs a folder")?));
             }
             "--refresh" => refresh = true,
+            "--creation" => creation=true,
             "--json" => {}
             _ => return Err("usage: hgs worktrees --path PATH [--refresh] [--json]".into()),
         }
@@ -383,6 +391,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("worktree catalog requires an absolute folder path".into());
     }
     let mut value = catalog(&path, refresh);
+    if creation { value["worktrees"]=json!([]); }
     value["machine"] = json!(crate::config::Config::load()
         .map_err(|e| e.to_string())?
         .host());
@@ -407,7 +416,7 @@ fn inherited_upstream(read: &dyn Fn(&[&str]) -> Result<String>, base: &str) -> O
     Some((remote, merge))
 }
 
-fn create(args: &[String]) -> Result<Value> {
+pub(super) fn create(args: &[String]) -> Result<Value> {
     let mobile = args.iter().any(|value| value == "--mobile");
     let _signals = mobile.then(MobileSignals::install);
     let total_deadline = Instant::now() + Duration::from_secs(if mobile { 25 } else { 315 });
@@ -518,6 +527,7 @@ fn create(args: &[String]) -> Result<Value> {
     // Atomic reservation rejects simultaneous creators and existing/symlinked
     // destinations. Git accepts this empty directory but never overwrites files.
     if mobile_stopped() || Instant::now() >= total_deadline { return Err("Worktree creation cancelled before checkout".into()); }
+    super::worktree_requests::reserve_checkout()?;
     fs::create_dir(&destination).map_err(|e| format!("Cannot reserve destination: {e}"))?;
     let outcome = git(
         &source,

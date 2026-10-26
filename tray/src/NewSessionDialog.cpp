@@ -741,13 +741,69 @@ void NewSessionDialog::updateForm()
 }
 void NewSessionDialog::start()
 {
-    if(!m_start->isEnabled())return;
+    if(!m_start->isEnabled()||m_creationSubmitted)return;
     // Spec D5: ask before this computer's session host of another Windows session
     // starts the agent. Cancel keeps the form; no folder check or worktree starts.
     if(!LocalSessionHost::confirmLaunch(this,m_fleet.local(),host())||!m_start->isEnabled())return;
+    if(m_backgroundCreation){
+        m_creationSubmitted=true;
+        const auto path=m_folder->currentData(Qt::UserRole+2).toString();
+        const auto model=agent()=="opencode"?m_model->currentData().toString():QString();
+        const auto *machine=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+        QJsonObject plan{{"host",host()},{"machine",machine?machine->host:host()},
+            {"cmd",agent()},{"account",account()},{"tag",m_name->text()},
+            {"group",m_project->currentData().toString()},{"implicit_inbox",implicitInbox()},
+            {"swarm",m_projectCatalogSwarm},{"target",path},{"source",path},
+            {"auto",m_autoPreferred&&(m_repositorySource||automaticWorktreeAvailable())},
+            {"branch",m_generatedBranch},{"catalog",m_worktreeCatalog},
+            {"add_folder",m_folder->currentData().toString().isEmpty()&&!projectWorktree(path)},
+            {"model",model},{"effort",model.isEmpty()?QString():m_effort->currentData().toString()},
+            {"terminal",m_openTerminal->isChecked()&&agent()!="dsh"&&agent()!="opencode"},
+            {"repository",m_repositorySource}};
+        if(!m_repositorySource&&plan["auto"].toBool())plan["destination"]=automaticWorktreePath();
+        plan["group_name"]=m_project->currentText();
+        if(m_repositorySource&&m_repository){
+            plan["url"]=m_repository->url();plan["parent"]=m_repository->parentFolder();
+            plan["repository_name"]=m_repository->folderName();plan["target"]=m_repository->destination();
+            plan["new_project"]=m_project->currentData(NewRepositoryProjectRole).toBool();
+            plan["project_name"]=m_newProjectName->text().trimmed();
+        }
+        if(m_repositorySource&&m_repository&&!m_repository->createdPath().isEmpty()){
+            plan["clone_done"]=true;plan["target"]=m_repository->createdPath();plan["add_folder"]=false;
+            plan["acquisition_confirmed"]=true;
+        }
+        if(!m_creationPredecessor.isEmpty())plan["predecessor"]=m_creationPredecessor;
+        emit creationRequested(plan);if(m_creationSubmitted)accept();return;
+    }
     if(m_repositorySource){if(m_repository)m_repository->begin();return;}
     m_startWithWorktree=m_autoPreferred&&automaticWorktreeAvailable();
     m_error->setText(tr("Checking folder…"));m_validation=m_client.requestDirectories(host(),m_folder->currentData(Qt::UserRole+2).toString());updateForm();
+}
+void NewSessionDialog::creationAdmissionFailed(const QString &error)
+{
+    m_creationSubmitted=false;m_error->setText(error);updateForm();
+}
+void NewSessionDialog::restoreCreationChoices(const QJsonObject &plan)
+{
+    m_creationPredecessor=plan["id"].toString();
+    m_name->setText(plan["tag"].toString());m_openTerminal->setChecked(plan["terminal"].toBool());
+    selectAccount(plan["account"].toString());
+    if(plan["repository"].toBool()&&!plan["clone_done"].toBool()){
+        setRepositorySource(true);m_repositoryUrl->setText(plan["url"].toString());
+        m_repositoryDestination->setText(plan["target"].toString());m_customDestination=true;
+        if(plan["new_project"].toBool()){
+            m_project->setCurrentIndex(m_project->findData(true,NewRepositoryProjectRole));
+            m_newProjectName->setText(plan["project_name"].toString());
+        }
+    }else selectPath((plan["worktree_done"].toBool()||plan["clone_done"].toBool())?plan["target"].toString():plan["source"].toString(plan["target"].toString()),
+        plan["auto"].toBool()&&!plan["worktree_done"].toBool());
+    if(!plan["model"].toString().isEmpty()){
+        const auto effort=plan["effort"].toString();
+        m_chosenModel=QJsonObject{{"value",plan["model"]},{"label",plan["model"]},
+            {"effort_options",effort.isEmpty()?QJsonArray():QJsonArray{effort}},{"effort_labels",effort.isEmpty()?QJsonArray():QJsonArray{effort}}};
+        m_chosenHost=host();m_chosenKey=modelKey();updateModels();
+    }
+    updateForm();
 }
 bool NewSessionDialog::automaticWorktreeAvailable() const
 {

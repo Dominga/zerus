@@ -1,4 +1,5 @@
 #include "SessionSearch.h"
+#include "SessionCreationController.h"
 #include "SessionAccounts.h"
 #include "SessionPresentation.h"
 #include "IdentityBadge.h"
@@ -19,7 +20,7 @@
 #include <QVBoxLayout>
 
 namespace {
-enum { Title = Qt::UserRole + 60, Meta, Snippet, Query, Hit, Host, Name, Archive, Run, Provider, Machine };
+enum { Title = Qt::UserRole + 60, Meta, Snippet, Query, Hit, Host, Name, Archive, Run, Provider, Machine, Creation };
 class SearchDelegate final : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
@@ -104,15 +105,18 @@ SessionSearch::SessionSearch(const QString &hgs, QWidget *parent) : QWidget(pare
 
 QString SessionSearch::sessionKey(const QListWidgetItem *item)
 {
-    if (!item) return {};
+    if (!item||!creationId(item).isEmpty()) return {};
     const QString archive = item->data(Archive).toString();
     return item->data(Host).toString() + '\n' + item->data(Name).toString() + (archive.isEmpty() ? QString() : '\n' + archive);
 }
+QString SessionSearch::creationId(const QListWidgetItem *item){return item?item->data(Creation).toString():QString();}
+void SessionSearch::setCreations(const QJsonObject &operations){if(m_creations==operations)return;m_creations=operations;if(active())rebuild();}
 
 void SessionSearch::activateResult(QListWidgetItem *item)
 {
     if (!item) return;
     m_selectedHit = item->data(Qt::UserRole).toString();
+    if(!creationId(item).isEmpty()){emit creationActivated(creationId(item));return;}
     emit resultActivated(item->data(Host).toString(), item->data(Name).toString(), item->data(Archive).toString(),
                          item->data(Run).toString(), item->data(Hit).toJsonObject(), m_query);
 }
@@ -280,6 +284,22 @@ void SessionSearch::rebuild()
     };
     if (m_fleet.local().localSessions) append({}, m_fleet.local());
     for (const auto &host : m_fleet.peerNames()) if (const auto *box = m_fleet.peer(host)) append(host, *box);
+    int creations=0;
+    if(active()&&(m_filter=="all"||m_filter=="active"))for(auto it=m_creations.begin();it!=m_creations.end();++it){
+        const auto value=it.value().toObject();const auto host=value["host"].toString();
+        if(value["state"]=="bound"||!value["show_pending"].toBool())continue;
+        if(!m_hosts.isEmpty()&&!m_hosts.contains(host.isEmpty()?QStringLiteral("@local"):host))continue;
+        if(!m_folderPath.isEmpty()&&(host!=m_folderHost||!MachinePlatform::same(value["target"].toString(),m_folderPath,MachinePlatform::of(m_fleet.local().metrics,host.isEmpty()))))continue;
+        SessionInfo account;account.cmd=value["cmd"].toString();account.accountId=value["account"].toString();
+        if(!SessionAccounts::accepts(m_accountBindings,host,account))continue;
+        const auto text=SessionCreationController::details(value);if(!text.contains(m_query,Qt::CaseInsensitive))continue;
+        auto *item=new QListWidgetItem(m_list);const auto key="#creation\n"+it.key();
+        item->setData(Qt::UserRole,key);item->setData(Creation,it.key());item->setData(Title,value["tag"].toString());
+        item->setData(Meta,SessionCreationController::caption(value));item->setData(Snippet,value["error"].toString());item->setData(Query,m_query);
+        item->setData(Provider,value["cmd"].toString());item->setData(Machine,value["machine"].toString(host));
+        item->setData(Qt::AccessibleTextRole,value["tag"].toString()+"\n"+SessionCreationController::caption(value));
+        if(key==m_selectedHit)m_list->setCurrentItem(item);++creations;
+    }
     m_list->verticalScrollBar()->setValue(scroll);
     int pending = 0; QStringList errors;
     for (const auto &host : visibleHosts) {
@@ -287,6 +307,7 @@ void SessionSearch::rebuild()
         if (m_errors.contains(host)) errors << (host.isEmpty() ? m_fleet.local().host : host) + ": " + m_errors.value(host).left(200);
     }
     QString status = tr("%1 messages, %2 sessions").arg(messages).arg(sessions);
+    if(creations)status+=tr(", %1 creations").arg(creations);
     if (m_query.size() < 2) status = tr("Type 2+ characters to search message contents");
     else if (pending || m_debounce.isActive()) status += tr(" — Searching…");
     if (truncated) status += tr(" — Limited history searched");

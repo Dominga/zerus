@@ -158,7 +158,7 @@ pub(crate) fn chain(tasks: &[Task], id: u32) -> BTreeSet<u32> {
 
 /// Whether one dependency lets its dependent start: a hard one needs the
 /// dependency Accepted, a soft one only started.
-fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
+pub(crate) fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
     let Some(dep) = team.task(task) else { return false };
     let hard = team.settings.all_hard || kind == DependencyKind::Hard;
     if hard {
@@ -168,19 +168,55 @@ fn satisfied(team: &Team, task: u32, kind: DependencyKind) -> bool {
     }
 }
 
+/// Every task that depends on `id`, directly or through another task (C6).
+pub(crate) fn dependants_count(tasks: &[Task], id: u32) -> usize {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![id];
+    while let Some(task) = pending.pop() {
+        for dependent in dependents(tasks, task) {
+            if seen.insert(dependent) {
+                pending.push(dependent);
+            }
+        }
+    }
+    seen.len()
+}
+
+/// The order the dispatcher hands ready tasks to members (C6): the task with
+/// the most transitive dependants first, then the lowest number. Each member
+/// takes at most one task per tick, so this decides which of its ready tasks
+/// goes first and never starves a task that unblocks the most work.
+pub(crate) fn dispatch_order(team: &Team, ready: Vec<u32>) -> Vec<u32> {
+    let mut ordered = ready;
+    ordered.sort_by_key(|id| (std::cmp::Reverse(dependants_count(&team.tasks, *id)), *id));
+    ordered
+}
+
+/// The earlier-phase tasks a barrier phase still waits for (C3): a barrier
+/// task starts only once every task of a lower phase is finished.
+pub(crate) fn barrier_blockers(team: &Team, task: &Task) -> Vec<u32> {
+    let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return Vec::new() };
+    if !phase.barrier {
+        return Vec::new();
+    }
+    let target = phase.order();
+    let order_of = |n: u32| team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order());
+    let mut blockers: Vec<u32> = team
+        .tasks
+        .iter()
+        .filter(|other| other.phase != task.phase && order_of(other.phase) < target && !other.status.finished())
+        .map(|other| other.id)
+        .collect();
+    blockers.sort_unstable();
+    blockers
+}
+
 /// A barrier phase's tasks wait until every task of a lower phase is finished:
 /// accepted, rejected or cancelled. A Draft task left in an earlier phase also
 /// holds the barrier. "Lower" follows the display and approval order (F10), so
 /// a moved draft keeps its barrier semantics with its new place.
 fn barrier_holds(team: &Team, task: &Task) -> bool {
-    let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return false };
-    if !phase.barrier {
-        return false;
-    }
-    let target = phase.order();
-    // A phase without a record (the approved plan's phase 1) keeps its number.
-    let order_of = |n: u32| team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order());
-    team.tasks.iter().any(|other| other.phase != task.phase && order_of(other.phase) < target && !other.status.finished())
+    !barrier_blockers(team, task).is_empty()
 }
 
 /// Pending tasks whose dependencies and phase barrier are satisfied, in id order.
@@ -416,5 +452,34 @@ mod tests {
         // Cancelled tasks need no assignee.
         t.tasks[0].status = Cancelled;
         assert!(validate(&t, &BTreeSet::new()).errors.iter().all(|f| f.task != Some(1)));
+    }
+
+    #[test]
+    fn the_dispatcher_hands_out_the_task_with_the_most_transitive_dependants() {
+        // #1 unblocks nothing, #2 unblocks #4 and through it #5, #3 unblocks
+        // #6; #7 and #8 tie, so the lower number goes first (C6).
+        let t = team(vec![
+            task(1, &[], Pending),
+            task(2, &[], Pending),
+            task(3, &[], Pending),
+            task(4, &[(2, Hard)], Pending),
+            task(5, &[(4, Hard)], Pending),
+            task(6, &[(3, Hard)], Pending),
+            task(7, &[], Pending),
+            task(8, &[], Pending),
+        ]);
+        assert_eq!(dependants_count(&t.tasks, 2), 2);
+        assert_eq!(dependants_count(&t.tasks, 4), 1);
+        assert_eq!(dependants_count(&t.tasks, 1), 0);
+        assert_eq!(dispatch_order(&t, vec![1, 2, 3, 7, 8]), vec![2, 3, 1, 7, 8]);
+    }
+
+    #[test]
+    fn a_barrier_blocker_is_named_for_the_wait() {
+        let mut t = team(vec![task(1, &[], InProgress), task(2, &[], Accepted), task(3, &[], Pending)]);
+        t.tasks[2].phase = 2;
+        t.phases = vec![Phase { n: 2, barrier: true, ..Default::default() }];
+        assert_eq!(barrier_blockers(&t, &t.tasks[2]), vec![1]);
+        assert!(barrier_blockers(&t, &t.tasks[0]).is_empty());
     }
 }

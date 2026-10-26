@@ -970,11 +970,20 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     };
     let label = actor.label(team);
     let team_lead = team.lead.clone();
+    // C1: the lead reports its own task and accepts it in one step; nobody
+    // else accepts on a report.
+    let accept = input["accept"].as_bool() == Some(true);
+    if accept {
+        ensure!(!by_member.is_empty() && by_member == team_lead, "Only the lead accepts its own task on its report");
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(task.attempts.iter().any(|a| a.id == attempt_id), "Task #{id} has no attempt {attempt_id}");
     let current = task.open_attempt().map(|a| (a.id.clone(), a.member.clone(), a.n));
     let open = current.filter(|(open, member, _)| open == attempt_id && (by_member.is_empty() || *member == by_member));
     if let Some((open_id, member, n)) = open {
+        if accept {
+            ensure!(member == team_lead, "Task #{id} is not the lead's own task: accept it with hgs team accept");
+        }
         let attempt = task.attempts.iter_mut().find(|a| a.id == open_id).unwrap();
         attempt.state = AttemptState::Reported;
         attempt.report = Some(Report { text: body, at: now(), ..Default::default() });
@@ -986,6 +995,11 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         let title = task.title.clone();
         let role = team.role_of(&member);
         events.push(Event::new("reported", json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
+        if accept {
+            let decided = decide(team, input, actor, true, events)?;
+            let status = decided["status"].clone();
+            return Ok(json!({"status":status,"task":id,"attempt":n}));
+        }
         return Ok(json!({"status":"submitted","task":id,"attempt":n}));
     }
     // A6: while the task is Submitted and its report was captured, the member
@@ -2202,6 +2216,59 @@ mod tests {
         assert_eq!(foreign["status"], "stale");
         report(&mut team, &json!({"task":1,"attempt":second,"text":"done"}), &Actor::Member("dev".into()), &mut events).unwrap();
         assert_eq!(team.task(1).unwrap().status, TaskStatus::Submitted);
+    }
+
+    #[test]
+    fn the_lead_reports_and_accepts_its_own_task_in_one_step() {
+        let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead"}}})).unwrap();
+        let mut events = Vec::new();
+        plan(
+            &mut team,
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
+                "tasks":[{"id":1,"title":"Review the plan","assignee":"lead"}]}),
+            &Actor::Member("lead".into()),
+            &mut events,
+        )
+        .unwrap();
+        approve(&mut team, &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        // C1: the lead's task is handed out without a message; its report and
+        // its acceptance are one step.
+        let attempt = hand_out(&mut team, 1);
+        events.clear();
+        let receipt = report(
+            &mut team,
+            &json!({"task":1,"attempt":attempt,"text":"Reviewed: the plan holds","accept":true}),
+            &Actor::Member("lead".into()),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!((receipt["status"].as_str(), receipt["attempt"].as_u64()), (Some("accepted"), Some(1)));
+        let task = team.task(1).unwrap();
+        assert_eq!((task.status, task.decided_by), (TaskStatus::Accepted, Some(Decider::Lead)));
+        assert_eq!(task.attempts[0].report.as_ref().unwrap().text, "Reviewed: the plan holds");
+        assert_eq!(task.attempts[0].notice, Notice::None);
+        let kinds: Vec<&str> = events.iter().map(|event| event.kind).collect();
+        assert_eq!(kinds, vec!["reported", "accepted"]);
+        assert_eq!(events[1].payload["by"], "Lead");
+        // Only the lead accepts on a report, and only its own task.
+        let mut other = running_team();
+        let attempt = hand_out(&mut other, 1);
+        let error = report(
+            &mut other,
+            &json!({"task":1,"attempt":attempt,"text":"Mine","accept":true}),
+            &Actor::Member("dev".into()),
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "Only the lead accepts its own task on its report");
+        let error = report(&mut other, &json!({"task":1,"attempt":attempt,"text":"Mine","accept":true}), &Actor::Human, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Only the lead accepts its own task on its report");
+        // Without accept the report waits for a decision, as any other.
+        let receipt = report(&mut other, &json!({"task":1,"attempt":attempt,"text":"Done"}), &Actor::Member("dev".into()), &mut events).unwrap();
+        assert_eq!(receipt["status"], "submitted");
     }
 
     #[test]

@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|discard|pause|resume|stop|archive|status|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "discard", "pause", "resume", "stop",
@@ -215,14 +215,21 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     // dispatcher records each member's last seen liveness, so `stopped` is
     // derived here without a listing of status's own (L3).
     if let Some(tasks) = value["tasks"].as_array_mut() {
+        let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
         for (task, value) in team.tasks.iter().zip(tasks) {
             if let Some(phase) = ops::attempt_phase(task, stopped(team, task)) {
                 if let Some(attempt) = value["attempts"].as_array_mut().and_then(|attempts| attempts.last_mut()) {
                     attempt["phase"] = json!(phase);
                 }
             }
+            // C3: every open task says what blocks it and which action frees it.
+            if let Some(waits) = super::inbox::waits(team, task, ready.contains(&task.id)) {
+                value["waits"] = waits;
+            }
         }
     }
+    // C4: the reports the owner's attention list shows.
+    value["attention"] = json!(super::inbox::attention(team, super::super::now()));
     // Each member's queue: its open task first, then the tasks returned to it
     // (A5, spec section 6).
     if let Some(members) = value["members"].as_array_mut() {
@@ -269,6 +276,8 @@ fn summary(team: &Team) -> Value {
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "revision":team.revision,"updated":team.updated,
         "waiting_for_lead":waiting_for_lead(team),"pending_phase":pending_phase(team),
+        // C4: the owner's attention list, also from the polled team list.
+        "attention":super::inbox::attention(team, super::super::now()),
     })
 }
 
@@ -667,6 +676,13 @@ fn list_items(teams: &[Team]) -> Value {
     json!({"items":teams.iter().map(summary).collect::<Vec<_>>()})
 }
 
+/// The lead's inbox (C2): every report, question, permission request, its own
+/// task and stopped member, oldest first. Read only; the coalesced message the
+/// dispatcher sends lists the new ones.
+fn inbox_view(team: &Team) -> Value {
+    json!({"items": super::inbox::items(team).iter().map(super::inbox::Item::value).collect::<Vec<_>>()})
+}
+
 fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
@@ -702,6 +718,10 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             // finished team's status never reads every team (C1).
             let teams = if finished { active_team_records(&store)? } else { Vec::new() };
             Ok(view_with(&team, &teams, sessions.as_deref()))
+        }
+        "inbox" => {
+            let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            Ok(inbox_view(&team))
         }
         "events" => {
             let before = match &input["before"] {
@@ -1339,6 +1359,42 @@ mod tests {
         assert_eq!(items["items"].as_array().unwrap().len(), 1);
         assert!(items["items"][0].get("left_running").is_none());
         assert!(items["items"][0]["members"][0]["queue"].is_array());
+    }
+
+    #[test]
+    fn the_inbox_and_status_name_the_leads_next_actions() {
+        let mut team = running_team();
+        // The report waits for a decision: one inbox item, one wait.
+        {
+            let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+            attempt.state = AttemptState::Reported;
+            attempt.report = Some(Report { text: "Done and checked".into(), at: 10.0, ..Default::default() });
+        }
+        team.task_mut(1).unwrap().status = TaskStatus::Submitted;
+        let inbox = inbox_view(&team);
+        assert_eq!(inbox["items"][0]["kind"], "report");
+        assert_eq!((inbox["items"][0]["task"].as_u64(), inbox["items"][0]["member"].as_str()), (Some(1), Some("Backend")));
+        assert!(inbox["items"][0]["command"].as_str().unwrap().contains("hgs team accept --json"));
+        let value = view_with(&team, &[], None);
+        assert_eq!(value["tasks"][0]["waits"], json!({"for":"lead","on":["Lead"],"unblock":"accept #1"}));
+        // An old report shows on the owner's attention list; 0 turns it off.
+        let mut old = team.clone();
+        old.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().at = super::super::super::now() - 61.0 * 60.0;
+        let value = view_with(&old, &[], None);
+        assert_eq!(value["attention"][0]["kind"], "report");
+        assert_eq!(value["attention"][0]["task"], 1);
+        // The polled team list names the same attention items.
+        assert_eq!(summary(&old)["attention"][0]["task"], 1);
+        old.settings.remind_owner_minutes = 0;
+        assert_eq!(view_with(&old, &[], None)["attention"], json!([]));
+        // The settings are optional with the spec's defaults (C2, C4).
+        assert_eq!(
+            (team.settings.inbox_interval_seconds, team.settings.remind_lead_minutes, team.settings.remind_owner_minutes),
+            (120, 15, 60)
+        );
+        // The inbox is a read, named in the usage.
+        assert!(USAGE.contains("inbox"));
+        assert!(!MUTATIONS.contains(&"inbox"));
     }
 
     #[test]

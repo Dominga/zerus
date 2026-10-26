@@ -1,6 +1,7 @@
 //! WhiteWh fork: the agent team record (docs/superpowers/specs/2026-10-24-agent-teams-core-design.md).
 //! One team is stored whole as JSON; these types are its schema.
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +62,17 @@ pub(crate) struct Settings {
     /// Background work before the lead is told once (N5).
     #[serde(default = "default_blocked_timeout")]
     pub blocked_timeout_seconds: u64,
+    /// At most one inbox message reaches the lead per this many seconds (C2).
+    #[serde(default = "default_inbox_interval")]
+    pub inbox_interval_seconds: u64,
+    /// Minutes an undecided report waits before the lead is reminded once;
+    /// 0 turns the reminder off (C4).
+    #[serde(default = "default_remind_lead")]
+    pub remind_lead_minutes: u64,
+    /// Minutes before that report shows on the owner's attention list in the
+    /// desktop; 0 turns it off (C4).
+    #[serde(default = "default_remind_owner")]
+    pub remind_owner_minutes: u64,
 }
 
 fn default_max_members() -> usize {
@@ -74,6 +86,15 @@ fn default_start_timeout() -> u64 {
 }
 fn default_blocked_timeout() -> u64 {
     1800
+}
+fn default_inbox_interval() -> u64 {
+    120
+}
+fn default_remind_lead() -> u64 {
+    15
+}
+fn default_remind_owner() -> u64 {
+    60
 }
 fn default_phase() -> u32 {
     1
@@ -90,6 +111,9 @@ impl Default for Settings {
             report_timeout_seconds: default_report_timeout(),
             start_timeout_seconds: default_start_timeout(),
             blocked_timeout_seconds: default_blocked_timeout(),
+            inbox_interval_seconds: default_inbox_interval(),
+            remind_lead_minutes: default_remind_lead(),
+            remind_owner_minutes: default_remind_owner(),
         }
     }
 }
@@ -172,6 +196,10 @@ pub(crate) struct Member {
     /// hash; the most recent ones only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asked: Vec<String>,
+    /// The permission request the lead's inbox names while it waits for an
+    /// answer (C2): the member's session question as Zerus read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingQuestion>,
     /// The conversation whose notifications the dispatcher muted: a member
     /// works for the lead, so its replies do not call the owner. Muted once
     /// per conversation; the owner may unmute it.
@@ -194,6 +222,41 @@ impl Member {
     /// A started DeepSeek member whose role chose a model or effort.
     pub(crate) fn needs_settings(&self) -> bool {
         self.agent == "dsh" && !self.settings_applied && (!self.model.is_empty() || !self.effort.is_empty())
+    }
+}
+
+/// A member's pending native question as Zerus read it (C2): the lead answers
+/// it with `hgs team answer` by this exact id and hash, as before, but now the
+/// inbox lists it with the rest instead of a message of its own.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PendingQuestion {
+    pub question_id: String,
+    pub question_hash: String,
+    #[serde(default)]
+    pub approval: bool,
+    #[serde(default)]
+    pub at: f64,
+    /// The card the answer command is built from: header, question and options.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub card: serde_json::Value,
+}
+
+/// The lead's last inbox message (C2): when it went and which items it named,
+/// so one coalesced message replaces the per-item messages and a reminder can
+/// still reach the lead later.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Inbox {
+    #[serde(default)]
+    pub told_at: f64,
+    /// Item keys already named, oldest first, bounded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told: Vec<String>,
+}
+
+impl Inbox {
+    /// An empty record adds no key to an old team's JSON.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.told_at == 0.0 && self.told.is_empty()
     }
 }
 
@@ -393,6 +456,10 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// The lead was reminded once that this report still waits for a decision
+    /// (C4); absent until it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reminded_at: Option<f64>,
     #[serde(default)]
     pub report: Option<Report>,
     /// Questions this attempt asked the lead, oldest first (A3).
@@ -565,6 +632,9 @@ pub(crate) struct Team {
     /// The "all tasks decided" message to the lead: sent once per such state.
     #[serde(default, skip_serializing_if = "Notice::is_none")]
     pub idle: Notice,
+    /// The lead's coalesced inbox message (C2).
+    #[serde(default, skip_serializing_if = "Inbox::is_empty")]
+    pub inbox: Inbox,
     /// Who finished the team and with what summary; set by `finish`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<Finish>,
@@ -711,8 +781,16 @@ mod tests {
     fn an_old_attempt_loads_with_the_new_fields_at_their_defaults() {
         let team: Team = serde_json::from_value(old_attempt_team()).unwrap();
         assert_eq!(team.settings.start_timeout_seconds, 180);
+        // The lead's load settings (C2, C4) default; an old team has no inbox.
+        assert_eq!(
+            (team.settings.inbox_interval_seconds, team.settings.remind_lead_minutes, team.settings.remind_owner_minutes),
+            (120, 15, 60)
+        );
+        assert!(team.inbox.told.is_empty() && team.inbox.told_at == 0.0);
+        assert!(team.members.iter().all(|member| member.pending.is_none()));
         let attempt = &team.tasks[0].attempts[0];
         assert_eq!((attempt.started_at, attempt.start_warned), (None, false));
+        assert!(attempt.reminded_at.is_none());
         assert!(attempt.turn_reply.is_empty());
         assert!(attempt.questions.is_empty());
         assert_eq!(attempt.open_question(), None);
@@ -720,14 +798,16 @@ mod tests {
         let report = attempt.report.as_ref().unwrap();
         assert!(!report.captured);
         assert!(report.replaced.is_empty());
-        // Writing it back adds only the default start timeout to the settings;
-        // the new fields stay absent so an old binary reads the file.
+        // Writing it back adds only the default timeouts to the settings; the
+        // new fields stay absent so an old binary reads the file.
         let value = serde_json::to_value(&team).unwrap();
         assert_eq!(value["settings"]["start_timeout_seconds"], json!(180));
+        assert!(value.get("inbox").is_none() && value.get("pending").is_none());
         let attempt = &value["tasks"][0]["attempts"][0];
-        for key in ["started_at", "start_warned", "turn_reply", "questions"] {
+        for key in ["started_at", "start_warned", "turn_reply", "questions", "reminded_at"] {
             assert!(attempt.get(key).is_none(), "{key} should be skipped when empty");
         }
+        assert!(value["members"][1].get("pending").is_none());
         assert!(value["tasks"][0].get("hold").is_none());
         let report = &attempt["report"];
         assert!(report.get("captured").is_none() && report.get("replaced").is_none());

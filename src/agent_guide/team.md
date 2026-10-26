@@ -13,7 +13,8 @@ Lead, from your own session:
      "assignee":"api","deps":[{"task":2}]}]} | hgs team plan --json
   hard waits for Accepted, soft for In progress. The owner approves
   in Zerus; nothing runs before.
-  {"team":"ID"} | hgs team status --json   tasks, attempts, ready, findings
+  {"team":"ID"} | hgs team status --json   tasks, attempts, waits, findings
+  {"team":"ID"} | hgs team inbox --json    reports, questions, your tasks
   Reports arrive as [Zerus team messages; decide each:
     {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json
     add "reason" to reject (it returns); "hold":true keeps it back:
@@ -22,11 +23,11 @@ Lead, from your own session:
   reassign, retry, cancel take the same fields; a free peer of the same
   role may get it; reassign pins it. Members ask with hgs team ask and
   answer with hgs team reply; native questions and permission requests need
-  hgs team answer. Allow only what the task needs; ask the owner when in
-  doubt. Zerus says when a member stops: message it, retry, reassign or ask
-  the owner. Phases, extend, finish: hgs guide team-lead
-  A DeepSeek (dsh) lead acts as Lead, not as the owner: approve-phase, stop
-  and the other owner-only decisions are refused to it.
+  hgs team answer. Allow only what the task needs; else ask the owner.
+  When a member stops: message, retry, reassign or ask the owner.
+  Phases, extend, finish: hgs guide team-lead
+  A DeepSeek (dsh) lead acts as Lead, not the owner: owner-only decisions
+  are refused to it.
 
 Member: the task message names your task and attempt. Do it, then report once:
   {"request_id":"UUID","team":"ID","task":N,"attempt":"ATTEMPT","text":"..."} |

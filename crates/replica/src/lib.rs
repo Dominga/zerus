@@ -1,6 +1,7 @@
 //! Replicated Zerus documents on Loro. This crate is the only code in Zerus
 //! that imports `loro`: hgs and the mobile apps use its typed operations, so
 //! a Loro upgrade or a schema change happens here once.
+mod attachment;
 mod error;
 pub mod ids;
 mod ops;
@@ -13,6 +14,9 @@ mod store;
 mod sync;
 mod task;
 
+pub use attachment::{
+    TaskAttachment, MAX_ATTACHMENT, MAX_ATTACHMENTS, MAX_ATTACHMENT_TOTAL, TASK_SCHEMA,
+};
 pub use error::{Error, ErrorKind, Result};
 pub use project::{ProjectDoc, Settings};
 pub use render::{cancel_message, task_prompt, Tools};

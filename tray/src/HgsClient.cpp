@@ -26,6 +26,11 @@
 #include <QDataStream>
 #include <QCryptographicHash>
 #include <QUuid>
+#include <QFutureWatcher>
+#include <QPromise>
+#include <QRunnable>
+#include <QThreadPool>
+#include <memory>
 
 #include <algorithm>
 #include <cmath>
@@ -575,9 +580,11 @@ quint64 HgsClient::requestTask(const QStringList &arguments, const QString &inpu
     const quint64 request = ++m_taskRequest;
     QStringList args{QStringLiteral("task")}; args.append(arguments);
     auto call = processRequest(m_hgs, args); call.timeoutMs = taskTimeoutMs(arguments);
+    call.maximumOutputBytes = 36 * 1024 * 1024;
     // stdin always closes, even empty: a command that reads a text never waits on the GUI.
     call.input = input.toUtf8();
     ProcessRunner::run(std::move(call), this, [this, request](const ProcessRunner::Result &result) {
+        if (result.outputLimitExceeded) return emit taskFailed(request, tr("Task response exceeds 36 MiB"));
         if (result.outcome == ProcessRunner::Result::TimedOut) return emit taskFailed(request, tr("hgs task timed out"));
         if (result.outcome == ProcessRunner::Result::FailedToStart)
             return emit taskFailed(request, tr("cannot start '%1': %2").arg(m_hgs, result.errorString));
@@ -585,9 +592,19 @@ quint64 HgsClient::requestTask(const QStringList &arguments, const QString &inpu
             const QString detail = QString::fromLocal8Bit(result.standardError).trimmed().left(4000);
             return emit taskFailed(request, detail.isEmpty() ? tr("exit code %1").arg(result.exitCode) : detail);
         }
-        QJsonParseError error; const auto data = QJsonDocument::fromJson(result.standardOutput, &error);
-        if (error.error != QJsonParseError::NoError || !data.isObject()) emit taskFailed(request, tr("Invalid task response"));
-        else emit taskReady(request, data.object());
+        auto promise = std::make_shared<QPromise<QJsonDocument>>(); promise->start();
+        auto *watcher = new QFutureWatcher<QJsonDocument>(this);
+        connect(watcher, &QFutureWatcher<QJsonDocument>::finished, this, [this, request, watcher] {
+            const auto data = watcher->result(); watcher->deleteLater();
+            if (!data.isObject()) emit taskFailed(request, tr("Invalid task response"));
+            else emit taskReady(request, data.object());
+        });
+        watcher->setFuture(promise->future());
+        static QThreadPool parser;
+        static const bool configured = [] { parser.setMaxThreadCount(2); return true; }(); Q_UNUSED(configured);
+        parser.start(QRunnable::create([promise, bytes = result.standardOutput] {
+            promise->addResult(QJsonDocument::fromJson(bytes)); promise->finish();
+        }));
     });
     return request;
 }

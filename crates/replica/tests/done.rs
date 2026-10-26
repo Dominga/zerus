@@ -32,6 +32,7 @@ fn done_in(store: &ProjectStore, text: &str, now: i64, session: &str) -> String 
     let session = SessionKey {
         machine: "m".into(),
         session: session.into(),
+        ..Default::default()
     };
     task.record_send(&session, "request-1", &Actor::Person, now - 2)
         .unwrap();
@@ -205,6 +206,7 @@ fn a_session_filter_counts_and_pages_only_that_sessions_tasks_from_the_cache() {
     let api = SessionKey {
         machine: "m".into(),
         session: "codex/api".into(),
+        ..Default::default()
     };
     settle_all(root.path());
     store.done_page(None, 50, 0, None).unwrap();
@@ -260,6 +262,7 @@ fn a_cache_written_before_the_filter_is_read_again() {
     let api = SessionKey {
         machine: "m".into(),
         session: "codex/api".into(),
+        ..Default::default()
     };
     let page = store.done_page(None, 50, 0, Some(&api)).unwrap();
     assert_eq!(page.total, 1);

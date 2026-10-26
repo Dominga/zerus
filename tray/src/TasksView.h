@@ -2,6 +2,7 @@
 #include "TaskBoard.h"
 #include "TaskDrag.h"
 #include "TaskRow.h"
+#include "HgsClient.h"
 #include <QHash>
 #include <QJsonObject>
 #include <QPointer>
@@ -28,9 +29,10 @@ struct TaskSession {
     bool running = true;  // whether its agent runs, for the cancel dialog
     bool working = false; // whether its agent is in a turn, for the cancel dialog
     int kind = 0;         // the status's SessionStatusBadge::Kind, as the session list shows it
+    QString id;          // immutable launch identity, run identity for legacy bindings
     bool operator==(const TaskSession &other) const {
         return host == other.host && name == other.name && status == other.status && blocker == other.blocker
-            && running == other.running && working == other.working && kind == other.kind;
+            && running == other.running && working == other.working && kind == other.kind && id == other.id;
     }
 };
 
@@ -107,13 +109,14 @@ private:
                  std::function<void(const QString &)> failed = {});
     void received(const QJsonObject &listing, quint64 generation);
     void render();
+    TaskBoard projectedBoard() const;
     void selectStage(const QString &stage);
     // One `hgs task` call of a sequence; `then` sees its reply.
     struct Step { QStringList arguments; QString input; std::function<void(const QJsonObject &)> then = {}; };
     QList<Step> steps(const TaskItem &task, TaskAction action) const;
     QList<Step> editSteps(const TaskItem &task, const TaskEdits &edits) const;
     // `target REF SESSION|any [--host ALIAS]` without the project.
-    static QStringList targetArguments(const QString &uuid, const QString &host, const QString &session);
+    static QStringList targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id = {});
     // Runs the steps in order and refreshes after. `finished` follows the last
     // success; `failed` replaces the notice for the first refusal.
     void run(QList<Step> steps, std::function<void()> finished = {}, std::function<void(const QString &)> failed = {});
@@ -121,7 +124,7 @@ private:
     void openTask(const TaskItem &task);
     void confirmCancel(const TaskItem &task);
     void openSettings();
-    void addTask(const QString &key, const QString &text);
+    void addTask(const QString &key, const QString &text, const QList<MessageAttachment> &attachments);
     void updateComposer();
     void applyComposerKey();
     void schedule();

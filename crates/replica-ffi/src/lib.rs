@@ -103,6 +103,7 @@ impl From<SessionRef> for replica::SessionKey {
         Self {
             machine: key.machine,
             session: key.session,
+            ..Default::default()
         }
     }
 }

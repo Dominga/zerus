@@ -188,10 +188,12 @@ mod tests {
         let own = SessionKey {
             machine: "m".into(),
             session: "codex/api".into(),
+            ..Default::default()
         };
         let other = SessionKey {
             machine: "m".into(),
             session: "codex/web".into(),
+            ..Default::default()
         };
         let agent = Actor::Agent(own.clone());
         let mut settings = Settings::default();

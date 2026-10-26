@@ -652,9 +652,40 @@ pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference)
 
 /// Pastes a task prompt or cancel message into `name` for its current run and
 /// conversation, the way `hgs send` does, and returns the durable receipt.
-pub(crate) fn submit_task_text(name: &str, text: &str) -> Result<Value> {
+pub(crate) fn submit_task_message(session: &zerus_replica::SessionKey, text: &str, attachments: &[Value]) -> Result<Value> {
     local_sessions()?;
-    input::submit_text(name, text)
+    input::submit_task(session, text, attachments)
+}
+
+/// Task routing uses saved identity metadata only: no provider inspection,
+/// history, process reconciliation or native API calls for each task row.
+pub(crate) fn task_bindings() -> Result<Vec<Value>> {
+    use std::fs;
+    use std::io::Read;
+    let mut rows = Vec::new();
+    for directory in [root(), root().join("bindings"), root().join("dsh/bindings"), root().join("opencode/bindings")] {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if path.extension().is_none_or(|s| s != "json") || stem.len() != 64 || !stem.bytes().all(|c| c.is_ascii_hexdigit()) { continue; }
+            let row = (|| {
+                let mut bytes = Vec::new();
+                let file = crate::platform::no_follow(std::fs::OpenOptions::new().read(true)).open(&path).ok()?;
+                if !file.metadata().ok()?.is_file() { return None; }
+                file.take(1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+                if bytes.len() > 1024 * 1024 { return None; }
+                let row: Value = serde_json::from_slice(&bytes).ok()?;
+                (row["rename_shadow"] != true && !string(&row, "name").is_empty() && !string(&row, "run_id").is_empty()).then_some(row)
+            })();
+            if let Some(row) = row { rows.push(row); }
+        }
+    }
+    Ok(rows)
 }
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.

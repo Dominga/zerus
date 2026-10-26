@@ -10,7 +10,7 @@ bool listed(const QString &stage) { return stage == QLatin1String("todo") || sta
 void session(const QJsonValue &value, QString &host, QString &name, bool &known) {
     const auto object = value.toObject();
     name = object.value("session").toString(); host = object.value("host").toString();
-    known = !object.contains("host") || !object.value("host").isNull();
+    known = (!object.contains("host") || !object.value("host").isNull()) && object.value("resolved").toBool(true);
 }
 }
 
@@ -24,9 +24,12 @@ TaskItem TaskBoard::item(const QJsonObject &t) {
     const auto target = t.value("target").toObject();
     if (target.value("kind").toString() == QLatin1String("session")) session(target, item.targetHost, item.targetSession, item.targetKnown);
     if (t.value("session").isObject()) session(t.value("session"), item.sessionHost, item.sessionName, item.sessionKnown);
+    item.targetId = target.value("session_id").toString();
+    item.sessionId = t.value("session").toObject().value("session_id").toString();
     const auto author = t.value("author").toObject();
     if (author.value("kind").toString() == QLatin1String("agent")) {
         item.author = author.value("session").toString(); item.authorHost = author.value("host").toString();
+        item.authorId = author.value("session_id").toString();
     }
     return item;
 }
@@ -45,20 +48,23 @@ TaskBoard TaskBoard::fromListing(const QJsonObject &listing) {
     return board;
 }
 
-bool TaskBoard::belongsTo(const TaskItem &t, const QString &host, const QString &name) {
-    if (listed(t.stage)) return t.targetKnown && !t.targetSession.isEmpty() && t.targetHost == host && t.targetSession == name;
-    return t.sessionKnown && !t.sessionName.isEmpty() && t.sessionHost == host && t.sessionName == name;
+bool TaskBoard::belongsTo(const TaskItem &t, const QString &host, const QString &name, const QString &id) {
+    const bool pinned = listed(t.stage);
+    const auto taskId = pinned ? t.targetId : t.sessionId;
+    return (pinned ? t.targetKnown : t.sessionKnown) && (pinned ? t.targetHost : t.sessionHost) == host
+        && (taskId.isEmpty() ? !(pinned ? t.targetSession : t.sessionName).isEmpty() && (pinned ? t.targetSession : t.sessionName) == name
+                            : !id.isEmpty() && taskId == id);
 }
 
-bool TaskBoard::keptFor(const TaskItem &t, const QString &host, const QString &name) {
-    return belongsTo(t, host, name) || (listed(t.stage) && t.targetSession.isEmpty());
+bool TaskBoard::keptFor(const TaskItem &t, const QString &host, const QString &name, const QString &id) {
+    return belongsTo(t, host, name, id) || (listed(t.stage) && t.targetSession.isEmpty());
 }
 
 QList<TaskItem> TaskBoard::rows(const QString &stage, const View &view, bool older) const {
     QList<TaskItem> out;
     const bool done = stage == QLatin1String("done");
     for (const auto &t : tasks) {
-        if (t.stage != stage || (view.only && !keptFor(t, view.host, view.session))) continue;
+        if (t.stage != stage || (view.only && !keptFor(t, view.host, view.session, view.id))) continue;
         if (done && (view.now - t.stageAt > RecentDoneMs) != older) continue;
         out << t;
     }

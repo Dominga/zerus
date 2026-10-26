@@ -124,7 +124,7 @@ public:
     // Send and push now (message.push) in this field; off by default. Only the
     // main message field pushes: a subagent message bypasses the session's queue.
     void setPushEnabled(bool enabled);
-    // The Tasks tab's input: text only, no toolbar, model settings or Stop; the
+    // The Tasks tab's input: text and attachments, no model settings or Stop; the
     // send button carries the stage a new task goes to. Drafts keep their keys.
     void setTaskMode(bool taskMode);
     void setSendLabel(const QString &label);

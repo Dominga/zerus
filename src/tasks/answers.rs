@@ -50,6 +50,8 @@ pub(super) fn answer(action: &str, out: &Value, place: usize, caller: &str, dest
     let task = &out["task"];
     let it = name(task);
     match action {
+        "handoff" => format!("{it} was handed off to {destination}."),
+        "start" => format!("{it} is In progress in {caller}."),
         "add" => format!("Filed {it} in {}, position {place}, for {caller}.", label(task)),
         "move" => format!("{it} is position {place} in {}.", label(task)),
         "edit" => format!("{it} has the new prompt."),

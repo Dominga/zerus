@@ -18,7 +18,7 @@ pub const PAGE: usize = 512 * 1024;
 pub const MAX_UPDATES: usize = 256;
 /// The largest document a phone puts together from parts: twice the 4 MiB a
 /// task document may reach.
-const MAX_ASSEMBLY: usize = 2 * crate::MAX_DOCUMENT;
+const MAX_ASSEMBLY: usize = 2 * (crate::MAX_DOCUMENT + crate::MAX_ATTACHMENT_TOTAL.div_ceil(3) * 4);
 
 /// One document's updates on the wire: `task` is its UUID, or none for the
 /// project document; `bytes` are base64.

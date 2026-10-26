@@ -56,6 +56,8 @@ private slots:
     void aFailedListingBacksOffAndClearsItsCounts();
     void unreadableTaskFilesAreNamed();
     void aRowOpensOnlyOnAClickOnItself();
+    void renamedTaskKeepsItsEmphasisAndRejectsAReusedName();
+    void taskImagesAreSavedWithTheDescription();
 };
 
 void TestTasksView::initTestCase() {
@@ -63,6 +65,40 @@ void TestTasksView::initTestCase() {
     QCoreApplication::setOrganizationName("hgs-tests"); QCoreApplication::setApplicationName("tasks-view");
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings.path());
+}
+
+void TestTasksView::renamedTaskKeepsItsEmphasisAndRejectsAReusedName() {
+    auto target = FakeTasksCli::pinned("codex/old"); target["session_id"] = "launch_id:original";
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo", {{"target", target}})}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    auto known = sessions(); known[0].name = "codex/new"; known[0].id = "launch_id:original";
+    view.setContext("project-1", "orchard", "", "codex/new", "\ncodex/new", known);
+    QTRY_VERIFY(row(view, 1));
+    QVERIFY(row(view, 1)->property("mine").toBool());
+    QVERIFY(row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("new"));
+    QVERIFY(!row(view, 1)->findChild<QLabel *>("taskMeta")->text().contains("old"));
+    known[0].name = "codex/old"; known[0].id = "launch_id:replacement";
+    view.setContext("project-1", "orchard", "", "codex/old", "\ncodex/old", known);
+    QVERIFY(!row(view, 1)->property("mine").toBool());
+    QVERIFY(!action(row(view, 1), "sendNow")->property("blockedReason").toString().isEmpty());
+}
+
+void TestTasksView::taskImagesAreSavedWithTheDescription() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path()));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(760, 560); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "\ncodex/api", sessions());
+    auto *composer = view.composer(); QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
+    composer->editor()->setPlainText("A screenshot");
+    QVERIFY(composer->addAttachment("screen.png", "image/png", "immutable bytes"));
+    QTest::keyClick(composer->editor(), Qt::Key_Return);
+    QTRY_COMPARE(view.board().tasks.size(), 1);
+    QTRY_VERIFY(composer->editor()->toPlainText().isEmpty());
+    QFile state(dir.filePath("tasks.json")); QVERIFY(state.open(QIODevice::ReadOnly));
+    const auto saved = QJsonDocument::fromJson(state.readAll()).object().value("tasks").toArray().first().toObject();
+    const auto file = saved.value("attachments").toArray().first().toObject();
+    QCOMPARE(file.value("name").toString(), QString("screen.png"));
+    QCOMPARE(QByteArray::fromBase64(file.value("data_base64").toString().toLatin1()), QByteArray("immutable bytes"));
+    QVERIFY(saved.value("text").toString().contains("[Image #1]"));
 }
 
 void TestTasksView::tilesCountAndChooseTheFirstStage() {

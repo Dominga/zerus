@@ -11,12 +11,15 @@ struct TaskItem {
     // name. An empty name is Any session; targetKnown is false for a computer this
     // one has not verified.
     QString targetHost, targetSession;
+    QString targetId;
     bool targetKnown = true;
     // The session the task was last sent to; empty when it was never sent.
     QString sessionHost, sessionName;
+    QString sessionId;
     bool sessionKnown = true;
     // Who filed it: empty for the person, otherwise the agent's session and its computer.
     QString author, authorHost;
+    QString authorId;
     qint64 createdAt = 0, stageAt = 0, cancelledAt = 0;
     bool writable = true;
     int queue = 0;   // position in the project's To do, from 1
@@ -36,10 +39,10 @@ public:
     int damaged = 0;
 
     // The open session's tasks: pinned to it in To do and Backlog, sent to it later.
-    static bool belongsTo(const TaskItem &task, const QString &host, const QString &session);
+    static bool belongsTo(const TaskItem &task, const QString &host, const QString &session, const QString &id = {});
     // "Only this session" keeps those and the Any session tasks in To do and Backlog.
-    static bool keptFor(const TaskItem &task, const QString &host, const QString &session);
-    struct View { QString host, session; bool only = false; qint64 now = 0; };
+    static bool keptFor(const TaskItem &task, const QString &host, const QString &session, const QString &id = {});
+    struct View { QString host, session; bool only = false; qint64 now = 0; QString id; };
     // A stage's rows in display order: To do and Backlog by rank, In review and In
     // progress oldest first, Done newest first. Done holds the last 7 days; `older`
     // asks for the rest of it.

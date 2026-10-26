@@ -114,9 +114,15 @@ class Mobile(test_tasks.DeliveryFixture):
         mine = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 50})["tasks"][0]["session"]
         only = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 50, "session": mine})
         self.assertEqual((only["total"], only["recent"], [r["text"] for r in only["tasks"]]), (1, 1, ["Task 0"]))
-        other = dict(mine, session="codex/elsewhere")
+        renamed = dict(mine, session="codex/renamed")
+        same = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 50, "session": renamed})
+        self.assertEqual(same["total"], 1)
+        other = dict(mine, session="codex/elsewhere", session_id="run_id:another")
         none = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 50, "session": other})
         self.assertEqual((none["total"], none["recent"], none["tasks"]), (0, 0, []))
+        legacy = {k: v for k, v in mine.items() if k != "session_id"}
+        old_client = self.mobile("mobile-done", {"schema": 1, "project": "project-1", "limit": 50, "session": legacy})
+        self.assertEqual(old_client["total"], 1)
         broken = {"schema": 1, "project": "project-1", "limit": 50, "session": {"session": self.name}}
         self.assertIn("invalid request", self.mobile("mobile-done", broken, ok=False)["error"])
 

@@ -37,6 +37,9 @@ def log(t,kind,body=''): t.setdefault('log',[]).append({'kind':kind,'actor':{'ki
 def top(t): data['tasks'].remove(t); data['tasks'].insert(0,t)
 order=['review','active','todo','backlog','done']
 cmd=a[1]
+content={}
+if cmd in ('add','edit') and '--content-json' in a:
+    content=json.loads(text); text=content['text']
 if cmd=='list':
     tasks=sorted(data['tasks'],key=lambda t: order.index(t['stage']))
     out({'project':project,'tasks':[{k:v for k,v in t.items() if k!='log'} for t in tasks],'damaged':data.get('damaged',[])}); sys.exit(0)
@@ -49,6 +52,7 @@ if cmd=='add':
     t={'uuid':'uuid-%d'%n,'id':'T-%06d'%n,'ref':'orchard/T-%06d'%n,'text':text,'stage':'backlog' if '--backlog' in a else 'todo',
        'summary':'','cancel_reason':'','cancelled_at':None,'created_at':now,'stage_at':now,'writable':True,
        'author':{'kind':'person'},'target':target,'session':None,'rank':'V'}
+    if 'attachments' in content: t['attachments']=content['attachments']
     log(t,'created'); data['tasks'].append(t); save(); out({'task':t}); sys.exit(0)
 t=find(a[2])
 if cmd=='get': out({'project':project,'task':t}); sys.exit(0)
@@ -65,7 +69,9 @@ elif cmd=='send':
     t['stage']='active'; t['stage_at']=now; t['session']={'machine':'m-here','session':session,'host':''}; log(t,'sent')
 elif cmd=='cancel':
     t['stage']='review'; t['stage_at']=now; t['cancelled_at']=now; t['cancel_reason']=opt('--reason') or ''; log(t,'cancelled')
-elif cmd=='edit': t['text']=text; log(t,'edited')
+elif cmd=='edit':
+    t['text']=text; log(t,'edited')
+    if 'attachments' in content: t['attachments']=content['attachments']
 elif cmd=='target':
     t['target']={'kind':'any'} if a[3]=='any' else {'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':a[3],'host':opt('--host') or ''}
     log(t,'target',a[3])

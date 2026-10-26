@@ -3635,6 +3635,8 @@ void SessionsWindow::updateTasks(const Entry *entry)
     for (const auto &other : std::as_const(m_entries)) {
         if (other.session.state == "archived" || m_organization.groupFor(other.identity) != projectId) continue;
         TaskSession session{other.host, other.session.name, status(other.session, other.online), {}, true};
+        session.id = other.session.launchId.isEmpty() ? (other.session.runId.isEmpty() ? QString() : QStringLiteral("run_id:") + other.session.runId)
+                                                     : QStringLiteral("launch_id:") + other.session.launchId;
         session.running = other.online && other.session.state == "running" && other.session.processState != "exited";
         session.working = SessionPresentation::working(other.session, other.online);
         // In progress rows show its state as the session list does.

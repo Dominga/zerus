@@ -41,7 +41,7 @@ protected:
         if (!property("spinning").toBool()) return;
         QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
         p.setPen(QPen(m_color, 2)); const QPointF center = QRectF(rect()).center();
-        p.drawArc(QRectF(center.x() - 3, center.y() - 3, 6, 6), (-45 - m_angle) * 16, 180 * 16);
+        p.drawArc(QRectF(center.x() - 5, center.y() - 5, 10, 10), (-45 - m_angle) * 16, 180 * 16);
     }
 private:
     QTimer m_timer; QColor m_color; int m_angle = 0;
@@ -116,12 +116,12 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     // Tab reaches a row, Enter or Space opens it, and its actions follow the focus.
     setFocusPolicy(Qt::TabFocus);
     auto *layout = new QHBoxLayout(this); layout->setContentsMargins(12, 6, 12, 10); layout->setSpacing(11);
-    m_glyph = new TaskGlyph; m_glyph->setObjectName("taskGlyph"); m_glyph->setFixedSize(18, 18); m_glyph->setAlignment(Qt::AlignCenter);
+    m_glyph = new TaskGlyph; m_glyph->setObjectName("taskGlyph"); m_glyph->setFixedSize(22, 22); m_glyph->setAlignment(Qt::AlignCenter);
     auto *glyphColumn = new QVBoxLayout; glyphColumn->setContentsMargins(0, 4, 0, 0); glyphColumn->addWidget(m_glyph); glyphColumn->addStretch();
     layout->addLayout(glyphColumn);
     auto *main = new QVBoxLayout; main->setContentsMargins(0, 0, 0, 0); main->setSpacing(0); layout->addLayout(main, 1);
     // The header's height is fixed, so showing the icons never moves anything.
-    auto *header = new QWidget; header->setFixedHeight(26);
+    auto *header = new QWidget; header->setFixedHeight(34);
     auto *headerLayout = new QHBoxLayout(header); headerLayout->setContentsMargins(0, 0, 0, 0); headerLayout->setSpacing(8);
     // The rich-text labels take no mouse input: presses, drags and clicks on them are the row's.
     m_meta = new QLabel; m_meta->setObjectName("taskMeta"); m_meta->setTextFormat(Qt::RichText); m_meta->setTextInteractionFlags(Qt::NoTextInteraction);
@@ -152,7 +152,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         : QString();
     m_glyph->setText(glyph); m_glyph->setSpinning(task.stage == QLatin1String("active"), stage);
     setAccessibleName(task.id + QStringLiteral(": ") + task.text.section(QLatin1Char('\n'), 0, 0));
-    setWorkspaceStyle(m_glyph, QStringLiteral("border:2px solid %1;border-radius:9px;color:%1;font-size:9.5px;font-weight:700;").arg(stage.name()));
+    setWorkspaceStyle(m_glyph, QStringLiteral("border:2px solid %1;border-radius:11px;color:%1;font-size:11px;font-weight:700;").arg(stage.name()));
     // Meta: ID, the session (or the target), the session's status for In
     // progress, the time, and who filed it.
     const auto who = [&](const QString &text) {
@@ -197,7 +197,8 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         const auto actions = TaskBoard::actions(task.stage);
         for (const auto action : actions) {
             auto *button = new QToolButton(m_actions); button->setObjectName(QStringLiteral("taskAction:") + actionKey(action));
-            button->setFixedSize(26, 26); button->setIconSize(QSize(15, 15)); button->setAutoRaise(true); button->setCursor(Qt::ArrowCursor);
+            button->setFixedSize(34, 32); button->setIconSize(QSize(20, 20)); button->setAutoRaise(true); button->setCursor(Qt::ArrowCursor);
+            button->setAttribute(Qt::WA_LayoutUsesWidgetRect);
             connect(button, &QToolButton::clicked, this, [this, action, button] {
                 const QString why = button->property("blockedReason").toString();
                 if (why.isEmpty()) return emit actionRequested(action);
@@ -207,7 +208,7 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
             button->installEventFilter(this);
             m_actions->layout()->addWidget(button); m_buttons.insert(int(action), button);
         }
-        m_actions->setFixedWidth(int(actions.size()) * 26 + qMax(0, int(actions.size()) - 1) * 2);
+        m_actions->setFixedWidth(int(actions.size()) * 34 + qMax(0, int(actions.size()) - 1) * 2);
     }
     for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it) {
         const auto action = TaskAction(it.key()); const QString why = state.blocked.value(it.key());

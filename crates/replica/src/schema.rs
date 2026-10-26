@@ -52,12 +52,27 @@ impl Stage {
     }
 }
 
-/// A session on a computer: the computer's swarm identity and the session name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A session on a computer. `session` is a display/routing hint; new callers
+/// retain the immutable launch identity (or run identity for legacy bindings).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionKey {
     pub machine: String,
     pub session: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
 }
+
+impl PartialEq for SessionKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.machine == other.machine
+            && if self.session_id.is_empty() && other.session_id.is_empty() {
+                self.session == other.session
+            } else {
+                !self.session_id.is_empty() && self.session_id == other.session_id
+            }
+    }
+}
+impl Eq for SessionKey {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -107,6 +122,8 @@ pub struct TaskView {
     pub cancelled_at: Option<i64>,
     pub cancel_reason: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::TaskAttachment>,
     pub log: Vec<LogEntry>,
 }
 

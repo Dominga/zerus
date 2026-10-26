@@ -28,6 +28,7 @@ fn api() -> SessionKey {
     SessionKey {
         machine: "00000000-0000-4000-8000-000000000001".into(),
         session: "codex/api".into(),
+        ..Default::default()
     }
 }
 

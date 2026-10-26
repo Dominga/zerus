@@ -260,6 +260,28 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     }
     // C4: the reports the owner's attention list shows.
     value["attention"] = json!(super::inbox::attention(team, super::super::now()));
+    // Section 9.4: a delegated task shows its sub-team, and the team lists its
+    // children with rolled-up counts; each level keeps its own tasks and plan
+    // health.
+    if let Some(tasks) = value["tasks"].as_array_mut() {
+        for (task, value) in team.tasks.iter().zip(tasks) {
+            let child = teams.iter().find(|child| {
+                child.parent.as_ref().is_some_and(|parent| parent.team == team.id && parent.task == task.id)
+            });
+            if let Some(child) = child {
+                let done = child.tasks.iter().filter(|task| task.status.finished()).count();
+                value["subteam"] = json!({"team":child.id,"status":child.status,"done":done,"total":child.tasks.len()});
+            }
+        }
+    }
+    value["children"] = json!(teams
+        .iter()
+        .filter(|child| child.parent.as_ref().is_some_and(|parent| parent.team == team.id))
+        .map(|child| {
+            let done = child.tasks.iter().filter(|task| task.status.finished()).count();
+            json!({"team":child.id,"name":child.name,"status":child.status,"done":done,"total":child.tasks.len()})
+        })
+        .collect::<Vec<_>>());
     // F12: a draft that cannot open yet says so plainly; the tooltip data names
     // the phase before it and that phase's open tasks.
     if let Some(phases) = value["phases"].as_array_mut() {
@@ -361,28 +383,126 @@ fn summary(team: &Team) -> Value {
     })
 }
 
+/// Section 9.1: creates a sub-team from its parent task. The assignee's
+/// session becomes the sub-team's lead; the caller must be that session, the
+/// parent lead, or the owner. Returns (parent team, task) for the link.
+fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(String, u32)>> {
+    if !input["parent"].is_object() {
+        return Ok(None);
+    }
+    let store = Store::open(false)?;
+    let parent = store
+        .load(text(&input["parent"], "team"))?
+        .context("Unknown parent team")?;
+    ensure!(
+        matches!(parent.status, TeamStatus::Running | TeamStatus::Paused),
+        "Only a running or paused team delegates a sub-team"
+    );
+    let number = input["parent"]["task"]
+        .as_u64()
+        .and_then(|number| u32::try_from(number).ok())
+        .filter(|number| *number > 0)
+        .context("The parent task number is required")?;
+    let task = parent.task(number).context("Unknown parent task")?;
+    ensure!(!task.status.finished(), "The parent task is already decided");
+    let member = parent
+        .member(&task.assignee)
+        .with_context(|| format!("The parent task #{} has no assignee", task.id))?
+        .clone();
+    let session = member
+        .session
+        .clone()
+        .with_context(|| format!("{} has no session to lead a sub-team", member.id))?;
+    let caller = caller_record();
+    let parent_lead = parent.member(&parent.lead).and_then(|lead| lead.session.clone());
+    let by_assignee = caller.as_ref().is_some_and(|record| record["name"].as_str() == Some(session.name.as_str()));
+    let by_parent_lead = caller
+        .as_ref()
+        .is_some_and(|record| parent_lead.as_ref().is_some_and(|lead| record["name"].as_str() == Some(lead.name.as_str())));
+    let by_owner = caller.is_none() && text(input, "by") == "human";
+    ensure!(
+        by_assignee || by_parent_lead || by_owner,
+        "A sub-team is created from the parent task's assignee, the parent lead or you"
+    );
+    // The assignee's session becomes the sub-team's lead.
+    filled["lead"] = json!({
+        "id":member.id,"role":if member.role.is_empty(){"Lead"}else{member.role.as_str()},"agent":member.agent,
+        "account":member.account,"model":member.model,"effort":member.effort,"permissions":member.permissions,
+        "permissions_profile":member.permissions_profile,"computer":member.computer,"folder":member.folder,
+        "directory":if member.directory.is_empty(){parent.folder.clone()}else{member.directory.clone()},
+        "session":session,"prompt":member.prompt
+    });
+    filled["parent"] = json!({"team":parent.id,"task":task.id,"lead":parent.lead,"member":member.id});
+    if text(filled, "folder").is_empty() {
+        filled["folder"] = json!(if member.directory.is_empty() { parent.folder.clone() } else { member.directory.clone() });
+    }
+    if text(filled, "project").is_empty() {
+        filled["project"] = json!(parent.project.clone());
+    }
+    // Section 9.3: a sub-team inherits who approves its plan unless the
+    // request says otherwise.
+    if filled["settings"].is_null() {
+        filled["settings"] = json!({"subteam_approval": parent.settings.subteam_approval});
+    } else if filled["settings"].get("subteam_approval").is_none() {
+        filled["settings"]["subteam_approval"] = json!(parent.settings.subteam_approval);
+    }
+    Ok(Some((parent.id.clone(), task.id)))
+}
+
 fn create(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
+    // A replay returns the first receipt before validating the parent again.
+    if let Some(receipt) = Store::open(false)?.receipt(request, input)? {
+        return Ok(receipt);
+    }
     let mut filled = input.clone();
-    if let Some(record) = caller_record() {
-        // A lead creates its own team: its session is the lead's.
-        let lead = &mut filled["lead"];
-        ensure!(lead.is_object(), "Describe the lead");
-        let session = json!({"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"]});
-        ensure!(lead["session"].is_null() || lead["session"]["name"] == record["name"], "A session creates only a team it leads");
-        lead["session"] = session;
-        if lead["agent"].is_null() {
-            lead["agent"] = json!(record["agent"]);
+    let parent_link = parent_create(input, &mut filled)?;
+    if parent_link.is_none() {
+        if let Some(record) = caller_record() {
+            // A lead creates its own team: its session is the lead's.
+            let lead = &mut filled["lead"];
+            ensure!(lead.is_object(), "Describe the lead");
+            let session = json!({"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"]});
+            ensure!(lead["session"].is_null() || lead["session"]["name"] == record["name"], "A session creates only a team it leads");
+            lead["session"] = session;
+            if lead["agent"].is_null() {
+                lead["agent"] = json!(record["agent"]);
+            }
+        } else {
+            ensure!(nonempty_env("HGS_SESSION").is_none(), "Zerus could not verify the calling session");
+            ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
         }
-    } else {
-        ensure!(nonempty_env("HGS_SESSION").is_none(), "Zerus could not verify the calling session");
-        ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
     }
     let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
+    // Section 9.2: depth, children and tree sessions are checked at create.
+    if let Some((parent_id, _)) = &parent_link {
+        let store = Store::open(false)?;
+        let all = store.teams(false, 10_000)?;
+        let parent = all
+            .iter()
+            .find(|candidate| candidate.id == *parent_id)
+            .context("The parent team is no longer active")?;
+        let master = ops::root_of(parent, &all);
+        ops::ensure_tree_create(parent, &master, &all, &team)?;
+    }
     let start = team.brief == Notice::Pending;
     // The request's identity is what the caller sent, so a replay matches.
-    let receipt = Store::open(true)?.create(request, input, team, events)?;
+    let receipt = Store::open(true)?.create(request, input, team.clone(), events)?;
+    if let Some((parent_id, task)) = parent_link {
+        let mut store = Store::open(true)?;
+        let child = team.id.clone();
+        store.mutate(None, &parent_id, None, |parent, events| {
+            if !parent.children.contains(&child) {
+                parent.children.push(child.clone());
+            }
+            if let Some(parent_task) = parent.tasks.iter_mut().find(|candidate| candidate.id == task) {
+                parent_task.subteam = Some(child.clone());
+            }
+            events.push(Event::new("subteam_created", json!({"team":child,"task":task})));
+            Ok(Value::Null)
+        })?;
+    }
     if start {
         if let Err(error) = super::dispatcher::ensure_worker() {
             eprintln!("hgs: the team dispatcher did not start: {error}");
@@ -928,7 +1048,18 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             let sessions = if status_lists_sessions(team.status) { recent_sessions().ok() } else { None };
             // Only the teams that still run, from the indexed query, so a
             // finished team's status never reads every team (C1).
-            let teams = if finished { active_team_records(&store)? } else { Vec::new() };
+            let mut teams = if finished { active_team_records(&store)? } else { Vec::new() };
+            // Section 9.4: the linked sub-teams are read by id (at most 32),
+            // whatever their status, for the parent task card and the children
+            // list; this is bounded and only for a team that has children.
+            for child in team.children.iter().take(32) {
+                if teams.iter().any(|team| &team.id == child) {
+                    continue;
+                }
+                if let Some(child) = store.load(child)? {
+                    teams.push(child);
+                }
+            }
             Ok(view_with(&team, &teams, sessions.as_deref()))
         }
         "inbox" => {
@@ -978,11 +1109,27 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("The member has no session")?;
                 filled["text"] = json!(super::dispatcher::last_reply(&session)?);
             }
-            if matches!(op, "plan" | "add-member") {
+            if matches!(op, "plan" | "add-member" | "swap-member") {
                 // An existing session must run here and be free of another
                 // active team; its own folder replaces the planned one (F8).
                 // A retry returns here before any listing (L4).
                 adopt_existing_sessions(&store, request, input, op, &mut filled)?;
+            }
+            // Section 9.2: a change that can bind a new session keeps the whole
+            // tree within its master's budget (extend binds none, and is
+            // checked for a tree already over it).
+            if matches!(op, "add-member" | "swap-member" | "extend") {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let all = store.teams(false, 10_000)?;
+                let added = match op {
+                    "add-member" => usize::from(filled["member"]["session"].is_object()),
+                    "swap-member" => usize::from(
+                        filled["session"].is_object()
+                            && team.member(text(&filled, "member")).is_none_or(|member| member.session.is_none()),
+                    ),
+                    _ => 0,
+                };
+                ops::ensure_tree_sessions(&team, &all, added)?;
             }
             if matches!(op, "approve" | "approve-phase") {
                 // F13: the lead approves only on the owner's exact sentence,
@@ -1678,6 +1825,23 @@ mod tests {
         );
         // A plan without checks says so with an empty list.
         assert_eq!(view_with(&running_team(), &[], None)["checks"], json!([]));
+    }
+
+    #[test]
+    fn a_parent_task_shows_its_subteam_and_the_team_lists_its_children() {
+        let parent = running_team();
+        let mut child = Team { id: "child".into(), name: "Child".into(), lead: "dev".into(), status: TeamStatus::Running, ..Default::default() };
+        child.parent = Some(Parent { team: parent.id.clone(), task: 1, lead: "lead".into(), member: "dev".into() });
+        child.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
+        child.tasks.push(Task { id: 1, title: "Sub work".into(), assignee: "dev".into(), status: TaskStatus::Accepted, ..Default::default() });
+        child.tasks.push(Task { id: 2, title: "More".into(), assignee: "dev".into(), ..Default::default() });
+        let view = view_with(&parent, &[parent.clone(), child.clone()], None);
+        // Section 9.4: the delegated task shows its sub-team and counts.
+        let task = view["tasks"].as_array().unwrap().iter().find(|task| task["id"] == 1).unwrap();
+        assert_eq!(task["subteam"], json!({"team":"child","status":"running","done":1,"total":2}));
+        assert_eq!(view["children"], json!([{"team":"child","name":"Child","status":"running","done":1,"total":2}]));
+        // The parent's plan health counts only its own tasks.
+        assert_eq!(view["health"]["tasks"], 1);
     }
 
     #[test]

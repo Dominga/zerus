@@ -63,6 +63,9 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         (60..=86_400).contains(&settings.blocked_timeout_seconds),
         "The blocked warning waits 60 to 86400 seconds"
     );
+    // Section 9.2: the tree bounds are set on the master.
+    ensure!((1..=8).contains(&settings.tree_depth), "A tree goes 1 to 8 levels below its master");
+    ensure!((1..=200).contains(&settings.tree_sessions), "A tree runs 1 to 200 sessions");
     Ok(())
 }
 
@@ -146,6 +149,26 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?
     };
     validate_settings(&settings)?;
+    // Section 9.1: a sub-team names the parent team and its open task; the
+    // caller fills the parent lead and the assignee's session as the lead.
+    let parent: Option<Parent> = if input["parent"].is_object() {
+        let value = &input["parent"];
+        let team = clean(text(value, "team").trim(), 80, "The parent team")?;
+        ensure!(!team.is_empty(), "The parent team is required");
+        let task = value["task"]
+            .as_u64()
+            .and_then(|id| u32::try_from(id).ok())
+            .filter(|id| *id > 0)
+            .context("The parent task number is required")?;
+        Some(Parent {
+            team,
+            task,
+            lead: clean(text(value, "lead").trim(), 40, "The parent lead")?,
+            member: clean(text(value, "member").trim(), 40, "The parent member")?,
+        })
+    } else {
+        None
+    };
     // From the desktop: the members and template tasks proposed for the
     // lead's plan; the lead starts and gets a planning brief.
     let mut members = vec![lead.clone()];
@@ -189,6 +212,7 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         tasks,
         brief: if start { Notice::Pending } else { Notice::None },
         lead_protocol: clean(&lead_protocol, 8000, "The lead protocol")?,
+        parent,
         ..Default::default()
     };
     let events = vec![Event::new("created", json!({"by":"You","name":name}))];
@@ -324,14 +348,41 @@ fn verified_word(input: &Value) -> anyhow::Result<Option<OwnerWord>> {
     }
 }
 
+/// Section 9.3: a sub-team's plan and phases are approved by its parent lead
+/// (default) or by the owner; the sub-lead cannot approve its own plan.
+fn ensure_subteam_approver(team: &Team, actor: &Actor) -> anyhow::Result<()> {
+    if team.parent.is_none() || matches!(actor, Actor::Human) {
+        return Ok(());
+    }
+    if team.settings.subteam_approval == SubteamApproval::Owner {
+        bail!("The owner approves this sub-team's plan and phases");
+    }
+    let parent = team.parent.as_ref().unwrap();
+    ensure!(
+        matches!(actor, Actor::Member(id) if !parent.lead.is_empty() && *id == parent.lead),
+        "The parent lead approves this sub-team's plan and phases"
+    );
+    Ok(())
+}
+
+/// Whether this actor is the parent lead (section 9.3, default setting).
+fn parent_approves(team: &Team, actor: &Actor) -> bool {
+    team.parent.as_ref().is_some_and(|parent| {
+        team.settings.subteam_approval == SubteamApproval::Parent
+            && matches!(actor, Actor::Member(id) if !parent.lead.is_empty() && *id == parent.lead)
+    })
+}
+
 fn approve(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(team.status == TeamStatus::Planning, "Only a plan in Planning can be approved");
+    ensure_subteam_approver(team, actor)?;
     let owner_word = verified_word(input)?;
     // C1: the owner's word is the lead's route; a member can never approve on
     // a word the CLI did not verify in the lead's own session.
     ensure!(owner_word.is_none() || actor.is_lead(team), "Only the lead approves on the owner's word");
     ensure!(
         matches!(actor, Actor::Human)
+            || parent_approves(team, actor)
             || owner_word.is_some()
             || (team.settings.approval == Approval::Auto && actor.is_lead(team)),
         "The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence"
@@ -550,6 +601,9 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
 /// Approves a draft phase once every phase before it ended (owner), or discards
 /// it with its tasks (the lead or the owner, F10).
 fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    if approve {
+        ensure_subteam_approver(team, actor)?;
+    }
     let owner_word = verified_word(input)?;
     // C1: the owner's word is the lead's route; a member can never approve a
     // phase on a word the CLI did not verify in the lead's own session.
@@ -557,13 +611,17 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     if approve {
         // F13: only the owner approves in person; the lead does it on the
         // owner's exact sentence, checked by the CLI against its session.
+        // Section 9.3: a parent lead approves its sub-team's phases.
         ensure!(
-            matches!(actor, Actor::Human) || owner_word.is_some(),
+            matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
             "The lead approves a phase only on the owner's word: pass \"owner_word\""
         );
     } else {
         // The lead adds drafts, so it may drop its own; the owner may too (F10).
-        ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you discard a phase");
+        ensure!(
+            matches!(actor, Actor::Human) || actor.is_lead(team) || parent_approves(team, actor),
+            "Only the lead or you discard a phase"
+        );
     }
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = input["phase"]
@@ -1355,6 +1413,103 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
         json!({"member":role,"from":from,"to":to,"by":"You","agent":agent,"changed":changed,"lead":lead}),
     ));
     Ok(json!({"status":"swapped","member":id,"from":from,"to":to,"agent":agent,"tasks":handed,"lead":lead}))
+}
+
+/// Section 9.2: the root of a team's tree, by parent links among the loaded
+/// teams (a missing parent stops the walk at the team itself).
+pub(crate) fn root_of(team: &Team, all: &[Team]) -> Team {
+    let mut current = team.clone();
+    let mut seen = BTreeSet::new();
+    while let Some(parent) = current.parent.clone() {
+        if !seen.insert(current.id.clone()) {
+            break;
+        }
+        match all.iter().find(|candidate| candidate.id == parent.team) {
+            Some(next) => current = next.clone(),
+            None => break,
+        }
+    }
+    current
+}
+
+/// How many sub-team levels a team sits below its master.
+pub(crate) fn depth_of(team: &Team, all: &[Team]) -> u32 {
+    let mut depth = 0;
+    let mut current = team.clone();
+    let mut seen = BTreeSet::new();
+    while let Some(parent) = current.parent.clone() {
+        if depth >= 32 || !seen.insert(current.id.clone()) {
+            break;
+        }
+        match all.iter().find(|candidate| candidate.id == parent.team) {
+            Some(next) => {
+                depth += 1;
+                current = next.clone();
+            }
+            None => break,
+        }
+    }
+    depth
+}
+
+/// The sessions a team binds (its lead included), without removed members.
+pub(crate) fn session_count(team: &Team) -> usize {
+    team.members.iter().filter(|member| member.state != MemberState::Removed && member.session.is_some()).count()
+}
+
+/// The sessions the whole tree rooted at `master` binds.
+pub(crate) fn tree_session_count(master: &Team, all: &[Team]) -> usize {
+    let mut seen = BTreeSet::new();
+    let mut queue = vec![master.id.clone()];
+    let mut total = 0;
+    while let Some(id) = queue.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(team) = all.iter().find(|team| team.id == id) {
+            total += session_count(team);
+            queue.extend(team.children.iter().cloned());
+        }
+    }
+    // Parent links are the truth even if a children list was not kept.
+    for team in all.iter().filter(|team| !seen.contains(&team.id)) {
+        if root_of(team, all).id == master.id {
+            total += session_count(team);
+        }
+    }
+    total
+}
+
+/// Section 9.2: a sub-team may be created only within the master's depth, its
+/// 32 children and the tree's session budget.
+pub(crate) fn ensure_tree_create(parent: &Team, master: &Team, all: &[Team], child: &Team) -> anyhow::Result<()> {
+    ensure!(parent.children.len() < 32, "A team has at most 32 sub-teams");
+    let depth = depth_of(parent, all) + 1;
+    ensure!(
+        depth <= master.settings.tree_depth,
+        "Sub-teams go at most {} levels below the master",
+        master.settings.tree_depth
+    );
+    let sessions = tree_session_count(master, all) + session_count(child);
+    ensure!(
+        sessions <= master.settings.tree_sessions as usize,
+        "The whole tree runs at most {} sessions",
+        master.settings.tree_sessions
+    );
+    Ok(())
+}
+
+/// Section 9.2: a change that adds sessions (add-member, swap-member) keeps the
+/// tree within the master's session budget.
+pub(crate) fn ensure_tree_sessions(team: &Team, all: &[Team], added: usize) -> anyhow::Result<()> {
+    let master = root_of(team, all);
+    let sessions = tree_session_count(&master, all) + added;
+    ensure!(
+        sessions <= master.settings.tree_sessions as usize,
+        "The whole tree runs at most {} sessions",
+        master.settings.tree_sessions
+    );
+    Ok(())
 }
 
 /// The id of the next question of a team: `q1`, `q2`, ... Questions are never
@@ -3838,5 +3993,151 @@ mod tests {
         assert_eq!(team.brief, Notice::Pending);
         assert_eq!(team.swapped.last().unwrap()["old"], "claude/x/lead");
         assert!(events.iter().any(|event| event.kind == "member_swapped" && event.payload["lead"] == true));
+    }
+
+    #[test]
+    fn a_subteam_is_approved_by_its_parent_lead_or_the_owner() {
+        fn subteam(approval: SubteamApproval) -> Team {
+            let mut team = Team {
+                id: "child".into(),
+                name: "Child".into(),
+                lead: "dev".into(),
+                status: TeamStatus::Planning,
+                parent: Some(Parent { team: "t".into(), task: 1, lead: "lead".into(), member: "dev".into() }),
+                ..Default::default()
+            };
+            team.settings.subteam_approval = approval;
+            team.members.push(Member {
+                id: "dev".into(),
+                role: "Backend".into(),
+                agent: "codex".into(),
+                session: Some(SessionRef { name: "codex/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), host: String::new() }),
+                ..Default::default()
+            });
+            team.tasks.push(Task { id: 1, title: "Sub work".into(), assignee: "dev".into(), ..Default::default() });
+            team
+        }
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        // Section 9.3: the sub-lead cannot approve its own plan; the parent
+        // lead can, without the owner's word.
+        let mut child = subteam(SubteamApproval::Parent);
+        let error = apply(&mut child, "approve", &json!({}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("parent lead approves"), "{error}");
+        apply(&mut child, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(child.status, TeamStatus::Running);
+        // The owner always approves, whatever the setting.
+        let mut owner = subteam(SubteamApproval::Owner);
+        apply(&mut owner, "approve", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+        let mut strict = subteam(SubteamApproval::Owner);
+        let error = apply(&mut strict, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("owner approves"), "{error}");
+        // A phase of a sub-team: the parent lead approves it without the
+        // owner's word; the sub-lead cannot.
+        let mut phases = subteam(SubteamApproval::Parent);
+        apply(&mut phases, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        apply(&mut phases, "cancel", &json!({"task":1}), &Actor::Human, &none, &mut events).unwrap();
+        extend(
+            &mut phases,
+            &json!({"tasks":[{"id":2,"title":"Next","assignee":"dev"}]}),
+            &Actor::Member("dev".into()),
+            &none,
+            &mut events,
+        )
+        .unwrap();
+        let phase = phases.phases.last().unwrap().n;
+        let error = apply(&mut phases, "approve-phase", &json!({"phase":phase}), &Actor::Member("dev".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("parent lead approves"), "{error}");
+        apply(&mut phases, "approve-phase", &json!({"phase":phase}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        // A flat team is unchanged: its own lead still needs the owner's word.
+        let mut flat = subteam(SubteamApproval::Parent);
+        flat.parent = None;
+        let error = apply(&mut flat, "approve", &json!({}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("owner's word"), "{error}");
+    }
+
+    #[test]
+    fn tree_limits_bound_depth_children_and_sessions() {
+        fn with_session(id: &str, parent: Option<(&str, u32)>, sessions: usize) -> Team {
+            let mut team = Team { id: id.into(), name: id.into(), lead: "lead".into(), ..Default::default() };
+            for index in 0..sessions {
+                team.members.push(Member {
+                    id: format!("m{index}"),
+                    role: "Backend".into(),
+                    agent: "codex".into(),
+                    session: Some(SessionRef {
+                        name: format!("codex/x/{id}-{index}"),
+                        run_id: "r".into(),
+                        conversation_id: "c".into(),
+                        host: String::new(),
+                    }),
+                    ..Default::default()
+                });
+            }
+            if let Some((parent, task)) = parent {
+                team.parent = Some(Parent { team: parent.into(), task, lead: "lead".into(), member: "m0".into() });
+            }
+            team
+        }
+        let mut master = with_session("m", None, 0);
+        master.settings.tree_depth = 2;
+        master.settings.tree_sessions = 2;
+        let a = with_session("a", Some(("m", 1)), 1);
+        let b = with_session("b", Some(("a", 1)), 1);
+        let all = vec![master.clone(), a.clone(), b.clone()];
+        assert_eq!((depth_of(&a, &all), depth_of(&b, &all)), (1, 2));
+        assert_eq!(root_of(&b, &all).id, "m");
+        assert_eq!(tree_session_count(&master, &all), 2);
+        // A sub-team of b would be the third level below the master.
+        let c = with_session("c", Some(("b", 1)), 0);
+        let error = ensure_tree_create(&b, &master, &all, &c).unwrap_err().to_string();
+        assert!(error.contains("at most 2 levels"), "{error}");
+        // A new session beyond the tree budget is refused.
+        let d = with_session("d", Some(("m", 2)), 1);
+        let error = ensure_tree_create(&master, &master, &all, &d).unwrap_err().to_string();
+        assert!(error.contains("at most 2 sessions"), "{error}");
+        // add-member and swap-member ask ensure_tree_sessions for the addition.
+        assert!(ensure_tree_sessions(&a, &all, 1).is_err());
+        assert!(ensure_tree_sessions(&a, &all, 0).is_ok());
+        // At most 32 sub-teams.
+        let mut full = master.clone();
+        full.children = (0..32).map(|index| format!("s{index}")).collect();
+        let error = ensure_tree_create(&full, &master, &all, &with_session("e", Some(("m", 3)), 0))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("at most 32 sub-teams"), "{error}");
+        // Creating a sub-team in the parent task's place records the link in
+        // the child and the parent keeps the child id (section 9.1).
+        let (mut link, _) = create(
+            "child",
+            &json!({"name":"Child","lead":{"id":"dev","role":"Backend","agent":"codex"},
+                "parent":{"team":"m","task":1,"lead":"lead","member":"dev"}}),
+        )
+        .unwrap();
+        link.children.push("grand".into());
+        assert_eq!(link.parent.as_ref().map(|parent| (parent.team.as_str(), parent.task)), Some(("m", 1)));
+        assert_eq!(link.children, vec!["grand".to_owned()]);
+    }
+
+    #[test]
+    fn plan_health_counts_only_this_levels_tasks() {
+        let parent = running_team();
+        let mut child = Team { id: "child".into(), name: "Child".into(), lead: "dev".into(), ..Default::default() };
+        child.parent = Some(Parent { team: parent.id.clone(), task: 1, lead: "lead".into(), member: "dev".into() });
+        child.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
+        for id in 1..=5 {
+            child.tasks.push(Task { id, title: format!("Child {id}"), assignee: "dev".into(), ..Default::default() });
+        }
+        // Section 9.4: each tree level keeps its own plan health.
+        assert_eq!(plan::validate(&parent, &BTreeSet::new()).health.tasks, 2);
+        assert_eq!(plan::validate(&child, &BTreeSet::new()).health.tasks, 5);
     }
 }

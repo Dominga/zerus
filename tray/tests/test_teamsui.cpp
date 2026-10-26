@@ -25,6 +25,8 @@
 #include <QScrollArea>
 #include <QSplitter>
 #include <QTemporaryDir>
+#include <QImage>
+#include <QTextBrowser>
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTimer>
@@ -329,6 +331,7 @@ private slots:
     void malformedPhasesFallBack();
     void lightThemeShots();
     void deliveryShots();
+    void reportPreviewsAndFindings();
     void emptyPanelOffersNewTeamAndDesigner();
     void embeddedNewTeamIsLedByTheSession();
     void workspaceAddsAMember();
@@ -2628,6 +2631,88 @@ void TestTeamsUi::catalogEditorMarksManualEdits()
     QTRY_VERIFY(editor.findChild<QLabel *>("teamCatalogStatus")->text().contains("1 unsaved change"));
     QVERIFY(editor.findChild<QPushButton *>("teamCatalogSave")->isEnabled());
     shot(&editor, "d1-manual-edits");
+}
+
+void TestTeamsUi::reportPreviewsAndFindings()
+{
+    QTemporaryDir work;
+    QVERIFY(work.isValid());
+    QImage image(8, 8, QImage::Format_RGB32);
+    image.fill(Qt::red);
+    QVERIFY(image.save(work.filePath("shot.png")));
+    QFile page(work.filePath("page.html"));
+    QVERIFY(page.open(QIODevice::WriteOnly));
+    page.write("<html><body><b>HTML evidence</b></body></html>");
+    page.close();
+
+    auto t = team();
+    t["folder"] = work.path();
+    t["settings"] = QJsonObject{{"evidence_folders", QJsonArray{work.path()}}};
+    auto tasks = t["tasks"].toArray();
+    auto task = tasks[1].toObject();
+    auto attempts = task["attempts"].toArray();
+    auto attempt = attempts[0].toObject();
+    attempt["report"] = QJsonObject{
+        {"text", "Form ready"}, {"at", 1300.0},
+        {"structured", QJsonObject{
+             {"summary", "Form ready and checked"}, {"commit", "abc1234"},
+             {"criteria", QJsonArray{QJsonObject{{"n", 1}, {"result", "pass"}, {"evidence", QJsonArray{0}}, {"note", "Validation works"}}}},
+             {"evidence", QJsonArray{
+                  QJsonObject{{"kind", "command"}, {"caption", "tests"}, {"command", "cargo test"}, {"exit", 0}, {"tail", "ok"}},
+                  QJsonObject{{"kind", "image"}, {"caption", "Screenshot"}, {"path", work.filePath("shot.png")}},
+                  QJsonObject{{"kind", "html"}, {"caption", "Report"}, {"path", work.filePath("page.html")}},
+                  QJsonObject{{"kind", "url"}, {"caption", "PR"}, {"url", "https://example.com/pr/1"}}}},
+             {"limits", QJsonArray{"Windows not checked"}}}}};
+    attempts[0] = attempt;
+    task["attempts"] = attempts;
+    tasks[1] = task;
+    t["tasks"] = tasks;
+    t["findings"] = QJsonObject{
+        {"items", QJsonArray{
+             QJsonObject{{"id", "f1"}, {"severity", "critical"}, {"title", "Cache race"}, {"scenario", "Two writers"},
+                         {"file", "src/cache.rs"}, {"line", 42}, {"state", "open"}, {"from_task", "2"}},
+             QJsonObject{{"id", "f2"}, {"severity", "later"}, {"title", "Docs"}, {"state", "deferred"}, {"note", "after v2"}}}},
+        {"next_cursor", ""}};
+    t["findings_summary"] = QJsonObject{{"open", QJsonObject{{"critical", 1}, {"normal", 0}, {"later", 0}}}, {"deferred", 1}};
+    setTeam(t);
+
+    const auto parsed = Teams::parse(t);
+    const auto live = [](const Member &) { Live state; state.known = true; return state; };
+    // D1: the structured report renders criteria, evidence with previews and
+    // its limits.
+    TeamTaskCard card;
+    card.setTask(parsed, 2, live, true);
+    card.resize(760, 1400);
+    card.show();
+    QTRY_VERIFY(card.findChild<QLabel *>("teamReportSummary"));
+    QVERIFY(card.findChild<QWidget *>("teamReportCriteria"));
+    QVERIFY2(card.findChild<QLabel *>("teamReportEvidenceImage"), "the image evidence previews");
+    QVERIFY2(card.findChild<QTextBrowser *>("teamReportEvidenceHtml"), "the HTML evidence previews");
+    QVERIFY(card.findChild<QLabel *>("teamReportLimits"));
+    shot(&card, "report-structured");
+
+    // D2: the header counts findings by severity, and the list offers every
+    // action.
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1600, 900);
+    workspace.show();
+    controller.refresh();
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamBarFindings"));
+    shot(&workspace, "findings-header");
+    auto *pill = dynamic_cast<TeamUi::Pill *>(workspace.findChild<QWidget *>("teamBarFindings"));
+    QVERIFY(pill);
+    QVERIFY2(pill->toolTip().contains("1 critical") && pill->toolTip().contains("1 deferred"), qPrintable(pill->toolTip()));
+    workspace.findChild<QPushButton *>("teamWorkspaceFindings")->click();
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamFindingsDialog"));
+    auto *dialog = workspace.findChild<QWidget *>("teamFindingsDialog");
+    for (const auto &action : {"reopen", "urgent", "replan", "defer", "fixed", "dropped"})
+        QVERIFY2(dialog->findChild<QPushButton *>(QStringLiteral("teamFindingAction_%1").arg(action)), action);
+    shot(dialog, "findings-dialog");
 }
 
 #include "test_teamsui.moc"

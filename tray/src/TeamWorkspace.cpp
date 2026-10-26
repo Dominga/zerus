@@ -8,6 +8,9 @@
 #include "TeamTaskCard.h"
 #include "TeamWidgets.h"
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QGridLayout>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMenu>
@@ -274,6 +277,80 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
     // G6: the phase in work (or the next draft) and the phases, not one bar
     // over every task.
     h->addWidget(new PhaseProgressBars(c, phaseProgress(team), true));
+    // D2: findings by severity, with the deferred count, and their actions.
+    const auto openFindings = team.findingsSummary.value("open").toObject();
+    const int critical = openFindings.value("critical").toInt();
+    const int normal = openFindings.value("normal").toInt();
+    const int later = openFindings.value("later").toInt();
+    const int deferred = team.findingsSummary.value("deferred").toInt();
+    if (team.findingsKnown && critical + normal + later + deferred > 0) {
+        auto *pill = new Pill(tr("%1 critical \u00b7 %2 normal \u00b7 %3 later \u00b7 %4 deferred")
+                                  .arg(critical).arg(normal).arg(later).arg(deferred),
+                              critical > 0 ? c.danger : c.warn);
+        pill->setObjectName("teamBarFindings");
+        h->addWidget(pill);
+        auto *findings = button(tr("Findings\u2026"), "teamWorkspaceFindings", false);
+        h->addWidget(findings);
+        QObject::connect(findings, &QPushButton::clicked, this, [this, team] {
+            auto *dialog = new QDialog(this);
+            dialog->setObjectName("teamFindingsDialog");
+            dialog->setAttribute(Qt::WA_DeleteOnClose);
+            dialog->setWindowTitle(tr("Findings \u00b7 %1").arg(team.name));
+            dialog->resize(680, 520);
+            auto *outer = new QVBoxLayout(dialog);
+            auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+            auto *body = new QWidget; body->setObjectName("teamFindingsList");
+            auto *list = new QVBoxLayout(body); list->setContentsMargins(10, 10, 10, 10); list->setSpacing(8);
+            const Colors fc = colorsFor(m_dark);
+            for (const auto &finding : team.findings) {
+                auto *row = new QWidget; row->setObjectName("teamFindingRow");
+                auto *rv = new QVBoxLayout(row); rv->setContentsMargins(0, 0, 0, 0); rv->setSpacing(3);
+                const QColor severity = finding.severity == "critical" ? fc.danger : finding.severity == "normal" ? fc.warn : fc.muted;
+                rv->addWidget(label(QStringLiteral("%1 \u00b7 %2").arg(finding.severity.toUpper(), finding.title), severity, 12, true));
+                if (!finding.scenario.isEmpty()) {
+                    auto *scenario = label(finding.scenario, fc.text2, 11); scenario->setWordWrap(true); rv->addWidget(scenario);
+                }
+                QString where = finding.file;
+                if (!where.isEmpty() && finding.line > 0) where += QStringLiteral(":%1").arg(finding.line);
+                if (!where.isEmpty()) rv->addWidget(label(where, fc.muted, 11));
+                if (!finding.state.isEmpty()) rv->addWidget(label(tr("state: %1%2").arg(finding.state,
+                    finding.note.isEmpty() ? QString() : tr(" \u2014 %1").arg(finding.note)), fc.muted, 11));
+                auto *actions = new QHBoxLayout; actions->setContentsMargins(0, 2, 0, 0); actions->setSpacing(6);
+                // D2: the finding actions; each needs a confirmation.
+                const QList<QPair<QString, QString>> choices{
+                    {QStringLiteral("reopen"), tr("Reopen")}, {QStringLiteral("urgent"), tr("Urgent phase")},
+                    {QStringLiteral("replan"), tr("Replan")}, {QStringLiteral("defer"), tr("Defer")},
+                    {QStringLiteral("fixed"), tr("Fixed")}, {QStringLiteral("dropped"), tr("Dropped")}};
+                for (const auto &choice : choices) {
+                    auto *action = new QPushButton(choice.second);
+                    action->setObjectName(QStringLiteral("teamFindingAction_%1").arg(choice.first));
+                    action->setFlat(true);
+                    QObject::connect(action, &QPushButton::clicked, this, [this, finding, choice] {
+                        if (!m_panel->confirm("teamFindingActionConfirm", choice.second,
+                                              tr("%1 finding \"%2\"?").arg(choice.second, finding.title), choice.second))
+                            return;
+                        QJsonObject input{{"finding", finding.id}, {"action", choice.first}, {"note", QString()}};
+                        bool ok = false;
+                        if (finding.task.toInt(&ok) && ok) input["task"] = finding.task.toInt();
+                        m_teams->act("finding", input);
+                    });
+                    actions->addWidget(action);
+                }
+                actions->addStretch();
+                rv->addLayout(actions);
+                auto *line = new QFrame; line->setFrameShape(QFrame::HLine); line->setStyleSheet(QStringLiteral("color:%1;").arg(fc.border.name()));
+                list->addWidget(row); list->addWidget(line);
+            }
+            if (team.findings.isEmpty()) list->addWidget(label(tr("No findings on this page."), fc.muted, 12));
+            list->addStretch();
+            scroll->setWidget(body);
+            outer->addWidget(scroll, 1);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+            QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+            outer->addWidget(buttons);
+            dialog->show();
+        });
+    }
     if (team.created > 0) h->addWidget(label(duration(QDateTime::currentSecsSinceEpoch() - team.created), c.muted, 11));
     h->addStretch();
     const auto add = [&](const QString &text, const char *objectName, bool primary, const std::function<void()> &run) {

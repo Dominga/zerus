@@ -161,6 +161,8 @@ Team parse(const QJsonObject &v)
     Team team;
     team.id = str(v, "id"); team.name = str(v, "name"); team.status = str(v, "status");
     team.project = str(v, "project"); team.folder = str(v, "folder"); team.lead = str(v, "lead");
+    for (const auto &folder : v.value("settings").toObject().value("evidence_folders").toArray())
+        team.evidenceFolders.append(folder.toString());
     team.revision = v.value("revision").toInteger(); team.created = v.value("created").toDouble(); team.updated = v.value("updated").toDouble();
     const auto settings = v.value("settings").toObject();
     team.allHard = settings.value("all_hard").toBool();
@@ -323,6 +325,38 @@ Team parse(const QJsonObject &v)
                 const auto item = r.toObject();
                 attempt.replaced.append({item.value("text").toString(), item.value("at").toDouble()});
             }
+            // D1: the structured report and its unstructured flag.
+            attempt.unstructured = report.value("unstructured").toBool();
+            const auto structured = report.value("structured").toObject();
+            if (!structured.isEmpty()) {
+                attempt.structured.present = true;
+                attempt.structured.summary = str(structured, "summary");
+                attempt.structured.commit = str(structured, "commit");
+                for (const auto &c : structured.value("criteria").toArray()) {
+                    const auto item = c.toObject();
+                    ReportCriterion criterion;
+                    criterion.n = item.value("n").toInt();
+                    criterion.result = str(item, "result");
+                    criterion.note = str(item, "note");
+                    for (const auto &e : item.value("evidence").toArray()) criterion.evidence.append(e.toInt());
+                    attempt.structured.criteria.append(criterion);
+                }
+                for (const auto &e : structured.value("evidence").toArray()) {
+                    const auto item = e.toObject();
+                    ReportEvidence evidence;
+                    evidence.kind = str(item, "kind");
+                    evidence.caption = str(item, "caption");
+                    evidence.path = str(item, "path");
+                    evidence.url = str(item, "url");
+                    evidence.command = str(item, "command");
+                    evidence.tail = str(item, "tail");
+                    evidence.text = str(item, "text");
+                    evidence.hasExit = item.contains("exit");
+                    evidence.exit = item.value("exit").toInt();
+                    attempt.structured.evidence.append(evidence);
+                }
+                for (const auto &l : structured.value("limits").toArray()) attempt.structured.limits.append(l.toString());
+            }
             // A3: questions to the lead, answered or open.
             for (const auto &q : a.value("questions").toArray()) {
                 const auto item = q.toObject();
@@ -484,6 +518,31 @@ Team parse(const QJsonObject &v)
     team.approvedBy = str(v, "approved_by");
     const auto word = v.value("owner_word");
     team.ownerWord = word.isObject() ? str(word.toObject(), "text") : word.toString();
+    // D2: findings is a page object {items, next_cursor}; the summary and the
+    // deferred list come with it.
+    const auto findings = v.value("findings").toObject();
+    if (v.contains("findings")) {
+        team.findingsKnown = true;
+        for (const auto &item : findings.value("items").toArray()) {
+            const auto f = item.toObject();
+            TeamFinding finding;
+            finding.id = str(f, "id");
+            finding.fromTask = str(f, "from_task");
+            finding.severity = str(f, "severity");
+            finding.title = str(f, "title");
+            finding.file = str(f, "file");
+            finding.line = f.value("line").toInt();
+            finding.scenario = str(f, "scenario");
+            finding.task = str(f, "task");
+            finding.state = str(f, "state");
+            finding.by = str(f, "by");
+            finding.at = f.value("at").toDouble();
+            finding.note = str(f, "note");
+            team.findings.append(finding);
+        }
+        team.findingsNext = str(findings, "next_cursor");
+    }
+    if (v.value("findings_summary").isObject()) team.findingsSummary = v.value("findings_summary").toObject();
     return team;
 }
 

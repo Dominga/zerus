@@ -1929,6 +1929,30 @@ pub(crate) fn send_denial(session: &SessionRef, tool: &str, reason: &str) -> any
 
 /// B4: commits the member's work in its own folder, on its own team branch.
 /// Never pushes, never amends, never changes branches.
+/// C2: why a repository's own configuration (the `local` and `worktree`
+/// scopes of `git config --list --show-scope --name-only`) cannot be committed
+/// with, or None.
+fn refused_repository_config(listing: &str) -> Option<String> {
+    for line in listing.lines() {
+        let Some((scope, key)) = line.split_once(char::is_whitespace) else { continue };
+        if !matches!(scope, "local" | "worktree") {
+            continue;
+        }
+        let key = key.trim().to_lowercase();
+        let reason = if key.starts_with("include.") || key.starts_with("includeif.") {
+            "includes another Git config".to_owned()
+        } else if key.starts_with("filter.") {
+            "configures a Git filter".to_owned()
+        } else if matches!(key.as_str(), "core.hookspath" | "core.fsmonitor" | "gpg.program") || key.starts_with("gpg.") {
+            format!("configures {key}")
+        } else {
+            continue;
+        };
+        return Some(reason);
+    }
+    None
+}
+
 pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[String]) -> anyhow::Result<Value> {
     let git = |args: &[&str]| -> anyhow::Result<std::process::Output> {
         // C2: every git call carries the hardened config and a timeout; the
@@ -1986,28 +2010,16 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
         let stderr = err_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
         Ok(std::process::Output { status, stdout, stderr })
     };
-    // C2: a repository-local hook, fsmonitor or filter configuration is refused
-    // rather than silently ignored.
-    for key in ["core.hooksPath", "core.fsmonitor", "gpg.program"] {
-        let found = git(&["config", "--local", "--get", key])?;
-        anyhow::ensure!(
-            !found.status.success() || String::from_utf8_lossy(&found.stdout).trim().is_empty(),
-            "This repository configures {key}; Zerus commits without it"
-        );
+    // C2: configuration the repository itself controls - its .git/config and,
+    // with extensions.worktreeConfig, its config.worktree - must not run code:
+    // a hook, fsmonitor, signing program, filter or included file is refused
+    // rather than silently ignored. Git lowercases section and key names, so
+    // the keys are compared in lowercase.
+    let listed = git(&["config", "--list", "--show-scope", "--name-only"])?;
+    anyhow::ensure!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr).trim());
+    if let Some(reason) = refused_repository_config(&String::from_utf8_lossy(&listed.stdout)) {
+        anyhow::bail!("This repository {reason}; Zerus commits without it");
     }
-    // C2: an included config could define a filter or hook; refuse it. Git
-    // stores section names in lowercase (`includeif.onbranch:...`), so the keys
-    // are compared after listing them, not with a case-sensitive pattern.
-    let keys = git(&["config", "--local", "--name-only", "--list"])?;
-    anyhow::ensure!(
-        !String::from_utf8_lossy(&keys.stdout)
-            .lines()
-            .map(str::to_lowercase)
-            .any(|key| key.starts_with("include.") || key.starts_with("includeif.")),
-        "This repository includes another Git config; Zerus commits without it"
-    );
-    let filters = git(&["config", "--local", "--get-regexp", "^filter\\."])?;
-    anyhow::ensure!(filters.stdout.is_empty(), "This repository configures a Git filter; Zerus commits without it");
     let current = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     anyhow::ensure!(current.status.success(), "{}", String::from_utf8_lossy(&current.stderr).trim());
     let current = String::from_utf8_lossy(&current.stdout).trim().to_owned();
@@ -4334,7 +4346,7 @@ mod tests {
         run(&["switch", "-q", "team/t-dev"]);
         run(&["config", "--local", "core.hooksPath", ".githooks"]);
         let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
-        assert!(error.contains("core.hooksPath"), "{error}");
+        assert!(error.contains("core.hookspath"), "{error}");
         run(&["config", "--local", "--unset", "core.hooksPath"]);
         run(&["config", "--local", "filter.slow.clean", "cat"]);
         let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
@@ -4356,6 +4368,21 @@ mod tests {
         let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
         assert!(error.contains("includes another Git config"), "{error}");
         run(&["config", "--local", "--remove-section", "includeIf.onbranch:team/**"]);
+        // The worktree's own config (extensions.worktreeConfig) is the
+        // repository's too: a filter or include there is refused.
+        run(&["config", "--local", "extensions.worktreeConfig", "true"]);
+        run(&["config", "--worktree", "filter.ev2.clean", "false"]);
+        let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
+        assert!(error.contains("Git filter"), "{error}");
+        run(&["config", "--worktree", "--remove-section", "filter.ev2"]);
+        run(&["config", "--worktree", "includeIf.onbranch:team/**.path", "included.config"]);
+        let error = commit_in(folder, "team/t-dev", "x", &[]).unwrap_err().to_string();
+        assert!(error.contains("includes another Git config"), "{error}");
+        run(&["config", "--worktree", "--remove-section", "includeIf.onbranch:team/**"]);
+        run(&["config", "--local", "--unset", "extensions.worktreeConfig"]);
+        // Scopes other than the repository's own are not its to refuse.
+        assert_eq!(refused_repository_config("global\tfilter.lfs.clean\nlocal\tcore.bare\n"), None);
+        assert!(refused_repository_config("worktree\tINCLUDEIF.onbranch:x.path\n").is_some());
         // C2: a call with more than 1 MB of output finishes without blocking:
         // git show --name-only prints every file of this commit.
         for index in 0..6000 {

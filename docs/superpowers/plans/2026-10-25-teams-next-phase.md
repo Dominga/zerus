@@ -622,6 +622,66 @@ answered; a denial cannot carry an explanation.
   library (local patch, noted in UPSTREAM.md) and keep the terminal's size
   while it is hidden or tiny. Owner: yes, in the fixes phase after phase 35.
 
+- **U13. Expert and ProExpert take over work that keeps coming back (owner,
+  2026-10-26).** Two catalog roles: Expert (Claude Opus 5.5, effort high) and
+  ProExpert (Claude Opus 5.5, effort xhigh). When a task has been rejected
+  three times, the lead judges the cause: a small remaining fix stays with its
+  member; a gap beyond the member's model goes to the Expert (reassign, the
+  Expert merges the member's branch and continues from it). The ProExpert is
+  added only when the Expert could not finish it either. After an expert's
+  takeover is accepted, Zerus compacts that expert's context
+  (`hgs compact-context`) so the next takeover starts small. Zerus support:
+  the third rejection shows the lead this choice in the inbox (with the
+  rejection reasons), an expert member does not count against
+  `max_members` or may be added to a full team with the owner's confirmation,
+  and the compaction runs on acceptance of a task that was reassigned to a
+  member tagged `rework`. Owner: yes.
+
+- **U14. Catalog decisions on the owner's word (owner, 2026-10-26).** The owner
+  asked the lead to apply two role proposals while the desktop could not be
+  used; catalog decide/apply accept only "by":"human" from outside any agent
+  session, so the lead had to hand the owner a script. As F13 does for phases:
+  `catalog decide` and `apply` from the lead's own session accept
+  `"owner_word": {"text"}` when the owner typed that sentence there within 30
+  minutes ("примени изменения каталога" / "apply the catalog changes"); the
+  draft and the event say "Applied by Lead on your word" with the quote.
+  Owner: yes.
+
+- **U15. Catalog proposals are decided without a designer session (seen
+  2026-10-26).** Keep, Reject and Apply did nothing while the Team designer
+  session was not active; the designer page drops the result and the error of
+  `catalog decide`. They must work in any session state and show errors.
+  Owner: yes, in the fixes phase.
+
+- **U16. The Team designer starts with what it needs (owner, 2026-10-26).** Its
+  session stopped at Claude's folder-trust prompt in its own Zerus folder, and
+  the prompt showed only in the main sessions list. Zerus trusts that private
+  folder and writes narrow rules (catalog get/propose/route, guides, read-only
+  tools) at the designer's launch, never by answering prompts; start-up trust
+  stays manual for every other folder. The designer window shows its
+  session's questions and permission cards. Owner: yes, in the fixes phase.
+
+- **U17. Permission answers collapse to one line (owner, 2026-10-26).** Member
+  cards list every stored permission answer (up to 20 lines, deny reasons in
+  full) and grow the members column. One summary line ('18 allowed · 2 denied ·
+  last: ...'), expandable to the newest five; the task card the same for its
+  attempt. Owner: yes, in the fixes phase.
+
+- **U18. The lead's inbox does not wait for the lead to be fully idle (owner,
+  2026-10-26).** Three member permission requests waited about 30 minutes while
+  the lead's own subagent ran: the notifier and reminders need activity idle.
+  Deliver to a lead whose turn ended also while its own background work runs;
+  a permission unanswered for remind_owner_minutes goes to the owner's
+  attention and notification, answerable there. Owner: yes, in the fixes phase.
+
+- **U19. Confirm subagents (owner, 2026-10-27).** A session may start subagents
+  on its own and the owner has no say. A global setting in Settings > Sessions,
+  'Ask before an agent starts subagents', ON by default: Zerus's pre-tool hook
+  asks before a subagent starts, one request per turn listing how many, which
+  type, model and effort; never auto-approved; a team member's request goes to
+  its lead. Agents that cannot be asked are marked, never blocked.
+  Owner: yes, in the fixes phase.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

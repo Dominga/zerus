@@ -479,6 +479,14 @@ answered; a denial cannot carry an explanation.
   usage observation older than the last turn as unknown, never as cold.
   Owner: yes, as soon as possible.
 
+- **U3. A resume must not restore an older conversation (urgent, seen 2026-10-26).**
+  After a reboot, Resume restored this lead's conversation as of 23:49 the day
+  before: the native transcript held nothing of the next run (00:09-04:30),
+  while Zerus's own events held all of it. Before a resume, compare the
+  transcript's last turn with the session's last recorded event; when the
+  transcript is behind, do not resume silently: warn and offer the missing
+  dialogue from the events. Owner: yes, in the next phase.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

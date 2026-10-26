@@ -1129,8 +1129,7 @@ mod tests {
         use crate::state::teams::model::{Member, Team, TeamStatus};
         let dir = tempfile::tempdir().unwrap();
         // Hermetic: a TEMP inside another repository must not flag the sibling.
-        std::env::set_var("GIT_CEILING_DIRECTORIES", dir.path());
-        let repo = dir.path().join("project");
+        crate::state::teams::dispatcher::set_git_ceiling(&dir.path().display().to_string());        let repo = dir.path().join("project");
         std::fs::create_dir(&repo).unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
         assert!(git(&["init", "-q"]).success());
@@ -1157,7 +1156,6 @@ mod tests {
         team.project = "/elsewhere".into();
         team.members[1].directory.clear();
         assert_eq!(super::view_with(&team, &[], None)["members"][1]["outside_project"], true);
-        std::env::remove_var("GIT_CEILING_DIRECTORIES");
     }
 
     #[test]

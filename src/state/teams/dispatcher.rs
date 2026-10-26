@@ -1273,8 +1273,33 @@ pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result
 }
 
 /// F1.4/F1.6: one git read in a folder, trimmed; None when git says nothing.
+/// F1.4/F1.6: one git command in a folder. Tests can set a per-thread ceiling
+/// (a temp dir) so a TEMP inside another repository cannot leak into discovery
+/// without touching the process environment other tests share.
+fn git_command(folder: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command.arg("-C").arg(folder);
+    #[cfg(test)]
+    if let Some(ceiling) = GIT_CEILING.with(|ceiling| ceiling.borrow().clone()) {
+        command.env("GIT_CEILING_DIRECTORIES", ceiling);
+    }
+    command
+}
+
+#[cfg(test)]
+thread_local! {
+    static GIT_CEILING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The ceiling this test thread's git reads use; call it at the start of a test
+/// that creates a repository under a TEMP which may itself sit in one.
+#[cfg(test)]
+pub(crate) fn set_git_ceiling(ceiling: &str) {
+    GIT_CEILING.with(|value| *value.borrow_mut() = Some(ceiling.to_owned()));
+}
+
 fn git_at(folder: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git").arg("-C").arg(folder).args(args).output().ok()?;
+    let output = git_command(folder).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -4584,7 +4609,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Hermetic: a TEMP inside another repository must not make the sibling
         // look like a repository of its own.
-        std::env::set_var("GIT_CEILING_DIRECTORIES", dir.path());
+        set_git_ceiling(&dir.path().display().to_string());
         let repo = dir.path().join("project");
         std::fs::create_dir(&repo).unwrap();
         let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
@@ -4613,7 +4638,6 @@ mod tests {
         assert_eq!(branch, "team/t1/dev");
         assert_eq!(Path::new(&project).file_name().and_then(|name| name.to_str()), Some("project"));
         assert_eq!(folder_facts(""), (String::new(), String::new()));
-        std::env::remove_var("GIT_CEILING_DIRECTORIES");
     }
 
     #[test]

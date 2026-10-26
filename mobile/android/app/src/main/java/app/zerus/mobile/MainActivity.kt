@@ -287,11 +287,9 @@ class MainActivity : ComponentActivity() {
                 IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) },
                     modifier = Modifier.semantics {
                         contentDescription = "Refresh"
-                        if (!conversationObscured) conversationLoad?.let { stateDescription = it.text; liveRegion = LiveRegionMode.Polite }
+                        if (!conversationObscured) conversationLoad?.let { stateDescription = it.text }
                     }) {
-                    if (conversationLoad?.spinner == true && !conversationObscured)
-                        CircularProgressIndicator(Modifier.size(24.dp), color = Mint, strokeWidth = 2.dp)
-                    else Icon(Icons.Default.Refresh, null)
+                    Icon(Icons.Default.Refresh, null)
                 }
                 if (selected == null) IconButton(onClick = { keyboard?.hide(); settings = true }, modifier = Modifier.semantics {
                     if (updateState.sessionId >= 0) stateDescription = "Installation pending"
@@ -317,6 +315,7 @@ class MainActivity : ComponentActivity() {
             }
             if (selected == null) CatalogRefreshStatus(model)
             if (selected != null) SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
+            if (selected != null) ConversationRefreshStatus(model, conversationLoad)
             if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(model.error, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -755,6 +754,25 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         target.archiveId.isBlank() && model.conversationQuestions.isNotEmpty() || model.speech.outgoing.any { it.belongsTo(target) }
     return ConversationLoadPresentation.status(hasContent, model.detailBusy, model.detailProgress,
         model.olderLoading, historyProgress, model.demo, resolved = model.activity != null, opening = opening)
+}
+
+@Composable private fun ConversationRefreshStatus(model: ZerusViewModel, status: ConversationLoadPresentation.Status?) {
+    val banner = ConversationLoadPresentation.banner(status, model.conversationEvents.isNotEmpty(),
+        model.activityVerified, model.historyComplete && model.readPositionReady, model.demo) ?: return
+    // Keep the status outside the scrollable history and reserve both text lines
+    // and the indicator slot: changing read phases must not move the messages.
+    Surface(color = Surface, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp).heightIn(min = 40.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                if (banner.spinner) CircularProgressIndicator(Modifier.fillMaxSize(), color = Mint, strokeWidth = 2.dp)
+            }
+            Column(Modifier.weight(1f).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }) {
+                Text(banner.text, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(banner.detail, style = MaterialTheme.typography.labelSmall, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
 }
 
 @Composable private fun Conversation(model: ZerusViewModel, session: Session, loadStatus: ConversationLoadPresentation.Status?, onReview: (Draft) -> Unit,

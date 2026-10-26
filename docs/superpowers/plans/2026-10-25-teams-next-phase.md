@@ -79,6 +79,9 @@ answered; a denial cannot carry an explanation.
 
 - **B1. Show the exact command** in the permission request (lead and GUI), and
   after the answer who answered and how: owner, lead, rule, timeout. Owner: yes.
+  Gap (seen 2026-10-26): `hgs team answer` with the allow option refuses a
+  non-empty text ("Choose an approval outcome"); an allow with a note should
+  work, the note reaching the member as a deny's reason does (B2).
 - **B2. Deny with a reason.** `hgs team answer` takes a text that reaches the
   member as its reason (and a recommendation what to do instead). Owner: yes.
 - **B3. Preflight at team creation.** Warn when a member's agent runs in a
@@ -89,6 +92,9 @@ answered; a denial cannot carry an explanation.
   sandbox) stages and commits in the member's own worktree on the member's team
   branch only, never pushes, records the sha on the attempt. Refused for any
   other folder or branch. Owner: yes.
+  Later (re-review, normal): `refused_repository_config` refuses a list of
+  risky keys; replace that denylist with an allowlist of safe local and
+  worktree keys, so a key git adds later is refused by default.
 - **B5. Permission profiles, decided by the lead.** Owner's model:
   1. The team designer sets base permissions per role in the template
      (for example: read only / write own folder / build and test / commit via
@@ -147,6 +153,18 @@ answered; a denial cannot carry an explanation.
     as one message to the lead; the owner sees the same numbers in the GUI.
   Owner: yes, first, into the nearest phase (Permissions, with F10 once the
   fix-phase build is installed).
+  Refinement (owner, 2026-10-26): health is computed per phase and for the
+  plan separately. Today one block covers every task of the team, history
+  included (79 tasks: "critical path 14" says nothing about the draft).
+  - `phases[].health` in status and in each extend/edit-draft validation: only
+    that phase's tasks (dependencies on earlier phases count as met): task
+    count, dependency chain, critical path with each member doing one task
+    at a time, parallelism, widest ready set, load per member, fan-in and
+    the phase's warnings;
+  - the plan's `health`: the same over every task not yet decided, across
+    phases; decided work counts only in totals;
+  - "starved" stays a live signal of the phase in work, not a draft's
+    health (U9).
 - **C8. Running-plan revisions, a last resort.** A good plan never needs it:
   C7 must catch the problem while planning. If a running plan is stuck anyway,
   the lead may propose a revision of not-started tasks of an approved phase
@@ -381,6 +399,10 @@ answered; a denial cannot carry an explanation.
   The desktop says just that on the waiting draft: "Waiting for the previous
   phase to be ready" (the detail - which phase, how many tasks open - stays in
   the tooltip).
+  Refinement (owner, 2026-10-26): the owner may approve the next draft while
+  the previous phase still runs; the barrier keeps the order, so its tasks
+  start only when every earlier phase is finished. Today Approve stays
+  disabled until every earlier phase ends.
 - **F13. The lead approves on the owner's explicit word (owner).** The lead may
   approve the plan or the next phase itself only when the owner said so
   explicitly in the lead's session, with a key phrase: "план принят" / "plan
@@ -449,6 +471,23 @@ answered; a denial cannot carry an explanation.
   Same numbers in the session row, the Teams panel and the workspace header,
   with a tooltip naming the phase. Owner: yes, as soon as possible.
 
+- **G9. Phases stacked vertically in the graph, each with its status,
+  decision and health (owner, 2026-10-26).** The workspace graph lays phase
+  bands side by side; a long plan becomes a wide strip. Instead:
+  - phases are stacked top to bottom, one band per phase, its layers left to
+    right inside it (G3/G4 stay inside the band);
+  - every band collapses to one compact header row (finished phases start
+    collapsed; the choice is remembered per team);
+  - the header carries the phase: number and title, a status chip - Done,
+    In work, Approved (not started), Draft, Paused - progress done/total, the
+    phase health from C7 (critical path, parallelism, warnings; the details
+    in a tooltip) and, for a draft, Approve and Discard (disabled with the
+    F12 reason while an earlier phase is not ready); every decision keeps
+    its confirmation;
+  - this replaces the draft strips above the members column (G5); the
+    list and panel views get the same header.
+  Owner: yes.
+
 ## H. Operations
 
 - **H1. Resume after usage limits.** A flag on the lead (or session): when a
@@ -505,6 +544,74 @@ answered; a denial cannot carry an explanation.
   stopped while it has a ready or open task, tell the lead once, and resume it
   (hgs resume -d) when the team setting allows it (default on for team
   members; never for the lead's own session). Owner: to be confirmed.
+
+- **U5. Work continues without the owner as a watchdog (seen 2026-10-26, our
+  team and a Codex lead in team 351555ed).** Three cases of one gap, all on the
+  installed fa6ff80b:
+  (1) a lead's next own task stayed ready with no attempt while the lead was
+  active, until the owner asked "what are we waiting for"; (2) after a reject
+  the member went on working on the reason in the same turn, the new attempt
+  went out only when it stopped, and its report on the rejected attempt was
+  dropped silently (#300); (3) a member ended its turn on its time budget
+  without a report (#301) and nobody was told, so the team stood still.
+  The phase-32 build covers part of it (C1 hands the lead's task out without
+  waiting for an idle lead, C2 lists stalled members, A2 captures the last
+  reply). Still missing:
+  - status names why a ready task has no attempt (`ready_without_attempt`:
+    member busy, in Background, needs settings, refused recently, session
+    stopped), and the lead's inbox shows it after N minutes;
+  - a reject with a reason opens the next attempt at once for the same member
+    (the reason is its hand-out), or a report on the just-rejected attempt is
+    taken for the next one instead of being dropped;
+  - the lead (not only the owner) may use `use-last-reply` for a member that
+    stopped without a report;
+  - on the installed fa6ff80b, member permission requests and reports often
+    never reached the lead as messages (QA waited 30-45 min three times) and
+    the lead polled `hgs inspect`; the phase-32 inbox (C2) should fix it,
+    to be verified after the install;
+  - acceptance scenario: two consecutive lead tasks, the first accepted during
+    an active turn; the second gets exactly one attempt and starts without an
+    owner message; again with a restart between accept and hand-out; a real
+    owner approval still waits. Owner: to be confirmed.
+
+- **U6. A finished Background job continues its task (Codex lead, team
+  351555ed).** A member's long job (an upload, a build) ended while its
+  attempt had no report and the member was idle; nothing told it. When a
+  Background job of a member with an open attempt ends, Zerus sends the member
+  one message with the command, exit status and the last output lines, so the
+  task goes on; the same check runs after a session restart (U4). The job keeps
+  its identity across ticks (pid with start time, as C12 already ties a
+  budget). Not Zerus's: the incident's 600 s kill came from the agent's own
+  helper (`subprocess.run(timeout=600)`), and "outcome unknown, check the
+  remote before retrying a PUT" is the publishing script's logic; Zerus cannot
+  see a helper's internal timeouts. Owner: to be confirmed.
+
+- **U7. Members of one role are told apart (seen 2026-10-26).** Two members
+  with the role Backend (backend, backend2) both appear as "from: Backend" in
+  hand-outs, reports and the inbox. Messages and cards name the member id, or
+  a numbered role ("Backend 2"), whenever the role is not unique.
+  Owner: to be confirmed.
+
+- **U8. Moving the lead or a member to another account (seen 2026-10-26).**
+  The Claude account of the lead and the reviewer reached its weekly limit.
+  A running team cannot bind a member to a new session: membership follows
+  the session name, so the new lead session took over only after the old
+  session was renamed away and the new one given its name. A replacement
+  reviewer could not be added (the team already had its 6 members and
+  `max_members` is fixed after Planning), and `remove-member` is the owner's
+  and refuses a member with draft tasks. H6 (swap-member) must also cover
+  the lead's own session (same lead id, open task and inbox), launch on the
+  chosen account, and not count the replaced member against `max_members`.
+  Owner: to be confirmed.
+
+- **U9. Members do not flood the lead before a phase is approved (owner,
+  2026-10-26).** While every open task is in a draft phase waiting for the
+  owner's approval, Zerus sends the lead no "starved" notices (seen: one per
+  member, each after 20 min, for 22 open tasks): a member with nothing ready
+  because the next phase is not approved yet is expected, and the lead cannot
+  act on it. Status and the desktop still show that the draft waits for the
+  owner. Starved notices start again only once a phase is approved and a
+  member still has no ready task. Owner: yes.
 
 ## Order of work (proposal)
 

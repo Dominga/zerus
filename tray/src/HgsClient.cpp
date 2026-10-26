@@ -121,6 +121,16 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.backgroundStarted = work.value("started_at").toDouble();
     s.backgroundObservedAt = work.value("sampled_at").toDouble();
     s.backgroundCommand = work.value("command").toString();
+    // G7: the services the session runs are listed apart from the jobs; they
+    // are never Background work.
+    s.services.clear();
+    for (const auto &value : work.value("services").toArray()) {
+        const auto service = value.toObject();
+        SessionInfo::Service entry;
+        entry.name = service.value("name").toString(); entry.command = service.value("command").toString();
+        entry.since = service.value("since").toDouble();
+        if (!entry.name.isEmpty()) s.services.append(entry);
+    }
     s.runId = obj.value(QStringLiteral("run_id")).toString();
     s.notificationPreferences = obj.value("notification_preferences").toObject();
     s.sharedNotifications = SessionNotifications::valid(s.notificationPreferences, s.conversationId);

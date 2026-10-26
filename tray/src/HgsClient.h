@@ -42,6 +42,11 @@ struct SessionInfo {
     int backgroundProcesses = -1;
     double backgroundStarted = 0, backgroundObservedAt = 0;
     QString backgroundCommand;
+    // G7: the MCP servers and other services this session runs. They live with
+    // the session, so they are never Background work; the name, the command and
+    // when each started.
+    struct Service { QString name, command; double since = 0; };
+    QList<Service> services;
     bool reviewLater = false, attentionAcknowledged = false;
     // Confirmed notification preference from the session's host, shared by devices.
     bool muted = false;

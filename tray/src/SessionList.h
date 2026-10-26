@@ -17,6 +17,9 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             // for the strip in its card.
             TeamMember,
             TeamLead,
+            // G7: the services the session runs (name, command, since); shown as
+            // an icon on the row, never as Background work.
+            Services,
             Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
 }
 class QToolButton;

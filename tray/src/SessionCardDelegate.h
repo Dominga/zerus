@@ -162,6 +162,20 @@ public:
         if (rowCollapsed(index)) return {};
         return titleLayout(row, base, compact, index, statusOf(index, selected)).question;
     }
+    // G7: the services chip sits left of the git badge on the metadata line; a
+    // session that runs services shows them there, never as Background work.
+    static QRect servicesRect(const QRect &row, const QModelIndex &index, QFont base, bool compact) {
+        if (rowCollapsed(index) || index.data(SessionRoles::Header).toBool() || !index.data(SessionRoles::ChildId).toString().isEmpty()) return {};
+        if (index.data(SessionRoles::Services).toList().isEmpty()) return {};
+        const QRect card = sessionCardRect(row).adjusted(sessionCardTileInset() + sessionCardIndent(index), 0, 0, 0);
+        const int textX = card.x() + 20, right = card.right() - 11;
+        const int end = sessionCardTileInset() > 0 ? right : right - machineBadgeWidth(index, base, right - textX) - 8;
+        const QRect git = gitStatusRect(row, index, base, compact);
+        const int left = git.isEmpty() ? end : git.left() - 6;
+        const int w = 30;
+        if (left - w < textX + 40) return {};
+        return QRect(left - w, card.y() + (compact ? 25 : 29), w, 18);
+    }
     static QRect gitStatusRect(const QRect &row, const QModelIndex &index, QFont base, bool compact) {
         if (rowCollapsed(index) || index.data(SessionRoles::Header).toBool() || !index.data(SessionRoles::ChildId).toString().isEmpty()) return {};
         const QRect card = sessionCardRect(row).adjusted(sessionCardTileInset() + sessionCardIndent(index), 0, 0, 0);
@@ -631,6 +645,16 @@ private:
         const QRect gitBadge = gitStatusRect(option.rect, index, option.font, compact);
         if (!gitBadge.isEmpty()) GitStatusBadge::paint(p, gitBadge,
             GitStatusBadge::fitted(GitStatusBadge::marks(index.data(SessionRoles::GitStatus).toJsonObject()), option.font, gitBadge.width()), option.font, dark);
+        // G7: the services chip: a gear and their count, left of the git badge.
+        const QRect servicesBadge = servicesRect(option.rect, index, option.font, compact);
+        if (!servicesBadge.isEmpty()) {
+            p->setPen(QPen(QColor(dark ? "#3a4650" : "#d3dde5"), 1)); p->setBrush(Qt::NoBrush);
+            p->drawRoundedRect(QRectF(servicesBadge).adjusted(.5, .5, -.5, -.5), 8, 8);
+            workspaceIcon("settings", muted).paint(p, QRect(servicesBadge.x() + 3, servicesBadge.y() + 3, 12, 12));
+            QFont serviceFont = option.font; serviceFont.setPixelSize(10); p->setFont(serviceFont); p->setPen(muted);
+            p->drawText(servicesBadge.adjusted(16, 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                        QString::number(index.data(SessionRoles::Services).toList().size()));
+        }
         const int metadataWidth = qMax(0, (!gitBadge.isEmpty() ? gitBadge.left() : tiles ? right + 8 : machineBadge.left()) - textX - 8);
         const QString metaIcon = index.data(SessionRoles::MetaIcon).toString();
         const int iconInset = !metaIcon.isEmpty() && metadataWidth >= 32 ? 18 : 0;

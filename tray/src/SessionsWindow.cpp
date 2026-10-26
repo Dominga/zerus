@@ -3176,6 +3176,11 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     roles.insert(SessionRoles::CoordinationWait, !terminating && SessionPresentation::currentActivity(s,e.online) && s.hasCoordinationWait() ? s.coordinationWait : QJsonObject());
     roles.insert(SessionRoles::Waiting, !terminating && e.online && SessionPresentation::waitingIdle(s));
     roles.insert(SessionRoles::OptionalQuestions, terminating ? 0 : SessionPresentation::optionalQuestionCount(s, e.online));
+    // G7: the services the session runs, apart from Background work.
+    QVariantList services;
+    for (const auto &service : s.services)
+        services.append(QVariantMap{{"name", service.name}, {"command", service.command}, {"since", service.since}});
+    roles.insert(SessionRoles::Services, services);
     roles.insert(SessionRoles::MachineName, e.machine);
     roles.insert(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
     roles.insert(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); roles.insert(ChildrenRole, childCount(s, false, e.online, includeCompleted));
@@ -4165,6 +4170,18 @@ void SessionsWindow::renderDetails()
     m_fullTitle = project ? project->name + " / " + sessionLabel(s) : displayTitle(s); m_title->setToolTip(sessionTooltip({s.name}, 380).html);
     QString meta = entry->machine + QStringLiteral("  /  ") + s.cmd + QStringLiteral("  /  ") + projectContext(s);
     m_fullMeta = projectContext(s);
+    // G7: the services this session runs are named in the header, with their
+    // start times and the reminder that they outlive it and are not Background
+    // work. They never turn the status into Background.
+    if (!s.services.isEmpty()) {
+        QStringList lines;
+        for (const auto &service : s.services) {
+            const QString since = service.since > 0 ? QDateTime::fromSecsSinceEpoch(qint64(service.since)).toString(QStringLiteral("d MMM HH:mm")) : tr("unknown");
+            lines << tr("%1 · since %2").arg(service.name, since) + (service.command.isEmpty() ? QString() : QStringLiteral("\n") + service.command);
+        }
+        lines << tr("These outlive the session and are not Background work.");
+        m_fullMeta += QStringLiteral("  ·  ") + (s.services.size() == 1 ? tr("1 service") : tr("%2 services").arg(s.services.size()));
+        m_meta->setToolTip(lines.join(QLatin1Char('\n')));    } else m_meta->setToolTip(QString());
     m_providerBadge->setValue(s.cmd); m_machineBadge->setValue(entry->machine);
     {const bool cards=WorkspaceSkin::current().view(QStringLiteral("sessions"))==QLatin1String("cards");
      const QString branch=s.gitDetached?QString():s.gitBranch;
@@ -4180,7 +4197,19 @@ void SessionsWindow::renderDetails()
         if (reason == "clean_exit") meta += '\n' + tr("Session closed normally");
         else if (reason == "user_archived") meta += '\n' + tr("Moved to archive");
     }
-    m_meta->setToolTip(sessionTooltip({meta, m_details.value("model").toString(s.model)}, 420).html); updateHeaderText();
+    // G7: the header tooltip also names the services this session runs; they
+    // live with it and are never Background work.
+    QString headerTip = sessionTooltip({meta, m_details.value("model").toString(s.model)}, 420).html;
+    if (!s.services.isEmpty()) {
+        QStringList lines;
+        for (const auto &service : s.services) {
+            const QString since = service.since > 0 ? QDateTime::fromSecsSinceEpoch(qint64(service.since)).toString(QStringLiteral("d MMM HH:mm")) : tr("unknown");
+            lines << tr("%1 · since %2").arg(service.name, since) + (service.command.isEmpty() ? QString() : QStringLiteral("\n") + service.command);
+        }
+        lines << tr("These outlive the session and are not Background work.");
+        headerTip = Qt::convertFromPlainText(lines.join(QLatin1Char('\n')));
+    }
+    m_meta->setToolTip(headerTip); updateHeaderText();
     const bool waiting=entry->online && SessionPresentation::waitingIdle(s);
     m_badge->setText(waiting?SessionPresentation::waitingCaption(s):state); const auto color = waiting
         ? QColor(m_dark ? "#edd096" : "#795913")
@@ -5186,20 +5215,47 @@ void SessionsWindow::resumeBehind(const QString &name, const QString &detail)
     const QRegularExpression missingRe(QStringLiteral("\"missing\"\\s*:\\s*([0-9]+)"));
     const auto missingMatch = missingRe.match(detail);
     const QString missing = missingMatch.hasMatch() ? tr(" (%1 entries missing)").arg(missingMatch.captured(1)) : QString();
-    QMessageBox dialog(QMessageBox::Warning, tr("The transcript is behind"),
-        tr("Claude's transcript stops at %1, but Zerus recorded the conversation up to %2%3.\n\n"
-           "Resuming as it is restores the older conversation and leaves that recorded dialogue out.")
-            .arg(when(transcriptAt), when(eventsAt), missing), QMessageBox::NoButton, this);
-    dialog.setObjectName("resumeBehindConfirm"); dialog.setTextFormat(Qt::PlainText);
-    auto *lost = dialog.addButton(tr("Resume with the lost dialogue"), QMessageBox::AcceptRole);
-    auto *asIs = dialog.addButton(tr("Resume as it is"), QMessageBox::ActionRole);
-    auto *cancel = dialog.addButton(QMessageBox::Cancel);
-    dialog.setDefaultButton(lost); dialog.setEscapeButton(cancel);
-    dialog.exec();
-    const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &e) { return e.session.name == name; });
-    const QString host = entry == m_entries.cend() ? QString() : entry->host;
-    if (dialog.clickedButton() == lost) { m_pending = true; m_client.resumeSession(host, name, true); }
-    else if (dialog.clickedButton() == asIs) { m_pending = true; m_client.resumeSession(host, name, false, true); }
+    // The refusal may be plain text ("stops 14400 s before the events Zerus
+    // recorded") without the JSON times; the lag still names the gap.
+    const QRegularExpression lagRe(QStringLiteral("stops\\s+(\\d+)\\s*s\\s+before"));
+    const auto lagMatch = lagRe.match(detail);
+    const qint64 lag = lagMatch.hasMatch() ? lagMatch.captured(1).toLongLong() : 0;
+    QString lagText;
+    if (lag > 0) {
+        const qint64 minutes = lag / 60;
+        lagText = minutes >= 60 ? tr("%1 h").arg(minutes / 60) : tr("%1 min").arg(qMax<qint64>(1, minutes));
+    }
+    QString behindText;
+    if (transcriptAt > 0 && eventsAt > 0)
+        behindText = tr("Claude's transcript stops at %1, but Zerus recorded the conversation up to %2%3.\n\n"
+                  "Resuming as it is restores the older conversation and leaves that recorded dialogue out.")
+            .arg(when(transcriptAt), when(eventsAt), missing);
+    else if (lag > 0)
+        behindText = tr("Claude's transcript stops %1 before the events Zerus recorded%2.\n\n"
+                  "Resuming as it is restores the older conversation and leaves that recorded dialogue out.")
+            .arg(lagText, missing);
+    else
+        behindText = tr("Claude's transcript is behind the events Zerus recorded%1.\n\n"
+                  "Resuming as it is restores the older conversation and leaves that recorded dialogue out.").arg(missing);
+    // The dialog is modeless: a refused resume must not block the window (or the
+    // tests) in a nested loop; its answer runs in the finished handler.
+    auto *dialog = new QMessageBox(QMessageBox::Warning, tr("The transcript is behind"), behindText, QMessageBox::NoButton, this);
+    dialog->setObjectName("resumeBehindConfirm"); dialog->setTextFormat(Qt::PlainText);
+    auto *lost = dialog->addButton(tr("Resume with the lost dialogue"), QMessageBox::AcceptRole);
+    lost->setObjectName("resumeLostDialogue");
+    auto *asIs = dialog->addButton(tr("Resume as it is"), QMessageBox::ActionRole);
+    asIs->setObjectName("resumeAsIs");
+    auto *cancel = dialog->addButton(QMessageBox::Cancel);
+    dialog->setDefaultButton(lost); dialog->setEscapeButton(cancel);
+    connect(dialog, &QDialog::finished, this, [this, dialog, name] {
+        const auto entry = std::find_if(m_entries.cbegin(), m_entries.cend(), [&](const Entry &e) { return e.session.name == name; });
+        const QString host = entry == m_entries.cend() ? QString() : entry->host;
+        const auto *clicked = dialog->clickedButton();
+        if (clicked && clicked->objectName() == "resumeLostDialogue") { m_pending = true; m_client.resumeSession(host, name, true); }
+        else if (clicked && clicked->objectName() == "resumeAsIs") { m_pending = true; m_client.resumeSession(host, name, false, true); }
+        dialog->deleteLater();
+    });
+    dialog->open();
 }
 
 void SessionsWindow::cancelStartContinuation(const QString &reason)

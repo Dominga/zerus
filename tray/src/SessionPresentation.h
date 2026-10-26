@@ -61,6 +61,15 @@ inline SessionInfo inspected(SessionInfo s, const QJsonObject &details)
         s.backgroundStarted = work.value("started_at").toDouble();
         s.backgroundObservedAt = work.value("sampled_at").toDouble();
         s.backgroundCommand = work.value("command").toString();
+        // G7: services from the inspection too, when they belong to this run.
+        s.services.clear();
+        for (const auto &value : work.value("services").toArray()) {
+            const auto service = value.toObject();
+            SessionInfo::Service entry;
+            entry.name = service.value("name").toString(); entry.command = service.value("command").toString();
+            entry.since = service.value("since").toDouble();
+            if (!entry.name.isEmpty()) s.services.append(entry);
+        }
     }
     // A selected-session inspection can discover failure before the fleet poll.
     // Never apply another run/conversation or older hook evidence to its row.

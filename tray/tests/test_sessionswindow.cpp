@@ -351,6 +351,8 @@ private slots:
     void fileDropsAcrossSessionPanelKeepDraftAndTarget();
     void terminalDropKeepsActivityDraftAndDoesNotSubmit();
     void sessionContextMenuGuardsIdentityAndChanges();
+    void sessionServicesAreNotBackgroundWork();
+    void resumeBehindOffersTheLostDialogue();
     void sessionContextMenuSavedAndArchive();
     void sessionContextMenuClearsSession();
     void compactMetadataAndSubagentRoster();
@@ -7023,6 +7025,164 @@ void TestSessionsWindow::sessionAttentionMenuSurvivesRoutinePoll()
     QVERIFY(list->item(0)->data(SessionRoles::Attention).toBool());
     QVERIFY(window.findChild<QLabel *>("notice")->text().contains("A new reply or question arrived"));
     menu->hide();
+}
+
+// G7: a session that runs MCP servers and services shows them as an icon with
+// their names and start times, and its status never reads Background for them.
+void TestSessionsWindow::sessionServicesAreNotBackgroundWork()
+{
+    QTemporaryDir temp; const auto program = temp.filePath("hgs");
+    QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+root=pathlib.Path(__file__).parent
+a=sys.argv[1:]
+if a[0].startswith('@'):a=a[1:]
+if a[0]=='inspect':print((root/'details.json').read_text() if (root/'details.json').exists() else '{}')
+else:print('{}')
+)PY");
+    fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    { QFile details(temp.filePath("details.json")); QVERIFY(details.open(QIODevice::WriteOnly));
+      details.write(QJsonDocument(QJsonObject{{"tracked", true}, {"run_id", "run-services"}, {"conversation_id", "conversation-services"},
+          {"runtime_state", "live"}, {"process_state", "running"}, {"activity", "idle"}, {"phase", "idle"},
+          {"process_work", QJsonObject{{"count", 0}, {"sampled_at", 1792868400.0},
+              {"services", QJsonArray{QJsonObject{{"name", "qdrant"}, {"command", "qdrant --mcp"}, {"since", 1792868000.0}},
+                                      QJsonObject{{"name", "socraticode"}, {"command", "socraticode --mcp"}, {"since", 1792868100.0}}}}}}}).toJson()); }
+    auto state = fleet(); auto box = state.local();
+    for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") {
+        session.state = "running"; session.runId = "run-services"; session.conversationId = "conversation-services";
+        session.phase = "idle"; session.activity = "idle"; session.processState = "running";
+        // G7: the listing carries the services (hgs ls -> process_work.services);
+        // the row model reads them from here, not from the inspection.
+        session.services = {SessionInfo::Service{QStringLiteral("qdrant"), QStringLiteral("qdrant --mcp"), 1792868000.0},
+                            SessionInfo::Service{QStringLiteral("socraticode"), QStringLiteral("socraticode --mcp"), 1792868100.0}};
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program)); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    const auto rowOf = [&](const QString &name) { for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString().endsWith(name)) return i; return -1; };
+    const int row = rowOf("codex/hgs/dashboard");
+    QTRY_VERIFY(row >= 0);
+    window.showSession({}, "codex/hgs/dashboard");
+    QTRY_VERIFY(!list->item(row)->data(SessionRoles::Services).toList().isEmpty());
+    const auto services = list->item(row)->data(SessionRoles::Services).toList();
+    QCOMPARE(services.size(), 2);
+    QCOMPARE(services[0].toMap().value("name").toString(), QStringLiteral("qdrant"));
+    // The header names the services with their start times.
+    auto *meta = window.findChild<QLabel *>("sessionMeta");
+    QVERIFY(meta);
+    QTRY_VERIFY2(meta->text().contains(QStringLiteral("service")), qPrintable(meta->text()));
+    QVERIFY2(meta->toolTip().contains(QStringLiteral("qdrant")), qPrintable(meta->toolTip()));
+    QVERIFY2(meta->toolTip().contains(QStringLiteral("since")), qPrintable(meta->toolTip()));
+    if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) {
+        QTest::qWait(200);
+        window.grab().save(QDir(shots).filePath("session-services.png"));
+    }
+}
+
+// U3: hgs refuses a stale resume; the dialog shows both times and the missing
+// count, offers the lost dialogue as the default, and each choice sends its own
+// flag (or nothing for Cancel).
+void TestSessionsWindow::resumeBehindOffersTheLostDialogue()
+{
+    QTemporaryDir temp; const auto program = temp.filePath("hgs"), log = temp.filePath("resume.log");
+    QFile fixture(program); QVERIFY(fixture.open(QIODevice::WriteOnly));
+    fixture.write(QStringLiteral(R"PY(#!/usr/bin/env python3
+import sys,json,pathlib
+root=pathlib.Path(__file__).parent
+a=sys.argv[1:]
+if a[0].startswith('@'):a=a[1:]
+if a[0]=='inspect':print((root/'details.json').read_text() if (root/'details.json').exists() else '{}')
+elif a[0]=='resume':
+ (root/'resume.log').open('a').write(json.dumps(sys.argv[1:])+'\n')
+ if (root/'behind').exists():
+  if (root/'plain').exists():
+   print('codex/hgs/dashboard: the native transcript stops 14400 s before the events Zerus recorded (transcript_behind); resume with --accept-stale or --with-lost-dialogue', file=sys.stderr)
+  else:
+   print(json.dumps({'error':'transcript_behind','transcript_at':1792868400,'events_at':1792869000,'missing':3}), file=sys.stderr)
+  sys.exit(1)
+ print(json.dumps({'status':'resumed','request_id':'r'}))
+else:print('{}')
+)PY").toUtf8());
+    fixture.close(); QVERIFY(FakeCli::makeRunnable(fixture.fileName()));
+    QFile behind(temp.filePath("behind")); QVERIFY(behind.open(QIODevice::WriteOnly)); behind.write("1"); behind.close();
+    { QFile details(temp.filePath("details.json")); QVERIFY(details.open(QIODevice::WriteOnly));
+      details.write(QJsonDocument(QJsonObject{{"tracked", true}, {"run_id", "run-behind"}, {"conversation_id", "conversation-behind"},
+          {"runtime_state", "saved"}, {"process_state", "exited"}, {"resumable", true}}).toJson()); }
+    auto state = fleet(); auto box = state.local();
+    for (auto &session : box.sessions) if (session.name == "codex/hgs/dashboard") { session.state = "paused"; session.runId = "run-behind"; session.conversationId = "conversation-behind"; }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program)); window.resize(1280, 760); window.setFleet(state); window.show();
+    auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
+    auto *menu = window.findChild<QMenu *>("sessionContextMenu"); QVERIFY(menu);
+    int row = -1; for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString().endsWith("codex/hgs/dashboard")) row = i;
+    QVERIFY(row >= 0);
+    list->setCurrentRow(row);
+    const auto resumes = [&] { QFile file(log); return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList(); };
+    const auto answer = [&](const QString &button) {
+        auto *poll = new QTimer(&window); poll->setInterval(5); auto *age = new QElapsedTimer; age->start();
+        QObject::connect(poll, &QTimer::timeout, &window, [poll, age, &window, button] {
+            auto *dialog = window.findChild<QMessageBox *>("resumeBehindConfirm");
+            if (!(dialog && dialog->isVisible()) && age->elapsed() < 5000) return;
+            poll->stop(); poll->deleteLater(); delete age;
+            if (!dialog || !dialog->isVisible()) return;
+            QCOMPARE(dialog->text().contains(QStringLiteral("stops at")), true);
+            if (button == "cancel") dialog->button(QMessageBox::Cancel)->click();
+            else if (auto *wanted = dialog->findChild<QPushButton *>(button)) wanted->click();
+        });
+        poll->start();
+    };
+    const auto pausedFleet = [&] {
+        auto st = fleet(); auto b = st.local();
+        for (auto &s : b.sessions) if (s.name == "codex/hgs/dashboard") { s.state = "paused"; s.runId = "run-behind"; s.conversationId = "conversation-behind"; }
+        st.setLocal(b, QDateTime::currentMSecsSinceEpoch());
+        return st;
+    };
+    const auto waitFlag = [&](const QString &flag) {
+        QElapsedTimer t; t.start();
+        while (t.elapsed() < 8000 && !(resumes().isEmpty() ? false : resumes().last().contains(flag))) QTest::qWait(20);
+    };
+    // Each scenario gets a fresh window, so no refused-resume state carries over.
+    const auto scenario = [&](const QString &button, bool shot, bool *sawDefault, const QString &flag) {
+        SessionsWindow w(FakeCli::program(program)); w.resize(1280, 760); w.setFleet(pausedFleet()); w.show();
+        auto *l = w.findChild<QListWidget *>("sessionList"); auto *m = w.findChild<QMenu *>("sessionContextMenu"); QVERIFY(l && m);
+        int r = -1; for (int i = 0; i < l->count(); ++i) if (l->item(i)->data(SessionRoles::Key).toString().endsWith("codex/hgs/dashboard")) r = i;
+        QVERIFY(r >= 0); l->setCurrentRow(r); m->hide(); QTest::keyClick(l, Qt::Key_Menu);
+        auto *action = m->findChild<QAction *>("contextChangeSession"); QVERIFY(action);
+        auto *poll = new QTimer(&w); poll->setInterval(5); auto *age = new QElapsedTimer; age->start();
+        QObject::connect(poll, &QTimer::timeout, &w, [poll, age, &w, button, shot, sawDefault] {
+            auto *dialog = w.findChild<QMessageBox *>("resumeBehindConfirm");
+            if (!(dialog && dialog->isVisible()) && age->elapsed() < 5000) return;
+            poll->stop(); poll->deleteLater(); delete age;
+            if (!dialog || !dialog->isVisible()) return;
+            QVERIFY(dialog->text().contains(QStringLiteral("transcript")));
+            if (sawDefault) *sawDefault = dialog->defaultButton() && dialog->defaultButton()->objectName() == "resumeLostDialogue";
+            if (shot) { if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) dialog->grab().save(QDir(shots).filePath("resume-behind.png")); }
+            if (button == "cancel") dialog->button(QMessageBox::Cancel)->click();
+            else if (auto *wanted = dialog->findChild<QPushButton *>(button)) wanted->click();
+        });
+        poll->start();
+        action->trigger();
+        QElapsedTimer waited; waited.start();
+        while (waited.elapsed() < 10000) {
+            QTest::qWait(20);
+            if (!flag.isEmpty() && !resumes().isEmpty() && resumes().last().contains(flag)) break;
+        }
+    };
+    // Cancel: the refused attempt sends nothing more.
+    int before = resumes().size();
+    scenario("cancel", false, nullptr, {});
+    QCOMPARE(resumes().size(), before + 1);
+    // The plain-text refusal (no JSON times) still shows the dialog and sends
+    // --accept-stale.
+    scenario("resumeAsIs", false, nullptr, "--accept-stale");
+    QVERIFY2(resumes().last().contains("--accept-stale"), qPrintable(resumes().join(QStringLiteral(" | "))));
+    // The JSON refusal with the times: the lost dialogue is the default.
+    { QFile plain(temp.filePath("plain")); QVERIFY(plain.open(QIODevice::WriteOnly)); plain.write("1"); plain.close(); }
+    bool sawDefault = false;
+    scenario("resumeLostDialogue", true, &sawDefault, "--with-lost-dialogue");
+    QVERIFY2(resumes().last().contains("--with-lost-dialogue"), qPrintable(resumes().join(QStringLiteral(" | "))));
+    QVERIFY(sawDefault);
 }
 
 void TestSessionsWindow::sessionContextMenuGuardsIdentityAndChanges()

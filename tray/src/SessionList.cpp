@@ -270,6 +270,20 @@ bool SessionList::viewportEvent(QEvent *event)
                 QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), rect);
                 return true;
             }
+            // G7: the services chip names them and reminds that they are not work.
+            const auto servicesRect = SessionDelegate::servicesRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool());
+            if (servicesRect.contains(help->pos())) {
+                QStringList lines;
+                for (const auto &value : row->data(SessionRoles::Services).toList()) {
+                    const auto service = value.toMap();
+                    const double since = service.value("since").toDouble();
+                    lines << tr("%1 · since %2").arg(service.value("name").toString(),
+                        since > 0 ? QDateTime::fromSecsSinceEpoch(qint64(since)).toString(QStringLiteral("d MMM HH:mm")) : tr("unknown"));
+                }
+                lines << tr("These live with the session and are not Background work.");
+                QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(lines.join(QLatin1Char('\n'))), viewport(), servicesRect);
+                return true;
+            }
         }
     }
     if (event->type() == QEvent::ToolTip && narrow(this)) {

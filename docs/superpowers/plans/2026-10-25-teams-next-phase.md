@@ -718,6 +718,16 @@ answered; a denial cannot carry an explanation.
   model for well-specified backend work; templates carry that default.
   Owner: yes.
 
+- **U24. A starved notice only when the lead can act (owner, 2026-10-27).** The
+  'no ready task for 20 min' message kept arriving for members who had nothing
+  they could take: every open task was assigned to another member (the Expert)
+  or waited for it, and the lead had already said there was no work for them.
+  Send it only when the lead can do something: a ready or pending task of the
+  member's role is held by a busy member and could be reassigned, or the plan
+  has no task the member can ever get (suggest finishing or removing it). Once
+  per member and episode, not per 20 minutes; the lead may mute it for a member
+  ('expected idle until #N'). U9 stays for drafts. Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

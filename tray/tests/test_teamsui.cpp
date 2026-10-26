@@ -844,6 +844,7 @@ void TestTeamsUi::newTeamStartsTheLeadWithTheTemplate()
     auto *policy = dialog.findChild<QComboBox *>("teamNewFolderPolicy");
     QVERIFY(policy);
     QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+    shot(&dialog, "new-team-folder-policy");
     // F7/L7: "Take into a new team" names the leftover session; the dialog
     // offers it as the existing lead, and a session on another computer cannot
     // lead from here.

@@ -131,6 +131,62 @@ void TeamTaskCard::rebuild()
             box->setProperty("question", asked.id);
             auto *b = new QVBoxLayout(box); b->setContentsMargins(10, 7, 10, 7); b->setSpacing(5);
             auto *text = label(asked.text, c.fg, 12); text->setWordWrap(true); b->addWidget(text);
+            // B1/B2: a permission request shows the exact command the agent
+            // asked about (or says the agent did not show it), the agent's own
+            // reason, and offers allow or deny with a reason. The decision goes
+            // out as `hgs team answer`; a deny's text reaches the member.
+            if (asked.permission()) {
+                auto *head = row(6);
+                if (!asked.tool.isEmpty()) head->addWidget(new Pill(asked.tool, c.warn));
+                const auto source = asked.commandSource;
+                if (asked.command.isEmpty()) {
+                    auto *missing = label(tr("command not shown by the agent - read it with hgs inspect"), c.warn, 11);
+                    missing->setObjectName("teamPermissionNoCommand");
+                    missing->setWordWrap(true);
+                    head->addWidget(missing, 1);
+                } else {
+                    head->addWidget(label(source == "process" ? tr("command from the running process") : tr("command from the tool input"), c.text3, 10), 1);
+                }
+                b->addLayout(head);
+                if (!asked.command.isEmpty()) {
+                    auto *command = label(asked.command, c.fg, 11);
+                    command->setObjectName("teamPermissionCommand");
+                    command->setFont(NewSessionDense::mono(11));
+                    command->setWordWrap(true);
+                    command->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                    command->setToolTip(asked.command);
+                    b->addWidget(command);
+                }
+                if (!asked.reason.isEmpty()) {
+                    auto *reason = label(tr("Agent: %1").arg(asked.reason), c.text2, 11);
+                    reason->setObjectName("teamPermissionReason");
+                    reason->setWordWrap(true);
+                    b->addWidget(reason);
+                }
+                auto *decideRow = row(6);
+                auto *reasonEdit = new QLineEdit; reasonEdit->setObjectName("teamPermissionDenyReason");
+                reasonEdit->setProperty("question", asked.id);
+                reasonEdit->setPlaceholderText(tr("Why deny? The member receives this"));
+                decideRow->addWidget(reasonEdit, 1);
+                auto *deny = button(tr("Deny"), "teamPermissionDeny");
+                deny->setProperty("question", asked.id);
+                deny->setProperty("danger", true);
+                deny->setToolTip(tr("Deny this request; the reason reaches the member as a message"));
+                const auto decide = [this, id = asked.id](const QString &decision, const QString &text) {
+                    if (act) act("answer", {{"question", id}, {"decision", decision}, {"text", text}});
+                };
+                QObject::connect(deny, &QPushButton::clicked, this, [reasonEdit, decide] {
+                    decide(QStringLiteral("deny"), reasonEdit->text().trimmed());
+                });
+                auto *allow = button(tr("Allow"), "teamPermissionAllow", true);
+                allow->setProperty("question", asked.id);
+                allow->setToolTip(tr("Allow exactly this request"));
+                QObject::connect(allow, &QPushButton::clicked, this, [decide] { decide(QStringLiteral("allow"), {}); });
+                decideRow->addWidget(deny); decideRow->addWidget(allow);
+                b->addLayout(decideRow);
+                v->addWidget(box);
+                continue;
+            }
             auto *answerRow = row(6);
             auto *edit = new QLineEdit; edit->setObjectName("teamAnswerText"); edit->setProperty("question", asked.id);
             edit->setPlaceholderText(tr("Answer %1…").arg(m_team.roleOf(task->assignee)));
@@ -148,6 +204,23 @@ void TeamTaskCard::rebuild()
             b->addLayout(answerRow);
             v->addWidget(box);
         }
+    }
+    // B1: the permissions already answered for the attempt, with who answered
+    // and the deny text.
+    for (auto it = task->attempts.crbegin(); it != task->attempts.crend(); ++it) {
+        if (it->permissions.isEmpty()) continue;
+        section(tr("Permissions"));
+        for (const auto &answer : it->permissions) {
+            const QString by = answer.by == "owner" ? tr("you") : answer.by == "lead" ? tr("the lead")
+                             : answer.by == "rule" ? tr("a rule") : answer.by == "timeout" ? tr("a timeout") : tr("unknown");
+            QString line = answer.denied() ? tr("Denied by %1").arg(by) : tr("Allowed by %1").arg(by);
+            if (answer.denied() && !answer.reason.isEmpty()) line += QStringLiteral(": ") + answer.reason;
+            auto *mark = label(line, answer.denied() ? c.warn : c.accent, 11, false, "teamPermissionAnswered");
+            mark->setWordWrap(true);
+            mark->setProperty("decision", answer.decision);
+            v->addWidget(mark);
+        }
+        break;
     }
     if (!task->description.isEmpty()) {
         section(tr("Description"));

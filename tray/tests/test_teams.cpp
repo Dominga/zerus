@@ -139,6 +139,7 @@ private slots:
     void leftRunningMembersOfAFinishedTeam();
     void draftPhasesApproveInOrder();
     void phaseProgressShowsThePhaseInWorkAndThePhases();
+    void permissionRequestsCarryTheCommandAndTheAnswer();
     void modelReadsAttemptStatesQuestionsHoldsAndReports();
     void attemptPhasesAreDerivedForAnOlderHgs();
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
@@ -345,6 +346,65 @@ void TestTeams::leftRunningMembersOfAFinishedTeam()
 
 // G6: two numbers instead of one over every task — the phase in work (or, when
 // none is in work, the next draft waiting for approval) and the phases.
+// B1/B2: a permission request carries the exact command, where it came from and
+// the agent's reason; the answer keeps the decision, who answered and the deny
+// text. B5: a plan that widens a role's profile says so.
+void TestTeams::permissionRequestsCarryTheCommandAndTheAnswer()
+{
+    auto team = deliveryTeam();
+    auto tasks = team["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 4) continue;
+        task["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a4"}, {"member", "tester"}, {"state", "asking"},
+            {"questions", QJsonArray{
+                QJsonObject{{"id", "q1"}, {"text", "Run the migration?"}, {"at", 1600}, {"tool", "Bash"},
+                            {"command", "npm run migrate --force"}, {"command_source", "tool_input"},
+                            {"reason", "The migration is not reversible"}},
+                QJsonObject{{"id", "q2"}, {"text", "Edit the team file?"}, {"at", 1650}, {"tool", "Edit"},
+                            {"command", ""}, {"command_source", "unknown"}, {"reason", "Needs a new phase"}}}},
+            {"permissions", QJsonArray{
+                QJsonObject{{"question_id", "q0"}, {"decision", "deny"}, {"by", "owner"}, {"at", 1700},
+                            {"reason", "That kills every ninja on the machine"}},
+                QJsonObject{{"question_id", "q1"}, {"decision", "allow"}, {"by", "lead"}, {"at", 1710}}}}}};
+        tasks[i] = task;
+    }
+    team["tasks"] = tasks;
+    const auto parsed = parse(team);
+    const auto *task = parsed.task(4);
+    QVERIFY(task);
+    QVERIFY(!task->attempts.isEmpty());
+    const auto &attempt = task->attempts.last();
+    QCOMPARE(attempt.questions.size(), 2);
+    QVERIFY(attempt.questions[0].permission());
+    QCOMPARE(attempt.questions[0].tool, QStringLiteral("Bash"));
+    QCOMPARE(attempt.questions[0].command, QStringLiteral("npm run migrate --force"));
+    QCOMPARE(attempt.questions[0].commandSource, QStringLiteral("tool_input"));
+    QCOMPARE(attempt.questions[0].reason, QStringLiteral("The migration is not reversible"));
+    QVERIFY(!attempt.questions[0].answered());
+    QCOMPARE(attempt.questions[1].commandSource, QStringLiteral("unknown"));
+    QCOMPARE(attempt.permissions.size(), 2);
+    QVERIFY(attempt.permissions[0].denied());
+    QCOMPARE(attempt.permissions[0].by, QStringLiteral("owner"));
+    QCOMPARE(attempt.permissions[0].reason, QStringLiteral("That kills every ninja on the machine"));
+    QCOMPARE(attempt.permissions[1].decision, QStringLiteral("allow"));
+    // B5: the widening names the member the plan widens and how far.
+    auto widened = deliveryTeam();
+    auto members = widened["members"].toArray();
+    auto tester = members[2].toObject();
+    tester["profile_widening"] = QJsonObject{{"member", "tester"}, {"from", "read"}, {"to", "build"}};
+    members[2] = tester; widened["members"] = members;
+    const auto widening = parse(widened);
+    QCOMPARE(widening.widenings.size(), 1);
+    QCOMPARE(widening.widenings[0].member, QStringLiteral("tester"));
+    QCOMPARE(widening.widenings[0].from, QStringLiteral("read"));
+    QCOMPARE(widening.widenings[0].to, QStringLiteral("build"));
+    // The catalog role carries the profile the plan may widen.
+    QJsonObject role{{"id", "reviewer"}, {"name", "Reviewer"}, {"permissions_profile", "commit"}};
+    const auto catalogRole = parseRole(role);
+    QCOMPARE(catalogRole.permissionsProfile, QStringLiteral("commit"));
+}
+
 void TestTeams::phaseProgressShowsThePhaseInWorkAndThePhases()
 {
     // phasedTeam: phase 1 holds the ten checkout tasks (one accepted), phase 2

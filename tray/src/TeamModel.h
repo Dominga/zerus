@@ -47,17 +47,31 @@ struct SessionChoice {
     QString host, name, runId, conversationId, agent, directory;
 };
 
-// A member's question to the lead (A3); open until the lead answers it.
+// A member's question to the lead (A3); open until the lead answers it. B1: a
+// permission request also carries the exact command the agent asked about,
+// where it came from ("tool_input", "process" or "unknown"), the agent's
+// reason, and on the answer the decision, who made it (lead, owner, rule,
+// timeout, unknown) and the deny text.
 struct Question {
     QString id, text, answer, by;
     double at = 0, answeredAt = 0;
+    QString tool, command, commandSource, reason, decision;
     bool answered() const { return answeredAt > 0 || !answer.isEmpty(); }
+    bool permission() const { return !tool.isEmpty() || !command.isEmpty() || !reason.isEmpty(); }
 };
 
 // A report that replaced the reply captured for an attempt (A6).
 struct ReplacedReport {
     QString text;
     double at = 0;
+};
+
+// B1: one answered permission request on an attempt (the store keeps the last
+// 20): what was decided, who decided it and the deny text.
+struct PermissionAnswer {
+    QString questionId, decision, by, reason;
+    double at = 0;
+    bool denied() const { return decision == "deny"; }
 };
 
 struct Attempt {
@@ -79,6 +93,7 @@ struct Attempt {
     QString phase;
     bool phaseKnown = false;
     QList<Question> questions;          // oldest first
+    QList<PermissionAnswer> permissions; // B1: answered requests, oldest first
     const Question *openQuestion() const
     {
         for (const auto &question : questions) if (!question.answered()) return &question;
@@ -168,6 +183,10 @@ struct Team {
     // Done and Stopped teams: the member sessions that still run (F7).
     QList<LeftRunning> leftRunning;
     bool leftRunningKnown = false;
+    // B5: a role whose permissions profile the plan widens beyond the template;
+    // a plan with one cannot be approved until the owner confirms it.
+    struct Widening { QString member, role, from, to; };
+    QList<Widening> widenings;
     // Only from `team status`: layers by task, tasks in a cycle, ready tasks,
     // plan errors and warnings.
     bool full = false;
@@ -311,6 +330,7 @@ QList<int> memberQueue(const Team &team, const QString &member);
 // and the designer's draft of proposed changes.
 struct Role {
     QString id, name, color, prompt, agent, account, model, effort, permissions, computer, folder, canMessage;
+    QString permissionsProfile;   // B5: read, write, build, commit or network
     QStringList tags;
     bool dangerous = false;
     QJsonObject json() const;

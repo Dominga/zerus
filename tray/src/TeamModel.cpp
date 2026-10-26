@@ -189,6 +189,28 @@ Team parse(const QJsonObject &v)
         member.lead = member.id == team.lead;
         if (member.lead && member.role.isEmpty()) member.role = tr("Lead");
         team.members.append(member);
+        // B5: a member whose plan widens its role's permissions profile.
+        if (m.value("profile_widening").isObject()) {
+            const auto w = m.value("profile_widening").toObject();
+            Team::Widening widening;
+            widening.member = str(w, "member"); if (widening.member.isEmpty()) widening.member = member.id;
+            widening.role = member.role; widening.from = str(w, "from"); widening.to = str(w, "to");
+            if (!widening.from.isEmpty() || !widening.to.isEmpty()) team.widenings.append(widening);
+        }
+    }
+    if (v.value("profile_widening").isObject()) {
+        const auto w = v.value("profile_widening").toObject();
+        Team::Widening widening;
+        widening.member = str(w, "member"); widening.role = str(w, "role");
+        widening.from = str(w, "from"); widening.to = str(w, "to");
+        if (!widening.from.isEmpty() || !widening.to.isEmpty()) team.widenings.append(widening);
+    }
+    for (const auto &value : v.value("profile_widening").toArray()) {
+        const auto w = value.toObject();
+        Team::Widening widening;
+        widening.member = str(w, "member"); widening.role = str(w, "role");
+        widening.from = str(w, "from"); widening.to = str(w, "to");
+        if (!widening.from.isEmpty() || !widening.to.isEmpty()) team.widenings.append(widening);
     }
     for (const auto &value : v.value("tasks").toArray()) {
         const auto t = value.toObject();
@@ -232,7 +254,26 @@ Team parse(const QJsonObject &v)
                 Question entry;
                 entry.id = str(item, "id"); entry.text = str(item, "text"); entry.answer = str(item, "answer"); entry.by = str(item, "by");
                 entry.at = item.value("at").toDouble(); entry.answeredAt = item.value("answered_at").toDouble();
+                // B1: a permission request carries the exact command the agent
+                // asked about, where it came from, and the agent's reason; the
+                // answer records the decision, who made it and the deny text.
+                entry.tool = str(item, "tool");
+                entry.command = str(item, "command");
+                entry.commandSource = str(item, "command_source");
+                entry.reason = str(item, "reason");
+                entry.decision = str(item, "decision");
                 attempt.questions.append(entry);
+            }
+            // B1: the permission answers kept on the attempt.
+            for (const auto &value : a.value("permissions").toArray()) {
+                const auto item = value.toObject();
+                PermissionAnswer answer;
+                answer.questionId = str(item, "question_id");
+                answer.decision = str(item, "decision");
+                answer.by = str(item, "by");
+                answer.reason = str(item, "reason");
+                answer.at = item.value("at").toDouble();
+                attempt.permissions.append(answer);
             }
             if (attempt.member.isEmpty()) attempt.member = task.assignee;
             return attempt;
@@ -621,10 +662,11 @@ QList<PhaseGroup> phaseGroups(const Team &team)
 QString PhaseProgress::tooltip() const
 {
     if (!valid()) return {};
-    const QString phaseLine = draft
-        ? tr("Phase %1 · %2 tasks done, waiting for your approval").arg(phase).arg(tr("%1 of %2").arg(done).arg(total))
-        : tr("Phase %1 · %2 tasks done").arg(phase).arg(tr("%1 of %2").arg(done).arg(total));
-    return phaseLine + QLatin1Char('\n')
+    // G8/spec 11: the tooltip names the phase the tasks bar counts.
+    const QString name = title.isEmpty() ? tr("Phase %1").arg(phase) : tr("Phase %1 %2").arg(phase).arg(title);
+    QString line = QStringLiteral("%1: %2/%3").arg(name).arg(done).arg(total);
+    if (draft) line += QStringLiteral(" · ") + tr("waiting for your approval");
+    return line + QLatin1Char('\n')
         + tr("%1 of %2 phases finished; discarded drafts do not count").arg(phasesDone).arg(phasesTotal);
 }
 
@@ -854,6 +896,7 @@ Role parseRole(const QJsonObject &v)
     r.id = str(v, "id"); r.name = str(v, "name"); r.color = str(v, "color"); r.prompt = str(v, "prompt");
     r.agent = str(v, "agent"); r.account = str(v, "account"); r.model = str(v, "model"); r.effort = str(v, "effort");
     r.permissions = str(v, "permissions"); r.computer = str(v, "computer"); r.folder = str(v, "folder");
+    r.permissionsProfile = str(v, "permissions_profile");   // B5: read, write, build, commit, network
     r.canMessage = str(v, "can_message"); r.dangerous = v.value("dangerous").toBool();
     for (const auto &tag : v.value("tags").toArray()) r.tags.append(tag.toString());
     return r;

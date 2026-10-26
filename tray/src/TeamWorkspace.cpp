@@ -199,6 +199,9 @@ void TeamWorkspace::render()
         tv->addWidget(teamBar(*team, status));
         // G5: the drafts wait in the members column; the canvas keeps its height.
         if (team->hasFinish) tv->addWidget(finishSummary(*team));
+        // B5: a plan that widens a role's permissions waits for the owner's
+        // explicit confirmation; the strip names what widens.
+        if (!team->widenings.isEmpty()) tv->addWidget(wideningStrip(*team));
         if (!m_error.isEmpty()) tv->addWidget(errorStrip());
         // Strips: Stuck, plan errors.
         if (status == "stuck" || !team->errors.isEmpty()) {
@@ -287,9 +290,12 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
             const auto comment = QInputDialog::getMultiLineText(this, tr("Send back to the coordinator"), tr("What should change in the plan?"), {}, &ok);
             if (ok && !comment.trimmed().isEmpty()) m_conversation->send(tr("Your plan needs changes before I approve it: %1").arg(comment.trimmed()));
         });
-        auto *approve = add(tr("Approve && Run"), "teamWorkspaceApprove", true, [this] { m_panel->act("approve", {}); });
+        auto *approve = add(tr("Approve && Run"), "teamWorkspaceApprove", true, [this, id = team.id] {
+            if (const auto *current = currentTeam(id)) approveTeam(*current);
+        });
         approve->setEnabled(team.errors.isEmpty() && !team.tasks.isEmpty());
         if (!approve->isEnabled()) approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet") : tr("Fix the plan errors first"));
+        else if (!team.widenings.isEmpty()) approve->setToolTip(tr("A permission widening needs your confirmation"));
     } else if (team.status == "running") {
         add(tr("Pause"), "teamWorkspacePause", false, [this] { m_panel->act("pause", {}); });
     } else if (team.status == "paused") {
@@ -473,6 +479,47 @@ QWidget *TeamWorkspace::finishSummary(const Team &team)
     text->setObjectName("teamWorkspaceFinishText");
     h->addWidget(text, 1);
     return strip;
+}
+
+QWidget *TeamWorkspace::wideningStrip(const Team &team)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *strip = new QFrame; strip->setObjectName("teamWideningStrip"); strip->setMinimumHeight(34);
+    strip->setStyleSheet(QStringLiteral("QFrame#teamWideningStrip{background:%1;border-bottom:1px solid %2;}")
+                             .arg(alpha(c.warn, .12).name(QColor::HexArgb), alpha(c.warn, .5).name(QColor::HexArgb)));
+    auto *h = new QHBoxLayout(strip); h->setContentsMargins(12, 6, 12, 6); h->setSpacing(8);
+    QStringList lines;
+    for (const auto &widening : team.widenings) {
+        const QString who = widening.role.isEmpty() ? (widening.member.isEmpty() ? tr("A member") : widening.member) : widening.role;
+        lines << tr("%1: %2 → %3").arg(who, widening.from.isEmpty() ? tr("(none)") : widening.from,
+                                       widening.to.isEmpty() ? tr("(none)") : widening.to);
+    }
+    auto *text = label(tr("Permissions widened: %1. Approve only after confirming.").arg(lines.join(QStringLiteral(" · "))), c.warn, 12);
+    text->setObjectName("teamWideningText");
+    text->setWordWrap(true);
+    h->addWidget(text, 1);
+    return strip;
+}
+
+void TeamWorkspace::approveTeam(const Team &team)
+{
+    // B5: a widening is the owner's decision, every time; the approve request
+    // carries confirm_widening only after this confirmation.
+    if (!team.widenings.isEmpty()) {
+        QStringList lines;
+        for (const auto &widening : team.widenings) {
+            const QString who = widening.role.isEmpty() ? widening.member : widening.role;
+            lines << tr("%1: %2 → %3").arg(who, widening.from, widening.to);
+        }
+        if (!m_panel->confirm("teamWideningConfirm", tr("Widen permissions?"),
+                              tr("This plan widens the permissions of its members beyond the template:\n\n%1\n\n"
+                                 "Approve it only if they need it.").arg(lines.join(QStringLiteral("\n"))),
+                              tr("Confirm and approve")))
+            return;
+        m_panel->act("approve", {{"confirm_widening", true}});
+        return;
+    }
+    m_panel->act("approve", {});
 }
 
 QWidget *TeamWorkspace::errorStrip()

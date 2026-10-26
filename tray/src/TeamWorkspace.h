@@ -48,6 +48,10 @@ private:
     QWidget *draftPhase(const Teams::Team &team, int phase);
     QWidget *draftDetail(const Teams::Team &team, const Teams::PhaseGroup &group);
     QWidget *finishSummary(const Teams::Team &team);
+    // B5: the widening notice, and the approve that asks for the owner's
+    // confirmation and sends confirm_widening.
+    QWidget *wideningStrip(const Teams::Team &team);
+    void approveTeam(const Teams::Team &team);
     QWidget *errorStrip();
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).

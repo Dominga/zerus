@@ -293,6 +293,7 @@ private slots:
     void leftoverMembersAreShownApart();
     void memberEditorPicksAnExistingSession();
     void phaseProgressShowsTwoBars();
+    void permissionCardsAndGraphOrder();
     void severalDraftPhasesRenderAndApproveInOrder();
     void draftReorderSendsMovePhase();
     void pinMarkAndFinishedTeamShowWhoFinished();
@@ -1426,6 +1427,124 @@ void TestTeamsUi::memberEditorPicksAnExistingSession()
 // G6: the team card, its header and the workspace bar carry two compact bars —
 // the phase in work (or the next draft waiting) and the phases — readable at
 // 420 and 290 px in both themes.
+// B1/B2: the permission card shows the exact command, where it came from and
+// the agent's reason, and offers allow or deny with a reason; an answered
+// request names who answered and the deny text. B5: a plan that widens a
+// profile says so and its approve asks for the owner's confirmation. G3: a
+// dead-end task sinks below the tasks others depend on in its column.
+void TestTeamsUi::permissionCardsAndGraphOrder()
+{
+    // B1/B2, the card.
+    auto team = deliveryTeam();
+    auto tasks = team["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 17) continue;
+        task["description"] = QStringLiteral("Replace the captured report");
+        task["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a17"}, {"member", "backend"}, {"state", "asking"},
+            {"questions", QJsonArray{
+                QJsonObject{{"id", "q1"}, {"text", "Run the migration?"}, {"at", 1600}, {"tool", "Bash"},
+                            {"command", "npm run migrate --force"}, {"command_source", "tool_input"},
+                            {"reason", "The migration is not reversible"}},
+                QJsonObject{{"id", "q2"}, {"text", "Edit the team file?"}, {"at", 1650}, {"tool", "Edit"},
+                            {"command", ""}, {"command_source", "unknown"}, {"reason", "Needs a new phase"}}}},
+            {"permissions", QJsonArray{
+                QJsonObject{{"question_id", "q0"}, {"decision", "deny"}, {"by", "owner"}, {"at", 1700},
+                            {"reason", "That kills every ninja on the machine"}},
+                QJsonObject{{"question_id", "q1"}, {"decision", "allow"}, {"by", "lead"}, {"at", 1710}}}}}};
+        tasks[i] = task;
+    }
+    team["tasks"] = tasks;
+    const auto parsed = Teams::parse(team);
+    const auto live = [](const Teams::Member &) { return Teams::Live{}; };
+    QStringList acts; QStringList answers;
+    TeamTaskCard card;
+    card.act = [&](const QString &op, const QJsonObject &input) { acts << op; if (op == "answer") answers << QJsonDocument(input).toJson(QJsonDocument::Compact); };
+    card.resize(440, 1100); card.show();
+    card.setTask(parsed, 17, live, true);
+    auto *command = card.findChild<QLabel *>("teamPermissionCommand");
+    QVERIFY(command);
+    QCOMPARE(command->text(), QStringLiteral("npm run migrate --force"));
+    QVERIFY(card.findChild<QLabel *>("teamPermissionReason"));
+    QVERIFY(card.findChild<QLabel *>("teamPermissionNoCommand"));   // the second request has none
+    auto *allow = card.findChild<QPushButton *>("teamPermissionAllow");
+    auto *deny = card.findChild<QPushButton *>("teamPermissionDeny");
+    QVERIFY(allow && deny);
+    // Allow sends the decision; deny sends its reason as the text.
+    allow->click();
+    QTRY_COMPARE(answers.size(), 1);
+    QVERIFY(answers.last().contains("allow"));
+    card.findChild<QLineEdit *>("teamPermissionDenyReason")->setText("Stop-Process kills every ninja");
+    deny->click();
+    QTRY_COMPARE(answers.size(), 2);
+    QVERIFY(answers.last().contains("deny"));
+    QVERIFY(answers.last().contains("Stop-Process kills every ninja"));
+    // Who answered: the deny names the owner and its reason, the allow the lead.
+    const auto answered = card.findChildren<QLabel *>("teamPermissionAnswered");
+    QCOMPARE(answered.size(), 2);
+    QVERIFY(answered[0]->text().contains(QStringLiteral("Denied by you")));
+    QVERIFY(answered[0]->text().contains(QStringLiteral("That kills every ninja on the machine")));
+    QVERIFY(answered[1]->text().contains(QStringLiteral("Allowed by the lead")));
+    shot(&card, "permission-card-dark");
+    lightPalette();
+    card.setTask(parsed, 17, live, false);
+    QTRY_VERIFY(card.findChild<QLabel *>("teamPermissionCommand"));
+    shot(&card, "permission-card-light");
+    darkPalette();
+
+    // G3: the task another depends on stays above the dead end in its column.
+    const auto colors = TeamUi::colorsFor(true);
+    TeamUi::TaskView view(colors, TeamUi::TaskView::Wide);
+    TeamUi::TaskView::Node dead; dead.id = 1; dead.layer = 0; dead.title = "Dead end"; dead.kind = "pending"; dead.statusText = "Pending"; dead.tone = colors.muted;
+    TeamUi::TaskView::Node needed; needed.id = 2; needed.layer = 0; needed.title = "Needed"; needed.kind = "in_progress"; needed.statusText = "In progress"; needed.tone = colors.accent;
+    TeamUi::TaskView::Node consumer; consumer.id = 3; consumer.layer = 1; consumer.title = "Consumer"; consumer.kind = "pending"; consumer.statusText = "Pending"; consumer.tone = colors.muted;
+    view.nodes = {dead, needed, consumer};   // the dead end comes first in the input
+    view.edges = {{3, {2}}};
+    view.resize(520, 380); view.show();
+    view.layout();
+    QVERIFY(view.nodeRect(2).top() < view.nodeRect(1).top());
+    shot(&view, "graph-dead-end-dark");
+
+    // B5: the widening strip and the confirmation on approve.
+    auto planning = phasedTeam();
+    planning["status"] = "planning";
+    auto members = planning["members"].toArray();
+    auto first = members[1].toObject();
+    first["profile_widening"] = QJsonObject{{"member", first["id"].toString()}, {"from", "read"}, {"to", "build"}};
+    members[1] = first; planning["members"] = members;
+    setTeam(planning);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 860); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWideningStrip"));
+    QVERIFY(workspace.findChild<QWidget *>("teamWideningStrip")->findChild<QLabel *>("teamWideningText")->text().contains("read → build"));
+    shot(&workspace, "widening-strip-dark");
+    auto *approve = workspace.findChild<QPushButton *>("teamWorkspaceApprove");
+    QVERIFY(approve && approve->isEnabled());
+    // Declining the confirmation sends nothing; confirming sends approve with confirm_widening.
+    QTimer::singleShot(0, &panel, [&panel] {
+        if (auto *box = panel.findChild<QMessageBox *>("teamWideningConfirm"))
+            box->button(QMessageBox::Cancel)->click();
+    });
+    approve->click();
+    QTest::qWait(120);
+    QCOMPARE(calls(script(), "approve").size(), 0);
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceApprove"));
+    QTimer::singleShot(0, &panel, [&panel] {
+        if (auto *box = panel.findChild<QMessageBox *>("teamWideningConfirm"))
+            for (auto *b : box->buttons()) if (b->text() == QStringLiteral("Confirm and approve")) { b->click(); break; }
+    });
+    workspace.findChild<QPushButton *>("teamWorkspaceApprove")->click();
+    QTRY_COMPARE(calls(script(), "approve").size(), 1);
+    QCOMPARE(calls(script(), "approve").first()["confirm_widening"].toBool(), true);
+}
+
 void TestTeamsUi::phaseProgressShowsTwoBars()
 {
     auto phased = phasedTeam();

@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QKeyEvent>
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <tuple>
@@ -465,6 +466,8 @@ public:
     // node, in the view's own (unzoomed) coordinates.
     QRectF bandRect(int phase) const { return m_bandRects.value(phase); }
     QRectF summaryRect(int phase) const { return m_summaries.value(phase); }
+    // G3: where a task landed; a dead-end sits below the tasks others need.
+    QRectF nodeRect(int id) const { return m_rects.value(id); }
     QMap<int, QList<int>> edges;   // task -> its dependencies
     QSet<QPair<int, int>> soft;    // (dependency, task) edges that need only In progress
     QSet<int> cycle, emphasis;     // emphasis: Show what blocks
@@ -502,6 +505,16 @@ public:
     void layout()
     {
         m_rects.clear(); m_bandRects.clear(); m_summaries.clear(); m_bandBackgrounds.clear(); m_listLayers.clear(); m_bandLayers.clear();
+        // G3: inside a layer (and inside a phase band) a task other tasks depend
+        // on comes first, in the existing order; a dead-end task — nothing
+        // depends on it — sinks to the bottom of its column.
+        QSet<int> needed;
+        for (auto it = edges.cbegin(); it != edges.cend(); ++it) for (int dep : it.value()) needed.insert(dep);
+        if (!needed.isEmpty()) {
+            std::stable_partition(nodes.begin(), nodes.end(), [&needed](const Node &n) { return needed.contains(n.id); });
+            for (auto &band : bands)
+                std::stable_partition(band.tasks.begin(), band.tasks.end(), [&needed](int id) { return needed.contains(id); });
+        }
         QMap<int, int> column;
         if (m_mode == Graph) {
             if (banded()) {

@@ -458,6 +458,13 @@ its publisher heartbeat continues. Local quota pressure does not accumulate the
 network retry delay. Transport failures retain their exponential backoff, capped
 at 60 seconds; storage and identity conflicts remain fatal.
 
+After a claimed encrypted request is processed and its durable result is
+flushed, the request loop yields and immediately starts its next authenticated
+claim. It does not add the 250 ms idle pause to successful queued work. Empty
+long polls and local cache pressure retain their 250 ms pacing, and network
+failures retain their existing backoff. This changes neither the claim order
+nor the permanent identity and no-replay checks.
+
 Legacy adoption uses the journal's existing authenticated-admission contract:
 `receive_before` authenticates/decrypts the request before `encrypted_reserve`,
 and rejects signed Read/non-READS requests before any native dispatch. The a2

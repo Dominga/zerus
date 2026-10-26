@@ -888,7 +888,7 @@ impl<N: Native + 'static> Engine<'_, N> {
                 )
                 .await
                 else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 let mut batch = batch?;
                 let Value::Array(rows) = batch["requests"].take() else {
@@ -897,23 +897,33 @@ impl<N: Native + 'static> Engine<'_, N> {
                 if rows.len() > 1 {
                     return Err(Failure::Retry);
                 }
+                let received = !rows.is_empty();
                 let deadline = tokio::time::Instant::now() + CLAIM_AUTHORIZATION_WAIT;
                 let profile = self.refresh_claimed(deadline).await?;
                 for row in rows {
                     if self.connector.stopping.is_set() {
-                        return Ok(());
+                        return Ok(false);
                     }
                     self.receive_before(&profile, row, deadline).await?;
                 }
                 if self.connector.stopping.is_set() {
-                    return Ok(());
+                    return Ok(false);
                 }
-                self.flush(&profile).await
+                self.flush(&profile).await?;
+                Ok(received)
             };
             let wait = match iteration.await {
-                Ok(()) => {
+                Ok(received) => {
                     delay = 1;
-                    Duration::from_millis(250)
+                    // A completed turn has already flushed its durable result.
+                    // Yield to heartbeat/stop, then claim the next queued ID
+                    // without adding a quarter second to every read. Empty
+                    // polls retain their pacing; quota/error waits are separate.
+                    if received {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_millis(250)
+                    }
                 }
                 Err(error) => {
                     let Some(wait) = error.request_retry_wait(&mut delay) else {
@@ -1324,6 +1334,145 @@ mod tests {
             .await
             .is_err());
         assert_eq!(f.connector.native.calls.borrow().len(), 1);
+    }
+    #[tokio::test]
+    async fn queued_authenticated_reads_claim_again_after_flush_without_a_success_sleep() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Instant;
+
+        let mut f = Fixture::new();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut profile = workspace::load_active(&f.private_dir).unwrap();
+        profile.server_url = format!("http://{}", listener.local_addr().unwrap());
+        let store = Store::lock(&f.private_dir, false).unwrap();
+        let old = store.read("active.json").unwrap().unwrap();
+        store
+            .replace(
+                "active.json",
+                &Store::revision(Some(&old)),
+                &serde_json::to_vec(&profile).unwrap(),
+            )
+            .unwrap();
+        drop(store);
+        f.relay = workspace::relay(&profile, true).unwrap();
+        let first = serde_json::to_value(f.request(
+            &profile,
+            REQUEST,
+            &profile.identity.device.device_id,
+            "",
+        ))
+        .unwrap();
+        let second_id = "00000000-0000-4000-8000-000000000022";
+        let second = serde_json::to_value(f.request(
+            &profile,
+            second_id,
+            &profile.identity.device.device_id,
+            "",
+        ))
+        .unwrap();
+        let membership = json!({"changes":[],"membership_revision":profile.membership.revision,"membership_head":profile.membership.head,"next_after":null});
+        let (finished, stop) = tokio::sync::oneshot::channel();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut claims = 0;
+            let mut results = 0;
+            let mut delivered = None;
+            let mut gaps = Vec::new();
+            let mut finished = Some(finished);
+            while Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(value) => value,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let body_start = loop {
+                    let mut block = [0; 4096];
+                    let n = stream.read(&mut block).unwrap();
+                    assert!(n > 0 && bytes.len() + n < 2 * 1024 * 1024);
+                    bytes.extend_from_slice(&block[..n]);
+                    if let Some(i) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let header = String::from_utf8(bytes[..body_start].to_vec()).unwrap();
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < body_start + length {
+                    let mut block = [0; 4096];
+                    let n = stream.read(&mut block).unwrap();
+                    assert!(n > 0 && bytes.len() + n < 2 * 1024 * 1024);
+                    bytes.extend_from_slice(&block[..n]);
+                }
+                let path = header
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                let response = if path.starts_with("/v2/node/membership?") {
+                    membership.clone()
+                } else if path == "/v2/node/requests?wait=25" {
+                    claims += 1;
+                    if let Some(at) = delivered.take() {
+                        gaps.push(Instant::now().duration_since(at));
+                    }
+                    match claims {
+                        1 => json!({"requests":[first.clone()]}),
+                        2 => json!({"requests":[second.clone()]}),
+                        3 => json!({"requests":[first.clone()]}), // Same ID must never execute twice.
+                        4 => {
+                            finished.take().unwrap().send(()).unwrap();
+                            json!({"requests":[]})
+                        }
+                        _ => panic!("unexpected fixture claim"),
+                    }
+                } else {
+                    assert!(path.starts_with("/v2/node/requests/") && path.ends_with("/result"));
+                    results += 1;
+                    delivered = Some(Instant::now());
+                    json!({})
+                };
+                let response = serde_json::to_vec(&response).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", response.len()).unwrap();
+                stream.write_all(&response).unwrap();
+                if claims == 4 {
+                    return (claims, results, gaps);
+                }
+            }
+            panic!("bounded fixture did not receive all claims");
+        });
+        f.connector.snapshot_ready.set();
+        let engine = f.engine();
+        let stopping = async {
+            stop.await.unwrap();
+            f.connector.stopping.set();
+        };
+        let (result, ()) = future::join(engine.requests(), stopping).await;
+        result.unwrap();
+        let (claims, results, gaps) = server.join().unwrap();
+        assert_eq!(
+            (claims, results, f.connector.native.calls.borrow().len()),
+            (4, 2, 2)
+        );
+        assert_eq!(gaps.len(), 2);
+        assert!(gaps.iter().all(|gap| *gap < Duration::from_millis(200)), "queued reads must claim promptly after a flushed result, without a quarter-second success sleep: {gaps:?}");
+        assert!(f.connector.journal.encrypted_pending().unwrap().is_empty());
     }
     #[tokio::test]
     async fn own_process_authorization_contention_waits_without_losing_claimed_request() {

@@ -1481,3 +1481,805 @@ async fn encrypted_poll_spool_refusal_leaves_request_queued_until_capacity_retur
 async fn encrypted_poll_cpu_refusal_leaves_request_queued_until_capacity_returns() {
     preclaim_capacity_refusal_keeps_the_same_request_queued("cpu").await;
 }
+
+mod encrypted_read_retention_controls {
+    use super::*;
+
+    // Read-payload retention controls: exact same source is appended to CONTROL
+    // and FINAL. These use real signed envelopes and the normal store operations.
+    fn retention_envelope(
+        sender: &Identity,
+        recipient: &Identity,
+        state: &MembershipState,
+        gateway: &str,
+        request: &str,
+        wire: (PayloadKind, OperationClass),
+        text: &[u8],
+    ) -> EncryptedEnvelope {
+        let (kind, class) = wire;
+        let mut header = seal(
+            sender,
+            recipient,
+            state,
+            gateway,
+            request,
+            kind,
+            b"header template",
+        )
+        .header;
+        header.operation_class = class;
+        crypto::seal(sender, recipient.public(), header, text).unwrap()
+    }
+    async fn retention_complete(
+        store: &Store,
+        identities: (&Identity, &Identity),
+        state: &MembershipState,
+        node: &Credential,
+        device: &Credential,
+        classes: (OperationClass, OperationClass),
+        bytes: usize,
+    ) -> (
+        String,
+        zerus_relay::store::EncryptedSubmission,
+        EncryptedEnvelope,
+        EncryptedEnvelope,
+    ) {
+        let (computer, phone) = identities;
+        let (request_class, result_class) = classes;
+        let request_id = id();
+        let request = retention_envelope(
+            phone,
+            computer,
+            state,
+            &node.id,
+            &request_id,
+            (PayloadKind::Request, request_class),
+            b"synthetic read or mutation request",
+        );
+        let prepared = zerus_relay::store::EncryptedSubmission::new(
+            json!({"envelope":request}),
+            phone.public().clone(),
+        )
+        .unwrap();
+        store.encrypted_submit(device, &prepared).await.unwrap();
+        let claimed = store.encrypted_claim(node).await.unwrap();
+        assert_eq!(claimed["requests"][0]["header"]["request_id"], request_id);
+        let result = retention_envelope(
+            computer,
+            phone,
+            state,
+            &node.id,
+            &request_id,
+            (PayloadKind::Result, result_class),
+            &vec![b'x'; bytes],
+        );
+        let output = zerus_relay::store::EncryptedSubmission::new(
+            json!({"envelope":result}),
+            computer.public().clone(),
+        )
+        .unwrap();
+        store
+            .encrypted_result(node, &request_id, &output)
+            .await
+            .unwrap();
+        (request_id, prepared, request, result)
+    }
+    async fn retention_age(store: &Store, request: &str) {
+        store.db.exec("UPDATE encrypted_requests SET created=created-7200,claimed=claimed-7200,updated=updated-7200,expires=expires-7200 WHERE id=?",args![request]).await.unwrap();
+    }
+    async fn retention_usage(store: &Store, device: &Credential) -> Value {
+        store
+            .db
+            .one(
+                "SELECT payload_bytes,active,mutations FROM workspace_usage WHERE workspace_id=?",
+                args![&device.workspace],
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    #[tokio::test]
+    async fn completed_read_payloads_cannot_block_a_small_new_read_after_the_read_cache_window() {
+        let mut cfg = config();
+        cfg.max_queue_bytes = 8 * 1024 * 1024;
+        let backend = Backend::new(cfg).await;
+        let store = backend.store().await;
+        let peer = if backend.is_postgres() {
+            backend.store().await
+        } else {
+            store.clone()
+        };
+        let (computer, _secret, mut state, node) = create(&store).await;
+        let (phone, _secret, device) =
+            enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+        let mut receipts = Vec::new();
+        // The full normal submit admits a 2MiB result reservation; completed
+        // ~956KiB results progressively consume this private fixture's 8MiB cap.
+        for _ in 0..12 {
+            let request_id = id();
+            let request = retention_envelope(
+                &phone,
+                &computer,
+                &state,
+                &node.id,
+                &request_id,
+                (PayloadKind::Request, OperationClass::Read),
+                b"inspect",
+            );
+            let prepared = zerus_relay::store::EncryptedSubmission::new(
+                json!({"envelope":request}),
+                phone.public().clone(),
+            )
+            .unwrap();
+            match store.encrypted_submit(&device, &prepared).await {
+                Ok(_) => {}
+                Err(error) => {
+                    assert_eq!(error.0, StatusCode::TOO_MANY_REQUESTS);
+                    break;
+                }
+            }
+            assert_eq!(
+                peer.encrypted_claim(&node).await.unwrap()["requests"][0]["header"]["request_id"],
+                request_id
+            );
+            let result = retention_envelope(
+                &computer,
+                &phone,
+                &state,
+                &node.id,
+                &request_id,
+                (PayloadKind::Result, OperationClass::Read),
+                &vec![b'x'; 700 * 1024],
+            );
+            let output = zerus_relay::store::EncryptedSubmission::new(
+                json!({"envelope":result}),
+                computer.public().clone(),
+            )
+            .unwrap();
+            peer.encrypted_result(&node, &request_id, &output)
+                .await
+                .unwrap();
+            receipts.push((
+                request_id,
+                prepared,
+                request.digest().unwrap(),
+                result.digest().unwrap(),
+            ));
+        }
+        assert!(!receipts.is_empty() && receipts.len() < 12);
+        let before = retention_usage(&store, &device).await;
+        assert_eq!(i(&before, "active"), 0);
+        assert!(backend.cfg.max_queue_bytes - i(&before, "payload_bytes") < 2 * 1024 * 1024);
+        for (request, _, _, _) in &receipts {
+            retention_age(&store, request).await;
+        }
+        let due = store.db.one("SELECT CAST(SUM(body_bytes+result_bytes+reserved_bytes) AS BIGINT) AS bytes FROM encrypted_requests WHERE workspace_id=?",args![&device.workspace]).await.unwrap().unwrap();
+        peer.maintain_encrypted().await.unwrap();
+        let after = retention_usage(&store, &device).await;
+        let next = id();
+        let envelope = retention_envelope(
+            &phone,
+            &computer,
+            &state,
+            &node.id,
+            &next,
+            (PayloadKind::Request, OperationClass::Read),
+            b"a small new session read",
+        );
+        let prepared = zerus_relay::store::EncryptedSubmission::new(
+            json!({"envelope":envelope}),
+            phone.public().clone(),
+        )
+        .unwrap();
+        let admitted = store.encrypted_submit(&device, &prepared).await;
+        assert!(admitted.is_ok(),"completed encrypted Read payloads must release capacity after the read-cache window, even with active=0");
+        assert_eq!(
+            i(&before, "payload_bytes") - i(&after, "payload_bytes"),
+            i(&due, "bytes")
+        );
+        assert_eq!(i(&before, "mutations"), i(&after, "mutations"));
+        for (request, prepared, body_hash, result_hash) in receipts {
+            let exact = peer.encrypted_submit(&device, &prepared).await.unwrap().1;
+            assert_eq!(exact["state"], "completed");
+            assert_eq!(exact["envelope"], Value::Null);
+            let row=store.db.one("SELECT body_hash,result_hash,state,metadata_bytes FROM encrypted_requests WHERE id=?",args![&request]).await.unwrap().unwrap();
+            assert_eq!(row["body_hash"], body_hash);
+            assert_eq!(row["result_hash"], result_hash);
+            assert_eq!(row["state"], "completed");
+            assert_eq!(i(&row, "metadata_bytes"), 1024);
+        }
+        assert_eq!(
+            peer.encrypted_claim(&node).await.unwrap()["requests"][0]["header"]["request_id"],
+            next
+        );
+        assert!(peer.encrypted_claim(&node).await.unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        peer.db.close().await;
+        store.db.close().await;
+    }
+    #[tokio::test]
+    async fn read_cache_requires_both_classes_and_preserves_mutation_control_recovery() {
+        let backend = Backend::new(config()).await;
+        let store = backend.store().await;
+        let (computer, _secret, mut state, node) = create(&store).await;
+        let (phone, _secret, device) =
+            enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+        let mut cases = Vec::new();
+        for (request_class, result_class) in [
+            (OperationClass::Read, OperationClass::Read),
+            (OperationClass::Mutation, OperationClass::Mutation),
+            (OperationClass::Control, OperationClass::Control),
+            (OperationClass::Mutation, OperationClass::Read),
+            (OperationClass::Read, OperationClass::Mutation),
+        ] {
+            let (request, prepared, body, result) = retention_complete(
+                &store,
+                (&computer, &phone),
+                &state,
+                &node,
+                &device,
+                (request_class, result_class),
+                128,
+            )
+            .await;
+            let row = store
+                .db
+                .one(
+                    "SELECT updated,expires FROM encrypted_requests WHERE id=?",
+                    args![&request],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let read =
+                request_class == OperationClass::Read && result_class == OperationClass::Read;
+            let expected = if read {
+                3600.0
+            } else {
+                backend.cfg.retention as f64
+            };
+            assert!(
+                (row["expires"].as_f64().unwrap() - row["updated"].as_f64().unwrap() - expected)
+                    .abs()
+                    < 0.1
+            );
+            retention_age(&store, &request).await;
+            cases.push((
+                request,
+                prepared,
+                body.digest().unwrap(),
+                result.digest().unwrap(),
+                read,
+            ));
+        }
+        store.maintain_encrypted().await.unwrap();
+        for (request, prepared, body_hash, result_hash, read) in cases {
+            let receipt = store.encrypted_receipt(&device, &request).await.unwrap();
+            assert_eq!(receipt["state"], "completed");
+            assert_eq!(receipt["envelope"].is_null(), read);
+            let row = store
+                .db
+                .one(
+                    "SELECT body_hash,result_hash FROM encrypted_requests WHERE id=?",
+                    args![&request],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row["body_hash"], body_hash);
+            assert_eq!(row["result_hash"], result_hash);
+            assert_eq!(
+                store.encrypted_submit(&device, &prepared).await.unwrap().1,
+                receipt
+            );
+        }
+        assert!(store.encrypted_claim(&node).await.unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        store.db.close().await;
+    }
+    #[tokio::test]
+    async fn legacy_read_adoption_authenticates_full_pairs_and_keeps_unprovable_rows() {
+        let backend = Backend::new(config()).await;
+        let store = backend.store().await;
+        let (computer, _secret, mut state, node) = create(&store).await;
+        let (phone, _secret, device) =
+            enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+        let mut cases = Vec::new();
+        for mode in [
+            "read",
+            "old-worker-result",
+            "mutation",
+            "control",
+            "result-class",
+            "body-hash",
+            "result-hash",
+            "request-signature",
+            "result-signature",
+            "route-mismatch",
+            "duplicate-json",
+            "missing-chunk",
+            "extra-chunk",
+            "cutoff-chunk",
+            "unknown-version",
+            "oversize-request",
+        ] {
+            let class = match mode {
+                "mutation" => OperationClass::Mutation,
+                "control" => OperationClass::Control,
+                _ => OperationClass::Read,
+            };
+            let result_class = if mode == "result-class" {
+                OperationClass::Mutation
+            } else {
+                class
+            };
+            let (request, prepared, body, result) = retention_complete(
+                &store,
+                (&computer, &phone),
+                &state,
+                &node,
+                &device,
+                (class, result_class),
+                256,
+            )
+            .await;
+            // Emulate the exact old completed shape: no trusted class marker and
+            // seven-day payload expiry, despite an old completion timestamp.
+            store.db.exec("UPDATE encrypted_requests SET payload_class=0,updated=updated-7200,expires=? WHERE id=?",args![now()+backend.cfg.retention as f64,&request]).await.unwrap();
+            match mode {
+                "old-worker-result" => {
+                    store
+                        .db
+                        .exec(
+                            "UPDATE encrypted_requests SET payload_class=3 WHERE id=?",
+                            args![&request],
+                        )
+                        .await
+                        .unwrap();
+                }
+                "body-hash" => {
+                    store
+                        .db
+                        .exec(
+                            "UPDATE encrypted_requests SET body_hash='wrong' WHERE id=?",
+                            args![&request],
+                        )
+                        .await
+                        .unwrap();
+                }
+                "result-hash" => {
+                    store
+                        .db
+                        .exec(
+                            "UPDATE encrypted_requests SET result_hash='wrong' WHERE id=?",
+                            args![&request],
+                        )
+                        .await
+                        .unwrap();
+                }
+                "request-signature" => {
+                    let mut bad = body.clone();
+                    bad.signature = crypto::encode(&[0; 64]);
+                    let bytes = serde_json::to_string(&bad).unwrap();
+                    store.db.exec("UPDATE encrypted_request_chunks SET body=? WHERE request_id=? AND sequence=0",args![&bytes,&request]).await.unwrap();
+                    store
+                        .db
+                        .exec(
+                            "UPDATE encrypted_requests SET body_hash=?,body_bytes=? WHERE id=?",
+                            args![&bad.digest().unwrap(), bytes.len(), &request],
+                        )
+                        .await
+                        .unwrap();
+                }
+                "result-signature" => {
+                    let mut bad = result.clone();
+                    bad.signature = crypto::encode(&[0; 64]);
+                    let bytes = serde_json::to_string(&bad).unwrap();
+                    store.db.exec("UPDATE encrypted_requests SET result=?,result_hash=?,result_bytes=? WHERE id=?",args![&bytes,&bad.digest().unwrap(),bytes.len(),&request]).await.unwrap();
+                }
+                "route-mismatch" => {
+                    let mut header = result.header.clone();
+                    header.route_id = id();
+                    let bad =
+                        crypto::seal(&computer, phone.public(), header, b"wrong route").unwrap();
+                    let bytes = serde_json::to_string(&bad).unwrap();
+                    store.db.exec("UPDATE encrypted_requests SET result=?,result_hash=?,result_bytes=? WHERE id=?",args![&bytes,&bad.digest().unwrap(),bytes.len(),&request]).await.unwrap();
+                }
+                "duplicate-json" => {
+                    let encoded = serde_json::to_string(&body).unwrap();
+                    let duplicated =
+                        encoded.replacen("{\"version\":1,", "{\"version\":1,\"version\":1,", 1);
+                    assert_ne!(duplicated, encoded);
+                    store.db.exec("UPDATE encrypted_request_chunks SET body=? WHERE request_id=? AND sequence=0",args![&duplicated,&request]).await.unwrap();
+                    store
+                        .db
+                        .exec(
+                            "UPDATE encrypted_requests SET body_bytes=? WHERE id=?",
+                            args![duplicated.len(), &request],
+                        )
+                        .await
+                        .unwrap();
+                }
+                "missing-chunk" => {
+                    store
+                        .db
+                        .exec(
+                            "DELETE FROM encrypted_request_chunks WHERE request_id=?",
+                            args![&request],
+                        )
+                        .await
+                        .unwrap();
+                }
+                "extra-chunk" => {
+                    store.db.exec("INSERT INTO encrypted_request_chunks(request_id,sequence,body) VALUES(?,1,'unexpected')",args![&request]).await.unwrap();
+                }
+                "cutoff-chunk" => {
+                    // First three rows concatenate to the COMPLETE exact accepted
+                    // signed request. A fourth hidden row invalidates completeness.
+                    let bytes = serde_json::to_string(&body).unwrap();
+                    assert!(bytes.is_ascii());
+                    let a = bytes.len() / 3;
+                    let b = 2 * a;
+                    store.db.exec("UPDATE encrypted_request_chunks SET body=? WHERE request_id=? AND sequence=0",args![&bytes[..a],&request]).await.unwrap();
+                    for (sequence, part) in [
+                        (1i64, &bytes[a..b]),
+                        (2i64, &bytes[b..]),
+                        (3i64, "unexpected"),
+                    ] {
+                        store.db.exec("INSERT INTO encrypted_request_chunks(request_id,sequence,body) VALUES(?,?,?)",args![&request,sequence,part]).await.unwrap();
+                    }
+                }
+                "unknown-version" => {
+                    let mut unknown = result.clone();
+                    unknown.version = 2;
+                    store
+                        .db
+                        .exec(
+                            "UPDATE encrypted_requests SET result=? WHERE id=?",
+                            args![&serde_json::to_string(&unknown).unwrap(), &request],
+                        )
+                        .await
+                        .unwrap();
+                }
+                "oversize-request" => {
+                    store
+                        .db
+                        .exec(
+                            "UPDATE encrypted_requests SET body_bytes=131073 WHERE id=?",
+                            args![&request],
+                        )
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            cases.push((mode, request, prepared));
+        }
+        // A formerly accepted signer which is now revoked is deliberately not
+        // reclassified using an untrusted replacement or a stale key assumption.
+        let (other_phone, _secret, other_device) =
+            enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+        let (request, prepared, _, _) = retention_complete(
+            &store,
+            (&computer, &other_phone),
+            &state,
+            &node,
+            &other_device,
+            (OperationClass::Read, OperationClass::Read),
+            256,
+        )
+        .await;
+        store.db.exec("UPDATE encrypted_requests SET payload_class=0,updated=updated-7200,expires=? WHERE id=?",args![now()+backend.cfg.retention as f64,&request]).await.unwrap();
+        store
+            .db
+            .exec(
+                "UPDATE encrypted_members SET revoked=1 WHERE workspace_id=? AND device_id=?",
+                args![&device.workspace, &other_device.id],
+            )
+            .await
+            .unwrap();
+        cases.push(("revoked-key", request, prepared));
+        let before = retention_usage(&store, &device).await;
+        for _ in 0..18 {
+            store.maintain_encrypted().await.unwrap();
+        }
+        let after = retention_usage(&store, &device).await;
+        assert_eq!(i(&after, "active"), 0);
+        assert_eq!(i(&before, "mutations"), i(&after, "mutations"));
+        for (mode, request, _prepared) in cases {
+            let row=store.db.one("SELECT payload_class,state,result_bytes,result_hash,body_hash FROM encrypted_requests WHERE id=?",args![&request]).await.unwrap().unwrap();
+            assert_eq!(row["state"], "completed");
+            assert_ne!(
+                i(&row, "payload_class"),
+                0,
+                "finite adoption must move conservative rows out of its index"
+            );
+            assert_eq!(
+                i(&row, "result_bytes") == 0,
+                ["read", "old-worker-result"].contains(&mode),
+                "only a fully authenticated matching Read pair may expire early: {mode}"
+            );
+        }
+        store.db.close().await;
+    }
+    #[tokio::test]
+    async fn read_payload_refund_is_atomic_across_workers_restarts_and_duplicate_maintenance() {
+        let backend = Backend::new(config()).await;
+        let store = backend.store().await;
+        let peer = if backend.is_postgres() {
+            backend.store().await
+        } else {
+            store.clone()
+        };
+        let (computer, _secret, mut state, node) = create(&store).await;
+        let (phone, _secret, device) =
+            enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+        let (request, prepared, body, result) = retention_complete(
+            &store,
+            (&computer, &phone),
+            &state,
+            &node,
+            &device,
+            (OperationClass::Read, OperationClass::Read),
+            1024,
+        )
+        .await;
+        retention_age(&store, &request).await;
+        let before = retention_usage(&store, &device).await;
+        let row=store.db.one("SELECT body_bytes+result_bytes+reserved_bytes AS bytes FROM encrypted_requests WHERE id=?",args![&request]).await.unwrap().unwrap();
+        let shard = store.db.shard(&device.workspace);
+        let shard_before = store
+            .db
+            .one(
+                "SELECT payload_bytes FROM payload_shards WHERE id=?",
+                args![shard],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (a, b) = tokio::join!(store.maintain_encrypted(), peer.maintain_encrypted());
+        a.unwrap();
+        b.unwrap();
+        let after = retention_usage(&store, &device).await;
+        let shard_after = store
+            .db
+            .one(
+                "SELECT payload_bytes FROM payload_shards WHERE id=?",
+                args![shard],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            i(&before, "payload_bytes") - i(&after, "payload_bytes"),
+            i(&row, "bytes")
+        );
+        assert_eq!(
+            i(&shard_before, "payload_bytes") - i(&shard_after, "payload_bytes"),
+            i(&row, "bytes")
+        );
+        peer.db.close().await;
+        store.db.close().await;
+        drop(peer);
+        drop(store);
+        let reopened = backend.store().await;
+        reopened.maintain_encrypted().await.unwrap();
+        assert_eq!(retention_usage(&reopened, &device).await, after);
+        let exact = reopened
+            .encrypted_submit(&device, &prepared)
+            .await
+            .unwrap()
+            .1;
+        assert_eq!(exact["state"], "completed");
+        assert_eq!(exact["envelope"], Value::Null);
+        let durable = reopened
+            .db
+            .one(
+                "SELECT body_hash,result_hash FROM encrypted_requests WHERE id=?",
+                args![&request],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable["body_hash"], body.digest().unwrap());
+        assert_eq!(durable["result_hash"], result.digest().unwrap());
+        assert!(reopened.encrypted_claim(&node).await.unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        reopened.db.close().await;
+    }
+    #[tokio::test]
+    async fn legacy_schema_upgrade_keeps_receipt_identities_before_bounded_classification() {
+        let backend = Backend::new(config()).await;
+        let store = backend.store().await;
+        let (computer, _secret, mut state, node) = create(&store).await;
+        let (phone, _secret, device) =
+            enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+        let (request, prepared, body, result) = retention_complete(
+            &store,
+            (&computer, &phone),
+            &state,
+            &node,
+            &device,
+            (OperationClass::Read, OperationClass::Read),
+            256,
+        )
+        .await;
+        store
+            .db
+            .exec(
+                "UPDATE encrypted_requests SET updated=updated-7200,expires=? WHERE id=?",
+                args![now() + backend.cfg.retention as f64, &request],
+            )
+            .await
+            .unwrap();
+        store
+            .db
+            .exec("DROP INDEX encrypted_payload_classification", &[])
+            .await
+            .unwrap();
+        store
+            .db
+            .exec(
+                "ALTER TABLE encrypted_requests DROP COLUMN payload_class",
+                &[],
+            )
+            .await
+            .unwrap();
+        store.db.close().await;
+        drop(store);
+        let reopened = backend.store().await;
+        let old = reopened.encrypted_receipt(&device, &request).await.unwrap();
+        assert!(!old["envelope"].is_null());
+        for _ in 0..4 {
+            reopened.maintain_encrypted().await.unwrap();
+        }
+        let receipt = reopened
+            .encrypted_submit(&device, &prepared)
+            .await
+            .unwrap()
+            .1;
+        assert_eq!(receipt["state"], "completed");
+        assert_eq!(receipt["envelope"], Value::Null);
+        let hashes = reopened
+            .db
+            .one(
+                "SELECT body_hash,result_hash FROM encrypted_requests WHERE id=?",
+                args![&request],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(hashes["body_hash"], body.digest().unwrap());
+        assert_eq!(hashes["result_hash"], result.digest().unwrap());
+        reopened.db.close().await;
+    }
+    #[tokio::test]
+    async fn shorter_configured_retention_is_never_extended_for_encrypted_reads() {
+        let mut cfg = config();
+        cfg.retention = 30;
+        let backend = Backend::new(cfg).await;
+        let store = backend.store().await;
+        let (computer, _secret, mut state, node) = create(&store).await;
+        let (phone, _secret, device) =
+            enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+        let (request, _, _, _) = retention_complete(
+            &store,
+            (&computer, &phone),
+            &state,
+            &node,
+            &device,
+            (OperationClass::Read, OperationClass::Read),
+            128,
+        )
+        .await;
+        let row = store
+            .db
+            .one(
+                "SELECT updated,expires FROM encrypted_requests WHERE id=?",
+                args![&request],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            (row["expires"].as_f64().unwrap() - row["updated"].as_f64().unwrap() - 30.0).abs()
+                < 0.1
+        );
+        store.db.close().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_adoption_failure_cannot_starve_existing_encrypted_expiry() {
+        let backend = Backend::new(config()).await;
+        let store = backend.store().await;
+        let (computer, _secret, mut state, node) = create(&store).await;
+        let (phone, _secret, device) =
+            enroll(&store, &computer, &node, &mut state, DeviceRole::Phone).await;
+        let (legacy, _, _, _) = retention_complete(
+            &store,
+            (&computer, &phone),
+            &state,
+            &node,
+            &device,
+            (OperationClass::Read, OperationClass::Read),
+            256,
+        )
+        .await;
+        store
+            .db
+            .exec(
+                "UPDATE encrypted_requests SET payload_class=0,expires=? WHERE id=?",
+                args![now() + backend.cfg.retention as f64, &legacy],
+            )
+            .await
+            .unwrap();
+        let request_id = id();
+        let request = retention_envelope(
+            &phone,
+            &computer,
+            &state,
+            &node.id,
+            &request_id,
+            (PayloadKind::Request, OperationClass::Mutation),
+            b"not executed",
+        );
+        let prepared = zerus_relay::store::EncryptedSubmission::new(
+            json!({"envelope":request}),
+            phone.public().clone(),
+        )
+        .unwrap();
+        store.encrypted_submit(&device, &prepared).await.unwrap();
+        store
+            .db
+            .exec(
+                "UPDATE encrypted_requests SET expires=0 WHERE id=?",
+                args![&request_id],
+            )
+            .await
+            .unwrap();
+        // Fail ONLY the legacy member lookup, after the existing expiry path has
+        // everything needed to finish. This is a disposable fixture, never live.
+        store
+            .db
+            .exec(
+                "ALTER TABLE encrypted_members RENAME TO unavailable_encrypted_members",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(store.maintain_encrypted().await.is_err());
+        store
+            .db
+            .exec(
+                "ALTER TABLE unavailable_encrypted_members RENAME TO encrypted_members",
+                &[],
+            )
+            .await
+            .unwrap();
+        let row=store.db.one("SELECT state,body_bytes,reserved_bytes,body_hash FROM encrypted_requests WHERE id=?",args![&request_id]).await.unwrap().unwrap();
+        assert_eq!(
+            row["state"], "uncertain",
+            "legacy classification failure must not starve pre-existing encrypted expiry"
+        );
+        assert_eq!(i(&row, "body_bytes"), 0);
+        assert_eq!(i(&row, "reserved_bytes"), 0);
+        assert_eq!(row["body_hash"], request.digest().unwrap());
+        assert_eq!(i(&retention_usage(&store, &device).await, "active"), 0);
+        assert!(!store.encrypted_receipt(&device, &legacy).await.unwrap()["envelope"].is_null());
+        assert_eq!(
+            store.encrypted_submit(&device, &prepared).await.unwrap().1["state"],
+            "uncertain"
+        );
+        assert!(store.encrypted_claim(&node).await.unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        store.db.close().await;
+    }
+}

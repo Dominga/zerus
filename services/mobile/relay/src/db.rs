@@ -629,7 +629,10 @@ impl Db {
                 ("invitations", vec![("added_by", "TEXT")]),
                 (
                     "encrypted_requests",
-                    vec![("metadata_bytes", "BIGINT NOT NULL DEFAULT 0")],
+                    vec![
+                        ("metadata_bytes", "BIGINT NOT NULL DEFAULT 0"),
+                        ("payload_class", "BIGINT NOT NULL DEFAULT 0"),
+                    ],
                 ),
                 (
                     "encrypted_route_bindings",

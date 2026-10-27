@@ -232,7 +232,22 @@ class MainActivity : ComponentActivity() {
         onDispose { lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(invitation) { invitation?.let { server = it.server; code = it.code; tab = 3; pairing = true; onInvitationUsed() } }
-    LaunchedEffect(model, lifecycle, tab) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+    val refreshTarget = model.selected?.target
+    val reviewingNativeInput = refreshTarget != null && model.conversationQuestions.isNotEmpty()
+    LaunchedEffect(model, lifecycle, tab, refreshTarget, reviewingNativeInput, model.demo) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        if (refreshTarget?.archiveId?.isBlank() == true && !reviewingNativeInput && !model.demo) {
+            var started = android.os.SystemClock.elapsedRealtime()
+            model.awaitActivityRead()
+            while (true) {
+                // At most one inspection: wait for its actual completion before the
+                // next turn, with a two-second floor and a short idle yield.
+                delay(if (model.error.isNotBlank()) 5_000L else
+                    maxOf(200L, 2_000L - (android.os.SystemClock.elapsedRealtime() - started)))
+                started = android.os.SystemClock.elapsedRealtime()
+                model.refreshActivity()
+                model.awaitActivityRead()
+            }
+        }
         while (true) {
             delay(5_000)
             if (model.selected != null) model.refreshActivity()

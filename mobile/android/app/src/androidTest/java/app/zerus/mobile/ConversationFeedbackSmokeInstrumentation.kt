@@ -228,6 +228,26 @@ class ConversationFeedbackSmokeInstrumentation : Instrumentation() {
             inspection.get().countDown()
             await("second conversation verified and history settled") { main { model.activityVerified && !model.detailBusy && !model.olderLoading } && text(fresh) != null && !progressVisible() }
             check(historyReads.get() == beforeHistory + 1) { "History-first opening fetched the complete page twice" }
+            // Measure the real Activity timer after one observed automatic read,
+            // independent of where the fixture entered the current timer cycle.
+            val beforeAutomatic = main {
+                check(!model.detailBusy)
+                inspection.set(CountDownLatch(1))
+                inspectionReads.get()
+            }
+            await("first observed automatic activity read") { inspectionReads.get() > beforeAutomatic }
+            inspection.get().countDown()
+            await("automatic read settled") { main { !model.detailBusy && model.activityVerified } }
+            val beforeNext = main {
+                inspection.set(CountDownLatch(1))
+                inspectionReads.get()
+            }
+            await("foreground activity refresh within 2.5 seconds", 2_500) { inspectionReads.get() > beforeNext }
+            val heldAutomatic = inspectionReads.get()
+            SystemClock.sleep(2_200)
+            check(inspectionReads.get() == heldAutomatic) { "Foreground timer duplicated its in-flight inspection" }
+            inspection.get().countDown()
+            await("held automatic read settled") { main { !model.detailBusy && model.activityVerified } }
             val headsBeforeBack = backgroundHeadReads.get()
             main { model.back() }
             await("catalog head scanning resumes after leaving the conversation") { backgroundHeadReads.get() > headsBeforeBack }

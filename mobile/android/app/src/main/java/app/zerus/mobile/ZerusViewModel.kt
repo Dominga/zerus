@@ -2902,10 +2902,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshActivity(explicit: Boolean = false) {
         refreshActivity(explicit,freshInspection=false)
     }
+    /** Cancelling a visible timer only stops its wait, never the retained read. */
+    internal suspend fun awaitActivityRead() { detailJob?.join() }
+
     private fun refreshActivity(explicit: Boolean, freshInspection: Boolean, ownerCurrent: () -> Boolean = { true }) {
         if (demo || terminalVisible) return
         val original = selected ?: return
-        // The five-second background loop must not start another inspection
+        // Background refresh must not start another inspection
         // while the opening inspection is already verified and its first
         // history page is still arriving. Explicit refresh stays available.
         if(!explicit && !freshInspection && activityVerified && olderLoading && lastHistoryObservation==0L) return

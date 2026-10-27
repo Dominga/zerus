@@ -10,6 +10,7 @@
 #include "TeamWidgets.h"
 #include "TeamPhaseScroll.h"
 #include "CollapsibleBlock.h"
+#include "WorkspaceStyle.h"
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
@@ -134,9 +135,9 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     m_drawer->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return m_panel->confirm(name, title, text, action); };
     // The panel may outlive this workspace.
     m_panel->confirmClosed = [alive = QPointer<TeamWorkspace>(this)] { if (alive) alive->scheduleRender(); };
-    m_drawer->reassign = [this](int task, const QPoint &global) { if (const auto *team = m_teams->watched()) m_panel->reassignMenu(*team, task, global); };
+    m_drawer->reassign = [this](int task, const QPoint &global) { if (const auto *team = currentTeam(m_team)) m_panel->reassignMenu(*team, task, global); };
     m_drawer->problemActions = [this](const Member &member, const Status &status) -> QWidget * {
-        const auto *team = m_teams->watched();
+        const auto *team = currentTeam(m_team);
         return team ? m_panel->problemActions(*team, member, status) : nullptr;
     };
     QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
@@ -843,7 +844,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     const bool planning = team.status == "planning";
     if (planning) {
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
-        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, 0); });
+        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, 0); });
         h->addWidget(task);
         if (m_view == "graph") {
             auto *hint = elided(tr("Drag from a node's right edge onto a task to connect them"), c.dim, 11);
@@ -954,12 +955,12 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     // a drag from a node's handle adds a dependency, a selected edge goes.
     if (team.status == "planning") {
         view->editable = true;
-        view->clicked = [this](int id, const QPoint &) { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
-        view->linked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, true); };
-        view->unlinked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, false); };
+        view->clicked = [this](int id, const QPoint &) { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, false); };
     }
     if (team.status != "planning") view->clicked = [this](int id, const QPoint &) {
-        const auto *team = m_teams->watched();
+        const auto *team = currentTeam(m_team);
         if (team) if (const auto *task = team->task(id); task && task->subteam.known && !task->subteam.team.isEmpty()) {
             m_teams->watch(task->subteam.team);
             showTeam(task->subteam.team);
@@ -967,6 +968,7 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         }
         m_drawerTask = id; scheduleRender();
     };
+    keepGraphEdit(view, team.id);
     auto *area = new GraphArea; area->setObjectName("teamWorkspaceCanvas");
     area->setFrameShape(QFrame::NoFrame);
     // Fit starts the graph afresh; otherwise it stays where it was scrolled.
@@ -1054,6 +1056,17 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
                      && (m_focus.isEmpty() || task->assignee == m_focus);
         view->nodes.append(node);
     }
+}
+
+void TeamWorkspace::keepGraphEdit(TaskView *view, const QString &team)
+{
+    if (!view->editable && view->editableTasks.isEmpty()) return;
+    const auto kept = m_graphEdit.value(team);
+    view->keepEdit(kept.first, kept.second);
+    view->editChanged = [this, team](int connectFrom, QPair<int, int> edge) {
+        if (!connectFrom && !edge.first) m_graphEdit.remove(team);
+        else m_graphEdit.insert(team, {connectFrom, edge});
+    };
 }
 
 QWidget *TeamWorkspace::board(const Team &team)
@@ -1540,27 +1553,31 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group)
     // in Planning).
     if (team.status == "planning") {
         view->editable = true;
-        view->linked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, true); };
-        view->unlinked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, false); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, false); };
     } else if (ownerPhaseState(team, group) == "draft") {
         for (int id : group.tasks) if (const auto *task = team.task(id); task && task->status == "draft") view->editableTasks.insert(id);
         view->linked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, true); };
         view->unlinked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, false); };
     }
-    if (team.status == "planning") view->clicked = [this](int id, const QPoint &) { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
+    if (team.status == "planning") view->clicked = [this](int id, const QPoint &) { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
     else view->clicked = [this](int id, const QPoint &) {
-        const auto *t = m_teams->watched();
+        const auto *t = currentTeam(m_team);
         if (t) if (const auto *task = t->task(id); task && task->subteam.known && !task->subteam.team.isEmpty()) {
             m_teams->watch(task->subteam.team); showTeam(task->subteam.team); return;
         }
         m_drawerTask = id; scheduleRender();
     };
+    keepGraphEdit(view, team.id);
     view->layout();
     // The phase scrolls sideways when its graph is wider than the column.
     auto *area = new QScrollArea; area->setObjectName("teamPhaseGraphArea"); area->setFrameShape(QFrame::NoFrame);
     area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     area->setWidget(view); area->setWidgetResizable(false);
-    area->setStyleSheet(QStringLiteral("QScrollArea#teamPhaseGraphArea{background:transparent;} QScrollArea#teamPhaseGraphArea > QWidget > QWidget{background:transparent;}"));
+    // Spec 1.2: the thin 8 px bar without arrows here too, also outside a
+    // window that styles its bars.
+    area->setStyleSheet(QStringLiteral("QScrollArea#teamPhaseGraphArea{background:transparent;} QScrollArea#teamPhaseGraphArea > QWidget > QWidget{background:transparent;}")
+                        + workspaceScrollbars(m_dark));
     area->viewport()->setAutoFillBackground(false);
     area->setFixedHeight(view->height() + 10);
     return area;
@@ -1667,7 +1684,7 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
                                 .arg(c.surface.name(), problem ? toneColor(c, problemsByTask.value(id)).name() : c.cardBorder.name(), c.accent.name(),
                                      task->status == "draft" ? QStringLiteral("dashed") : QStringLiteral("solid")));
         line->setToolTip(QStringLiteral("#%1 %2 — %3").arg(id).arg(task->title, mark.tooltip.isEmpty() ? s.text : mark.tooltip));
-        line->clicked = team.status == "planning" ? std::function<void()>([this, id] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); })
+        line->clicked = team.status == "planning" ? std::function<void()>([this, id] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); })
                                                   : std::function<void()>([this, id] { m_drawerTask = id; scheduleRender(); });
         auto *h = new QHBoxLayout(line); h->setContentsMargins(8, 4, 8, 4); h->setSpacing(8);
         auto *layer = label(QStringLiteral("L%1").arg(layers.value(id) + 1), c.dim, 10, false, "teamLayerLabel"); layer->setFixedWidth(20); h->addWidget(layer);
@@ -1797,7 +1814,7 @@ QWidget *TeamWorkspace::sideLists(const Team &team, const QString &status)
                 auto *t = elided(issue.text, tone, 12); t->setToolTip(issue.text); h->addWidget(t, 1);
                 if (issue.task) {
                     r->setCursor(Qt::PointingHandCursor); r->setToolTip(tr("Open the task"));
-                    r->clicked = [this, id = issue.task] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
+                    r->clicked = [this, id = issue.task] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
                 }
                 block->body()->addWidget(r);
             }
@@ -1906,7 +1923,7 @@ QWidget *TeamWorkspace::members(const Team &team)
             auto *wait = row(6);
             wait->addWidget(label(tr("Waiting for a task"), c.muted, 11));
             auto *assign = button(tr("Assign task…"), "teamWorkspaceAssign"); assign->setProperty("ghost", true);
-            QObject::connect(assign, &QPushButton::clicked, this, [this, id = m.id, assign] { if (const auto *t = m_teams->watched()) assignMenu(*t, id, assign->mapToGlobal(QPoint(0, assign->height()))); });
+            QObject::connect(assign, &QPushButton::clicked, this, [this, id = m.id, assign] { if (const auto *t = currentTeam(m_team)) assignMenu(*t, id, assign->mapToGlobal(QPoint(0, assign->height()))); });
             auto *ask = button(tr("Ask lead to plan for it"), "teamWorkspaceAskLead"); ask->setProperty("ghost", true);
             QObject::connect(ask, &QPushButton::clicked, this, [this, role] {
                 m_conversation->send(tr("I added %1 to the team. Plan a task for it and reassign it with hgs team reassign.").arg(role));
@@ -2094,7 +2111,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         auto *more = new QToolButton; more->setIcon(workspaceIcon("more", c.muted)); more->setAutoRaise(true); more->setObjectName("teamWorkspaceMemberMenu");
         more->setToolTip(tr("Member actions"));
         QObject::connect(more, &QToolButton::clicked, this, [this, id = m.id, more] {
-            const auto *t = m_teams->watched();
+            const auto *t = currentTeam(m_team);
             if (const auto *member = t ? t->member(id) : nullptr) memberMenu(*t, *member, more->mapToGlobal(QPoint(0, more->height())));
         });
         bh->addWidget(more, 0, Qt::AlignTop);

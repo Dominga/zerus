@@ -118,6 +118,8 @@ private:
     bool m_dark = true, m_showBlockers = false, m_pending = false, m_dirty = false;
     int m_confirming = 0;
     void releaseHold();
+    // Releases the hold once the event loop is back at `level` (the one the menu opened from).
+    void releaseUnwound(int level);
     double m_zoom = 1.0;
     // team id -> phase -> open; at most a handful of teams, oldest dropped.
     QHash<QString, QHash<int, bool>> m_phaseOpen;

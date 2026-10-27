@@ -108,6 +108,9 @@ private:
     // and the full tooltip. `phase` holds the tasks drawn in this view (empty:
     // a team without phases).
     void graphNodes(TeamUi::TaskView *view, const Teams::Team &team, const QList<int> &order, const QSet<int> &phase);
+    // #465 N18: a graph view takes back the owner's half-made link and
+    // selected edge, and reports their changes, per team.
+    void keepGraphEdit(TeamUi::TaskView *view, const QString &team);
     QWidget *boardColumns(const Teams::Team &team, const QList<int> &ids, int phase);
     QWidget *layerRows(const Teams::Team &team, const QList<int> &ids);
     // The tasks with a problem and the tone each shows.
@@ -156,6 +159,9 @@ private:
     // renders, and Team stuck's Show on graph.
     int m_rejectPhase = 0;
     QString m_rejectText;
+    // #465 N18: per team, the task a click-to-connect started from and the
+    // selected edge (dependency, task), across re-renders.
+    QHash<QString, std::pair<int, QPair<int, int>>> m_graphEdit;
     bool m_showBlockers = false, m_rejectFocus = false, m_zoomManual = false;
     double m_zoom = 1.0;
     int m_drawerTask = 0;

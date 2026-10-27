@@ -490,23 +490,49 @@ fn apply_one(catalog: &mut Catalog, proposal: &Proposal) -> anyhow::Result<()> {
 }
 
 /// The template a goal would use: the first rule whose words all appear.
+/// N2: the prototype's routeMatch: an empty `when` never matches; "everything"
+/// or "*" always matches; otherwise any word of 3+ letters (stop words out)
+/// that appears in the goal matches.
+fn route_match(when: &str, goal_words: &BTreeSet<String>) -> bool {
+    const STOP: [&str; 16] = [
+        "the", "and", "for", "with", "any", "all", "else", "when", "use", "to", "of", "in", "on", "a", "an", "is",
+    ];
+    let lowered = when.to_lowercase();
+    let tokens: Vec<String> = lowered
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if tokens.iter().any(|token| token == "everything" || token == "*") {
+        return true;
+    }
+    tokens
+        .iter()
+        .filter(|token| token.chars().count() >= 3 && !STOP.contains(&token.as_str()))
+        .any(|token| goal_words.contains(token))
+}
+
 pub(crate) fn route(catalog: &Catalog, goal: &str) -> Value {
-    let goal = goal.to_lowercase();
+    let goal_words: BTreeSet<String> = goal
+        .to_lowercase()
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
     let mut added: Vec<String> = Vec::new();
     for rule in &catalog.routing {
-        let words: Vec<String> = rule.when.to_lowercase().split_whitespace().map(str::to_owned).collect();
-        if !words.is_empty() && words.iter().all(|w| goal.contains(w.as_str())) {
-            let use_ = if rule.use_.is_empty() { &rule.template } else { &rule.use_ };
-            if let Some(role) = use_.strip_prefix('+') {
-                // U25: a "+ role" rule adds a member and keeps searching.
-                if !added.iter().any(|found| found == role) {
-                    added.push(role.to_owned());
-                }
-                continue;
+        if !route_match(&rule.when, &goal_words) {
+            continue;
+        }
+        let use_ = if rule.use_.is_empty() { &rule.template } else { &rule.use_ };
+        if let Some(role) = use_.strip_prefix('+') {
+            if !added.iter().any(|found| found == role) {
+                added.push(role.to_owned());
             }
-            if let Some(template) = catalog.templates.iter().find(|t| t.id == *use_) {
-                return json!({"rule":rule.id,"template":template,"approval":rule.approval,"added":added});
-            }
+            continue;
+        }
+        if let Some(template) = catalog.templates.iter().find(|t| t.id == *use_) {
+            return json!({"rule":rule.id,"template":template,"approval":rule.approval,"added":added});
         }
     }
     let fallback = catalog.templates.first();
@@ -708,6 +734,25 @@ pub(crate) fn run(op: &str, input: &Value, human: bool) -> anyhow::Result<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_matches_like_the_prototype() {
+        let mut catalog = builtin();
+        catalog.routing = vec![
+            Rule { id: "review".into(), when: "review · release".into(), template: "bugfix".into(), approval: String::new(), use_: String::new() },
+            Rule { id: "all".into(), when: "everything else".into(), template: "feature".into(), approval: String::new(), use_: String::new() },
+        ];
+        validate(&catalog).unwrap();
+        // Either word of "review · release" matches; the dot is not a token.
+        assert_eq!(route(&catalog, "please review this")["template"]["id"], "bugfix");
+        assert_eq!(route(&catalog, "make a release")["template"]["id"], "bugfix");
+        // "everything else" always matches, so it is the catch-all, not the
+        // first template fallback.
+        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
+        // An empty when never matches.
+        catalog.routing[0].when.clear();
+        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
+    }
 
     #[test]
     fn the_builtin_catalog_is_valid_and_routes_bugs() {

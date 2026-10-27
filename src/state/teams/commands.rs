@@ -649,6 +649,7 @@ fn draft_start(input: &Value) -> anyhow::Result<Value> {
         caller_record().is_some(),
         nonempty_env("DSH_SESSION_ID").is_some(),
         nonempty_env("HGS_SESSION").is_some(),
+        nonempty_env("HGS_RUN_ID").is_some(),
     )?;
     let mut store = Store::open(true)?;
     let mut lead = input["lead"].clone();
@@ -676,13 +677,19 @@ fn expected_revision(op: &str, input: &Value) -> Option<u64> {
     }
 }
 
+/// U12/N4: one owner check for every path that can act as the owner. An agent
+/// session carries DSH_SESSION_ID, HGS_SESSION or HGS_RUN_ID and is refused.
+fn owner_caller(input: &Value, record: bool, dsh: bool, env: bool, run: bool) -> anyhow::Result<()> {
+    ensure!(!record && !dsh && !env && !run, "An agent session cannot act as the owner");
+    ensure!(text(input, "by") == "human", "Add \"by\":\"human\" to act as yourself");
+    Ok(())
+}
+
 /// C2: an operation before any team exists is yours: from a process outside
 /// every session, saying so.
-fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool) -> anyhow::Result<()> {
-    ensure!(!record && !dsh, "Only you start a draft team, not an agent session");
-    ensure!(!env, "Zerus could not verify the calling session");
-    ensure!(text(input, "by") == "human", "Add \"by\":\"human\" to start a draft as yourself");
-    Ok(())
+fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool, run: bool) -> anyhow::Result<()> {
+    owner_caller(input, record, dsh, env, run)
+        .context("Only you start a draft team, not an agent session")
 }
 
 fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) -> anyhow::Result<Value> {
@@ -1109,8 +1116,14 @@ fn create(input: &Value) -> anyhow::Result<Value> {
                 lead["agent"] = json!(record["agent"]);
             }
         } else {
-            ensure!(nonempty_env("HGS_SESSION").is_none(), "Zerus could not verify the calling session");
-            ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
+            owner_caller(
+                input,
+                false,
+                nonempty_env("DSH_SESSION_ID").is_some(),
+                nonempty_env("HGS_SESSION").is_some(),
+                nonempty_env("HGS_RUN_ID").is_some(),
+            )
+            .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
     let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
@@ -2355,8 +2368,20 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("A JSON object is required".into());
     }
     let result = if catalog {
-        // The designer proposes from its session; only you decide and apply.
-        let human = caller_record().is_none() && nonempty_env("HGS_SESSION").is_none() && text(&input, "by") == "human";
+        // N4: the catalog's owner path applies the same agent-session rule.
+        let human = if text(&input, "by") == "human" {
+            owner_caller(
+                &input,
+                caller_record().is_some(),
+                nonempty_env("DSH_SESSION_ID").is_some(),
+                nonempty_env("HGS_SESSION").is_some(),
+                nonempty_env("HGS_RUN_ID").is_some(),
+            )
+            .map_err(|error| error.to_string())?;
+            true
+        } else {
+            false
+        };
         super::catalog::run(&operation, &input, human)
     } else {
         run(&operation, &input, wait)
@@ -3839,11 +3864,11 @@ mod tests {
     fn only_the_owner_outside_every_session_starts_a_draft() {
         // C2: no team exists yet to prove a member by.
         let owner = json!({"by":"human"});
-        owner_without_team(&owner, false, false, false).unwrap();
-        for (record, dsh, env) in [(true, false, false), (false, true, false), (false, false, true)] {
-            assert!(owner_without_team(&owner, record, dsh, env).is_err(), "{record} {dsh} {env}");
+        owner_without_team(&owner, false, false, false, false).unwrap();
+        for (record, dsh, env, run) in [(true, false, false, false), (false, true, false, false), (false, false, true, false), (false, false, false, true)] {
+            assert!(owner_without_team(&owner, record, dsh, env, run).is_err(), "{record} {dsh} {env} {run}");
         }
-        assert!(owner_without_team(&json!({}), false, false, false).is_err());
+        assert!(owner_without_team(&json!({}), false, false, false, false).is_err());
     }
 
     #[test]

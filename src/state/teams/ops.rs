@@ -650,7 +650,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 8] = [
+pub(crate) const OWNER_SETTINGS: [&str; 10] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -659,6 +659,9 @@ pub(crate) const OWNER_SETTINGS: [&str; 8] = [
     "tree_sessions",
     "subteam_approval",
     "auto_accept",
+    // N6 (U18): the lead cannot switch off the owner's escalations.
+    "remind_owner_minutes",
+    "remind_owner_permission_minutes",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -4837,6 +4840,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("Draft numbers changed"), "{error}");
+    }
+
+    #[test]
+    fn only_the_owner_sets_the_reminder_minutes() {
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        for field in ["remind_owner_minutes", "remind_owner_permission_minutes"] {
+            let mut settings = serde_json::Map::new();
+            settings.insert(field.to_owned(), json!(0));
+            let error = apply(&mut team, "settings", &json!({"settings": Value::Object(settings)}), &Actor::Member("lead".into()), &none, &mut events)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Only you change"), "{field}: {error}");
+        }
+        apply(&mut team, "settings", &json!({"settings":{"remind_owner_minutes":0}}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.settings.remind_owner_minutes, 0);
     }
 
     #[test]

@@ -995,27 +995,33 @@ pub(crate) fn hand_off_text_with(
     if !team.goal.is_empty() {
         text += &format!("Team goal: {}\n", team.goal);
     }
+    let mut task_in_prompt = false;
     if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
         // U25: the role's prompt blocks in its order, when the catalog has one.
-        let ordered = super::catalog::load().ok().and_then(|catalog| {
+        let (ordered, has_task) = super::catalog::load().ok().and_then(|catalog| {
             let role_name = team.role_of(&attempt.member);
             let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-            super::catalog::prompt_order_text(role, prompt, Some(task), "")
-        });
+            let has_task = role.prompt_order.iter().any(|key| key == "task")
+                && !role.prompt_off.iter().any(|key| key == "task");
+            Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
+        }).unwrap_or((None, false));
+        task_in_prompt = has_task;
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
             text += &ordered;
         } else {
             text += &format!("Role: {prompt}\n");
         }
     }
-    text += &format!("\nTask #{}: {}\n", task.id, task.title);
-    if !task.description.is_empty() {
-        text += &format!("{}\n", task.description);
-    }
-    if !task.criteria.is_empty() {
-        text += "\nAcceptance criteria:\n";
-        for criterion in &task.criteria {
-            text += &format!("- {criterion}\n");
+    if !task_in_prompt {
+        text += &format!("\nTask #{}: {}\n", task.id, task.title);
+        if !task.description.is_empty() {
+            text += &format!("{}\n", task.description);
+        }
+        if !task.criteria.is_empty() {
+            text += "\nAcceptance criteria:\n";
+            for criterion in &task.criteria {
+                text += &format!("- {criterion}\n");
+            }
         }
     }
     let deps: Vec<String> = task

@@ -30,16 +30,23 @@ const ACTIVE_TEAMS: i64 = 1000;
 /// C6: whether this CLI runs in the session of the sub-team's parent lead.
 fn parent_lead_calls(store: &Store, team: &Team) -> anyhow::Result<bool> {
     let Some(link) = &team.parent else { return Ok(false) };
-    let Some(record) = caller_record() else { return Ok(false) };
-    Ok(parent_lead_proven(team, store.load(&link.team)?.as_ref(), &record))
+    let record = caller_record();
+    let dsh = nonempty_env("DSH_SESSION_ID");
+    if record.is_none() && dsh.is_none() {
+        return Ok(false);
+    }
+    Ok(parent_lead_proven(team, store.load(&link.team)?.as_ref(), record.as_ref(), dsh.as_deref()))
 }
 
-/// The caller is the parent team's lead and no member of the sub-team itself.
-fn parent_lead_proven(team: &Team, parent: Option<&Team>, record: &Value) -> bool {
+/// The caller is the parent team's lead and no member of the sub-team itself:
+/// proven by its process record, or for a dsh lead by its conversation.
+fn parent_lead_proven(team: &Team, parent: Option<&Team>, record: Option<&Value>, dsh: Option<&str>) -> bool {
     let (Some(link), Some(parent)) = (&team.parent, parent) else { return false };
-    link.team == parent.id
-        && calling_member(team, record).is_none()
-        && calling_member(parent, record).as_deref() == Some(parent.lead.as_str())
+    let (here, there) = match record {
+        Some(record) => (calling_member(team, record), calling_member(parent, record)),
+        None => (dsh_member(team, dsh.unwrap_or_default()), dsh_member(parent, dsh.unwrap_or_default())),
+    };
+    link.team == parent.id && here.is_none() && there.as_deref() == Some(parent.lead.as_str())
 }
 
 /// The member whose session runs this CLI, proven by process ancestry.
@@ -808,7 +815,8 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         "next-goal" => {
             ensure!(!goal.is_empty(), "The next-goal proposal carries its goal");
             let fresh = uuid::Uuid::new_v4().to_string();
-            next_goal_in(store, &fresh, &json!({"team":team_id,"goal":goal,"request_id":fresh}))?
+            // N2: it runs as your own next goal, not as the caller re-derived.
+            next_goal_as(store, &fresh, &json!({"team":team_id,"goal":goal,"request_id":fresh}), &Actor::Human)?
         }
         other => bail!("Unknown proposal kind {other}"),
     };
@@ -1482,6 +1490,8 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
     }
     let Ok(Some(team)) = store.load(text(input, "team")) else { return Ok(()) };
     let planned = op == "plan" && team.status == TeamStatus::Planning;
+    // C3: a draft's members bind sessions under the same checks.
+    let drafted = op == "draft" && text(input, "action") == "update" && team.status == TeamStatus::Draft;
     let joined = op == "add-member" && matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused);
     let swapped = op == "swap-member"
         && matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
@@ -1489,6 +1499,11 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
     if planned {
         if let Some(members) = filled["members"].as_array_mut() {
             adopt_members(store, &team, members)?;
+        }
+    } else if drafted {
+        // The lead keeps its own session; the others are checked.
+        for member in filled["set"]["members"].as_array_mut().into_iter().flatten().filter(|member| member["id"] != team.lead.as_str()) {
+            adopt_members(store, &team, std::slice::from_mut(member))?;
         }
     } else if joined {
         adopt_members(store, &team, std::slice::from_mut(&mut filled["member"]))?;
@@ -1924,7 +1939,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("The member has no session")?;
                 filled["text"] = json!(super::dispatcher::last_reply(&session)?);
             }
-            if matches!(op, "plan" | "add-member" | "swap-member") {
+            if matches!(op, "plan" | "add-member" | "swap-member" | "draft") {
                 // An existing session must run here and be free of another
                 // active team; its own folder replaces the planned one (F8).
                 // A retry returns here before any listing (L4).
@@ -3230,5 +3245,44 @@ mod tests {
         assert!(team.proposals[0]["decided_at"].as_f64().is_some());
         // An old proposal stored with a bare member id runs as well.
         assert_eq!(proposal_input("t", "swap-member", &json!("dev")).unwrap()["member"], "dev");
+    }
+
+    #[test]
+    fn the_parent_lead_is_proven_in_the_parent_team_by_record_or_dsh() {
+        // C6: never by a sub-team member that carries the parent lead's id.
+        let mut parent = running_team();
+        parent.id = "parent".into();
+        parent.members[0].session.as_mut().unwrap().conversation_id = "dsh-lead".into();
+        let mut child = running_team();
+        child.id = "child".into();
+        child.parent = Some(Parent { team: "parent".into(), task: 1, lead: "lead".into(), member: "dev".into() });
+        let lead = json!({"name":"claude/x/lead","run_id":"r0"});
+        let stranger = json!({"name":"claude/x/other","run_id":"r9"});
+        // The sub-team's own lead runs in the same session as the parent's in
+        // running_team(); a distinct sub-lead shows the proof.
+        child.members[0].session = Some(SessionRef { name: "claude/x/sublead".into(), run_id: "r5".into(), ..Default::default() });
+        assert!(parent_lead_proven(&child, Some(&parent), Some(&lead), None));
+        assert!(!parent_lead_proven(&child, Some(&parent), Some(&stranger), None));
+        assert!(parent_lead_proven(&child, Some(&parent), None, Some("dsh-lead")));
+        assert!(!parent_lead_proven(&child, Some(&parent), None, Some("dsh-other")));
+        assert!(!parent_lead_proven(&child, None, Some(&lead), None));
+        let mut unlinked = child.clone();
+        unlinked.parent = None;
+        assert!(!parent_lead_proven(&unlinked, Some(&parent), Some(&lead), None));
+    }
+
+    #[test]
+    fn an_accepted_next_goal_runs_as_the_owner() {
+        // N2: the decision does not re-derive its caller from the input.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut team = running_team();
+        ops::apply(&mut team, "propose", &json!({"kind":"next-goal","goal":"Ship v2","reason":"Done here"}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        team.status = TeamStatus::Done;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let receipt = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"by":"human"}), &Actor::Human).unwrap();
+        let next = receipt["result"]["team"].as_str().unwrap().to_owned();
+        assert_eq!(store.load(&next).unwrap().unwrap().goal, "Ship v2");
+        assert_eq!(store.load("t").unwrap().unwrap().next, next);
     }
 }

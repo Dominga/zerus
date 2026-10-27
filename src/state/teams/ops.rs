@@ -552,12 +552,12 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
-const OWNER_SETTINGS: [&str; 8] = [
+/// Spec 6.1 lets the lead set resume_after_limits too.
+const OWNER_SETTINGS: [&str; 7] = [
     "approval",
     "phase_approval",
     "max_members",
     "worktrees_forbidden",
-    "resume_after_limits",
     "tree_depth",
     "tree_sessions",
     "subteam_approval",
@@ -1880,8 +1880,9 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
 /// the answer as a message.
 fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you answer a member's question");
-    // C7: a forwarded sub-team question is "sub:<team id>:<question id>".
-    let question = clean(text(input, "question").trim(), 120, "A question id")?;
+    // C7: a forwarded sub-team question is "sub:<team id>:<question id>",
+    // once per level (at most 8 levels).
+    let question = clean(text(input, "question").trim(), 400, "A question id")?;
     ensure!(!question.is_empty(), "A question id is required");
     let body = clean(text(input, "text").trim(), 4000, "An answer")?;
     ensure!(!body.is_empty(), "An answer needs text");
@@ -2101,6 +2102,8 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                     "settings" => {
                         let settings: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
                         validate_settings(&settings)?;
+                        // C4: the lead drafts the rest; the owner's settings stay theirs.
+                        ensure_lead_settings(&team.settings, &settings, actor)?;
                         team.settings = settings;
                     }
                     "members" => {
@@ -5338,6 +5341,19 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.starts_with("Only you change the team's approval"), "{error}");
+        // Nor in a draft the owner creates; the lead may set the limits flag
+        // (spec 6.1).
+        let (mut draft, _) = create("d", &json!({"name":"D","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        draft.status = TeamStatus::Draft;
+        draft.draft = Some(Draft { revision: 1, ..Default::default() });
+        let mut auto = serde_json::to_value(&draft.settings).unwrap();
+        auto["approval"] = json!("auto");
+        let error = apply(&mut draft.clone(), "draft", &json!({"action":"update","revision":1,"set":{"settings":auto}}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("Only you change the team's approval"), "{error}");
+        apply(&mut team, "settings", &json!({"settings":{"resume_after_limits":true}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert!(team.settings.resume_after_limits);
     }
 
     #[test]

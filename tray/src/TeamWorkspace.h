@@ -42,18 +42,32 @@ protected:
 private:
     void scheduleRender();
     QWidget *teamBar(const Teams::Team &team, const QString &status);
-    // G5/F10: a draft waits for approval as one compact, foldable line at the
-    // top of the members column; opened, it shows its tasks and the lead's diff,
-    // and its arrows move it among the drafts (move-phase).
-    QWidget *draftPhase(const Teams::Team &team, int phase);
-    QWidget *draftDetail(const Teams::Team &team, const Teams::PhaseGroup &group);
     QWidget *finishSummary(const Teams::Team &team);
     // B5: the widening notice, and the approve that asks for the owner's
     // confirmation and sends confirm_widening.
     QWidget *wideningStrip(const Teams::Team &team);
     void approveTeam(const Teams::Team &team);
     // C2/C4: the lead's inbox and the owner's attention list.
+    // G9: the phase band header's decisions. Approve and Discard ask for the
+    // owner's confirmation and return true only when the request was sent; the
+    // F10 arrows move a draft among the drafts.
+    bool approvePhase(const Teams::Team &team, int phase);
+    bool discardPhase(const Teams::Team &team, int phase);
+    void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
+    // F8: the lead's open membership proposals with Accept and Reject; remove
+    // and swap ask for confirmation. A decision goes out once.
+    QWidget *proposalsStrip(const Teams::Team &team);
+    QSet<QString> m_decidedProposals;
+    // F7: a Done team starts the next goal with the same folder, settings,
+    // lead and members (their live sessions adopted).
+    void nextGoalDialog(const Teams::Team &team);
+    // H6: swap a member's session, agent, model or account (the lead too),
+    // confirmed; the old session keeps running and is listed for you to stop.
+    void swapDialog(const Teams::Team &team, const Teams::Member &member);
+    QWidget *swappedList(const Teams::Team &team);
+    // F7/F8: opens another team in this workspace (previous, next, a new one).
+    void openOtherTeam(const QString &team);
     QWidget *attentionStrip(const Teams::Team &team);
     QWidget *errorStrip();
     // The team as the controller currently has it, by id (a poll may have
@@ -79,10 +93,19 @@ private:
     QString m_team, m_view = QStringLiteral("graph"), m_filter = QStringLiteral("all"), m_focus;
     QString m_error;
     bool m_dark = true, m_pending = false, m_feedOpen = false, m_fit = true;
-    // G5: the two blocks of the members column fold independently, and the
-    // owner's choice survives a restart; one draft at a time opens.
-    bool m_phasesOpen = true, m_membersOpen = true;
-    int m_openDraft = 0;
+    // G9: one phase decision is in flight at a time; a second click on a header
+    // before the answer arrives sends nothing. After an answer, that phase stays
+    // decided until the team's revision moves (the store has taken the
+    // decision); a failed send lets it go. Only a sent decision marks it.
+    int m_phaseAct = 0;
+    QSet<QString> m_phasesDecided;   // "team/phase" sent at m_decidedRevision
+    qint64 m_decidedRevision = -1;
+    bool phaseDecided(const Teams::Team &team, int phase) const;
+    QString markPhaseDecided(const Teams::Team &team, int phase);
+    void phaseSent(const QString &key, bool ok, const QString &message);
+    // G5: the members block folds, and the owner's choice survives a restart.
+    // (G9 moved the draft phases into the graph's band headers.)
+    bool m_membersOpen = true;
     double m_zoom = 1.0;
     int m_drawerTask = 0;
     QHash<QString, QPoint> m_scroll;

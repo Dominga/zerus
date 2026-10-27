@@ -62,6 +62,7 @@ TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(pare
     m_card->back = [this] { m_openTask = 0; render(); };
     m_card->act = [this](const QString &operation, const QJsonObject &input) { act(operation, input); };
     m_card->openTask = [this](int task) { openTask(task); };
+    m_card->openTeam = [this](const QString &team) { m_controller->watch(team); };
     m_card->openSession = [this](const QString &host, const QString &session) { if (openSession) openSession(host, session); };
     m_card->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return confirm(name, title, text, action); };
     m_card->reassign = [this](int task, const QPoint &global) {
@@ -506,9 +507,12 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
     auto *menu = new QMenu(more);
     menu->addAction(tr("Copy team ID"), this, [id = team.id] { QGuiApplication::clipboard()->setText(id); });
     if (QStringList{"running", "paused", "planning"}.contains(team.status))
-        menu->addAction(tr("Stop…"), this, [this, name = team.name] {
-            if (confirm("teamStopConfirm", tr("Stop team?"), tr("Stop %1? Every open task is cancelled and no task is handed out again. "
-                                                                 "Member sessions keep running; their current turns finish.").arg(name), tr("Stop team")))
+        menu->addAction(tr("Stop…"), this, [this, team] {
+            const auto impact = subtreeImpact(team, m_controller->teams());
+            QString text = tr("Stop %1? Every open task is cancelled and no task is handed out again. "
+                              "Member sessions keep running; their current turns finish.").arg(team.name);
+            if (impact.first > 0) text += tr(" It stops %1 sub-teams and affects %2 member sessions in them.").arg(impact.first).arg(impact.second);
+            if (confirm("teamStopConfirm", tr("Stop team?"), text, tr("Stop team")))
                 act("stop", {});
         });
     more->setMenu(menu);
@@ -540,7 +544,14 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
     if (team.status == "running") {
         auto *pause = button(tr("Pause"), "teamPause");
         pause->setToolTip(tr("Running turns finish; nothing new is handed out"));
-        QObject::connect(pause, &QPushButton::clicked, this, [this] { act("pause", {}); });
+        QObject::connect(pause, &QPushButton::clicked, this, [this, team] {
+            const auto impact = subtreeImpact(team, m_controller->teams());
+            if (impact.first > 0 && !confirm("teamPauseTreeConfirm", tr("Pause the team tree?"),
+                    tr("Pause %1? It also pauses %2 sub-teams and %3 member sessions in them.").arg(team.name).arg(impact.first).arg(impact.second),
+                    tr("Pause")))
+                return;
+            act("pause", {});
+        });
         actions->addWidget(pause);
     } else if (team.status == "paused") {
         auto *resume = button(tr("Resume"), "teamResume", true);
@@ -549,9 +560,12 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
     }
     if (team.status == "running" || team.status == "paused") {
         auto *stop = button(tr("Stop…"), "teamStop");
-        QObject::connect(stop, &QPushButton::clicked, this, [this, name = team.name] {
-            if (confirm("teamStopConfirm", tr("Stop team?"), tr("Stop %1? Every open task is cancelled and no task is handed out again. "
-                                                                 "Member sessions keep running; their current turns finish.").arg(name), tr("Stop team")))
+        QObject::connect(stop, &QPushButton::clicked, this, [this, team] {
+            const auto impact = subtreeImpact(team, m_controller->teams());
+            QString text = tr("Stop %1? Every open task is cancelled and no task is handed out again. "
+                              "Member sessions keep running; their current turns finish.").arg(team.name);
+            if (impact.first > 0) text += tr(" It stops %1 sub-teams and affects %2 member sessions in them.").arg(impact.first).arg(impact.second);
+            if (confirm("teamStopConfirm", tr("Stop team?"), text, tr("Stop team")))
                 act("stop", {});
         });
         actions->addWidget(stop);
@@ -882,7 +896,14 @@ void TeamPanel::reassignMenu(const Team &team, int taskId, const QPoint &global)
         if (member.id == task->assignee) continue;
         const auto status = memberStatus(team, member, m_live ? m_live(member) : Live{});
         auto *action = menu.addAction(QStringLiteral("%1 · %2 — %3").arg(team.roleOf(member.id), member.model.isEmpty() ? member.agent : member.model, status.text));
-        QObject::connect(action, &QAction::triggered, this, [this, taskId, id = member.id] { act("reassign", {{"task", taskId}, {"member", id}}); });
+        QObject::connect(action, &QAction::triggered, this, [this, team, taskId, id = member.id] {
+            const auto choice = subteamChoice(this, team, taskId, tr("Reassign"));
+            if (choice.isEmpty()) return;
+            QJsonObject input{{"task", taskId}, {"member", id}};
+            const auto *delegated = team.task(taskId);
+            if (delegated && delegated->subteam.known) input["subteam"] = choice;
+            act("reassign", input);
+        });
     }
     if (menu.isEmpty()) menu.addAction(tr("No other member"))->setEnabled(false);
     menu.exec(global);

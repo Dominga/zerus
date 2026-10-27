@@ -46,6 +46,76 @@ impl Default for Policy {
 pub(super) fn policy_path() -> PathBuf {
     root().join("recovery/policy.json")
 }
+/// H1: sessions a team asked the recovery service to resume after a limit.
+fn team_path() -> PathBuf {
+    root().join("recovery/team.json")
+}
+/// A team refreshes its request; an old one from a stopped worker expires.
+const TEAM_OVERRIDE_SECONDS: f64 = 900.0;
+fn team_overrides() -> std::collections::BTreeMap<String, Value> {
+    let Ok(value) = read_json(&team_path()) else { return Default::default() };
+    value["items"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, item)| now() - item["at"].as_f64().unwrap_or(0.0) < TEAM_OVERRIDE_SECONDS)
+        .map(|(name, item)| (name.clone(), item.clone()))
+        .collect()
+}
+fn override_for(overrides: &std::collections::BTreeMap<String, Value>, snapshot: &Value) -> bool {
+    overrides
+        .get(string(snapshot, "name"))
+        .is_some_and(|item| item["run_id"].as_str().unwrap_or_default() == string(snapshot, "run_id"))
+}
+/// H1: the team dispatcher names a member's session whose reset it wants the
+/// recovery service to wait for; `on: false` stops that. The request is
+/// refreshed at most once a minute and expires when the dispatcher stops.
+pub(super) fn set_team_override(name: &str, run_id: &str, on: bool) -> Result<()> {
+    let mut items: serde_json::Map<String, Value> =
+        read_json(&team_path()).ok().and_then(|value| value["items"].as_object().cloned()).unwrap_or_default();
+    if on {
+        let stale = items.get(name).is_none_or(|item| {
+            item["run_id"].as_str().unwrap_or_default() != run_id || now() - item["at"].as_f64().unwrap_or(0.0) >= 60.0
+        });
+        if stale {
+            items.insert(name.to_owned(), json!({"run_id":run_id,"at":now()}));
+        }
+        while items.len() > 200 {
+            let Some(oldest) = items
+                .iter()
+                .min_by(|a, b| a.1["at"].as_f64().unwrap_or(0.0).total_cmp(&b.1["at"].as_f64().unwrap_or(0.0)))
+                .map(|(name, _)| name.clone())
+            else {
+                break;
+            };
+            items.remove(&oldest);
+        }
+    } else {
+        items.remove(name);
+    }
+    atomic(&team_path(), &json!({"items":items}).to_string())?;
+    Ok(())
+}
+/// H1: the shared policy with a team's reset request applied: only the
+/// session-limit class, waiting for the reset, even when the shared policy is
+/// off.
+fn effective_policy(p: &Policy, requested: bool) -> Policy {
+    if !requested {
+        return p.clone();
+    }
+    let mut q = p.clone();
+    q.enabled = true;
+    q.session_limit = true;
+    q.session_limit_mode = "reset".into();
+    if !p.enabled {
+        q.service = false;
+        q.rate_limit = false;
+        q.network = false;
+        // An old enabled_at from a previous policy must not hide this episode.
+        q.enabled_at = 0.0;
+    }
+    q
+}
 fn read_json(path: &Path) -> Result<Value> {
     serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
@@ -596,6 +666,7 @@ pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
     let job = load_job(string(record, "name"));
     let p = policy()?;
     let s = journal::summary(record, true);
+    let p = effective_policy(&p, override_for(&team_overrides(), &s));
     if job["id"] != id
         || job["state"] != "dispatching"
         || job["identity"] != identity(&s)
@@ -611,10 +682,11 @@ pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
 
 pub(super) fn check_native_submission(snapshot: &Value) -> Result<()> {
     let job = load_job(string(snapshot, "name"));
+    let p = effective_policy(&policy()?, override_for(&team_overrides(), snapshot));
     if job["state"] != "dispatching"
         || job["identity"] != identity(snapshot)
         || !same_failure(&job, snapshot)
-        || !enabled(&policy()?, class(&snapshot["provider_error"]))
+        || !enabled(&p, class(&snapshot["provider_error"]))
     {
         return Err("Native recovery was cancelled or changed".into());
     }
@@ -652,11 +724,9 @@ fn tick() -> Result<()> {
     let mut sends = Vec::new();
     // Native inspection can wait on an agent. Never hold the global write lock
     // while collecting observations; delivery revalidates the exact failure.
-    let snapshots = if policy()?.enabled {
-        observe()?
-    } else {
-        vec![]
-    };
+    let overrides = team_overrides();
+    let observing = policy()?.enabled || !overrides.is_empty();
+    let snapshots = if observing { observe()? } else { vec![] };
     let mut dismisses = Vec::new();
     {
         let _guard = lock(None)?;
@@ -669,7 +739,7 @@ fn tick() -> Result<()> {
                 &json!({"at":now(),"enabled":p.enabled}).to_string(),
             )?;
         }
-        if !p.enabled {
+        if !p.enabled && overrides.is_empty() {
             return Ok(());
         }
         let mut occupied = std::collections::BTreeSet::new();
@@ -680,8 +750,15 @@ fn tick() -> Result<()> {
             }
         }
         for s in snapshots {
+            // H1: a team's request only wakes the session-limit class for this
+            // session; everything else follows the shared policy.
+            let requested = override_for(&overrides, &s);
+            if !p.enabled && !requested {
+                continue;
+            }
+            let effective = effective_policy(&p, requested);
             let old = load_job(string(&s, "name"));
-            let mut job = advance(old.clone(), &s, &p, now());
+            let mut job = advance(old.clone(), &s, &effective, now());
             if job.is_null() {
                 if old.is_object() {
                     atomic(
@@ -1602,5 +1679,32 @@ mod tests {
         let fresh = advance(job.clone(), &s, &on(), 51.0);
         assert_ne!(fresh["id"], job["id"]);
         assert_eq!(fresh["attempt"], 0);
+    }
+
+    #[test]
+    fn a_teams_request_resumes_only_the_session_limit_class_without_the_shared_policy() {
+        let off = Policy::default();
+        assert!(!off.enabled);
+        // H1: the team setting turns on the session-limit wait for one episode
+        // even when the shared policy is off; the other classes stay off.
+        let requested = effective_policy(&off, true);
+        assert!(requested.enabled && requested.session_limit);
+        assert!(!requested.service && !requested.rate_limit && !requested.network);
+        assert_eq!(requested.session_limit_mode, "reset");
+        assert_eq!(requested.enabled_at, 0.0);
+        // Without a request the shared policy decides.
+        assert!(!effective_policy(&off, false).enabled);
+        // When the shared policy is on, only the limit class changes: it waits
+        // for the reset even if the policy retried on an interval.
+        let on = Policy { enabled: true, session_limit_mode: "interval".into(), ..Default::default() };
+        let requested = effective_policy(&on, true);
+        assert!(requested.session_limit && requested.session_limit_mode == "reset");
+        assert!(requested.service && requested.rate_limit && requested.network);
+        // A request names a session and its run: a rebuilt session is not it.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("claude/x/dev".to_owned(), json!({"run_id":"r2","at":now()}));
+        assert!(override_for(&overrides, &json!({"name":"claude/x/dev","run_id":"r2"})));
+        assert!(!override_for(&overrides, &json!({"name":"claude/x/dev","run_id":"r1"})));
+        assert!(!override_for(&overrides, &json!({"name":"claude/x/other","run_id":"r2"})));
     }
 }

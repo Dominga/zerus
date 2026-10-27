@@ -100,10 +100,40 @@ pub(crate) struct Settings {
     /// the shared or their own existing folder only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worktrees_forbidden: bool,
+    /// H1: resume a member's session after a usage-limit reset, even when the
+    /// shared automatic-recovery policy is off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resume_after_limits: bool,
+    /// Hierarchy (section 9.2), set on the master team: how deep sub-teams may
+    /// go below it and how many sessions the whole tree may run.
+    #[serde(default = "default_tree_depth", skip_serializing_if = "tree_depth_is_default")]
+    pub tree_depth: u32,
+    #[serde(default = "default_tree_sessions", skip_serializing_if = "tree_sessions_is_default")]
+    pub tree_sessions: u32,
+    /// Who approves a sub-team's plan and phases (section 9.3).
+    #[serde(default, skip_serializing_if = "subteam_approval_is_default")]
+    pub subteam_approval: SubteamApproval,
 }
 
 fn default_max_members() -> usize {
     6
+}
+/// Section 9.2: two levels of sub-teams below the master, and sixteen active
+/// sessions in the whole tree.
+fn default_tree_depth() -> u32 {
+    2
+}
+fn default_tree_sessions() -> u32 {
+    16
+}
+fn tree_depth_is_default(depth: &u32) -> bool {
+    *depth == default_tree_depth()
+}
+fn tree_sessions_is_default(sessions: &u32) -> bool {
+    *sessions == default_tree_sessions()
+}
+fn subteam_approval_is_default(approval: &SubteamApproval) -> bool {
+    *approval == SubteamApproval::Parent
 }
 fn default_report_timeout() -> u64 {
     120
@@ -146,6 +176,10 @@ impl Default for Settings {
             remind_owner_minutes: default_remind_owner(),
             background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
+            resume_after_limits: false,
+            tree_depth: default_tree_depth(),
+            tree_sessions: default_tree_sessions(),
+            subteam_approval: SubteamApproval::default(),
         }
     }
 }
@@ -280,6 +314,15 @@ pub(crate) struct Member {
     /// command, where it came from and the agent's reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<serde_json::Value>,
+    /// H1: the member's session is stopped by a usage limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limited: Option<MemberLimit>,
+    /// H1: Zerus asked the recovery service to wait for this member's reset.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub limit_resume: bool,
+    /// H6: a swapped member's new session starts even before its next task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub launch_after_swap: bool,
 }
 
 /// One commit Zerus made for an attempt (B4).
@@ -336,6 +379,53 @@ pub(crate) struct MemberService {
     pub command: String,
     #[serde(default)]
     pub since: f64,
+}
+
+/// What a sub-team's plan and phases wait for (section 9.3): the parent lead
+/// by default, or the owner.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SubteamApproval {
+    #[default]
+    Parent,
+    Owner,
+}
+
+/// The team and task a sub-team was delegated from (section 9.1).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Parent {
+    pub team: String,
+    pub task: u32,
+    /// The parent team's lead, who approves this sub-team's plan by default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lead: String,
+    /// The assignee whose session became the sub-team's lead.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+}
+
+/// A member's session stopped by a usage limit (H1); `resets_at` is present
+/// only when the session reports a reset time.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberLimit {
+    pub at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<f64>,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// What a swapped member's next attempt needs to continue the work (H6): the
+/// previous attempt, when it began, its partial report and its open questions.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Continuation {
+    pub attempt: String,
+    pub n: u32,
+    pub since: f64,
+    #[serde(default)]
+    pub report: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<String>,
 }
 
 /// A member's pending native question as Zerus read it (C2): the lead answers
@@ -627,6 +717,10 @@ pub(crate) struct Question {
     pub notice: Notice,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notice_id: String,
+    /// Section 9.6: the parent question this one was escalated as; the
+    /// parent's answer is copied back here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub forwarded: String,
 }
 
 impl Question {
@@ -767,6 +861,14 @@ pub(crate) struct Task {
     /// D2: the finding text a reopened task hands out with its next attempt.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reopen_note: String,
+    /// H6: the hand-out after a swap carries the previous attempt's partial
+    /// report and open questions; cleared once the new attempt is delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Continuation>,
+    /// Section 9.4: the sub-team delegated from this task; its status is
+    /// derived for `hgs team status`, not stored here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subteam: Option<String>,
 }
 
 impl Task {
@@ -836,6 +938,10 @@ pub(crate) struct Phase {
     /// and its tasks are handed out before other pending ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub urgent: bool,
+    /// Section 9.5: why a "Rework" draft was opened after the parent lead
+    /// rejected the sub-team's report.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 impl Phase {
@@ -931,6 +1037,17 @@ pub(crate) struct Team {
     /// lead with the planning brief.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lead_protocol: String,
+    /// H6: the sessions members were swapped away from, oldest first, at most
+    /// 20: {member, old, at, by}. The old session keeps running for the owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub swapped: Vec<serde_json::Value>,
+    /// Section 9.1: the parent team and task this sub-team was delegated
+    /// from; absent on a master (or any flat) team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Parent>,
+    /// Section 9.1: the sub-teams delegated from this team, at most 32.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
 }
 
 impl Team {
@@ -984,8 +1101,65 @@ mod tests {
         assert!(value["tasks"].as_array().unwrap().iter().all(|task| task["phase"] == json!(1) && task.get("pinned").is_none()));
         assert_eq!(value["settings"]["approval"], "auto");
         assert_eq!(value["tasks"][1]["deps"][0], json!({"task":1,"kind":"hard"}));
+        // H1/H6: the new optional fields stay out of an old team's file.
+        assert!(value["settings"].get("resume_after_limits").is_none());
+        assert!(value.get("swapped").is_none());
+        // Section 9: a flat team has no parent, no children and the default
+        // tree settings are not written.
+        assert!(value.get("parent").is_none() && value.get("children").is_none());
+        assert_eq!((team.settings.tree_depth, team.settings.tree_sessions), (2, 16));
+        assert_eq!(team.settings.subteam_approval, SubteamApproval::Parent);
+        assert!(value["settings"].get("tree_depth").is_none() && value["settings"].get("tree_sessions").is_none());
+        assert!(value["settings"].get("subteam_approval").is_none());
         let back: Team = serde_json::from_value(value).unwrap();
         assert_eq!(back, team);
+    }
+
+    #[test]
+    fn a_subteam_link_and_children_round_trip() {
+        let mut team: Team = serde_json::from_value(old_team()).unwrap();
+        team.parent = Some(Parent { team: "master".into(), task: 3, lead: "lead".into(), member: "dev".into() });
+        team.children = vec!["sub1".into(), "sub2".into()];
+        team.tasks[0].subteam = Some("sub1".into());
+        let value = serde_json::to_value(&team).unwrap();
+        assert_eq!(value["parent"]["team"], "master");
+        assert_eq!(value["parent"]["task"], 3);
+        assert_eq!(value["children"], json!(["sub1","sub2"]));
+        assert_eq!(value["tasks"][0]["subteam"], "sub1");
+        let back: Team = serde_json::from_value(value).unwrap();
+        assert_eq!(back, team);
+        // Settings beyond the defaults are written, and a changed approval.
+        team.settings.tree_depth = 3;
+        team.settings.tree_sessions = 24;
+        team.settings.subteam_approval = SubteamApproval::Owner;
+        let value = serde_json::to_value(&team).unwrap();
+        assert_eq!(value["settings"]["tree_depth"], 3);
+        assert_eq!(value["settings"]["tree_sessions"], 24);
+        assert_eq!(value["settings"]["subteam_approval"], "owner");
+    }
+
+    #[test]
+    fn the_limit_setting_and_member_episode_round_trip() {
+        let mut team: Team = serde_json::from_value(old_team()).unwrap();
+        assert!(!team.settings.resume_after_limits);
+        team.settings.resume_after_limits = true;
+        team.members[0].limited = Some(MemberLimit {
+            at: 100.0,
+            resets_at: Some(200.0),
+            detail: "You've hit your session limit".into(),
+        });
+        team.members[0].limit_resume = true;
+        let value = serde_json::to_value(&team).unwrap();
+        assert_eq!(value["settings"]["resume_after_limits"], true);
+        assert_eq!(value["members"][0]["limited"]["resets_at"], 200.0);
+        let back: Team = serde_json::from_value(value).unwrap();
+        assert!(back.settings.resume_after_limits && back.members[0].limit_resume);
+        assert_eq!(back.members[0].limited.as_ref().and_then(|limit| limit.resets_at), Some(200.0));
+        // An unknown reset time is optional.
+        let limit: MemberLimit = serde_json::from_value(json!({"at":10.0})).unwrap();
+        assert_eq!((limit.resets_at, limit.detail.as_str()), (None, ""));
+        // H6: a task's continuation is optional.
+        assert!(team.tasks.iter().all(|task| task.continuation.is_none()));
     }
 
     fn phased_team() -> Team {

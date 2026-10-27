@@ -682,6 +682,168 @@ answered; a denial cannot carry an explanation.
   its lead. Agents that cannot be asked are marked, never blocked.
   Owner: yes, in the fixes phase.
 
+- **U20. Sandboxed members can report and ask (seen 2026-10-27).** A DeepSeek
+  member's hgs team report/ask failed with 'attempt to write a readonly
+  database'; its report stayed a chat message and A2 did not capture it, so the
+  task stood for two hours. Owner: yes, in the fixes phase.
+
+- **U21. Command templates instead of escalations (owner, 2026-10-27).** 133
+  sandbox escalations in 6 hours: 124 routine (46 git commit/merge, 78 Qt
+  build/test), 9 needing judgment (all 5 denials). A built-in template set,
+  shipped with Zerus and on for every team (no approval per plan; a global
+  switch turns it off, projects may add templates): typed, allowlisted
+  arguments, run by Zerus outside the sandbox in the member's folder (hgs team
+  run); clones for DeepSeek members remove the git escalations. Expected: about
+  9 requests instead of 133. No automatic approval of native prompts.
+  Owner: yes, in the fixes phase.
+
+- **U22. DeepSeek session-log upload (found 2026-10-27).** 18 of 21 dsh sessions
+  upload their transcripts to DeepSeek (session-log-deepseek). Settings >
+  Sessions 'Block DeepSeek session-log upload', on by default: Zerus starts its
+  dsh sessions with it off, verifies it and marks a session that still
+  uploads. Owner: yes, in the fixes phase.
+
+- **U23. Stop the trial-and-error loops (owner, 2026-10-27).** DeepSeek flash
+  members spent hours in build-run-edit cycles (QA on #356 fixed its tests
+  around a bug in its own widget code; frontend on #343 ran out of context), and
+  the lead approved each cycle without seeing that the task stood still.
+  (1) Loop detection: Zerus notices the same failing test or the same build
+  error across N runs (template runs or escalations) of one attempt and tells
+  the lead once with the repeated failure, so the lead looks at the cause or
+  hands the task to the Expert (U13). (2) Role guard: plan validation warns
+  when a QA or Reviewer member gets an implementation task, and when one member
+  both implements a task and reviews or tests it; the lead's reassign shows
+  the same warning. (3) Model routing: the designer and the lead protocol give
+  GUI work and hard debugging to stronger models and keep the light DeepSeek
+  model for well-specified backend work; templates carry that default.
+  Owner: yes.
+
+- **U24. A starved notice only when the lead can act (owner, 2026-10-27).** The
+  'no ready task for 20 min' message kept arriving for members who had nothing
+  they could take: every open task was assigned to another member (the Expert)
+  or waited for it, and the lead had already said there was no work for them.
+  Send it only when the lead can do something: a ready or pending task of the
+  member's role is held by a busy member and could be reassigned, or the plan
+  has no task the member can ever get (suggest finishing or removing it). Once
+  per member and episode, not per 20 minutes; the lead may mute it for a member
+  ('expected idle until #N'). U9 stays for drafts. Owner: yes.
+
+- **U25. New UI from the owner's design (owner, 2026-10-27).** The designer's
+  clickable prototype and its spec are the source of truth for look and
+  behaviour: `D:\Tools\Zerus-UI-handoff\Zerus-prototype.html`
+  (opens offline; the Prototype button switches Running / Stuck / Done /
+  Planning and the theme) and `SPEC.md` with 52 screenshots in `shots` (sections 0-14, with an
+  acceptance checklist in 13; screenshots follow). UI strings are English,
+  exactly as in the prototype; colours and sizes go into the skin tokens, never
+  hard-coded. Pieces:
+  (1) Skin: the prototype's tokens in both themes, the new role colours
+  (secretary, coder, qa, designer, leadgpt, expert, proexpert; a role's colour
+  comes from the catalog), thin 8 px scroll bars, the real gear and bell-off
+  icons, one collapsible block pattern remembered in QSettings, and the
+  'agent works' dots under the model icon (static when animations are off).
+  (2) Session list: '+' per project, git / background / services chips with
+  counts in row 2 (the old cloud goes), team members muted by default with
+  bell-off and a grey edge, the lead's team strip without the name, the
+  member tree with its lines (spec 2).
+  (3) The lead's session header carries the team status, phase/tasks/phases
+  progress, time and the team actions; the Team tab's name bar goes. The
+  composer row has three zones (spec 3, 4).
+  (4) Team tab: phase scrolls in Graph, Board and Layers with Accept /
+  Reject (with a comment the lead reworks) / Undo / Auto-accept drafts; the
+  right column's Needs your answer, Team stuck and Plan problems collapsed by
+  default; Members as a tree with collapsed task lists (spec 5.1-5.3, 5.5,
+  5.7). The server adds the phase states rejected and queued, the owner's
+  send-back comment, Undo and the team's auto-accept of error-free drafts.
+  (5) Graph: two-line nodes without a status word, the working indicator at
+  the agent, orthogonal edge routing around nodes with corridors, edge editing
+  in planning and drafts (spec 5.4).
+  (6) Inspector: one column of collapsible cards instead of tabs (spec 6).
+  (7) Projects, Machines (editable connection form with Discard, Refresh,
+  Phones), Agent accounts (machine filter, signed in/out) (spec 7-9).
+  (8) New session dialog 'B - Dense, labels left' (spec 10).
+  (9) Team designer and an editable catalog: roles with prompt order,
+  templates with roster counts and 'only if needed', routing with Try it,
+  Save / Revert, the same widget in Settings > Teams; the catalog model of
+  spec 12 on the server (spec 11, 12).
+  (10) A sub-lead inside a team (spec 5.6): `members[].parent` and `sub`; a
+  sub-lead hands out, reviews and accepts its reports' tasks, the lead reviews
+  only its direct reports. Sub-teams (Hierarchy, Prompt 2) stay for whole
+  delegated tasks. In phase 36 with the review fixes. Owner: yes.
+
+- **U26. Team roster changes only on the owner's explicit word (owner,
+  2026-10-27).** The owner asked the lead to put frontend on Opus and add a
+  backend and an Expert; swap-member, remove-member and max_members are
+  owner-only, so the lead had to hand the owner a script. As F13 and U14 do:
+  `add-member`, `swap-member`, `remove-member` and a `settings` change of
+  `max_members` from the lead's own session are accepted only with
+  `"owner_word": {"text"}` when the owner typed that request in the lead's
+  session within 30 minutes, and only for what the sentence names (one
+  verified word covers the changes of that one request). Without the word the
+  lead proposes (F8) and changes nothing; add-member, which the lead may run
+  today, needs the word too. The event and status say "Changed by Lead on your
+  word" with the quote. Owner: yes.
+
+- **U27. Visual lanes for a readable plan (owner, 2026-10-27).** The plan's
+  layers come only from dependencies, so a phase without many dependencies is
+  one endless first layer; the lead added soft dependencies just to make the
+  graph readable. A task gets an optional `lane` (a number with an optional
+  label, such as "Checkpoint 1") that the lead or the owner sets in the plan
+  and in drafts; Graph, Board and Layers group a phase's tasks into its lanes,
+  in order, each lane a labelled row that can collapse (lanes without a value
+  fall back to the dependency layer). Lanes never change hand-out: only
+  dependencies, phases and barriers do. Status and the desktop show and edit
+  them (drag a task to another lane, rename a lane). Owner: yes.
+
+- **U28. Planning rules for the lead (owner, 2026-10-27).** The built-in lead
+  protocol gives the lead these rules for every plan; the designer and the
+  plan health refer to them.
+  Phases: (1) at most 20-25 tasks per phase, each ending with an
+  install-ready build and NOTES.md; more work is split into phases.
+  (2) Checkpoints (merge, then review and QA, in their own lanes) on demand:
+  sometimes after one lane, sometimes after two or three. (3) Choose them by
+  efficiency: batch the check when that is cheaper, check riskier work in
+  smaller pieces. (4) Checkpoint findings go back to the same member before
+  the integration; final review findings go to the next phase. (5) An
+  approved plan is not reshaped; new work goes to the next phase's draft.
+  Dependencies: (6) a hard dependency only where a task really cannot start
+  earlier; one inside a lane splits it, so move that task to the next lane.
+  (7) No dependencies on tasks of an earlier phase: the barrier waits for it.
+  (8) Shared foundations first (the skin, a server model), at the start of
+  the first lane, for a strong member.
+  Load and models: (9) balance every lane, not only the phase, by size as
+  well as count. (10) GUI, hard logic and debugging go to strong models
+  (Opus, Codex); well-specified server work and small fixes to DeepSeek.
+  (11) Split a heavy task into its server and desktop parts. (12) QA never
+  implements tasks; the reviewer never writes code it will review. (13) The
+  Expert and ProExpert stay in reserve with no tasks: the Expert takes a task
+  returned three times for a model weakness (not a small fix), the ProExpert
+  only when the Expert fails; an expert's context is compacted after its work
+  is accepted. (14) Before planning, ask the owner how to spread the members
+  over accounts. (15) The lead plans only merges, integration and builds for
+  itself, and runs no long background work in its session (its inbox waits
+  meanwhile), except fixing critical findings at the end before the build.
+  Task text: (16) self-contained: the plan item code, the paths of the spec,
+  prototype and screenshots, what to change and the acceptance criteria.
+  (17) Tests through the real entry point (the CLI or the dispatcher) that
+  fail before the fix. (18) The checks named, with totals in the report,
+  against the Rust baseline and the known flaky tests. (19) Folders follow the
+  agent and the need: DeepSeek members work best in a clone; sometimes all
+  members share one folder or one memory. The lead plans it first, then asks
+  the owner explicitly how it should work and explains why it chose that.
+  (20) Builds and tests of DeepSeek members run through the built-in command
+  templates or scripts in their own folder, not dozens of one-off
+  permissions.
+  Before sending the plan: (21) plan health: no errors, a sensible critical
+  path, parallelism near the number of implementers, every lane balanced,
+  every warning explained. (22) Offer a phase split above 25 tasks. (23) No
+  starved notices before a phase is approved; a member's idleness is reported
+  only when the lead can act. (24) The roster and the member limit change
+  only on the owner's explicit word (U26); otherwise the lead proposes.
+  The rules live in the team catalog, versioned like roles and templates:
+  the built-in text is the default, the owner edits it by hand and the
+  designer agent proposes changes that the owner keeps or rejects. The Team
+  designer shows them in their own tab, Planning rules. Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

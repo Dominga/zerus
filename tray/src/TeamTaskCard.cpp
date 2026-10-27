@@ -2,15 +2,38 @@
 #include "TeamWidgets.h"
 #include <QCheckBox>
 #include <QCursor>
+#include <QDesktopServices>
+#include <QFile>
+#include <QFileInfo>
 #include <QGraphicsOpacityEffect>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QJsonObject>
 #include <QLineEdit>
+#include <QPixmap>
+#include <QTextBrowser>
 #include <QTimer>
 #include <QMenu>
 #include <QPlainTextEdit>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
+
+// D1: evidence may be previewed only inside the team's folder, a member's
+// folder or settings.evidence_folders.
+static bool insideRoots(const QString &path, const QStringList &roots)
+{
+    const auto target = QFileInfo(path).canonicalFilePath();
+    if (target.isEmpty()) return false;
+    for (const auto &root : roots) {
+        const auto base = QFileInfo(root).canonicalFilePath();
+        if (!base.isEmpty() && (target == base || target.startsWith(base + QLatin1Char('/')))) return true;
+    }
+    return false;
+}
 
 using namespace TeamUi;
 
@@ -91,6 +114,38 @@ void TeamTaskCard::rebuild()
     meta->addWidget(new Pill(role, roleColor(role, m_dark)));
     meta->addStretch();
     v->addLayout(meta);
+    // G1: the sub-team delegated from this task, or the action that makes one.
+    if (task->subteam.known && !task->subteam.team.isEmpty()) {
+        auto *box = new QWidget; box->setObjectName("teamTaskSubteam");
+        auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 4, 0, 2); h->setSpacing(8);
+        const QString statusText = tr("Sub-team \u00b7 %1 \u00b7 %2/%3")
+                                       .arg(task->subteam.status.isEmpty() ? tr("open") : task->subteam.status)
+                                       .arg(task->subteam.done).arg(task->subteam.total);
+        h->addWidget(new Pill(statusText, c.accent));
+        auto *open = new QPushButton(tr("Open sub-team"));
+        open->setObjectName("teamTaskOpenSubteam"); open->setFlat(true); open->setCursor(Qt::PointingHandCursor);
+        QObject::connect(open, &QPushButton::clicked, this, [this, id = task->subteam.team] { if (openTeam) openTeam(id); });
+        h->addWidget(open);
+        h->addStretch();
+        v->addWidget(box);
+    } else if (m_team.status == "running" || m_team.status == "paused") {
+        auto *box = new QWidget; box->setObjectName("teamTaskDelegateBox");
+        auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 4, 0, 2); h->setSpacing(8);
+        auto *delegate = new QPushButton(tr("Delegate to a sub-team\u2026"));
+        delegate->setObjectName("teamTaskDelegate"); delegate->setFlat(true); delegate->setCursor(Qt::PointingHandCursor);
+        QObject::connect(delegate, &QPushButton::clicked, this, [this, id = task->id] {
+            if (!confirm || !confirm("teamDelegateConfirm", tr("Delegate to a sub-team"),
+                                     tr("Create a sub-team from task #%1? Its lead will be the assignee.").arg(id), tr("Delegate")))
+                return;
+            bool ok = false;
+            const auto name = QInputDialog::getText(this, tr("Delegate to a sub-team"), tr("Sub-team name"), QLineEdit::Normal, {}, &ok);
+            if (!ok || name.trimmed().isEmpty() || !act) return;
+            act("create", QJsonObject{{"name", name.trimmed()}, {"parent", QJsonObject{{"team", m_team.id}, {"task", id}}}});
+        });
+        h->addWidget(delegate);
+        h->addStretch();
+        v->addWidget(box);
+    }
     // The problem and what can be done.
     if (problem && assignee) {
         auto *banner = card(c, problem && tone == c.warn ? c.warn : c.danger);
@@ -347,7 +402,7 @@ void TeamTaskCard::rebuild()
     // The newest report.
     for (int i = task->attempts.size() - 1; i >= 0; --i) {
         const auto &a = task->attempts[i];
-        if (a.report.isEmpty()) continue;
+        if (a.report.isEmpty() && !a.structured.present) continue;
         section(tr("Report"));
         auto *box = new QFrame; box->setObjectName("teamTaskReport");
         box->setStyleSheet(QStringLiteral("QFrame#teamTaskReport{background:%1;border-left:3px solid %2;border-radius:6px;}")
@@ -356,6 +411,89 @@ void TeamTaskCard::rebuild()
         auto *text = label(a.report, c.fg, 12); text->setWordWrap(true); text->setTextInteractionFlags(Qt::TextSelectableByMouse);
         text->setObjectName("teamReportText");
         b->addWidget(text);
+        // D1: the structured report: summary and commit, criteria, evidence
+        // with safe previews, and what was not checked.
+        if (a.structured.present) {
+            QStringList roots;
+            if (!m_team.folder.isEmpty()) roots << m_team.folder;
+            for (const auto &member : m_team.members) if (!member.directory.isEmpty()) roots << member.directory;
+            roots << m_team.evidenceFolders;
+            if (!a.structured.summary.isEmpty()) {
+                auto *summary = label(a.structured.summary, c.fg, 12, true, "teamReportSummary");
+                summary->setWordWrap(true); b->addWidget(summary);
+            }
+            if (!a.structured.commit.isEmpty())
+                b->addWidget(label(tr("Commit: %1").arg(a.structured.commit), c.muted, 11, false, "teamReportCommit"));
+            if (!a.structured.criteria.isEmpty()) {
+                auto *grid = new QWidget; grid->setObjectName("teamReportCriteria");
+                auto *g = new QGridLayout(grid); g->setContentsMargins(0, 6, 0, 0); g->setHorizontalSpacing(10);
+                int row = 0;
+                for (const auto &criterion : a.structured.criteria) {
+                    g->addWidget(label(QStringLiteral("#%1").arg(criterion.n), c.text3, 11), row, 0);
+                    g->addWidget(label(criterion.result, c.fg, 11, true), row, 1);
+                    auto *note = label(criterion.note, c.text2, 11); note->setWordWrap(true);
+                    g->addWidget(note, row, 2);
+                    if (!criterion.evidence.isEmpty()) {
+                        QStringList refs;
+                        for (int index : criterion.evidence)
+                            if (index >= 0 && index < a.structured.evidence.size())
+                                refs << tr("evidence %1").arg(index + 1);
+                        g->addWidget(label(refs.join(QStringLiteral(", ")), c.muted, 10), row, 3);
+                    }
+                    ++row;
+                }
+                g->setColumnStretch(2, 1);
+                b->addWidget(grid);
+            }
+            for (int index = 0; index < a.structured.evidence.size(); ++index) {
+                const auto &evidence = a.structured.evidence[index];
+                auto *card = new QWidget; card->setObjectName("teamReportEvidence");
+                auto *ev = new QVBoxLayout(card); ev->setContentsMargins(0, 6, 0, 0); ev->setSpacing(3);
+                const QString caption = evidence.caption.isEmpty() ? tr("Evidence %1").arg(index + 1) : evidence.caption;
+                ev->addWidget(label(QStringLiteral("%1 \u00b7 %2").arg(index + 1).arg(caption), c.text3, 11, true));
+                const bool allowed = !evidence.path.isEmpty() && insideRoots(evidence.path, roots);
+                const auto suffix = QFileInfo(evidence.path).suffix().toLower();
+                if (evidence.kind == QLatin1String("image") && allowed && QFileInfo(evidence.path).size() <= 10 * 1024 * 1024
+                    && QStringList{"png", "jpg", "jpeg", "webp"}.contains(suffix)) {
+                    QPixmap pixmap(evidence.path);
+                    if (!pixmap.isNull()) {
+                        auto *image = new QLabel; image->setObjectName("teamReportEvidenceImage");
+                        image->setPixmap(pixmap.scaledToWidth(qMin(420, pixmap.width()), Qt::SmoothTransformation));
+                        ev->addWidget(image);
+                    } else ev->addWidget(label(evidence.path, c.muted, 11, false, "teamReportEvidenceLink"));
+                } else if (evidence.kind == QLatin1String("html") && allowed && QFileInfo(evidence.path).size() <= 1024 * 1024) {
+                    QFile file(evidence.path);
+                    if (file.open(QIODevice::ReadOnly)) {
+                        auto *view = new QTextBrowser; view->setObjectName("teamReportEvidenceHtml");
+                        view->setOpenLinks(false); view->setOpenExternalLinks(false);
+                        view->setMaximumHeight(220); view->setHtml(QString::fromUtf8(file.read(1024 * 1024)));
+                        ev->addWidget(view);
+                    }
+                } else if (evidence.kind == QLatin1String("command") || evidence.kind == QLatin1String("log")) {
+                    auto *command = label(QStringLiteral("$ %1").arg(evidence.command), c.text2, 11, true);
+                    command->setWordWrap(true); ev->addWidget(command);
+                    if (evidence.hasExit) ev->addWidget(label(tr("exit %1").arg(evidence.exit), evidence.exit == 0 ? c.muted : c.danger, 11));
+                    if (!evidence.tail.isEmpty()) {
+                        auto *tail = label(evidence.tail, c.muted, 10); tail->setWordWrap(true);
+                        tail->setObjectName("teamReportEvidenceTail"); ev->addWidget(tail);
+                    }
+                } else if (evidence.kind == QLatin1String("text")) {
+                    auto *body = label(evidence.text, c.text2, 11); body->setWordWrap(true);
+                    body->setObjectName("teamReportEvidenceText"); ev->addWidget(body);
+                } else {
+                    const QString reference = !evidence.path.isEmpty() ? evidence.path : evidence.url;
+                    auto *link = label(reference, c.accent, 11, false, "teamReportEvidenceLink");
+                    link->setWordWrap(true); link->setCursor(Qt::PointingHandCursor);
+                    link->setToolTip(tr("Preview unavailable; the path is shown as given"));
+                    ev->addWidget(link);
+                }
+                b->addWidget(card);
+            }
+            if (!a.structured.limits.isEmpty()) {
+                auto *limits = label(tr("Not checked: %1").arg(a.structured.limits.join(QStringLiteral("; "))), c.warn, 11, false, "teamReportLimits");
+                limits->setWordWrap(true); b->addWidget(limits);
+            }
+        }
         // A2: the reply Zerus captured while the member may still be working.
         if (a.captured) {
             auto *captured = label(tr("Captured from the member's last reply; it can still send the real report."), c.warn, 11, false, "teamReportCaptured");
@@ -457,8 +595,14 @@ void TeamTaskCard::rebuild()
             if (act) act("take-over", {{"task", id}});
     };
     const auto cancelTask = [this, id] {
-        if (!confirm || confirm("teamCancelTaskConfirm", tr("Cancel task?"), tr("Cancel this task? Tasks that depend on it hard never become ready."), tr("Cancel task")))
-            if (act) act("cancel", {{"task", id}});
+        if (confirm && !confirm("teamCancelTaskConfirm", tr("Cancel task?"), tr("Cancel this task? Tasks that depend on it hard never become ready."), tr("Cancel task")))
+            return;
+        const auto choice = subteamChoice(this, m_team, id, tr("Cancel"));
+        if (choice.isEmpty()) return;
+        if (!act) return;
+        QJsonObject input{{"task", id}};
+        if (const auto *t = m_team.task(id); t && t->subteam.known) input["subteam"] = choice;
+        act("cancel", input);
     };
     const auto retry = [this, id, n = task->last() ? task->last()->n : 0] {
         if (n == 0 || !confirm || confirm("teamRetryConfirm", tr("Retry task?"), tr("Revoke attempt %1 and hand the task out again?").arg(n), tr("Retry")))

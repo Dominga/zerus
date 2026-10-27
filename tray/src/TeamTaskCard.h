@@ -21,6 +21,8 @@ public:
     std::function<void()> back;
     std::function<void(const QString &operation, const QJsonObject &input)> act;
     std::function<void(int task)> openTask;
+    // G1: open the sub-team a delegated task names.
+    std::function<void(const QString &team)> openTeam;
     std::function<void(const QString &host, const QString &session)> openSession;
     std::function<void(int task, const QPoint &global)> reassign;
     // The actions a member's problem offers (the Team tab's own buttons).

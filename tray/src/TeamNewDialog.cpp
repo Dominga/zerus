@@ -1,6 +1,7 @@
 #include "TeamNewDialog.h"
 #include "HgsClient.h"
 #include "TeamController.h"
+#include "TeamTemplateList.h"
 #include "TeamWidgets.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -58,10 +59,12 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     auto *form = new QFormLayout; form->setLabelAlignment(Qt::AlignRight);
     m_name = new QLineEdit; m_name->setObjectName("teamNewName"); m_name->setPlaceholderText(tr("Checkout redesign"));
     form->addRow(tr("Name"), m_name);
-    m_template = combo("teamNewTemplate");
-    m_template->addItem(tr("No template"), QString());
-    for (const auto &t : teams->catalog().templates) m_template->addItem(t.name, t.id);
-    form->addRow(tr("Template"), m_template);
+    // F6: a compact list with search and favourites; it tells the form only
+    // after the whole form exists (connected at the end of the constructor).
+    m_templateList = new TeamTemplateList; m_templateList->setObjectName("teamNewTemplates");
+    m_templateList->setDark(palette().color(QPalette::Window).lightness() < 128);
+    m_templateList->setCatalog(teams->catalog());
+    form->addRow(tr("Template"), m_templateList);
     m_goal = new QPlainTextEdit; m_goal->setObjectName("teamNewGoal"); m_goal->setFixedHeight(64);
     m_goal->setPlaceholderText(tr("What the team should deliver"));
     form->addRow(tr("Goal"), m_goal);
@@ -113,7 +116,8 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     auto *existingRow = new QHBoxLayout;
     m_useExisting = new QCheckBox(tr("Use an existing session as lead")); m_useExisting->setObjectName("teamNewUseExisting");
     m_existingLead = combo("teamNewExistingLead");
-    for (const auto &s : sessions) if (s.host.isEmpty()) m_existingLead->addItem(s.name, s.name);
+    // F4: the Team designer never leads a team.
+    for (const auto &s : sessions) if (s.host.isEmpty() && !isDesignerSession(s.host, s.name)) m_existingLead->addItem(s.name, s.name);
     m_useExisting->setEnabled(m_existingLead->count() > 0);
     m_existingLead->setEnabled(false);
     existingRow->addWidget(m_useExisting); existingRow->addWidget(m_existingLead, 1);
@@ -151,7 +155,6 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     footer->addWidget(cancel); footer->addWidget(m_create);
     outer->addLayout(footer);
 
-    connect(m_template, &QComboBox::currentIndexChanged, this, [this] { applyTemplate(); });
     connect(m_name, &QLineEdit::textChanged, this, [this] { validate(); });
     connect(m_folder, &QLineEdit::textChanged, this, [this] { validate(); });
     connect(m_leadAgent, &QComboBox::currentIndexChanged, this, [this] { fillAccounts(m_leadAccount, m_leadAgent->currentData().toString(), {}); validate(); });
@@ -184,6 +187,20 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     const auto &routing = teams->catalog().routing;
     Q_UNUSED(routing);
     fillAccounts(m_leadAccount, "claude", {});
+    applyTemplate();
+    m_templateList->selected = [this](const QString &id) { m_templateId = id; applyTemplate(); };
+}
+
+TeamNewDialog::~TeamNewDialog()
+{
+    // The list is destroyed after this body; it must not apply a template then.
+    if (m_templateList) m_templateList->selected = nullptr;
+}
+
+void TeamNewDialog::selectTemplate(const QString &id)
+{
+    m_templateList->setCurrent(id);
+    m_templateId = id;
     applyTemplate();
 }
 
@@ -257,7 +274,7 @@ void TeamNewDialog::applyTemplate()
 {
     for (auto *r : m_rowList) { r->box->deleteLater(); delete r; }
     m_rowList.clear();
-    const auto *t = m_teams->catalog().templ(m_template->currentData().toString());
+    const auto *t = m_teams->catalog().templ(m_templateId);
     if (t) {
         for (const auto &seat : t->roster) {
             const auto *role = m_teams->catalog().role(seat.role);
@@ -386,7 +403,7 @@ void TeamNewDialog::create()
         if (role && !byRole.contains(role->id)) byRole.insert(role->id, id);
     }
     QJsonArray tasks;
-    const auto *t = m_teams->catalog().templ(m_template->currentData().toString());
+    const auto *t = m_teams->catalog().templ(m_templateId);
     if (t && m_planning->currentData() == "template") {
         for (int i = 0; i < t->tasks.size(); ++i) {
             const auto &k = t->tasks[i];

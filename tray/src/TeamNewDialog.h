@@ -29,6 +29,10 @@ public:
                   const QString &folder, const QString &project, QWidget *parent = nullptr);
     // The created team's id, once Create team succeeded.
     QString createdTeam() const { return m_created; }
+    ~TeamNewDialog() override;
+    // F6: the template the list shows as chosen, applied as a click would.
+    void selectTemplate(const QString &id);
+    QString templateId() const { return m_templateId; }
     // F7: take a session a finished team left running into a new team. The
     // dialog's only existing-session slot is the lead, so it is preselected
     // there; a session on another computer cannot lead from here.
@@ -51,9 +55,12 @@ private:
     // Accounts by computer: profile id -> (provider, label, signed in).
     struct Account { QString id, provider, label; bool signedIn = true; };
     QMap<QString, QList<Account>> m_accounts;
-    QLineEdit *m_name, *m_folder;
-    QComboBox *m_template, *m_leadAgent, *m_leadAccount, *m_leadModel, *m_leadEffort, *m_existingLead;
-    QCheckBox *m_useExisting, *m_worktrees, *m_review;
+    QLineEdit *m_name = nullptr, *m_folder = nullptr;
+    QComboBox *m_leadAgent = nullptr, *m_leadAccount = nullptr, *m_leadModel = nullptr, *m_leadEffort = nullptr, *m_existingLead = nullptr;
+    // F6: the compact template list; "-" or empty is no template.
+    class TeamTemplateList *m_templateList = nullptr;
+    QString m_templateId;
+    QCheckBox *m_useExisting = nullptr, *m_worktrees = nullptr, *m_review = nullptr;
     // B6: how members get their folders - auto (the lead picks), shared or a
     // worktree each. A folder that is not a Git repository allows only shared.
     QComboBox *m_folderPolicy = nullptr;
@@ -63,12 +70,12 @@ private:
     // N10: the current shared choice came from the non-Git folder rule, so
     // resuming typing returns it to auto.
     bool m_forcedShared = false;
-    QComboBox *m_planning;
-    QSpinBox *m_maxMembers;
-    QPlainTextEdit *m_goal;
-    QLabel *m_gitNote, *m_summary;
-    QPushButton *m_create;
-    QVBoxLayout *m_rows;
+    QComboBox *m_planning = nullptr;
+    QSpinBox *m_maxMembers = nullptr;
+    QPlainTextEdit *m_goal = nullptr;
+    QLabel *m_gitNote = nullptr, *m_summary = nullptr;
+    QPushButton *m_create = nullptr;
+    QVBoxLayout *m_rows = nullptr;
     QList<Row *> m_rowList;
     QString m_project, m_created;
 };

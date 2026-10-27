@@ -77,12 +77,63 @@ fn decide_command(team: &Team, task: &Task, accept: bool) -> String {
     )
 }
 
+/// How many decided proposals the lead's inbox lists (C9), the latest first.
+const DECIDED_PROPOSALS: usize = 5;
+
 /// The items waiting for the lead, oldest first, at most `ITEM_LIMIT`.
 pub(crate) fn items(team: &Team) -> Vec<Item> {
     if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
     }
     let mut items: Vec<Item> = Vec::new();
+    // C9: the team's own items, once each, not once per task.
+    // F1.4: a member whose launch failed (the folder check) is an item.
+    for member in team
+        .members
+        .iter()
+        .filter(|member| member.state != MemberState::Removed && !member.error.is_empty() && member.session.is_none())
+    {
+        let role = team.role_of(&member.id);
+        items.push(Item {
+            kind: "member_error",
+            key: format!("member_error:{}", member.id),
+            task: None,
+            member: role.clone(),
+            since: crate::state::now(),
+            summary: summary(&format!("{role} was not started: {}", member.error)),
+            command: format!(
+                "{} | hgs team relaunch --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
+            ),
+            detail: member.error.clone(),
+        });
+    }
+    // F8: each decided proposal reaches the lead with the decision and the
+    // owner's reason, not only as a feed event; the latest few, by decision.
+    let mut decided: Vec<&Value> = team
+        .proposals
+        .iter()
+        .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected")))
+        .collect();
+    let decided_at = |proposal: &Value| proposal["decided_at"].as_f64().or(proposal["at"].as_f64()).unwrap_or_default();
+    decided.sort_by(|a, b| decided_at(b).total_cmp(&decided_at(a)));
+    for proposal in decided.into_iter().take(DECIDED_PROPOSALS) {
+        let id = proposal["id"].as_str().unwrap_or_default().to_owned();
+        let state = proposal["state"].as_str().unwrap_or_default().to_owned();
+        let kind = proposal["kind"].as_str().unwrap_or_default();
+        let note = proposal["note"].as_str().unwrap_or_default();
+        let why = if note.is_empty() { String::new() } else { format!(": {note}") };
+        items.push(Item {
+            kind: "proposal_decided",
+            key: format!("proposal:{id}"),
+            task: None,
+            member: "owner".into(),
+            since: decided_at(proposal),
+            summary: summary(&format!("The owner {state} your {kind} proposal {id}{why}")),
+            command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
+            detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
+        });
+    }
     for task in &team.tasks {
         // A report to decide (C2).
         if task.status == TaskStatus::Submitted {
@@ -134,45 +185,6 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
                     detail: String::new(),
                 });
             }
-        }
-        // F1.4: a member whose launch failed (the folder check) is an item.
-        for member in team
-            .members
-            .iter()
-            .filter(|member| member.state != MemberState::Removed && !member.error.is_empty() && member.session.is_none())
-        {
-            let role = team.role_of(&member.id);
-            items.push(Item {
-                kind: "member_error",
-                key: format!("member_error:{}", member.id),
-                task: None,
-                member: role.clone(),
-                since: crate::state::now(),
-                summary: summary(&format!("{role} was not started: {}", member.error)),
-                command: format!(
-                    "{} | hgs team relaunch --json",
-                    json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
-                ),
-                detail: member.error.clone(),
-            });
-        }
-        // F8: each decided proposal reaches the lead with the decision and the        // owner's reason, not only as a feed event.
-        for proposal in team.proposals.iter().filter(|proposal| {
-            matches!(proposal["state"].as_str(), Some("accepted") | Some("rejected"))
-        }) {
-            let id = proposal["id"].as_str().unwrap_or_default().to_owned();
-            let state = proposal["state"].as_str().unwrap_or_default().to_owned();
-            let reason = proposal["reason"].as_str().unwrap_or_default();
-            items.push(Item {
-                kind: "proposal_decided",
-                key: format!("proposal:{id}"),
-                task: None,
-                member: "owner".into(),
-                since: proposal["at"].as_f64().unwrap_or_default(),
-                summary: summary(&format!("The owner {state} your proposal: {reason}")),
-                command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
-                detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
-            });
         }
         // A member that stopped on its task (C2), unless it waits for an
         // answer: that is the question item above.
@@ -255,6 +267,26 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
             detail: attempt.turn_reply.clone(),
         });
     }
+    // H1: a member stopped by a usage limit is one item, with its reset time
+    // when the session reports one.
+    for member in &team.members {
+        let Some(limit) = &member.limited else { continue };
+        let role = team.role_of(&member.id);
+        let reset = match limit.resets_at {
+            Some(at) => format!("; resets at {}", local_time(at)),
+            None => "; reset time unknown".to_owned(),
+        };
+        items.push(Item {
+            kind: "member_limited",
+            key: format!("member_limited:{}:{}", member.id, limit.at),
+            task: None,
+            member: role.clone(),
+            since: limit.at,
+            summary: summary(&format!("{role} stopped by a usage limit{reset}")),
+            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
+        });
+    }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);
     items
@@ -312,6 +344,14 @@ fn age(now: f64, since: f64) -> String {
         1 => "1 min".into(),
         minutes => format!("{minutes} min"),
     }
+}
+
+/// A reset time as a person reads it, in this computer's zone; status keeps
+/// the numeric `resets_at`.
+fn local_time(at: f64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(at.round() as i64, 0)
+        .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| format!("{at:.0}"))
 }
 
 /// The single message that lists the lead's new items (C2).
@@ -504,12 +544,30 @@ mod tests {
     }
 
     #[test]
+    fn decided_proposals_are_listed_once_each_however_many_tasks() {
+        // C9: neither once per task nor without bound: the five latest, listed
+        // oldest first like every item.
+        let mut team = team();
+        for n in 0..25 {
+            team.tasks.push(Task { id: 10 + n, title: "More".into(), assignee: "dev".into(), ..Default::default() });
+        }
+        for n in 0..8 {
+            team.proposals.push(json!({"id":format!("p{n}"),"kind":"add-member","state":"accepted","at":1.0,"decided_at":100.0 + f64::from(n)}));
+        }
+        let decided: Vec<String> = items(&team).into_iter().filter(|item| item.kind == "proposal_decided").map(|item| item.key).collect();
+        assert_eq!(decided, ["proposal:p3", "proposal:p4", "proposal:p5", "proposal:p6", "proposal:p7"]);
+        // A team without tasks still lists them.
+        team.tasks.clear();
+        assert_eq!(items(&team).iter().filter(|item| item.kind == "proposal_decided").count(), 5);
+    }
+
+    #[test]
     fn a_decided_proposal_reaches_the_lead() {
         let mut team = team();
         team.proposals.push(json!({"id":"p1","kind":"add-member","state":"rejected","reason":"needs help","note":"not now","at":10.0}));
         let items = items(&team);
         let found = items.iter().find(|item| item.kind == "proposal_decided").unwrap();
-        assert!(found.summary.contains("rejected") && found.summary.contains("needs help"), "{}", found.summary);
+        assert!(found.summary.contains("rejected") && found.summary.contains("not now"), "{}", found.summary);
         assert_eq!(found.detail, "not now");
     }
 

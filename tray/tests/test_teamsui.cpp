@@ -35,11 +35,13 @@
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTimer>
+#include <QUuid>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include "AgentWorking.h"
 #include "CollapsibleBlock.h"
 #include "HgsClient.h"
+#include "SettingsPage.h"
 #include "TeamCatalogEditor.h"
 #include "TeamAttentionNotices.h"
 #include <QClipboard>
@@ -586,6 +588,8 @@ class TestTeamsUi : public QObject {
 private slots:
     void initTestCase();
     void init();
+    void settingsPageShowsTheSubagentSetting();
+    void aSessionRecordShowsTheUnconfirmableSubagentNote();
     void catalogModelAppliesKeptProposals();
     void taskCardOffersActionsByStatus();
     void attemptStatesShowPhaseIcons();
@@ -3096,6 +3100,66 @@ void TestTeamsUi::boardColumnsKeepTheirScroll()
     QTRY_VERIFY(old.isNull());
     QTRY_VERIFY(pending());
     QTRY_COMPARE(pending()->value(), scrolled);
+}
+
+void TestTeamsUi::settingsPageShowsTheSubagentSetting()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString script = dir.filePath("fake-hgs");
+    QVERIFY(FakeCli::install(script, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a[:2]==['subagents-confirm','get']:
+    print(json.dumps({'confirm': os.environ.get('FAKE_CONFIRM','true')=='true'}))
+elif a[:2]==['subagents-confirm','set']:
+    body=json.load(sys.stdin)
+    open(__file__+'.calls','a').write(json.dumps(body)+'\n')
+    print(json.dumps({'confirm':body.get('confirm')}))
+elif a[:2]==['session-upload-block','get']:
+    print(json.dumps({'block': True}))
+)PY"));
+    qputenv("FAKE_CONFIRM", "false");
+    SettingsPage page(FakeCli::program(script));
+    auto *box = page.findChild<QCheckBox *>("workspaceConfirmSubagents");
+    QVERIFY(box);
+    QCOMPARE(box->isChecked(), false);
+    box->click();
+    QFile calls(script + ".calls");
+    QTRY_VERIFY(calls.exists());
+    QVERIFY(calls.open(QIODevice::ReadOnly));
+    const auto sent = QJsonDocument::fromJson(calls.readAll().trimmed()).object();
+    QCOMPARE(sent.value("confirm").toBool(), true);
+    const auto id = sent.value("request_id").toString();
+    QVERIFY2(!QUuid(id).isNull() && QUuid(id).toString(QUuid::WithoutBraces) == id, qPrintable(id));
+    // The same page carries the DeepSeek upload block from #481, on by default.
+    auto *upload = page.findChild<QCheckBox *>("workspaceSessionUploadBlock");
+    QVERIFY(upload && upload->isChecked());
+    // Shots: setting on/off, light/dark (only with ZERUS_TEAM_SHOTS).
+    for (bool enabled : {true, false}) {
+        qputenv("FAKE_CONFIRM", enabled ? "true" : "false");
+        lightPalette();
+        SettingsPage page(FakeCli::program(script));
+        page.resize(1200, 900);
+        if (auto *nav = page.findChild<QListWidget *>("settingsSections")) nav->setCurrentRow(1);
+        QCoreApplication::processEvents();
+        const QString suffix = enabled ? "on" : "off";
+        shot(&page, "u19-settings-subagents-" + suffix);
+        darkPalette();
+        shot(&page, "u19-settings-subagents-" + suffix + "-dark");
+        lightPalette();
+    }
+    qputenv("FAKE_CONFIRM", "false");
+    qunsetenv("FAKE_CONFIRM");
+}
+
+void TestTeamsUi::aSessionRecordShowsTheUnconfirmableSubagentNote()
+{
+    const QJsonArray rows{ QJsonObject{{"name", "codex/x/dev"}, {"cmd", "codex"},
+        {"subagent_confirm", "subagent confirmation not supported by codex"}} };
+    const auto parsed = HgsClient::parseSessions(rows);
+    QCOMPARE(parsed.size(), 1);
+    QCOMPARE(parsed.first().subagentConfirm, QStringLiteral("subagent confirmation not supported by codex"));
 }
 
 QTEST_MAIN(TestTeamsUi)

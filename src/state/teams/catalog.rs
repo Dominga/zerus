@@ -783,8 +783,7 @@ mod tests {
 
     #[test]
     fn export_import_and_revert_move_versions() {
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var("HGS_STATE_DIR").ok();
         std::env::set_var("HGS_STATE_DIR", dir.path());

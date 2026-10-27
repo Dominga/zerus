@@ -1,14 +1,14 @@
 import { createSignal, createMemo, batch } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
-import { sessions as seedSessions, archived, stressSessions } from "./mock/data";
-import type { Session, Status } from "./mock/types";
+import { sessions as seedSessions, archived, stressSessions, projects } from "./mock/data";
+import type { AgentKind, Session, Status } from "./mock/types";
 
 // UI state for the mockup. In the Tauri client the catalog store is fed by
 // whole-row upserts from the Rust backend (`reconcile` keyed by `key`), so a
 // status change touches only the DOM nodes bound to that row.
 
 export type MenuEntry =
-  | { label: string; icon?: string; kbd?: string; danger?: boolean; disabled?: boolean; checked?: boolean; action?: () => void }
+  | { label: string; icon?: string; agent?: AgentKind; kbd?: string; danger?: boolean; disabled?: boolean; checked?: boolean; action?: () => void }
   | { separator: true }
   | { heading: string };
 
@@ -38,6 +38,8 @@ export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>(
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
 export const [collapsed, setCollapsed] = createStore<Record<string, boolean>>({});
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({ "ws:1": true });
+/** Project order in the list; dragging a project header changes it. */
+export const [projectOrder, setProjectOrder] = createSignal<string[]>(projects.map((p) => p.id));
 export const [compactRows, setCompactRows] = createStore<Record<string, boolean>>({ "ws:8": true });
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
 export const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | undefined>();

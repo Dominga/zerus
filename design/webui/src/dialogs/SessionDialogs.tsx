@@ -4,6 +4,7 @@ import { Icon, AgentGlyph } from "../lib/icons";
 import { catalog, dialog, setDialog, selected, setSelectedKey, setPage, toast, type Page } from "../state";
 import { projects, machines, accounts } from "../mock/data";
 import { SessionCard } from "../screens/sessions/SessionCard";
+import { projectColor } from "../screens/setup/store";
 
 type GoItem = { kind: "Session" | "Project" | "Account" | "Machine" | "Section" | "Command"; title: string; detail: string; kbd?: string; run: () => void };
 
@@ -189,7 +190,7 @@ function MoveProject() {
     <Dialog id="move-project" title="Move to project" width="380px" icon="folder">
       <div class="col" style={{ gap: "4px" }}>
         <For each={projects}>{(p) => (
-          <button class="menu-item entity" style={{ "--entity": `var(--z-entity-palette-${p.colorIndex})` }} onClick={() => { toast("Moved", `Session moved to ${p.name}. Its folder and process are unchanged.`); setDialog(undefined); }}>
+          <button class="menu-item entity" style={{ "--entity": projectColor(p) }} onClick={() => { toast("Moved", `Session moved to ${p.name}. Its folder and process are unchanged.`); setDialog(undefined); }}>
             <Icon name="folder" size={14} />{p.name}<Show when={p.id === selected()?.project}><span class="grow" /><Icon name="check" size={14} /></Show>
           </button>
         )}</For>

@@ -1,5 +1,6 @@
 import { For, Show, createEffect, onCleanup, type JSX } from "solid-js";
 import { Icon } from "../lib/icons";
+import { ProviderGlyph } from "../screens/sessions/SessionCard";
 import { menu, setMenu, toasts, dialog, setDialog } from "../state";
 
 /** Context and dropdown menus share one positioned popover. */
@@ -49,6 +50,8 @@ export function MenuLayer() {
                   <Show when={item.checked !== undefined} fallback={<Show when={item.icon} fallback={<span style={{ width: "14px" }} />}><Icon name={item.icon!} size={14} /></Show>}>
                     <Icon name={item.checked ? "check" : "minus"} size={14} style={{ opacity: item.checked ? 1 : 0 }} />
                   </Show>
+                  {/* Accounts lead with their type: the provider glyph, then the name. */}
+                  <Show when={item.agent}><span class="menu-agent" style={{ color: `var(--z-agent-${item.agent})` }}><ProviderGlyph agent={item.agent!} size={13} /></span></Show>
                   <span>{item.label}</span>
                   <Show when={item.kbd}><span class="kbd">{item.kbd}</span></Show>
                 </button>

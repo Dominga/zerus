@@ -1,5 +1,5 @@
 import { createMemo } from "solid-js";
-import { catalog, collapsed, stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows } from "../../state";
+import { catalog, collapsed, stateFilter, matchesFilter, search, machineFilter, projectFilter, expandedChildren, compactRows, projectOrder } from "../../state";
 import { projects, machines } from "../../mock/data";
 import type { Session, Subagent } from "../../mock/types";
 
@@ -58,7 +58,9 @@ export const listRows = createMemo<Row[]>(() => {
     all.set(s.project, c);
   }
   const rows: Row[] = [];
-  for (const p of projects) {
+  for (const id of projectOrder()) {
+    const p = projects.find((x) => x.id === id);
+    if (!p) continue;
     const list = groups.get(p.id);
     if (!list?.length) continue;
     const { attention, unread, working } = all.get(p.id)!;

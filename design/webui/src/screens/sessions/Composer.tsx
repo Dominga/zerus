@@ -57,7 +57,6 @@ function ResizeHandle() {
   return (
     <div class="cmp-resize" classList={{ dragging: dragging() }} tabindex="0" role="separator" aria-orientation="horizontal"
       aria-label="Message field height" aria-valuemin={EDITOR.min} aria-valuemax={EDITOR.max} aria-valuenow={editorHeight()}
-      data-tip="Drag to resize the message field. Double-click to restore the default height."
       onPointerDown={down} onDblClick={() => setEditorHeight(EDITOR.initial)} onKeyDown={key}>
       <i class="cmp-grip" />
     </div>
@@ -85,7 +84,7 @@ export function Composer() {
         <Show when={attached()}>
           <button class="tchip" onClick={() => setAttached(0)} title="Attachments: preview, open or remove"><Icon name="paperclip" size={13} />{attached()} attached</button>
         </Show>
-        <button class="tchip" classList={{ rec: recording() }} onClick={() => setRecording(!recording())}
+        <button class="tchip rec-slot" classList={{ rec: recording() }} onClick={() => setRecording(!recording())}
           title={recording() ? "Stop recording (Space / Esc)" : videoMode() ? "Click to start a video recording." : "Click to start a voice recording."}>
           <Icon name={recording() ? "square" : videoMode() ? "video" : "mic"} size={13} />{recording() ? "Stop (0:07)" : videoMode() ? "Video" : "Voice"}
         </button>

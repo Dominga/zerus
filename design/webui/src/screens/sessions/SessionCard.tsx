@@ -93,13 +93,18 @@ const PROVIDER_GLYPH: Record<AgentKind, string> = {
   deepseek: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
 };
 
-/** Provider badge; `plan` adds the account type after the name (status bar usage). */
-export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: number; plan?: string }) {
+/** The provider glyph alone (IdentityBadges::paint), for menus and filter chips. */
+export function ProviderGlyph(props: { agent: AgentKind; size?: number }) {
   return (
-    <span class="agent-badge" classList={{ narrow: props.narrow }} style={{ "--agent": `var(--z-agent-${props.agent})`, "max-width": `${props.max ?? 95}px` }} title={props.plan ? `${AGENT_LABEL[props.agent]} ${props.plan}` : AGENT_LABEL[props.agent]}>
+    <svg width={props.size ?? 12} height={props.size ?? 12} viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
+  );
+}
+
+export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: number }) {
+  return (
+    <span class="agent-badge" classList={{ narrow: props.narrow }} style={{ "--agent": `var(--z-agent-${props.agent})`, "max-width": `${props.max ?? 95}px` }} title={AGENT_LABEL[props.agent]}>
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
       <Show when={!props.narrow}><span class="ab-label">{AGENT_LABEL[props.agent]}</span></Show>
-      <Show when={props.plan && !props.narrow}><span class="ab-plan">{props.plan}</span></Show>
     </span>
   );
 }

@@ -43,10 +43,10 @@ function StatusBar() {
       </Show>
       <span class="grow" />
       <Show when={acc() && acc()!.fiveHour > 0}>
-        <button class="sb-usage" title={`${AGENT_LABEL[acc()!.agent]} ${acc()!.plan} · ${acc()!.label}: 5-hour and weekly limits; at the current pace the limit runs out in about 3 h`} onClick={() => setPage("accounts")}>
-          {/* The account type always leads the numbers: provider glyph and name, then the plan. */}
-          <AgentBadge agent={acc()!.agent} plan={acc()!.plan} max={180} />
+        <button class="sb-usage" title={`${acc()!.label} · ${AGENT_LABEL[acc()!.agent]}: 5-hour and weekly limits; at the current pace the limit runs out in about 3 h`} onClick={() => setPage("accounts")}>
+          {/* Account name, then the account type (provider badge), then the meters. */}
           <span class="sb-account ell">{acc()!.label}</span>
+          <AgentBadge agent={acc()!.agent} />
           <span class="meter" classList={{ warn: acc()!.fiveHour > 50 }}><i style={{ width: `${acc()!.fiveHour}%` }} /></span><span class="tabular">5h {acc()!.fiveHour}%</span>
           <span class="meter"><i style={{ width: `${acc()!.week}%` }} /></span><span class="tabular">7d {acc()!.week}%</span>
         </button>
@@ -78,11 +78,11 @@ function ReviewTools() {
               <option value="error">Offline / errors</option>
             </select>
           </label>
-          <label>Zerus mark motion (while sessions need attention)
+          <label>Zerus mark motion (chosen: Spin-up; the others are for reference)
             <select value={logoMotion()} onChange={(e) => setLogoMotion(e.currentTarget.value as LogoMotion)}>
-              <option value="qt">As in Qt: one turn, pause</option>
-              <option value="spin">Spin-up: two turns, settle</option>
-              <option value="turbine">Strong spin-up: three turns</option>
+              <option value="spin">Spin-up: two turns, settle (chosen)</option>
+              <option value="qt">Reference: as in Qt, one turn, pause</option>
+              <option value="turbine">Reference: three turns</option>
             </select>
           </label>
           <div class="rp-row">

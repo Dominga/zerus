@@ -21,9 +21,17 @@
   .icon-btn.hd:hover { background: var(--z-color-hover); color: var(--z-color-text); }
   .sp-search .field { width: 100%; height: 32px; padding: 0 10px; border-radius: 7px; font-size: 13px; }
   .sp-filters { display: flex; align-items: stretch; gap: 3px; }
-  .fchip { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 30px; padding: 0 2px; border-radius: 6px; border: 1px solid transparent; color: var(--z-color-muted); font-size: 11px; }
+  /* State filters (SessionsWindow): count in the text colour, glyph muted; the
+     checked filter takes the accent. The bell turns attention-yellow while
+     sessions need attention (as in Qt); the bolt turns violet while any session
+     is active (owner request, round 4). */
+  .fchip { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 30px; padding: 0 2px; border-radius: 6px; border: 1px solid transparent; color: var(--z-list-text); font-size: 11px; }
+  .fchip svg { color: var(--z-list-muted); }
   .fchip:hover { background: var(--z-color-hover); }
-  .fchip.on { background: var(--z-color-segment-on); border-color: var(--z-color-border); color: var(--z-color-accent); font-weight: 600; }
+  .fchip.on { background: var(--z-color-segment-on); border-color: var(--z-color-border); color: var(--z-color-accent); }
+  .fchip.on svg { color: var(--z-color-accent); }
+  .fchip.t-attention svg { color: var(--z-list-filter-attention); }
+  .fchip.t-active svg { color: var(--z-list-filter-active); }
   .scope-btn { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 3px; height: 30px; min-width: 30px; padding: 0 4px; border-radius: 6px; color: var(--z-color-muted); font-size: 11px; }
   .scope-btn:hover { background: var(--z-color-hover); color: var(--z-color-text); }
   .scope-btn.on { color: var(--z-color-accent); background: var(--z-color-segment-on); }
@@ -38,14 +46,25 @@
   .sp-empty { flex: 1; }
 
   /* Docked width handle (QSplitter handle, 8 px, transparent). */
-  .sp-resize { position: absolute; z-index: 6; top: 0; bottom: 0; right: -5px; width: 8px; cursor: col-resize; touch-action: none; }
-  .sp-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: var(--z-color-accent-muted); opacity: 0; transition: opacity var(--z-motion-fast); }
-  .sp-resize:hover::after, .sp-resize.dragging::after { opacity: 1; }
+  /* Width handle: an 8 px strip on the edge; only a centred grip (4×52) shows,
+     on hover, focus and drag, the same as the side panel's. */
+  .sp-resize { position: absolute; z-index: 6; top: 0; bottom: 0; right: -5px; width: 8px; cursor: col-resize; touch-action: none; outline: none; }
+  .sp-resize > i, .insp-resize > i { position: absolute; top: 50%; left: 2px; width: 4px; height: 52px; margin-top: -26px; border-radius: 2px; background: var(--z-color-accent); opacity: 0; transition: opacity var(--z-motion-fast); }
+  .sp-resize:hover > i, .sp-resize:focus-visible > i, .sp-resize.dragging > i { opacity: 1; }
+  .sp-resize.dragging > i { transition: none; }
   .layout-right .sp-resize { right: auto; left: -5px; }
 
   /* Virtual rows: absolutely placed, moved with transforms only. */
   .vrow { position: absolute; top: 0; left: 0; right: 0; contain: layout style; }
   .rowhit { position: absolute; inset: 0; cursor: default; }
+  .rowhit, .group-band { user-select: none; -webkit-user-select: none; }
+  /* Drag to organise (SessionList.cpp): a 2 px accent line between rows, or a
+     2 px frame (radius 5) around the project header a session moves into. */
+  .drop-line, .drop-box { position: absolute; z-index: 5; top: 0; pointer-events: none; }
+  .drop-line { height: 2px; border-radius: 1px; background: var(--z-color-accent); }
+  .drop-box { left: 5px; right: 5px; border: 2px solid var(--z-color-accent); border-radius: 5px; }
+  .rowhit.dragged .scard { opacity: .45; }
+  .sp-scroll.organizing .rowhit:hover .scard:not(.selected) { background: transparent; }
 
   /* Project header: 40 px row, band (2,5,-2,-3) radius 6, contents inset 9. */
   .group-band { position: absolute; left: 2px; right: 2px; top: 5px; height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 6px; text-align: left; }
@@ -127,7 +146,6 @@
   .agent-badge { position: relative; flex: none; display: inline-flex; align-items: center; height: 18px; padding: 0 6px 0 22px; border-radius: 4px; background: var(--z-list-provider-bg); color: var(--agent); font-size: 11px; font-weight: 500; overflow: hidden; white-space: nowrap; }
   .agent-badge svg { position: absolute; left: 4px; top: 3.5px; }
   .agent-badge .ab-label { overflow: hidden; text-overflow: ellipsis; }
-  .agent-badge .ab-plan { flex: none; margin-left: 5px; padding-left: 5px; border-left: 1px solid color-mix(in srgb, currentColor 30%, transparent); font-weight: 600; }
   .agent-badge.narrow { width: 26px; padding: 0; }
   .agent-badge.narrow svg { left: 7px; }
   /* Machine badge: 18 px, radius 4, text + 12, at most a third of the line. */

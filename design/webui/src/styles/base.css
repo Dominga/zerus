@@ -152,6 +152,7 @@
     box-shadow: var(--z-shadow-popover); font-size: var(--fs-sm);
     animation: drop var(--z-motion-fast) var(--ease) both;
   }
+  .menu-agent { flex: none; display: inline-grid; place-items: center; width: 14px; height: 14px; }
   .menu-item {
     display: flex; align-items: center; gap: 8px; width: 100%; min-height: 26px; padding: 3px 8px;
     border-radius: var(--z-radius-sm); text-align: left; color: var(--z-color-text-2);

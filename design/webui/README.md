@@ -22,7 +22,8 @@ npm run skins:check # validate, resolve and compile the built-in skins
   `?page=settings`, `?dialog=new-session`, `?itab=tasks&tab=taskview`,
   `?select=mac:1`, `?filter=archived`, `?strip=1`, `?q=pagination`,
   `?demo=empty|loading|error`, `?skin=zerus-dark|zerus-light|fjord|paper`,
-  `?logo=spin|turbine|qt` (Zerus mark motion) and `#item-<id>` (scroll
+  `?logo=spin|turbine|qt` (Zerus mark motion; the owner chose `spin`, the
+  others are kept for reference) and `#item-<id>` (scroll
   Activity to an item, for example `#item-a3c` for the voice note and
   `#item-a3d` for the round video note).
 - `skins/*.json`: skin format v1 (tokens, component variants and layout
@@ -39,6 +40,12 @@ deliberate departures from Qt, both owner requests: the emphasis edge is 4 px
 and sits closer to the card's top and bottom, and switching a card to its
 compact row morphs in 220 ms instead of swapping. The composer height (76-720),
 side panel width (default 400, at least 240), list width and Activity width are
-remembered in browser storage. The
+remembered in browser storage.
+
+The Zerus Dark and Light palettes come from the Qt sources
+(`SessionsWindow::applyTheme`, `IdentityBadges::paintRow`, `ActivityView`,
+`MessageComposer`); fonts, radii and motion follow the prototype's base style.
+`src/screens/sessions/organize.ts` holds bulk selection and drag-and-drop
+placement, after `tray/src/SessionList.cpp`. The
 dashed MOCK UP button in the rail, its popover and the dashed outcome switches in
 some dialogs are review aids, not product UI.

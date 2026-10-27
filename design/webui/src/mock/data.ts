@@ -11,7 +11,7 @@ export const machines: Machine[] = [
 ];
 
 export const projects: Project[] = [
-  { id: "aurora", name: "Aurora platform", colorIndex: 1, vivid: false, isDefault: false, folders: [
+  { id: "aurora", name: "Aurora platform", color: "#00ab80", colorIndex: 0, vivid: false, isDefault: false, folders: [
     { name: "API and web app", machine: "workstation", path: "/home/example/src/aurora" },
     { name: "macOS client", machine: "macbook", path: "/Users/example/src/aurora" },
     { name: "Integration tests", machine: "build-01", path: "/srv/example/aurora" },

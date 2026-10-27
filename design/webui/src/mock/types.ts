@@ -47,6 +47,8 @@ export interface ProjectFolder {
 export interface Project {
   id: string;
   name: string;
+  /** A chosen colour (Edit color…); otherwise the palette slot. */
+  color?: string;
   colorIndex: number;
   vivid: boolean;
   isDefault: boolean;

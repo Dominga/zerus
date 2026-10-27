@@ -222,7 +222,6 @@ function WidthHandle() {
   return (
     <div class="insp-resize" classList={{ dragging: dragging() }} tabindex="0" role="separator" aria-orientation="vertical" aria-label="Side panel width"
       aria-valuemin={INSPECTOR_WIDTH.min} aria-valuemax={INSPECTOR_WIDTH.max} aria-valuenow={inspectorWidth()}
-      data-tip="Drag to resize the side panel. Double-click to restore the default width." data-tip-pos="left"
       onPointerDown={down} onDblClick={() => setInspectorWidth(INSPECTOR_WIDTH.initial)} onKeyDown={key}><i /></div>
   );
 }

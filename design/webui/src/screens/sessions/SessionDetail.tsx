@@ -6,7 +6,7 @@ import { Inspector } from "./Inspector";
 import { AgentBadge, MachineBadge } from "./SessionCard";
 import { TaskView } from "../tasks/TaskView";
 import { reduced } from "../tasks/motion";
-import { selected, detailTab, setDetailTab, inspectorOpen, setInspectorOpen, setMenu, setDialog, toast, subagentOpen, STATUS_LABEL, type DetailTab } from "../../state";
+import { selected, detailTab, setDetailTab, inspectorOpen, setInspectorOpen, setInspectorTab, setMenu, setDialog, toast, subagentOpen, STATUS_LABEL, type DetailTab } from "../../state";
 import { projects, terminalLines, processes } from "../../mock/data";
 import { skin } from "../../skin/runtime";
 
@@ -101,6 +101,26 @@ function NativeTab() {
   );
 }
 
+/** "Pursuing goal" floats over the top of Activity, as the prototype's pill does,
+ *  so it never pushes the header or the conversation down. Click opens the goal
+ *  in Plan & agents. */
+function GoalPill() {
+  const s = () => selected();
+  return (
+    <Show when={s()?.goal}>
+      <button class="goal-pill" onClick={() => { setInspectorTab("plan"); setInspectorOpen(true); }}
+        data-tip="Open the goal in Plan & agents" aria-label={`Pursuing goal: ${s()?.goal}. Open in Plan & agents`}>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="7" cy="7" r="5.5" /><circle cx="7" cy="7" r="2.5" /></svg>
+        <b>Pursuing goal</b>
+        <span class="gp-text ell">{s()?.goal}</span>
+        <span class="gp-time tabular">· 1 h 12 min</span>
+        <span class="grow" />
+        <span class="gp-more">Details</span><Icon name="chevron-right" size={13} />
+      </button>
+    </Show>
+  );
+}
+
 function EmptyDetail() {
   return (
     <div class="detail-empty">
@@ -125,7 +145,7 @@ function Header() {
     { label: "Copy connect command", icon: "link" },
     { label: s().status === "ended" ? "Restore session" : "Pause session", icon: s().status === "ended" ? "play" : "pause" },
     { separator: true as const },
-    { label: "Clear session…", icon: "rotate-ccw", action: () => setDialog("clear-session") },
+    { label: "Clear session…", icon: "clear", action: () => setDialog("clear-session") },
     { label: "Move to archive", icon: "archive", disabled: s().status !== "ready" },
     { label: "Terminate session…", icon: "circle-stop", danger: true, action: () => setDialog("terminate") },
   ];
@@ -139,7 +159,7 @@ function Header() {
         <button class="icon-btn" data-tip="Open session folder in file manager"><Icon name="folder-open" size={16} /></button>
         <button class="icon-btn" data-tip="Open shell in session folder"><Icon name="square-terminal" size={16} /></button>
         <button class="icon-btn" data-tip="Copy session ID" onClick={() => toast("Copied", "Session ID copied")}><Icon name="copy" size={15} /></button>
-        <button class="icon-btn" data-tip="Clear session" onClick={() => setDialog("clear-session")}><Icon name="rotate-ccw" size={15} /></button>
+        <button class="icon-btn" data-tip="Clear session" onClick={() => setDialog("clear-session")}><Icon name="clear" size={15} /></button>
         <Show when={s().status === "ended"}><button class="btn small primary"><Icon name="play" size={12} />Restore</button></Show>
         <button class="icon-btn" data-tip="Session actions" onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>
@@ -157,9 +177,6 @@ function Header() {
         <span class="grow" />
         <span class="dh-model ell">{s().model} {s().effort}</span>
       </div>
-      <Show when={s().goal}>
-        <button class="goal-btn" onClick={() => toast("Plan & agents", "Opens the goal details in the side panel")}><b>Pursuing goal</b><span class="dim">1 h 12 min</span><span class="grow" /><span class="accent">Details →</span></button>
-      </Show>
     </header>
   );
 }
@@ -220,7 +237,8 @@ export function SessionDetail() {
             <div class="tab-body">
               <Switch>
                 <Match when={detailTab() === "activity"}>
-                  <div class="activity-wrap" style={columnStyle()}>
+                  <div class="activity-wrap" classList={{ "has-goal": !!selected()?.goal }} style={columnStyle()}>
+                    <GoalPill />
                     <ActivityView />
                     <div class="cmp-col"><Composer /></div>
                   </div>

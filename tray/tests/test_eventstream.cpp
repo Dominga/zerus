@@ -124,7 +124,8 @@ void TestEventStream::peerListingsKeepTheAlias()
 
 void TestEventStream::computerWithoutTheMarkerIsUnsupported()
 {
-    EventStream stream(install(QStringLiteral("#!/bin/sh\necho 'usage: hgs ...'\n")), {});
+    // Fake CLIs are Python scripts, which the Windows fake runs too.
+    EventStream stream(install(QStringLiteral("#!/usr/bin/env python3\nprint('usage: hgs ...')\n")), {});
     stream.start();
     QTRY_COMPARE(stream.state(), EventStream::State::Unsupported);
     QVERIFY(!stream.live());

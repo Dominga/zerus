@@ -71,16 +71,31 @@ public:
     {
         m_dark = dark;
         const auto c = TeamUi::colorsFor(dark);
+        // QA #347: the list paints its own surface and its rows take the theme's
+        // foreground. A transparent list over a light viewport palette showed the
+        // dark theme's row text on white.
+        QPalette view = m_list->palette();
+        view.setColor(QPalette::Base, c.surface); view.setColor(QPalette::Window, c.surface);
+        view.setColor(QPalette::Text, c.fg); view.setColor(QPalette::WindowText, c.fg);
+        view.setColor(QPalette::Highlight, TeamUi::alpha(c.accent, .16));
+        view.setColor(QPalette::HighlightedText, c.fg);
+        m_list->setPalette(view);
+        m_list->viewport()->setAutoFillBackground(true);
+        m_list->viewport()->setPalette(view);
         setStyleSheet(QStringLiteral(
-            "QListWidget#teamTemplateList{background:transparent;border:1px solid %1;border-radius:8px;outline:0;}"
+            "QListWidget#teamTemplateList{background:%7;border:1px solid %1;border-radius:8px;outline:0;}"
             "QListWidget#teamTemplateList::item{border-bottom:1px solid %2;}"
             "QListWidget#teamTemplateList::item:selected,QListWidget#teamTemplateList::item:selected:active{background:%3;}"
             "QListWidget#teamTemplateList::item:hover:!selected{background:%4;}"
+            "QLabel#teamTemplateName{color:%8;}"
+            "QLabel#teamTemplateMeta{color:%9;}"
+            "QLineEdit#teamTemplateSearch{background:%10;color:%8;border:1px solid %1;border-radius:6px;padding:3px 6px;}"
             "QToolButton#teamTemplateFavouritesOnly{padding:2px 7px;border:1px solid %1;border-radius:6px;color:%5;}"
             "QToolButton#teamTemplateFavouritesOnly:checked{color:%6;border-color:%6;}"
             "QLabel#teamTemplateDetail{color:%5;font-size:11px;}")
             .arg(c.border.name(), TeamUi::alpha(c.border, .5).name(QColor::HexArgb), TeamUi::alpha(c.accent, dark ? .16 : .12).name(QColor::HexArgb),
-                 TeamUi::alpha(c.fg, .04).name(QColor::HexArgb), c.muted.name(), favouriteColor(dark).name()));
+                 TeamUi::alpha(c.fg, .04).name(QColor::HexArgb), c.muted.name(), favouriteColor(dark).name(), c.surface.name(),
+                 c.fg.name(), c.dim.name(), c.card.name()));
         rebuild();
     }
     // The ids in list order: every template the search keeps, favourites
@@ -108,6 +123,13 @@ private:
     void rebuild()
     {
         m_rebuilding = true;
+        // QA #347: an old row's item widget outlives clear(); delete it so no
+        // stale row paints over a new one after a theme switch.
+        for (int i = 0; i < m_list->count(); ++i) {
+            if (auto *item = m_list->item(i)) {
+                if (auto *widget = m_list->itemWidget(item)) { m_list->removeItemWidget(item); widget->deleteLater(); }
+            }
+        }
         m_list->clear();
         const auto c = TeamUi::colorsFor(m_dark);
         const QString query = m_search->text().trimmed();
@@ -136,7 +158,7 @@ private:
             auto *line = new QWidget; line->setObjectName("teamTemplateRow"); line->setProperty("template", id);
             auto *h = new QHBoxLayout(line); h->setContentsMargins(10, 0, 4, 0); h->setSpacing(8);
             h->addWidget(TeamUi::label(name, c.fg, 12, false, "teamTemplateName"));
-            if (!meta.isEmpty()) h->addWidget(TeamUi::label(meta, c.dim, 11));
+            if (!meta.isEmpty()) h->addWidget(TeamUi::label(meta, c.dim, 11, false, "teamTemplateMeta"));
             h->addStretch();
             if (id != QLatin1String("-")) {
                 auto *star = new QToolButton; star->setObjectName("teamTemplateFavourite"); star->setProperty("template", id);

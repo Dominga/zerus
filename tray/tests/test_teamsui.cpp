@@ -3348,6 +3348,16 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     QVERIFY(tab.findChild<QLineEdit *>("teamNewFolder")->isReadOnly());
     QCOMPARE(tab.draftId(), QStringLiteral("draft-1"));
     QVERIFY(tab.findChild<QPushButton *>("teamNewDiscard")->isVisible());
+    // QA #347: a folder that is not a Git repository has one folder for every
+    // member; the draft shows the policy as Shared, fixed, with the reason.
+    {
+        auto *policy = tab.findChild<QComboBox *>("teamNewFolderPolicy");
+        QVERIFY(policy);
+        QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+        QVERIFY(!policy->isEnabled());
+        QVERIFY2(policy->toolTip().contains(QStringLiteral("every member works in this folder")), qPrintable(policy->toolTip()));
+        QVERIFY(tab.findChild<QLabel *>("teamNewGitNote")->isVisible());
+    }
     // The lead edits the draft: the form follows and marks what it changed.
     setTeam(draftTeam(path));
     QTRY_COMPARE(tab.findChild<QPlainTextEdit *>("teamNewGoal")->toPlainText(), QStringLiteral("Redesign checkout: address form and tests"));

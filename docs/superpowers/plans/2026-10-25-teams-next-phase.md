@@ -794,6 +794,53 @@ answered; a denial cannot carry an explanation.
   dependencies, phases and barriers do. Status and the desktop show and edit
   them (drag a task to another lane, rename a lane). Owner: yes.
 
+- **U28. Planning rules for the lead (owner, 2026-10-27).** The built-in lead
+  protocol gives the lead these rules for every plan; the designer and the
+  plan health refer to them.
+  Phases: (1) at most 20-25 tasks per phase, each ending with an
+  install-ready build and NOTES.md; more work is split into phases.
+  (2) Checkpoints (merge, then review and QA, in their own lanes) on demand:
+  sometimes after one lane, sometimes after two or three. (3) Choose them by
+  efficiency: batch the check when that is cheaper, check riskier work in
+  smaller pieces. (4) Checkpoint findings go back to the same member before
+  the integration; final review findings go to the next phase. (5) An
+  approved plan is not reshaped; new work goes to the next phase's draft.
+  Dependencies: (6) a hard dependency only where a task really cannot start
+  earlier; one inside a lane splits it, so move that task to the next lane.
+  (7) No dependencies on tasks of an earlier phase: the barrier waits for it.
+  (8) Shared foundations first (the skin, a server model), at the start of
+  the first lane, for a strong member.
+  Load and models: (9) balance every lane, not only the phase, by size as
+  well as count. (10) GUI, hard logic and debugging go to strong models
+  (Opus, Codex); well-specified server work and small fixes to DeepSeek.
+  (11) Split a heavy task into its server and desktop parts. (12) QA never
+  implements tasks; the reviewer never writes code it will review. (13) The
+  Expert and ProExpert stay in reserve with no tasks: the Expert takes a task
+  returned three times for a model weakness (not a small fix), the ProExpert
+  only when the Expert fails; an expert's context is compacted after its work
+  is accepted. (14) Before planning, ask the owner how to spread the members
+  over accounts. (15) The lead plans only merges, integration and builds for
+  itself, and runs no long background work in its session (its inbox waits
+  meanwhile), except fixing critical findings at the end before the build.
+  Task text: (16) self-contained: the plan item code, the paths of the spec,
+  prototype and screenshots, what to change and the acceptance criteria.
+  (17) Tests through the real entry point (the CLI or the dispatcher) that
+  fail before the fix. (18) The checks named, with totals in the report,
+  against the Rust baseline and the known flaky tests. (19) Folders follow the
+  agent and the need: DeepSeek members work best in a clone; sometimes all
+  members share one folder or one memory. The lead plans it first, then asks
+  the owner explicitly how it should work and explains why it chose that.
+  (20) Builds and tests of DeepSeek members run through the built-in command
+  templates or scripts in their own folder, not dozens of one-off
+  permissions.
+  Before sending the plan: (21) plan health: no errors, a sensible critical
+  path, parallelism near the number of implementers, every lane balanced,
+  every warning explained. (22) Offer a phase split above 25 tasks. (23) No
+  starved notices before a phase is approved; a member's idleness is reported
+  only when the lead can act. (24) The roster and the member limit change
+  only on the owner's explicit word (U26); otherwise the lead proposes.
+  Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

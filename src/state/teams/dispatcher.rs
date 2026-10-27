@@ -2448,6 +2448,8 @@ fn refused_repository_config(listing: &str) -> Option<String> {
             "includes another Git config".to_owned()
         } else if key.starts_with("filter.") {
             "configures a Git filter".to_owned()
+        } else if key.starts_with("merge.") && key.ends_with(".driver") {
+            "configures a Git merge driver".to_owned()
         } else if matches!(key.as_str(), "core.hookspath" | "core.fsmonitor" | "gpg.program") || key.starts_with("gpg.") {
             format!("configures {key}")
         } else {
@@ -5548,6 +5550,9 @@ mod tests {
         // Scopes other than the repository's own are not its to refuse.
         assert_eq!(refused_repository_config("global\tfilter.lfs.clean\nlocal\tcore.bare\n"), None);
         assert!(refused_repository_config("worktree\tINCLUDEIF.onbranch:x.path\n").is_some());
+        // U21: a merge driver is a command git runs during the merge.
+        assert!(refused_repository_config("local\tmerge.ours.driver\n").is_some());
+        assert_eq!(refused_repository_config("local\tmerge.ff\n"), None);
         // C2: a call with more than 1 MB of output finishes without blocking:
         // git show --name-only prints every file of this commit.
         for index in 0..6000 {

@@ -704,9 +704,12 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     }
     let old = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
+    let accepted = old.proposals.iter().any(|proposal| {
+        proposal["kind"] == "next-goal" && proposal["state"] == "accepted"
+    });
     ensure!(
-        matches!(caller, Actor::Human) || matches!(caller, Actor::Member(member) if *member == old.lead),
-        "Only the lead or you start the next goal"
+        matches!(caller, Actor::Human) || (matches!(caller, Actor::Member(member) if *member == old.lead) && accepted),
+        "Only you, or the lead with an accepted next-goal proposal, start the next goal"
     );
     let goal = text(input, "goal").trim().to_owned();
     ensure!(!goal.is_empty(), "A next goal needs its goal");
@@ -1003,6 +1006,10 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
     } else if filled["settings"].get("subteam_approval").is_none() {
         filled["settings"]["subteam_approval"] = json!(parent.settings.subteam_approval);
     }
+    // N27: a sub-team's plan and phases are approved by its parent lead (or
+    // you), never auto; its create input cannot turn approval off.
+    filled["settings"]["approval"] = json!("review");
+    filled["settings"]["phase_approval"] = json!("review");
     Ok(Some((parent.id.clone(), task.id)))
 }
 
@@ -1688,6 +1695,63 @@ fn cascade_status(store: &mut Store, team_id: &str, op: &str, depth: usize) -> a
     Ok(())
 }
 
+/// U26: the values the owner's sentence must name for this roster change; empty
+/// when the request changes no roster or cap (so no word is needed).
+fn roster_word_names(team: &Team, op: &str, input: &Value) -> Vec<String> {
+    match op {
+        "add-member" => {
+            let member = &input["member"];
+            let id = text(member, "id");
+            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+        }
+        "remove-member" => {
+            let id = text(input, "member");
+            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+        }
+        "swap-member" => {
+            let id = text(input, "member");
+            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+        }
+        "settings" => {
+            let cap = input["settings"]["max_members"].as_u64();
+            match cap {
+                Some(cap) if cap as usize != team.settings.max_members => vec![cap.to_string()],
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// U26: fills the verified roster word for a lead caller, or refuses. The
+/// verifier is a parameter so a test can use a fixture events database.
+fn check_roster_word(
+    team: &Team,
+    op: &str,
+    input: &Value,
+    filled: &mut Value,
+    caller: &Actor,
+    verify: impl Fn(&Team, &Value, &[String], f64) -> anyhow::Result<super::model::OwnerWord>,
+) -> anyhow::Result<()> {
+    if !matches!(caller, Actor::Member(id) if *id == team.lead) {
+        return Ok(());
+    }
+    let needed = roster_word_names(team, op, filled);
+    if needed.is_empty() {
+        return Ok(());
+    }
+    // `roster_word` itself is never the caller's to send: strip it first, so a
+    // caller cannot assert a word that was not verified.
+    if let Some(object) = filled.as_object_mut() {
+        object.remove("roster_word");
+    }
+    let word = verify(team, input, &needed, super::super::now())
+        .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
+    filled["owner_word_checked"] = serde_json::to_value(&word)?;
+    filled["roster_word"] = Value::Bool(true);
+    Ok(())
+}
+
 /// 9.7: a task with a sub-team cannot be cancelled or reassigned without
 /// saying whether the sub-team stops or keeps running.
 fn choose_subteam(store: &mut Store, team: &Team, input: &Value) -> anyhow::Result<()> {
@@ -2046,6 +2110,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // check below fills it, from the lead's own session.
             if let Some(object) = filled.as_object_mut() {
                 object.remove("owner_word_checked");
+                object.remove("roster_word");
             }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
                 // Without an attempt, the task's open one.
@@ -2104,6 +2169,15 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     filled["owner_word_checked"] = serde_json::to_value(&verified)?;
                 }
             }
+            // U26: a lead changes the roster (or max_members) only on the
+            // owner's fresh word, and only for the change that word names.
+            if matches!(op, "add-member" | "swap-member" | "remove-member" | "settings") {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let caller = actor(&team, op, &filled)?;
+                check_roster_word(&team, op, input, &mut filled, &caller, |team, input, needed, now| {
+                    super::owner_word::verify_roster(team, input, needed, now)
+                })?;
+            }
             let receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
@@ -2161,6 +2235,8 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     // H2: `--json` reads stdin; `--json-file PATH` reads the same request from
     // a file (PowerShell 5.1 turns Cyrillic in a pipe into "?").
     let mut args = args.to_vec();
+    let wait = args.iter().any(|arg| arg == "--wait");
+    args.retain(|arg| arg != "--wait");
     let file = if let Some(index) = args.iter().position(|arg| arg == "--json-file") {
         let path = args
             .get(index + 1)
@@ -2174,12 +2250,6 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     let catalog = args.first().map(String::as_str) == Some("catalog");
     if catalog {
         args.remove(0);
-    }
-    // U20: `--wait` asks for the worker's outcome of a queued request.
-    let mut wait = false;
-    if let Some(index) = args.iter().position(|arg| arg == "--wait") {
-        args.remove(index);
-        wait = true;
     }
     if args.len() != 2 || (args[1] != "--json" && file.is_none()) {
         return Err(USAGE.into());
@@ -2344,6 +2414,97 @@ mod tests {
         assert_eq!((next.previous.as_str(), next.goal.as_str()), (old_id, "two"));
         assert_eq!(next.member("dev").unwrap().session.as_ref().map(|session| session.name.as_str()), Some("claude/x/dev"));
         assert_eq!(store.load(old_id).unwrap().unwrap().next, next_id);
+    }
+
+    #[test]
+    fn every_roster_change_needs_the_owner_word_naming_it() {
+        use rusqlite::Connection;
+        let now = crate::state::now();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+        let add = |text: &str| {
+            db.execute(
+                "INSERT INTO events(name, conversation, payload) VALUES ('claude/x/lead','c1',?1)",
+                rusqlite::params![json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":text}).to_string()],
+            ).unwrap();
+        };
+        add("Please add bob to the roster");
+        add("Please add alice to the roster");
+        add("Please swap dev for another member");
+        add("Please remove dev from the roster");
+        add("Please change max members to 5");
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(),
+            session: Some(SessionRef { name: "claude/x/lead".into(), conversation_id: "c1".into(), ..Default::default() }), ..Default::default() });
+        team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
+        let caller = Actor::Member("lead".into());
+        let verify = |_: &Team, input: &Value, needed: &[String], now: f64| {
+            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", input["owner_word"]["text"].as_str().unwrap_or_default(), needed, now)
+        };
+        let cases = [
+            ("add-member", json!({"member":{"id":"bob"}}), "Please add bob to the roster", "Please add alice to the roster"),
+            ("swap-member", json!({"member":"dev"}), "Please swap dev for another member", "Please add alice to the roster"),
+            ("remove-member", json!({"member":"dev"}), "Please remove dev from the roster", "Please add alice to the roster"),
+            ("settings", json!({"settings":{"max_members":5}}), "Please change max members to 5", "Please add alice to the roster"),
+        ];
+        for (op, base, sentence, other) in cases {
+            let mut without = base.clone();
+            let input = base.clone();
+            assert!(!super::roster_word_names(&team, op, &input).is_empty(), "{op}");
+            let error = super::check_roster_word(&team, op, &input, &mut without, &caller, verify).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{op}: {error}");
+            // A caller-supplied roster_word is not a word.
+            let mut claimed = base.clone();
+            claimed["roster_word"] = Value::Bool(true);
+            let input = claimed.clone();
+            let error = super::check_roster_word(&team, op, &input, &mut claimed, &caller, verify).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{op}: {error}");
+            // A word naming something else is refused.
+            let mut wrong = base.clone();
+            wrong["owner_word"] = json!({"text": other});
+            let input = wrong.clone();
+            let error = super::check_roster_word(&team, op, &input, &mut wrong, &caller, verify).unwrap_err().to_string();
+            assert!(error.contains("your word") || error.contains("not in the lead session"), "{op}: {error}");
+            // The fresh word naming the change fills the verified flag.
+            let mut good = base.clone();
+            good["owner_word"] = json!({"text": sentence});
+            let input = good.clone();
+            super::check_roster_word(&team, op, &input, &mut good, &caller, verify).unwrap();
+            assert_eq!(good["roster_word"], true, "{op}");
+            assert!(good["owner_word_checked"].is_object(), "{op}");
+        }
+    }
+
+    #[test]
+    fn a_lead_starts_the_next_goal_only_after_an_accepted_proposal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let mut done = Team { id: "done".into(), name: "Done".into(), lead: "lead".into(), status: TeamStatus::Done, goal: "one".into(), ..Default::default() };
+        done.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        store.create("66666666-6666-4666-8666-666666666666", &json!({}), done.clone(), Vec::new()).unwrap();
+        // N1: the lead alone cannot start the next goal.
+        let error = super::next_goal_as(
+            &mut store,
+            "77777777-7777-4777-8777-777777777777",
+            &json!({"request_id":"77777777-7777-4777-8777-777777777777","team":"done","goal":"two"}),
+            &Actor::Member("lead".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("accepted next-goal proposal"), "{error}");
+        // With the owner's accepted proposal it can.
+        let mut with_proposal = done.clone();
+        with_proposal.id = "done2".into();
+        with_proposal.proposals.push(json!({"id":"p1","kind":"next-goal","state":"accepted","goal":"two"}));
+        store.create("88888888-8888-4888-8888-888888888888", &json!({}), with_proposal, Vec::new()).unwrap();
+        let value = super::next_goal_as(
+            &mut store,
+            "99999999-9999-4999-8999-999999999999",
+            &json!({"request_id":"99999999-9999-4999-8999-999999999999","team":"done2","goal":"two"}),
+            &Actor::Member("lead".into()),
+        )
+        .unwrap();
+        assert_eq!(value["status"], "planned");
     }
 
     #[test]

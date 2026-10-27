@@ -3143,6 +3143,10 @@ elif a[:2]==['subagents-confirm','set']:
     print(json.dumps({'confirm':body.get('confirm')}))
 elif a[:2]==['session-upload-block','get']:
     print(json.dumps({'block': True}))
+elif a[:2]==['session-upload-block','set']:
+    body=json.load(sys.stdin)
+    open(__file__+'.calls','a').write(json.dumps(body)+'\n')
+    print(json.dumps({'block':body.get('block')}))
 )PY"));
     qputenv("FAKE_CONFIRM", "false");
     SettingsPage page(FakeCli::program(script));
@@ -3160,6 +3164,20 @@ elif a[:2]==['session-upload-block','get']:
     // The same page carries the DeepSeek upload block from #481, on by default.
     auto *upload = page.findChild<QCheckBox *>("workspaceSessionUploadBlock");
     QVERIFY(upload && upload->isChecked());
+    // U22: toggling it reads get (the checked state above) and sends set with
+    // block false and a canonical request id.
+    calls.close();
+    QFile::remove(script + ".calls");
+    upload->click();
+    QTRY_VERIFY(QFile::exists(script + ".calls"));
+    {
+        QFile wrote(script + ".calls");
+        QVERIFY(wrote.open(QIODevice::ReadOnly));
+        const auto sent = QJsonDocument::fromJson(wrote.readAll().trimmed()).object();
+        QCOMPARE(sent.value("block").toBool(true), false);
+        const auto id = sent.value("request_id").toString();
+        QVERIFY2(!QUuid(id).isNull() && QUuid(id).toString(QUuid::WithoutBraces) == id, qPrintable(id));
+    }
     // Shots: setting on/off, light/dark (only with ZERUS_TEAM_SHOTS).
     for (bool enabled : {true, false}) {
         qputenv("FAKE_CONFIRM", enabled ? "true" : "false");

@@ -518,6 +518,18 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             if let Some(since) = member.background_since {
                 value["background_minutes"] = json!(((now - since).max(0.0) / 60.0).round() as u64);
             }
+            // U22: a DeepSeek member's session that still uploads says so on
+            // the member and its card.
+            if member.agent == "dsh" {
+                if let Some(session) = &member.session {
+                    if session.host.is_empty() {
+                        if let Some(seen) = super::super::dsh::check_upload(&session.name) {
+                            value["upload_seen"] = seen;
+                            value["upload_note"] = json!("DeepSeek session-log upload still active");
+                        }
+                    }
+                }
+            }
             // B1: the pending permission request and the answers so far.
             value["question"] = member.permission.clone().unwrap_or(Value::Null);
             value["permission_answers"] = json!(member.permission_answers);

@@ -37,6 +37,7 @@ tempfile = "3"
 toml_edit = "0.25"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
+ruzstd = { version = "0.8", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

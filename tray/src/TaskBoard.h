@@ -26,6 +26,17 @@ struct TaskItem {
     qint64 createdAt = 0, stageAt = 0, cancelledAt = 0;
     bool writable = true;
     int queue = 0;   // position in the project's To do, from 1
+    bool operator==(const TaskItem &o) const {
+        return ref == o.ref && id == o.id && uuid == o.uuid && title == o.title && text == o.text && stage == o.stage
+            && summary == o.summary && cancelReason == o.cancelReason && targetHost == o.targetHost
+            && targetSession == o.targetSession && targetId == o.targetId && targetKind == o.targetKind
+            && targetMachine == o.targetMachine && worker == o.worker && targetKnown == o.targetKnown
+            && sessionHost == o.sessionHost && sessionName == o.sessionName && sessionId == o.sessionId
+            && sessionKnown == o.sessionKnown && author == o.author && authorHost == o.authorHost && authorId == o.authorId
+            && createdAt == o.createdAt && stageAt == o.stageAt && cancelledAt == o.cancelledAt && writable == o.writable
+            && queue == o.queue;
+    }
+    bool operator!=(const TaskItem &o) const { return !(*this == o); }
 };
 
 enum class TaskAction { Edit, ToBacklog, Top, SendNow, ToTodo, Cancel, BackToTodo, Accept, Pause, Rename };

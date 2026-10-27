@@ -265,6 +265,8 @@ void TestTasksView::firstActiveFilterCombinesReviewAndWorkWithoutChangingSelecti
 
 void TestTasksView::taskDocumentAndDiscussionUseActivityComposition() {
     QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo", {{"title", "A clear task title"}, {"text", "A **canonical** document."}})}));
+    // The board's listing arrives after the task's own read, as on a loaded runner.
+    { QFile delay(dir.filePath("delay-list")); QVERIFY(delay.open(QIODevice::WriteOnly)); delay.write("0.5"); }
     HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
     QWidget center; auto *layout = new QVBoxLayout(&center); layout->setContentsMargins(0, 0, 0, 0);
     auto *pane = inspector.takeDetailsPane(); layout->addWidget(pane); center.resize(1100, 780); center.show();
@@ -276,6 +278,8 @@ void TestTasksView::taskDocumentAndDiscussionUseActivityComposition() {
     QVERIFY(!composer->isAncestorOf(pane->findChild<QWidget *>("taskInspectorActions")));
     MessageComposer activity; activity.resize(800, 400); activity.show(); activity.setTheme(true);
     QCOMPARE(composer->editor()->height(), activity.editor()->height());
+    // A comment is saved only for the board's loaded project (zerus-fexl).
+    QTRY_COMPARE(board.board().projectId, QStringLiteral("project-1"));
     composer->editor()->setPlainText("A clarification before Start"); composer->findChild<QPushButton *>("sendMessage")->click();
     QTRY_VERIFY(detail->toPlainText().contains("A clarification before Start")); QTRY_VERIFY(detail->toPlainText().contains("Waiting for Start"));
     QCOMPARE(pane->findChild<QTabBar *>("taskDetailTabs")->currentIndex(), 0);

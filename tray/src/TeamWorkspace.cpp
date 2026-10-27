@@ -116,6 +116,8 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     m_drawer->openTeam = [this](const QString &team) { m_teams->watch(team); showTeam(team); };
     m_drawer->openSession = [this](const QString &host, const QString &session) { if (openSession) openSession(host, session); };
     m_drawer->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return m_panel->confirm(name, title, text, action); };
+    // The panel may outlive this workspace.
+    m_panel->confirmClosed = [alive = QPointer<TeamWorkspace>(this)] { if (alive) alive->scheduleRender(); };
     m_drawer->reassign = [this](int task, const QPoint &global) { if (const auto *team = m_teams->watched()) m_panel->reassignMenu(*team, task, global); };
     m_drawer->problemActions = [this](const Member &member, const Status &status) -> QWidget * {
         const auto *team = m_teams->watched();
@@ -191,6 +193,8 @@ void TeamWorkspace::placePopover()
 void TeamWorkspace::render()
 {
     if (!isVisible()) return;
+    // A confirmation is open (TeamPanel::confirm): its asker stays alive.
+    if (m_panel->confirming()) return;
     const Colors c = colorsFor(m_dark);
     const Team *team = m_teams->watched();
     if (!team || team->id != m_team) team = m_teams->team(m_team);
@@ -530,30 +534,37 @@ void TeamWorkspace::phaseSent(const QString &key, bool ok, const QString &messag
 // operation the draft strip used. Returns false when nothing was sent (a
 // cancelled confirmation, a decision in flight or one already sent for this
 // revision): a cancel leaves the header usable, a sent one never goes twice.
-bool TeamWorkspace::approvePhase(const Team &team, int phase)
+bool TeamWorkspace::approvePhase(const QString &id, int phase)
 {
-    if (m_phaseAct || phaseDecided(team, phase)) return false;
+    const auto *team = currentTeam(id);
+    if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     int count = 0;
-    for (const auto &group : phaseGroups(team)) if (group.n == phase) count = group.tasks.size();
+    for (const auto &group : phaseGroups(*team)) if (group.n == phase) count = group.tasks.size();
     if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
                           tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
                           tr("Approve phase")))
         return false;
-    const QString key = markPhaseDecided(team, phase);
-    m_panel->act("approve-phase", {{"team", team.id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
+    // The team may have been refreshed while the dialog was open: read it again.
+    team = currentTeam(id);
+    if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
+    const QString key = markPhaseDecided(*team, phase);
+    m_panel->act("approve-phase", {{"team", id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     return true;
 }
 
-bool TeamWorkspace::discardPhase(const Team &team, int phase)
+bool TeamWorkspace::discardPhase(const QString &id, int phase)
 {
-    if (m_phaseAct || phaseDecided(team, phase)) return false;
+    const auto *team = currentTeam(id);
+    if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     int count = 0;
-    for (const auto &group : phaseGroups(team)) if (group.n == phase) count = group.tasks.size();
+    for (const auto &group : phaseGroups(*team)) if (group.n == phase) count = group.tasks.size();
     if (!m_panel->confirm("teamDiscardPhaseConfirm", tr("Discard phase?"),
                           tr("Discard phase %1 and its %2 tasks?").arg(phase).arg(count), tr("Discard phase")))
         return false;
-    const QString key = markPhaseDecided(team, phase);
-    m_panel->act("discard-phase", {{"team", team.id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
+    team = currentTeam(id);
+    if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
+    const QString key = markPhaseDecided(*team, phase);
+    m_panel->act("discard-phase", {{"team", id}, {"phase", phase}}, [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     return true;
 }
 
@@ -750,14 +761,8 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     };
     // G9: the band header carries a draft's Approve and Discard (confirmed)
     // and the F10 move arrows.
-    view->phaseApprove = [this, id = team.id](int phase) {
-        const auto *current = currentTeam(id);
-        return current && approvePhase(*current, phase);
-    };
-    view->phaseDiscard = [this, id = team.id](int phase) {
-        const auto *current = currentTeam(id);
-        return current && discardPhase(*current, phase);
-    };
+    view->phaseApprove = [this, id = team.id](int phase) { return approvePhase(id, phase); };
+    view->phaseDiscard = [this, id = team.id](int phase) { return discardPhase(id, phase); };
     view->phaseMoveUp = [this, id = team.id](int phase) {
         const auto *current = currentTeam(id);
         if (!current) return;
@@ -993,11 +998,11 @@ QWidget *TeamWorkspace::board(const Team &team)
             approve->setEnabled(approveBlocked(team, group.n).isEmpty() && (team.phase(group.n) ? team.phase(group.n)->waiting.text.isEmpty() : true));
             approve->setToolTip(approveBlocked(team, group.n));
             QObject::connect(approve, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
-                if (const auto *current = currentTeam(id)) approvePhase(*current, phase);
+                approvePhase(id, phase);
             });
             auto *discard = button(tr("Discard"), "teamBoardDiscardPhase");
             QObject::connect(discard, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
-                if (const auto *current = currentTeam(id)) discardPhase(*current, phase);
+                discardPhase(id, phase);
             });
             h->addWidget(approve); h->addWidget(discard);
         }

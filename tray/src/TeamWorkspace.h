@@ -51,8 +51,8 @@ private:
     // G9: the phase band header's decisions. Approve and Discard ask for the
     // owner's confirmation and return true only when the request was sent; the
     // F10 arrows move a draft among the drafts.
-    bool approvePhase(const Teams::Team &team, int phase);
-    bool discardPhase(const Teams::Team &team, int phase);
+    bool approvePhase(const QString &team, int phase);
+    bool discardPhase(const QString &team, int phase);
     void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
     // F8: the lead's open membership proposals with Accept and Reject; remove

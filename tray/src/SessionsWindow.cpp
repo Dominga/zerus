@@ -1,5 +1,4 @@
 #include "SettingsJson.h"
-#include "JsonParse.h"
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
@@ -1409,7 +1408,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_inspector->addTab(m_children, tr("Plan && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
     const auto taskLaunchBytes = settings.value("tasks/pendingExecutorLaunches").toByteArray();
-    const auto taskLaunchDoc = taskLaunchBytes.size() <= 65536 ? JsonParse::local(taskLaunchBytes) : QJsonDocument();
+    const auto taskLaunchDoc = SettingsJson::document(QStringLiteral("tasks/pendingExecutorLaunches"), 65536);
     m_taskLaunches = taskLaunchDoc.object();
     bool validLaunches = taskLaunchBytes.isEmpty() || taskLaunchDoc.isObject();
     if (m_taskLaunches.size() > 16) validLaunches = false;
@@ -2992,7 +2991,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
 }
 
 bool SessionsWindow::saveTaskLaunches() {
-    QSettings settings; settings.setValue("tasks/pendingExecutorLaunches", QJsonDocument(m_taskLaunches).toJson(QJsonDocument::Compact));
+    QSettings settings; SettingsJson::store(settings, QStringLiteral("tasks/pendingExecutorLaunches"), QJsonDocument(m_taskLaunches));
     settings.sync();
     if (m_tasks) m_tasks->setExecutorLaunches(m_taskLaunches);
     return settings.status() == QSettings::NoError;
@@ -3022,7 +3021,7 @@ void SessionsWindow::savePendingLaunches()
 {
     auto legacy=m_pendingLaunches;
     for(auto it=legacy.begin();it!=legacy.end();)if(it.value().toObject()["creation_schema"]==1)it=legacy.erase(it);else ++it;
-    QSettings settings; settings.setValue("workspace/pendingLaunches", QJsonDocument(legacy).toJson(QJsonDocument::Compact)); settings.sync();
+    QSettings settings; SettingsJson::store(settings, QStringLiteral("workspace/pendingLaunches"), QJsonDocument(legacy)); settings.sync();
 }
 
 bool SessionsWindow::takeEndedLaunch(const QString &launchId, QJsonObject *launch)
@@ -4234,7 +4233,10 @@ void SessionsWindow::renderDetails()
         s.conversationState = m_details.value("conversation_state").toString(s.conversationState);
         s.runtimeState = m_details.value("runtime_state").toString(s.runtimeState);
         s.activitySummary = m_details.value("activity_summary").toString(s.activitySummary);
-        s.activityDetail = m_details.value("activity_detail").toString(s.activityDetail);
+        if (m_details.value("activity_detail").isString()) {
+            s.activityDetail = m_details.value("activity_detail").toString();
+            s.activityAnswers = QuestionReply::prepared(m_details, QStringLiteral("activity_detail"));
+        }
         s.providerError = m_details.value("provider_error").toObject();
         s.currentTool = m_details.value("current_tool").toString(s.currentTool);
         s.toolDetail = m_details.value("tool_detail").toString(s.toolDetail);
@@ -5828,8 +5830,8 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
         }
         ReadMarkStore::add(m_fleet.takeNewReadMarks());
         const auto marks = m_fleet.attentionMarks(), read = m_fleet.readReplies();
-        QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
-        QSettings().setValue("attention/readReplies", QJsonDocument(read).toJson(QJsonDocument::Compact));
+        SettingsJson::store(QStringLiteral("attention/sessionMarks"), QJsonDocument(marks));
+        SettingsJson::store(QStringLiteral("attention/readReplies"), QJsonDocument(read));
         if (current.key == m_selectedKey) m_readSelectionKey = current.key;
         rebuild(); updateDashboard(); emit attentionMarksChanged(marks, read); return;
     }

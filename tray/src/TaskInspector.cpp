@@ -1044,7 +1044,7 @@ void TaskInspector::createCard() {
     if (m_creation.isEmpty()) {
         m_creation = {{"project", project}, {"title", title}, {"request_id", QUuid::createUuid().toString(QUuid::WithoutBraces)},
                       {"stage", m_stage == QLatin1String("backlog") ? "backlog" : "todo"}, {"session", m_sessionId.isEmpty() ? "any" : m_session}, {"host", m_sessionId.isEmpty() ? QString() : m_host}, {"session_id", m_sessionId}};
-        settings.setValue(key + "/request", QJsonDocument(m_creation).toJson(QJsonDocument::Compact)); settings.sync();
+        SettingsJson::store(settings, key + "/request", QJsonDocument(m_creation)); settings.sync();
         if (settings.status() != QSettings::NoError) { m_creation = {}; m_createError->setText(tr("Could not save the new card identity. Nothing was sent.")); m_createError->show(); return; }
     }
     m_creating = true; m_newTitle->setReadOnly(true); m_createError->hide();

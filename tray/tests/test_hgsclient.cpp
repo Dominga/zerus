@@ -543,20 +543,38 @@ void TestHgsClient::questionReplyPreviews_data()
 void TestHgsClient::questionReplyPreviews()
 {
     QFETCH(QString, prompt); QFETCH(QString, preview);
-    SessionInfo session;session.tracked=true;session.phase="working";session.activity="busy";
-    session.prompt=prompt;session.activitySummary="Working";
-    session.activityDetail=prompt.left(240)+QChar(0x2026);
-    QCOMPARE(SessionPresentation::currentAction(session),"Working: "+preview);
-    session.activityDetail=prompt;
-    QCOMPARE(SessionPresentation::currentAction(session),"Working: "+preview);
-    session.phase="input";
-    QCOMPARE(SessionPresentation::currentAction(session),"Needs input: "+preview);
-    session.phase="working";session.activitySummary.clear();session.activityDetail.clear();
-    QCOMPARE(SessionPresentation::currentAction(session),"Working: "+preview);
+    // The answers are prepared with the row, off the GUI thread (QuestionReply.h).
+    const auto row = [&prompt](const QJsonObject &fields) {
+        QJsonObject raw{{"name", "codex/demo"}, {"tracked", true}, {"phase", "working"}, {"activity", "busy"},
+                        {"prompt", prompt}, {"activity_summary", "Working"}};
+        for (auto it = fields.begin(); it != fields.end(); ++it) raw[it.key()] = it.value();
+        return HgsClient::box(QJsonObject{{"host", "local"}, {"ok", true}, {"sessions", QJsonArray{raw}}}).sessions.first();
+    };
+    QCOMPARE(SessionPresentation::currentAction(row({{"activity_detail", prompt.left(240) + QChar(0x2026)}})), "Working: " + preview);
+    QCOMPARE(SessionPresentation::currentAction(row({{"activity_detail", prompt}})), "Working: " + preview);
+    QCOMPARE(SessionPresentation::currentAction(row({{"activity_detail", prompt}, {"phase", "input"}})), "Needs input: " + preview);
+    QCOMPARE(SessionPresentation::currentAction(row({{"activity_summary", ""}})), "Working: " + preview);
     // A previous question reply must not replace a subsequent tool excerpt.
-    session.activitySummary="Read";session.currentTool="Read";session.toolDetail="src/example.rs";session.activityDetail=session.toolDetail;
-    QCOMPARE(SessionPresentation::currentAction(session),QString("Read: src/example.rs"));
-    QCOMPARE(session.prompt,prompt);
+    const auto tool = row({{"activity_summary", "Read"}, {"current_tool", "Read"}, {"tool_detail", "src/example.rs"}, {"activity_detail", "src/example.rs"}});
+    QCOMPARE(SessionPresentation::currentAction(tool), QString("Read: src/example.rs"));
+    QCOMPARE(tool.prompt, prompt);
+    // An inspection's detail carries the preview its prepare step recorded.
+    auto running = row({{"state", "running"}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"last_event_at", 1},
+                        {"prompt", "Earlier request"}, {"activity_detail", "Reading"}});
+    QCOMPARE(SessionPresentation::currentAction(running), QString("Working: Reading"));
+    QJsonObject details{{"tracked", true}, {"run_id", "run-one"}, {"conversation_id", "conversation-one"}, {"last_event_at", 2},
+                        {"activity_summary", "Working"}, {"activity_detail", prompt}};
+    QuestionReply::annotate(details);
+    QVERIFY(details.contains(QuestionReply::previewKey("activity_detail")));
+    running = SessionPresentation::inspected(running, details);
+    QCOMPARE(running.activityDetail, prompt); QCOMPARE(running.activityAnswers, preview);
+    QCOMPARE(SessionPresentation::currentAction(running), "Working: " + preview);
+    // Search and archive rows a GUI-thread conversion reads carry theirs too.
+    QJsonArray rows{QJsonObject{{"name", "codex/demo"}, {"prompt", prompt}}, QJsonObject{{"name", "codex/plain"}, {"prompt", "Plain"}}};
+    QuestionReply::annotateRows(rows);
+    QCOMPARE(rows[0].toObject().value(QuestionReply::previewKey("prompt")).toString(), preview);
+    QVERIFY(!rows[1].toObject().contains(QuestionReply::previewKey("prompt")));
+    QCOMPARE(HgsClient::parseSessions(rows).first().promptAnswers, preview);
 }
 
 void TestHgsClient::unrecognizedQuestionPreviewsStayLiteral()

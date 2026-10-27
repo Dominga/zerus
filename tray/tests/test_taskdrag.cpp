@@ -132,6 +132,14 @@ void TestTaskDrag::thePayloadNamesTheTaskAndItsProject() {
     QMimeData text; text.setText("T-000007"); QVERIFY(!TaskDrag::from(&text));
     QMimeData broken; broken.setData("application/x-zerus-task", "{}"); QVERIFY(!TaskDrag::from(&broken));
     QVERIFY(!TaskDrag::from(nullptr));
+    // The payload stays in this process and reads without a JSON parse; a
+    // truncated or extended one is not a task either.
+    const auto payload = mime->data("application/x-zerus-task");
+    QVERIFY(!payload.startsWith('{'));
+    for (const auto &bytes : {payload.chopped(1), payload + QByteArray(1, '\0'),
+                              QByteArray(R"({"project":"project-1","uuid":"uuid-7"})")}) {
+        QMimeData other; other.setData("application/x-zerus-task", bytes); QVERIFY(!TaskDrag::from(&other));
+    }
 }
 
 void TestTaskDrag::everyStageStartsADrag() {

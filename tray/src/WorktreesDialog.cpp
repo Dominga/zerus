@@ -1,4 +1,3 @@
-#include "JsonParse.h"
 #include "WorktreesDialog.h"
 #include "DialogButtons.h"
 #include "WorktreeBatchCleanupDialog.h"
@@ -276,8 +275,8 @@ void WorktreesDialog::setContext(const SessionOrganization &projects, const Flee
             const auto common=source.catalog["common_dir"].toString(), repository=key(source.host,common);
             const auto review=m_client->worktreeReview(source.host,common,3600);
             if(source.fresh&&!review.isEmpty()) {
-                m_reviews[repository]=review;m_reviewAttempted.insert(repository);
-                for(const auto &path:review["targeted_paths"].toArray())m_reviewAttempted.insert(key(repository,path.toString()));
+                m_reviews[repository]=review;m_reviewAttempted[repository].insert(QString());
+                for(const auto &path:review["targeted_paths"].toArray())m_reviewAttempted[repository].insert(path.toString());
             }
         }
         const auto project = m_project->currentData().toString(), computer = m_computer->currentData().toString();
@@ -433,7 +432,7 @@ void WorktreesDialog::render()
                 const auto repository = key(source.host, source.catalog["common_dir"].toString());
                 const bool failed = m_reviewErrors.contains(repository);
                 const bool deferred = valid && WorktreeReviewUi::hasReason(detail, {"status_unavailable"})
-                    && (!m_reviewAttempted.contains(key(repository,path))
+                    && (!reviewAttempted(repository, path)
                         || (m_reviewRequest && m_reviewKey==repository && m_reviewWorktree==path));
                 if ((valid && !deferred) || failed) { ++processed; if (group == 3 || failed) ++unavailable; }
             }
@@ -564,18 +563,17 @@ void WorktreesDialog::reviewSelection()
     for (const auto &source : m_sources) {
         if (!canClean(source)) continue;
         const auto common = source.catalog["common_dir"].toString(), repository = key(source.host, common);
-        QString focus, attempt = repository;
-        if (m_reviewAttempted.contains(repository)) {
+        QString focus;
+        if (reviewAttempted(repository)) {
             if (!m_reviews.contains(repository)) continue;
             for (const auto &value : source.catalog["worktrees"].toArray()) {
                 const auto row = value.toObject(); if (row["kind"] != "linked") continue;
                 const auto reviewed = reviewedRow(source, row); const auto path = row["path"].toString();
-                const auto candidate = key(repository, path);
-                if ((reviewed.isEmpty() || WorktreeReviewUi::hasReason(reviewed, {"status_unavailable"})) && !m_reviewAttempted.contains(candidate)) { focus = path; attempt = candidate; break; }
+                if ((reviewed.isEmpty() || WorktreeReviewUi::hasReason(reviewed, {"status_unavailable"})) && !reviewAttempted(repository, path)) { focus = path; break; }
             }
             if (focus.isEmpty()) continue;
         }
-        m_reviewAttempted.insert(attempt); m_reviewKey = repository; m_reviewWorktree = focus; m_reviewGeneration = m_generation;
+        m_reviewAttempted[repository].insert(focus); m_reviewKey = repository; m_reviewWorktree = focus; m_reviewGeneration = m_generation;
         m_reviewRequest = m_client->reviewWorktrees(source.host, common, focus); updateActions(); return;
     }
 }
@@ -599,8 +597,4 @@ void WorktreesDialog::cleanUp()
 void WorktreesDialog::invalidateReview(const QString &repository)
 {
     m_reviews.remove(repository); m_reviewErrors.remove(repository); m_reviewAttempted.remove(repository);
-    for (auto it = m_reviewAttempted.begin(); it != m_reviewAttempted.end();) {
-        const auto parts = JsonParse::localArray(it->toUtf8());
-        if (!parts.isEmpty() && parts.first().toString() == repository) it = m_reviewAttempted.erase(it); else ++it;
-    }
 }

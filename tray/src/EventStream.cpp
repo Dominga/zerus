@@ -3,6 +3,7 @@
 #include "ChildProcess.h"
 #include "JsonParse.h"
 #include "ProcessRunner.h"
+#include "QuestionReply.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -283,6 +284,7 @@ private:
             inspection["events"] = std::exchange(m_activity.events, {});
             inspection["cursor"] = m_activity.cursor;
             if (std::exchange(m_activity.replace, false)) inspection["replace_events"] = true;
+            QuestionReply::annotate(inspection);
             m_activity.dirty = false;
             QMetaObject::invokeMethod(m_front, [front = m_front, name = m_activity.name, inspection] {
                 if (front->m_followedName == name) {

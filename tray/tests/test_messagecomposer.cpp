@@ -856,6 +856,14 @@ void TestMessageComposer::savedDraftsNameAndOpenTheirSession()
     save(remote, "  \n  Review   the deployment  ");
     save(child, "Ask the worker"); save(question, "Answer the question");
     save("voice-message-draft\n" + remote, {}, true); save("legacy", "Kept under an old key");
+    // A question-answer key keeps its JSON identity on disk. The draft index
+    // decodes it off the GUI thread; owner() then names its session at once.
+    QVERIFY(ComposerDraftStore().keys().contains(question));
+    const auto owner = ComposerDraftStore::owner(question);
+    QCOMPARE(int(owner.kind), int(ComposerDraftOwner::Kind::Question));
+    QCOMPARE(owner.machine, QString("mac")); QCOMPARE(owner.session, QString("claude/infra/review"));
+    const auto unlisted = "question\n" + QString::fromUtf8(QJsonDocument(QJsonArray{local, "question-two", "hash"}).toJson(QJsonDocument::Compact)) + "\nrun\nconversation";
+    QVERIFY(ComposerDraftStore::owner(unlisted).kind != ComposerDraftOwner::Kind::Question);
     // Newest first: the remote draft becomes the oldest.
     QFile manifest(ComposerDraftStore::directory() + '/' + QCryptographicHash::hash(remote.toUtf8(), QCryptographicHash::Sha256).toHex() + "/draft.json");
     QVERIFY(manifest.open(QIODevice::ReadWrite));

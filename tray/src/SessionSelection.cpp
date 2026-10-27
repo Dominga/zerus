@@ -3,6 +3,7 @@
 #include "SessionsWindow.h"
 #include "LocalLaunchWarning.h"
 #include "SessionList.h"
+#include "SettingsJson.h"
 #include "MessageComposer.h"
 #include "WorkspaceIcons.h"
 #include <QAction>
@@ -299,8 +300,8 @@ void SessionsWindow::runSelectionAction(SelectionAction action, const QList<Entr
         }
         ReadMarkStore::add(m_fleet.takeNewReadMarks());
         const auto marks = m_fleet.attentionMarks(), read = m_fleet.readReplies();
-        QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
-        QSettings().setValue("attention/readReplies", QJsonDocument(read).toJson(QJsonDocument::Compact));
+        SettingsJson::store(QStringLiteral("attention/sessionMarks"), QJsonDocument(marks));
+        SettingsJson::store(QStringLiteral("attention/readReplies"), QJsonDocument(read));
         rebuild(); updateDashboard(); emit attentionMarksChanged(marks, read);
         showNotice(tr("%1: %2 of %3 sessions updated.").arg(selectionActionText(action)).arg(changed).arg(targets.size()), changed != targets.size()); return;
     }

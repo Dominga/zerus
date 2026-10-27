@@ -10,6 +10,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPointer>
+#include "JsonSettings.h"
 #include "FakeCli.h"
 #include "WorktreePanel.h"
 #include "NewSessionDialog.h"
@@ -636,7 +637,7 @@ elif c=='dirs':dump({'path':a[1] if len(a)>1 else '','directories':[]})
         // An expired disk catalog triggers a new bounded scan on the next opening.
         QSettings settings;auto snapshots=QJsonDocument::fromJson(settings.value("workspace/worktreeSnapshots").toByteArray()).object();
         for(auto i=snapshots.begin();i!=snapshots.end();++i){auto data=i.value().toObject();data["received_at"]=QDateTime::currentSecsSinceEpoch()-3601;i.value()=data;}
-        settings.setValue("workspace/worktreeSnapshots",QJsonDocument(snapshots).toJson());
+        setJsonSetting("workspace/worktreeSnapshots",QJsonDocument(snapshots).toJson());
         const auto before=calls().count("worktrees --path");WorktreesDialog expired(&client,projects,fleet(),false);expired.show();
         QTRY_VERIFY(calls().count("worktrees --path")>before);
     }

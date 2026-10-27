@@ -87,7 +87,7 @@ QHash<QString,QString> bundleValues(const QString &path){
 DesktopUpdateFeed parseDev(const QByteArray &data){
     DesktopUpdateFeed result;
     if(data.size()>256*1024)return result;
-    QString error;auto doc=JsonParse::local(data,&error);
+    QString error;auto doc=JsonParse::parse(data,&error);
     if(!error.isEmpty()||!doc.isObject())return result;
     auto raw=doc.object();
     if(!integer(raw["schemaVersion"],2,2)||raw["product"]!="zerus"||raw["platform"]!="desktop"||raw["channel"]!="dev"||raw["channelTag"]!="dev"||raw.contains("sourceDirty")||!integer(raw["buildId"],1,9007199254740991LL)||!integer(raw["buildNumber"],1,9007199254740991LL))return result;
@@ -174,7 +174,7 @@ DesktopUpdateFeed UpdateController::parseFeed(const QByteArray &data,const QStri
     if(channel=="dev")return parseDev(data);
     DesktopUpdateFeed result;
     if(data.size()>256*1024||!(channel=="stable"||channel=="nightly"))return result;
-    QString error;auto doc=JsonParse::local(data,&error);if(!error.isEmpty()||!doc.isObject())return result;
+    QString error;auto doc=JsonParse::parse(data,&error);if(!error.isEmpty()||!doc.isObject())return result;
     auto raw=doc.object();
     if(!integer(raw["schemaVersion"],1,1)||raw["product"]!="zerus"||raw["platform"]!="desktop"||raw["channel"]!=channel||raw.contains("sourceDirty")||!integer(raw["releaseId"],1,9007199254740991LL))return result;
     QString version=raw["versionName"].toString(),release=raw["releaseUrl"].toString();
@@ -310,7 +310,7 @@ QString UpdateController::wingetPackage(const QString &executable){
 }
 bool UpdateController::installerRecord(const QByteArray &data){
     if(data.isEmpty()||data.size()>installerRecordLimit)return false;
-    QString error;const auto document=JsonParse::local(data,&error);
+    QString error;const auto document=JsonParse::parse(data,&error);
     if(!error.isEmpty()||!document.isObject())return false;
     const auto record=document.object();
     return integer(record["schema"],1,1)&&record["kind"]=="installer"&&record["product"]=="Zerus";
@@ -537,7 +537,7 @@ void UpdateController::updateLoginItem(std::function<void(const QString &)> done
     },60000,true);
 }
 void UpdateController::sourceInstallation(const QString &executable){
-    m_installation.kind="unknown";QDir directory=QFileInfo(executable).absoluteDir();
+    QString kind="unknown";QDir directory=QFileInfo(executable).absoluteDir();
 #ifdef Q_OS_WIN
     // The portable zip has build-info.json next to hgs-tray.exe: never a source
     // build, even unpacked inside a folder kept in Git (a profile, for instance).
@@ -545,7 +545,7 @@ void UpdateController::sourceInstallation(const QString &executable){
 #else
     const bool bundle=false;
 #endif
-    for(int depth=0;!bundle&&depth<20;++depth){if(QFileInfo::exists(directory.filePath(".git"))){m_installation.kind="source";break;}if(!directory.cdUp())break;}
+    for(int depth=0;!bundle&&depth<20;++depth){if(QFileInfo::exists(directory.filePath(".git"))){kind="source";break;}if(!directory.cdUp())break;}
 #ifdef Q_OS_WIN
     // Windows builds ship as a portable zip; there is no package manager to ask.
     // Stable stays the default: stable releases after 0.42.2 carry the same tested
@@ -553,14 +553,19 @@ void UpdateController::sourceInstallation(const QString &executable){
     // nightly, is kept.
     // The per-user installer leaves installation.json next to hgs-tray.exe
     // (scripts/windows_installer.py); a zip has none. Neither updates itself.
-    if(m_installation.kind=="unknown"){
-        QFile record(QFileInfo(executable).absoluteDir().filePath("installation.json"));QByteArray data;
-        if(record.open(QIODevice::ReadOnly))data=record.read(installerRecordLimit+1);
-        if(installerRecord(data))m_installation.kind="installer";
-        else{m_installation.kind="portable";m_installation.package=wingetPackage(executable);}
+    // The record is read and parsed off the GUI thread (ProcessRunner.h).
+    if(kind=="unknown"){
+        const QString path=QFileInfo(executable).absoluteDir().filePath("installation.json");
+        ProcessRunner::post(this,[path]{QFile record(path);QByteArray data;if(record.open(QIODevice::ReadOnly))data=record.read(installerRecordLimit+1);return installerRecord(data);},
+            [this,executable](bool installer){
+                if(installer)m_installation.kind="installer";
+                else{m_installation.kind="portable";m_installation.package=wingetPackage(executable);}
+                emit changed();compare();
+            });
+        return;
     }
 #endif
-    emit changed();compare();
+    m_installation.kind=kind;emit changed();compare();
 }
 void UpdateController::detectInstallation(const QString &executable){
     QString canonical=QFileInfo(executable).canonicalFilePath();if(canonical.isEmpty()){m_installation.kind="unknown";emit changed();compare();return;}
@@ -633,8 +638,15 @@ void UpdateController::compare(){
 
 void UpdateController::present(const QString &message){m_comparison=message;m_message=m_notice+(m_notice.isEmpty()||message.isEmpty()?QString():QStringLiteral(" "))+message;}
 void UpdateController::restoreCatalog(){
-    QSettings settings;auto selected=channel();auto raw=settings.value("updates/catalog/"+selected).toByteArray();auto parsed=parseFeed(raw,selected);auto checked=settings.value("updates/lastSuccess/"+selected,0).toLongLong();
-    if(!parsed.valid||checked<=0||checked>QDateTime::currentSecsSinceEpoch())return;
-    m_feed=parsed;m_lastSuccess=checked;m_cached=true;m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(checked).toString(Qt::ISODate)+" (cached).";
-    present(comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));
+    // The saved catalog is parsed off the GUI thread (ProcessRunner.h). Posted
+    // first, it is applied before the result of a check started after it; a later
+    // restore, or a catalog already verified meanwhile, supersedes it.
+    QSettings settings;const auto selected=channel();const auto raw=settings.value("updates/catalog/"+selected).toByteArray();
+    const auto checked=settings.value("updates/lastSuccess/"+selected,0).toLongLong();const auto generation=++m_restoreGeneration;
+    ProcessRunner::post(this,[raw,selected]{return parseFeed(raw,selected);},[this,generation,selected,checked](const DesktopUpdateFeed &parsed){
+        if(generation!=m_restoreGeneration||selected!=channel()||m_feed.valid)return;
+        if(!parsed.valid||checked<=0||checked>QDateTime::currentSecsSinceEpoch())return;
+        m_feed=parsed;m_lastSuccess=checked;m_cached=true;m_notice="Last successful check: "+QDateTime::fromSecsSinceEpoch(checked).toString(Qt::ISODate)+" (cached).";
+        present(comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));emit changed();compare();
+    });
 }

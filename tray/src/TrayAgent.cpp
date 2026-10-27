@@ -173,27 +173,30 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
 #endif
             return;
         }
-        const auto target = AttentionTracker::target(token);
-        if (target.isEmpty()) return;
-        m_pendingAttention = token;
-        showSessions();
+        // The token is decoded off the GUI thread (JsonParse.h).
+        ProcessRunner::post(this, [token] { return AttentionTracker::target(token); },
+                            [this, token, activationToken](const QJsonObject &target) {
+            if (target.isEmpty()) return;
+            m_pendingAttention = token; m_pendingTarget = target;
+            showSessions();
 #ifdef Q_OS_LINUX
-        if (!activationToken.isEmpty()) KWindowSystem::setCurrentXdgActivationToken(activationToken);
-        KWindowSystem::activateWindow(m_sessionsWindow->windowHandle());
+            if (!activationToken.isEmpty()) KWindowSystem::setCurrentXdgActivationToken(activationToken);
+            KWindowSystem::activateWindow(m_sessionsWindow->windowHandle());
 #else
-        Q_UNUSED(activationToken);
+            Q_UNUSED(activationToken);
 #endif
-        resolveAttentionClick();
-        if (m_pendingAttention.isEmpty()) return;
-        const auto host = target.value("host").toString();
-        if (host.isEmpty()) m_client.requestLocal(); else m_client.requestPeer(host);
-        QTimer::singleShot(16000, this, [this, token] { if (m_pendingAttention == token) resolveAttentionClick(true); });
+            resolveAttentionClick();
+            if (m_pendingAttention.isEmpty()) return;
+            const auto host = target.value("host").toString();
+            if (host.isEmpty()) m_client.requestLocal(); else m_client.requestPeer(host);
+            QTimer::singleShot(16000, this, [this, token] { if (m_pendingAttention == token) resolveAttentionClick(true); });
+        });
     });
     connect(m_notifier.get(), &AttentionNotifier::failed, this, [this](const QString &token, const QString &detail) {
         qWarning().noquote() << "Zerus: notification:" << detail;
         if(UpdateController::isUpdateToken(token))return;
         m_attention.deliveryFailed(token);
-        QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
+        SettingsJson::store(QStringLiteral("attention/observed"), QJsonDocument(m_attention.state()));
         if (m_sessionsWindow) m_sessionsWindow->showNotificationNotice(tr("System notification was not delivered: %1").arg(detail));
     });
 
@@ -303,13 +306,6 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
         pollAllKnownPeers(m_client, m_state);
     });
 
-    // Parse the large saved values on the preparation thread before their first use.
-    SettingsJson::warm(this, {QStringLiteral("attention/readReplies"), QStringLiteral("attention/sessionMarks"),
-                              QStringLiteral("attention/pendingReads"), QStringLiteral("attention/sharedReadMigrated"),
-                              QStringLiteral("workspace/organization"), QStringLiteral("workspace/pendingLaunches"),
-                              QStringLiteral("workspace/launchAccounts"), QStringLiteral("swarm/observedOrganization"),
-                              QStringLiteral("swarm/observedVersions"), QStringLiteral("workspace/worktreeSnapshots")});
-
     auto *discover = new QProcess(this);
     discover->setProgram(cfg.hgsPath.isEmpty() ? QStringLiteral("hgs") : cfg.hgsPath);
     discover->setArguments({QStringLiteral("ls"), QStringLiteral("--json")});
@@ -394,6 +390,17 @@ TrayAgent::~TrayAgent()
     // Родителя-виджета у окна редактора нет (см. TrayAgent.h) -- без этого delete оно
     // пережило бы трей висячим top-level QWidget'ом. Само меню удаляет ~TrayMenu.
     delete m_sessionsWindow;
+}
+
+QStringList TrayAgent::jsonSettings()
+{
+    return {QStringLiteral("attention/observed"), QStringLiteral("attention/readReplies"), QStringLiteral("attention/sessionMarks"),
+            QStringLiteral("attention/pendingReads"), QStringLiteral("attention/sharedReadMigrated"), QStringLiteral("attention/linuxTokens"),
+            QStringLiteral("workspace/organization"), QStringLiteral("workspace/pendingLaunches"), QStringLiteral("workspace/launchAccounts"),
+            QStringLiteral("workspace/worktreeSnapshots"), QStringLiteral("workspace/repositoryClone/*/pending"),
+            QStringLiteral("swarm/observedOrganization"), QStringLiteral("swarm/observedVersions"),
+            QStringLiteral("recovery/sharedPolicy"), QStringLiteral("speech/providerOperation"),
+            QStringLiteral("tasks/pendingExecutorLaunches"), QStringLiteral("tasks/newCard/*/request")};
 }
 
 TrayAgent::ReadState TrayAgent::storedReadState()
@@ -547,13 +554,12 @@ void TrayAgent::observeAttention(const QString &host, const BoxState &box)
     m_attention.setOptionalQuestions(QuestionNotificationSettings::enabled());
     const auto changes = m_attention.observe(host, box);
     if (m_attention.state() != before)
-        QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
+        SettingsJson::store(QStringLiteral("attention/observed"), QJsonDocument(m_attention.state()));
     for (const auto &token : changes.cleared) m_notifier->withdraw(token);
     for (const auto &notice : changes.raised) m_notifier->post(notice.token, notice.title, notice.body);
     if (m_sessionsWindow && !m_pendingAttention.isEmpty()) {
         m_sessionsWindow->setFleet(m_state);
-        const auto target = AttentionTracker::target(m_pendingAttention);
-        resolveAttentionClick(box.ok && target.value("host").toString() == host);
+        resolveAttentionClick(box.ok && m_pendingTarget.value("host").toString() == host);
     }
 }
 
@@ -587,7 +593,7 @@ void TrayAgent::publishReadMarks()
 void TrayAgent::resolveAttentionClick(bool final)
 {
     if (m_pendingAttention.isEmpty() || !m_sessionsWindow) return;
-    const auto target = AttentionTracker::target(m_pendingAttention);
+    const auto target = m_pendingTarget;
     const auto host = target.value("host").toString();
     const auto *box = host.isEmpty() ? &m_state.local() : m_state.peer(host);
     if (box) for (const auto &session : box->sessions) {
@@ -686,7 +692,7 @@ void TrayAgent::showSessions()
     if (!m_sessionsWindow) {
         m_sessionsWindow = new SessionsWindow(m_cfg.hgsPath);
         const auto publishReadState = [this]() {
-            QSettings().setValue("attention/readReplies", QJsonDocument(m_state.readReplies()).toJson(QJsonDocument::Compact));
+            SettingsJson::store(QStringLiteral("attention/readReplies"), QJsonDocument(m_state.readReplies()));
             publishReadMarks();
             m_sessionsWindow->setFleet(m_state); refreshIcon();
             if (!m_menu.isOpen()) rebuildMenu();
@@ -699,7 +705,7 @@ void TrayAgent::showSessions()
         });
         connect(m_sessionsWindow, &SessionsWindow::attentionMarksChanged, this, [this, publishReadState](const QJsonObject &marks, const QJsonObject &read) {
             m_state.setAttentionMarks(marks); m_state.setReadReplies(read);
-            QSettings().setValue("attention/sessionMarks", QJsonDocument(marks).toJson(QJsonDocument::Compact));
+            SettingsJson::store(QStringLiteral("attention/sessionMarks"), QJsonDocument(marks));
             // Consume muted events and withdraw current banners immediately.
             // Unmute keeps the recorded edge, so it never replays an old event.
             observeAttention({}, m_state.local());

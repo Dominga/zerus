@@ -68,6 +68,9 @@ struct SessionInfo {
     QString cwd, canonicalCwd, gitCommonDir, cwdSource, gitRoot, gitBranch, gitWorktreeName, gitMetadataState;
     bool gitWorktree = false, gitDetached = false;
     QString activitySummary, activityDetail, subagentSource;
+    // "Your answer: …" for the user's own answers in prompt and activityDetail,
+    // prepared off the GUI thread (QuestionReply.h); empty for other text.
+    QString promptAnswers, activityAnswers;
     bool subagentCountsComplete = false;
     int subagentActiveCount = 0, subagentCompletedCount = 0, subagentTotalCount = -1;
     QJsonArray subagentPreviews;

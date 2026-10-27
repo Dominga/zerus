@@ -100,21 +100,38 @@ receivers stay unchanged. Later steps replace them with typed prepared models.
   aborts the test with the call site.
 - `scripts/ci/check-source.py` rejects `QJsonDocument::fromJson` and
   `QCborValue::fromCbor` in `tray/src` outside `JsonParse.cpp`.
-- During migration, small local preference values that are still read on the
-  GUI thread go through `JsonParse::localSetting()`. It is capped at 64 KiB, and
-  `check-source.py` lists the files and call counts allowed to use it. The list
-  may only shrink, and each entry has a Beads task. Owner decision,
-  2026-10-27: «согласен, оставляем исключения до M2» — the list must be empty
-  at the end of M2. All `hgs` and stream output is parsed off the GUI thread
-  from M1 on, without exception.
-- JSON values kept in QSettings go through `SettingsJson`. It parses a value
-  only when its stored bytes changed since the last read. The tray warms the
-  large keys (organization, swarm observations, read marks, worktree
-  snapshots) on the preparation thread at startup, and writers record what
-  they stored, so the GUI thread does not parse them again. On arch the saved
-  organization is 66 KB and the swarm versions 102 KB, both above the
-  `local()` limit, so a cold read of either on the GUI thread counts as a
-  violation.
+- During M1, small values the tray wrote itself were still read on the GUI
+  thread through `JsonParse::local()`, capped at 64 KiB, and `check-source.py`
+  listed the files and call counts allowed to use it. The list could only
+  shrink, and each entry had a Beads task. Owner decision, 2026-10-27:
+  «согласен, оставляем исключения до M2» — the list must be empty at the end
+  of M2. It is empty (zerus-604d.11): `local()` is removed, `check-source.py`
+  rejects any call to it, and the GUI thread has no parse exception. All `hgs`
+  and stream output is parsed off the GUI thread from M1 on, without
+  exception. The former entries now use:
+  - prepared values: the user's answers in a prompt or activity detail are
+    parsed with the row or the inspection in its prepare step and carried in
+    `SessionInfo`; the update catalog, the Windows installer record, the
+    connector configuration and notification tokens are parsed through
+    `ProcessRunner::post`; question-answer draft keys are decoded by the
+    draft index on its worker;
+  - representations without a parse: in-process drag data is a
+    `QDataStream`, account bindings are length-prefixed fields, and worktree
+    reviews are kept per repository;
+  - `SettingsJson` for the pending executor launches.
+  Persisted formats are unchanged: draft keys, notification tokens and
+  QSettings values written by earlier builds still read.
+- JSON values kept in QSettings go through `SettingsJson`, and the GUI thread
+  never parses them. Before the tray and its windows exist, `main()` parses
+  every key the desktop keeps this way on a worker thread and waits for it
+  (`TrayAgent::jsonSettings()`, with `*` for per-project and per-computer
+  groups); writers store through `SettingsJson::store`, which records the
+  value it serialized. A GUI-thread read of bytes nobody parsed, because
+  another process changed the value or a key is missing from the startup
+  list, is reported like a parse (fatal in the Qt suites); it returns the
+  value last parsed for that key, or an empty one, and parses the stored bytes
+  on the preparation thread for later reads. On arch the saved organization is
+  66 KB and the swarm versions 102 KB.
 - Tests: preparation runs on `hgs-prepare` and application happens on the owner
   thread; global result order is preserved; a destroyed owner drops prepared
   values; a fixture listing and inspection through `HgsClient` parse off the GUI

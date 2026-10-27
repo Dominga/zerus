@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
+#include "OffGuiThread.h"
 #include "RelaySettings.h"
 
 class TestRelaySettings : public QObject {
@@ -33,6 +34,13 @@ class TestRelaySettings : public QObject {
         program.write("#!/bin/sh\ncase \"$*\" in '"+arguments+"') ;; *) exit 1 ;; esac\ncat '"+answer.fileName().toUtf8()+"'\nexit "+QByteArray::number(code)+"\n");
         program.close();
         return QFile::setPermissions(program.fileName(),QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner);
+    }
+    // The store parses the file, which the panel does off the GUI thread (JsonParse.h).
+    static bool load(const RelaySettings::ConfigStore &store,RelaySettings::Snapshot *snapshot,QString *error){
+        return offGuiThread([&]{return store.load(snapshot,error);});
+    }
+    static bool save(const RelaySettings::ConfigStore &store,const RelaySettings::Snapshot &expected,const RelaySettings::Prepared &prepared,RelaySettings::Snapshot *saved,QString *error){
+        return offGuiThread([&]{return store.save(expected,prepared,saved,error);});
     }
     static constexpr char Probe[]="--user show zerus-mobile-connector.service --property=LoadState,ActiveState,SubState,KillMode,UnitFileState,FragmentPath,DropInPaths,ExecStart --no-pager";
 private slots:
@@ -207,6 +215,34 @@ private slots:
         if(dropIns.isEmpty())QVERIFY(!label->text().contains(QStringLiteral("switched")));
 #endif
     }
+    void panelReadsAndWritesTheConfigurationOffTheGuiThread(){
+#ifdef Q_OS_LINUX
+        QTemporaryDir dir;QVERIFY(dir.isValid());const auto config=connectorConfig(dir);QVERIFY(!config.isEmpty());
+        QVERIFY(fakeTool(dir,"systemctl",Probe,"LoadState=loaded\nActiveState=active\nSubState=running\nKillMode=process\n"));
+        const auto previous=qgetenv("PATH");qputenv("PATH",temporaryRoot(dir).toUtf8()+":"+previous);
+        const auto restore=qScopeGuard([previous]{qputenv("PATH",previous);});
+        // Every suite fails on a GUI-thread parse: the panel reads and saves on a worker.
+        RelaySettings::Panel panel(config);
+        auto *configured=panel.findChild<QLabel*>("configuredRelay");auto *save=panel.findChild<QPushButton*>("saveRelayConfiguration");
+        auto *notice=panel.findChild<QLabel*>("relaySaveNotice");auto *status=panel.findChild<QLabel*>("connectorServiceStatus");
+        QVERIFY(configured&&save&&notice&&status);QVERIFY(!save->isEnabled());
+        QTRY_COMPARE(configured->text(),QStringLiteral("Configured relay: https://relay.example.test"));QVERIFY(save->isEnabled());
+        QCOMPARE(panel.findChild<QLineEdit*>("relayStateDirectory")->text(),temporaryRoot(dir)+"/state");
+        // The service status waits for the configuration: it exists, so nothing comes first.
+        QTRY_VERIFY(status->text().startsWith(QStringLiteral("Connector service: running")));
+        QVERIFY(!panel.findChild<QWidget*>("connectorStartCommand")->isHidden());
+        save->click();QVERIFY(!save->isEnabled());
+        QTRY_VERIFY2(notice->text().startsWith(QStringLiteral("Configuration saved privately")),qPrintable(notice->text()));QVERIFY(save->isEnabled());
+        RelaySettings::Snapshot saved;QString error;QVERIFY2(load(RelaySettings::ConfigStore(config),&saved,&error),qPrintable(error));
+        QCOMPARE(saved.object.value("server_url").toString(),QStringLiteral("https://relay.example.test"));
+        // An edit made elsewhere since the panel read the file is refused, off the GUI thread too.
+        auto edited=saved.object;edited.insert("poll_interval",11);QVERIFY(write(config,edited));
+        save->click();QTRY_VERIFY2(notice->text().contains(QStringLiteral("changed outside this editor")),qPrintable(notice->text()));
+        panel.findChild<QPushButton*>("reloadRelayConfiguration")->click();QVERIFY(!save->isEnabled());QTRY_VERIFY(save->isEnabled());
+        save->click();QTRY_VERIFY(notice->text().startsWith(QStringLiteral("Configuration saved privately")));
+        QVERIFY(load(RelaySettings::ConfigStore(config),&saved,&error));QCOMPARE(saved.object.value("poll_interval").toInt(),11);
+#endif
+    }
     void macLaunchAgentProbe_data(){
         QTest::addColumn<QByteArray>("output");QTest::addColumn<int>("code");QTest::addColumn<QString>("expected");QTest::addColumn<bool>("restart");
         QTest::newRow("running")<<QByteArray("gui/501/com.hgdev.zerus-mobile-connector = {\n\tstate = running\n\tprogram = /Applications/Zerus.app/Contents/MacOS/zerus-mobile-connector\n}\n")<<0
@@ -235,17 +271,17 @@ private slots:
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto path=temporaryRoot(dir)+"/connector.json";
         auto old=original(temporaryRoot(dir)+"/existing-state");QVERIFY(write(path,old.object));
         RelaySettings::ConfigStore store(path);RelaySettings::Snapshot loaded,saved;QString error;
-        QVERIFY2(store.load(&loaded,&error),qPrintable(error));
+        QVERIFY2(load(store,&loaded,&error),qPrintable(error));
         auto p=RelaySettings::prepare(loaded,{"https://relay.example.test",{},temporaryRoot(dir)+"/existing-state"},&error);QVERIFY(p);
-        QVERIFY2(store.save(loaded,*p,&saved,&error),qPrintable(error));
+        QVERIFY2(save(store,loaded,*p,&saved,&error),qPrintable(error));
         QCOMPARE(saved.object,loaded.object);
         QCOMPARE(QFileInfo(path).permissions()&(QFile::ReadGroup|QFile::WriteGroup|QFile::ReadOther|QFile::WriteOther),QFile::Permissions{});
     }
     void freshSetupAllocatesPrivateStateWithoutCopyingReceipts(){
         QTemporaryDir dir;QVERIFY(dir.isValid());RelaySettings::ConfigStore store(temporaryRoot(dir)+"/config/connector.json");
-        RelaySettings::Snapshot loaded,saved;QString error;QVERIFY(store.load(&loaded,&error));QVERIFY(!loaded.exists);
+        RelaySettings::Snapshot loaded,saved;QString error;QVERIFY(load(store,&loaded,&error));QVERIFY(!loaded.exists);
         auto p=RelaySettings::prepare(loaded,{RelaySettings::canonicalRelay(),"synthetic-new-node-token",temporaryRoot(dir)+"/new-state"},&error);QVERIFY(p);
-        QVERIFY2(store.save(loaded,*p,&saved,&error),qPrintable(error));
+        QVERIFY2(save(store,loaded,*p,&saved,&error),qPrintable(error));
         QVERIFY(saved.exists);QVERIFY(QFileInfo(temporaryRoot(dir)+"/new-state").isDir());
         QVERIFY(QDir(temporaryRoot(dir)+"/new-state").entryList(QDir::NoDotAndDotDot|QDir::AllEntries).isEmpty());
         QCOMPARE(QFileInfo(temporaryRoot(dir)+"/new-state").permissions()&(QFile::ReadGroup|QFile::WriteGroup|QFile::ExeGroup|QFile::ReadOther|QFile::WriteOther|QFile::ExeOther),QFile::Permissions{});
@@ -254,34 +290,34 @@ private slots:
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto parent=temporaryRoot(dir)+"/shared-parent";QVERIFY(QDir().mkdir(parent));
         QVERIFY(QFile::setPermissions(parent,QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner|QFile::ReadGroup|QFile::ExeGroup|QFile::ReadOther|QFile::ExeOther));
         RelaySettings::ConfigStore store(temporaryRoot(dir)+"/connector.json");RelaySettings::Snapshot old,saved;QString error;
-        QVERIFY(store.load(&old,&error));
+        QVERIFY(load(store,&old,&error));
         auto p=RelaySettings::prepare(old,{RelaySettings::canonicalRelay(),"synthetic-new-node-token",parent+"/fresh"},&error);QVERIFY(p);
-        QVERIFY2(store.save(old,*p,&saved,&error),qPrintable(error));
+        QVERIFY2(save(store,old,*p,&saved,&error),qPrintable(error));
         QCOMPARE(QFileInfo(parent).permissions()&(QFile::ReadOther|QFile::ExeOther),QFile::Permissions(QFile::ReadOther|QFile::ExeOther));
         QCOMPARE(QFileInfo(parent+"/fresh").permissions()&(QFile::ReadGroup|QFile::ExeGroup|QFile::ReadOther|QFile::ExeOther),QFile::Permissions{});
     }
     void externalEditAndAtomicReplacementRefuseOverwrite(){
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto path=temporaryRoot(dir)+"/connector.json";
         auto old=original(temporaryRoot(dir)+"/state");QVERIFY(write(path,old.object));
-        RelaySettings::ConfigStore store(path);RelaySettings::Snapshot loaded,saved;QString error;QVERIFY(store.load(&loaded,&error));
+        RelaySettings::ConfigStore store(path);RelaySettings::Snapshot loaded,saved;QString error;QVERIFY(load(store,&loaded,&error));
         auto p=RelaySettings::prepare(loaded,{"https://relay.example.test",{},temporaryRoot(dir)+"/state"},&error);QVERIFY(p);
         auto edited=old.object;edited.insert("poll_interval",11);QVERIFY(write(path,edited));
-        QVERIFY(!store.save(loaded,*p,&saved,&error));QVERIFY(store.load(&saved,&error));QCOMPARE(saved.object,edited);
-        QVERIFY(store.load(&loaded,&error));QVERIFY(write(temporaryRoot(dir)+"/replacement",loaded.object));
+        QVERIFY(!save(store,loaded,*p,&saved,&error));QVERIFY(load(store,&saved,&error));QCOMPARE(saved.object,edited);
+        QVERIFY(load(store,&loaded,&error));QVERIFY(write(temporaryRoot(dir)+"/replacement",loaded.object));
         QVERIFY(QFile::remove(path));QVERIFY(QFile::rename(temporaryRoot(dir)+"/replacement",path));
-        QVERIFY(!store.save(loaded,*p,&saved,&error));
+        QVERIFY(!save(store,loaded,*p,&saved,&error));
     }
     void symlinkAndPublicFilesAreRefused(){
         QTemporaryDir dir;QVERIFY(dir.isValid());const auto real=temporaryRoot(dir)+"/real.json";
         QVERIFY(write(real,original(temporaryRoot(dir)+"/state").object));QString error;RelaySettings::Snapshot loaded;
-        QVERIFY2(RelaySettings::ConfigStore(real).load(&loaded,&error),qPrintable(error));
-        QVERIFY(QFile::link(real,temporaryRoot(dir)+"/link.json"));QVERIFY(!RelaySettings::ConfigStore(temporaryRoot(dir)+"/link.json").load(&loaded,&error));
+        QVERIFY2(load(RelaySettings::ConfigStore(real),&loaded,&error),qPrintable(error));
+        QVERIFY(QFile::link(real,temporaryRoot(dir)+"/link.json"));QVERIFY(!load(RelaySettings::ConfigStore(temporaryRoot(dir)+"/link.json"),&loaded,&error));
         QVERIFY(QFile::setPermissions(real,QFile::ReadOwner|QFile::WriteOwner|QFile::ReadOther));
-        QVERIFY(!RelaySettings::ConfigStore(real).load(&loaded,&error));
+        QVERIFY(!load(RelaySettings::ConfigStore(real),&loaded,&error));
         QVERIFY(QFile::setPermissions(real,QFile::ReadOwner|QFile::WriteOwner));
-        QVERIFY2(RelaySettings::ConfigStore(real).load(&loaded,&error),qPrintable(error));
+        QVERIFY2(load(RelaySettings::ConfigStore(real),&loaded,&error),qPrintable(error));
         QVERIFY(QFile::link(temporaryRoot(dir),temporaryRoot(dir)+"/parent-link"));
-        QVERIFY(!RelaySettings::ConfigStore(temporaryRoot(dir)+"/parent-link/real.json").load(&loaded,&error));
+        QVERIFY(!load(RelaySettings::ConfigStore(temporaryRoot(dir)+"/parent-link/real.json"),&loaded,&error));
     }
 #endif
 };

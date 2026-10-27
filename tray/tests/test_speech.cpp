@@ -1,3 +1,4 @@
+#include "JsonSettings.h"
 #include "speech/SpeechClient.h"
 #include "speech/SpeechRecorder.h"
 #include "speech/RoundVideo.h"
@@ -514,7 +515,7 @@ private slots:
     }
     void settingsUnknownReceiptRemainsPendingWithoutReplay() {
         QTemporaryDir dir;const QJsonObject pending{{"host",""},{"computer","This computer"},{"machine_id","bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"},{"request_id","aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"},{"action","profile_upsert"}};
-        QSettings().setValue("speech/providerOperation",QJsonDocument(pending).toJson(QJsonDocument::Compact));
+        setJsonSetting("speech/providerOperation",QJsonDocument(pending).toJson(QJsonDocument::Compact));
         SpeechSettings settings(fixture(dir.path()));settings.refresh();auto *check=settings.findChild<QPushButton *>("speechCheckOperation");check->click();QTRY_VERIFY(check->isEnabled());
         QCOMPARE(QJsonDocument::fromJson(QSettings().value("speech/providerOperation").toByteArray()).object(),pending);
         QVERIFY(!settings.findChild<QPushButton *>("speechAdd")->isEnabled());QVERIFY(!QFile::exists(dir.path()+"/management-actions"));

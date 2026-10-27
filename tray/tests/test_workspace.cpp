@@ -1141,6 +1141,14 @@ void TestWorkspace::nativeDropPlacement()
     std::unique_ptr<QMimeData> mime(foreign.mimeData({other}));
     QDragEnterEvent invalid(QPoint(20, 20), Qt::MoveAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(list.viewport(), &invalid); QVERIFY(!invalid.isAccepted());
+    // So are malformed ones; this list's own payload is no JSON to parse.
+    const auto own = std::unique_ptr<QMimeData>(list.mimeData({a}))->data("application/x-hgs-session-placement");
+    QVERIFY(!own.isEmpty()); QVERIFY(!own.startsWith('{'));
+    for (const auto &bytes : {own.chopped(1), own + "x", QByteArray(R"({"token":"","group":false,"id":"a"})")}) {
+        QMimeData malformed; malformed.setData("application/x-hgs-session-placement", bytes);
+        QDragEnterEvent rejected(QPoint(20, 20), Qt::MoveAction, &malformed, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(list.viewport(), &rejected); QVERIFY(!rejected.isAccepted());
+    }
     QSignalSpy toggled(&list, &SessionList::groupToggled);
     list.setCurrentItem(a); QTest::mouseClick(list.viewport(), Qt::LeftButton, Qt::NoModifier, list.visualItemRect(first).center());
     QCOMPARE(toggled.size(), 1); QCOMPARE(list.currentItem(), a);

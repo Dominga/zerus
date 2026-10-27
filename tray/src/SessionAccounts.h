@@ -9,8 +9,30 @@
 // A selection contains recorded machine-local bindings, never captions or agent
 // types. Verified account identities only group those bindings for presentation.
 namespace SessionAccounts {
+// Host, provider, "id" or "home", and that value, each preceded by its length
+// and a colon, so that bindingParts() reads them back without a parse. Bindings
+// stay in memory; none is stored.
 inline QString binding(const QString &host, const QString &provider, const QString &id, const QString &home = {}) {
-    return QString::fromUtf8(QJsonDocument(QJsonArray{host, provider, id.isEmpty() ? QStringLiteral("home") : QStringLiteral("id"), id.isEmpty() ? home : id}).toJson(QJsonDocument::Compact));
+    QString key;
+    for (const QString &field : {host, provider, id.isEmpty() ? QStringLiteral("home") : QStringLiteral("id"), id.isEmpty() ? home : id})
+        key += QString::number(field.size()) + QLatin1Char(':') + field;
+    return key;
+}
+// The four fields of a binding, or none for another string.
+inline QStringList bindingParts(const QString &key) {
+    QStringList parts; qsizetype at = 0;
+    while (at < key.size() && parts.size() < 4) {
+        const auto colon = key.indexOf(QLatin1Char(':'), at);
+        if (colon <= at || colon - at > 9) return {};
+        qsizetype size = 0;
+        for (qsizetype i = at; i < colon; ++i) {
+            if (!key[i].isDigit() || key[i].unicode() > '9') return {};
+            size = size * 10 + (key[i].unicode() - '0');
+        }
+        if (size > key.size() - colon - 1) return {};
+        parts << key.mid(colon + 1, size); at = colon + 1 + size;
+    }
+    return parts.size() == 4 && at == key.size() ? parts : QStringList();
 }
 inline QString binding(const QString &host, const SessionInfo &session) {
     return binding(host, session.cmd, session.accountId, session.accountHome);

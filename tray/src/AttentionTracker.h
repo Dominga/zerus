@@ -24,6 +24,9 @@ public:
     // IDs are still recorded, so turning them on announces only later ones.
     void setOptionalQuestions(bool on) { m_optionalQuestions = on; }
     QJsonObject state() const { return m_hosts; }
+    // The session a notification token names. It parses JSON: off the GUI
+    // thread only (JsonParse.h). Tokens from earlier runs, which the system
+    // notification center may still hold, keep the same encoding.
     static QJsonObject target(const QString &token);
     static bool matches(const QJsonObject &target, const SessionInfo &session);
 private:

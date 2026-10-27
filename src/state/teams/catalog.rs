@@ -3,6 +3,7 @@
 //! the designer only proposes changes into a draft, and a human keeps or
 //! rejects each one and applies them as the next version.
 use super::super::*;
+use super::model::Task;
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -314,6 +315,40 @@ fn save(catalog: &Catalog) -> anyhow::Result<()> {
         let _ = fs::copy(path(), prev_path());
     }
     atomic(&path(), &serde_json::to_string_pretty(catalog)?).map_err(anyhow::Error::msg)
+}
+
+/// U25: the role's prompt blocks in the owner's order, skipping the ones turned
+/// off. None when the role has no order (an old catalog keeps today's text).
+pub(crate) fn prompt_order_text(role: &Role, member_prompt: &str, task: Option<&Task>, project_rules: &str) -> Option<String> {
+    if role.prompt_order.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    for key in &role.prompt_order {
+        if role.prompt_off.contains(key) {
+            continue;
+        }
+        let block = match key.as_str() {
+            "rules" => (!project_rules.trim().is_empty()).then(|| format!("Project rules:\n{}\n", project_rules.trim())),
+            "role" => (!member_prompt.trim().is_empty()).then(|| format!("Role: {}\n", member_prompt.trim())),
+            "protocol" => (!role.protocol_extra.trim().is_empty()).then(|| format!("Team protocol extra:\n{}\n", role.protocol_extra.trim())),
+            "task" => task.map(|task| {
+                let criteria = task.criteria.join("; ");
+                let rendered = role
+                    .task_template
+                    .replace("{id}", &task.id.to_string())
+                    .replace("{title}", &task.title)
+                    .replace("{description}", &task.description)
+                    .replace("{criteria}", &criteria);
+                format!("Task:\n{rendered}\n")
+            }),
+            note => role.notes.get(note).map(|value| format!("Note:\n{}\n", value.trim())),
+        };
+        if let Some(block) = block {
+            text += &block;
+        }
+    }
+    Some(text)
 }
 
 fn prev_path() -> PathBuf {
@@ -699,6 +734,66 @@ mod tests {
         // A rule naming an unknown role or template is refused.
         catalog.routing[0].use_ = "+nobody".into();
         assert!(validate(&catalog).unwrap_err().to_string().contains("unknown role"));
+    }
+
+    #[test]
+    fn export_import_and_revert_move_versions() {
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var("HGS_STATE_DIR").ok();
+        std::env::set_var("HGS_STATE_DIR", dir.path());
+        let result = (|| -> anyhow::Result<()> {
+            let mut start = builtin();
+            start.version = 1;
+            save(&start)?;
+            let exported = run("export", &json!({}), true)?;
+            assert_eq!(exported["catalog"]["version"], 1);
+            // A bad catalog is refused and changes nothing.
+            let error = run("import", &json!({"version":1,"catalog":{"roles":[{"id":"x","name":"","prompt":""}]}}), true)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("needs a name"), "{error}");
+            // A good one becomes v2.
+            let mut imported = start.clone();
+            imported.roles[0].name = "Imported Lead".into();
+            let value = run("import", &json!({"version":1,"catalog":imported}), true)?;
+            assert_eq!(value["version"], 2);
+            assert_eq!(load()?.roles[0].name, "Imported Lead");
+            // Revert brings the previous version back as v3.
+            let value = run("revert", &json!({}), true)?;
+            assert_eq!(value["version"], 3);
+            assert_eq!(load()?.roles[0].name, "Lead");
+            Ok(())
+        })();
+        match old {
+            Some(value) => std::env::set_var("HGS_STATE_DIR", value),
+            None => std::env::remove_var("HGS_STATE_DIR"),
+        }
+        result.unwrap();
+    }
+
+    #[test]
+    fn the_prompt_order_sends_each_block_and_skips_the_off_ones() {
+        let mut role = Role {
+            id: "dev".into(), name: "Dev".into(), prompt: "Write the code".into(), protocol_extra: "Report each step".into(),
+            prompt_order: vec!["rules".into(), "role".into(), "protocol".into(), "task".into(), "note1".into()],
+            task_template: "Do #{id} {title}: {description}. Criteria: {criteria}".into(),
+            ..Default::default()
+        };
+        role.notes.insert("note1".into(), "Read the docs first".into());
+        let task = Task { id: 7, title: "API".into(), description: "The endpoint".into(), criteria: vec!["Fast".into(), "Safe".into()], ..Default::default() };
+        let text = prompt_order_text(&role, &role.prompt, Some(&task), "Use tabs").unwrap();
+        assert!(text.starts_with("Project rules:\nUse tabs\nRole: Write the code\n"), "{text}");
+        assert!(text.contains("Team protocol extra:\nReport each step"), "{text}");
+        assert!(text.contains("Do #7 API: The endpoint. Criteria: Fast; Safe"), "{text}");
+        assert!(text.contains("Note:\nRead the docs first"), "{text}");
+        // Off blocks are skipped; an old role (no order) keeps today's text.
+        role.prompt_off = vec!["protocol".into(), "task".into()];
+        let text = prompt_order_text(&role, &role.prompt, Some(&task), "").unwrap();
+        assert!(!text.contains("Team protocol extra") && !text.contains("Do #7"), "{text}");
+        role.prompt_order.clear();
+        assert!(prompt_order_text(&role, &role.prompt, Some(&task), "").is_none());
     }
 
     #[test]

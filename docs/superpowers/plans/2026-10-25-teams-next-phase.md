@@ -839,7 +839,10 @@ answered; a denial cannot carry an explanation.
   starved notices before a phase is approved; a member's idleness is reported
   only when the lead can act. (24) The roster and the member limit change
   only on the owner's explicit word (U26); otherwise the lead proposes.
-  Owner: yes.
+  The rules live in the team catalog, versioned like roles and templates:
+  the built-in text is the default, the owner edits it by hand and the
+  designer agent proposes changes that the owner keeps or rejects. The Team
+  designer shows them in their own tab, Planning rules. Owner: yes.
 
 ## Order of work (proposal)
 

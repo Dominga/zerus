@@ -339,6 +339,22 @@ void armConfirm(TeamPanel *panel, bool cancel, int tries = 300)
     });
 }
 
+// Answers the next confirmation after running `during` while it is open, as a
+// poll arriving under the dialog does.
+void armConfirmAfter(TeamPanel *panel, std::function<void()> during, int tries = 300)
+{
+    QTimer::singleShot(0, panel, [panel, during, tries] {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        if (!box) {
+            if (tries > 0) QTimer::singleShot(10, panel, [panel, during, tries] { armConfirmAfter(panel, during, tries - 1); });
+            return;
+        }
+        during();
+        for (auto *button : box->buttons())
+            if (box->buttonRole(button) == QMessageBox::DestructiveRole) { button->click(); return; }
+    });
+}
+
 void darkPalette()
 {
     if (qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) return;
@@ -440,6 +456,7 @@ private slots:
     void workspaceShowsGraphBoardAndFocus();
     void workspaceGroupsTasksByPhase();
     void phaseApprovalAndFinishAskTheOwner();
+    void aRefreshUnderThePhaseConfirmationKeepsItsAsker();
     void leftoverMembersAreShownApart();
     void memberEditorPicksAnExistingSession();
     void phaseProgressShowsTwoBars();
@@ -1319,6 +1336,56 @@ void TestTeamsUi::workspaceGroupsTasksByPhase()
     QTRY_COMPARE(cards(), (QList<int>{1, 2, 3, 4, 5}));
     QTRY_VERIFY(toggles().size() == 3 && !toggles()[1]->property("collapsed").toBool());
     shot(&workspace, "d3-phases-board");
+}
+
+void TestTeamsUi::aRefreshUnderThePhaseConfirmationKeepsItsAsker()
+{
+    // The installed build crashed after Approve: a poll under the dialog
+    // rebuilt the Team tab, deleted the graph that asked and replaced the team
+    // it held. While a confirmation is open nothing is rebuilt; afterwards the
+    // team is read again and the views catch up.
+    auto ready = phasedTeam();
+    auto readyTasks = ready["tasks"].toArray();
+    for (int i = 0; i < readyTasks.size(); ++i) {
+        auto task = readyTasks[i].toObject();
+        if (task["phase"].toInt() == 2) task["status"] = "accepted";
+        readyTasks[i] = task;
+    }
+    ready["tasks"] = readyTasks;
+    setTeam(ready);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(([&] { auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return v && v->bands.size() >= 3; })());
+    workspace.render();
+    QTest::qWait(100);
+    auto *graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QVERIFY(graph && graph->approveRect(3).width() > 0);
+    graph->grab();
+    const QPointer<QWidget> asker(graph);
+    bool aliveUnderDialog = false;
+    armConfirmAfter(&panel, [&] {
+        // A poll lands and both views try to rebuild under the dialog.
+        controller.refresh();
+        QTest::qWait(300);
+        workspace.render();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QTest::qWait(50);
+        aliveUnderDialog = !asker.isNull();
+    });
+    QTest::mouseClick(graph, Qt::LeftButton, {}, viewPoint(graph, graph->approveRect(3)));
+    QVERIFY(aliveUnderDialog);
+    QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
+    QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 3);
+    // After the dialog the views rebuild once and the decision holds.
+    QTRY_VERIFY(asker.isNull());
+    QTRY_VERIFY(([&] { auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return v && v->decided.contains(3); })());
 }
 
 void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()

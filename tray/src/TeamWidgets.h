@@ -15,6 +15,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QKeyEvent>
@@ -1107,14 +1108,19 @@ protected:
                 if (it.value().contains(point)) {
                     const auto *band = bandOf(it.key());
                     if (band && band->blocked.isEmpty() && !decided.contains(it.key()) && phaseApprove) {
-                        if (phaseApprove(it.key())) { decided.insert(it.key()); update(); }
+                        // The callback asks in a dialog: this view may be gone after it.
+                        const int phase = it.key();
+                        const QPointer<QWidget> alive(this);
+                        if (phaseApprove(phase) && alive) { decided.insert(phase); update(); }
                     }
                     return;
                 }
             for (auto it = m_discard.cbegin(); it != m_discard.cend(); ++it)
                 if (it.value().contains(point)) {
                     if (!decided.contains(it.key()) && phaseDiscard) {
-                        if (phaseDiscard(it.key())) { decided.insert(it.key()); update(); }
+                        const int phase = it.key();
+                        const QPointer<QWidget> alive(this);
+                        if (phaseDiscard(phase) && alive) { decided.insert(phase); update(); }
                     }
                     return;
                 }

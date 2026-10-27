@@ -213,7 +213,7 @@ fn request() -> Result<Value> {
     if bytes.len() > REQUEST_MAX {
         return Err("Hook health request is too large".into());
     }
-    serde_json::from_slice(&bytes).map_err(|_| "Invalid hook health request".into())
+    serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|_| "Invalid hook health request".into())
 }
 fn exact_keys(input: &Value, fields: &[&str]) -> Result<()> {
     if input.as_object().is_none_or(|object| {

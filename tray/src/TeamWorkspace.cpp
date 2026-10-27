@@ -515,8 +515,15 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
                 QString where = finding.file;
                 if (!where.isEmpty() && finding.line > 0) where += QStringLiteral(":%1").arg(finding.line);
                 if (!where.isEmpty()) rv->addWidget(label(where, fc.muted, 11));
-                if (!finding.state.isEmpty()) rv->addWidget(label(tr("state: %1%2").arg(finding.state,
+                if (!finding.state.isEmpty()) rv->addWidget(label(tr("state: %1%2%3").arg(finding.state,
+                    finding.phase > 0 ? tr(" · phase %1").arg(finding.phase) : QString(),
                     finding.note.isEmpty() ? QString() : tr(" — %1").arg(finding.note)), fc.muted, 11));
+                // N17: the owner's replan proposal stays with its finding.
+                if (!finding.proposal.isEmpty()) {
+                    auto *proposal = label(tr("Proposal: %1").arg(finding.proposal), fc.text2, 11, false, "teamFindingProposal");
+                    proposal->setWordWrap(true);
+                    rv->addWidget(proposal);
+                }
                 auto *actions = new QHBoxLayout; actions->setContentsMargins(0, 2, 0, 0); actions->setSpacing(6);
                 // D2: the finding actions; each needs a confirmation.
                 const QList<QPair<QString, QString>> choices{
@@ -528,10 +535,21 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
                     action->setObjectName(QStringLiteral("teamFindingAction_%1").arg(choice.first));
                     action->setFlat(true);
                     QObject::connect(action, &QPushButton::clicked, this, [this, finding, choice] {
-                        if (!m_panel->confirm("teamFindingActionConfirm", choice.second,
-                                              tr("%1 finding \"%2\"?").arg(choice.second, finding.title), choice.second))
-                            return;
                         QJsonObject input{{"finding", finding.id}, {"action", choice.first}, {"note", QString()}};
+                        if (choice.first == "replan") {
+                            // N17 (spec 8): a replan carries the owner's proposal; the
+                            // team pauses until the owner resumes it.
+                            bool given = false;
+                            TeamPanel::RenderHold hold(m_panel);
+                            const QString proposal = QInputDialog::getMultiLineText(
+                                this, tr("Replan"), tr("What should the lead change in the plan for \"%1\"? The team pauses until you resume it.").arg(finding.title),
+                                QString(), &given).trimmed();
+                            if (!given || proposal.isEmpty()) return;
+                            input["proposal"] = proposal;
+                        } else if (!m_panel->confirm("teamFindingActionConfirm", choice.second,
+                                                     tr("%1 finding \"%2\"?").arg(choice.second, finding.title), choice.second)) {
+                            return;
+                        }
                         bool ok = false;
                         if (finding.task.toInt(&ok) && ok) input["task"] = finding.task.toInt();
                         m_teams->act("finding", input);
@@ -733,9 +751,18 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     int count = 0;
     for (const auto &group : phaseGroups(*team)) if (group.n == phase) count = group.tasks.size();
-    if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
-                          tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
-                          tr("Approve phase")))
+    // F12/N40: a draft approved while an earlier phase runs runs alongside it;
+    // the owner is warned of what that costs before anything is sent.
+    const int alongside = alongsidePhase(*team, phase);
+    if (alongside) {
+        if (!m_panel->confirm("teamApproveAlongsideConfirm", tr("Approve phase %1 now?").arg(phase),
+                              tr("If you approve phase %1 now, the lead can send members to its tasks while phase %2 still runs, "
+                                 "but can no longer edit this phase. Are you sure?").arg(phase).arg(alongside),
+                              tr("Approve now")))
+            return false;
+    } else if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
+                                 tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
+                                 tr("Approve phase")))
         return false;
     // The team may have been refreshed while the dialog was open: read it again.
     team = currentTeam(id);
@@ -1254,8 +1281,14 @@ QWidget *TeamWorkspace::board(const Team &team)
         }
         if (group.draft) {
             auto *approve = button(tr("Approve"), "teamBoardApprovePhase", true);
-            approve->setEnabled(approveBlocked(team, group.n).isEmpty() && (team.phase(group.n) ? team.phase(group.n)->waiting.text.isEmpty() : true));
-            approve->setToolTip(approveBlocked(team, group.n));
+            // F12/N40: a draft behind an approved phase that still runs stays
+            // approvable; the warning comes on the click.
+            const int alongside = alongsidePhase(team, group.n);
+            const auto *record = team.phase(group.n);
+            const bool blocked = !approveBlocked(team, group.n).isEmpty() || (!alongside && record && !record->waiting.text.isEmpty());
+            approve->setEnabled(!blocked);
+            approve->setToolTip(alongside ? tr("Approve runs phase %1 now, alongside phase %2").arg(group.n).arg(alongside)
+                                          : approveBlocked(team, group.n));
             QObject::connect(approve, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
                 approvePhase(id, phase);
             });
@@ -1495,7 +1528,10 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         const QString blocked = !team.full ? tr("Checking the plan…")
                               : !errors.isEmpty() ? tr("Fix the plan errors first:\n%1").arg(errors.join(QLatin1Char('\n'))) : acceptBlocked(team, group.n);
         accept->setEnabled(blocked.isEmpty() && !decided);
-        accept->setToolTip(blocked.isEmpty() ? tr("Hand the phase's tasks out (it waits if an earlier phase is still running)") : blocked);
+        const int alongside = alongsidePhase(team, group.n);
+        accept->setToolTip(blocked.isEmpty() ? (alongside ? tr("Hand the phase's tasks out now, alongside phase %1").arg(alongside)
+                                                          : tr("Hand the phase's tasks out (it waits if an earlier phase is still running)"))
+                                              : blocked);
         QObject::connect(accept, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { approvePhase(id, phase); });
         h->addWidget(accept);
         // F10 and G9: the order among the drafts and the owner's discard, in a menu.

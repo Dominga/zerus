@@ -279,7 +279,7 @@ fn run(args: &[String]) -> GraphResult<Value> {
         let mut bytes = Vec::new();
         io::stdin().take(8193).read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= 8192, "Graph receipt scope is too large");
-        let request: Request = serde_json::from_slice(&bytes)?;
+        let request: Request = serde_json::from_slice(crate::state::without_bom(&bytes))?;
         ensure!(
             !request.name.is_empty()
                 && request.name.len() <= 512

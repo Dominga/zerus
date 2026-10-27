@@ -189,7 +189,9 @@ pub(crate) fn dependants_count(tasks: &[Task], id: u32) -> usize {
 /// goes first and never starves a task that unblocks the most work.
 pub(crate) fn dispatch_order(team: &Team, ready: Vec<u32>) -> Vec<u32> {
     let mut ordered = ready;
-    ordered.sort_by_key(|id| (std::cmp::Reverse(dependants_count(&team.tasks, *id)), *id));
+    // N11 (spec 8): an urgent phase's tasks still go first, as `ready` keeps
+    // them; the dependants decide within each group.
+    ordered.sort_by_key(|id| (!urgent(team, *id), std::cmp::Reverse(dependants_count(&team.tasks, *id)), *id));
     ordered
 }
 
@@ -235,12 +237,13 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .map(|task| task.id)
         .collect();
     // D2: an urgent phase's tasks go before every other pending one.
-    let urgent = |id: u32| {
-        team.task(id)
-            .is_some_and(|task| task.phase > 1 && team.phases.iter().any(|phase| phase.n == task.phase && phase.urgent))
-    };
-    out.sort_by_key(|id| (!urgent(*id), *id));
+    out.sort_by_key(|id| (!urgent(team, *id), *id));
     out
+}
+
+/// D2: a task of an urgent phase.
+fn urgent(team: &Team, id: u32) -> bool {
+    team.task(id).is_some_and(|task| task.phase > 1 && team.phases.iter().any(|phase| phase.n == task.phase && phase.urgent))
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -527,7 +530,9 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 team.tasks.iter().any(|task| task.phase != n && order_of(task.phase) < target && !task.status.finished())
             };
             let blocked = blocked || queued;
-            let approved = n == 1 || record.is_some_and(|phase| phase.state.is_accepted());
+            // N41 (spec 10.2): nothing is approved before Approve & Run, phase
+            // 1 included.
+            let approved = !planning && (n == 1 || record.is_some_and(|phase| phase.state.is_accepted()));
             let status = if !approved || record.is_some_and(|phase| phase.state.is_draft()) {
                 "draft"
             } else if open == 0 {

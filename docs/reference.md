@@ -42,6 +42,21 @@ sessions have been safely closed to load the guard; upgrading Zerus never
 restarts or hot-reloads a host that owns live agents. The shared acceptance
 corpus is `tests/fixtures/command-guard.json`.
 
+## Subagent confirmation
+
+Zerus asks the owner before an agent starts subagents. The global setting is on
+by default for every computer and account, including existing installs, and is
+kept by hgs: `hgs subagents-confirm get --json` and a bounded set request
+`{"request_id":"UUID","confirm":false} | hgs subagents-confirm set --json`.
+When it is on, Claude's `PreToolUse` hook answers an `Agent`/`Task` call with
+`permissionDecision: "ask"` and a reason naming the subagent type, its model
+(the tool input, else the definition in `.claude/agents/<type>.md`, else
+"inherits <session model>"), its effort when known and the description.
+Subagent calls of one turn are grouped as "Start N subagents: ...". Automatic
+tool approvals never answer this request; a team member's request reaches its
+lead like any other permission request. Agents without a pre-tool subagent
+approval are not blocked; their status says the confirmation is not supported.
+
 ## CLI sessions
 
 `hgs` starts a command in a named project tmux session and attaches locally or
@@ -1004,6 +1019,28 @@ Enter and Shift+Enter in the message field, Escape, Tab and Shift+Tab, Tab to ta
 a suggestion, list navigation keys, Menu and Shift+F10, Ctrl/Command-click,
 Space and Escape during voice capture, Ctrl+Shift+C/V (⌘C/⌘V on macOS) and
 Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
+
+<a id="agent-teams"></a>
+
+## Agent teams
+
+### The Team designer's folder
+
+The Team designer runs in Zerus's own folder,
+`<state>/hgs/sessions/team-designer` (`HGS_STATE_DIR` when set, else
+`~/.local/state/hgs/sessions`). Zerus creates and owns that folder: it belongs
+to no project, and the desktop shows the designer's session in General.
+
+At `hgs team catalog designer` Zerus trusts exactly that folder in the Claude
+account config the launch reads, so Claude's start-up "Trust this folder?"
+prompt no longer stops the designer, and gives the session narrow permission
+rules: Bash for `hgs team catalog get`, `propose` and `route` and for
+`hgs guide`, plus read-only file tools (Read, Glob, Grep). The rules grant no
+writing tool; the designer's only change is a catalog proposal that the owner
+keeps or rejects.
+
+Claude's start-up trust stays manual for every other folder. No other agent
+(Codex, DeepSeek, Kimi, OpenCode) gets folder trust or rules from Zerus.
 
 <a id="activity"></a>
 

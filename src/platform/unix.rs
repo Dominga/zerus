@@ -1663,14 +1663,39 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
     Ok(0)
 }
 
+/// A pipe whose two ends no child of this process inherits (N33): a child
+/// holding the write end would keep the reader from ever seeing EOF.
+fn cloexec_pipe() -> std::io::Result<[i32; 2]> {
+    let mut fds = [0i32; 2];
+    #[cfg(target_os = "linux")]
+    let made = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let made = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if made < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(error);
+        }
+    }
+    Ok(fds)
+}
+
 /// H2: the current process reads `bytes` as stdin through an anonymous pipe,
 /// in memory only: a JSON request may hold a private key and must not land on
 /// disk.
 pub fn stdin_from_bytes(bytes: Vec<u8>) -> std::io::Result<()> {
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    let fds = cloexec_pipe()?;
+    // dup2 leaves the new stdin inheritable: a child (ssh for `hgs @peer`)
+    // reads it. The write end stays with this process only, so the reader
+    // sees EOF once the bytes are written (N33).
     if unsafe { libc::dup2(fds[0], 0) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -1711,6 +1736,27 @@ pub(crate) fn write_script(path: &Path, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// N33: a child started while the stdin pipe is being written never
+    /// holds its write end, so the reader sees EOF once this process closes it.
+    #[test]
+    fn the_stdin_pipe_write_end_never_reaches_a_child() {
+        let fds = cloexec_pipe().unwrap();
+        for fd in fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "fd {fd} flags {flags}");
+        }
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        unsafe { libc::close(fds[1]) };
+        assert!(unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) } >= 0);
+        let mut byte = [0u8; 1];
+        // EOF (0), not EAGAIN: no write end is left anywhere.
+        let read = unsafe { libc::read(fds[0], byte.as_mut_ptr() as *mut _, 1) };
+        let _ = child.kill();
+        let _ = child.wait();
+        unsafe { libc::close(fds[0]) };
+        assert_eq!(read, 0, "{}", std::io::Error::last_os_error());
+    }
 
     #[test]
     fn prepared_path_keeps_the_caller_order_and_appends_user_installers() {

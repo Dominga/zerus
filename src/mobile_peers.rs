@@ -148,7 +148,7 @@ fn input<T: serde::de::DeserializeOwned>() -> Result<T> {
         .take((MAX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= MAX_BYTES, "mobile request is too large");
-    serde_json::from_slice(&bytes).context("invalid mobile request")
+    serde_json::from_slice(crate::state::without_bom(&bytes)).context("invalid mobile request")
 }
 
 fn options<'a>(

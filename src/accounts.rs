@@ -194,6 +194,19 @@ pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf
     Ok((profile.provider, path))
 }
 
+/// The Claude account config the next launch reads (U16): the native
+/// `.claude.json`, or the one `CLAUDE_CONFIG_DIR` names.
+pub(crate) fn claude_account_config() -> Result<PathBuf> {
+    claude::account_config()
+}
+
+/// U16: mark Zerus's own Team designer folder trusted in the account config the
+/// designer's Claude session reads. Only that folder; start-up trust stays
+/// manual for every other folder.
+pub(crate) fn trust_claude_folder(config: &Path, folder: &str) -> Result<bool> {
+    claude::trust_folder(config, folder)
+}
+
 fn default_label(provider: &str) -> &'static str {
     if provider=="opencode" {return "Native OpenCode configuration";}
     if provider == "dsh" {
@@ -658,7 +671,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             use std::io::{IsTerminal,Read};
             if std::io::stdin().is_terminal() || dry {return Err(Error::new(1,"Credential transport requires a private input pipe. Use account copy."));}
             let mut payload=Vec::new();std::io::stdin().take((MAX_TRANSFER+1)as u64).read_to_end(&mut payload)?;
-            println!("{}",import(config,id,arg(args,"--label").unwrap_or(id),&payload)?);
+            println!("{}",import(config,id,arg(args,"--label").unwrap_or(id),crate::state::without_bom(&payload))?);
         },
         "login"=>{
             if id=="native-dsh" {return crate::native_ui::open(config,"","@account",dry);}

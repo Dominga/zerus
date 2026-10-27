@@ -825,7 +825,7 @@ answered; a denial cannot carry an explanation.
   prototype and screenshots, what to change and the acceptance criteria.
   (17) Tests through the real entry point (the CLI or the dispatcher) that
   fail before the fix. (18) The checks named, with totals in the report,
-  against the Rust baseline and the known flaky tests; a member runs each suite once and reruns only what failed, the repeated stability runs happen once, at the lead's integration. (19) Folders follow the
+  against the Rust baseline and the known flaky tests; a member runs each suite once and reruns only what failed, the repeated stability runs happen once, at the lead's integration. A member asks the lead (hgs team ask) before a run expected to take more than about ten minutes (the full test_sessionswindow, the full Rust suite, repeated GUI runs) and names the suite and why; the lead may move it to the integration or a separate test pass. The lead plans the test load with the work: it weighs each task's checks, the machine's load from the members' parallel builds and suites, and moves heavy suites out of the members' tasks into one pass (the integration or a test stage of its own) when that is cheaper; a member then runs only the suites of the files it changed. (19) Folders follow the
   agent and the need: DeepSeek members work best in a clone; sometimes all
   members share one folder or one memory. The lead plans it first, then asks
   the owner explicitly how it should work and explains why it chose that.

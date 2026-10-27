@@ -74,6 +74,8 @@ struct SessionInfo {
     QString cwd, canonicalCwd, gitCommonDir, cwdSource, gitRoot, gitBranch, gitWorktreeName, gitMetadataState;
     bool gitWorktree = false, gitDetached = false;
     QString activitySummary, activityDetail, subagentSource;
+    // U19: why subagents cannot be confirmed in this session, from its record.
+    QString subagentConfirm;
     bool subagentCountsComplete = false;
     int subagentActiveCount = 0, subagentCompletedCount = 0, subagentTotalCount = -1;
     QJsonArray subagentPreviews;

@@ -560,6 +560,7 @@ Team parse(const QJsonObject &v)
         if (p.value("waiting").isObject()) {
             const auto w = p.value("waiting").toObject();
             phase.waiting.text = str(w, "text"); phase.waiting.phase = w.value("phase").toInt();
+            phase.waiting.alongside = w.value("alongside").toBool();
             for (const auto &id : w.value("open").toArray()) phase.waiting.open.append(id.toInt());
         }
         // F13: the owner's sentence the lead approved on.
@@ -745,6 +746,8 @@ Team parse(const QJsonObject &v)
             finding.by = str(f, "by");
             finding.at = f.value("at").toDouble();
             finding.note = str(f, "note");
+            finding.proposal = str(f, "proposal");
+            finding.phase = f.value("phase").toInt();
             team.findings.append(finding);
         }
         team.findingsNext = str(findings, "next_cursor");
@@ -1244,13 +1247,23 @@ QString approveBlocked(const Team &team, int phase)
 {
     const auto *record = team.phase(phase);
     if (!record || !record->draft()) return tr("Phase %1 is not a draft").arg(phase);
-    // QA: name the nearest phase that still has to open or end, not the first
-    // one above the plan: for drafts 2, 3 and 4, phase 4 waits for phase 3.
+    // QA: name the nearest phase that still has to open, not the first one
+    // above the plan: for drafts 2, 3 and 4, phase 4 waits for phase 3.
     const auto blocker = nearestBlocker(team, phase);
-    if (!blocker.phase) return {};
-    if (!blocker.approved) return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(blocker.phase);
-    return QCoreApplication::translate("Teams", "Phase %1 opens after phase %2 ends: %n task(s) still open", nullptr, blocker.open)
-        .arg(phase).arg(blocker.phase);
+    if (!blocker.phase || blocker.approved) return {};
+    return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(blocker.phase);
+}
+
+// F12/N40: an approved phase still at work does not block the draft; the
+// owner may approve it to run alongside, warned first.
+int alongsidePhase(const Team &team, int phase)
+{
+    const auto *record = team.phase(phase);
+    if (!record) return 0;
+    if (record->waiting.alongside) return record->waiting.phase;
+    if (!record->draft()) return 0;
+    const auto blocker = nearestBlocker(team, phase);
+    return blocker.phase && blocker.approved ? blocker.phase : 0;
 }
 
 QString acceptBlocked(const Team &team, int phase)
@@ -1269,9 +1282,8 @@ QString approveBlockedShort(const Team &team, int phase)
     const auto *record = team.phase(phase);
     if (!record || !record->draft()) return {};
     const auto blocker = nearestBlocker(team, phase);
-    if (!blocker.phase) return {};
-    if (!blocker.approved) return tr("after phase %1").arg(blocker.phase);
-    return QCoreApplication::translate("Teams", "after phase %1 ends · %n open", nullptr, blocker.open).arg(blocker.phase);
+    if (!blocker.phase || blocker.approved) return {};
+    return tr("after phase %1").arg(blocker.phase);
 }
 
 QMap<int, int> phaseLayers(const Team &team, const QList<int> &tasks)

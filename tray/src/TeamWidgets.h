@@ -586,6 +586,7 @@ public:
         QString healthTip;
         QString blocked;      // F12: why Approve is disabled, empty when ready
         QString blockedTip;
+        bool alongside = false;   // F12/N40: Approve runs it beside a running phase
         int changes = 0;      // the lead's pending edits on a draft
         QStringList changeLines;   // those edits as a diff, for the header's tooltip
     };
@@ -1621,8 +1622,14 @@ inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::functi
             band.total = summary->total;
             band.healthTip = phaseHealthTip(team, group.n);
         }
-        // F12: a draft whose predecessor is not ready says why Approve is off.
-        if (const auto *record = team.phase(group.n); record && !record->waiting.text.isEmpty()) {
+        // F12/N40: a draft whose predecessor is not ready says why Approve is
+        // off; one that can run alongside an approved phase keeps it on.
+        const int alongside = band.draft ? alongsidePhase(team, group.n) : 0;
+        if (alongside) {
+            band.alongside = true;
+            band.blockedTip = tr("Approve runs phase %1 now, alongside phase %2",
+                                 QString::number(group.n), QString::number(alongside));
+        } else if (const auto *record = team.phase(group.n); record && !record->waiting.text.isEmpty()) {
             band.blocked = record->waiting.text;
             QStringList open;
             for (int id : record->waiting.open) open << QStringLiteral("#%1").arg(id);

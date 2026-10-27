@@ -1,8 +1,32 @@
 diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
-index 75aabc18..ed528cd4 100644
+index 75aabc18..9b014492 100644
 --- a/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
 +++ b/mobile/android/app/src/main/java/app/zerus/mobile/MainActivity.kt
-@@ -287,11 +287,9 @@ class MainActivity : ComponentActivity() {
+@@ -232,7 +232,22 @@ class MainActivity : ComponentActivity() {
+         onDispose { lifecycle.removeObserver(observer) }
+     }
+     LaunchedEffect(invitation) { invitation?.let { server = it.server; code = it.code; tab = 3; pairing = true; onInvitationUsed() } }
+-    LaunchedEffect(model, lifecycle, tab) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
++    val refreshTarget = model.selected?.target
++    val reviewingNativeInput = refreshTarget != null && model.conversationQuestions.isNotEmpty()
++    LaunchedEffect(model, lifecycle, tab, refreshTarget, reviewingNativeInput, model.demo) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
++        if (refreshTarget?.archiveId?.isBlank() == true && !reviewingNativeInput && !model.demo) {
++            var started = android.os.SystemClock.elapsedRealtime()
++            model.awaitActivityRead()
++            while (true) {
++                // At most one inspection: wait for its actual completion before the
++                // next turn, with a two-second floor and a short idle yield.
++                delay(if (model.error.isNotBlank()) 5_000L else
++                    maxOf(200L, 2_000L - (android.os.SystemClock.elapsedRealtime() - started)))
++                started = android.os.SystemClock.elapsedRealtime()
++                model.refreshActivity()
++                model.awaitActivityRead()
++            }
++        }
+         while (true) {
+             delay(5_000)
+             if (model.selected != null) model.refreshActivity()
+@@ -287,11 +302,9 @@ class MainActivity : ComponentActivity() {
                  IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) },
                      modifier = Modifier.semantics {
                          contentDescription = "Refresh"
@@ -16,7 +40,7 @@ index 75aabc18..ed528cd4 100644
                  }
                  if (selected == null) IconButton(onClick = { keyboard?.hide(); settings = true }, modifier = Modifier.semantics {
                      if (updateState.sessionId >= 0) stateDescription = "Installation pending"
-@@ -316,7 +314,11 @@ class MainActivity : ComponentActivity() {
+@@ -316,7 +329,11 @@ class MainActivity : ComponentActivity() {
                      LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
              }
              if (selected == null) CatalogRefreshStatus(model)
@@ -29,7 +53,7 @@ index 75aabc18..ed528cd4 100644
              if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
                  Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                      Text(model.error, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-@@ -757,6 +759,44 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
+@@ -757,6 +774,44 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
          model.olderLoading, historyProgress, model.demo, resolved = model.activity != null, opening = opening)
  }
  
@@ -75,7 +99,7 @@ index 75aabc18..ed528cd4 100644
      onReviewOutgoing: (OutgoingMessage) -> Unit, onAttach: (Target) -> Unit,
      positions: MutableMap<String, ConversationAnchor>,jumpRequest: ConversationMessageJump?,onJumpConsumed: () -> Unit) {
 diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
-index 04616e82..a69c1dcb 100644
+index 04616e82..a8c390fa 100644
 --- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
 +++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
 @@ -381,6 +381,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
@@ -178,7 +202,7 @@ index 04616e82..a69c1dcb 100644
          }
          if (demo) { conversationEvents = Demo.events; conversationQuestions = emptyList() }
          else refreshActivity()
-@@ -2873,6 +2897,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+@@ -2873,13 +2897,21 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
          flushDrafts()
          if (selected != null) { navigationId++; cancelDetail(); selected = null; activity = null; activeFrame = null; activityVerified = false /* BEGIN QUESTION_AVAILABILITY_PROBE writer-back */; questionVerificationProbe(QuestionUiProbe.VerificationWriter.BACK) /* END QUESTION_AVAILABILITY_PROBE writer-back */ }
          else selectedProject = null
@@ -186,11 +210,14 @@ index 04616e82..a69c1dcb 100644
      }
      fun refreshActivity(explicit: Boolean = false) {
          refreshActivity(explicit,freshInspection=false)
-@@ -2880,6 +2905,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+     }
++    /** Cancelling a visible timer only stops its wait, never the retained read. */
++    internal suspend fun awaitActivityRead() { detailJob?.join() }
++
      private fun refreshActivity(explicit: Boolean, freshInspection: Boolean, ownerCurrent: () -> Boolean = { true }) {
          if (demo || terminalVisible) return
          val original = selected ?: return
-+        // The five-second background loop must not start another inspection
++        // Background refresh must not start another inspection
 +        // while the opening inspection is already verified and its first
 +        // history page is still arriving. Explicit refresh stays available.
 +        if(!explicit && !freshInspection && activityVerified && olderLoading && lastHistoryObservation==0L) return

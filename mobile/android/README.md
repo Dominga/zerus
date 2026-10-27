@@ -64,6 +64,13 @@ already submitted probe keeps its request identity and may finish; explicit
 read-evidence preparation remains available. Returning to the list resumes the
 bounded fair head scheduler.
 
+While an ordinary conversation is visible, automatic inspection waits for the
+current read to finish, with a two-second minimum cycle and at least a 200 ms
+pause after a slower read. Errors, catalog views and native-input review keep
+their five-second pacing. The timer waits on the existing read job; navigation
+and journal handling keep their current behavior. Manual refresh still shares
+any in-flight read.
+
 The emulator-only `WorkspaceJournalSmokeInstrumentation` separately exercises real
 Keystore/SQLite recovery with private state and ciphertext larger than 2 MiB.
 Compiling its test APK does not qualify that native runtime path; running it

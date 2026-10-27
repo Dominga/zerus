@@ -1640,6 +1640,20 @@ fn read_only(error: &anyhow::Error) -> bool {
         .any(|sign| text.contains(sign))
 }
 
+/// N5: where a member's sandboxed write queues - the folder the worker reads a
+/// member's outbox from: the member's own folder as the team records it, never
+/// this process's directory. A member that ran `cd tray` and then reports would
+/// otherwise leave the request in `tray/.zerus-team/outbox`, where the worker
+/// never looks.
+fn member_outbox_folder(team: &Team, member: &Member) -> anyhow::Result<std::path::PathBuf> {
+    match super::dispatcher::member_folder_path(team, member) {
+        Ok(folder) if !folder.is_empty() => Ok(std::path::PathBuf::from(folder)),
+        // A team without a folder has no member folder either; the session's own
+        // directory is all there is.
+        _ => std::env::current_dir().context("The member has no folder to queue in"),
+    }
+}
+
 /// U20: a member in a sandbox may not write the team store, but it writes its
 /// own folder. The report, ask or commit waits there as `<request_id>.json` for
 /// the worker, which applies it with the same identity checks (folder + attempt
@@ -1651,7 +1665,8 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         bail!("Only a member queues this request; a sandbox does not block the lead");
     };
     let request_id = text(input, "request_id").to_owned();
-    let folder = std::env::current_dir().context("The member has no folder to queue in")?;
+    let member = team.member(&member_id).context("Unknown member")?;
+    let folder = member_outbox_folder(&team, member)?;
     let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
         "attempt":text(input, "attempt"), "input":input});
     let path = super::outbox::push(&folder, &request)?;
@@ -1985,11 +2000,28 @@ fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow
     .map(|_| ())
 }
 
+/// N4: how long `hgs team run --wait` waits by default: a short poll a member's
+/// shell can afford, never the template's whole bound (up to an hour).
+const RUN_WAIT_SECONDS: f64 = 90.0;
+
 /// U21: a member asks Zerus to run one built-in command template. Zerus runs it
-/// outside the member's sandbox (the worker is not confined), so the request
-/// goes through the U20 outbox in the member's own folder; the member waits for
-/// the exit code and the output tail.
-fn team_run(input: &Value, _wait: bool) -> anyhow::Result<Value> {
+/// outside the member's sandbox (a detached runner, C1), so the request goes
+/// through the U20 outbox in the member's own folder. N4: an answer already in
+/// the folder is the answer and never queues the run again; the wait is short,
+/// and asking again with the same request_id reads the result.
+fn team_run(input: &Value, wait: bool) -> anyhow::Result<Value> {
+    // N5: queue where the worker reads - the member's own folder, never this
+    // process's directory.
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let Actor::Member(member_id) = actor(&team, "run", input)? else {
+        bail!("Only a member runs a template; the lead runs commands itself")
+    };
+    let folder = member_outbox_folder(&team, team.member(&member_id).context("Unknown member")?)?;
+    team_run_in(&folder, input, wait, RUN_WAIT_SECONDS)
+}
+
+fn team_run_in(folder: &std::path::Path, input: &Value, wait: bool, wait_seconds: f64) -> anyhow::Result<Value> {
     let request_id = text(input, "request_id").to_owned();
     ensure!(canonical_uuid(&request_id), "A canonical request_id is required");
     let store = Store::open(false)?;
@@ -1999,25 +2031,58 @@ fn team_run(input: &Value, _wait: bool) -> anyhow::Result<Value> {
     };
     ensure!(member_id != team.lead, "The lead runs commands itself");
     let attempt_id = text(input, "attempt").to_owned();
-    let task = team
+    let attempt = team
         .tasks
         .iter()
         .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member_id));
-    let Some(task) = task else { bail!("attempt {attempt_id} does not run for this member") };
-    let folder = std::env::current_dir().context("The member has no folder to run in")?;
+    let Some(task) = attempt else { bail!("attempt {attempt_id} does not run for this member") };
+    // N4: an outcome already there answers at once; the same request never runs twice.
+    if let Some(result) = super::outbox::result(folder, &request_id) {
+        return Ok(result);
+    }
+    if super::outbox::running(folder, &request_id).is_some() {
+        return Ok(if wait {
+            super::outbox::wait(folder, &request_id, wait_seconds).unwrap_or_else(|| running_note(&request_id))
+        } else {
+            running_note(&request_id)
+        });
+    }
+    if let Some(queued) = super::outbox::request(folder, &request_id) {
+        // A push of the same id is already queued: answer its state, do not push
+        // a second file (the member retried because the first call did not wait).
+        ensure!(
+            queued["template"] == input["template"] && queued["args"] == input["args"],
+            "request_id {request_id} is already used by another run; use a new UUID"
+        );
+        return Ok(json!({
+            "status":"queued", "request_id":request_id,
+            "path":super::outbox::request_path(folder, &request_id).to_string_lossy(),
+            "note":"This run is already queued; ask again with the same request_id (or --wait) to read its result."
+        }));
+    }
     // Validate here too: a bad template never reaches the worker's queue.
     let template = text(input, "template").to_owned();
-    super::templates::plan(&template, &input["args"], &folder)?;
+    super::templates::plan(&template, &input["args"], folder)?;
     let request = json!({"op":"run","request_id":request_id,"team":team.id,"member":member_id,"attempt":attempt_id,
         "template":template,"args":input["args"].clone(),"task":task.id,"input":input});
-    let path = super::outbox::push(&folder, &request)?;
-    let bounded = super::templates::timeout_for(&template);
+    let path = super::outbox::push(folder, &request)?;
     let queued = json!({
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
-        "note":"Zerus runs the template outside your sandbox; the result waits in your folder."
+        "note":"Zerus runs the template outside your sandbox; ask again with the same request_id (or --wait) to read the exit code."
     });
-    // The run's own bound plus the worker's poll: a long build is not cut short.
-    Ok(super::outbox::wait(&folder, &request_id, bounded as f64 + 30.0).unwrap_or(queued))
+    if !wait {
+        return Ok(queued);
+    }
+    Ok(super::outbox::wait(folder, &request_id, wait_seconds).unwrap_or_else(|| json!({
+        "status":"running", "request_id":request_id,
+        "note":"The run has not finished yet; ask again with the same request_id to read its exit code."
+    })))
+}
+
+/// N4: the answer while a runner still holds the claim.
+fn running_note(request_id: &str) -> Value {
+    json!({"status":"running","request_id":request_id,
+        "note":"Zerus is running it; ask again with the same request_id to read the exit code."})
 }
 
 /// U21: the built-in set, the owner's additions and the global off switch.
@@ -2294,6 +2359,11 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len() == 2 && args[0] == "worker" && args[1] == "--stop" {
         return super::dispatcher::stop_worker();
     }
+    // C1: the detached runner of one claimed template run; the worker starts it,
+    // hands it the request on standard input and never waits for a command.
+    if args.len() == 2 && args[0] == "worker" && args[1] == "--run" {
+        return super::dispatcher::worker_run();
+    }
     // H2: `--json` reads stdin; `--json-file PATH` reads the same request from
     // a file (PowerShell 5.1 turns Cyrillic in a pipe into "?").
     let mut args = args.to_vec();
@@ -2518,6 +2588,97 @@ mod tests {
             let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
             assert!(saved.task(2).is_none(), "the refused phase is not added");
         });
+    }
+
+    /// N4/F1: `hgs team run` answers from the member's folder: a result already
+    /// there never queues the run again, the wait is short, and the same
+    /// request_id reads the outcome instead of running the command twice.
+    #[test]
+    fn a_run_answers_without_queueing_it_twice_and_waits_briefly() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.folder = folder.display().to_string();
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let input = |request: &str| json!({"request_id":request,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
+            // An answer already in the folder is the answer: no push, no wait.
+            let request = "22222222-2222-4222-8222-222222222222";
+            std::fs::create_dir_all(super::super::outbox::dir(&folder)).unwrap();
+            let answer = json!({"status":"ran","request_id":request,"exit":0,"tail":"old"});
+            std::fs::write(super::super::outbox::result_path(&folder, request), serde_json::to_vec(&answer).unwrap()).unwrap();
+            let value = super::team_run_in(&folder, &input(request), false, 0.1).unwrap();
+            assert_eq!((value["status"].as_str(), value["tail"].as_str()), (Some("ran"), Some("old")));
+            assert!(!super::super::outbox::request_path(&folder, request).exists(), "the result queued the run again");
+            // A short wait, not the template's 1800 s.
+            let request = "33333333-3333-4333-8333-333333333333";
+            let started = std::time::Instant::now();
+            let value = super::team_run_in(&folder, &input(request), true, 0.2).unwrap();
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the wait took {:?}", started.elapsed());
+            assert_eq!(value["status"], "running", "{value}");
+            assert!(super::super::outbox::request(&folder, request).is_some(), "the queued request left");
+            // Asking again with the same id reads the queue; another run cannot reuse it.
+            let value = super::team_run_in(&folder, &input(request), false, 0.1).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            let mut other = input(request);
+            other["template"] = json!("cargo-clippy");
+            let error = super::team_run_in(&folder, &other, false, 0.1).unwrap_err().to_string();
+            assert!(error.contains("already used by another run"), "{error}");
+            // A result written later comes back without a wait.
+            let done = json!({"status":"ran","request_id":request,"exit":0,"tail":"done"});
+            super::super::outbox::settle(&folder, &json!({"request_id":request}), &done).unwrap();
+            assert_eq!(super::team_run_in(&folder, &input(request), false, 0.1).unwrap()["tail"], "done");
+        });
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    /// N5: a sandboxed write queues in the member's own folder, never in the
+    /// process's directory: a member that ran `cd tray` before reporting would
+    /// otherwise queue where the worker never looks.
+    #[test]
+    fn a_sandboxed_write_queues_in_the_members_folder_not_the_process_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.folder = project.display().to_string();
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+            let member_folder = std::path::PathBuf::from(
+                super::super::dispatcher::member_folder_path(&team, team.member("dev").unwrap()).unwrap(),
+            );
+            assert_eq!(member_folder, project);
+            let report = "22222222-2222-4222-8222-222222222222";
+            let input = json!({"request_id":report,"team":id,"attempt":attempt,"text":"Done and checked"});
+            let value = super::queue_write("report", &input, false).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            assert!(super::super::outbox::request_path(&member_folder, report).exists(), "the report queued outside the member's folder");
+            let run = "33333333-3333-4333-8333-333333333333";
+            let input = json!({"request_id":run,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
+            let value = super::team_run(&input, false).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            assert!(super::super::outbox::request_path(&member_folder, run).exists(), "the run queued outside the member's folder");
+            // Not in the directory this test process happens to run in.
+            let here = std::env::current_dir().unwrap();
+            assert!(!super::super::outbox::request_path(&here, report).exists());
+            assert!(!super::super::outbox::request_path(&here, run).exists());
+        });
+        crate::state::teams::templates::settings_override(None);
     }
 
     #[test]

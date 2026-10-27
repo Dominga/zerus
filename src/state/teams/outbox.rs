@@ -29,6 +29,79 @@ pub(crate) fn result_path(folder: &Path, request_id: &str) -> PathBuf {
     dir(folder).join(format!("{request_id}.result.json"))
 }
 
+/// C1: where a claimed run waits while its runner executes it:
+/// `<request_id>.running.json`, naming the request, when it started and its bound.
+pub(crate) fn running_path(folder: &Path, request_id: &str) -> PathBuf {
+    dir(folder).join(format!("{request_id}.running.json"))
+}
+
+/// Writes the claim for a run the way a request is written: beside its name and
+/// renamed, so a reader never sees half of it.
+pub(crate) fn write_running(folder: &Path, request_id: &str, marker: &Value) -> anyhow::Result<PathBuf> {
+    ensure!(super::store::canonical_uuid(request_id), "An outbox request needs a canonical request_id");
+    let dir = dir(folder);
+    fs::create_dir_all(&dir)?;
+    let temp = dir.join(format!("{request_id}.running.tmp"));
+    fs::write(&temp, serde_json::to_vec(marker)?)?;
+    let path = running_path(folder, request_id);
+    fs::rename(&temp, &path)?;
+    Ok(path)
+}
+
+/// The claim of one run, when the runner still holds it.
+pub(crate) fn running(folder: &Path, request_id: &str) -> Option<Value> {
+    fs::read(running_path(folder, request_id)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+/// The claim a run's runner holds: the request plus when it started and its
+/// bound; None when there is no such file or it is unusable.
+pub(crate) fn read_marker(path: &Path) -> Option<Value> {
+    use std::io::Read;
+    let file = fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > REQUEST_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(REQUEST_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > REQUEST_BYTES {
+        return None;
+    }
+    serde_json::from_slice::<Value>(&bytes).ok().filter(Value::is_object)
+}
+
+/// Every claim left in a folder, at most `SCAN_LIMIT` of them (C1's stale runs).
+pub(crate) fn running_all(folder: &Path) -> Vec<(PathBuf, Value)> {
+    let Ok(entries) = fs::read_dir(dir(folder)) else { return Vec::new() };
+    let mut found = Vec::new();
+    for entry in entries.take(SCAN_LIMIT).flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".running.json") else { continue };
+        if !super::store::canonical_uuid(id) {
+            continue;
+        }
+        let path = entry.path();
+        if let Some(value) = read_marker(&path) {
+            found.push((path, value));
+        }
+    }
+    found.sort_by(|left, right| left.0.file_name().cmp(&right.0.file_name()));
+    found
+}
+
+/// Records a run's outcome and drops its claim: the member's poll reads the
+/// first, and a claimed run is answered exactly once.
+pub(crate) fn settle_running(folder: &Path, request_id: &str, outcome: &Value) -> anyhow::Result<()> {
+    fs::write(result_path(folder, request_id), serde_json::to_vec(outcome)?)?;
+    let _ = fs::remove_file(running_path(folder, request_id));
+    Ok(())
+}
+
+/// N4: a request with this id still queued, for a member asking again.
+pub(crate) fn request(folder: &Path, request_id: &str) -> Option<Value> {
+    read_request(&request_path(folder, request_id), &format!("{request_id}.json")).ok()
+}
+
 /// Queues one request for the worker. The file is written beside its name and
 /// renamed, so the worker never reads half a request.
 pub(crate) fn push(folder: &Path, request: &Value) -> anyhow::Result<PathBuf> {
@@ -79,6 +152,7 @@ pub(crate) fn pending(folder: &Path, limit: usize) -> anyhow::Result<Vec<(PathBu
     let age = |modified: SystemTime| now.duration_since(modified).unwrap_or_default();
     let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
     let mut results: Vec<(SystemTime, PathBuf)> = Vec::new();
+    let mut claims: Vec<(SystemTime, PathBuf)> = Vec::new();
     let mut rejected_any = false;
     for entry in entries.take(SCAN_LIMIT).flatten() {
         let path = entry.path();
@@ -94,6 +168,9 @@ pub(crate) fn pending(folder: &Path, limit: usize) -> anyhow::Result<Vec<(PathBu
             rejected_any = true;
         } else if name.ends_with(".result.json") {
             results.push((modified, path));
+        } else if name.ends_with(".running.json") {
+            // C1: a claimed run is never a request; its runner settles it.
+            claims.push((modified, path));
         } else if name.ends_with(".tmp") {
             if age(modified) > TEMP_AGE {
                 let _ = fs::remove_file(&path);
@@ -106,6 +183,7 @@ pub(crate) fn pending(folder: &Path, limit: usize) -> anyhow::Result<Vec<(PathBu
         }
     }
     prune(&mut results, age);
+    prune(&mut claims, age);
     candidates.sort();
     let mut requests = Vec::new();
     // At most READS_PER_TICK files are opened: unusable ones are answered and

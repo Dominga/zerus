@@ -194,6 +194,19 @@ pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf
     Ok((profile.provider, path))
 }
 
+/// The Claude account config the next launch reads (U16): the native
+/// `.claude.json`, or the one `CLAUDE_CONFIG_DIR` names.
+pub(crate) fn claude_account_config() -> Result<PathBuf> {
+    claude::account_config()
+}
+
+/// U16: mark Zerus's own Team designer folder trusted in the account config the
+/// designer's Claude session reads. Only that folder; start-up trust stays
+/// manual for every other folder.
+pub(crate) fn trust_claude_folder(config: &Path, folder: &str) -> Result<bool> {
+    claude::trust_folder(config, folder)
+}
+
 fn default_label(provider: &str) -> &'static str {
     if provider=="opencode" {return "Native OpenCode configuration";}
     if provider == "dsh" {

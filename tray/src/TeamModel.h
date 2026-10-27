@@ -238,8 +238,9 @@ struct Phase {
     QList<int> tasks;          // task ids; a discarded phase keeps them
     QList<PhaseChange> changes; // F10: the lead's changes since the owner last saw it
     // F12: why a draft waits - "Waiting for the previous phase to be ready"
-    // with that phase and its open tasks.
-    struct Waiting { QString text; int phase = 0; QList<int> open; };
+    // with that phase and its open tasks. N40: an approved phase still running
+    // no longer blocks the draft: "Can run alongside phase N", `alongside`.
+    struct Waiting { QString text; int phase = 0; QList<int> open; bool alongside = false; };
     Waiting waiting;
     // F13: the owner's sentence the lead approved on.
     QString ownerWord;
@@ -442,9 +443,12 @@ struct PhaseProgress {
 };
 PhaseProgress phaseProgress(const Team &team);
 // Why phase N may not be approved yet (spec 10), empty when it may: every
-// lower phase must be approved and its tasks decided. "Phase 2 opens after
-// phase 1 ends."
+// lower phase must be approved. An approved phase still at work no longer
+// blocks it (F12/N40): the draft then runs alongside it.
 QString approveBlocked(const Team &team, int phase);
+// F12/N40: the earlier approved phase this draft would run alongside (0 when
+// none); the desktop warns the owner before approving it.
+int alongsidePhase(const Team &team, int phase);
 // U25 (spec 5.2): the owner's state of a phase: planned (the team is planning),
 // draft, rejected, queued, running or done. phase_summary[].state when the
 // server sends it, else read from the record and the phase's tasks.

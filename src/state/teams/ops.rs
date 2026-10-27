@@ -1519,6 +1519,13 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
     ensure!(!task.status.finished(), "The parent task is already decided");
     let member = if link.member.is_empty() { task.assignee.clone() } else { link.member.clone() };
     let text: String = format!("[Sub-team {} {}] {}", child.id, child.name, summary).chars().take(4000).collect();
+    // N23: a replayed finish (or a second call after the report landed) files
+    // no second report.
+    if task.attempts.iter().any(|attempt| {
+        attempt.report.as_ref().is_some_and(|report| report.text.starts_with(&format!("[Sub-team {} ", child.id)))
+    }) {
+        return Ok(task.id);
+    }
     let n = task.attempts.len() as u32 + 1;
     task.attempts.push(Attempt {
         n,
@@ -1526,7 +1533,9 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
         member,
         sent_at: now(),
         delivered_at: Some(now()),
-        state: AttemptState::Delivered,
+        // N22: a filed sub-team report is a report waiting for the parent lead,
+        // not an open delivery.
+        state: AttemptState::Reported,
         report: Some(Report { text, at: now(), ..Default::default() }),
         ..Default::default()
     });
@@ -1538,7 +1547,8 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
 /// that carries the reason for its lead.
 pub(crate) fn reopen_subteam(child: &mut Team, reason: &str) -> anyhow::Result<u32> {
     ensure!(child.parent.is_some(), "The team is not a sub-team");
-    ensure!(matches!(child.status, TeamStatus::Done | TeamStatus::Stopped), "The sub-team is not finished");
+    // N24: only a finished sub-team reopens; a stopped one stays stopped.
+    ensure!(child.status == TeamStatus::Done, "The sub-team is not finished");
     let n = child
         .phases
         .iter()
@@ -1576,6 +1586,8 @@ pub(crate) fn answer_forwarded(child: &mut Team, parent_question: &str, answer: 
                     question.answer = answer.to_owned();
                     question.answered_at = Some(now());
                     question.by = "Lead".into();
+                    // N21: the dispatcher delivers a Pending answer to the member.
+                    question.notice = Notice::Pending;
                     return true;
                 }
             }
@@ -2087,30 +2099,47 @@ pub(crate) fn depth_of(team: &Team, all: &[Team]) -> u32 {
 
 /// The sessions a team binds (its lead included), without removed members.
 pub(crate) fn session_count(team: &Team) -> usize {
-    team.members.iter().filter(|member| member.state != MemberState::Removed && member.session.is_some()).count()
+    // N26: a planned member without a session still gets launched, so it binds
+    // a session in the tree budget.
+    team.members.iter().filter(|member| member.state != MemberState::Removed).count()
 }
 
-/// The sessions the whole tree rooted at `master` binds.
+/// The sessions the whole tree rooted at `master` binds. A shared sub-lead
+/// session counts once, and finished teams no longer bind sessions (N26).
 pub(crate) fn tree_session_count(master: &Team, all: &[Team]) -> usize {
     let mut seen = BTreeSet::new();
+    let mut sessions = BTreeSet::new();
     let mut queue = vec![master.id.clone()];
-    let mut total = 0;
     while let Some(id) = queue.pop() {
         if !seen.insert(id.clone()) {
             continue;
         }
         if let Some(team) = all.iter().find(|team| team.id == id) {
-            total += session_count(team);
+            if !matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived) {
+                for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+                    let key = member.session.as_ref().map_or_else(
+                        || format!("member:{}:{}", team.id, member.id),
+                        |session| format!("session:{}:{}", session.host, session.name),
+                    );
+                    sessions.insert(key);
+                }
+            }
             queue.extend(team.children.iter().cloned());
         }
     }
     // Parent links are the truth even if a children list was not kept.
     for team in all.iter().filter(|team| !seen.contains(&team.id)) {
-        if root_of(team, all).id == master.id {
-            total += session_count(team);
+        if root_of(team, all).id == master.id && !matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived) {
+            for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+                let key = member.session.as_ref().map_or_else(
+                    || format!("member:{}:{}", team.id, member.id),
+                    |session| format!("session:{}:{}", session.host, session.name),
+                );
+                sessions.insert(key);
+            }
         }
     }
-    total
+    sessions.len()
 }
 
 /// Section 9.2: a sub-team may be created only within the master's depth, its
@@ -2565,24 +2594,38 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                 }
             }
             team.draft = None;
+            // N6: the same lead session now leads the team and gets its planning
+            // brief once, created from a draft or not.
+            team.brief = Notice::Pending;
             events.push(Event::new("draft_created", json!({"approve":approve,"team":team.id})));
             Ok(json!({"status":if approve {"running"} else {"planning"},"team":team.id}))
         }
         "discard" => {
             ensure!(human, "Only you discard a draft");
+            let reason = clean(text(input, "reason").trim(), 2000, "A reason")?;
             team.status = TeamStatus::Stopped;
+            // N7: the durable reason the owner discarded it for, and the
+            // request to stop the lead's session (the command stops it).
+            team.stop_reason = "draft_discarded".into();
             team.draft = None;
+            team.brief = Notice::None;
             let stop_lead = input["stop_lead"].as_bool() == Some(true);
-            events.push(Event::new("draft_discarded", json!({"stop_lead":stop_lead})));
-            Ok(json!({"status":"stopped","stop_lead":stop_lead}))
+            events.push(Event::new(
+                "draft_discarded",
+                json!({"stop_lead":stop_lead,"reason":reason,"by":actor.label(team)}),
+            ));
+            Ok(json!({"status":"stopped","stop_lead":stop_lead,"reason":"draft_discarded"}))
         }
         other => bail!("A draft action is update, seen, get, create or discard, not {other}"),
     }
 }
 
 /// F7: the next team a Done team starts: the same folder, settings, lead and
-/// members, whose live sessions are adopted; empty plan and goal.
-pub(crate) fn next_team(team: &Team, goal: &str, name: &str) -> Team {
+/// members, whose live sessions are adopted; empty plan and goal. N8: a session
+/// that is gone, or that now serves another active team, is not carried over -
+/// that member starts fresh (NotCreated) - and no session-bound state of the
+/// old team follows.
+pub(crate) fn next_team(team: &Team, goal: &str, name: &str, live: &[super::dispatcher::Seen], others: &[Team]) -> Team {
     let mut next = Team {
         id: uuid::Uuid::new_v4().to_string(),
         name: if name.is_empty() { team.name.clone() } else { name.to_owned() },
@@ -2593,15 +2636,59 @@ pub(crate) fn next_team(team: &Team, goal: &str, name: &str) -> Team {
         previous: team.id.clone(),
         status: TeamStatus::Planning,
         created: now(),
-        members: team.members.clone(),
+        members: Vec::new(),
+        // N6/N8: the same lead session leads the new team and gets its brief.
+        brief: Notice::Pending,
         ..Default::default()
     };
-    for member in &mut next.members {
-        if member.session.is_none() {
-            member.state = MemberState::NotCreated;
-        }
+    for member in &team.members {
+        let mut member = member.clone();
+        let adopted = member.session.as_ref().filter(|session| !serves_another_team(session, others)).and_then(|session| {
+            live.iter()
+                .find(|seen| seen.host == session.host && seen.name == session.name && seen.live && !seen.run_id.is_empty())
+                .map(|seen| SessionRef { run_id: seen.run_id.clone(), conversation_id: seen.conversation_id.clone(), ..session.clone() })
+        });
+        member.session = adopted;
+        member.state = if member.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
+        // N8: none of the session-bound state of the old team follows.
+        member.launch_id.clear();
+        member.error.clear();
+        member.settings_applied = false;
+        member.asked.clear();
+        member.pending = None;
+        member.permission = None;
+        member.permission_answers.clear();
+        member.limited = None;
+        member.limit_resume = false;
+        member.budget = None;
+        member.background_since = None;
+        member.background_told = false;
+        member.starved_since = None;
+        member.starved_told = false;
+        member.services.clear();
+        member.quieted.clear();
+        member.seen = None;
+        member.launch_after_swap = false;
+        member.inbox = Inbox::default();
+        next.members.push(member);
     }
     next
+}
+
+/// N8: whether a session is the lead or a member of another active team; it
+/// then stays with that team and the next team starts this member fresh.
+fn serves_another_team(session: &SessionRef, others: &[Team]) -> bool {
+    others.iter().any(|other| {
+        other
+            .member(&other.lead)
+            .and_then(|lead| lead.session.as_ref())
+            .is_some_and(|lead| lead.name == session.name && lead.host == session.host)
+            || other
+                .members
+                .iter()
+                .filter(|member| member.id != other.lead && member.state != MemberState::Removed)
+                .any(|member| member.session.as_ref().is_some_and(|member| member.name == session.name && member.host == session.host))
+    })
 }
 
 /// F8: the lead proposes a membership change; the owner decides.
@@ -2631,8 +2718,11 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     }
     ensure!(member.to_string().len() <= 8192, "A proposal's member has at most 8 KiB");
     let id = format!("p{}", team.proposals.len() + 1);
+    // N3: accepting the proposal runs the change under this one request id, so
+    // a retried or interrupted decision replays it instead of running twice.
+    let operation_request = uuid::Uuid::new_v4().to_string();
     let proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
-        "member":member,"goal":input["goal"].clone()});
+        "member":member,"goal":input["goal"].clone(),"operation_request":operation_request});
     team.proposals.push(proposal);
     events.push(Event::new("proposed", json!({"id":id,"kind":kind})));
     Ok(json!({"status":"proposed","proposal":id}))
@@ -3034,9 +3124,41 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(id != team.lead, "The lead cannot be removed");
             let reports: Vec<String> = team.reports_of(&id).iter().map(|member| member.role.clone()).collect();
             ensure!(reports.is_empty(), "Move its reports to another lead first: {}", reports.join(", "));
+            // N10: a member whose only open tasks are drafts can still go when
+            // the owner names the member that takes them (spec 4).
             let open: Vec<u32> = team.tasks.iter().filter(|t| t.assignee == id && !t.status.finished()).map(|t| t.id).collect();
-            ensure!(open.is_empty(), "Reassign or cancel its open tasks first: {}",
-                open.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", "));
+            if !open.is_empty() {
+                let target = text(input, "reassign_drafts_to").trim().to_owned();
+                ensure!(
+                    !target.is_empty(),
+                    "Reassign or cancel its open tasks first: {} (or give \"reassign_drafts_to\" for its drafts)",
+                    open.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ")
+                );
+                ensure!(target != id, "A member cannot take over its own drafts");
+                ensure!(
+                    team.member(&target).is_some_and(|member| member.id != team.lead && member.state != MemberState::Removed),
+                    "Unknown member {target}"
+                );
+                let drafts: Vec<u32> =
+                    open.iter().copied().filter(|task| team.task(*task).is_some_and(|task| task.status == TaskStatus::Draft)).collect();
+                let started: Vec<u32> = open.iter().copied().filter(|task| !drafts.contains(task)).collect();
+                ensure!(
+                    started.is_empty(),
+                    "Reassign or cancel its started tasks first: {}",
+                    started.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ")
+                );
+                let role = team.role_of(&id);
+                let to = team.role_of(&target);
+                for task_id in &drafts {
+                    if let Some(task) = team.task_mut(*task_id) {
+                        task.assignee = target.clone();
+                    }
+                }
+                events.push(Event::new(
+                    "drafts_reassigned",
+                    json!({"by":actor.label(team),"from":role,"to":to,"tasks":drafts}),
+                ));
+            }
             let role = team.role_of(&id);
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
             member.state = MemberState::Removed;
@@ -5423,15 +5545,54 @@ mod tests {
     fn a_next_goal_team_keeps_members_and_adopts_their_sessions() {
         let mut team = running_team();
         team.status = TeamStatus::Done;
-        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
-            Some(SessionRef { name: "claude/x/dev".into(), ..Default::default() });
-        let next = next_team(&team, "Ship v2", "Checkout 2");
+        // N8: the old team's session-bound state must not follow the member.
+        let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        member.session = Some(SessionRef { name: "claude/x/dev".into(), ..Default::default() });
+        member.pending = Some(Default::default());
+        member.permission = Some(json!({"tool":"Bash"}));
+        member.permission_answers = vec![json!({"decision":"allow"})];
+        member.limited = Some(Default::default());
+        member.limit_resume = true;
+        member.budget = Some(Default::default());
+        member.seen = Some(Default::default());
+        member.error = "old launch failed".into();
+        member.launch_id = "L".into();
+        member.settings_applied = true;
+        member.quieted = "c-old".into();
+        let live = [crate::state::teams::dispatcher::Seen {
+            name: "claude/x/dev".into(),
+            run_id: "r9".into(),
+            conversation_id: "c9".into(),
+            live: true,
+            ..Default::default()
+        }];
+        let next = next_team(&team, "Ship v2", "Checkout 2", &live, &[]);
         assert_eq!(next.status, TeamStatus::Planning);
         assert_eq!((next.folder.as_str(), next.goal.as_str(), next.previous.as_str()), (team.folder.as_str(), "Ship v2", team.id.as_str()));
         assert_eq!(next.lead, team.lead);
         assert_eq!(next.members.len(), team.members.len());
         assert!(next.tasks.is_empty());
-        assert_eq!(next.member("dev").unwrap().session.as_ref().map(|session| session.name.as_str()), Some("claude/x/dev"));
+        assert_eq!(next.brief, Notice::Pending);
+        let dev = next.member("dev").unwrap();
+        assert_eq!(dev.state, MemberState::Active);
+        assert_eq!(
+            dev.session.as_ref().map(|session| (session.name.as_str(), session.run_id.as_str(), session.conversation_id.as_str())),
+            Some(("claude/x/dev", "r9", "c9"))
+        );
+        assert!(dev.pending.is_none() && dev.permission.is_none() && dev.permission_answers.is_empty());
+        assert!(dev.limited.is_none() && !dev.limit_resume && dev.budget.is_none() && dev.seen.is_none());
+        assert!(dev.error.is_empty() && dev.launch_id.is_empty() && !dev.settings_applied && dev.quieted.is_empty());
+        // A session that is gone leaves the member NotCreated.
+        let next = next_team(&team, "Ship v2", "", &[], &[]);
+        let dev = next.member("dev").unwrap();
+        assert_eq!((dev.state, dev.session.is_some()), (MemberState::NotCreated, false));
+        // A session that now serves another active team stays there.
+        let mut other = running_team();
+        other.id = "other".into();
+        other.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "claude/x/dev".into(), ..Default::default() });
+        let next = next_team(&team, "Ship v2", "", &live, &[other]);
+        assert_eq!(next.member("dev").unwrap().state, MemberState::NotCreated);
     }
 
     #[test]
@@ -5817,6 +5978,12 @@ mod tests {
         let report = parent_task.attempts.last().unwrap().report.as_ref().unwrap();
         assert!(report.text.contains("[Sub-team child Child]") && report.text.contains("Sub work is done"), "{}", report.text);
         assert_eq!(parent_task.attempts.last().unwrap().member, "dev");
+        // N22: the filed report waits for the parent lead; it is not open.
+        assert_eq!(parent_task.attempts.last().unwrap().state, AttemptState::Reported);
+        // N23: a replay files no second report.
+        let before = parent_task.attempts.len();
+        file_subteam_report(&child, &mut parent).unwrap();
+        assert_eq!(parent.task(1).unwrap().attempts.len(), before);
         // Section 9.5: the rejection reopens the sub-team with a Rework draft
         // that carries the reason for its lead.
         let phase = reopen_subteam(&mut child, "Fix the migration").unwrap();
@@ -5824,6 +5991,9 @@ mod tests {
         assert!(child.finish.is_none());
         let draft = child.phases.iter().find(|p| p.n == phase).unwrap();
         assert_eq!((draft.title.as_str(), draft.reason.as_str(), draft.state), ("Rework", "Fix the migration", PhaseState::Draft));
+        // N24: a stopped sub-team stays stopped on a reject.
+        child.status = TeamStatus::Stopped;
+        assert!(reopen_subteam(&mut child, "again").is_err());
         // A flat team cannot be reopened.
         assert!(reopen_subteam(&mut Team::default(), "x").is_err());
     }
@@ -5843,6 +6013,8 @@ mod tests {
         let question = &child.tasks[0].attempts[0].questions[0];
         assert_eq!((question.answer.as_str(), question.by.as_str()), ("Postgres", "Lead"));
         assert!(question.answered_at.is_some());
+        // N21: the answer is pending for the member's dispatcher.
+        assert_eq!(question.notice, Notice::Pending);
         assert!(!answer_forwarded(&mut child, &forwarded, "again"));
         // Section 9.7: a task with a sub-team asks how to treat it.
         let mut task = Task { id: 1, title: "Work".into(), assignee: "dev".into(), ..Default::default() };

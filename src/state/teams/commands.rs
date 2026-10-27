@@ -192,6 +192,8 @@ fn starts_worker(op: &str) -> bool {
         "approve" | "resume" | "extend" | "approve-phase" | "ask" | "reply" | "release" | "expect" | "swap-member"
             // U25: auto-accept may take a draft on enabling or after a rework.
             | "settings" | "rework-phase"
+            // N6: a created draft team starts its lead and sends it the brief.
+            | "draft"
     )
 }
 
@@ -435,6 +437,16 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
                     "phase":previous,
                     "open":open
                 });
+            } else if !open.is_empty() {
+                // F12/N40: an approved phase that is still running does not
+                // block the draft - the owner may approve it to run alongside
+                // (the desktop warns before sending).
+                value["waiting"] = json!({
+                    "text":format!("Can run alongside phase {previous}"),
+                    "phase":previous,
+                    "open":open,
+                    "alongside":true
+                });
             }
         }
     }
@@ -621,33 +633,92 @@ fn summary(team: &Team) -> Value {
     })
 }
 
-/// F5: the draft with its revision, unseen fields and preflight.
-fn draft_get(input: &Value) -> anyhow::Result<Value> {
-    let store = Store::open(false)?;
-    draft_get_in(&store, input)
+/// N7: stops the lead's session of a discarded draft, when the owner asked for
+/// it (spec 3). The session is terminated, not forgotten: it stays in the
+/// archive like any stopped session.
+fn stop_lead_session(session: &SessionRef) -> anyhow::Result<()> {
+    ensure!(!session.name.is_empty(), "The draft's lead has no session to stop");
+    #[cfg(test)]
+    if RECORD_LEAD_STOPS.with(std::cell::Cell::get) {
+        LEAD_STOPS.with(|stops| stops.borrow_mut().push((session.host.clone(), session.name.clone())));
+        return Ok(());
+    }
+    let output = super::dispatcher::hgs(&session.host, &["terminate", &session.name], None, std::time::Duration::from_secs(30))?;
+    ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    Ok(())
 }
 
-fn draft_get_in(store: &Store, input: &Value) -> anyhow::Result<Value> {
-    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+#[cfg(test)]
+thread_local! {
+    /// Tests record the lead stop instead of terminating a real session.
+    static RECORD_LEAD_STOPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LEAD_STOPS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// N7: from now on, stop_lead_session records its argument instead of running
+/// hgs terminate; `lead_stops` reads the record, `record_lead_stops(false)`
+/// returns to the real route.
+#[cfg(test)]
+pub(crate) fn record_lead_stops(record: bool) {
+    if record {
+        LEAD_STOPS.with(|stops| stops.borrow_mut().clear());
+    }
+    RECORD_LEAD_STOPS.with(|flag| flag.set(record));
+}
+
+#[cfg(test)]
+pub(crate) fn lead_stops() -> Vec<(String, String)> {
+    LEAD_STOPS.with(|stops| stops.borrow().clone())
+}
+
+/// F5: the draft with its revision, unseen fields and preflight. N1/F5: a read
+/// by the draft's own lead clears the owner-edited marks - the owner's edit wins
+/// only over a lead edit made before the lead read it (spec 3) - so the lead can
+/// change those fields after reading.
+fn draft_get(input: &Value) -> anyhow::Result<Value> {
+    // A lead's read writes the marks away; the owner's read does not. A store
+    // the sandbox leaves read-only still reads the draft (the marks stay).
+    let mut store = match Store::open(true) {
+        Ok(store) => store,
+        Err(error) if read_only(&error) => Store::open(false)?,
+        Err(error) => return Err(super::store::write_error(error)),
+    };
+    draft_get_in(&mut store, input)
+}
+
+fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
+    let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(team.status == TeamStatus::Draft, "The team is not a draft");
+    let lead_reads = matches!(actor(&team, "draft", input), Ok(Actor::Member(member)) if member == team.lead);
+    let marked = team.draft.as_ref().is_some_and(|draft| !draft.owner_edited.is_empty());
+    if lead_reads && marked {
+        let label = team.role_of(&team.lead);
+        let cleared = store.mutate(None, &team.id, None, |team, events| {
+            if let Some(draft) = team.draft.as_mut() {
+                draft.owner_edited.clear();
+            }
+            events.push(Event::new("draft_read", json!({"by":label})));
+            Ok(Value::Null)
+        });
+        // A read that cannot write (a read-only store) still answers the draft.
+        if cleared.is_ok() {
+            team = store.load(&team.id)?.context("Unknown team")?;
+        }
+    }
     let draft = team.draft.clone().unwrap_or_default();
     let validation = super::plan::validate(&team, &BTreeSet::new());
     Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"preflight":validation}))
 }
 
 /// F5: the owner starts a draft team; the lead session is adopted when given,
-/// otherwise the lead is not created yet. Nothing exists before this call.
+/// otherwise the dispatcher starts it in the team's folder (N6). Nothing exists
+/// before this call.
 fn draft_start(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
     ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
     // C2: there is no team yet to prove a member by, so only you start one.
-    owner_without_team(
-        input,
-        caller_record().is_some(),
-        nonempty_env("DSH_SESSION_ID").is_some(),
-        nonempty_env("HGS_SESSION").is_some(),
-        nonempty_env("HGS_RUN_ID").is_some(),
-    )?;
+    let (dsh, session, run) = caller_identities();
+    owner_without_team(input, caller_record().is_some(), dsh.is_some(), session.is_some(), run.is_some())?;
     let mut store = Store::open(true)?;
     let mut lead = input["lead"].clone();
     if store.receipt(&request, input)?.is_none() && lead["session"].is_object() {
@@ -660,7 +731,12 @@ fn draft_start(input: &Value) -> anyhow::Result<Value> {
         let adopted = adopted_session(&Team::default(), &member, &store.active_teams(ACTIVE_TEAMS)?, &live_sessions()?)?;
         lead["session"] = serde_json::to_value(&adopted.session)?;
     }
-    draft_start_in(&mut store, &request, input, lead)
+    let value = draft_start_in(&mut store, &request, input, lead)?;
+    // N6: the draft's lead is launched and briefed by the dispatcher.
+    if let Err(error) = super::dispatcher::ensure_worker() {
+        eprintln!("hgs: the team dispatcher did not start: {error}");
+    }
+    Ok(value)
 }
 
 /// C1: the team revision a change must find. The draft, edit-draft,
@@ -704,6 +780,9 @@ fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) 
     let mut lead: super::model::Member = serde_json::from_value(lead_value).context("Invalid lead")?;
     ensure!(lead.session.is_some() || !lead.agent.is_empty(), "A draft lead needs an agent or an existing session");
     lead.id = "lead".into();
+    // N6/spec 3: the draft's lead starts in the team's folder, never a worktree.
+    lead.folder = MemberFolder::Shared;
+    lead.directory.clear();
     if lead.role.is_empty() {
         lead.role = "Lead".into();
     }
@@ -716,22 +795,14 @@ fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) 
         lead: "lead".into(),
         draft: Some(super::model::Draft { revision: 1, ..Default::default() }),
         revision: 1,
+        // N6: the dispatcher starts (or adopts) the lead in the folder and gives
+        // it the draft brief once (spec 3).
+        brief: Notice::Pending,
         ..Default::default()
     };
     team.members.push(lead);
     let id = team.id.clone();
-    let brief = format!(
-        "[Zerus team \u{b7} draft]\nYou lead the draft team {id}. Read the built-in lead protocol and hgs guide designer; \
-         the owner and you edit the draft with hgs team draft before it can be created.",
-        id = id
-    );
-    let session = team.member("lead").and_then(|member| member.session.clone());
     store.create(request, input, team, vec![Event::new("team_drafted", json!({"team":id}))])?;
-    // One brief, when the lead already has a session; a launched lead gets it
-    // from the dispatcher's first-turn hand-off.
-    if let Some(session) = session {
-        let _ = super::dispatcher::send(&session, &uuid::Uuid::new_v4().to_string(), &brief);
-    }
     Ok(json!({"team":id,"revision":1}))
 }
 
@@ -741,7 +812,12 @@ fn next_goal(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
     ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
     let mut store = Store::open(true)?;
-    next_goal_in(&mut store, &request, input)
+    let value = next_goal_in(&mut store, &request, input)?;
+    // N6/N8: the next team's lead gets its planning brief from the dispatcher.
+    if let Err(error) = super::dispatcher::ensure_worker() {
+        eprintln!("hgs: the team dispatcher did not start: {error}");
+    }
+    Ok(value)
 }
 
 fn next_goal_in(store: &mut Store, request: &str, input: &Value) -> anyhow::Result<Value> {
@@ -756,7 +832,7 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     }
     let old = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
-    // N12: one next goal per done team, and the lead takes the accepted
+    // N3/N12: one next goal per done team, and the lead takes the accepted
     // proposal's goal rather than a new one.
     ensure!(old.next.is_empty(), "The next goal was already started for this team");
     let accepted_goal = old.proposals.iter().find_map(|proposal| {
@@ -775,7 +851,11 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     ensure!(goal.chars().count() <= 4000, "A goal has at most 4000 characters");
     let name = text(input, "name").trim().to_owned();
     ensure!(name.chars().count() <= 80, "A name has at most 80 characters");
-    let next = super::ops::next_team(&old, &goal, &name);
+    // N8: the members' live sessions are adopted; one that is gone or serves
+    // another active team is not. A listing that fails adopts none (the
+    // members start fresh when work is ready) rather than refusing the goal.
+    let live = live_sessions().unwrap_or_default();
+    let next = super::ops::next_team(&old, &goal, &name, &live, &store.active_teams(ACTIVE_TEAMS)?);
     let next_id = next.id.clone();
     store.create(request, input, next, vec![Event::new("next_goal", json!({"team":next_id,"previous":old.id}))])?;
     store.mutate(None, &old.id, None, |team, events| {
@@ -796,8 +876,11 @@ fn decide_proposal(input: &Value) -> anyhow::Result<Value> {
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
     let caller = actor(&team, "decide-proposal", input)?;
     let receipt = decide_proposal_in(&mut store, input, &caller)?;
-    if receipt["status"] == "accepted" && receipt["kind"] == "swap-member" {
-        // A swap without a session launches one (H6).
+    if receipt["status"] == "accepted"
+        && matches!(receipt["kind"].as_str(), Some("add-member") | Some("swap-member") | Some("next-goal"))
+    {
+        // N4: an accepted membership change may bind or launch a session, and a
+        // next goal's lead gets its brief; the dispatcher must run.
         if let Err(error) = super::dispatcher::ensure_worker() {
             eprintln!("hgs: the team dispatcher did not start: {error}");
         }
@@ -805,10 +888,12 @@ fn decide_proposal(input: &Value) -> anyhow::Result<Value> {
     Ok(receipt)
 }
 
-/// C8: the input an accepted add-member or swap-member proposal runs with. A
-/// swap's member is its id, or an object with the id and the section 5 fields.
-fn proposal_input(team: &str, kind: &str, member: &Value) -> anyhow::Result<Value> {
-    let mut value = json!({"team":team,"request_id":uuid::Uuid::new_v4().to_string(),"by":"human"});
+/// C8/N3: the input an accepted add-member or swap-member proposal runs with.
+/// A swap's member is its id, or an object with the id and the section 5
+/// fields; the operation carries the proposal's own request id, so a retried
+/// decision replays it.
+fn proposal_input(team: &str, kind: &str, member: &Value, request: &str) -> anyhow::Result<Value> {
+    let mut value = json!({"team":team,"request_id":request,"by":"human"});
     if kind == "add-member" {
         ensure!(member.is_object(), "The add-member proposal carries its member");
         value["member"] = member.clone();
@@ -832,6 +917,8 @@ fn added_sessions(team: &Team, op: &str, filled: &Value) -> usize {
         "swap-member" => usize::from(
             filled["session"].is_object() && team.member(text(filled, "member")).is_none_or(|member| member.session.is_none()),
         ),
+        // N26: a plan can add a whole roster before any session exists.
+        "plan" => filled["members"].as_array().map_or(0, Vec::len),
         _ => 0,
     }
 }
@@ -849,6 +936,30 @@ fn owner_change(store: &mut Store, op: &str, value: &Value) -> anyhow::Result<Va
     store.mutate(Some((&request, value)), &team_id, None, |team, events| {
         ops::apply(team, op, &filled, &Actor::Human, &BTreeSet::new(), events)
     })
+}
+
+/// N3: the request id an accepted proposal's change runs under. It is stored
+/// with the proposal the first time it is needed (proposals made before this
+/// field get one then), so a decision retried or interrupted between its writes
+/// replays the change instead of running it twice.
+fn proposal_operation_request(store: &mut Store, team_id: &str, proposal: &str, team: &Team) -> anyhow::Result<String> {
+    if let Some(request) = team.proposals.iter().find(|found| found["id"] == proposal).and_then(|found| found["operation_request"].as_str()) {
+        if super::store::canonical_uuid(request) {
+            return Ok(request.to_owned());
+        }
+    }
+    let request = uuid::Uuid::new_v4().to_string();
+    let mut stored = request.clone();
+    store.mutate(None, team_id, None, |team, _| {
+        if let Some(found) = team.proposals.iter_mut().find(|found| found["id"] == proposal) {
+            match found["operation_request"].as_str() {
+                Some(existing) if super::store::canonical_uuid(existing) => stored = existing.to_owned(),
+                _ => found["operation_request"] = json!(request),
+            }
+        }
+        Ok(Value::Null)
+    })?;
+    Ok(stored)
 }
 
 fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyhow::Result<Value> {
@@ -879,19 +990,25 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
     let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
     let member = team.proposals[at]["member"].clone();
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
+    // N3: the change runs under one request id stored with the proposal, so an
+    // interrupted or retried decision replays it instead of applying it twice.
+    let operation_request = proposal_operation_request(store, &team_id, &id, &team)?;
     let result = match kind.as_str() {
-        "add-member" | "swap-member" => owner_change(store, &kind, &proposal_input(&team_id, &kind, &member)?)?,
+        "add-member" | "swap-member" => {
+            owner_change(store, &kind, &proposal_input(&team_id, &kind, &member, &operation_request)?)?
+        }
         "remove-member" => {
             let member_id = member["id"].as_str().or(member.as_str()).unwrap_or_default().to_owned();
-            store.mutate(None, &team_id, None, |team, events| {
-                super::ops::apply(team, "remove-member", &json!({"member":member_id}), &Actor::Human, &BTreeSet::new(), events)
+            let value = json!({"team":team_id,"request_id":operation_request,"member":member_id,"by":"human"});
+            store.mutate(Some((&operation_request, &value)), &team_id, None, |team, events| {
+                super::ops::apply(team, "remove-member", &value, &Actor::Human, &BTreeSet::new(), events)
             })?
         }
         "next-goal" => {
             ensure!(!goal.is_empty(), "The next-goal proposal carries its goal");
-            let fresh = uuid::Uuid::new_v4().to_string();
             // N2: it runs as your own next goal, not as the caller re-derived.
-            next_goal_as(store, &fresh, &json!({"team":team_id,"goal":goal,"request_id":fresh}), &Actor::Human)?
+            let value = json!({"team":team_id,"goal":goal,"request_id":operation_request,"by":"human"});
+            next_goal_as(store, &operation_request, &value, &Actor::Human)?
         }
         other => bail!("Unknown proposal kind {other}"),
     };
@@ -1039,6 +1156,8 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
         .context("The parent task number is required")?;
     let task = parent.task(number).context("Unknown parent task")?;
     ensure!(!task.status.finished(), "The parent task is already decided");
+    // N25: one sub-team per parent task; a second create must not overwrite it.
+    ensure!(task.subteam.is_none(), "The parent task already has a sub-team");
     let member = parent
         .member(&task.assignee)
         .with_context(|| format!("The parent task #{} has no assignee", task.id))?
@@ -1092,11 +1211,37 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
     Ok(Some((parent.id.clone(), task.id)))
 }
 
+/// N25: a create whose child landed but whose parent update failed is repaired
+/// on the replay: the reserved child id is already the request id.
+fn repair_parent_link(child_id: &str, input: &Value) -> anyhow::Result<()> {
+    let Some(parent_id) = input["parent"]["team"].as_str() else { return Ok(()) };
+    let Some(number) = input["parent"]["task"].as_u64().and_then(|n| u32::try_from(n).ok()) else { return Ok(()) };
+    let mut store = Store::open(true)?;
+    if store.load(child_id)?.is_none() {
+        return Ok(());
+    }
+    store.mutate(None, parent_id, None, |parent, events| {
+        if let Some(task) = parent.tasks.iter_mut().find(|task| task.id == number) {
+            task.subteam = Some(child_id.to_owned());
+        }
+        if !parent.children.iter().any(|id| id == child_id) {
+            parent.children.push(child_id.to_owned());
+        }
+        events.push(Event::new("subteam_repaired", json!({"team":child_id,"task":number})));
+        Ok(Value::Null)
+    })?;
+    Ok(())
+}
+
 fn create(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
-    // A replay returns the first receipt before validating the parent again.
+    // A replay returns the first receipt; a parent link is repaired first
+    // (N25: the child may exist from a create whose parent mutate failed).
     if let Some(receipt) = Store::open(false)?.receipt(request, input)? {
+        if input["parent"].is_object() {
+            repair_parent_link(request, input)?;
+        }
         return Ok(receipt);
     }
     let mut filled = input.clone();
@@ -1123,7 +1268,28 @@ fn create(input: &Value) -> anyhow::Result<Value> {
             .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
-    let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
+    let (team, events) = {
+        let mut child_id = uuid::Uuid::new_v4().to_string();
+        if let Some((parent_id, task)) = &parent_link {
+            // N25: reserve the parent link before the child exists. The request
+            // id is the child id, so a retry after a failed create reuses it;
+            // a different concurrent create sees the reservation and is refused.
+            child_id = request.to_owned();
+            let mut store = Store::open(true)?;
+            let pid = parent_id.clone();
+            let number = *task;
+            store.mutate(None, &pid, None, |parent, events| {
+                let parent_task = parent.tasks.iter_mut().find(|candidate| candidate.id == number).context("The parent task is missing")?;
+                match &parent_task.subteam {
+                    Some(existing) if existing != &child_id => bail!("The parent task already has a sub-team"),
+                    _ => parent_task.subteam = Some(child_id.clone()),
+                }
+                events.push(Event::new("subteam_reserved", json!({"team":child_id,"task":number})));
+                Ok(Value::Null)
+            })?;
+        }
+        ops::create(&child_id, &filled)?
+    };
     // Section 9.2: depth, children and tree sessions are checked at create.
     if let Some((parent_id, _)) = &parent_link {
         let store = Store::open(false)?;
@@ -1466,10 +1632,25 @@ fn status_lists_sessions(status: TeamStatus) -> bool {
 /// The live sessions of this computer and its peers, as the dispatcher reads
 /// them (F7, F8).
 fn live_sessions() -> anyhow::Result<Vec<super::dispatcher::Seen>> {
+    #[cfg(test)]
+    if let Some(found) = LIVE_SESSIONS.with(|sessions| sessions.borrow().clone()) {
+        return Ok(found);
+    }
     let output = super::dispatcher::hgs("", &["ls", "--json", "--no-archives"], None, std::time::Duration::from_secs(15))?;
     ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
     Ok(super::dispatcher::seen(&listing))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// N3/N4: a test's own live listing instead of a real `hgs ls`.
+    static LIVE_SESSIONS: std::cell::RefCell<Option<Vec<super::dispatcher::Seen>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn live_sessions_override(sessions: Option<Vec<super::dispatcher::Seen>>) {
+    LIVE_SESSIONS.with(|slot| *slot.borrow_mut() = sessions);
 }
 
 /// How long a finished team's status reuses one live listing (C1, NEW-2): the
@@ -1957,6 +2138,11 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
     let mut store = Store::open(true)?;
+    // N28: a replay returns the first receipt instead of duplicating the
+    // parent question.
+    if let Some(receipt) = store.receipt(request, input)? {
+        return Ok(receipt);
+    }
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
     let link = team.parent.clone().context("Only a sub-team escalates a question")?;
     let by = actor(&team, "escalate", input)?;
@@ -1990,9 +2176,10 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         }
     };
     let parent_question = ops::forward_question(&team, &question);
+    ensure!(question.forwarded.is_empty(), "This question was already escalated");
     let child_name = team.name.clone();
     let child_id = team.id.clone();
-    store.mutate(None, &child_id, None, |team, events| {
+    store.mutate(Some((request, input)), &child_id, None, |team, events| {
         for task in &mut team.tasks {
             for attempt in &mut task.attempts {
                 for question in &mut attempt.questions {
@@ -2006,7 +2193,22 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         Ok(Value::Null)
     })?;
     let _ = child_name;
-    forward_to_parent(&mut store, &team, &parent_question, question_id, &question.text, &link)?;
+    if let Err(error) = forward_to_parent(&mut store, &team, &parent_question, question_id, &question.text, &link) {
+        // N28: a failure upstream must not leave the child marked forwarded.
+        let _ = store.mutate(None, &child_id, None, |team, _| {
+            for task in &mut team.tasks {
+                for attempt in &mut task.attempts {
+                    for question in &mut attempt.questions {
+                        if question.forwarded == parent_question {
+                            question.forwarded.clear();
+                        }
+                    }
+                }
+            }
+            Ok(Value::Null)
+        });
+        return Err(error);
+    }
     Ok(json!({"status":"escalated","team":child_id,"question":parent_question,"parent":link.team}))
 }
 
@@ -2306,7 +2508,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // Section 9.2: a change that can bind a new session keeps the whole
             // tree within its master's budget (extend binds none, and is
             // checked for a tree already over it).
-            if matches!(op, "add-member" | "swap-member" | "extend") {
+            if matches!(op, "plan" | "approve" | "add-member" | "swap-member" | "extend") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 // Bounded: ancestors by id and children by id; a flat team
                 // reads nothing beyond the team itself.
@@ -2353,7 +2555,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     super::owner_word::verify_roster(team, input, needed, now)
                 })?;
             }
-            let receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
+            // N7: a replayed discard does not stop the lead's session twice.
+            let replayed = op == "draft"
+                && text(&filled, "action") == "discard"
+                && store.receipt(request, input)?.is_some();
+            let mut receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
             }) {
@@ -2363,6 +2569,19 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 }
                 Err(error) => return Err(super::store::write_error(error)),
             };
+            // N7: discarding a draft stops the lead's session when the owner
+            // asked for it (spec 3); a failure leaves the discard done and names
+            // it in the answer.
+            if op == "draft" && text(&filled, "action") == "discard" && receipt["stop_lead"].as_bool() == Some(true) && !replayed {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                match team.member(&team.lead).and_then(|member| member.session.clone()) {
+                    Some(session) => match stop_lead_session(&session) {
+                        Ok(()) => receipt["lead_stopped"] = json!(true),
+                        Err(error) => receipt["lead_stop_error"] = json!(format!("{error:#}")),
+                    },
+                    None => receipt["lead_stopped"] = json!(false),
+                }
+            }
             if starts_worker(op) {
                 // The dispatcher runs while any team runs; it exits by itself.
                 if let Err(error) = super::dispatcher::ensure_worker() {
@@ -2647,6 +2866,418 @@ mod tests {
             assert!(error.contains("the worktree policy gives every member its own folder"), "{error}");
             let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
             assert!(saved.task(2).is_none(), "the refused phase is not added");
+        });
+    }
+
+    /// N4/F1: `hgs team run` answers from the member's folder: a result already
+    /// there never queues the run again, the wait is short, and the same
+    /// request_id reads the outcome instead of running the command twice.
+    #[test]
+    fn a_run_answers_without_queueing_it_twice_and_waits_briefly() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.folder = folder.display().to_string();
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let input = |request: &str| json!({"request_id":request,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
+            // An answer already in the folder is the answer: no push, no wait.
+            let request = "22222222-2222-4222-8222-222222222222";
+            std::fs::create_dir_all(super::super::outbox::dir(&folder)).unwrap();
+            let answer = json!({"status":"ran","request_id":request,"exit":0,"tail":"old"});
+            std::fs::write(super::super::outbox::result_path(&folder, request), serde_json::to_vec(&answer).unwrap()).unwrap();
+            let value = super::team_run_in(&folder, &input(request), false, 0.1).unwrap();
+            assert_eq!((value["status"].as_str(), value["tail"].as_str()), (Some("ran"), Some("old")));
+            assert!(!super::super::outbox::request_path(&folder, request).exists(), "the result queued the run again");
+            // A short wait, not the template's 1800 s.
+            let request = "33333333-3333-4333-8333-333333333333";
+            let started = std::time::Instant::now();
+            let value = super::team_run_in(&folder, &input(request), true, 0.2).unwrap();
+            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the wait took {:?}", started.elapsed());
+            assert_eq!(value["status"], "running", "{value}");
+            assert!(super::super::outbox::request(&folder, request).is_some(), "the queued request left");
+            // Asking again with the same id reads the queue; another run cannot reuse it.
+            let value = super::team_run_in(&folder, &input(request), false, 0.1).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            let mut other = input(request);
+            other["template"] = json!("cargo-clippy");
+            let error = super::team_run_in(&folder, &other, false, 0.1).unwrap_err().to_string();
+            assert!(error.contains("already used by another run"), "{error}");
+            // A result written later comes back without a wait.
+            let done = json!({"status":"ran","request_id":request,"exit":0,"tail":"done"});
+            super::super::outbox::settle(&folder, &json!({"request_id":request}), &done).unwrap();
+            assert_eq!(super::team_run_in(&folder, &input(request), false, 0.1).unwrap()["tail"], "done");
+        });
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    /// N5: a sandboxed write queues in the member's own folder, never in the
+    /// process's directory: a member that ran `cd tray` before reporting would
+    /// otherwise queue where the worker never looks.
+    #[test]
+    fn a_sandboxed_write_queues_in_the_members_folder_not_the_process_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.folder = project.display().to_string();
+            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
+            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+            let member_folder = std::path::PathBuf::from(
+                super::super::dispatcher::member_folder_path(&team, team.member("dev").unwrap()).unwrap(),
+            );
+            assert_eq!(member_folder, project);
+            let report = "22222222-2222-4222-8222-222222222222";
+            let input = json!({"request_id":report,"team":id,"attempt":attempt,"text":"Done and checked"});
+            let value = super::queue_write("report", &input, false).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            assert!(super::super::outbox::request_path(&member_folder, report).exists(), "the report queued outside the member's folder");
+            let run = "33333333-3333-4333-8333-333333333333";
+            let input = json!({"request_id":run,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
+            let value = super::team_run(&input, false).unwrap();
+            assert_eq!(value["status"], "queued", "{value}");
+            assert!(super::super::outbox::request_path(&member_folder, run).exists(), "the run queued outside the member's folder");
+            // Not in the directory this test process happens to run in.
+            let here = std::env::current_dir().unwrap();
+            assert!(!super::super::outbox::request_path(&here, report).exists());
+            assert!(!super::super::outbox::request_path(&here, run).exists());
+        });
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    /// N5: a finished team's inbox still carries the owner's decision on the
+    /// lead's proposal (spec 4), so the lead hears the answer.
+    #[test]
+    fn a_done_team_reports_the_owners_proposal_decision_in_its_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.status = TeamStatus::Done;
+            team.proposals.push(json!({"id":"p1","kind":"next-goal","by":"Lead","at":10.0,"state":"accepted",
+                "decided_at":20.0,"note":"Go on","goal":"v2"}));
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let value = run("inbox", &json!({"team":id,"by":"human"}), false).unwrap();
+            let items = value["items"].as_array().unwrap();
+            let item = items.iter().find(|item| item["kind"] == "proposal_decided").expect("the decision is missing");
+            assert!(
+                item["summary"].as_str().unwrap_or_default().contains("accepted your next-goal proposal p1: Go on"),
+                "{item}"
+            );
+            // A running team with the same proposal lists nothing stale twice.
+            let mut running = running_team();
+            running.proposals.push(json!({"id":"p2","kind":"next-goal","by":"Lead","at":10.0,"state":"rejected","decided_at":20.0,"note":"No"}));
+            assert_eq!(super::super::inbox::items(&running).iter().filter(|item| item.kind == "proposal_decided").count(), 1);
+        });
+    }
+
+    /// N3: a finished team starts one next goal, however many requests ask for
+    /// it; a replay of the first answers its receipt.
+    #[test]
+    fn a_finished_team_starts_only_one_next_goal() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            super::live_sessions_override(Some(Vec::new()));
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.status = TeamStatus::Done;
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let first = run("next-goal", &json!({"team":id,"goal":"v2","by":"human","request_id":"22222222-2222-4222-8222-222222222222"}), false).unwrap();
+            assert_eq!(first["status"], "planned", "{first}");
+            let error = run("next-goal", &json!({"team":id,"goal":"v3","by":"human","request_id":"33333333-3333-4333-8333-333333333333"}), false)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("already started"), "{error}");
+            let again = run("next-goal", &json!({"team":id,"goal":"v2","by":"human","request_id":"22222222-2222-4222-8222-222222222222"}), false).unwrap();
+            assert_eq!(again["team"], first["team"]);
+        });
+        super::live_sessions_override(None);
+    }
+
+    /// N3: an accepted proposal's change runs under the proposal's own request
+    /// id, so a decision interrupted between its writes replays instead of
+    /// running the change twice.
+    #[test]
+    fn an_accepted_proposal_replays_instead_of_running_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.members.push(Member { id: "ops".into(), role: "Ops".into(), agent: "codex".into(), ..Default::default() });
+            team.proposals.push(json!({"id":"p1","kind":"remove-member","by":"Lead","at":10.0,"state":"open","reason":"bye",
+                "member":"ops","operation_request":"44444444-4444-4444-8444-444444444444"}));
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let decide = |store: &mut Store| {
+                super::decide_proposal_in(
+                    store,
+                    &json!({"request_id":"55555555-5555-4555-8555-555555555555","team":id,"proposal":"p1","accept":true,"reason":"bye"}),
+                    &Actor::Human,
+                )
+                .unwrap()
+            };
+            let first = decide(&mut store);
+            assert_eq!(first["status"], "accepted", "{first}");
+            let removals = |store: &Store| {
+                let events = store.events(&id, None, 50).unwrap();
+                events["items"].as_array().unwrap().iter().filter(|event| event["kind"] == "member_removed").count()
+            };
+            assert_eq!(removals(&store), 1);
+            // The change went through but the acceptance was lost (a crash
+            // between the two writes): the proposal is open again.
+            store
+                .mutate(None, &id, None, |team, _| {
+                    if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == "p1") {
+                        proposal["state"] = json!("open");
+                    }
+                    Ok(Value::Null)
+                })
+                .unwrap();
+            let again = decide(&mut store);
+            assert_eq!(again["status"], "accepted", "{again}");
+            assert_eq!(removals(&store), 1, "the change ran twice");
+        });
+    }
+
+    /// N4: an accepted add-member proposal runs the same adoption checks as the
+    /// owner's own change (C8's owner_change), not a bare ops::apply.
+    #[test]
+    fn an_accepted_add_member_runs_the_adoption_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            super::live_sessions_override(Some(Vec::new()));
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.proposals.push(json!({"id":"p1","kind":"add-member","by":"Lead","at":10.0,"state":"open","reason":"needs help",
+                "member":{"id":"ops","role":"Ops","agent":"codex","session":{"name":"codex/x/ops","host":""}},
+                "operation_request":"44444444-4444-4444-8444-444444444444"}));
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let error = super::decide_proposal_in(
+                &mut store,
+                &json!({"request_id":"55555555-5555-4555-8555-555555555555","team":id,"proposal":"p1","accept":true,"reason":"ok"}),
+                &Actor::Human,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("is not running on this computer"), "{error}");
+            let saved = store.load(&id).unwrap().unwrap();
+            assert_eq!(saved.proposals[0]["state"], "open", "the proposal was accepted without the check");
+            assert!(saved.member("ops").is_none());
+        });
+        super::live_sessions_override(None);
+    }
+
+    /// N7: discarding a draft keeps its reason and stops the lead's session,
+    /// only when the owner asked for it (spec 3).
+    #[test]
+    fn discarding_a_draft_stops_its_lead_and_keeps_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.status = TeamStatus::Draft;
+            team.draft = Some(Draft { revision: 3, ..Default::default() });
+            team.brief = Notice::Pending;
+            {
+                let lead = team.members.iter_mut().find(|member| member.id == "lead").unwrap();
+                lead.session = Some(SessionRef { name: "claude/x/lead".into(), run_id: "r0".into(), ..Default::default() });
+                lead.state = MemberState::Active;
+            }
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            super::record_lead_stops(true);
+            let value = run(
+                "draft",
+                &json!({"team":id,"by":"human","action":"discard","stop_lead":true,"reason":"not worth it",
+                    "request_id":"22222222-2222-4222-8222-222222222222"}),
+                false,
+            )
+            .unwrap();
+            super::record_lead_stops(false);
+            assert_eq!(value["lead_stopped"], true, "{value}");
+            assert_eq!(super::lead_stops(), vec![(String::new(), "claude/x/lead".to_string())]);
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert_eq!((saved.status, saved.stop_reason.as_str()), (TeamStatus::Stopped, "draft_discarded"));
+            assert!(saved.draft.is_none());
+            // The durable feed names the reason and the stop request.
+            let events = Store::open(false).unwrap().events(&id, None, 20).unwrap();
+            let event = events["items"].as_array().unwrap().iter().find(|event| event["kind"] == "draft_discarded").expect("no event");
+            assert_eq!(event["detail"]["reason"], "not worth it");
+            assert_eq!(event["detail"]["stop_lead"], true);
+            // A discard without stop_lead stops nothing.
+            let mut second = running_team();
+            second.id = "d2".into();
+            second.status = TeamStatus::Draft;
+            second.draft = Some(Draft { revision: 1, ..Default::default() });
+            let other = second.id.clone();
+            Store::open(true).unwrap().create("33333333-3333-4333-8333-333333333333", &json!({}), second, vec![]).unwrap();
+            super::record_lead_stops(true);
+            let value = run(
+                "draft",
+                &json!({"team":other,"by":"human","action":"discard","stop_lead":false,
+                    "request_id":"44444444-4444-4444-8444-444444444444"}),
+                false,
+            )
+            .unwrap();
+            super::record_lead_stops(false);
+            assert!(value.get("lead_stopped").is_none(), "{value}");
+            assert!(super::lead_stops().is_empty());
+        });
+    }
+
+    /// N10: a member whose only open tasks are drafts leaves when the owner
+    /// names the member that takes them (spec 4).
+    #[test]
+    fn a_removed_member_drafts_move_to_the_named_member() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), ..Default::default() });
+            team.tasks.push(Task { id: 2, title: "Later work".into(), assignee: "dev".into(), status: TaskStatus::Draft, phase: 2, ..Default::default() });
+            team.tasks.push(Task { id: 3, title: "Started".into(), assignee: "dev".into(), status: TaskStatus::Pending, phase: 2, ..Default::default() });
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            // Without a target the removal is refused, and with a target only
+            // the drafts may move.
+            let error = run("remove-member", &json!({"team":id,"by":"human","member":"dev","request_id":"22222222-2222-4222-8222-222222222222"}), false)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Reassign or cancel its open tasks first"), "{error}");
+            let error = run(
+                "remove-member",
+                &json!({"team":id,"by":"human","member":"dev","reassign_drafts_to":"qa","request_id":"33333333-3333-4333-8333-333333333333"}),
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("started tasks first"), "{error}");
+            // Its started work is cancelled: the draft moves to qa and dev goes.
+            for (task, request) in [(1, "44444444-4444-4444-8444-444444444444"), (3, "55555555-5555-4555-8555-555555555555")] {
+                run("cancel", &json!({"team":id,"by":"human","task":task,"request_id":request}), false).unwrap();
+            }
+            let value = run(
+                "remove-member",
+                &json!({"team":id,"by":"human","member":"dev","reassign_drafts_to":"qa","request_id":"66666666-6666-4666-8666-666666666666"}),
+                false,
+            )
+            .unwrap();
+            assert_eq!(value["status"], "removed", "{value}");
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert_eq!(saved.task(2).unwrap().assignee, "qa");
+            assert_eq!(saved.member("dev").unwrap().state, MemberState::Removed);
+        });
+    }
+
+    /// F5: the owner's edit wins only over a lead edit made before the lead read
+    /// it; the lead's read clears the marks, so the lead can change the field.
+    #[test]
+    fn a_lead_changes_an_owner_edited_field_after_reading_the_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.status = TeamStatus::Draft;
+            team.draft = Some(Draft { revision: 5, owner_edited: vec!["members".into()], ..Default::default() });
+            let lead_id = team.lead.clone();
+            {
+                let lead = team.members.iter_mut().find(|member| member.id == lead_id).unwrap();
+                lead.session =
+                    Some(SessionRef { name: "dsh/x/lead".into(), run_id: "r1".into(), conversation_id: "conv-lead".into(), ..Default::default() });
+            }
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let update = json!({"team":id,"action":"update","revision":5,"by":"human",
+                "set":{"members":[{"id":"dev2","role":"Ops","agent":"codex"}]},
+                "request_id":"22222222-2222-4222-8222-222222222222"});
+            // As the lead, before it reads, the owner-edited field is refused.
+            super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+            let error = run("draft", &update, false).unwrap_err().to_string();
+            assert!(error.contains("Owner changed members"), "{error}");
+            // The owner's read leaves the marks alone.
+            super::set_test_caller_identities(Some((None, None, None)));
+            let owner = run("draft", &json!({"team":id,"action":"get","by":"human"}), false).unwrap();
+            assert_eq!(owner["draft"]["owner_edited"], json!(["members"]), "{owner}");
+            // The lead's read clears them, and the same field can be changed.
+            super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+            let get = run("draft", &json!({"team":id,"action":"get","by":"human"}), false).unwrap();
+            assert!(get["draft"]["owner_edited"].is_null() || get["draft"]["owner_edited"] == json!([]), "{get}");
+            let mut again = update;
+            again["request_id"] = json!("33333333-3333-4333-8333-333333333333");
+            let value = run("draft", &again, false).unwrap();
+            assert_eq!(value["status"], "updated", "{value}");
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert!(saved.member("dev2").is_some(), "{:?}", saved.members.iter().map(|member| member.id.clone()).collect::<Vec<_>>());
+            assert!(saved.draft.as_ref().unwrap().owner_edited.is_empty());
+        });
+    }
+
+    /// F5/N6: a draft started with a new lead launches it in the team folder and
+    /// gives it the draft brief, like a desktop team's lead.
+    #[test]
+    fn a_started_draft_launches_and_briefs_its_new_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let value = run(
+                "draft",
+                &json!({"action":"start","by":"human","request_id":"11111111-1111-4111-8111-111111111111",
+                    "folder":project.display().to_string(),"name":"New team",
+                    "lead":{"agent":"claude","model":"opus","effort":"high","account":"work"}}),
+                false,
+            )
+            .unwrap();
+            let id = value["team"].as_str().unwrap().to_owned();
+            let team = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert_eq!((team.status, team.brief), (TeamStatus::Draft, Notice::Pending));
+            let lead = team.member("lead").unwrap();
+            assert_eq!((lead.state, lead.session.is_some(), lead.folder), (MemberState::NotCreated, false, MemberFolder::Shared));
+            // The lead starts in the team's folder, never a worktree.
+            assert_eq!(super::super::dispatcher::member_folder_path(&team, lead).unwrap(), project.display().to_string());
+            // The dispatcher's next tick starts it, then briefs it once.
+            let steps = super::super::dispatcher::steps(&team, &[], 100.0);
+            assert!(steps.contains(&crate::state::teams::dispatcher::Step::Launch { member: "lead".into() }), "{steps:?}");
+            let mut launched = team.clone();
+            {
+                let lead = launched.members.iter_mut().find(|member| member.id == "lead").unwrap();
+                lead.launch_id = "L".into();
+                lead.session = Some(SessionRef { name: "claude/x/newlead".into(), run_id: "r1".into(), ..Default::default() });
+            }
+            let free = crate::state::teams::dispatcher::Seen {
+                name: "claude/x/newlead".into(),
+                run_id: "r1".into(),
+                free: true,
+                idle: true,
+                live: true,
+                ..Default::default()
+            };
+            assert!(super::super::dispatcher::steps(&launched, &[free], 100.0).contains(&crate::state::teams::dispatcher::Step::Brief));
+            let brief = super::super::dispatcher::brief_text(&launched);
+            assert!(brief.contains("hgs guide designer") && brief.contains(&id), "{brief}");
         });
     }
 
@@ -2979,7 +3610,9 @@ mod tests {
         with_review_team(&team, || {
             let status = run("status", &json!({"team":"rv"}), false).unwrap();
             let phase = status["phases"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap().clone();
-            assert!(phase["waiting"].is_null(), "{phase}");
+            // #515: it says it can run alongside, not that it waits.
+            assert_eq!(phase["waiting"]["alongside"], true, "{phase}");
+            assert_eq!(phase["waiting"]["text"], "Can run alongside phase 1", "{phase}");
             call("approve-phase", json!({"phase":2,"by":"human"})).unwrap();
         });
     }
@@ -2996,97 +3629,6 @@ mod tests {
             assert_eq!(first["status"], "draft", "{first}");
             assert_eq!(first["state"], "planned");
         });
-    }
-
-    /// N4/F1: `hgs team run` answers from the member's folder: a result already
-    /// there never queues the run again, the wait is short, and the same
-    /// request_id reads the outcome instead of running the command twice.
-    #[test]
-    fn a_run_answers_without_queueing_it_twice_and_waits_briefly() {
-        let dir = tempfile::tempdir().unwrap();
-        let folder = dir.path().join("work");
-        std::fs::create_dir_all(&folder).unwrap();
-        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
-        crate::state::with_test_state_root(dir.path(), || {
-            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
-            let mut store = Store::open(true).unwrap();
-            let mut team = running_team();
-            team.folder = folder.display().to_string();
-            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
-            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
-            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
-            let id = team.id.clone();
-            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-            let input = |request: &str| json!({"request_id":request,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
-            // An answer already in the folder is the answer: no push, no wait.
-            let request = "22222222-2222-4222-8222-222222222222";
-            std::fs::create_dir_all(super::super::outbox::dir(&folder)).unwrap();
-            let answer = json!({"status":"ran","request_id":request,"exit":0,"tail":"old"});
-            std::fs::write(super::super::outbox::result_path(&folder, request), serde_json::to_vec(&answer).unwrap()).unwrap();
-            let value = super::team_run_in(&folder, &input(request), false, 0.1).unwrap();
-            assert_eq!((value["status"].as_str(), value["tail"].as_str()), (Some("ran"), Some("old")));
-            assert!(!super::super::outbox::request_path(&folder, request).exists(), "the result queued the run again");
-            // A short wait, not the template's 1800 s.
-            let request = "33333333-3333-4333-8333-333333333333";
-            let started = std::time::Instant::now();
-            let value = super::team_run_in(&folder, &input(request), true, 0.2).unwrap();
-            assert!(started.elapsed() < std::time::Duration::from_secs(10), "the wait took {:?}", started.elapsed());
-            assert_eq!(value["status"], "running", "{value}");
-            assert!(super::super::outbox::request(&folder, request).is_some(), "the queued request left");
-            // Asking again with the same id reads the queue; another run cannot reuse it.
-            let value = super::team_run_in(&folder, &input(request), false, 0.1).unwrap();
-            assert_eq!(value["status"], "queued", "{value}");
-            let mut other = input(request);
-            other["template"] = json!("cargo-clippy");
-            let error = super::team_run_in(&folder, &other, false, 0.1).unwrap_err().to_string();
-            assert!(error.contains("already used by another run"), "{error}");
-            // A result written later comes back without a wait.
-            let done = json!({"status":"ran","request_id":request,"exit":0,"tail":"done"});
-            super::super::outbox::settle(&folder, &json!({"request_id":request}), &done).unwrap();
-            assert_eq!(super::team_run_in(&folder, &input(request), false, 0.1).unwrap()["tail"], "done");
-        });
-        crate::state::teams::templates::settings_override(None);
-    }
-
-    /// N5: a sandboxed write queues in the member's own folder, never in the
-    /// process's directory: a member that ran `cd tray` before reporting would
-    /// otherwise queue where the worker never looks.
-    #[test]
-    fn a_sandboxed_write_queues_in_the_members_folder_not_the_process_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        crate::state::teams::templates::settings_override(Some(dir.path().join("templates.json")));
-        crate::state::with_test_state_root(dir.path(), || {
-            super::set_test_caller_identities(Some((Some("conv-dev".into()), None, None)));
-            let mut store = Store::open(true).unwrap();
-            let mut team = running_team();
-            team.folder = project.display().to_string();
-            let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
-            member.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "conv-dev".into(), ..Default::default() });
-            let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
-            let id = team.id.clone();
-            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
-            let member_folder = std::path::PathBuf::from(
-                super::super::dispatcher::member_folder_path(&team, team.member("dev").unwrap()).unwrap(),
-            );
-            assert_eq!(member_folder, project);
-            let report = "22222222-2222-4222-8222-222222222222";
-            let input = json!({"request_id":report,"team":id,"attempt":attempt,"text":"Done and checked"});
-            let value = super::queue_write("report", &input, false).unwrap();
-            assert_eq!(value["status"], "queued", "{value}");
-            assert!(super::super::outbox::request_path(&member_folder, report).exists(), "the report queued outside the member's folder");
-            let run = "33333333-3333-4333-8333-333333333333";
-            let input = json!({"request_id":run,"team":id,"attempt":attempt,"template":"cargo-test","args":{"filter":"teams"}});
-            let value = super::team_run(&input, false).unwrap();
-            assert_eq!(value["status"], "queued", "{value}");
-            assert!(super::super::outbox::request_path(&member_folder, run).exists(), "the run queued outside the member's folder");
-            // Not in the directory this test process happens to run in.
-            let here = std::env::current_dir().unwrap();
-            assert!(!super::super::outbox::request_path(&here, report).exists());
-            assert!(!super::super::outbox::request_path(&here, run).exists());
-        });
-        crate::state::teams::templates::settings_override(None);
     }
 
     #[test]
@@ -3142,7 +3684,7 @@ mod tests {
         let input = json!({"request_id":request,"folder":dir.path().display().to_string(),"lead":{"agent":"claude"}});
         let value = super::draft_start_in(&mut store, request, &input, input["lead"].clone()).unwrap();
         let id = value["team"].as_str().unwrap().to_owned();
-        let get = super::draft_get_in(&store, &json!({"team":id})).unwrap();
+        let get = super::draft_get_in(&mut store, &json!({"team":id})).unwrap();
         assert_eq!(get["revision"], 1);
         assert_eq!(get["draft"]["revision"], 1);
         assert!(get["preflight"]["errors"].is_array());
@@ -3173,6 +3715,14 @@ mod tests {
             ..Default::default()
         });
         store.create("44444444-4444-4444-8444-444444444444", &json!({"id":old_id}), done, Vec::new()).unwrap();
+        // N8: the live sessions are read once; this test's listing has dev's.
+        super::live_sessions_override(Some(vec![crate::state::teams::dispatcher::Seen {
+            name: "claude/x/dev".into(),
+            run_id: "r9".into(),
+            conversation_id: "c9".into(),
+            live: true,
+            ..Default::default()
+        }]));
         let value = super::next_goal_as(
             &mut store,
             "55555555-5555-4555-8555-555555555555",
@@ -3180,11 +3730,14 @@ mod tests {
             &Actor::Human,
         )
         .unwrap();
+        super::live_sessions_override(None);
         let next_id = value["team"].as_str().unwrap().to_owned();
         let next = store.load(&next_id).unwrap().unwrap();
         assert_eq!(next.status, TeamStatus::Planning);
         assert_eq!((next.previous.as_str(), next.goal.as_str()), (old_id, "two"));
-        assert_eq!(next.member("dev").unwrap().session.as_ref().map(|session| session.name.as_str()), Some("claude/x/dev"));
+        let dev = next.member("dev").unwrap();
+        assert_eq!(dev.session.as_ref().map(|session| (session.name.as_str(), session.run_id.as_str())), Some(("claude/x/dev", "r9")));
+        assert_eq!(dev.state, crate::state::teams::model::MemberState::Active);
         assert_eq!(store.load(old_id).unwrap().unwrap().next, next_id);
     }
 
@@ -3381,6 +3934,124 @@ mod tests {
             ])
         );
         assert_eq!(shared, BTreeSet::from(["a".to_owned(), "b".to_owned()]));
+    }
+
+    #[test]
+    fn phase35_findings_work_through_run() {
+        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        let old = ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"].map(|key| (key, std::env::var(key).ok()));
+        for key in ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] { std::env::remove_var(key); }
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((None, None, None)));
+            let mut store = Store::open(true).unwrap();
+            let req = |n: u8| format!("00000000-0000-4000-8000-0000000000{n:02}");
+            let mut parent = Team { id: "p".into(), name: "Parent".into(), lead: "lead".into(), status: TeamStatus::Running,
+                settings: Settings { tree_sessions: 16, ..Default::default() }, ..Default::default() };
+            parent.tasks.push(Task { id: 1, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::InProgress,
+                subteam: Some("c".into()), ..Default::default() });
+            parent.tasks[0].attempts.push(Attempt { n: 1, id: "pa".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "pq".into(), text: "Which DB?".into(), at: 1.0, forwarded: "q1".into(), ..Default::default() }], ..Default::default() });
+            let mut child = Team { id: "c".into(), name: "Child".into(), lead: "dev".into(), status: TeamStatus::Running,
+                parent: Some(Parent { team: "p".into(), task: 1, lead: "lead".into(), member: "dev".into() }), ..Default::default() };
+            child.tasks.push(Task { id: 1, title: "Work".into(), assignee: "dev".into(), status: TaskStatus::Accepted, ..Default::default() });
+            child.tasks[0].attempts.push(Attempt { n: 1, id: "ca".into(), member: "dev".into(), state: AttemptState::Reported,
+                report: Some(Report { text: "Done".into(), at: 1.0, ..Default::default() }),
+                questions: vec![Question { id: "q1".into(), text: "Which DB?".into(), at: 1.0, forwarded: "pq".into(), ..Default::default() }], ..Default::default() });
+            store.create(&req(1), &json!({}), parent.clone(), Vec::new()).unwrap();
+            store.create(&req(2), &json!({}), child.clone(), Vec::new()).unwrap();
+
+            // N21: the parent's answer leaves the child question Pending.
+            super::run("reply", &json!({"request_id":req(3),"team":"p","task":1,"question":"pq","text":"Postgres","by":"human"}), false).unwrap();
+            let saved = store.load("c").unwrap().unwrap();
+            let question = &saved.tasks[0].attempts[0].questions[0];
+            assert_eq!((question.answer.as_str(), question.notice), ("Postgres", Notice::Pending));
+
+            // N22/N23: finish files a Reported attempt the parent inbox lists,
+            // and a replay adds no second one.
+            let finish = json!({"request_id":req(4),"team":"c","summary":"Sub done","by":"human"});
+            super::run("finish", &finish, false).unwrap();
+            let parent_now = store.load("p").unwrap().unwrap();
+            let attempt = parent_now.tasks[0].attempts.last().unwrap();
+            assert_eq!(attempt.state, AttemptState::Reported);
+            let inbox = super::run("inbox", &json!({"team":"p","by":"human"}), false).unwrap();
+            assert!(inbox["items"].as_array().unwrap().iter().any(|item| item["task"] == 1), "{inbox}");
+            let count = parent_now.tasks[0].attempts.len();
+            super::run("finish", &finish, false).unwrap();
+            assert_eq!(store.load("p").unwrap().unwrap().tasks[0].attempts.len(), count);
+
+            // N24: a reject does not reopen a Stopped sub-team.
+            let mut stopped = store.load("c").unwrap().unwrap();
+            stopped.status = TeamStatus::Stopped;
+            store.mutate(None, "c", None, |team, _| { *team = stopped; Ok(Value::Null) }).unwrap();
+            let _ = super::run("reject", &json!({"request_id":req(5),"team":"p","task":1,"reason":"Rework","by":"human"}), false);
+            assert_eq!(store.load("c").unwrap().unwrap().status, TeamStatus::Stopped);
+
+            // N25: a second create on the same parent task is refused; a
+            // replay after the parent link was lost repairs it.
+            let mut parent2 = Team { id: "p2".into(), name: "Parent2".into(), lead: "dev".into(), status: TeamStatus::Running,
+                settings: Settings { tree_sessions: 16, ..Default::default() }, ..Default::default() };
+            parent2.members.push(Member { id: "dev".into(), role: "Lead".into(), agent: "codex".into(),
+                session: Some(SessionRef { name: "codex/x/dev".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() });
+            parent2.tasks.push(Task { id: 2, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+            store.create(&req(6), &json!({}), parent2.clone(), Vec::new()).unwrap();
+            let create = json!({"request_id":req(7),"team":"p2","name":"Sub","by":"human",
+                "parent":{"team":"p2","task":2},"lead":{"id":"dev","agent":"codex","role":"Lead"}});
+            super::run("create", &create, false).unwrap();
+            let second = super::run("create", &json!({"request_id":req(8),"team":"p2","name":"Other","by":"human",
+                "parent":{"team":"p2","task":2},"lead":{"id":"dev","agent":"codex","role":"Lead"}}), false);
+            assert!(second.unwrap_err().to_string().contains("already has a sub-team"));
+            let child_id = store.load("p2").unwrap().unwrap().tasks[0].subteam.clone().unwrap();
+            store.mutate(None, "p2", None, |team, _| { team.tasks[0].subteam = None; Ok(Value::Null) }).unwrap();
+            super::run("create", &create, false).unwrap();
+            assert_eq!(store.load("p2").unwrap().unwrap().tasks[0].subteam.as_deref(), Some(child_id.as_str()));
+
+            // N26: a 20-member plan under a 16-session budget is refused.
+            let mut sub = Team { id: "c3".into(), name: "Sub3".into(), lead: "lead".into(), status: TeamStatus::Planning,
+                settings: Settings { tree_sessions: 16, ..Default::default() },
+                parent: Some(Parent { team: "p2".into(), task: 2, lead: "dev".into(), member: "dev".into() }), ..Default::default() };
+            sub.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "codex".into(), ..Default::default() });
+            store.create(&req(9), &json!({}), sub, Vec::new()).unwrap();
+            let members: Vec<Value> = (1..=20).map(|n| json!({"id":format!("m{n}"),"role":"Dev","agent":"codex"})).collect();
+            let error = super::run("plan", &json!({"request_id":req(10),"team":"c3","by":"human","members":members}), false)
+                .unwrap_err().to_string();
+            assert!(error.contains("at most 16 sessions"), "{error}");
+
+            // N28: a replay returns the first receipt; a failed upstream
+            // forward clears the child's forwarded mark.
+            let mut p3 = Team { id: "p3".into(), name: "Parent3".into(), lead: "dev".into(), status: TeamStatus::Running, ..Default::default() };
+            p3.members.push(Member { id: "dev".into(), role: "Lead".into(), agent: "codex".into(),
+                session: Some(SessionRef { name: "codex/x/dev".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() });
+            p3.tasks.push(Task { id: 3, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::InProgress,
+                subteam: Some("c4".into()), ..Default::default() });
+            p3.tasks[0].attempts.push(Attempt { n: 1, id: "p3a".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "pq4".into(), text: "Q".into(), at: 1.0, forwarded: "q9".into(), ..Default::default() }], ..Default::default() });
+            let mut c4 = Team { id: "c4".into(), name: "Child4".into(), lead: "dev".into(), status: TeamStatus::Running,
+                parent: Some(Parent { team: "p3".into(), task: 3, lead: "dev".into(), member: "dev".into() }), ..Default::default() };
+            c4.tasks.push(Task { id: 1, title: "W".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+            c4.tasks[0].attempts.push(Attempt { n: 1, id: "c4a".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "q9".into(), text: "Q".into(), at: 1.0, ..Default::default() }], ..Default::default() });
+            store.create(&req(11), &json!({}), p3, Vec::new()).unwrap();
+            store.create(&req(12), &json!({}), c4, Vec::new()).unwrap();
+            let escalate = json!({"request_id":req(13),"team":"c4","question":"q9","by":"human"});
+            super::run("escalate", &escalate, false).unwrap();
+            let count = store.load("p3").unwrap().unwrap().tasks[0].attempts[0].questions.len();
+            super::run("escalate", &escalate, false).unwrap();
+            assert_eq!(store.load("p3").unwrap().unwrap().tasks[0].attempts[0].questions.len(), count, "a replay does not duplicate");
+            let mut stopped_parent = store.load("p3").unwrap().unwrap();
+            stopped_parent.tasks[0].status = TaskStatus::Accepted;
+            store.mutate(None, "p3", None, |team, _| { *team = stopped_parent; Ok(Value::Null) }).unwrap();
+            let mut c5 = store.load("c4").unwrap().unwrap();
+            c5.tasks[0].attempts[0].questions.push(Question { id: "q10".into(), text: "Q2".into(), at: 2.0, ..Default::default() });
+            store.mutate(None, "c4", None, |team, _| { *team = c5; Ok(Value::Null) }).unwrap();
+            let _ = super::run("escalate", &json!({"request_id":req(14),"team":"c4","question":"q10","by":"human"}), false);
+            let child = store.load("c4").unwrap().unwrap();
+            assert!(child.tasks[0].attempts[0].questions.iter().find(|q| q.id == "q10").unwrap().forwarded.is_empty());
+            super::set_test_caller_identities(None);
+            for (key, value) in old {
+                match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
+            }
+        });
     }
 
     #[test]
@@ -4381,10 +5052,10 @@ mod tests {
     }
 
     #[test]
-    fn a_draft_phase_says_it_waits_for_the_previous_phase() {
+    fn a_draft_phase_can_run_alongside_a_running_phase() {
         let mut team = running_team();
-        // N40: phase 1 still has open tasks, yet it is approved, so the draft
-        // after it can be approved now (F12): it waits for nothing.
+        // F12/N40: phase 1 still runs, and the draft after it says it can run
+        // alongside - not that it waits; the owner is warned by the desktop.
         team.tasks.push(Task { id: 3, title: "Fix".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
         team.phases.push(Phase {
             n: 2,
@@ -4396,11 +5067,21 @@ mod tests {
             ..Default::default()
         });
         let value = view_with(&team, &[], None);
-        assert!(value["phases"][0].get("waiting").is_none(), "{}", value["phases"][0]);
+        let phase = &value["phases"][0];
+        assert_eq!(phase["waiting"]["text"], "Can run alongside phase 1");
+        assert_eq!(phase["waiting"]["alongside"], true);
+        assert_eq!((phase["waiting"]["phase"].as_u64(), phase["waiting"]["open"].clone()), (Some(1), json!([1])));
+        // The server's rule is unchanged: a draft opens when no earlier phase is
+        // a draft, so this one can be approved while phase 1 still runs (it is
+        // queued until the dispatcher hands it out).
+        let mut approved = team.clone();
+        let mut events = Vec::new();
+        ops::apply(&mut approved, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(approved.phases[0].state, PhaseState::Queued);
         // Once the previous phase is decided, the draft is simply a draft.
         team.task_mut(1).unwrap().status = TaskStatus::Accepted;
         let value = view_with(&team, &[], None);
-        assert!(value["phases"][0].get("waiting").is_none());
+        assert!(value["phases"][0].get("waiting").is_none(), "{value}");
         // A second draft waits for the first draft by its number.
         team.phases.push(Phase {
             n: 3,
@@ -4417,6 +5098,7 @@ mod tests {
         assert_eq!(value["phases"][1]["waiting"]["phase"], 2);
         assert_eq!(value["phases"][1]["waiting"]["open"], json!([3]));
         assert_eq!(value["phases"][1]["waiting"]["text"], "Waiting for the previous phase to be approved");
+        assert!(value["phases"][1]["waiting"].get("alongside").is_none(), "{value}");
         // The approval refusal stays specific about which phase is in the way.
         let mut events = Vec::new();
         let error = ops::apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &BTreeSet::new(), &mut events)
@@ -4505,7 +5187,7 @@ mod tests {
         assert_eq!(team.proposals[0]["state"], "accepted");
         assert!(team.proposals[0]["decided_at"].as_f64().is_some());
         // An old proposal stored with a bare member id runs as well.
-        assert_eq!(proposal_input("t", "swap-member", &json!("dev")).unwrap()["member"], "dev");
+        assert_eq!(proposal_input("t", "swap-member", &json!("dev"), "11111111-1111-4111-8111-111111111111").unwrap()["member"], "dev");
     }
 
     #[test]

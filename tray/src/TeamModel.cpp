@@ -746,6 +746,8 @@ Team parse(const QJsonObject &v)
             finding.by = str(f, "by");
             finding.at = f.value("at").toDouble();
             finding.note = str(f, "note");
+            finding.proposal = str(f, "proposal");
+            finding.phase = f.value("phase").toInt();
             team.findings.append(finding);
         }
         team.findingsNext = str(findings, "next_cursor");

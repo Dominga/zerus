@@ -459,6 +459,7 @@ private:
     void sendReportToLead();
     // WhiteWh fork: the project (organization group) a session belongs to.
     QString projectOfKey(const QString &key) const;
+    QString teamProjectRules() const;
     QSet<QString> m_hostFilters, m_projectFilters;
     QString selectedHostTarget() const;
     void updateDashboard();

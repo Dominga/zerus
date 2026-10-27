@@ -1708,6 +1708,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // WhiteWh fork: Settings > Teams, the team catalog.
     m_teamCatalog=new TeamCatalogEditor(m_teams);m_teamCatalog->askDesigner=[this]{showTeamDesigner();};m_teamCatalog->setDesignerButton(true);
     m_teamCatalog->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
+    // U25: Prompt order shows the selected session's project rules.
+    m_teamCatalog->projectRules=[this]{return teamProjectRules();};
     m_teamSettingsSection=m_settingsPage->addSection(tr("Teams"),m_teamCatalog);
     connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);});
     m_settingsPage->pollingChanged=[this]{
@@ -4782,6 +4784,15 @@ void SessionsWindow::sendReportToLead()
     if (!m_composer->offerDraft(key, text)) showNotice(tr("The lead already has a draft. The report was not added."), true);
 }
 
+// U25: the selected session's project rules, numbered, for the catalog's
+// Prompt order.
+QString SessionsWindow::teamProjectRules() const
+{
+    const auto rules=IronRules::rules(projectOfKey(m_selectedKey));
+    QStringList lines;for(int i=0;i<rules.size();++i)lines<<QStringLiteral("%1. %2").arg(i+1).arg(rules[i]);
+    return lines.join(QLatin1Char('\n'));
+}
+
 QString SessionsWindow::projectOfKey(const QString &key) const
 {
     for (const auto &entry : m_entries) if (entry.key == key) return m_organization.groupFor(entry.identity);
@@ -6888,6 +6899,7 @@ void SessionsWindow::showTeamDesigner()
         m_teamDesignerPage->startDesigner=[this](const QString &folder,const QString &goal,const QJsonObject &agent){startTeamDesigner(folder,goal,agent);};
         m_teamDesignerPage->openDesigner=[this](const QString &name){showSession({},name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
         m_teamDesignerPage->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
+        m_teamDesignerPage->editor()->projectRules=[this]{return teamProjectRules();};
         m_teamDesignerPageIndex=m_pages->addWidget(m_teamDesignerPage);
     }
     // The designer follows the project of the session selected when the mode opens.
@@ -6905,7 +6917,7 @@ void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal
     QJsonObject input=agent;input.insert("folder",QDir::toNativeSeparators(folder));input.insert("goal",goal);
     m_teams->call(QStringLiteral("catalog designer"),input,
         [this](bool ok,const QJsonObject &result,const QString &error){
-            if(!ok){showNotice(tr("The Team designer did not start: %1").arg(error),true);if(m_teamDesignerPage)m_teamDesignerPage->refresh();return;}
+            if(!ok){showNotice(tr("The Team designer did not start: %1").arg(error),true);if(m_teamDesignerPage){m_teamDesignerPage->startFailed(error);m_teamDesignerPage->refresh();}return;}
             const auto name=result.value("name").toString();
             showNotice(tr("Team designer started%1").arg(name.isEmpty()?QString():QStringLiteral(": ")+name));
             // The page shows its conversation once the listing has it.

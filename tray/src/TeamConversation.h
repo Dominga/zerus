@@ -1,7 +1,10 @@
 #pragma once
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPointer>
+#include <QTextDocument>
 #include <QTimer>
+#include "HgsClient.h"
 #include <QWidget>
 #include <functional>
 
@@ -33,12 +36,42 @@ public:
     static void setPollInterval(int milliseconds);
     // The guarded send of `text`; one at a time.
     void send(const QString &text);
+    // U25 (spec 11.1): the Team designer's chat. Before the first message the
+    // intro and the composer stand in the middle; then the messages and the
+    // composer stay centred and grow until they fill the column, when the
+    // composer keeps to the bottom. The composer is the session's: the field
+    // grows (2-8 lines) with Send inside, and the row under it carries
+    // Attach, Cache, the context, Copy session reference and the model.
+    // `above` (proposals, the DRAFT bar) sits right above the composer.
+    void useDesignerLayout(QWidget *intro, QWidget *above);
+    // The model button of the designer's row; the page fills its menu.
+    QPushButton *modelButton() const { return m_model; }
+    // With no session, Send asks for one with the text; the text stays until
+    // startFinished says whether it started.
+    std::function<void(const QString &text)> startRequested;
+    // Voice and video record in the designer's own session (Activity).
+    std::function<void()> openSession;
+    void startFinished(const QString &error);
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 private:
     void poll();
     void received(const QString &host, const QString &name, const QJsonObject &data, const QString &archive);
+    void fitDesigner();
+    void fitInput();
+    void updateSend();
+    void showFiles();
+    bool m_designer = false, m_starting = false;
+    QWidget *m_intro = nullptr, *m_above = nullptr, *m_bottom = nullptr, *m_filesRow = nullptr;
+    class QFrame *m_card = nullptr;
+    class ComposerToolbar *m_row = nullptr;
+    QPushButton *m_attach = nullptr, *m_voice = nullptr, *m_video = nullptr, *m_reference = nullptr, *m_model = nullptr;
+    class ToolbarChip *m_cache = nullptr;
+    QPushButton *m_context = nullptr;
+    QList<MessageAttachment> m_files, m_sentFiles;
+    QPointer<QTextDocument> m_watched;
     HgsClient *m_client;
     QString m_host, m_name, m_pendingText;
     qint64 m_cursor = 0;

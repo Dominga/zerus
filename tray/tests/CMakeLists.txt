@@ -254,6 +254,11 @@ target_include_directories(test_readmarksync PRIVATE ../src)
 target_link_libraries(test_readmarksync PRIVATE Qt6::Test Qt6::Core hgs-tray-core)
 zerus_add_test(readmarksync test_readmarksync)
 
+add_executable(test_eventstream test_eventstream.cpp)
+target_include_directories(test_eventstream PRIVATE ../src)
+target_link_libraries(test_eventstream PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)
+zerus_add_test(eventstream test_eventstream)
+
 add_executable(test_jsonparse test_jsonparse.cpp)
 target_include_directories(test_jsonparse PRIVATE ../src)
 target_link_libraries(test_jsonparse PRIVATE Qt6::Test Qt6::Gui hgs-tray-core)

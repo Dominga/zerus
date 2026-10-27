@@ -252,8 +252,10 @@ the same frames. The protocol does not depend on how changes are detected.
 
 - **Qt desktop**: one `EventStream` per computer. Its reader, line framing,
   JSON parsing and per-computer store run on a worker thread. The store
-  publishes immutable prepared deltas to the GUI, coalesced to at most one
-  application per 50 ms. While a computer's stream is healthy, the desktop
+  publishes immutable prepared values to the GUI: Activity within 50 ms, and
+  listings at most every 2 s until M2 makes applying one cheap. A listing
+  arrives as the same `BoxState` a poll delivers, and Activity as an
+  inspect-shaped increment, so the existing apply paths stay unchanged. While a computer's stream is healthy, the desktop
   stops its `ls`, inspection, `git-status` and `processes` polls for it. A
   missing marker, or three stream failures within 60 s, falls back to today's
   polling, and the desktop retries the stream every 5 minutes.

@@ -406,7 +406,8 @@ fn capture(record: &Value) -> Result<String> {
     {
         return Err("invalid tracked pane".into());
     }
-    let output = backend::current().capture(pane, backend::Capture::Plain)?;
+    // A status summary shares this screen with its terminal choosers.
+    let output = kimi_tui_choice::plain(pane)?;
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
 

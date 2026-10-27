@@ -1,4 +1,5 @@
 #include "TrayAgent.h"
+#include "EventStream.h"
 #include "ProcessRunner.h"
 #include "SettingsJson.h"
 #include "QuestionNotificationSettings.h"
@@ -60,10 +61,17 @@ std::unique_ptr<TrayIcon> makeTrayIcon()
 // совпал с открытием меню) -- дублирующий вызов requestPeer() для уже летящего запроса
 // не создаёт второй процесс: HgsClient сам игнорирует его (m_peerInFlight), эта функция
 // вызывающего кода не гейтит.
+// A computer with a live event stream (EventStream.h) needs no periodic poll.
 void pollAllKnownPeers(HgsClient &client, const FleetState &state)
 {
+    const auto *streams = EventStreams::instance();
     for (const QString &alias : state.peerNames())
-        client.requestPeer(alias);
+        if (!streams || !streams->live(alias)) client.requestPeer(alias);
+}
+void pollLocal(HgsClient &client)
+{
+    const auto *streams = EventStreams::instance();
+    if (!streams || !streams->live({})) client.requestLocal();
 }
 
 // Терминал выбирается один раз на запуск. Явный шаблон в конфиге побеждает выбор
@@ -206,7 +214,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     connect(&m_menu, &TrayMenu::openModeChosen, this, &TrayAgent::setOpenMode);
     connect(&m_menu, &TrayMenu::sessionsRequested, this, &TrayAgent::showSessions);
     connect(&m_menu, &TrayMenu::refreshRequested, this, [this]() {
-        m_client.requestLocal();
+        pollLocal(m_client);
         pollAllKnownPeers(m_client, m_state);
     });
     connect(&m_menu, &TrayMenu::quitRequested, qApp, &QCoreApplication::quit);
@@ -245,9 +253,18 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     // Локальный тик: опрашивает только этот бокс, никакого ssh, миллисекунды. Стартует
     // сразу же, не дожидаясь ни peerPollMs, ни обнаружения пиров ниже -- та часть, что
     // отвечает "тик и первая отрисовка не должны ждать пиров" из задания.
+    // One long-lived event stream per computer replaces its periodic polls
+    // while live; polling continues for a computer without one.
+    if (EventStreams::enabled()) {
+        m_streams = new EventStreams(m_client.executable(), this);
+        connect(m_streams, &EventStreams::listingReady, this, [this](const QString &host, const BoxState &box) {
+            if (host.isEmpty()) onLocalReady(box); else onPeerReady(box);
+        });
+        m_streams->setHosts({QString()});
+    }
     m_localTimer.setInterval(cfg.localPollMs);
     connect(&m_localTimer, &QTimer::timeout, this, [this] {
-        m_client.requestLocal();
+        pollLocal(m_client);
         // Short-lived remote permission prompts must not wait for the ordinary
         // minute-long peer cadence. The client coalesces reads already in flight.
         const int interval = AutomaticApprovalPolicy::enabled() ? qMin(m_cfg.peerPollMs, 5000) : m_cfg.peerPollMs;
@@ -395,6 +412,7 @@ void TrayAgent::onLocalReady(const BoxState &box)
     }
     for (const auto &peer : m_state.peerNames())
         if (!previousPeers.contains(peer)) m_client.requestPeer(peer);
+    if (m_streams && previousPeers != m_state.peerNames()) m_streams->setHosts(QStringList{QString()} + m_state.peerNames());
     if (box.peersKnown && !m_peerTimer.isActive()) m_peerTimer.start();
     // A control-only computer reports no sessions; its answer only carries the
     // machine list and metrics. Every poll is a process start on Windows, so it
@@ -702,7 +720,7 @@ void TrayAgent::showSessions()
             else m_client.requestPeer(host);
         });
         connect(m_sessionsWindow, &SessionsWindow::refreshRequested, this, [this]() {
-            m_client.requestLocal(); pollAllKnownPeers(m_client, m_state);
+            pollLocal(m_client); pollAllKnownPeers(m_client, m_state);
         });
     }
     m_sessionsWindow->setFleet(m_state);

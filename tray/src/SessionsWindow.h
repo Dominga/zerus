@@ -461,6 +461,8 @@ private:
     QHash<QString, QElapsedTimer> m_remotePollAges;
     BusyIndicator *m_sessionLoading = nullptr;
     QElapsedTimer m_processPollAge,m_inspectionAge;
+    // Runs whose event-stream subscription ended; they are polled (EventStream.h).
+    QSet<QString> m_streamEnded;
     SessionList *m_sessions;
     SessionSearch *m_searchResults;
     QStackedWidget *m_listStack;

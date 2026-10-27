@@ -770,6 +770,7 @@ dependencies = [
  "uuid",
  "windows-sys",
  "zerus-replica",
+ "zerus-watch-protocol",
 ]
 
 [[package]]
@@ -2297,6 +2298,14 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+]
+
+[[package]]
+name = "zerus-watch-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

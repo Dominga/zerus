@@ -113,6 +113,7 @@ private:
     SessionsWindow *m_sessionsWindow = nullptr;
     // Records desktop activity for phone alerts; see DesktopPresence.h.
     std::unique_ptr<DesktopPresence> m_presence;
+    class EventStreams *m_streams = nullptr;
     QString m_presenceError;
 #ifdef Q_OS_WIN
     // The tray runs `hgs swarm worker` itself on Windows (SwarmWorkerSupervisor.h).

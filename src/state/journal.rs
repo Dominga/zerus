@@ -413,7 +413,13 @@ fn kimi_reply(db: &Connection, record: &Value, skip_scheduled: bool) -> Result<O
     Ok(stop.map(|(seq, at)| (seq, at, false)))
 }
 
+/// A session's status. Its readers of the live pane (the effort footer and
+/// every terminal chooser) share one capture of it.
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
+    kimi_tui_choice::observing(|| observed_summary(record, live_pane))
+}
+
+fn observed_summary(record: &Value, live_pane: bool) -> Value {
     let mut output = normalized_activity(record, live_pane);
     output["conversation_id"] = record["conversation_id"].clone();
     output
@@ -788,28 +794,17 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
-    let mut statement = db.prepare(&if after > 0 {
-        format!("SELECT seq, payload FROM events WHERE {TIMELINE} AND seq>?4 ORDER BY seq LIMIT 200")
-    } else { format!("SELECT seq, payload FROM events WHERE {TIMELINE} AND seq>?4 ORDER BY seq DESC LIMIT 100") }).map_err(|e| e.to_string())?;
-    let mut rows: Vec<(i64, String)> = statement
-        .query_map(params![journal_name, conversation, earlier, after], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<std::result::Result<_, _>>()
-        .map_err(|e| e.to_string())?;
-    if after == 0 {
-        rows.reverse();
-    }
+    let rows = if after > 0 {
+        timeline_rows(&db, journal_name, conversation, &earlier, after, 200, false)?
+    } else {
+        timeline_rows(&db, journal_name, conversation, &earlier, after, 100, true)?
+    };
     output["cursor"] = json!(rows.last().map(|(seq, _)| *seq).unwrap_or(after));
     output["history_truncated"] =
         json!(after > 0 && oldest.map(|seq| after < seq - 1).unwrap_or(false));
     let mut events = Vec::new();
     for (seq, payload) in rows {
-        let mut event: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
-        event["seq"] = json!(seq);
-        mark_system_prompt(&record, &mut event, "");
-        events.push(event);
+        events.push(timeline_event(&record, seq, &payload)?);
     }
     output["events"] = json!(events);
     let (messages, truncated) = message_events(&db, journal_name, conversation, &earlier)?;
@@ -826,6 +821,35 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     waits::decorate(std::slice::from_mut(&mut output));
     notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
     Ok(output)
+}
+
+/// A session timeline's rows after `after`, oldest first: the first `limit`
+/// of them, or with `newest` the last `limit`. `inspection` and `hgs watch`
+/// both read Activity through it and `timeline_event`.
+pub(super) fn timeline_rows(db: &Connection, journal_name: &str, conversation: Option<&str>, earlier: &str,
+    after: i64, limit: usize, newest: bool) -> Result<Vec<(i64, String)>> {
+    let mut statement = db.prepare(&if newest {
+        format!("SELECT seq, payload FROM events WHERE {TIMELINE} AND seq>?4 ORDER BY seq DESC LIMIT ?5")
+    } else { format!("SELECT seq, payload FROM events WHERE {TIMELINE} AND seq>?4 ORDER BY seq LIMIT ?5") }).map_err(|e| e.to_string())?;
+    let mut rows: Vec<(i64, String)> = statement
+        .query_map(params![journal_name, conversation, earlier, after, limit as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    if newest {
+        rows.reverse();
+    }
+    Ok(rows)
+}
+
+/// One Activity event as `inspect` returns it.
+pub(super) fn timeline_event(record: &Value, seq: i64, payload: &str) -> Result<Value> {
+    let mut event: Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+    event["seq"] = json!(seq);
+    mark_system_prompt(record, &mut event, "");
+    Ok(event)
 }
 
 pub(super) fn journal_name(record: &Value) -> &str {

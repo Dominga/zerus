@@ -330,6 +330,7 @@ HgsClient::~HgsClient()
 }
 
 BoxState HgsClient::box(const QJsonObject &object) { return boxFromObject(object); }
+ProcessRunner::Request HgsClient::commandRequest(const QString &hgs, const QStringList &arguments) { return processRequest(hgs, arguments); }
 
 QList<SessionInfo> HgsClient::parseSessions(const QJsonArray &rows) {
     QJsonObject box{{"host","archive"},{"ok",true},{"sessions",rows}};

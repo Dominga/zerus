@@ -3948,6 +3948,104 @@ needs manual inspection before another request. `agent_id` is supported only for
 verified DeepSeek continuable children. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
 
+### Event stream
+
+```sh
+hgs watch --json
+hgs @mac watch --json
+```
+
+`watch --json` is a long-lived stream of one computer's live sessions and of the
+Activity of the sessions a client follows. It is additive: every command above
+keeps its output. `hgs -h` prints `Event stream ABI: watch-v1` where it exists.
+A client that does not find the line keeps polling that computer. `@host` runs
+the peer's stream over one SSH connection with `ServerAliveInterval=10` and
+`ServerAliveCountMax=3`. An older peer answers with an error, never a launch.
+
+The stream writes one JSON frame per line on stdout and reads one control
+operation per line on stdin. EOF on stdin ends it with exit code 0, so a closed
+client or a dropped SSH link leaves no watcher behind. A closed stdout ends it
+quietly. The frame types live in `crates/watch-protocol`.
+
+Every frame has `v` (1), `t` and `seq`, which grows by one per frame. The first
+frame is `hello` with `machine_id`, `host`, `hgs_version`, a random `stream`,
+`heartbeat_ms`, `max_frame_bytes`, `topics` and `limits`. A `heartbeat` with `at`
+follows 10 s without other frames.
+
+| `t` | Fields | Meaning |
+|---|---|---|
+| `snapshot` | `topic`, `key?`, `items` or `value`, `page`, `last`, `cursor` | a replacement; keep the previous display until `last` |
+| `delta` | `topic`, `upsert[]` of `{key, row}`, `remove[]` of `{key, reason}`, `cursor` | catalog changes |
+| `events` | `topic`, `key`, `events[]`, `cursor` | new Activity events, oldest first |
+| `state` | `topic`, `key`, `value`, `rev` | the latest summary of one session |
+| `gap` | `topic`, `key?`, `reason` | discard the topic's state; a snapshot follows |
+| `error` | `code`, `message`, `topic?`, `key?`, `fatal` | a refused operation or a failed source |
+| `pong` | `id` | the answer to `ping` |
+
+The `catalog` topic is always on. Its rows are exactly the `sessions` of
+`hgs ls --json --local --no-archives`, keyed `run:<run_id>`, or `name:<name>` for
+a row without a run. The stream starts with a snapshot of them in pages of at
+most 512 KiB, then sends deltas. A rename is an upsert of the same key. A removal
+gives `replaced` (the name lists under a new run), `archived`, `forgotten` or
+`ended`. The listing's other fields arrive as one `catalog.meta` snapshot: at
+once when a lasting field changes, and at most every 10 s when only `metrics` or
+`desktop_presence` changed. Archives stay outside the stream; page them with
+`archives --json`.
+
+```json
+{"op":"subscribe","topic":"activity","session":{"name":"claude/sample-project/review","run_id":"RUN","conversation_id":"CONVERSATION"},"after":123,"tail":50}
+{"op":"unsubscribe","topic":"activity","session":{"name":"claude/sample-project/review","run_id":"RUN"}}
+{"op":"ping","id":1}
+```
+
+An Activity subscription follows one session by its catalog key. Its events are
+the objects `inspect` returns, and `cursor` is the journal `seq` that
+`inspect --after` takes. Without `after`, the first `events` frame carries the
+newest `tail` events (at most 100). With `after`, it carries the events after
+that `seq`, at most 200 per frame read. When `after` is older than the journal
+keeps, or newer than its newest row, the stream sends `gap` (`retention` or
+`reset`) and a tail `snapshot`. DeepSeek and OpenCode sessions answer from their
+own hosts: each change replaces their event window with a `snapshot`. `state`
+carries the `inspect --skip-processes` summary without `events`, `cursor` and
+`history_truncated`. It is sent when anything other than `goal_observed_at`
+changed. A session that leaves the catalog ends its subscription with the error
+`subscription_ended`. Unsubscribe stops it. A stream follows at most 16 sessions;
+more fail with `too_many_subscriptions`. Other topics fail with
+`unsupported_topic`; read them with their commands.
+
+The stream checks its sources every 250 ms. It stats the bindings, read marks,
+notification preferences, waits, launches, renames, name routes, the archive
+folder and the DeepSeek and OpenCode bindings, and holds a read-only connection
+to the Activity journal. A changed binding, or new journal rows of its session,
+derives only that session's row again, through the steps and under the lock of
+the listing. Any other change lists all rows again. Both wait 150 ms after a
+change and start at most every 500 ms and at most once per four durations of
+the previous one. Every 5 s the stream probes what no file shows: tmux sessions
+that start, end, are renamed, attached or detached, exited agent processes,
+ended background work, sessions that have not reported a hook event yet and the
+DeepSeek and OpenCode hosts. All rows are listed again every 5 s, for terminal
+choosers and status lines of sessions that already reported hooks. Followed
+summaries are re-read when their journal rows or catalog row change, at most
+every 500 ms, and otherwise every 2 s while the agent is busy and every 15 s
+while it is idle; DeepSeek and OpenCode every 2 s.
+
+A frame is at most 1 MiB including its newline. An event too large for a frame
+is cut with `"truncated": true`, and an oversized summary loses the oldest items
+of its largest lists, named in `stream_truncated`; `inspect` returns them whole.
+The outgoing queue holds 4 MiB. When the client reads slowly, catalog changes
+and summaries coalesce per key. When the queue overflows, the topic receives
+`gap` (`overflow`) and a fresh snapshot once the client catches up. Control lines
+are at most 64 KiB.
+
+The desktop runs one stream for each computer whose CLI prints the marker.
+While a computer's stream is live, the desktop stops polling that computer's
+listing and follows the selected session's Activity through the stream; the
+Processes tab keeps its own poll interval. Listings are applied at most every
+2 s, Activity within 50 ms. A stream that fails or stays silent for 30 s
+restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the desktop polls
+meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`
+keeps the desktop on polling.
+
 ## Validation
 
 Use [CONTRIBUTING.md](../CONTRIBUTING.md) for standard checks. Integration tests

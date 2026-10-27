@@ -17,8 +17,57 @@ pub(super) fn launcher_notices(rows: &[&str], agent: &str) -> bool {
     .contains(&prelude)
 }
 
+thread_local! {
+    /// Plain screens captured during one read-only observation, by pane.
+    static OBSERVED: std::cell::RefCell<Option<std::collections::BTreeMap<String, Vec<u8>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs a read-only status observation in which each pane is captured at most
+/// once. A summary reads its pane for the effort footer and again for every
+/// eligible terminal chooser; they now share one screen instead of starting a
+/// `tmux capture-pane` each (zerus-604d.7). Nothing that sends keys, resizes a
+/// pane or answers a chooser may run inside: those always capture afresh.
+pub(super) fn observing<T>(observe: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            if self.0 {
+                OBSERVED.with(|screens| screens.borrow_mut().take());
+            }
+        }
+    }
+    // A nested observation shares the outer one's screens.
+    let outer = OBSERVED.with(|screens| {
+        let mut screens = screens.borrow_mut();
+        let outer = screens.is_none();
+        if outer {
+            *screens = Some(Default::default());
+        }
+        outer
+    });
+    let _reset = Reset(outer);
+    observe()
+}
+
+/// The pane's plain screen; within `observing`, the one captured first.
+/// Failures are not kept, so a later reader tries again.
+pub(super) fn plain(pane: &str) -> Result<Vec<u8>> {
+    let shared = OBSERVED.with(|screens| screens.borrow().as_ref().and_then(|screens| screens.get(pane).cloned()));
+    if let Some(screen) = shared {
+        return Ok(screen);
+    }
+    let screen = backend::current().capture(pane, backend::Capture::Plain)?;
+    OBSERVED.with(|screens| {
+        if let Some(screens) = screens.borrow_mut().as_mut() {
+            screens.insert(pane.to_owned(), screen.clone());
+        }
+    });
+    Ok(screen)
+}
+
 pub(super) fn capture(record: &Value) -> Result<String> {
-    let out = backend::current().capture(string(record, "pane"), backend::Capture::Plain)?;
+    let out = plain(string(record, "pane"))?;
     if out.len() > 512 * 1024 {
         return Err("Terminal snapshot is too large".into());
     }
@@ -292,4 +341,47 @@ fn navigate(
             e
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    static CAPTURES: AtomicUsize = AtomicUsize::new(0);
+    struct Counting;
+    impl backend::TerminalBackend for Counting {
+        fn capture(&self, pane: &str, _: backend::Capture) -> Result<Vec<u8>> {
+            let n = CAPTURES.fetch_add(1, SeqCst);
+            if pane == "%9" {
+                return Err("no such pane".into());
+            }
+            Ok(format!("{pane} screen {n}").into_bytes())
+        }
+    }
+
+    #[test]
+    fn an_observation_captures_each_pane_once_and_nothing_else_shares() {
+        let record = |pane: &str| json!({"pane": pane});
+        backend::with_fake(&Counting, || {
+            CAPTURES.store(0, SeqCst);
+            // Outside an observation every read is fresh.
+            assert_eq!(capture(&record("%1")).unwrap(), "%1 screen 0");
+            assert_eq!(capture(&record("%1")).unwrap(), "%1 screen 1");
+            let seen = observing(|| {
+                let first = capture(&record("%1")).unwrap();
+                // A nested observation, and the effort footer's reader, share it.
+                let nested = observing(|| String::from_utf8(plain("%1").unwrap()).unwrap());
+                let other = capture(&record("%2")).unwrap();
+                // A failure is not kept: the next reader tries again.
+                assert!(capture(&record("%9")).is_err());
+                assert!(plain("%9").is_err());
+                (first, nested, other, capture(&record("%1")).unwrap())
+            });
+            assert_eq!(seen, ("%1 screen 2".into(), "%1 screen 2".into(), "%2 screen 3".into(), "%1 screen 2".into()));
+            assert_eq!(CAPTURES.load(SeqCst), 6);
+            // The observation ended: reads are fresh again.
+            assert_eq!(capture(&record("%1")).unwrap(), "%1 screen 6");
+        });
+    }
 }

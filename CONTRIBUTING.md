@@ -70,6 +70,8 @@ stable release, and raising them is routine maintenance. Run
 The replica crate has its own lockfile: run
 `cargo +1.99.1 test --locked --manifest-path crates/replica/Cargo.toml`; its
 golden vectors must keep decoding, and `ZERUS_BLESS=1` only adds new ones.
+The event stream's frame crate has one too: run
+`cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol`.
 
 On Linux, the three worktree modules run through `scripts/ci/worktree-tests.py`
 in a fresh PID/mount namespace, including their live process blockers and private

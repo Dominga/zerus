@@ -93,6 +93,9 @@ private:
     QString m_denseKey;
     quint64 m_localModelRequest = 0;
     bool m_denseDark = false, m_denseBlocked = false, m_denseSigningIn = false, m_localModelsListed = false;
+    // U25 part 8: the design's project, computer and folder menus.
+    void showDenseMenu(QComboBox *combo);
+    void createDenseProject();
     void loadMachines();
     void loadFolders(const QString &selectedPath = {});
     void browseFolder();

@@ -897,6 +897,25 @@ mod tests {
     }
 
     #[test]
+    fn route_matches_like_the_prototype() {
+        let mut catalog = builtin();
+        catalog.routing = vec![
+            Rule { id: "review".into(), when: "review · release".into(), template: "bugfix".into(), approval: String::new(), use_: String::new() },
+            Rule { id: "all".into(), when: "everything else".into(), template: "feature".into(), approval: String::new(), use_: String::new() },
+        ];
+        validate(&catalog).unwrap();
+        // Either word of "review · release" matches; the dot is not a token.
+        assert_eq!(route(&catalog, "please review this")["template"]["id"], "bugfix");
+        assert_eq!(route(&catalog, "make a release")["template"]["id"], "bugfix");
+        // "everything else" always matches, so it is the catch-all, not the
+        // first template fallback.
+        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
+        // An empty when never matches.
+        catalog.routing[0].when.clear();
+        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
+    }
+
+    #[test]
     fn the_builtin_catalog_is_valid_and_routes_bugs() {
         let catalog = builtin();
         validate(&catalog).unwrap();

@@ -51,6 +51,100 @@ fn parse_status(bytes: &[u8]) -> Option<Value> {
     Some(data)
 }
 
+/// U25 part 6: at most this many changed files are listed with their line
+/// counts; the totals cover every tracked change.
+const CHANGED_FILES: usize = 50;
+/// A listed path is clipped so the status stays small (the desktop reads 32 KiB).
+const CHANGED_PATH: usize = 300;
+/// `hgs git-diff` returns at most this much of the diff.
+const DIFF_BYTES: usize = 256 * 1024;
+
+fn clipped_path(path: &str) -> String {
+    if path.chars().count() <= CHANGED_PATH { return path.to_owned(); }
+    let tail: String = path.chars().rev().take(CHANGED_PATH - 1).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("…{tail}")
+}
+
+/// `git diff --numstat -z HEAD`: each tracked change against HEAD with its
+/// added and deleted lines (none for a binary file); a rename names its new
+/// path. Totals count every file, the list keeps the first CHANGED_FILES.
+fn parse_numstat(bytes: &[u8]) -> Option<Value> {
+    let mut fields = bytes.split(|b| *b == 0);
+    let (mut added, mut deleted, mut count) = (0u64, 0u64, 0u64);
+    let mut files = Vec::new();
+    while let Some(field) = fields.next() {
+        if field.is_empty() { continue; }
+        let line = std::str::from_utf8(field).ok()?;
+        let mut parts = line.splitn(3, '\t');
+        let (a, d, path) = (parts.next()?, parts.next()?, parts.next()?);
+        // A rename's paths follow as two NUL fields: old, then new.
+        let path = if path.is_empty() {
+            fields.next()?;
+            String::from_utf8_lossy(fields.next()?).into_owned()
+        } else {
+            path.to_owned()
+        };
+        let a = if a == "-" { None } else { Some(a.parse::<u64>().ok()?) };
+        let d = if d == "-" { None } else { Some(d.parse::<u64>().ok()?) };
+        added += a.unwrap_or(0);
+        deleted += d.unwrap_or(0);
+        count += 1;
+        if files.len() < CHANGED_FILES {
+            files.push(json!({"path":clipped_path(&path),"added":a,"deleted":d}));
+        }
+    }
+    Some(json!({"added":added,"deleted":deleted,"files":files,"tracked_files":count}))
+}
+
+/// U25 part 6 (spec 6, Changes): the checkout's changes against HEAD with line
+/// counts, then the untracked files (no counts), at most CHANGED_FILES in all.
+/// Read-only: git runs directly, without a shell, and never writes.
+fn changes(path: &Path, unborn: bool, deadline: Instant) -> Option<Value> {
+    let mut changes = if unborn {
+        json!({"added":0,"deleted":0,"files":[],"tracked_files":0})
+    } else {
+        parse_numstat(&git(path, &["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "HEAD", "--"], deadline).ok()?)?
+    };
+    let untracked = git(path, &["ls-files", "--others", "--exclude-standard", "-z"], deadline).ok()?;
+    let mut count = 0u64;
+    let files = changes["files"].as_array_mut()?;
+    for name in untracked.split(|b| *b == 0).filter(|name| !name.is_empty()) {
+        count += 1;
+        if files.len() < CHANGED_FILES {
+            files.push(json!({"path":clipped_path(&String::from_utf8_lossy(name)),"added":null,"deleted":null,"untracked":true}));
+        }
+    }
+    changes["untracked_files"] = json!(count);
+    let total = changes["tracked_files"].as_u64().unwrap_or(0) + count;
+    changes["truncated"] = json!(total > CHANGED_FILES as u64);
+    Some(changes)
+}
+
+/// `hgs git-diff --path P --json`: the checkout's diff against HEAD as text,
+/// at most DIFF_BYTES. Read-only, run with git directly.
+pub(super) fn diff(path: &Path) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut data = json!({"state":"unavailable","path":path});
+    let Some(path) = crate::platform::canonical(path).ok().filter(|p| p.is_dir()) else {
+        data["state"] = json!("folder_unavailable"); return data;
+    };
+    data["path"] = json!(path);
+    match git(&path, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "HEAD", "--"], deadline) {
+        Ok(bytes) => {
+            let truncated = bytes.len() > DIFF_BYTES;
+            let mut end = bytes.len().min(DIFF_BYTES);
+            // Never cut inside a UTF-8 sequence.
+            while end > 0 && end < bytes.len() && (bytes[end] & 0xC0) == 0x80 { end -= 1; }
+            data["diff"] = json!(String::from_utf8_lossy(&bytes[..end]));
+            data["truncated"] = json!(truncated);
+            data["bytes"] = json!(bytes.len());
+            data["state"] = json!("ok");
+        }
+        Err(error) => { data["state"] = json!(error.state); }
+    }
+    data
+}
+
 fn remote_check(cwd: &Path, common: &Path, remote: &str, reference: &str, tracking: &str, deadline: Instant) -> Value {
     // Include the configured endpoint and observed tracking OID in the identity.
     // A push/fetch or remote reconfiguration invalidates old verification.
@@ -95,6 +189,11 @@ pub(super) fn inspect(path: &Path) -> Value {
     };
     let Some(status) = parse_status(&bytes) else { return data; };
     data.as_object_mut().unwrap().extend(status.as_object().unwrap().clone());
+    if status["changed_files"].as_u64().is_some_and(|changed| changed > 0) {
+        if let Some(changes) = changes(&path, status["unborn"] == true, Instant::now() + Duration::from_millis(800)) {
+            data["changes"] = changes;
+        }
+    }
     let Some(root_path) = text(&path, &["rev-parse", "--show-toplevel"], local_deadline) else { return data; };
     let Some(common) = text(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"], local_deadline) else { return data; };
     data["root"] = json!(root_path);
@@ -142,22 +241,33 @@ pub(super) fn inspect(path: &Path) -> Value {
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
+    println!("{}", inspect(Path::new(&folder(args, "git-status")?)));
+    Ok(0)
+}
+
+/// `hgs git-diff --path PATH --json` (U25 part 6).
+pub(super) fn dispatch_diff(args: &[String]) -> Result<i32> {
+    println!("{}", diff(Path::new(&folder(args, "git-diff")?)));
+    Ok(0)
+}
+
+fn folder(args: &[String], command: &str) -> Result<String> {
+    let usage = format!("usage: hgs {command} --path PATH --json");
     let mut path = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => {},
             "--path" if path.is_none() => { i += 1; path = args.get(i); },
-            _ => return Err("usage: hgs git-status --path PATH --json".into()),
+            _ => return Err(usage),
         }
         i += 1;
     }
-    let path = path.ok_or("usage: hgs git-status --path PATH --json")?;
+    let path = path.ok_or(usage)?;
     if !Path::new(path).is_absolute() || path.chars().any(char::is_control) {
         return Err("Git status requires an absolute folder path".into());
     }
-    println!("{}", inspect(Path::new(path)));
-    Ok(0)
+    Ok(path.clone())
 }
 
 #[cfg(test)]
@@ -172,5 +282,64 @@ mod tests {
         assert_eq!((status["ahead"].as_u64(), status["behind"].as_u64()), (Some(2), Some(3)));
         assert!(parse_status(b"# branch.head main\0").is_none());
         assert!(parse_status(b"# branch.oid bad\0# branch.head main\0").is_none());
+    }
+
+    #[test]
+    fn numstat_counts_lines_binaries_and_renames_and_keeps_fifty() {
+        let bytes = b"12\t3\tsrc/a.rs\0-\t-\tlogo.png\x000\t4\t\0old/name.rs\0new/name.rs\0";
+        let changes = parse_numstat(bytes).unwrap();
+        assert_eq!((changes["added"].as_u64(), changes["deleted"].as_u64(), changes["tracked_files"].as_u64()), (Some(12), Some(7), Some(3)));
+        assert_eq!(changes["files"][0], json!({"path":"src/a.rs","added":12,"deleted":3}));
+        assert_eq!(changes["files"][1], json!({"path":"logo.png","added":null,"deleted":null}));
+        assert_eq!(changes["files"][2]["path"], "new/name.rs");
+        let many: Vec<u8> = (0..80).flat_map(|n| format!("1\t1\tf{n}.txt\0").into_bytes()).collect();
+        let changes = parse_numstat(&many).unwrap();
+        assert_eq!(changes["files"].as_array().unwrap().len(), CHANGED_FILES);
+        assert_eq!(changes["tracked_files"], 80);
+        assert_eq!(changes["added"], 80);
+        assert!(parse_numstat(b"x\t1\tbad\0").is_none());
+        let long = "d/".repeat(400);
+        assert!(clipped_path(&long).chars().count() <= CHANGED_PATH);
+    }
+
+    /// U25 part 6: the Changes card's data from a real checkout - git-status
+    /// lists each change with its lines, git-diff returns the text - and
+    /// neither writes (the index and the files are unchanged).
+    #[test]
+    fn a_checkouts_changes_and_diff_are_read_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git").arg("-C").arg(&repo).args(args)
+                .env("GIT_CEILING_DIRECTORIES", dir.path()).status().unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "start"]);
+        fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", "a"]);
+        fs::write(repo.join("a.txt"), "one\nthree\nfour\n").unwrap();
+        fs::write(repo.join("new.txt"), "fresh\n").unwrap();
+        let index = fs::read(repo.join(".git").join("index")).unwrap();
+        let status = inspect(&repo);
+        let changes = &status["changes"];
+        assert_eq!((changes["added"].as_u64(), changes["deleted"].as_u64()), (Some(2), Some(1)), "{status}");
+        assert_eq!(changes["files"][0], json!({"path":"a.txt","added":2,"deleted":1}));
+        assert_eq!(changes["files"][1], json!({"path":"new.txt","added":null,"deleted":null,"untracked":true}));
+        assert_eq!(changes["untracked_files"], 1);
+        assert_eq!(changes["truncated"], false);
+        let diff = diff(&repo);
+        assert_eq!(diff["state"], "ok");
+        assert!(diff["diff"].as_str().unwrap().contains("+three"), "{diff}");
+        assert_eq!(diff["truncated"], false);
+        assert_eq!(fs::read(repo.join(".git").join("index")).unwrap(), index, "the index is not rewritten");
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).unwrap(), "one\nthree\nfour\n");
+        // A clean checkout has no changes entry; a missing folder says so.
+        fs::remove_file(repo.join("new.txt")).unwrap();
+        run(&["checkout", "-q", "--", "a.txt"]);
+        assert!(inspect(&repo).get("changes").is_none());
+        assert_eq!(super::diff(&dir.path().join("missing"))["state"], "folder_unavailable");
     }
 }

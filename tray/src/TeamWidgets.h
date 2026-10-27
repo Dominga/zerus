@@ -21,6 +21,7 @@
 #include <QPolygonF>
 #include <QPushButton>
 #include <QSet>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QKeyEvent>
 #include <QTimer>
@@ -572,8 +573,11 @@ public:
     struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip, subteam; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0;
         // U25 part 5 (spec 5.4): "↤#2" - only the dependencies from other
         // phases (the ones inside it are edges); the problem text on the
-        // second line; whether the assignee's agent really works on it.
-        QString ext, problemText; bool working = false; };
+        // second line; whether the assignee's agent really works on it. The
+        // owner's 2026-10-27 addition: a small activity label ("review",
+        // "attempt 2", "held", "sub-team 1/2") right of the role chip and the
+        // model tile; a problem text wins over it.
+        QString ext, problemText, activity; bool working = false; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -1041,6 +1045,16 @@ protected:
             AgentWorking::paintTile(p, tile, agentLogo(n.agent, m_c.fg), m_c.dark, n.working, AgentWorking::phase());
             right = tile.right() + 6;
         }
+        if (!n.activity.isEmpty()) {
+            // The owner's small activity label: muted text3 at 11 px, right of
+            // the role chip and the model tile, and elided before a problem
+            // text would lose room to it.
+            QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(m_c.text3);
+            const double w = qMax(0.0, r.right() - 8 - right);
+            const QString shown = QFontMetrics(meta).elidedText(n.activity, Qt::ElideRight, int(w));
+            p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, shown);
+            right += qMin(w, double(QFontMetrics(meta).horizontalAdvance(shown))) + 6;
+        }
         if (!n.problemText.isEmpty()) {
             QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
             const double w = qMax(0.0, r.right() - 8 - right);
@@ -1198,7 +1212,16 @@ protected:
         const double titleW = pill.left() - 32 - idw;
         p.drawText(QRectF(26 + idw, r.top() + 2, titleW, 18), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(title).elidedText(n.title, Qt::ElideRight, int(titleW)));
         QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
-        p.drawText(QRectF(26, r.top() + 19, width() - 120, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
+        const int statusW = qMin(int(width() - 150), QFontMetrics(meta).horizontalAdvance(n.statusText) + 2);
+        p.drawText(QRectF(26, r.top() + 19, statusW, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
+        if (!n.activity.isEmpty()) {
+            // The same small activity label as the graph, muted, before the deps.
+            p.setPen(m_c.text3);
+            const double left = 26 + statusW + 8;
+            const double w = qMax(0.0, width() - 112 - left);
+            p.drawText(QRectF(left, r.top() + 19, w, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                       QFontMetrics(meta).elidedText(n.activity, Qt::ElideRight, int(w)));
+        }
         if (!n.deps.isEmpty()) {
             p.setFont(NewSessionDense::mono(10)); p.setPen(m_c.dim);
             p.drawText(QRectF(width() - 112, r.top() + 19, 104, 16), Qt::AlignRight | Qt::AlignVCenter, n.deps);
@@ -1721,6 +1744,109 @@ inline QLabel *elided(const QString &text, const QColor &color, int pixels = 12)
     l->setMinimumWidth(20);
     l->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     return l;
+}
+
+// U17: who decided a permission request, as the owner reads it.
+inline QString permissionBy(const QString &by)
+{
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    if (by == "owner") return tr("you");
+    if (by == "lead") return tr("the lead");
+    if (by == "rule") return tr("a rule");
+    if (by == "timeout") return tr("a timeout");
+    return tr("unknown");
+}
+
+// U17: the stored answers as one line: "Permissions: 18 allowed · 2 denied ·
+// last: allowed by the lead, 3 min ago".
+inline QString permissionSummary(const QList<PermissionAnswer> &answers, double now)
+{
+    if (answers.isEmpty()) return {};
+    int allowed = 0, denied = 0;
+    for (const auto &answer : answers) { if (answer.denied()) ++denied; else ++allowed; }
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    const auto &last = answers.last();
+    const QString decision = last.denied() ? tr("denied by %1").arg(permissionBy(last.by))
+                                           : tr("allowed by %1").arg(permissionBy(last.by));
+    return tr("Permissions: %1 allowed · %2 denied").arg(allowed).arg(denied)
+           + tr(" · last: %1, %2").arg(decision, agoText(last.at, now));
+}
+
+// U17: one stored answer as one row: the decision, who made it and how long
+// ago; the command and the deny reason each on one elided line, their whole
+// text in the line's tooltip.
+inline QWidget *permissionAnswerRow(const PermissionAnswer &answer, const Colors &c, double now, int pixels = 10)
+{
+    const auto tr = [](const char *text) { return QCoreApplication::translate("TeamPanel", text); };
+    auto *row = new QWidget; row->setObjectName("teamPermissionAnswerRow");
+    row->setProperty("decision", answer.decision);
+    auto *v = new QVBoxLayout(row); v->setContentsMargins(0, 1, 0, 1); v->setSpacing(0);
+    const QString decision = answer.denied() ? tr("Denied by %1").arg(permissionBy(answer.by))
+                                             : tr("Allowed by %1").arg(permissionBy(answer.by));
+    auto *line = label(QStringLiteral("%1 · %2").arg(decision, agoText(answer.at, now)),
+                       answer.denied() ? c.warn : c.accent, pixels, false, "teamPermissionDecision");
+    line->setProperty("decision", answer.decision);
+    v->addWidget(line);
+    const QString command = !answer.command.isEmpty() ? answer.command : answer.tool;
+    if (!command.isEmpty()) {
+        auto *asked = new ElidingLabel(command);
+        asked->setObjectName("teamPermissionCommand");
+        asked->setToolTip(command);
+        QPalette pal = asked->palette(); pal.setColor(QPalette::WindowText, c.text2); asked->setPalette(pal);
+        QFont f = asked->font(); f.setPixelSize(pixels); asked->setFont(f);
+        v->addWidget(asked);
+    }
+    if (!answer.reason.isEmpty()) {
+        auto *reason = new ElidingLabel(answer.reason);
+        reason->setObjectName("teamPermissionReason");
+        reason->setToolTip(answer.reason);
+        QPalette pal = reason->palette(); pal.setColor(QPalette::WindowText, c.text3); reason->setPalette(pal);
+        QFont f = reason->font(); f.setPixelSize(pixels); reason->setFont(f);
+        v->addWidget(reason);
+    }
+    QStringList tip;
+    tip << QStringLiteral("%1 · %2").arg(decision, agoText(answer.at, now));
+    if (!command.isEmpty()) tip << command;
+    if (!answer.reason.isEmpty()) tip << answer.reason;
+    row->setToolTip(tip.join(QLatin1Char('\n')));
+    return row;
+}
+
+// U17: the answers behind one toggle: the newest `limit` (0: all of them), each
+// one row, then "+N more" when the list is longer.
+inline QWidget *permissionAnswerList(const QList<PermissionAnswer> &answers, const Colors &c, double now, int limit, const char *name)
+{
+    auto *list = new QWidget; list->setObjectName(name);
+    auto *v = new QVBoxLayout(list); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(1);
+    const int shown = limit > 0 ? qMin(limit, int(answers.size())) : int(answers.size());
+    for (int i = 0; i < shown; ++i) v->addWidget(permissionAnswerRow(answers.at(answers.size() - 1 - i), c, now));
+    if (answers.size() > shown)
+        v->addWidget(label(QCoreApplication::translate("TeamPanel", "+%1 more").arg(answers.size() - shown),
+                           c.dim, 10, false, "teamPermissionMore"));
+    return list;
+}
+
+// U17: the one-line toggle both cards open their answers with; the choice is
+// kept in QSettings under `key`.
+inline QToolButton *permissionToggle(const QList<PermissionAnswer> &answers, const Colors &c, bool open, const char *name)
+{
+    auto *toggle = new QToolButton;
+    toggle->setObjectName(name);
+    toggle->setText(permissionSummary(answers, QDateTime::currentSecsSinceEpoch()));
+    toggle->setToolTip(QCoreApplication::translate("TeamPanel", "%1 answers · click to %2")
+                           .arg(answers.size())
+                           .arg(open ? QCoreApplication::translate("TeamPanel", "fold them")
+                                     : QCoreApplication::translate("TeamPanel", "expand them")));
+    toggle->setAccessibleDescription(open ? QCoreApplication::translate("TeamPanel", "Expanded")
+                                          : QCoreApplication::translate("TeamPanel", "Collapsed"));
+    toggle->setIcon(workspaceIcon(open ? "chevron-down" : "chevron-right", c.text2));
+    toggle->setIconSize(QSize(10, 10));
+    toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    toggle->setAutoRaise(true); toggle->setCheckable(true); toggle->setChecked(open);
+    toggle->setStyleSheet(QStringLiteral("QToolButton#%1{color:%2;font-size:11px;border:0;padding:1px 4px;background:transparent;}"
+                                         "QToolButton#%1:hover{color:%3;}")
+                              .arg(QString::fromLatin1(name), c.text2.name(), c.fg.name()));
+    return toggle;
 }
 
 // A member's queue (A5) under its current task: the open task first, then the

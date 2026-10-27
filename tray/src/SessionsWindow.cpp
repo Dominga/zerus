@@ -41,6 +41,7 @@
 #include "Extensions.h"
 #include "WindowTitleBar.h"
 #include "IronRulesPanel.h"
+#include "InspectorCards.h"
 #include "SessionLeadPanel.h"
 #include "SessionLeads.h"
 #include "WorkingLine.h"
@@ -728,7 +729,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_hint = label({}, "hint", details); m_hint->hide();
     m_goal = new QPushButton; m_goal->setObjectName("sessionGoal"); m_goal->hide();
     m_goal->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); detail->addWidget(m_goal);
-    connect(m_goal, &QPushButton::clicked, this, [this] { setInspectorVisible(true); m_inspector->setCurrentIndex(0); });
+    connect(m_goal, &QPushButton::clicked, this, [this] { openInspectorCard(InspectorCards::Tasks); });
     auto *tabs = new QTabWidget; m_detailTabs = tabs; tabs->setObjectName("sessionDetailTabs");
     tabs->setDocumentMode(true); tabs->tabBar()->setDrawBase(false);
     auto browser = [this]() {
@@ -1061,7 +1062,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     cacheLayout->addWidget(m_cacheWarning);cacheLayout->addWidget(m_cacheDetail);cacheLayout->addLayout(cacheActions);
     m_cacheStatus->setPopoverContent(cachePanel);
     toolbar->add(ComposerToolbar::Slot::Cache,m_cacheStatus);toolbar->add(ComposerToolbar::Slot::Context,m_contextUsage);
-    connect(cacheUsage,&QPushButton::clicked,this,[this]{m_cacheStatus->closePopover();setInspectorVisible(true);m_inspector->setCurrentIndex(1);});
+    connect(cacheUsage,&QPushButton::clicked,this,[this]{m_cacheStatus->closePopover();openInspectorCard(InspectorCards::Environment);});
     // Close first: the confirmation dialog must not open over a popup.
     connect(m_cacheClear,&QPushButton::clicked,this,[this]{m_cacheStatus->closePopover();clearContext();});
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &,const QString &error) {
@@ -1126,7 +1127,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_subagentComposer->toolbar()->add(ComposerToolbar::Slot::Context,m_subagentContextUsage);
     m_subagentView->useCompactJumpButton();m_subagentComposer->toolbar()->add(ComposerToolbar::Slot::Latest,m_subagentView->jumpButton());
     activityColumn(subagentLayout)->addWidget(m_subagentComposer);
-    for(auto *context:{m_contextUsage,m_subagentContextUsage})connect(context,&QPushButton::clicked,this,[this]{setInspectorVisible(true);m_inspector->setCurrentIndex(1);});
+    for(auto *context:{m_contextUsage,m_subagentContextUsage})connect(context,&QPushButton::clicked,this,[this]{openInspectorCard(InspectorCards::Context);});
     connect(m_subagentComposer, &MessageComposer::sendRequested, this,
         [this](const QString &key, const QString &text, const QList<MessageAttachment> &files) {
             const auto *entry = selected();
@@ -1274,8 +1275,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(m_composer,&MessageComposer::ironRulesRequested,this,[this]{
         if(!m_ironRules||!m_inspector)return;
-        setInspectorVisible(true);
-        for(QWidget *page=m_ironRules;page;page=page->parentWidget())if(const int index=m_inspector->indexOf(page);index>=0){m_inspector->setCurrentIndex(index);break;}
+        openInspectorCard(InspectorCards::IronRules);
     });
     connect(m_composer,&MessageComposer::interruptRequested,this,[this](const QString &key) {
         const auto *entry=selected();
@@ -1428,62 +1428,94 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_workSplitter->addWidget(tabs); tabs->setMinimumWidth(280);
     m_inspectorPanel = new QFrame; m_inspectorPanel->setObjectName("sessionInspectorPanel");
     auto *inspectorLayout = new QVBoxLayout(m_inspectorPanel);
-    inspectorLayout->setContentsMargins(8, 4, 8, 8); inspectorLayout->setSpacing(0);
-    m_inspector = new QTabWidget; m_inspector->setObjectName("sessionInspector");
-    m_inspector->setDocumentMode(true); m_inspector->tabBar()->setDrawBase(false);
-    // Include full native-font labels in the inspector's minimum size.
-    m_inspector->tabBar()->setElideMode(Qt::ElideNone);
-    m_inspector->tabBar()->setUsesScrollButtons(false);
-    m_inspector->tabBar()->installEventFilter(this);
+    inspectorLayout->setContentsMargins(0, 0, 0, 0); inspectorLayout->setSpacing(0);
+    // U25 part 6 (spec 6): one column of collapsible cards, no tabs.
+    m_inspector = new InspectorCards;
     m_worktrees=new WorktreePanel(&m_client);
     m_worktrees->filterRequested=[this](const QString &path,bool checkout){if(const auto *entry=selected())filterFolder(entry->host,path,checkout);};
     m_worktrees->sessionRequested=[this](const QString &name,const QString &archive){if(const auto *entry=selected())openRelatedSession(entry->host,name,archive);};
     m_worktrees->launchRequested=[this](const QString &path){if(const auto *entry=selected())showNewSession({},m_organization.groupFor(entry->identity),entry->host,{},path);};
-    auto *detailsPage=new QWidget;auto *detailsLayout=new QVBoxLayout(detailsPage);detailsLayout->setContentsMargins(0,0,0,0);
+    // Environment (spec 6): the Session ID row with its copy button, then
+    // machine, folder, branch, model, last event and Keep cache warm.
+    auto *environment=m_inspector->body(InspectorCards::Environment);
+    const auto envIcon=[](const char *glyph){auto *icon=new QLabel;icon->setObjectName("inspectorEnvIcon");icon->setProperty("glyph",QString::fromLatin1(glyph));icon->setFixedSize(14,14);return icon;};
     auto *identity = new QWidget; identity->setObjectName("detailsIdentity");
-    auto *identityLayout = new QVBoxLayout(identity); identityLayout->setContentsMargins(4,8,4,2); identityLayout->setSpacing(4);
-    m_detailsIdTitle = label(tr("Session ID"), "detailsIdentityTitle"); identityLayout->addWidget(m_detailsIdTitle);
-    auto *identityRow = new QHBoxLayout;
+    auto *identityRow = new QHBoxLayout(identity); identityRow->setContentsMargins(0,0,0,0); identityRow->setSpacing(9);
+    m_detailsIdTitle = label(tr("Session ID"), "detailsIdentityTitle"); m_detailsIdTitle->hide();
     m_detailsIdValue = new SessionIdentityLabel(tr("Not confirmed"));
     m_detailsIdValue->setObjectName("detailsIdentityValue"); m_detailsIdValue->setTextFormat(Qt::PlainText);
-    m_detailsIdValue->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred); m_detailsIdValue->setMinimumWidth(0);
-    m_detailsIdValue->setWordWrap(true);
+    m_detailsIdValue->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); m_detailsIdValue->setMinimumWidth(0);
+    m_detailsIdValue->setWordWrap(false);
     m_detailsIdValue->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
-    identityRow->addWidget(m_detailsIdValue);
     m_copySessionId = iconButton("copy", tr("Copy session ID"), "copySessionIdAction"); m_copySessionId->setAutoDefault(false);
     m_copySessionId->setProperty("sessionHeaderAction", true);
     configureWorkspaceIconButton(m_copySessionId, "copy", tr("Copy session ID"), m_dark);
     connect(m_copySessionId, &QPushButton::clicked, this, &SessionsWindow::copySessionIdentity);
-    identityRow->addWidget(m_copySessionId); identityRow->addStretch(); identityLayout->addLayout(identityRow);
-    detailsLayout->addWidget(identity); detailsLayout->addWidget(m_info,1);
-    auto *contextRow=new QHBoxLayout;m_detailsContext=new QLabel;m_detailsContext->setObjectName("detailsContext");m_detailsContext->setWordWrap(true);
+    identityRow->addWidget(envIcon("key")); identityRow->addWidget(m_detailsIdTitle); identityRow->addWidget(m_detailsIdValue,1); identityRow->addWidget(m_copySessionId);
+    environment->addWidget(identity);
+    for(const auto &[glyph,name,mode]:{std::tuple{"monitor","machine",Qt::ElideRight},std::tuple{"folder","folder",Qt::ElideRight},
+            std::tuple{"git-branch","branch",Qt::ElideMiddle},std::tuple{"asterisk","model",Qt::ElideRight},std::tuple{"clock","last event",Qt::ElideRight}}) {
+        auto *row=new QWidget;row->setObjectName("inspectorEnvRow");row->setProperty("row",QString::fromLatin1(name));
+        auto *h=new QHBoxLayout(row);h->setContentsMargins(0,0,0,0);h->setSpacing(9);
+        auto *value=new InspectorValue(mode);value->setObjectName("inspectorEnvValue");value->setProperty("row",QString::fromLatin1(name));
+        auto *key=new QLabel(tr(name));key->setObjectName("inspectorEnvKey");
+        h->addWidget(envIcon(glyph));h->addWidget(value,1);h->addWidget(key);
+        m_environment.insert(QString::fromLatin1(name),value);
+        environment->addWidget(row);
+    }
+    m_detailsContext=new QLabel;m_detailsContext->setObjectName("detailsContext");m_detailsContext->setWordWrap(true);m_detailsContext->hide();
     m_detailsClear=new QPushButton(tr("Clear session"));m_detailsClear->setObjectName("clearSessionFromDetails");m_detailsClear->setAutoDefault(false);
     m_detailsClear->setToolTip(tr("Start this agent's conversation from scratch, like /clear in Terminal. Your unsent draft is kept."));
     connect(m_detailsClear,&QPushButton::clicked,this,&SessionsWindow::clearContext);
-    contextRow->addWidget(m_detailsContext,1);contextRow->addWidget(m_detailsClear);detailsLayout->addLayout(contextRow);
     // WhiteWh fork: keep the prompt cache warm while the person is away.
-    auto *warmRow=new QHBoxLayout;m_keepWarm=new QCheckBox(tr("Keep cache warm"));m_keepWarm->setObjectName("keepCacheWarm");
+    auto *warmRow=new QHBoxLayout;m_keepWarm=new QCheckBox;m_keepWarm->setObjectName("keepCacheWarm");m_keepWarm->setAccessibleName(tr("Keep cache warm"));
     m_keepWarm->setToolTip(tr("Shortly before the provider's prompt cache expires, Zerus sends the idle agent a one-word service message, "
         "so the next turn reads the context from the cache. Each one uses a little of the account's limit; it is never shown as a reply."));
     m_keepWarmHours=new QSlider(Qt::Horizontal);m_keepWarmHours->setObjectName("keepCacheWarmHours");
-    m_keepWarmHours->setRange(1,CacheKeepalive::MaxHours);m_keepWarmHours->setPageStep(1);m_keepWarmHours->setValue(CacheKeepalive::DefaultHours);
+    m_keepWarmHours->setRange(1,qMin(8,CacheKeepalive::MaxHours));m_keepWarmHours->setPageStep(1);/* spec 6: 1-8 h */m_keepWarmHours->setValue(CacheKeepalive::DefaultHours);
     m_keepWarmHours->setToolTip(tr("Stop warming after this long without a turn"));
     m_keepWarmLimit=new QLabel;m_keepWarmLimit->setObjectName("keepCacheWarmLimit");
-    warmRow->addWidget(m_keepWarm);warmRow->addWidget(m_keepWarmHours,1);warmRow->addWidget(m_keepWarmLimit);detailsLayout->addLayout(warmRow);
-    connect(m_keepWarm,&QCheckBox::toggled,this,[this](bool on){m_keepWarmHours->setEnabled(on);setKeepWarm(on?m_keepWarmHours->value():0);});
+    // The slider (1-8 h) shows while the switch is on (spec 6).
+    m_keepWarmHours->setFixedWidth(70);
+    auto *warmLabel=new QLabel(tr("Keep cache warm"));warmLabel->setObjectName("keepCacheWarmLabel");
+    warmRow->setContentsMargins(0,0,0,0);warmRow->setSpacing(9);
+    warmRow->addWidget(envIcon("bolt"));warmRow->addWidget(warmLabel,1);warmRow->addWidget(m_keepWarmHours);warmRow->addWidget(m_keepWarmLimit);warmRow->addWidget(m_keepWarm);
+    environment->addLayout(warmRow);
+    connect(m_keepWarm,&QCheckBox::toggled,this,[this](bool on){
+        m_keepWarmHours->setEnabled(on);m_keepWarmHours->setVisible(on);m_keepWarmLimit->setVisible(on);setKeepWarm(on?m_keepWarmHours->value():0);});
     connect(m_keepWarmHours,&QSlider::valueChanged,this,[this](int hours){
-        m_keepWarmLimit->setText(tr("up to %n h",nullptr,hours));if(m_keepWarm->isChecked())setKeepWarm(hours);});
+        m_keepWarmLimit->setText(tr("%n h",nullptr,hours));if(m_keepWarm->isChecked())setKeepWarm(hours);});
+    // Context (spec 6): what hgs reports - the share used, used / limit, the
+    // bar, what is left and Clear session; the category rows only when an
+    // agent reports them. Then the session's own usage details.
+    auto *context=m_inspector->body(InspectorCards::Context);
+    {auto *head=new QHBoxLayout;head->setContentsMargins(0,0,0,0);
+     m_contextUsed=new QLabel;m_contextUsed->setObjectName("inspectorContextUsed");
+     m_contextTokens=new QLabel;m_contextTokens->setObjectName("inspectorContextTokens");
+     head->addWidget(m_contextUsed,1);head->addWidget(m_contextTokens);context->addLayout(head);}
+    m_contextBar=new ContextBar;context->addWidget(m_contextBar);
+    m_contextRows=new QWidget;m_contextRows->setObjectName("inspectorContextRows");new QVBoxLayout(m_contextRows);
+    m_contextRows->layout()->setContentsMargins(0,0,0,0);m_contextRows->hide();context->addWidget(m_contextRows);
+    {auto *row=new QHBoxLayout;row->setContentsMargins(0,0,0,0);
+     m_contextLeft=new QLabel;m_contextLeft->setObjectName("inspectorContextLeft");
+     row->addWidget(m_contextLeft,1);row->addWidget(m_detailsClear);context->addLayout(row);}
+    context->addWidget(m_detailsContext);
+    context->addWidget(m_info);
     // WhiteWh fork: the SocratiCode index of this session's folder.
-    m_socratiCode=new SocratiCodePanel(&m_client);detailsLayout->addWidget(m_socratiCode);
+    m_socratiCode=new SocratiCodePanel(&m_client);m_inspector->body(InspectorCards::SocratiCode)->addWidget(m_socratiCode);
     // WhiteWh fork: the iron rules of this session's project.
     // WhiteWh fork: Tasks & agents holds the agent's text, then the session's
     // place in its project and the project's iron rules.
-    auto *agentsPage=new QWidget;auto *agentsLayout=new QVBoxLayout(agentsPage);agentsLayout->setContentsMargins(0,0,0,0);agentsLayout->setSpacing(8);
-    agentsLayout->addWidget(m_children,1);
+    // Tasks (spec 6): the agent's plan and subagents, then Reports to.
+    auto *agentsLayout=m_inspector->body(InspectorCards::Tasks);
+    agentsLayout->addWidget(m_children);
     m_ironRules=new IronRulesPanel;
-    m_ironRules->changed=[this](int count){m_composer->setIronRulesCount(count);};
+    m_ironRules->changed=[this](int count){m_composer->setIronRulesCount(count);m_inspector->setValue(InspectorCards::IronRules,count>0?QString::number(count):QString());};
     // WhiteWh fork: lead and subordinate sessions of this project.
-    m_leadPanel=new SessionLeadPanel;agentsLayout->addWidget(m_leadPanel);agentsLayout->addWidget(m_ironRules);
+    m_leadPanel=new SessionLeadPanel;agentsLayout->addWidget(m_leadPanel);
+    m_inspector->body(InspectorCards::IronRules)->addWidget(m_ironRules);
+    // The card's header names the rules and counts them.
+    for(const char *name:{"inspectorPanelTitle","ironRulesCount"})if(auto *label=m_ironRules->findChild<QLabel *>(name))label->hide();
     m_leadPanel->setLead=[this](const QString &identity,const QString &lead){
         if(!SessionLeads::setLead(identity,lead)){showNotice(tr("A lead cannot report to another session, and a subordinate cannot lead."),true);return;}
         rebuild();updateLeadPanel();
@@ -1492,8 +1524,35 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         for(const auto &entry:m_entries)if(entry.identity==identity){showSession(entry.host,entry.session.name);return;}
     };
     m_leadPanel->sendReport=[this]{sendReportToLead();};
-    m_inspector->addTab(agentsPage, tr("Tasks && agents")); m_inspector->addTab(detailsPage, tr("Details"));
-    m_inspector->addTab(m_worktrees, tr("Worktrees"));
+    m_inspector->body(InspectorCards::Worktrees)->addWidget(m_worktrees);
+    // Changes (spec 6): "+A −D" in the header; the files with their lines,
+    // Commit changes… (fills the composer, never sends) and Open diff.
+    {auto *changes=m_inspector->body(InspectorCards::Changes);
+     m_changesList=new QWidget;m_changesList->setObjectName("inspectorChanges");auto *list=new QVBoxLayout(m_changesList);
+     list->setContentsMargins(0,0,0,0);list->setSpacing(4);changes->addWidget(m_changesList);
+     m_changesEmpty=new QLabel(tr("Working tree is clean."));m_changesEmpty->setObjectName("inspectorChangesEmpty");changes->addWidget(m_changesEmpty);
+     auto *row=new QHBoxLayout;row->setContentsMargins(0,0,0,0);
+     m_commitChanges=new QPushButton(tr("Commit changes…"));m_commitChanges->setObjectName("inspectorCommitChanges");m_commitChanges->setAutoDefault(false);
+     m_commitChanges->setToolTip(tr("Ask this session's agent to commit: the request goes into the composer, not sent"));
+     m_openDiff=new QPushButton(tr("Open diff"));m_openDiff->setObjectName("inspectorOpenDiff");m_openDiff->setAutoDefault(false);m_openDiff->setProperty("ghost",true);
+     row->addWidget(m_commitChanges);row->addWidget(m_openDiff);row->addStretch();changes->addLayout(row);
+     connect(m_commitChanges,&QPushButton::clicked,this,[this]{
+         auto *editor=m_composer->editor();const QString ask=tr("Commit the current changes with a short message.");
+         editor->setPlainText(editor->toPlainText().trimmed().isEmpty()?ask:editor->toPlainText().trimmed()+QStringLiteral("\n")+ask);
+         editor->moveCursor(QTextCursor::End);editor->setFocus(Qt::OtherFocusReason);});
+     connect(m_openDiff,&QPushButton::clicked,this,[this]{
+         const auto *entry=selected();if(!entry)return;
+         m_diffRequest=m_client.requestGitDiff(entry->host,m_details.value("cwd").toString(entry->session.cwd));});
+     connect(&m_client,&HgsClient::gitDiffReady,this,[this](quint64 request,const QJsonObject &data,const QString &error){
+         if(request==m_diffRequest)showDiff(data,error);});
+     connect(&m_client,&HgsClient::gitStatusChanged,this,[this](const QString &host,const QString &path){
+         const auto *entry=selected();
+         if(entry&&entry->host==host&&m_details.value("cwd").toString(entry->session.cwd)==path)updateChangesCard();});}
+    m_inspector->toggled=[this](InspectorCards::Card card,bool open){
+        if(!open)return;
+        if(card==InspectorCards::Worktrees)updateWorktrees();
+        if(card==InspectorCards::Changes)updateChangesCard();
+    };
     // WhiteWh fork: agent teams. The Team tab shows the selected session's team
     // or a team selected in the list; `?N` counts questions in member sessions.
     m_teams=new TeamController(new HgsClient(hgsPath,this),this);
@@ -1505,8 +1564,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         showNotice(tr("%1 is not listed; open it to send the reminder").arg(name),true);
     };
     m_teamPanel->answersChanged=[this](int answers){
-        const int index=m_inspector->indexOf(m_teamPanel);
-        if(index>=0)m_inspector->setTabText(index,answers?tr("Team ?%1").arg(answers):tr("Team"));
+        m_inspector->setProperty("teamAnswers",answers);updateEnvironmentCard();
     };
     m_teamPanel->setLive([this](const Teams::Member &member){return teamLive(member);});
     // F7: sessions a Done/Stopped team left running are stopped here, after the
@@ -1528,12 +1586,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     m_collapsedTeams=[]{const auto list=QSettings().value("workspace/collapsedTeams").toStringList();return QSet<QString>(list.cbegin(),list.cend());}();
     connect(m_sessions,&SessionList::teamActivated,this,&SessionsWindow::showTeam);
-    m_inspector->addTab(m_teamPanel, tr("Team"));
+    m_teamPanel->setEmbedded(true);m_inspector->body(InspectorCards::Team)->addWidget(m_teamPanel);
     // The team workspace: the Team tab next to Activity, shown while a team is.
     m_teamWorkspace=new TeamWorkspace(m_teams,m_teamPanel,this);
     m_teamWorkspace->openSession=m_teamPanel->openSession;
     m_teamWorkspace->sendMessage=m_teamPanel->sendMessage;
-    m_teamWorkspace->openTeamTab=[this]{setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
+    m_teamWorkspace->openTeamTab=[this]{openInspectorCard(InspectorCards::Team);};
     m_teamWorkspace->setLive([this](const Teams::Member &member){return teamLive(member);});
     // U25 (spec 3): the team's status and actions live in the lead session's
     // header; the Team tab has no name bar of its own.
@@ -1561,8 +1619,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         for(const auto &token:changes.cleared)emit teamAttentionCleared(token);
         for(const auto &notice:changes.raised)emit teamAttentionRaised(notice.token,notice.title,notice.body);
     });
-    connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
+    // In the scrolling column the two text views are as tall as their text.
+    for(auto *text:{m_children,m_info}){
+        text->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);text->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        text->setFrameShape(QFrame::NoFrame);text->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Fixed);
+        connect(text->document()->documentLayout(),&QAbstractTextDocumentLayout::documentSizeChanged,text,[text](const QSizeF &size){
+            const int height=qMax(0,qCeil(size.height())+text->frameWidth()*2);
+            if(text->height()!=height)text->setFixedHeight(height);});
+    }
+    connect(m_sessions,&SessionList::gitActivated,this,[this](const QString &key){
+        Q_UNUSED(key);openInspectorCard(InspectorCards::Changes);});
     m_workSplitter->addWidget(m_inspectorPanel);
     m_workSplitter->setStretchFactor(0, 1); m_workSplitter->setStretchFactor(1, 0);
     m_inspectorToggle = new QPushButton; m_inspectorToggle->setObjectName("toggleInspector");
@@ -1571,11 +1638,9 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show tasks, agents, details and worktrees"), m_dark);
     tabs->setCornerWidget(m_inspectorToggle);
     connect(m_inspectorToggle, &QPushButton::toggled, this, &SessionsWindow::setInspectorVisible);
-    connect(m_inspector, &QTabWidget::currentChanged, this, [](int index) { QSettings().setValue("workspace/inspectorTab", index); });
     connect(m_workSplitter, &QSplitter::splitterMoved, this, [this] {
         if (!m_inspectorPanel->isHidden()) { m_inspectorWidth = m_inspectorPanel->width(); QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth); }
     });
-    m_inspector->setCurrentIndex(qBound(0, settings.value("workspace/inspectorTab", 0).toInt(), m_inspector->count() - 1));
     m_inspectorWidth = qBound(240, settings.value("workspace/inspectorWidth", 290).toInt(), 600);
     m_inspectorPanel->hide();
     if (settings.value("workspace/inspectorVisible", false).toBool())
@@ -1708,6 +1773,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // WhiteWh fork: Settings > Teams, the team catalog.
     m_teamCatalog=new TeamCatalogEditor(m_teams);m_teamCatalog->askDesigner=[this]{showTeamDesigner();};m_teamCatalog->setDesignerButton(true);
     m_teamCatalog->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
+    // U25: Prompt order shows the selected session's project rules.
+    m_teamCatalog->projectRules=[this]{return teamProjectRules();};
     m_teamSettingsSection=m_settingsPage->addSection(tr("Teams"),m_teamCatalog);
     connect(m_swarm,&SwarmController::snapshotChanged,this,[this](const QJsonObject &snapshot){m_settingsPage->setSwarmSnapshot(snapshot);});
     m_settingsPage->pollingChanged=[this]{
@@ -2268,10 +2335,7 @@ void SessionsWindow::applyTheme()
         QPushButton#updatesAvailable:hover, QPushButton#restartToUpdate:hover { background:%7; }
         QLabel#notice[error="true"] { color:%12; }
         QSplitter::handle { background:transparent; width:8px; }
-        QFrame#sessionInspectorPanel { background:%11; border:1px solid %4; border-radius:8px; }
-        QTabWidget#sessionInspector::pane { border:0; border-top:1px solid %4; }
-        QTabWidget#sessionInspector QTabBar::tab { font-size:12px; padding:8px 7px; }
-        QTabWidget#sessionInspector QTextBrowser { padding:10px 2px 0; }
+        QFrame#sessionInspectorPanel { background:transparent; border:0; }
     )").arg(bg, m_fg, m_surface, m_border, m_accent, m_muted, hover,
               colors.accentText, colors.accentHover, selected,
               colors.inset, tone("Error", m_dark).name()) + workspaceScrollbars(m_dark) + skin.stylesheet);
@@ -2293,6 +2357,13 @@ void SessionsWindow::applyTheme()
     m_usageWarning->setStyleSheet(QString("QLabel{color:%1;}").arg(m_dark?"#ffabab":"#a42330"));
     m_usageRefresh->setTheme(m_dark);
     m_contextUsage->setTheme(m_dark);m_subagentContextUsage->setTheme(m_dark);
+    // U25 part 6: the inspector cards and their row icons follow the skin.
+    if(m_inspector){
+        m_inspector->setDark(m_dark);
+        const auto muted=WorkspaceSkin::color(WorkspaceSkin::active(),m_dark,QStringLiteral("muted"));
+        for(auto *icon:m_inspector->findChildren<QLabel *>("inspectorEnvIcon"))icon->setPixmap(workspaceIcon(icon->property("glyph").toString(),muted).pixmap(14,14));
+        updateContextCard();updateChangesCard();
+    }
     m_cacheStatus->setTheme(m_dark);
     m_cacheWarning->setStyleSheet(QString("QLabel{color:%1;font-size:12px;}").arg(m_dark?"#efbd78":"#91621a"));
     m_cacheDetail->setStyleSheet(QString("QLabel{color:%1;font-size:11px;}").arg(m_muted));
@@ -2469,7 +2540,7 @@ void SessionsWindow::applySessionStrip()
 void SessionsWindow::updateInspectorMinimum()
 {
     if(!m_inspectorPanel || !m_inspectorToggle || !m_splitter)return;
-    const int header=qMax(240,m_inspector->tabBar()->sizeHint().width()+m_inspectorToggle->sizeHint().width()+32);
+    const int header=240;
     if(m_inspectorPanel->minimumWidth()!=header)m_inspectorPanel->setMinimumWidth(header);
     int minimum=840;
     if(!m_inspectorPanel->isHidden() && m_pages && m_pages->currentIndex()==0) {
@@ -2493,12 +2564,8 @@ void SessionsWindow::setInspectorVisible(bool visible)
     // One control follows the right edge, rather than offering two hide actions.
     const bool restoreFocus = m_inspectorToggle->hasFocus();
     const bool keyboardFocus = m_inspectorToggle->property("keyboardFocus").toBool();
-    auto *oldHeader = visible ? m_detailTabs : m_inspector;
-    auto *newHeader = visible ? m_inspector : m_detailTabs;
-    if (newHeader->cornerWidget() != m_inspectorToggle) {
-        oldHeader->setCornerWidget(nullptr);
-        newHeader->setCornerWidget(m_inspectorToggle);
-    }
+    // The cards have no tab bar: the toggle stays in the session's tab corner.
+    if (m_detailTabs->cornerWidget() != m_inspectorToggle) m_detailTabs->setCornerWidget(m_inspectorToggle);
     m_inspectorPanel->setVisible(visible);
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
     m_inspectorToggle->setProperty("glyph", visible ? "collapse-panel" : "inspector");
@@ -2508,9 +2575,7 @@ void SessionsWindow::setInspectorVisible(bool visible)
     m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
     if (visible) {
-        // QTabWidget's own minimum width can ignore its full header in document
-        // mode. Give the splitter an explicit minimum including the corner button.
-        m_inspectorPanel->setMinimumWidth(qMax(240,m_inspector->tabBar()->sizeHint().width()+m_inspectorToggle->sizeHint().width()+32));
+        m_inspectorPanel->setMinimumWidth(240);
         const int available = m_workSplitter->width() - m_workSplitter->handleWidth();
         const int side = qBound(240, m_inspectorWidth, qMax(240, available - 280));
         m_workSplitter->setSizes({qMax(280, available - side), side});
@@ -4262,7 +4327,7 @@ void SessionsWindow::renderDetails()
     const bool reported=entry && entry->online;
     explainContextAction(m_cacheClear,reported?contextActionReason(m_details,"clear"):QString());
     const bool mainContext=m_subagentId.isEmpty();
-    m_detailsClear->setVisible(mainContext);m_detailsContext->setVisible(mainContext);
+    m_detailsClear->setVisible(mainContext);
     const bool canClear=mainContext && entry && entry->online && entry->session.state!="archived"
         && !m_clearRequest && !m_composer->isSending(m_selectedKey) && m_inspectError.isEmpty() && clearableContext(m_details);
     m_detailsClear->setEnabled(canClear);
@@ -4274,8 +4339,9 @@ void SessionsWindow::renderDetails()
      const int hours=warmable?CacheKeepalive::hours(entry->host,entry->session):0;
      const QSignalBlocker checkbox(m_keepWarm),slider(m_keepWarmHours);
      m_keepWarm->setChecked(hours>0);m_keepWarmHours->setValue(hours>0?hours:m_keepWarmHours->value());
-     m_keepWarmLimit->setText(tr("up to %n h",nullptr,m_keepWarmHours->value()));
-     m_keepWarm->setEnabled(warmable);m_keepWarmHours->setEnabled(warmable && hours>0);}
+     m_keepWarmLimit->setText(tr("%n h",nullptr,m_keepWarmHours->value()));
+     m_keepWarm->setEnabled(warmable);m_keepWarmHours->setEnabled(warmable && hours>0);
+     m_keepWarmHours->setVisible(hours>0);m_keepWarmLimit->setVisible(hours>0);}
     // A live agent clears natively; a stopped one starts fresh instead.
     const bool stopped=entry && (entry->session.state=="paused" || entry->session.state=="stopped");
     m_clear->setVisible(mainContext && !stopped && !(entry && entry->session.state=="archived"));m_clear->setEnabled(canClear);
@@ -4612,6 +4678,10 @@ void SessionsWindow::renderDetails()
         }
         if (list.value("truncated").toBool()) children += QString("<p style='color:%1'>%2</p>").arg(m_muted, tr("Showing the first 100 tasks."));
     }
+    // U25 part 6: the Tasks card's "N of M completed" for the main agent's list.
+    {const auto main = taskLists.value(taskOwners.isEmpty() ? QString() : taskOwners.first()).toObject().value("items").toArray();
+     int doneMain = 0; for (const auto &value : main) if (value.toObject().value("status").toString() == "completed") ++doneMain;
+     m_inspector->setValue(InspectorCards::Tasks, main.isEmpty() ? QString() : tr("%1 of %2 completed").arg(doneMain).arg(main.size()));}
     children += QString("<h3>%1 <span style='color:%2;font-weight:normal'>%3</span></h3>")
         .arg(source == "hook_profiles" ? tr("Profile groups") : tr("Subagents"), m_muted,
             currentChildren ? childCount(s, true) : tr("Last recorded"));
@@ -4693,16 +4763,16 @@ void SessionsWindow::renderDetails()
     m_copySessionId->setEnabled(!identity.isEmpty());
     m_copySessionId->setToolTip(copyCaption); m_copySessionId->setAccessibleName(copyCaption);
     m_copyHeaderId->setEnabled(!identity.isEmpty()); m_copyHeaderId->setToolTip(copyCaption); m_copyHeaderId->setAccessibleName(copyCaption);
-    QString info = QString("<h3>Session</h3><p>%1</p><h3>Directory</h3><p>%2</p><h3>Last recorded event</h3><p>%3</p><h3>History</h3><p>Activity stays on %4. Closing this window does not stop your agent.</p>")
-        .arg(htmlText(s.name),
-             htmlText(s.cwd.isEmpty() ? tr("Not reported") : s.cwd),
-             m_details.value("last_event_at").toDouble() ? QDateTime::fromSecsSinceEpoch(qint64(m_details.value("last_event_at").toDouble())).toLocalTime().toString("ddd, d MMM HH:mm:ss") : tr("No events yet"), htmlText(entry->machine));
-    if (!m_model->text().isEmpty()) info += QString("<h3>Model</h3><p>%1</p>").arg(htmlText(m_model->text()));
-    if (!s.gitRoot.isEmpty()) info += QString("<h3>Git</h3><p>%1<br>%2</p>").arg(htmlText(projectContext(s)), htmlText(s.gitRoot));
+    // U25 part 6: the Environment card shows the session, folder, branch,
+    // model and last event; this keeps the usage it reports.
+    QString info;
+    updateEnvironmentCard();
     if (!m_subagentId.isEmpty()) info = QString("<h3>%1</h3><p>%2</p><h3>%3</h3><p>%4</p><h3>%5</h3><p>%6</p>")
         .arg(tr("Subagent"), htmlText(m_subagentId), tr("Parent session"), htmlText(s.name), tr("Directory"), htmlText(m_subagentCwd));
     info += SessionUsage::html((m_subagentId.isEmpty() ? m_details : m_subagentDetails).value("session_usage").toObject(), m_muted, !m_subagentId.isEmpty());
     const QStringList infoContext{entry->key, m_details.value("conversation_id").toString(s.conversationId), m_subagentId};
+    // Another session or conversation starts the inspector at its top.
+    if (m_info->property("context").toStringList() != infoContext) m_inspector->verticalScrollBar()->setValue(0);
     auto previousInfo = m_info->property("inspectorHtml").toString();
     updateBrowser(m_info, foldInspectorSections(info), previousInfo, m_info->property("context").toStringList() == infoContext);
     m_info->setProperty("inspectorHtml", previousInfo); m_info->setProperty("context", infoContext);
@@ -4781,6 +4851,15 @@ void SessionsWindow::sendReportToLead()
     const QString host = lead->host, name = lead->session.name, key = lead->key;
     showSession(host, name);
     if (!m_composer->offerDraft(key, text)) showNotice(tr("The lead already has a draft. The report was not added."), true);
+}
+
+// U25: the selected session's project rules, numbered, for the catalog's
+// Prompt order.
+QString SessionsWindow::teamProjectRules() const
+{
+    const auto rules=IronRules::rules(projectOfKey(m_selectedKey));
+    QStringList lines;for(int i=0;i<rules.size();++i)lines<<QStringLiteral("%1. %2").arg(i+1).arg(rules[i]);
+    return lines.join(QLatin1Char('\n'));
 }
 
 QString SessionsWindow::projectOfKey(const QString &key) const
@@ -6591,12 +6670,148 @@ void SessionsWindow::showEvent(QShowEvent *event)
     if (m_framelessMain) FramelessWindow::apply(this); rebuild(); if (m_dashboardStale) updateDashboard();
     m_timer.start(); m_readTimer.start(); emit refreshRequested(); inspect();
 }
+// U25 part 6 (spec 6): links from outside (Open team panel, N iron rules,
+// the git chips, the context and cache indicators) open the inspector and
+// unfold the card they name.
+void SessionsWindow::openInspectorCard(int card)
+{
+    if (!m_inspector) return;
+    setInspectorVisible(true);
+    m_inspector->open(InspectorCards::Card(card));
+}
+
+void SessionsWindow::updateEnvironmentCard()
+{
+    if (!m_inspector) return;
+    const auto *entry = selected();
+    const auto set = [this](const char *row, const QString &text) { if (auto *value = m_environment.value(QString::fromLatin1(row))) value->setValue(text); };
+    // The Team card: the team's status and its open questions on the header.
+    QString teamValue;
+    if (entry && m_teams) if (const auto *team = m_teams->teamOfSession(entry->host, entry->session.name)) {
+        teamValue = team->status.isEmpty() ? QString() : team->status.left(1).toUpper() + team->status.mid(1);
+        const int answers = m_inspector->property("teamAnswers").toInt();
+        if (answers > 0) teamValue += tr(" · ?%1").arg(answers);
+    }
+    m_inspector->setValue(InspectorCards::Team, teamValue);
+    if (!entry) {
+        for (auto *value : m_environment) value->setValue(QString());
+        updateContextCard(); updateChangesCard(); return;
+    }
+    const auto &s = entry->session;
+    set("machine", entry->machine + (entry->host.isEmpty() ? tr(" · this computer") : QString()));
+    if (auto *key = m_inspector->body(InspectorCards::Environment)->parentWidget()->findChild<QLabel *>("inspectorEnvKey"))
+        key->setText(entry->online ? tr("machine") : tr("offline"));
+    const auto cwd = m_subagentId.isEmpty() ? m_details.value("cwd").toString(s.cwd) : m_subagentCwd;
+    const auto groupId = m_organization.groupFor(entry->identity);
+    const auto *group = m_organization.group(groupId);
+    const QString project = group ? group->name : QString();
+    set("folder", cwd.isEmpty() ? tr("Not reported") : (project.isEmpty() ? cwd : project + QStringLiteral(" · ") + cwd));
+    const auto git = m_client.gitStatusSnapshot(entry->host, cwd);
+    const QString branch = git.value("branch").toString();
+    set("branch", !branch.isEmpty() ? branch : !s.gitRoot.isEmpty() ? projectContext(s) : tr("No Git branch"));
+    set("model", m_model->text().isEmpty() ? tr("Not reported") : m_providerBadge->text().isEmpty() ? m_model->text()
+                                                                  : m_providerBadge->text() + QStringLiteral(" · ") + m_model->text());
+    const double at = m_details.value("last_event_at").toDouble();
+    set("last event", at > 0 ? QDateTime::fromSecsSinceEpoch(qint64(at)).toLocalTime().toString("d MMM HH:mm") : tr("No events yet"));
+    if (!cwd.isEmpty()) m_client.requestGitStatus(entry->host, cwd);
+    updateContextCard(); updateChangesCard();
+}
+
+void SessionsWindow::updateContextCard()
+{
+    if (!m_contextUsed) return;
+    const auto *entry = selected();
+    const auto usage = (m_subagentId.isEmpty() ? m_details : m_subagentDetails).value("session_usage").toObject().value("context").toObject();
+    const bool known = entry && usage.value("used").isDouble();
+    const double used = usage.value("used").toDouble(), limit = usage.value("limit").toDouble();
+    const auto compact = [](double n) { return n >= 1000 ? QString::number(qRound(n / 1000.0)) + QStringLiteral("k") : QString::number(qRound(n)); };
+    const auto &skin = WorkspaceSkin::active();
+    const auto token = [&skin, this](const char *name) { return WorkspaceSkin::color(skin, m_dark, QString::fromLatin1(name)); };
+    if (!known) {
+        m_contextUsed->setText(tr("Context not reported"));
+        m_contextTokens->clear(); m_contextLeft->clear();
+        m_contextBar->setParts({}, token("border"));
+        m_inspector->setValue(InspectorCards::Context, QString());
+    } else {
+        const bool capacity = limit > 0;
+        const int percent = capacity ? qRound(100.0 * used / limit) : -1;
+        m_contextUsed->setText(capacity ? tr("%1% used").arg(percent) : tr("%1 used").arg(compact(used)));
+        m_contextTokens->setText(capacity ? QStringLiteral("%1 / %2").arg(compact(used), compact(limit)) : compact(used));
+        m_contextLeft->setText(capacity ? tr("%1 left in the window").arg(compact(qMax(0.0, limit - used))) : QString());
+        m_contextBar->setParts(capacity ? QVector<ContextBar::Part>{{used / limit, token("accent")}} : QVector<ContextBar::Part>{}, token("border"));
+        m_inspector->setValue(InspectorCards::Context, capacity ? QStringLiteral("%1%").arg(percent) : QString(), true);
+    }
+    // The category rows only when an agent reports them (none does today).
+    const auto categories = usage.value("categories").toArray();
+    auto *rows = m_contextRows->layout();
+    while (auto *item = rows->takeAt(0)) { delete item->widget(); delete item; }
+    m_contextRows->setVisible(!categories.isEmpty());
+}
+
+void SessionsWindow::updateChangesCard()
+{
+    if (!m_changesList) return;
+    const auto *entry = selected();
+    auto *list = m_changesList->layout();
+    while (auto *item = list->takeAt(0)) { delete item->widget(); delete item; }
+    const auto cwd = entry ? m_details.value("cwd").toString(entry->session.cwd) : QString();
+    const auto git = entry ? m_client.gitStatusSnapshot(entry->host, cwd) : QJsonObject();
+    const auto changes = git.value("changes").toObject();
+    const bool known = git.value("state").toString() == "ok";
+    const auto &skin = WorkspaceSkin::active();
+    const auto token = [&skin, this](const char *name) { return WorkspaceSkin::color(skin, m_dark, QString::fromLatin1(name)).name(); };
+    for (const auto &value : changes.value("files").toArray()) {
+        const auto file = value.toObject();
+        auto *row = new QWidget; row->setObjectName("inspectorChangeRow");
+        auto *h = new QHBoxLayout(row); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(6);
+        auto *path = new InspectorValue(Qt::ElideMiddle); path->setObjectName("inspectorChangePath"); path->setValue(file.value("path").toString());
+        auto *added = new QLabel(file.value("untracked").toBool() ? tr("new") : file.value("added").isDouble() ? QStringLiteral("+%1").arg(file.value("added").toInt()) : QStringLiteral("bin"));
+        auto *deleted = new QLabel(file.value("deleted").isDouble() ? QStringLiteral("−%1").arg(file.value("deleted").toInt()) : QString());
+        added->setObjectName("inspectorChangeAdded"); deleted->setObjectName("inspectorChangeDeleted");
+        added->setStyleSheet(QStringLiteral("color:%1;").arg(token("accent"))); deleted->setStyleSheet(QStringLiteral("color:%1;").arg(token("danger")));
+        h->addWidget(path, 1); h->addWidget(added); h->addWidget(deleted);
+        list->addWidget(row);
+    }
+    if (changes.value("truncated").toBool()) {
+        const int total = changes.value("tracked_files").toInt() + changes.value("untracked_files").toInt();
+        list->addWidget(new QLabel(tr("%1 more files").arg(total - changes.value("files").toArray().size())));
+    }
+    const bool clean = known && git.value("changed_files").toInt() == 0;
+    m_changesEmpty->setText(!entry ? QString() : clean ? tr("Working tree is clean.") : known ? QString() : tr("Git status not reported for this folder."));
+    m_changesEmpty->setVisible(!m_changesEmpty->text().isEmpty());
+    m_commitChanges->setEnabled(entry && !clean && known && m_subagentId.isEmpty());
+    m_openDiff->setEnabled(entry && !clean && known);
+    m_inspector->setValue(InspectorCards::Changes, changes.isEmpty() ? QString()
+        : QStringLiteral("+%1 −%2").arg(changes.value("added").toInt()).arg(changes.value("deleted").toInt()));
+}
+
+void SessionsWindow::showDiff(const QJsonObject &data, const QString &error)
+{
+    if (!error.isEmpty() || data.value("state").toString() != "ok") {
+        showNotice(data.value("state") == "too_large" ? tr("The diff is larger than 1 MiB; open it in Terminal.")
+                                                      : tr("The diff could not be read: %1").arg(error.isEmpty() ? data.value("state").toString() : error), true);
+        return;
+    }
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName("inspectorDiffDialog");
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Diff · %1").arg(data.value("path").toString()));
+    dialog->resize(820, 600);
+    auto *v = new QVBoxLayout(dialog);
+    auto *text = new QPlainTextEdit(data.value("diff").toString());
+    text->setObjectName("inspectorDiffText"); text->setReadOnly(true); text->setLineWrapMode(QPlainTextEdit::NoWrap);
+    text->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    v->addWidget(text, 1);
+    if (data.value("truncated").toBool())
+        v->addWidget(new QLabel(tr("Showing the first 256 KiB of %1 KiB.").arg(data.value("bytes").toInt() / 1024)));
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    v->addWidget(buttons);
+    dialog->show();
+}
+
 bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    if(m_inspector && watched==m_inspector->tabBar()
-        && (event->type()==QEvent::FontChange || event->type()==QEvent::StyleChange || event->type()==QEvent::LayoutRequest || event->type()==QEvent::Resize)) {
-        QTimer::singleShot(0,this,&SessionsWindow::updateInspectorMinimum);
-    }
 
     if (m_children && watched == m_children->viewport() && event->type() == QEvent::Resize)
         QTimer::singleShot(0, this, &SessionsWindow::renderDetails);
@@ -6643,7 +6858,9 @@ void SessionsWindow::updateWorktrees()
     const auto *entry=selected();
     m_worktrees->setContext(entry?entry->host:QString(),entry?(m_subagentId.isEmpty()?m_details.value("cwd").toString(entry->session.cwd):m_subagentCwd):QString(),m_fleet);
     // WhiteWh fork: SocratiCode is an optional extension; off, its panel has no folder and hides.
-    if(m_socratiCode){const bool on=entry&&Extensions::enabled(QStringLiteral("socraticode"));m_socratiCode->setContext(on?entry->host:QString(),on?m_details.value("cwd").toString(entry->session.cwd):QString());}
+    if(m_socratiCode){const bool on=entry&&Extensions::enabled(QStringLiteral("socraticode"));m_socratiCode->setContext(on?entry->host:QString(),on?m_details.value("cwd").toString(entry->session.cwd):QString());
+        // The SocratiCode card exists only while the extension is on.
+        m_inspector->card(InspectorCards::SocratiCode)->setVisible(Extensions::enabled(QStringLiteral("socraticode")));}
     if(m_ironRules){
         const auto project=entry?m_organization.groupFor(entry->identity):QString();
         const auto *group=m_organization.group(project);
@@ -6854,8 +7071,7 @@ void SessionsWindow::showTeam(const QString &team)
 {
     m_selectedTeam=team;
     if(!m_teamPanel)return;
-    setInspectorVisible(true);
-    m_inspector->setCurrentWidget(m_teamPanel);
+    openInspectorCard(InspectorCards::Team);
     updateTeamPanel();
 }
 void SessionsWindow::filterFolder(const QString &host,const QString &path,bool checkout)
@@ -6887,8 +7103,9 @@ void SessionsWindow::showTeamDesigner()
         m_teamDesignerPage->designerSession=[this]{return teamDesignerSession();};
         m_teamDesignerPage->designerLive=[this]{Teams::Member member;member.session=teamDesignerSession();return teamLive(member);};
         m_teamDesignerPage->startDesigner=[this](const QString &folder,const QString &goal,const QJsonObject &agent){startTeamDesigner(folder,goal,agent);};
-        m_teamDesignerPage->openDesigner=[this](const QString &name){showSession({},name);setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
+        m_teamDesignerPage->openDesigner=[this](const QString &name){showSession({},name);openInspectorCard(InspectorCards::Team);};
         m_teamDesignerPage->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
+        m_teamDesignerPage->editor()->projectRules=[this]{return teamProjectRules();};
         m_teamDesignerPageIndex=m_pages->addWidget(m_teamDesignerPage);
     }
     // The designer follows the project of the session selected when the mode opens.
@@ -6906,7 +7123,7 @@ void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal
     QJsonObject input=agent;input.insert("folder",QDir::toNativeSeparators(folder));input.insert("goal",goal);
     m_teams->call(QStringLiteral("catalog designer"),input,
         [this](bool ok,const QJsonObject &result,const QString &error){
-            if(!ok){showNotice(tr("The Team designer did not start: %1").arg(error),true);if(m_teamDesignerPage)m_teamDesignerPage->refresh();return;}
+            if(!ok){showNotice(tr("The Team designer did not start: %1").arg(error),true);if(m_teamDesignerPage){m_teamDesignerPage->startFailed(error);m_teamDesignerPage->refresh();}return;}
             const auto name=result.value("name").toString();
             showNotice(tr("Team designer started%1").arg(name.isEmpty()?QString():QStringLiteral(": ")+name));
             // The page shows its conversation once the listing has it.

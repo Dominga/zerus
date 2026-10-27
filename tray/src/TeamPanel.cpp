@@ -89,6 +89,22 @@ void TeamPanel::setTheme(bool dark)
     scheduleRender();
 }
 
+void TeamPanel::setEmbedded(bool on)
+{
+    m_embedded = on;
+    m_scroll->setVerticalScrollBarPolicy(on ? Qt::ScrollBarAlwaysOff : Qt::ScrollBarAsNeeded);
+    fitEmbedded();
+}
+
+void TeamPanel::fitEmbedded()
+{
+    if (!m_embedded || !m_content) return;
+    const int width = m_scroll->viewport()->width();
+    auto *layout = m_content->layout();
+    const int height = layout && layout->hasHeightForWidth() ? layout->totalHeightForWidth(width) : m_content->sizeHint().height();
+    if (m_scroll->height() != height) m_scroll->setFixedHeight(qMax(0, height));
+}
+
 void TeamPanel::showDesigner(bool on)
 {
     if (m_designerShown == on) return;
@@ -125,6 +141,7 @@ void TeamPanel::resizeEvent(QResizeEvent *event)
     // The graph needs 400px; below that the list by layer replaces it.
     static const int threshold = 400;
     if (m_content && (m_content->property("narrow").toBool() != (width() < threshold))) scheduleRender();
+    fitEmbedded();
 }
 
 bool TeamPanel::confirm(const QString &name, const QString &title, const QString &text, const QString &action)
@@ -356,6 +373,7 @@ void TeamPanel::render()
     m_scroll->setWidget(content);
     m_content = content;
     m_scroll->verticalScrollBar()->setValue(scroll);
+    if (m_embedded) { fitEmbedded(); QTimer::singleShot(0, this, [this] { fitEmbedded(); }); }
     // While planning, the plan's actions stay pinned below the content.
     if (m_footer) { retire(m_footer); m_footer = nullptr; }
     if (team && team->status == "planning" && !m_openTask) { m_footer = planFooter(*team); m_outer->addWidget(m_footer); }

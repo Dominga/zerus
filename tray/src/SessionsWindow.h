@@ -24,6 +24,8 @@ class QPlainTextEdit;
 #include "SessionOrganization.h"
 #include "SessionRowPreferences.h"
 #include "SessionAccounts.h"
+#include "SessionRows.h"
+#include <QFont>
 
 class QAction;
 class QLabel;
@@ -95,7 +97,78 @@ public:
     void setDetailsPollForTests(int tickMs, int activityMs) { m_timer.setInterval(tickMs); m_activityPollMs = activityMs; }
     void setPushTimeoutForTests(int ms) { m_pushTimeout = ms; if (m_push) m_push->deadline.setRemainingTime(ms); }
 
+    // Sessions rows are prepared off the GUI thread (spec "Model preparation off
+    // the GUI thread"). rebuild() reconciles the window's own state on the GUI
+    // thread, copies what the rows read into RowInputs, and prepareRows() turns
+    // that copy into PreparedRows on the shared preparation thread
+    // (ProcessRunner::post). Only the newest preparation is applied, and only
+    // rows whose digest changed are written to the list.
+    using Entry = SessionRows::Entry;
+    struct RowInputs {
+        quint64 generation = 0;
+        QList<Entry> entries;   // listed sessions, sorted, with organization identities
+        FleetState fleet;
+        SessionOrganization organization;
+        SessionRowPreferences rowPreferences;
+        SessionRows::Selection selection;
+        QString readSelectionKey, creationSessionToSelect, revealCreation;
+        // Keys with an unsent draft in the message and subagent composers.
+        QSet<QString> drafts, childDrafts, expanded;
+        QString filter;
+        QSet<QString> hostFilters, projectFilters, accountFilters;
+        QString folderHost, folderPath;
+        bool folderCheckout = false;
+        double archiveFrom = 0, archiveUntil = 0;   // the archive window shown
+        QJsonObject pendingLaunches;
+        QSet<QString> ownedCreations;
+        bool includeCompleted = false, hideEmptyProjects = true;
+        QHash<QString, Entry> terminating;
+        QHash<QString, QJsonObject> gitStatus;      // host + '\n' + path
+        QHash<QString, QColor> machineColors;
+        QJsonArray accountProfiles, accountDetailsProfiles;
+        QFont tooltipFont;
+        int accessibleWidth = 420;
+        qint64 nowSecs = 0;
+    };
+    struct PreparedRow {
+        enum Kind { Header, Session, Child, Launch };
+        Kind kind = Session;
+        QString key, parentKey, child, launch;
+        Qt::ItemFlags flags;
+        bool hidden = false;
+        // Every role the row's item holds; any other row role is cleared.
+        QMap<int, QVariant> roles;
+        QByteArray digest;   // of key, flags, hidden and roles
+    };
+    struct PreparedRows {
+        quint64 generation = 0;
+        QList<PreparedRow> rows;
+        bool uniqueKeys = true;
+        int firstSession = -1, firstVisible = -1;
+        QMap<QString, int> counts;   // by state filter
+        QMap<QString, int> machineCounts, projectCounts, accountCounts;
+        QSet<QString> projectKeys, drafts;
+        QJsonObject creationScope;
+        QList<SessionAccounts::Account> accounts;
+        QList<std::pair<QString, QString>> gitReads;
+        int unreadReplies = 0;
+        QString countText, countShort;
+    };
+    // Reads only its argument: callable on any thread.
+    static PreparedRows prepareRows(const RowInputs &inputs);
+    // Tests: Blocking prepares on the preparation thread while the GUI thread
+    // waits, so rows are current when rebuild() returns, as suites expect.
+    enum class RowPreparation { Async, Blocking };
+    static void setRowPreparationForTests(RowPreparation mode);
+    RowInputs rowInputsForTests() const { return rowInputs(); }
+    quint64 rowGenerationForTests() const { return m_rowGeneration; }
+    bool rowsPendingForTests() const { return m_rowsPending || m_rowRequestQueued; }
+    int droppedRowPreparationsForTests() const { return m_droppedRowPreparations; }
+
 signals:
+    // Prepared rows of this generation were written to the list.
+    void rowsApplied(quint64 generation);
+
     void replyViewed(const QString &host, const QString &name, const QString &conversation, const QString &reply);
     void repliesMarkedRead(const QJsonObject &replies);
     void attentionMarksChanged(const QJsonObject &marks, const QJsonObject &readReplies);
@@ -123,7 +196,6 @@ protected:
 private:
     ArchiveBrowser *m_archiveBrowser = nullptr;
     QMap<QString,QList<SessionInfo>> m_archiveSearchRows;
-    struct Entry { QString host, machine, key, identity; SessionInfo session; bool online; };
     void applyTheme();
     void updateWindowPinAppearance();
     void applyContentScale();
@@ -155,9 +227,32 @@ private:
     void updateSessionLoading();
     void updateSessionFeedback();
     void rebuild();
-    // includeCompleted: the workspace/showCompletedSubagents setting, read once per rebuild.
-    QMap<int, QVariant> sessionCardRoles(const Entry &entry, bool includeCompleted) const;
-    QMap<int,QVariant> childCardRoles(const Entry &entry,const QString &id,const QJsonObject &child) const;
+    // The row preparation (SessionsWindowRows.cpp): the copy rebuild() takes, its
+    // request to the preparation thread, and writing the newest result.
+    RowInputs rowInputs() const;
+    void requestRows();
+    void postRows();
+    void applyRows(const PreparedRows &prepared);
+    void applyListRows(const PreparedRows &prepared);
+    static QMap<int, QVariant> sessionCardRoles(const Entry &entry, const RowInputs &inputs);
+    static QMap<int, QVariant> childCardRoles(const Entry &entry, const QString &id, const QJsonObject &child, const RowInputs &inputs);
+    // Selects (or only scrolls to) the row with this key now, and again when
+    // rows still being prepared are applied.
+    void revealRow(const QString &key, bool select);
+    void revealPendingRow();
+    SessionRows::Selection rowSelection() const { return {m_selectedKey, m_details, m_subagentId, m_subagentConversation}; }
+    static inline RowPreparation s_rowPreparation = RowPreparation::Async;
+    quint64 m_rowGeneration = 0;
+    bool m_rowsPending = false, m_rowRequestQueued = false;
+    int m_droppedRowPreparations = 0;
+    // One-time choices rebuild() made for the next applied rows: the row to
+    // select instead of the selected session, a placed creation, a fork whose
+    // terminal opens once it is selected, and a row to reveal.
+    std::optional<QString> m_rowSelection;
+    bool m_rowCreationPlaced = false;
+    QString m_forkTerminalKey;
+    struct PendingReveal { QString key; bool select = false; };
+    std::optional<PendingReveal> m_reveal;
     void selectSession();
     void inspect();
     // The DeepSeek native UI: its tab when the embedded plugin is available,
@@ -415,7 +510,6 @@ private:
     QPushButton *m_folderFilterClear=nullptr;
     WorktreePanel *m_worktrees=nullptr;
     QSet<QString> m_hostFilters, m_projectFilters, m_accountFilters;
-    SessionAccounts::Catalog m_sessionAccounts;
     QJsonArray m_sessionAccountProfiles;
     QJsonArray m_sessionAccountDetailsProfiles;
     QString selectedHostTarget() const;

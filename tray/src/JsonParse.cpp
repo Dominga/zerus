@@ -78,6 +78,11 @@ void reportUnprepared(const char *file, int line)
     if (onGuiThread()) violation(file, line, "JSON value not prepared for the GUI thread");
 }
 
+void reportGuiThreadPreparation(const char *what, const char *file, int line)
+{
+    if (onGuiThread()) violation(file, line, what);
+}
+
 int violations() { return s_violations; }
 
 void setViolationHandler(std::function<void(const char *, int)> handler)

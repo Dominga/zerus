@@ -333,6 +333,10 @@ public:
                                       Qt::QueuedConnection);
         }, Qt::QueuedConnection);
     }
+    void wait(const std::function<void()> &work)
+    {
+        QMetaObject::invokeMethod(m_preparer, [&work] { work(); }, Qt::BlockingQueuedConnection);
+    }
     void stop()
     {
         for (auto it = m_pending.begin(); it != m_pending.end(); ++it) QObject::disconnect(it->destroyed);
@@ -530,6 +534,13 @@ void postPrepared(QObject *owner, std::function<Prepared()> prepare, std::functi
 }
 
 bool isPreparationThread() { return QThread::currentThread() == s_preparationThread.load(); }
+
+void prepareAndWait(const std::function<void()> &work)
+{
+    auto *instance = isPreparationThread() ? nullptr : runner();
+    if (!instance) { work(); return; }
+    instance->wait(work);
+}
 
 #ifdef Q_OS_MACOS
 const char *launchBackend() { return "posix_spawn"; }

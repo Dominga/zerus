@@ -79,6 +79,9 @@ class TestNewSessionDialog : public QObject {
     }
 private slots:
     void initTestCase() {
+        // Workspace checks read Sessions rows right after an action: rows are prepared
+        // on the preparation thread while the GUI thread waits (SessionsWindow.h).
+        SessionsWindow::setRowPreparationForTests(SessionsWindow::RowPreparation::Blocking);
         QVERIFY(m_settings.isValid());QCoreApplication::setOrganizationName("hgs-tests");QCoreApplication::setApplicationName("new-session-dialog");
         QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,m_settings.path());
     }

@@ -19,16 +19,19 @@ inline Cache &cache() {
     return value;
 }
 inline void invalidate() { cache() = {}; }
+// A machine's color without a chosen one: pure, so usable on any thread.
+inline QColor paletteColor(const QString &machine) {
+    static const char *palette[]{"#5fbfa5", "#8ea9f4", "#c098e6", "#e7ae66", "#e38f9e", "#75bfcf", "#acc577"};
+    quint32 hash = 2166136261u;
+    for (const auto &byte : machine.toUtf8()) hash = (hash ^ quint8(byte)) * 16777619u;
+    return QColor(palette[((hash >> 16) ^ hash) % 7]);
+}
+// The GUI thread's cached color, chosen or from the palette.
 inline QColor color(const QString &machine) {
     auto &colors = cache().colors;
     if (const auto it = colors.constFind(machine); it != colors.cend()) return *it;
     QColor result(QSettings().value("machines/colors/" + machine).toString());
-    if (!result.isValid()) {
-        static const char *palette[]{"#5fbfa5", "#8ea9f4", "#c098e6", "#e7ae66", "#e38f9e", "#75bfcf", "#acc577"};
-        quint32 hash = 2166136261u;
-        for (const auto &byte : machine.toUtf8()) hash = (hash ^ quint8(byte)) * 16777619u;
-        result = QColor(palette[((hash >> 16) ^ hash) % 7]);
-    }
+    if (!result.isValid()) result = paletteColor(machine);
     colors.insert(machine, result);
     return result;
 }

@@ -40,6 +40,11 @@ bool onGuiThread();
 // did not: counted, logged and fatal like a parse (SettingsJson.h).
 void reportUnprepared(const char *file, int line);
 
+// Other preparation that belongs off the GUI thread, such as the Sessions rows
+// (SessionsWindow::prepareRows), reports a call there the same way: counted,
+// logged and fatal with ZERUS_GUI_THREAD_CHECKS=fatal.
+void reportGuiThreadPreparation(const char *what, const char *file = __builtin_FILE(), int line = __builtin_LINE());
+
 // Tests: violations so far, and a handler that replaces logging and the fatal
 // check (an empty handler restores them).
 int violations();

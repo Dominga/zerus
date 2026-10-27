@@ -650,6 +650,14 @@ bool MessageComposer::hasDraft(const QString &key) const
     return !draft.sending && (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty());
 }
 
+QSet<QString> MessageComposer::draftKeys() const
+{
+    QSet<QString> keys;
+    for (auto it = m_drafts.cbegin(); it != m_drafts.cend(); ++it) if (hasDraft(it.key())) keys.insert(it.key());
+    for (const auto &key : m_storedDrafts) if (!m_drafts.contains(key) && hasDraft(key)) keys.insert(key);
+    return keys;
+}
+
 void MessageComposer::notifyDraft(const QString &key)
 {
     if (key.isEmpty() || hasDraft(key) == m_unsent.contains(key)) return;

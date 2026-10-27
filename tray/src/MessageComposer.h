@@ -102,6 +102,8 @@ public:
     bool isSending(const QString &key) const;
     // Text or attachments not yet sent; a message on its way does not count.
     bool hasDraft(const QString &key) const;
+    // Every key hasDraft() is true for, from memory: a copy rows are prepared from.
+    QSet<QString> draftKeys() const;
     bool addAttachment(const QString &name, const QString &mime, const QByteArray &data);
     bool canEditAttachments() const { return !m_recording && !m_sessionStatusBlocksInput && !m_key.isEmpty() && !isDraftLoading(m_key) && !isSending(m_key) && !isWaitingToSend(m_key); }
     bool canAttachFiles() const { return m_attachmentsAvailable && canEditAttachments(); }

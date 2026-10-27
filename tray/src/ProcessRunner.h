@@ -90,6 +90,11 @@ void post(QObject *owner, Prepare prepare, Apply apply)
         [apply = std::move(apply)](Prepared value) mutable { apply(std::move(*std::static_pointer_cast<Value>(value))); });
 }
 
+// Runs work on the preparation thread, after what is already queued there, and
+// waits for it. Only for callers that must have the value at once (test modes);
+// on the preparation thread itself, or after shutdown, work runs in place.
+void prepareAndWait(const std::function<void()> &work);
+
 // True on the shared preparation thread.
 bool isPreparationThread();
 

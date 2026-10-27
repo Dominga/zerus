@@ -515,8 +515,15 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
                 QString where = finding.file;
                 if (!where.isEmpty() && finding.line > 0) where += QStringLiteral(":%1").arg(finding.line);
                 if (!where.isEmpty()) rv->addWidget(label(where, fc.muted, 11));
-                if (!finding.state.isEmpty()) rv->addWidget(label(tr("state: %1%2").arg(finding.state,
+                if (!finding.state.isEmpty()) rv->addWidget(label(tr("state: %1%2%3").arg(finding.state,
+                    finding.phase > 0 ? tr(" · phase %1").arg(finding.phase) : QString(),
                     finding.note.isEmpty() ? QString() : tr(" — %1").arg(finding.note)), fc.muted, 11));
+                // N17: the owner's replan proposal stays with its finding.
+                if (!finding.proposal.isEmpty()) {
+                    auto *proposal = label(tr("Proposal: %1").arg(finding.proposal), fc.text2, 11, false, "teamFindingProposal");
+                    proposal->setWordWrap(true);
+                    rv->addWidget(proposal);
+                }
                 auto *actions = new QHBoxLayout; actions->setContentsMargins(0, 2, 0, 0); actions->setSpacing(6);
                 // D2: the finding actions; each needs a confirmation.
                 const QList<QPair<QString, QString>> choices{
@@ -528,10 +535,21 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
                     action->setObjectName(QStringLiteral("teamFindingAction_%1").arg(choice.first));
                     action->setFlat(true);
                     QObject::connect(action, &QPushButton::clicked, this, [this, finding, choice] {
-                        if (!m_panel->confirm("teamFindingActionConfirm", choice.second,
-                                              tr("%1 finding \"%2\"?").arg(choice.second, finding.title), choice.second))
-                            return;
                         QJsonObject input{{"finding", finding.id}, {"action", choice.first}, {"note", QString()}};
+                        if (choice.first == "replan") {
+                            // N17 (spec 8): a replan carries the owner's proposal; the
+                            // team pauses until the owner resumes it.
+                            bool given = false;
+                            TeamPanel::RenderHold hold(m_panel);
+                            const QString proposal = QInputDialog::getMultiLineText(
+                                this, tr("Replan"), tr("What should the lead change in the plan for \"%1\"? The team pauses until you resume it.").arg(finding.title),
+                                QString(), &given).trimmed();
+                            if (!given || proposal.isEmpty()) return;
+                            input["proposal"] = proposal;
+                        } else if (!m_panel->confirm("teamFindingActionConfirm", choice.second,
+                                                     tr("%1 finding \"%2\"?").arg(choice.second, finding.title), choice.second)) {
+                            return;
+                        }
                         bool ok = false;
                         if (finding.task.toInt(&ok) && ok) input["task"] = finding.task.toInt();
                         m_teams->act("finding", input);
@@ -733,9 +751,18 @@ bool TeamWorkspace::approvePhase(const QString &id, int phase)
     if (!team || m_phaseAct || phaseDecided(*team, phase)) return false;
     int count = 0;
     for (const auto &group : phaseGroups(*team)) if (group.n == phase) count = group.tasks.size();
-    if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
-                          tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
-                          tr("Approve phase")))
+    // F12/N40: a draft approved while an earlier phase runs runs alongside it;
+    // the owner is warned of what that costs before anything is sent.
+    const int alongside = alongsidePhase(*team, phase);
+    if (alongside) {
+        if (!m_panel->confirm("teamApproveAlongsideConfirm", tr("Approve phase %1 now?").arg(phase),
+                              tr("If you approve phase %1 now, the lead can send members to its tasks while phase %2 still runs, "
+                                 "but can no longer edit this phase. Are you sure?").arg(phase).arg(alongside),
+                              tr("Approve now")))
+            return false;
+    } else if (!m_panel->confirm("teamApprovePhaseConfirm", tr("Approve phase?"),
+                                 tr("Hand phase %1's %2 tasks to the members?").arg(phase).arg(count),
+                                 tr("Approve phase")))
         return false;
     // The team may have been refreshed while the dialog was open: read it again.
     team = currentTeam(id);
@@ -1054,6 +1081,23 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     return area;
 }
 
+// U25 part 5 (owner, 2026-10-27): the small activity label a graph node, board
+// card and layers row carry right of the role chip and model tile: what happens
+// now. A problem text wins over it (the callers check that first); Pending,
+// Draft and Accepted say nothing - their icon and border say it.
+static QString activityLabel(const Teams::Task &task)
+{
+    if (task.status == QLatin1String("submitted")) return TeamWorkspace::tr("review");
+    if (task.status == QLatin1String("in_progress")) {
+        const int n = task.last() ? task.last()->n : 0;
+        if (n > 1) return TeamWorkspace::tr("attempt %1").arg(n);
+    }
+    if (task.held) return TeamWorkspace::tr("held");
+    if (task.subteam.known && !task.subteam.team.isEmpty())
+        return TeamWorkspace::tr("sub-team %1/%2").arg(task.subteam.done).arg(task.subteam.total);
+    return QString();
+}
+
 void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int> &order, const QSet<int> &phase)
 {
     const Colors c = colorsFor(m_dark);
@@ -1092,6 +1136,8 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         const bool unassigned = (team.status == "planning" || node.draft) && !assignee;
         if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }
         else if (node.problem) node.problemText = problemText.value(id);
+        // The owner's activity label; a problem text wins over it.
+        if (!unassigned && !node.problem) node.activity = activityLabel(*task);
         // Spec 1.4: the dots under the model tile while its agent really runs
         // this task.
         node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
@@ -1160,6 +1206,13 @@ QWidget *TeamWorkspace::board(const Team &team)
             const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r->addWidget(pill);
             if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r->addWidget(i); }
+            // The same small activity label as the graph (a problem text wins).
+            if (!problemTasks.contains(task.id)) {
+                const QString activity = activityLabel(task);
+                if (!activity.isEmpty()) {
+                    auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r->addWidget(a);
+                }
+            }
             const auto mark = phaseMark(team, task);
             auto *state = new StatusMark(s.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : s.tone),
                                          mark.kind.isEmpty() ? kindOfTask(task, s) : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
@@ -1191,17 +1244,33 @@ QWidget *TeamWorkspace::board(const Team &team)
         return col;
     };
     const auto makeRow = [&](const QList<int> &ids, int phase) -> QWidget * {
-        auto *rowBox = new QWidget; auto *h = new QHBoxLayout(rowBox);
+        auto *rowBox = new QWidget; rowBox->setObjectName("teamBoardRow"); auto *h = new QHBoxLayout(rowBox);
         h->setContentsMargins(12, 4, 12, 8); h->setSpacing(8);
         for (const auto &[key, name] : QList<std::pair<QString, QString>>{{"pending", tr("Pending")}, {"active", tr("Active")}, {"problems", tr("Problems")},
-                                                                         {"submitted", tr("Submitted")}, {"decided", tr("Decided")}, {"accepted", tr("Accepted")}})
-            h->addWidget(makeColumn(key, name, ids, phase), 1);
+                                                                         {"submitted", tr("Submitted")}, {"decided", tr("Decided")}, {"accepted", tr("Accepted")}}) {
+            // Decided only when a task is there, as on the phases' Board.
+            if (key == "decided" && std::none_of(team.tasks.cbegin(), team.tasks.cend(), [&](const Task &task) {
+                    return column(task, problemTasks.contains(task.id)) == "decided"; })) continue;
+            auto *column = makeColumn(key, name, ids, phase);
+            readableColumn(column);
+            h->addWidget(column, 1);
+        }
         return rowBox;
     };
     if (groups.isEmpty()) {
-        auto *w = makeRow([&] { QList<int> ids; for (const auto &task : team.tasks) ids.append(task.id); return ids; }(), 0);
-        w->setObjectName("teamWorkspaceBoard");
-        return w;
+        // U33: columns keep their readable width; a narrow window scrolls the
+        // whole board sideways (each column still scrolls its own cards).
+        auto *row = makeRow([&] { QList<int> ids; for (const auto &task : team.tasks) ids.append(task.id); return ids; }(), 0);
+        auto *area = new QScrollArea; area->setObjectName("teamWorkspaceBoard");
+        area->setWidgetResizable(true); area->setFrameShape(QFrame::NoFrame);
+        area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        area->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        area->setStyleSheet(QStringLiteral("QScrollArea#teamWorkspaceBoard{background:transparent;} QScrollArea#teamWorkspaceBoard > QWidget > QWidget#teamBoardRow{background:transparent;}")
+                            + workspaceScrollbars(m_dark));
+        area->viewport()->setAutoFillBackground(false);
+        area->setWidget(row);
+        keepScroll(area, QStringLiteral("board/row/") + m_focus);
+        return area;
     }
     // Phases stack: a header each, its board columns under an open one and
     // nothing but the header under a collapsed one.
@@ -1254,8 +1323,14 @@ QWidget *TeamWorkspace::board(const Team &team)
         }
         if (group.draft) {
             auto *approve = button(tr("Approve"), "teamBoardApprovePhase", true);
-            approve->setEnabled(approveBlocked(team, group.n).isEmpty() && (team.phase(group.n) ? team.phase(group.n)->waiting.text.isEmpty() : true));
-            approve->setToolTip(approveBlocked(team, group.n));
+            // F12/N40: a draft behind an approved phase that still runs stays
+            // approvable; the warning comes on the click.
+            const int alongside = alongsidePhase(team, group.n);
+            const auto *record = team.phase(group.n);
+            const bool blocked = !approveBlocked(team, group.n).isEmpty() || (!alongside && record && !record->waiting.text.isEmpty());
+            approve->setEnabled(!blocked);
+            approve->setToolTip(alongside ? tr("Approve runs phase %1 now, alongside phase %2").arg(group.n).arg(alongside)
+                                          : approveBlocked(team, group.n));
             QObject::connect(approve, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
                 approvePhase(id, phase);
             });
@@ -1345,7 +1420,12 @@ QWidget *TeamWorkspace::phaseColumn(const Team &team)
     area->setObjectName(m_view == "board" ? "teamWorkspaceBoard" : m_view == "layers" ? "teamWorkspaceLayers" : "teamWorkspacePhases");
     area->setProperty("view", m_view);
     area->setWidgetResizable(true); area->setFrameShape(QFrame::NoFrame);
-    area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // U33: the Board's columns keep their readable width, so a narrow window
+    // scrolls every phase sideways together (one page, the thin bar of spec
+    // 1.2); Graph and Layers fit the column as before.
+    const bool boardView = m_view == "board";
+    area->setHorizontalScrollBarPolicy(boardView ? Qt::ScrollBarAsNeeded : Qt::ScrollBarAlwaysOff);
+    if (boardView) area->setStyleSheet(workspaceScrollbars(m_dark));
     area->viewport()->setAutoFillBackground(true);
     QPalette p = area->viewport()->palette(); p.setColor(QPalette::Window, c.surface); area->viewport()->setPalette(p);
     auto *content = new QWidget; content->setObjectName("teamPhaseScrolls");
@@ -1495,7 +1575,10 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         const QString blocked = !team.full ? tr("Checking the plan…")
                               : !errors.isEmpty() ? tr("Fix the plan errors first:\n%1").arg(errors.join(QLatin1Char('\n'))) : acceptBlocked(team, group.n);
         accept->setEnabled(blocked.isEmpty() && !decided);
-        accept->setToolTip(blocked.isEmpty() ? tr("Hand the phase's tasks out (it waits if an earlier phase is still running)") : blocked);
+        const int alongside = alongsidePhase(team, group.n);
+        accept->setToolTip(blocked.isEmpty() ? (alongside ? tr("Hand the phase's tasks out now, alongside phase %1").arg(alongside)
+                                                          : tr("Hand the phase's tasks out (it waits if an earlier phase is still running)"))
+                                              : blocked);
         QObject::connect(accept, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { approvePhase(id, phase); });
         h->addWidget(accept);
         // F10 and G9: the order among the drafts and the owner's discard, in a menu.
@@ -1656,9 +1739,11 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
     auto *h = new QHBoxLayout(box); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(6);
     QList<std::pair<QString, QString>> columns{{"pending", tr("Pending")}, {"active", tr("Active")}, {"problems", tr("Problems")},
                                                {"submitted", tr("Submitted")}, {"accepted", tr("Accepted")}};
-    // A rejected or cancelled task never sits under Accepted (QA): its own column, when there is one.
+    // A rejected or cancelled task never sits under Accepted (QA): its own
+    // column, when the team has one. U33: every phase shows the same columns,
+    // so they line up from phase to phase.
     bool decided = false;
-    for (int id : ids) if (const auto *task = team.task(id)) decided = decided || column(*task, problemsByTask.contains(id)) == "decided";
+    for (const auto &task : team.tasks) decided = decided || column(task, problemsByTask.contains(task.id)) == "decided";
     if (decided) columns.append({"decided", tr("Decided")});
     for (const auto &[key, name] : columns) {
         auto *col = new QFrame; col->setObjectName("teamBoardColumn"); col->setProperty("column", key); col->setProperty("phase", phase);
@@ -1718,10 +1803,20 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
         const bool problems = key == "problems" && !shown.isEmpty();
         col->setStyleSheet(QStringLiteral("QFrame#teamBoardColumn{background:%1;border:1px solid %2;border-radius:10px;}")
                                .arg(shown.isEmpty() ? QStringLiteral("transparent") : c.bg.name(),
-                                    problems ? alpha(c.danger, .55).name(QColor::HexArgb) : shown.isEmpty() ? alpha(c.cardBorder, .6).name(QColor::HexArgb) : c.cardBorder.name()));
+                                          problems ? alpha(c.danger, .55).name(QColor::HexArgb) : shown.isEmpty() ? alpha(c.cardBorder, .6).name(QColor::HexArgb) : c.cardBorder.name()));
+        readableColumn(col);
         h->addWidget(col, 1);
     }
     return box;
+}
+
+// U33: a board column is never narrower than a readable card (two lines,
+// eliding only beyond that) and never sized by its cards, so the columns stay
+// equal and still when a task moves; wider windows share the room.
+void TeamWorkspace::readableColumn(QWidget *column)
+{
+    column->setMinimumWidth(BoardColumnWidth);
+    column->setSizePolicy(QSizePolicy::Ignored, column->sizePolicy().verticalPolicy());
 }
 
 QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
@@ -2154,16 +2249,23 @@ QWidget *TeamWorkspace::members(const Team &team)
             pv->addLayout(answerRow);
             col->addWidget(box);
         }
-        // The answers so far: who answered, and the deny reason.
-        for (const auto &answer : m.permissionAnswers) {
-            const QString by = answer.by == "owner" ? tr("you") : answer.by == "lead" ? tr("the lead")
-                             : answer.by == "rule" ? tr("a rule") : answer.by == "timeout" ? tr("a timeout") : tr("unknown");
-            QString line = answer.denied() ? tr("Denied by %1").arg(by) : tr("Allowed by %1").arg(by);
-            if (answer.denied() && !answer.reason.isEmpty()) line += QStringLiteral(": ") + answer.reason;
-            auto *mark = label(line, answer.denied() ? c.warn : c.accent, 10, false, "teamMemberPermissionAnswered");
-            mark->setWordWrap(true);
-            mark->setProperty("decision", answer.decision);
-            col->addWidget(mark);
+        // U17: the stored answers fold to one summary line and open to the
+        // newest five; the choice is kept for the team and the member.
+        if (!m.permissionAnswers.isEmpty()) {
+            const QString key = QStringLiteral("ui/expanded/teamPermissions/%1/%2").arg(team.id, m.id);
+            const bool open = QSettings().value(key, false).toBool();
+            auto *summary = permissionToggle(m.permissionAnswers, c, open, "teamMemberPermissionsToggle");
+            summary->setProperty("member", m.id);
+            QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {
+                QSettings().setValue(key, expanded);
+                scheduleRender();
+            });
+            col->addWidget(summary, 0, Qt::AlignLeft);
+            if (open) {
+                auto *list = permissionAnswerList(m.permissionAnswers, c, QDateTime::currentSecsSinceEpoch(), 5, "teamMemberPermissions");
+                list->setProperty("member", m.id);
+                col->addWidget(list);
+            }
         }
         bh->addLayout(col, 1);
         auto *right = new QVBoxLayout; right->setSpacing(3);

@@ -155,7 +155,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if raw.len() > 32768 {
         return Err("File request is too large".into());
     }
-    let input: Value = serde_json::from_slice(&raw).map_err(|_| "Invalid file request")?;
+    let input: Value = serde_json::from_slice(crate::state::without_bom(&raw)).map_err(|_| "Invalid file request")?;
     let fields = input.as_object().ok_or("Invalid file request")?;
     if fields.keys().any(|k| {
         ![

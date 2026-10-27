@@ -1308,11 +1308,31 @@ pub(super) fn hook() -> Result<i32> {
         && !external_agents::main_start(&record, &event) {
         return Ok(0);
     }
-    let agent = string(&record, "agent");
-    if !events(agent).contains(&kind)
-        && !versioned_events(agent).iter().any(|(event, _)| *event == kind)
+    let agent = string(&record, "agent").to_owned();
+    if !events(&agent).contains(&kind)
+        && !versioned_events(&agent).iter().any(|(event, _)| *event == kind)
     {
         return Ok(0);
+    }
+    // U19: the owner confirms subagents before Claude starts them.
+    if subagents_confirm::confirm() {
+        if agent != "claude" && kind == "SessionStart" {
+            record["subagent_confirm"] = json!(format!("subagent confirmation not supported by {agent}"));
+        }
+        if agent == "claude" {
+            if matches!(kind, "UserPromptSubmit" | "Stop" | "SessionEnd") {
+                subagents_confirm::group_reset(sid);
+            }
+            // U19: the ask becomes Claude's permission request, which the
+            // approval channel brings to the owner, or to a member's lead.
+            if let Some(output) = subagents_confirm::pre_tool(&mut record, &event, sid) {
+                println!("{output}");
+            }
+            if kind == "PostToolUse" && subagents_confirm::subagent_tool(&event) {
+                let tool = ["tool_use_id", "tool_call_id"].iter().map(|key| string(&event, key)).find(|id| !id.is_empty()).unwrap_or_default();
+                subagents_confirm::group_remove(sid, tool);
+            }
+        }
     }
     if pause_active(&record) && ["UserPromptSubmit", "PreToolUse", "TurnStarted"].contains(&kind) {
         eprintln!("hgs is pausing this session; retry after resuming");

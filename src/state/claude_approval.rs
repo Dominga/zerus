@@ -188,6 +188,24 @@ fn summary(request:&Value)->String {
     format!("{}\n\n{}",string(request,"tool_name"),target)
 }
 
+/// U19: the subagent confirmation a pending main-agent Agent/Task request is,
+/// for its tool use: the calls of its group the answer decides and the text
+/// that names them. None for any other request.
+fn subagents(record:&Value,request:&Value,tool_use:&str)->Option<(Vec<String>,String)> {
+    if !matches!(string(request,"tool_name"),"Agent"|"Task")||!string(request,"agent_id").is_empty()||tool_use.is_empty() {return None;}
+    let model=string(record,"model");
+    subagents_confirm::card(string(record,"conversation_id"),tool_use,string(record,"cwd"),if model.is_empty(){"the session model"}else{model})
+}
+
+/// U19: a subagent card says what starts, offers a one-time Yes or No (or a
+/// denial with a message) and is marked so automatic approvals never answer it.
+fn subagent_card(card:&mut Value,calls:&[String],text:&str) {
+    card["subagent_confirmation"]=json!(true);
+    card["subagent_calls"]=json!(calls);
+    card["questions"][0]["question"]=json!(text);
+    card["questions"][0]["header"]=json!("Subagents");
+}
+
 fn tool_call_id(record:&Value,tool:&str)->String {
     let ids:Vec<_>=record["active_tools"].as_object().into_iter().flatten().filter(|(_,v)|v["name"]==tool).map(|(k,_)|k.clone()).collect();
     if ids.len()==1 {ids[0].clone()} else {String::new()}
@@ -252,11 +270,15 @@ fn build_request(record:&Value,screen:Option<&str>,request:&Value,at:&Value,chil
     };
     let created=at.as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
     let tool_id=if child_request_id.is_empty(){tool_call_id(record,tool)}else{string(request,"tool_use_id").to_owned()};
-    Some((json!({"question_id":format!("claude-approval:{hash}"),"question_hash":hash,"tool_call_id":tool_id,"agent_id":request["agent_id"],"child_request_id":child_request_id,
+    let group=if child_request_id.is_empty(){subagents(record,request,&tool_id)}else{None};
+    let built=Some((json!({"question_id":format!("claude-approval:{hash}"),"question_hash":hash,"tool_call_id":tool_id,"agent_id":request["agent_id"],"child_request_id":child_request_id,
         "run_id":record["run_id"],"conversation_id":record["conversation_id"],"source":"claude_tool_approval",
         "can_answer":native.is_some(),"answer_unavailable_reason":problem,"approval":true,"approval_choices":native.is_some(),
         "answer_transport":"claude_tui","created_at":created,
-        "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel))
+        "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel));
+    // U19: without the waiting hook the subagent request is still marked, so
+    // no automatic approval takes it through the keys either.
+    built.map(|(mut card,panel)|{if let Some((calls,text))=&group {subagent_card(&mut card,calls,text);}(card,panel)})
 }
 
 fn native_body(panel:&Panel)->String {
@@ -353,8 +375,11 @@ fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value
     if !eligible(record)||!channel::shown(record,screen) {return None;}
     let alone=channel::alone(record,string(identity,"tool_call_id"));
     let complete=parse(screen);
-    if complete.as_ref().is_some_and(|panel|!proves(request,panel)||!alone) {return None;}
-    let native=complete;
+    // U19: a subagent request is answered through this hook only, with its
+    // own one-time choices; Claude's panel offers broader ones.
+    let group=subagents(record,request,string(identity,"tool_call_id"));
+    if group.is_none()&&complete.as_ref().is_some_and(|panel|!proves(request,panel)||!alone) {return None;}
+    let native=if group.is_some() {None} else {complete};
     // A diagnostic this card cannot show as the request's own leaves it to the
     // screen, whatever the diagnostic says.
     let warning=match safety_warning(request,screen,native.is_some(),alone) {
@@ -372,17 +397,21 @@ fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value
             vec![json!({"id":"1","label":"Yes","scope":"once"}),json!({"id":"2","label":"No","scope":"once"})]),
     };
     // The shown warning is part of the review; its countdown is not.
+    // The calls a subagent answer decides are part of what was reviewed.
     let hash=format!("{:x}",Sha256::digest(json!([identity["question_hash"],
         native.as_ref().map(|p|json!([p.title,identity_body(p),p.question,p.labels])),
-        warning.as_ref().map(identity_body)]).to_string()));
+        warning.as_ref().map(identity_body),group.as_ref().map(|(calls,_)|calls)]).to_string()));
     let created=record["pending_approval_at"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
-    Some(json!({"question_id":identity["question_id"],"question_hash":hash,"tool_call_id":identity["tool_call_id"],
+    let body=match &group {Some((_,text)) => format!("{text}\n\n{body}"),None => body};
+    let mut card=json!({"question_id":identity["question_id"],"question_hash":hash,"tool_call_id":identity["tool_call_id"],
         "agent_id":request["agent_id"],"child_request_id":"","run_id":record["run_id"],"conversation_id":record["conversation_id"],
         "source":"claude_tool_approval","can_answer":true,"answer_unavailable_reason":"","approval":true,"approval_choices":true,
         "answer_transport":"claude_hook","panel_verified":native.is_some(),"created_at":created,
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":true,
             "other_label":FEEDBACK,"other_description":"Deny this request with your message; Claude continues without it",
-            "options":options}]}))
+            "options":options}]});
+    if let Some((calls,text))=&group {subagent_card(&mut card,calls,text);}
+    Some(card)
 }
 
 fn bash_title(title:&str)->bool {
@@ -592,7 +621,11 @@ pub(super) fn available(record:&Value,question:&Value)->Result<()> {
 /// permission hook (`claude_hook`) for a one-time decision on its card.
 pub(super) fn answer(record:&Value,question:&Value,answers:&Value,request_id:&str)->Result<&'static str> {
     available(record,question)?;
-    if question["answer_transport"]!="claude_hook" {keys(record,question,answers,snapshot)?;return Ok("claude_tui");}
+    if question["answer_transport"]!="claude_hook" {
+        keys(record,question,answers,snapshot)?;
+        decide_group(record,question,answers);
+        return Ok("claude_tui");
+    }
     let identity=channel::identity(record).ok_or("The approval changed. Review its new request")?;
     let dir=match answer_channel::route(record,&identity)? {
         answer_channel::Route::Channel(dir) => dir,
@@ -622,7 +655,19 @@ pub(super) fn answer(record:&Value,question:&Value,answers:&Value,request_id:&st
     if transport=="claude_hook" {
         let _ = settle(record,match decision {"allow"=>Settled::Approved,"deny"=>Settled::Interrupted,_=>Settled::Refused(string(&identity,"tool_call_id"))});
     }
+    decide_group(record,question,answers);
     Ok(transport)
+}
+
+/// U19 (3): the answer to a subagent card decides every call it showed; the
+/// others' waiting hooks and later PreToolUse calls take the same decision.
+fn decide_group(record:&Value,question:&Value,answers:&Value) {
+    if question["subagent_confirmation"]!=true {return;}
+    let calls:Vec<String>=question["subagent_calls"].as_array().into_iter().flatten().filter_map(|id|id.as_str().map(str::to_owned)).collect();
+    let option=answers[0]["selected_option_ids"][0].as_str().and_then(|id|question["questions"][0]["options"].as_array()?
+        .iter().find(|option|string(option,"id")==id));
+    let allow=string(&answers[0],"text").is_empty()&&option.is_some_and(|option|label(string(option,"label")).starts_with("Yes"));
+    subagents_confirm::decide(string(record,"conversation_id"),&calls,allow);
 }
 /// Choose option `answers` in the verified native panel with its keys.
 fn keys(record:&Value,question:&Value,answers:&Value,snapshot:fn(&Value,&str)->Option<(Value,usize)>)->Result<()> {
@@ -1001,6 +1046,50 @@ pub(super) fn reconcile(record:Value)->Value {
         r["claude_tool_uses"]["toolu_one"]["at"]=json!(5.0);
         r
     }
+    const AGENT_PANEL:&str="────────────────────────────────────────\n Agent\n  Explore(Find the callers)\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for Agent commands in /work/project\n   3. No\n\n Esc to cancel · Tab to amend\n";
+
+    /// U19 (1): a subagent ask is a card of the waiting hook for that exact
+    /// tool use, naming every open call of its group, with one-time choices
+    /// only - even when Claude's panel shows broader ones.
+    #[test] fn a_subagent_ask_is_a_channel_card_for_its_tool_use() {
+        let dir=tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(),||{
+            let input=json!({"subagent_type":"Explore","model":"haiku","description":"Find the callers"});
+            let mut r=hooked("Agent",input.clone());r["cwd"]=json!("/work");r["model"]=json!("claude-opus-4-6");
+            subagents_confirm::group_add("conversation","toolu_one",&input);
+            subagents_confirm::group_add("conversation","toolu_two",&json!({"subagent_type":"general","description":"Write the fix"}));
+            let identity=channel::identity(&r).unwrap();
+            let q=channel_card(&r,Some(AGENT_PANEL),&identity).unwrap();
+            assert_eq!(q["subagent_confirmation"],true);
+            assert_eq!(q["subagent_calls"],json!(["toolu_one","toolu_two"]));
+            assert_eq!(q["tool_call_id"],"toolu_one");
+            assert_eq!((q["answer_transport"].clone(),q["panel_verified"].clone(),q["can_answer"].clone()),(json!("claude_hook"),json!(false),json!(true)));
+            assert_eq!(q["questions"][0]["header"],"Subagents");
+            assert_eq!(q["questions"][0]["question"],"Start 2 subagents: Explore (model haiku): Find the callers; general (model inherits claude-opus-4-6): Write the fix");
+            assert_eq!(options(&q),vec![("Yes".to_owned(),"once".to_owned()),("No".to_owned(),"once".to_owned())],"never Claude's broader choice");
+            // Without the waiting hook the screen card is still marked.
+            assert_eq!(card(&r,AGENT_PANEL)["subagent_confirmation"],true);
+            // The calls it decides are part of its identity: a third call is a new review.
+            let before=q["question_hash"].clone();
+            subagents_confirm::group_add("conversation","toolu_three",&json!({"subagent_type":"test"}));
+            assert_ne!(channel_card(&r,Some(AGENT_PANEL),&identity).unwrap()["question_hash"],before);
+            // An answer settles the whole group it showed; a denial with a message denies it too.
+            let answered=channel_card(&r,Some(AGENT_PANEL),&identity).unwrap();
+            decide_group(&r,&answered,&json!([{"question_id":"approval","selected_option_ids":["2"]}]));
+            for id in ["toolu_one","toolu_two","toolu_three"] {
+                assert_eq!(subagents_confirm::decided("conversation",id).as_deref(),Some("deny"),"{id}");
+            }
+            subagents_confirm::group_reset("conversation");
+            subagents_confirm::group_add("conversation","toolu_one",&input);
+            let q=channel_card(&r,Some(AGENT_PANEL),&identity).unwrap();
+            decide_group(&r,&q,&json!([{"question_id":"approval","selected_option_ids":["1"]}]));
+            assert_eq!(subagents_confirm::decided("conversation","toolu_one").as_deref(),Some("allow"));
+            // Another tool's card is not a subagent card.
+            let bash=hooked("Bash",json!({"command":"printf hi > out.txt"}));
+            assert!(channel_card(&bash,Some(BASH),&channel::identity(&bash).unwrap()).unwrap().get("subagent_confirmation").is_none());
+        });
+    }
+
     #[test] fn waiting_hook_card_answers_once_without_a_complete_panel() {
         let command="T=$(pwd); test \"$T\" = /workspace/example && rm -f $T/*.jsonl $T/*.port";
         let r=hooked("Bash",json!({"command":command}));

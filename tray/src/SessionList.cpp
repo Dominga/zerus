@@ -500,7 +500,16 @@ void SessionList::mouseReleaseEvent(QMouseEvent *e)
             emit groupToggled(id);
         e->accept(); return;
     }
+    // U25 part 6: a click on the git chip also opens the inspector's Changes.
+    QString gitKey;
+    const QPoint at = e->position().toPoint();
+    if (e->button() == Qt::LeftButton && (at - m_press).manhattanLength() < QApplication::startDragDistance()) {
+        if (const auto *row = itemAt(at); row && !row->data(SessionRoles::GitStatus).toJsonObject().isEmpty()
+            && SessionDelegate::gitStatusRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool()).contains(at))
+            gitKey = row->data(SessionRoles::Key).toString();
+    }
     QListWidget::mouseReleaseEvent(e);
+    if (!gitKey.isEmpty()) emit gitActivated(gitKey);
 }
 
 void SessionList::startDrag(Qt::DropActions)

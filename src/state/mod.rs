@@ -69,6 +69,8 @@ mod search;
 pub(crate) mod session_graph;
 mod storage;
 mod subagents;
+mod subagents_confirm;
+mod session_upload;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -218,6 +220,10 @@ fn account_binding(record: &Value) -> Value {
     json!({"provider":provider,"id":id,"home":agent_home,"run_id":record["run_id"]})
 }
 
+/// Tests that change HGS_STATE_DIR share this lock (they run in one process).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(super) fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -238,11 +244,17 @@ pub(super) fn now() -> f64 {
         .as_secs_f64()
 }
 
+/// H2, N34: JSON piped from PowerShell 5.1 starts with a UTF-8 BOM; every
+/// stdin reader parses the bytes after it.
+pub(crate) fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
+}
+
 /// H2: one JSON request from bytes: a leading UTF-8 BOM is dropped (PowerShell
 /// 5.1 adds one) and input that is not UTF-8 is refused with the hint that
 /// does not need a pipe. Every `--json` reader goes through this.
 pub(crate) fn json_request(bytes: &[u8]) -> Result<Value> {
-    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let bytes = without_bom(bytes);
     let text = std::str::from_utf8(bytes).map_err(|_| "Input is not UTF-8 (PowerShell 5.1: use --json-file)")?;
     serde_json::from_str(text).map_err(|e| e.to_string())
 }
@@ -696,6 +708,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     };
     if command == "worktrees" { return worktrees::dispatch(args); }
     if command == "git-status" { return git_status::dispatch(args); }
+    if command == "git-diff" { return git_status::dispatch_diff(args); }
     if command == "dirs" {
         if args.first().map(String::as_str) == Some("--create") {
             let request_id;
@@ -731,6 +744,12 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "hook" {
         return hooks::hook();
+    }
+    if command == "subagents-confirm" {
+        return subagents_confirm::dispatch(args);
+    }
+    if command == "session-upload-block" {
+        return session_upload::dispatch(args);
     }
     if command == "answer-channel" {
         return answer_channel::run();

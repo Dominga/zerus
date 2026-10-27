@@ -153,6 +153,7 @@ private slots:
     void aDraftTeamReadsItsRevisionUnseenFieldsAndGoal();
     void proposalsSwapsLimitsAndHostsRead();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
+    void feedLinesSpeakOfRosterChanges();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
     void feedLinesSpeakOfPhasesAndTheEndOfThePlan();
@@ -457,7 +458,8 @@ void TestTeams::leadLoadViewsCarryTheirNumbers()
     team["attention"] = QJsonArray{QJsonObject{{"kind", "report"}, {"task", 2}, {"member", "Frontend"}, {"since", 1792868400.0}, {"minutes", 70}}};
     auto phases = team["phases"].toArray();
     auto draft = phases[0].toObject();
-    draft["waiting"] = QJsonObject{{"text", "Waiting for the previous phase to be ready"}, {"phase", 1}, {"open", QJsonArray{3, 4}}};
+    draft["waiting"] = QJsonObject{{"text", "Can run alongside phase 1"}, {"phase", 1}, {"open", QJsonArray{3, 4}},
+                                   {"alongside", true}};
     phases[0] = draft; team["phases"] = phases;
     QJsonObject perMember{{"Backend", QJsonObject{{"tasks", 3}, {"on_critical_path", 2}}}};
     QJsonObject starvedEntry{{"member", "tester"}, {"role", "Tester"}, {"minutes", 25}, {"blocking", QJsonArray{4}}};
@@ -750,16 +752,31 @@ void TestTeams::draftPhasesApproveInOrder()
     const auto line = feedLine(diffed, moved);
     QVERIFY2(line.text.contains(QStringLiteral("Moved phase 3 to position 2")), qPrintable(line.text));
     QVERIFY(line.text.contains(QStringLiteral("renumbered")));
-    // Approved but not finished yet: its tasks still hold the next phase back.
+    // Approved but not finished yet (F12/N40): the next draft is approvable to
+    // run alongside it, and no longer blocked by its open tasks.
     auto running = roadmap;
     running["phases"] = QJsonArray{
         QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "approved"}, {"tasks", QJsonArray{11, 12}}},
         QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}}},
         QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{14}}}};
     const auto second = parse(running);
-    const auto blocked = approveBlocked(second, 3);
-    QVERIFY(blocked.contains(QStringLiteral("Phase 3 opens after phase 2 ends")));
-    QVERIFY(blocked.contains(QStringLiteral("2 task(s) still open")));
+    QCOMPARE(approveBlocked(second, 3), QString());
+    QCOMPARE(alongsidePhase(second, 3), 2);
+    // The server's own text says so, and the flag travels with it.
+    auto told = running;
+    told["phases"] = QJsonArray{
+        QJsonObject{{"n", 2}, {"title", "QA fixes"}, {"state", "approved"}, {"tasks", QJsonArray{11, 12}}},
+        QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "draft"}, {"tasks", QJsonArray{13}},
+                    {"waiting", QJsonObject{{"text", "Can run alongside phase 2"}, {"phase", 2},
+                                            {"open", QJsonArray{11, 12}}, {"alongside", true}}}},
+        QJsonObject{{"n", 4}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{14}}}};
+    const auto along = parse(told);
+    QVERIFY(along.phase(3)->waiting.alongside);
+    QCOMPARE(along.phase(3)->waiting.text, QStringLiteral("Can run alongside phase 2"));
+    QCOMPARE(alongsidePhase(along, 3), 2);
+    // A draft behind a draft still waits for the approval.
+    QVERIFY(approveBlocked(along, 4).contains(QStringLiteral("Phase 4 opens after phase 3 is approved")));
+    QCOMPARE(alongsidePhase(along, 4), 0);
     // Phase 2's tasks accepted: phase 3 opens, phase 4 still waits for phase 3.
     auto finished = running;
     auto finishedTasks = finished["tasks"].toArray();
@@ -1153,6 +1170,23 @@ void TestTeams::feedLinesSpeakOfStartsQuestionsAndHolds()
     QCOMPARE(line("released", QJsonObject{{"by", "Lead"}, {"task", 3}}).text, QStringLiteral("Released #3 Held retry"));
     QCOMPARE(line("report_replaced", QJsonObject{{"task", 2}, {"attempt", 1}}).text,
              QStringLiteral("Replaced the captured reply · #2 Address form · attempt 1"));
+}
+
+void TestTeams::feedLinesSpeakOfRosterChanges()
+{
+    const auto team = parse(deliveryTeam());
+    const auto line = [&](const char *kind, const QJsonObject &detail) {
+        return feedLine(team, QJsonObject{{"at", 1}, {"seq", 1}, {"kind", kind}, {"detail", detail}});
+    };
+    // U32: a member added on the owner's word carries the quote and who added it.
+    const auto added = line("member_added", QJsonObject{{"by", "Lead on your word"}, {"member", "Backend"},
+        {"owner_word", "может еще одного дипсик бэкендера добавим?"}});
+    QCOMPARE(added.text, QStringLiteral("Added Backend by Lead on your word: “может еще одного дипсик бэкендера добавим?”"));
+    QCOMPARE(added.by, QStringLiteral("Lead on your word"));
+    QCOMPARE(line("member_added", QJsonObject{{"by", "You"}, {"member", "Tester"}}).text, QStringLiteral("Added Tester by You"));
+    // The raised cap names the old and the new count.
+    QCOMPARE(line("max_members_raised", QJsonObject{{"old", 6}, {"new", 7}}).text,
+             QStringLiteral("Raised the member cap 6 → 7 on your word"));
 }
 
 void TestTeams::aRunningTeamIsStuckWhenNothingCanMove()

@@ -26,22 +26,18 @@ struct Tokens {
         text, text2, text3, muted, label, dim, accent, onAccent, warn, danger, folder;
 };
 
-inline QColor pick(const WorkspaceSkin::Skin &skin, bool dark, const QString &name, const char *darkValue, const char *lightValue)
-{
-    const auto value = skin.named(dark, name);
-    return QColor(value.isEmpty() ? QString::fromLatin1(dark ? darkValue : lightValue) : value);
-}
-
+// U25 part 8: the prototype's design tokens (WorkspaceSkin::color). A skin may
+// still name the dialog's own colors (dialog, fieldBorder, neutralBorder, ...).
 inline Tokens tokens(const WorkspaceSkin::Skin &skin, bool dark)
 {
-    const auto c = [&](const char *name, const char *d, const char *l) { return pick(skin, dark, QString::fromLatin1(name), d, l); };
-    return {c("dialog", "#1b1f26", "#ffffff"), c("field", "#151920", "#f5f7f9"), c("selectedAgent", "#1f3a31", "#e0f0e9"),
-            c("segmentOn", "#26443a", "#d8eee5"), c("buttonNeutral", "#232830", "#edf2f5"), c("disabled", "#2a3038", "#e4e8ec"),
-            c("border", "#2c323b", "#dce2e8"), c("fieldBorder", "#39404a", "#c9d1d9"), c("neutralBorder", "#4a525d", "#aeb8c2"),
-            c("track", "#2c323b", "#dce2e8"), c("foreground", "#e6e8eb", "#1a2733"), c("text2", "#c4cad1", "#334250"),
-            c("text3", "#aab1ba", "#4d5c6b"), c("muted", "#9aa3ad", "#627082"), c("label", "#8b939e", "#6b7785"),
-            c("dim", "#6f7883", "#8d97a2"), c("accent", "#7dd3b0", "#167357"), c("accentText", "#0f1a16", "#ffffff"),
-            c("warn", "#e8a75a", "#a66000"), c("danger", "#ef7d6d", "#b3261e"), c("folder", "#7fb6e0", "#2f6f9f")};
+    const auto c = [&](const char *name) { return WorkspaceSkin::color(skin, dark, QString::fromLatin1(name)); };
+    const auto own = [&](const char *name, const char *token) {
+        const auto value = skin.named(dark, QString::fromLatin1(name));
+        return value.isEmpty() ? c(token) : QColor(value);
+    };
+    return {own("dialog", "surface"), c("field"), c("selAgent"), c("segOn"), own("buttonNeutral", "hover"), own("disabled", "hover"),
+            c("border"), own("fieldBorder", "border"), own("neutralBorder", "text3"), own("track", "border"), c("fg"), c("text2"),
+            c("text3"), c("muted"), c("label"), c("dim"), c("accent"), c("accentText"), c("warn"), c("danger"), c("folder")};
 }
 
 inline QFont mono(int pixels, int weight = QFont::Normal)
@@ -54,6 +50,16 @@ inline QFont mono(int pixels, int weight = QFont::Normal)
     font.setWeight(QFont::Weight(weight));
     return font;
 }
+
+// A combo box whose list is the dense view's menu when `menu` is set: a header,
+// a check at the current choice, unavailable rows with their reason and the
+// view's own actions (U25 part 8). Without it, the ordinary list.
+class MenuCombo : public QComboBox {
+public:
+    using QComboBox::QComboBox;
+    std::function<void()> menu;
+    void showPopup() override { if (menu) menu(); else QComboBox::showPopup(); }
+};
 
 // A row caption: its letters spread across 40px, then 10px before the field.
 class Caption : public QWidget {
@@ -119,10 +125,11 @@ private:
     QString m_hint;
 };
 
-// The working folder as its tail: "…\parent\" dimmed, then the folder itself.
-class PathCombo : public QComboBox {
+// The working folder as its tail: its parent dimmed ("D:\work\", or "…\parent\"
+// past two levels), then the folder itself.
+class PathCombo : public MenuCombo {
 public:
-    using QComboBox::QComboBox;
+    using MenuCombo::MenuCombo;
     void setTail(int pathRole, QColor head, QColor leaf)
     {
         m_role = pathRole; m_head = head; m_leaf = leaf; update();
@@ -140,17 +147,18 @@ protected:
         option.currentIcon = {};
         p.drawComplexControl(QStyle::CC_ComboBox, option);
         auto field = style()->subControlRect(QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxEditField, this).adjusted(2, 0, -2, 0);
+        auto leafFont = mono(12, QFont::Medium);
         if (path.isEmpty()) {
-            p.setPen(m_head);
-            p.drawText(field, Qt::AlignLeft | Qt::AlignVCenter, placeholderText());
+            p.setFont(leafFont); p.setPen(m_leaf);
+            p.drawText(field, Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(leafFont).elidedText(placeholderText(), Qt::ElideRight, field.width()));
             return;
         }
         const auto separator = path.contains('\\') ? QChar('\\') : QChar('/');
-        auto parts = QDir::fromNativeSeparators(path).split('/', Qt::SkipEmptyParts);
-        const auto leafName = parts.isEmpty() ? path : parts.takeLast();
-        const auto parent = parts.isEmpty() ? QString() : parts.takeLast();
-        const auto head = QStringLiteral("…") + separator + (parent.isEmpty() ? QString() : parent + separator);
-        auto leafFont = mono(12, QFont::Medium);
+        auto parts = path.split(separator);
+        while (parts.size() > 1 && parts.last().isEmpty()) parts.removeLast();
+        const auto leafName = parts.takeLast();
+        const auto head = parts.size() > 2 ? QStringLiteral("…") + separator + parts.last() + separator
+                                           : parts.isEmpty() ? QString() : parts.join(separator) + separator;
         const int leafWidth = QFontMetrics(leafFont).horizontalAdvance(leafName);
         const auto headFont = mono(12);
         const auto shownHead = QFontMetrics(headFont).elidedText(head, Qt::ElideLeft, qMax(0, field.width() - leafWidth));
@@ -181,8 +189,9 @@ struct Agent {
     QString key, name, kind; // kind: subscription, balance, local or terminal
     QIcon icon;
     bool connected = true, busy = false; // connected: the chosen account
+    bool absent = false; // no account of this agent on the computer ("no acct / + add")
     double fiveHour = -1, week = -1; // percent used
-    QString reset, balance, tooltip;
+    QString reset, resetIn, balance, tooltip; // reset "01:40", resetIn "1h 40m"
     double balanceValue = -1;
     // A subscription agent's accounts and the one the session uses.
     QList<Account> accounts;
@@ -246,7 +255,7 @@ public:
     }
     const Agent &agent() const { return m_agent; }
     QSize sizeHint() const override { return {m_agent.narrow() ? kNarrow : 92, kHeight}; }
-    static constexpr int kHeight = 46, kNarrow = 46;
+    static constexpr int kHeight = 34, kNarrow = 38;
 
 protected:
     void paintEvent(QPaintEvent *) override
@@ -257,58 +266,53 @@ protected:
         if (isChecked()) {
             p.setPen(m_tokens.accent); p.setBrush(m_tokens.selected);
             p.drawRoundedRect(box, 6, 6);
-        } else if (hasFocus()) {
-            p.setPen(m_tokens.borderNeutral); p.setBrush(Qt::NoBrush);
+        } else if (underMouse() || hasFocus()) {
+            p.setPen(hasFocus() ? m_tokens.borderNeutral : Qt::transparent); p.setBrush(m_tokens.btnNeutral);
             p.drawRoundedRect(box, 6, 6);
         }
-        const int iconSize = m_agent.kind == QLatin1String("local") ? 22 : 24;
-        // An agent with several accounts never shows the offline state.
-        const bool off = !m_agent.connected && !m_agent.narrow() && !m_agent.multi();
         const auto lines = this->lines();
-        int contentWidth = iconSize;
-        if (m_agent.multi()) contentWidth += 6 + multiWidth();
-        else if (!lines.isEmpty()) contentWidth += 6 + blockWidth(lines);
+        int contentWidth = kIcon;
+        if (m_agent.multi()) contentWidth += kGap + multiWidth();
+        else if (meters()) contentWidth += kGap + meterWidth();
+        else if (!lines.isEmpty()) contentWidth += kGap + blockWidth(lines);
         int x = (width() - contentWidth) / 2;
-        const auto pixmap = m_agent.icon.pixmap(QSize(iconSize, iconSize), devicePixelRatioF(), off ? QIcon::Disabled : QIcon::Normal);
+        // Without an account, signed out or not set up: the icon grey at 45%.
+        const auto pixmap = m_agent.icon.pixmap(QSize(kIcon, kIcon), devicePixelRatioF(), dimmed() ? QIcon::Disabled : QIcon::Normal);
         p.save();
-        if (off) p.setOpacity(0.45);
-        p.drawPixmap(QRect(x, (height() - iconSize) / 2, iconSize, iconSize), pixmap);
+        if (dimmed()) p.setOpacity(0.45);
+        p.drawPixmap(QRect(x, (height() - kIcon) / 2, kIcon, kIcon), pixmap);
         p.restore();
+        x += kIcon + kGap;
         if (m_agent.multi()) {
             // "N acc" over one dot per account, colored by its 5h use.
-            x += iconSize + 6;
-            const auto font = mono(11, QFont::Medium);
-            const int top = (height() - (kLine + 3 + kDot)) / 2;
-            p.setFont(font);
+            const int top = (height() - (9 + 3 + kDot)) / 2;
+            p.setFont(mono(9, QFont::Medium));
             p.setPen(m_tokens.text2);
-            p.drawText(QRect(x, top, 80, kLine), Qt::AlignLeft | Qt::AlignVCenter, countText());
+            p.drawText(QRect(x, top, 80, 9), Qt::AlignLeft | Qt::AlignVCenter, countText());
             p.setPen(Qt::NoPen);
             for (int i = 0; i < m_agent.accounts.size(); ++i) {
                 const auto &account = m_agent.accounts[i];
-                p.setBrush(!account.connected ? m_tokens.borderNeutral : account.fiveHour >= 0 ? usageColor(account.fiveHour, m_tokens) : m_tokens.dim);
-                p.drawRoundedRect(QRectF(x + i * (kDot + 3), top + kLine + 3, kDot, kDot), kDot / 2.0, kDot / 2.0);
+                p.setBrush(!account.connected ? m_tokens.border : account.fiveHour >= 0 ? usageColor(account.fiveHour, m_tokens) : m_tokens.dim);
+                p.drawRoundedRect(QRectF(x + i * (kDot + 2), top + 9 + 3, kDot, kDot), kDot / 2.0, kDot / 2.0);
             }
             return;
         }
-        if (lines.isEmpty()) return;
-        x += iconSize + 6;
-        if (m_agent.kind == QLatin1String("subscription") && m_agent.connected) {
-            // [bar][percent] for 5h and week, then the 5h reset: 12px rows.
-            p.setFont(mono(kMeter));
-            const int top = (height() - 3 * kRow) / 2;
+        if (meters()) {
+            // A 12x2 bar and the percent for 5h and week, then the 5h reset: 8px rows.
+            p.setFont(mono(8));
+            const int top = (height() - (3 * kRow + 2)) / 2;
             const double values[2] = {m_agent.fiveHour, m_agent.week};
             for (int row = 0; row < 2; ++row) {
-                const int y = top + row * kRow;
-                const QRectF bar(x, y + (kRow - 3) / 2.0, kBar, 3);
+                const int y = top + row * (kRow + 1);
+                const QRectF bar(x, y + (kRow - 2) / 2.0, kBar, 2);
                 p.setPen(Qt::NoPen);
                 p.setBrush(m_tokens.track);
-                p.drawRoundedRect(bar, 1.5, 1.5);
-                const QRect label(x + kBar + 4, y, 48, kRow);
+                p.drawRect(bar);
+                const QRect label(x + kBar + 2, y, 40, kRow);
                 if (values[row] >= 0) {
-                    const auto color = usageColor(values[row], m_tokens);
-                    p.setBrush(color);
-                    p.drawRoundedRect(QRectF(bar.x(), bar.y(), qMax(1.5, kBar * qBound(0.0, values[row], 100.0) / 100.0), 3), 1.5, 1.5);
-                    p.setPen(values[row] < 65 ? m_tokens.text2 : color);
+                    p.setBrush(usageColor(values[row], m_tokens));
+                    p.drawRect(QRectF(bar.x(), bar.y(), qMax(1.0, kBar * qBound(0.0, values[row], 100.0) / 100.0), 2));
+                    p.setPen(usageText(values[row], m_tokens));
                     p.drawText(label, Qt::AlignLeft | Qt::AlignVCenter, QString::number(qRound(values[row])) + '%');
                 } else {
                     p.setPen(m_tokens.dim);
@@ -316,45 +320,56 @@ protected:
                 }
             }
             p.setPen(m_tokens.text3);
-            p.drawText(QRect(x, top + 2 * kRow, 80, kRow), Qt::AlignLeft | Qt::AlignVCenter, m_agent.reset);
+            p.drawText(QRect(x, top + 2 * (kRow + 1), 80, kRow), Qt::AlignLeft | Qt::AlignVCenter, m_agent.reset);
             return;
         }
-        // One or two monospace lines: a balance, or why the account cannot start yet.
-        const int top = (height() - lines.size() * kLine) / 2;
-        for (int row = 0; row < lines.size(); ++row) {
-            const auto &[text, color, font] = lines[row];
-            p.setFont(font); p.setPen(color);
-            p.drawText(QRect(x, top + row * kLine, 80, kLine), Qt::AlignLeft | Qt::AlignVCenter, text);
+        // Two monospace lines: a balance, or why the agent cannot start yet.
+        int height = 0;
+        for (const auto &line : lines) height += line.height;
+        int y = (this->height() - height - int(lines.size() - 1)) / 2;
+        for (const auto &line : lines) {
+            p.setFont(line.font); p.setPen(line.color);
+            p.drawText(QRect(x, y, 80, line.height), Qt::AlignLeft | Qt::AlignVCenter, line.text);
+            y += line.height + 1;
         }
     }
+    void enterEvent(QEnterEvent *event) override { QAbstractButton::enterEvent(event); update(); }
+    void leaveEvent(QEvent *event) override { QAbstractButton::leaveEvent(event); update(); }
 
 private:
-    static constexpr int kMeter = 10, kRow = 12, kBar = 18, kLine = 14, kDot = 5;
-    struct Line { QString text; QColor color; QFont font; };
+    static constexpr int kIcon = 20, kGap = 4, kRow = 8, kBar = 12, kDot = 4;
+    struct Line { QString text; QColor color; QFont font; int height; };
     QString countText() const { return QStringLiteral("%1 acc").arg(m_agent.accounts.size()); }
+    bool meters() const { return m_agent.kind == QLatin1String("subscription") && m_agent.connected && !m_agent.absent && !m_agent.multi(); }
+    // An agent with several accounts never shows the offline state.
+    bool dimmed() const { return m_agent.absent || (!m_agent.connected && !m_agent.multi() && m_agent.kind != QLatin1String("terminal")); }
     int multiWidth() const
     {
-        const int dots = int(m_agent.accounts.size()) * (kDot + 3) - 3;
-        return qMax(QFontMetrics(mono(11, QFont::Medium)).horizontalAdvance(countText()), dots);
+        const int dots = int(m_agent.accounts.size()) * (kDot + 2) - 2;
+        return qMax(QFontMetrics(mono(9, QFont::Medium)).horizontalAdvance(countText()), dots);
+    }
+    int meterWidth() const
+    {
+        const QFontMetrics metrics(mono(8));
+        return qMax(kBar + 2 + metrics.horizontalAdvance(QStringLiteral("100%")), metrics.horizontalAdvance(m_agent.reset));
     }
     QList<Line> lines() const
     {
-        if (m_agent.narrow()) return {};
-        if (m_agent.kind == QLatin1String("subscription") && m_agent.connected) return {{m_agent.reset, m_tokens.text3, mono(kMeter)}};
+        if (m_agent.narrow() || meters() || m_agent.multi()) return {};
+        if (m_agent.absent) return {{QStringLiteral("no acct"), m_tokens.dim, mono(8), 9}, {QStringLiteral("+ add"), m_tokens.warn, mono(8), 9}};
         if (m_agent.kind == QLatin1String("balance") && m_agent.connected) {
             // A key whose balance is not known yet says only that it is there.
-            if (m_agent.balance.isEmpty()) return {{QStringLiteral("key"), m_tokens.text2, mono(11, QFont::Medium)}};
+            if (m_agent.balance.isEmpty()) return {{QStringLiteral("key"), m_tokens.text2, mono(9, QFont::Medium), 9}};
             const auto color = m_agent.balanceValue < 2 ? m_tokens.danger : m_agent.balanceValue < 5 ? m_tokens.warn : m_tokens.text2;
-            return {{m_agent.balance, color, mono(11, QFont::Medium)}, {QStringLiteral("bal"), m_tokens.dim, mono(kMeter)}};
+            return {{m_agent.balance, color, mono(9, QFont::Medium), 9}, {QStringLiteral("bal"), m_tokens.label, mono(8), 9}};
         }
+        if (m_agent.connected) return {};
         const bool balance = m_agent.kind == QLatin1String("balance");
-        return {{balance ? QStringLiteral("no key") : QStringLiteral("offline"), m_tokens.dim, mono(kMeter)},
-                {m_agent.busy ? QStringLiteral("···") : balance ? QStringLiteral("+ add") : QStringLiteral("sign in"), m_agent.busy ? m_tokens.label : m_tokens.warn, mono(kMeter)}};
+        return {{balance ? QStringLiteral("no key") : QStringLiteral("offline"), m_tokens.dim, mono(8), 9},
+                {m_agent.busy ? QStringLiteral("···") : balance ? QStringLiteral("+ add") : QStringLiteral("sign in"), m_agent.busy ? m_tokens.muted : m_tokens.warn, mono(8), 9}};
     }
     int blockWidth(const QList<Line> &lines) const
     {
-        if (m_agent.kind == QLatin1String("subscription") && m_agent.connected)
-            return qMax(kBar + 4 + QFontMetrics(mono(kMeter)).horizontalAdvance(QStringLiteral("100%")), QFontMetrics(mono(kMeter)).horizontalAdvance(m_agent.reset));
         int widest = 0;
         for (const auto &line : lines) widest = qMax(widest, QFontMetrics(line.font).horizontalAdvance(line.text));
         return widest;
@@ -591,9 +606,9 @@ protected:
                 p.setBrush(index == m_current ? m_tokens.selected : m_tokens.btnNeutral);
                 p.drawRoundedRect(row, 4, 4);
             }
-            // 10px | email | 48px | 48px | 42px, 8px apart.
+            // 10px | email | 48px | 48px | 52px, 8px apart.
             const int left = row.left() + 6, right = row.right() - 6;
-            const int reset = right - 42, week = reset - 8 - 48, five = week - 8 - 48, mail = left + 10 + 8;
+            const int reset = right - 52, week = reset - 8 - 48, five = week - 8 - 48, mail = left + 10 + 8;
             if (index == m_current) {
                 QPainterPath check;
                 const double cy = row.center().y() + 0.5;
@@ -618,7 +633,7 @@ protected:
             drawMini(p, week, row, QStringLiteral("wk"), account.week, m_tokens, mini);
             p.setFont(mini);
             p.setPen(m_tokens.text3);
-            p.drawText(QRect(reset, row.y(), 42, row.height()), Qt::AlignLeft | Qt::AlignVCenter, account.reset);
+            p.drawText(QRect(reset, row.y(), 52, row.height()), Qt::AlignLeft | Qt::AlignVCenter, account.reset);
         }
         // Add account, under a rule.
         const auto add = rowRect(count());
@@ -681,9 +696,10 @@ public:
         setMinimumHeight(20);
         setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     }
-    void setText(const QString &title, const QString &details, bool warn)
+    // warn: the account cannot start yet; danger: the computer is offline.
+    void setText(const QString &title, const QString &details, bool warn, bool danger = false)
     {
-        m_title = title; m_details = details; m_warn = warn;
+        m_title = title; m_details = details; m_warn = warn; m_danger = danger;
         setAccessibleName(details.isEmpty() ? title : title + QStringLiteral(" · ") + details);
         setToolTip(accessibleName());
         update();
@@ -698,7 +714,7 @@ protected:
         auto bold = font(); bold.setWeight(QFont::Medium);
         const QFontMetrics boldMetrics(bold), metrics(font());
         const int titleWidth = qMin(width(), boldMetrics.horizontalAdvance(m_title));
-        p.setFont(bold); p.setPen(m_warn ? m_tokens.warn : m_tokens.text);
+        p.setFont(bold); p.setPen(m_danger ? m_tokens.danger : m_warn ? m_tokens.warn : m_tokens.text);
         p.drawText(QRect(0, 0, titleWidth, height()), Qt::AlignLeft | Qt::AlignVCenter, boldMetrics.elidedText(m_title, Qt::ElideRight, width()));
         if (m_details.isEmpty() || titleWidth >= width()) return;
         p.setFont(font()); p.setPen(m_tokens.label);
@@ -709,6 +725,6 @@ protected:
 private:
     Tokens m_tokens;
     QString m_title, m_details;
-    bool m_warn = false;
+    bool m_warn = false, m_danger = false;
 };
 }

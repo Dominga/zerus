@@ -42,9 +42,10 @@ struct Question {
 };
 
 // C4: one answered permission request (members[].permission_answers keeps the
-// last 20): what was decided, who decided it and the deny text.
+// last 20): what was decided, who decided it, the tool and command it asked
+// about and the deny text.
 struct PermissionAnswer {
-    QString questionId, decision, by, reason;
+    QString questionId, decision, by, reason, tool, command;
     double at = 0;
     bool denied() const { return decision == "deny"; }
 };
@@ -129,8 +130,9 @@ struct StructuredReport {
 
 // D2: one finding as `hgs team status` pages it.
 struct TeamFinding {
-    QString id, fromTask, severity, title, file, scenario, task, state, by, note;
-    int line = 0;
+    // N17, N18: the owner's replan proposal and a fix_phase finding's phase.
+    QString id, fromTask, severity, title, file, scenario, task, state, by, note, proposal;
+    int line = 0, phase = 0;
     double at = 0;
 };
 
@@ -237,8 +239,9 @@ struct Phase {
     QList<int> tasks;          // task ids; a discarded phase keeps them
     QList<PhaseChange> changes; // F10: the lead's changes since the owner last saw it
     // F12: why a draft waits - "Waiting for the previous phase to be ready"
-    // with that phase and its open tasks.
-    struct Waiting { QString text; int phase = 0; QList<int> open; };
+    // with that phase and its open tasks. N40: an approved phase still running
+    // no longer blocks the draft: "Can run alongside phase N", `alongside`.
+    struct Waiting { QString text; int phase = 0; QList<int> open; bool alongside = false; };
     Waiting waiting;
     // F13: the owner's sentence the lead approved on.
     QString ownerWord;
@@ -441,9 +444,12 @@ struct PhaseProgress {
 };
 PhaseProgress phaseProgress(const Team &team);
 // Why phase N may not be approved yet (spec 10), empty when it may: every
-// lower phase must be approved and its tasks decided. "Phase 2 opens after
-// phase 1 ends."
+// lower phase must be approved. An approved phase still at work no longer
+// blocks it (F12/N40): the draft then runs alongside it.
 QString approveBlocked(const Team &team, int phase);
+// F12/N40: the earlier approved phase this draft would run alongside (0 when
+// none); the desktop warns the owner before approving it.
+int alongsidePhase(const Team &team, int phase);
 // U25 (spec 5.2): the owner's state of a phase: planned (the team is planning),
 // draft, rejected, queued, running or done. phase_summary[].state when the
 // server sends it, else read from the record and the phase's tasks.
@@ -571,21 +577,34 @@ struct Role {
     QString permissionsProfile;   // B5: read, write, build, commit or network
     QStringList tags;
     bool dangerous = false;
+    // U25 (spec 11.3, 12): the editable role. `message` is lead, some or team
+    // (can_message keeps lead or team for older readers); `danger` holds the
+    // five allowed actions (push, deploy, del, pkgs, net); the prompt blocks
+    // go in `promptOrder` (rules, role, protocol, task and note keys), the
+    // ones switched off in `promptOff`, a note's text in `notes`.
+    QString about, icon, message, joins, protocolExtra, taskTemplate;
+    QStringList machines, messageTo, promptOrder, promptOff;
+    QJsonObject danger;
+    QMap<QString, QString> notes;
     QJsonObject raw;
     QJsonObject json() const;
 };
 struct Seat { QString role; int count = 1; bool optional = false; QJsonObject raw; };
-struct SkeletonTask { QString title, role; QList<int> deps; QJsonObject raw; };
+struct SkeletonTask { QString title, role; QList<int> deps; QJsonObject raw; int phase = 1; };
 struct Template {
     QString id, name, description, leadProtocol, planning, approval;
     QString phaseApproval;     // "" = same as the plan's approval
     QList<Seat> roster;
     QList<SkeletonTask> tasks;
     int maxMembers = 6;
+    QString work;      // U25: worktree, clone, same or cloud ("" = worktree)
+    QString phases;    // U25: same, owner or lead (new phases)
     QJsonObject raw;
     QJsonObject json() const;
 };
-struct Rule { QString id, when, templateId, approval; QJsonObject raw; QJsonObject json() const; };
+// U25: `use` is a template id or "+role" (adds a member and keeps looking);
+// empty uses templateId. An empty approval is the template's own.
+struct Rule { QString id, when, templateId, approval; QJsonObject raw; QString use; QJsonObject json() const; };
 struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; };
 struct Catalog {
     qint64 version = 0;

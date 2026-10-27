@@ -69,6 +69,8 @@ signals:
     // U25: a project's '+' (spec 2.1) and a card's chip (spec 2.2) were clicked.
     void projectNewSession(const QString &group);
     void chipActivated(const QString &key, int kind);
+    // U25 part 6: a card's git chip was clicked (the session's key).
+    void gitActivated(const QString &key);
     void dragFinished();
 protected:
     QStringList mimeTypes() const override { return {QStringLiteral("application/x-hgs-session-placement")}; }

@@ -555,7 +555,8 @@ pub(crate) fn designer_brief(catalog: &Catalog, goal: &str, project: &str) -> St
          needs, with a task skeleton) and routing rules. Read `hgs guide designer` first. You may read the owner's \
          projects to learn how they work, but change no file: your only output is proposals with `hgs team catalog propose --json`. \
          The owner keeps or rejects each proposal and applies them; running teams keep their roster. The catalog is v{}: \
-         read it with `echo '{{}}' | hgs team catalog get --json`. Ask the owner what they need, then propose.",
+         read it with `hgs team catalog get --json <<< '{{}}'`. Run `hgs` directly and send JSON on stdin in a \
+         heredoc. Ask the owner what they need, then propose.",
         catalog.version
     );
     // Section 9.8: the designer explains sub-leads: a role may lead one, and a
@@ -568,6 +569,60 @@ pub(crate) fn designer_brief(catalog: &Catalog, goal: &str, project: &str) -> St
         text += &format!("\n\nThe owner asks: {}", goal.trim());
     }
     text
+}
+
+/// U16: the Team designer's narrow Claude rules. It reads and proposes — the
+/// catalog read, propose and route calls and the guides over Bash, plus
+/// read-only file tools. Nothing here writes outside its folder.
+const DESIGNER_CLAUDE_RULES: [&str; 7] = [
+    "Bash(hgs team catalog get:*)",
+    "Bash(hgs team catalog propose:*)",
+    "Bash(hgs team catalog route:*)",
+    "Bash(hgs guide:*)",
+    "Read",
+    "Glob",
+    "Grep",
+];
+
+/// U16: Claude stops the designer at its start-up trust prompt. Zerus's own
+/// designer folder is private to Zerus (docs/reference.md), so exactly that
+/// folder is trusted in the account config the launch reads, before the
+/// session starts; every other folder keeps the manual prompt. Other agents
+/// have no such trust entry and get nothing.
+fn trust_designer(agent: &str, folder: &str, config: &std::path::Path) -> anyhow::Result<bool> {
+    if agent != "claude" {
+        return Ok(false);
+    }
+    Ok(crate::accounts::trust_claude_folder(config, folder)?)
+}
+
+/// The `hgs` arguments that start the Team designer. A Claude designer also
+/// takes the narrow rules on its own command line, after `--` (the way B5
+/// writes the lead's `hgs team answer` rule); other agents get no new option.
+fn designer_commands(agent: &str, folder: &str, model: &str, effort: &str, brief: &str, launch_id: &str) -> Vec<String> {
+    let mut args: Vec<String> = [agent, folder, "--new", "-n", "team-designer", "--launch-id", launch_id].map(String::from).to_vec();
+    // As a new session from the desktop: a terminal agent runs detached and
+    // takes the model on its own command line; OpenCode takes it from hgs.
+    let terminal = agent != "dsh" && agent != "opencode";
+    if terminal {
+        args.push("-d".into());
+    }
+    if agent == "opencode" && !model.is_empty() {
+        args.extend(["--model".into(), model.to_owned()]);
+        if !effort.is_empty() {
+            args.extend(["--effort".into(), effort.to_owned()]);
+        }
+    }
+    args.push("--".into());
+    if terminal {
+        args.extend(super::dispatcher::agent_args(agent, model, effort));
+        if agent == "claude" {
+            args.push("--allowedTools".into());
+            args.extend(DESIGNER_CLAUDE_RULES.iter().map(|rule| (*rule).to_owned()));
+        }
+    }
+    args.push(brief.to_owned());
+    args
 }
 
 fn designer(input: &Value) -> anyhow::Result<Value> {
@@ -588,25 +643,12 @@ fn designer(input: &Value) -> anyhow::Result<Value> {
     };
     let (model, effort) = (word("model")?, word("effort")?);
     let launch_id = uuid::Uuid::new_v4().to_string();
+    // U16: before the launch, so Claude reads the answer instead of asking.
+    if agent == "claude" {
+        trust_designer(agent, &folder, &crate::accounts::claude_account_config()?)?;
+    }
     let brief = designer_brief(&load()?, input["goal"].as_str().unwrap_or_default(), project);
-    let mut args: Vec<String> = [agent, folder.as_str(), "--new", "-n", "team-designer", "--launch-id", launch_id.as_str()].map(String::from).to_vec();
-    // As a new session from the desktop: a terminal agent runs detached and
-    // takes the model on its own command line; OpenCode takes it from hgs.
-    let terminal = agent != "dsh" && agent != "opencode";
-    if terminal {
-        args.push("-d".into());
-    }
-    if agent == "opencode" && !model.is_empty() {
-        args.extend(["--model".into(), model.clone()]);
-        if !effort.is_empty() {
-            args.extend(["--effort".into(), effort.clone()]);
-        }
-    }
-    args.push("--".into());
-    if terminal {
-        args.extend(super::dispatcher::agent_args(agent, &model, &effort));
-    }
-    args.push(brief);
+    let args = designer_commands(agent, &folder, &model, &effort, &brief, &launch_id);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = super::dispatcher::hgs("", &args, None, std::time::Duration::from_secs(120))?;
     ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
@@ -736,6 +778,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_claude_designer_is_trusted_for_its_folder_and_gets_the_narrow_rules() {
+        let folder = "C:\\Users\\owner\\.local\\state\\hgs\\sessions\\team-designer";
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".claude.json");
+        fs::write(&config, json!({
+            "oauthAccount": {"emailAddress": "owner@example.com"},
+            "projects": {
+                "C:\\work\\project": {"hasTrustDialogAccepted": false, "allowedTools": ["Bash(cargo:*)"]},
+                (folder): {"allowedTools": ["Read"]}
+            }
+        }).to_string()).unwrap();
+        // The launch arguments carry the narrow rules after the agent flags.
+        let args = designer_commands("claude", folder, "Opus", "high", "brief", "launch");
+        let at = args.iter().position(|arg| arg == "--allowedTools").expect("--allowedTools");
+        for (index, rule) in DESIGNER_CLAUDE_RULES.iter().enumerate() {
+            assert_eq!(args[at + 1 + index], *rule, "{args:?}");
+        }
+        assert_eq!(args.last().unwrap(), "brief");
+        assert!(args.iter().any(|arg| arg == "Opus") && args.iter().any(|arg| arg == "high"));
+        // Before the launch, exactly the designer's folder is trusted.
+        assert!(trust_designer("claude", folder, &config).unwrap());
+        let saved: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        assert_eq!(saved["projects"][folder]["hasTrustDialogAccepted"], true);
+        assert_eq!(saved["projects"][folder]["allowedTools"], json!(["Read"]), "its tools stay as Claude saved them");
+        assert_eq!(saved["projects"]["C:\\work\\project"]["hasTrustDialogAccepted"], false, "another folder keeps its answer");
+        assert_eq!(saved["projects"].as_object().unwrap().len(), 2, "no other project entry is added");
+        assert_eq!(saved["oauthAccount"]["emailAddress"], "owner@example.com");
+        assert!(!trust_designer("claude", folder, &config).unwrap(), "a second launch changes nothing");
+    }
+
+    #[test]
+    fn other_designer_agents_get_no_trust_and_no_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".claude.json");
+        for agent in ["codex", "kimi", "dsh", "opencode"] {
+            let args = designer_commands(agent, "C:\\designer", "", "", "brief", "launch");
+            assert!(!args.iter().any(|arg| arg == "--allowedTools"), "{agent}: {args:?}");
+            assert!(!trust_designer(agent, "C:\\designer", &config).unwrap(), "{agent}");
+        }
+        assert!(!config.exists(), "nothing writes a Claude account config for another agent");
+    }
+
+    #[test]
     fn route_matches_like_the_prototype() {
         let mut catalog = builtin();
         catalog.routing = vec![
@@ -783,8 +868,7 @@ mod tests {
 
     #[test]
     fn export_import_and_revert_move_versions() {
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var("HGS_STATE_DIR").ok();
         std::env::set_var("HGS_STATE_DIR", dir.path());

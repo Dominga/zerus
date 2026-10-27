@@ -566,7 +566,7 @@ target_link_libraries(test_accountusage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-
 zerus_add_test(accountusage test_accountusage)
 set_tests_properties(accountusage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-add_executable(test_newsessiondialog test_newsessiondialog.cpp)
+add_executable(test_newsessiondialog test_newsessiondialog.cpp ../resources.qrc)
 target_link_libraries(test_newsessiondialog PRIVATE Qt6::Test hgs-tray-views)
 target_compile_definitions(test_newsessiondialog PRIVATE ZERUS_OPENCODE_EFFORT_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-effort-ids.json")
 zerus_add_test(newsessiondialog test_newsessiondialog)
@@ -610,7 +610,7 @@ set_tests_properties(teams PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # WhiteWh fork: agent teams M3–M6 (task card, planning, New team, catalog, designer, workspace).
 add_executable(test_teamsui test_teamsui.cpp)
 target_include_directories(test_teamsui PRIVATE ../src)
-target_link_libraries(test_teamsui PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui)
+target_link_libraries(test_teamsui PRIVATE Qt6::Test Qt6::Widgets hgs-tray-ui hgs-speech)
 zerus_add_test(teamsui test_teamsui)
 set_tests_properties(teamsui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # WhiteWh fork: Claude desktop app sessions continued in Zerus.

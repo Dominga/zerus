@@ -82,6 +82,35 @@ QString openModeLabel(const QString &mode, bool windowsTerminal)
     return mode;
 }
 
+// Everything rebuild() shows and binds, in order: a poll that changes none of it
+// keeps the menu and its actions (and their DBusMenu IDs) in place.
+QString menuContent(const FleetState &state)
+{
+    QString content = TrayMenu::tr("Open Zerus");
+    const auto *updates = UpdateController::instance();
+    content += QLatin1Char('\n') + (updates->updateAvailable() ? updates->feed().version : QString())
+        + QLatin1Char(updates->restartRequired() ? 'r' : '-');
+    const auto sessions = [&content](const BoxState &box, bool local) {
+        for (const SessionInfo &s : box.sessions) {
+            if (s.state == "archived") continue;
+            content += QLatin1Char('\n') + sessionLabel(s) + QLatin1Char('\t') + s.name + QLatin1Char('\t')
+                + (local && s.attached > 0 && !s.clients.isEmpty() ? s.clients.constFirst() : QString())
+                + QLatin1Char(s.state != "running" ? 's' : 'r');
+        }
+    };
+    if (state.local().localSessions) {
+        content += QStringLiteral("\nlocal\t") + state.local().host;
+        sessions(state.local(), true);
+    }
+    for (const QString &alias : state.peerNames()) {
+        const BoxState *box = state.peer(alias);
+        content += QStringLiteral("\npeer\t") + alias + QLatin1Char('\t')
+            + QLatin1Char(state.peerPolledAt(alias) == 0 ? 'p' : box->ok ? 'o' : 'u');
+        if (state.peerPolledAt(alias) != 0 && box->ok) sessions(*box, false);
+    }
+    return content;
+}
+
 } // namespace
 
 TrayMenu::TrayMenu(const QStringList &openModes, const QString &currentMode,
@@ -126,6 +155,9 @@ TrayMenu::~TrayMenu()
 
 void TrayMenu::rebuild(const FleetState &state)
 {
+    auto content = menuContent(state);
+    if (content == m_content) return;
+    m_content = std::move(content);
     m_menu->clear();
     QAction *dashboard = m_menu->addAction(tr("Open Zerus"));
     connect(dashboard, &QAction::triggered, this, &TrayMenu::sessionsRequested);

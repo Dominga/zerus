@@ -23,12 +23,15 @@
 #include <QPointer>
 #include <QDir>
 #include <algorithm>
+#include <functional>
 
 class ListProbe : public SessionList { public: using SessionList::mimeData; using SessionList::initViewItemOption; };
 class TestWorkspace : public QObject {
     Q_OBJECT
 private slots:
     void durableIdentityAndMissingSessions();
+    void revisionFollowsTheSavedForm();
+    void rowTextChangeTimesFollowTheClock();
     void observedRowsKeepLocalOrderAndRenameWithoutClaimingMembership();
     void orderingAndRemoval();
     void invalidDataAndMoves();
@@ -77,6 +80,98 @@ private slots:
     void sessionListDestructionStopsOwnedCallbacks_data();
     void sessionListDestructionStopsOwnedCallbacks();
 };
+
+void TestWorkspace::revisionFollowsTheSavedForm()
+{
+    SessionOrganization model;
+    auto json = model.toJson(); auto revision = model.revision(); QVERIFY(revision);
+    int edits = 0;
+    // Every edit that changes the saved form changes the revision.
+    const auto step = [&](const char *what, const std::function<void()> &edit) {
+        edit();
+        const bool changed = model.toJson() != json;
+        QVERIFY2(!changed || model.revision() != revision, what);
+        edits += changed; json = model.toJson(); revision = model.revision();
+    };
+    // Observing known rows, as every rebuild does, keeps it.
+    const auto steady = [&](const char *what, const std::function<void()> &edit) {
+        edit(); QVERIFY2(model.revision() == revision, what); QCOMPARE(model.toJson(), json);
+    };
+    QString project, other, folder;
+    step("observe", [&] { model.observe("arch", "codex/p", "run-1"); });
+    steady("observe again", [&] { model.observe("arch", "codex/p", "run-1"); });
+    step("observe archive", [&] { model.observe("arch", "codex/p", "run-0", "archive-1"); });
+    steady("observe archive again", [&] { model.observe("arch", "codex/p", "run-0", "archive-1"); });
+    step("rename by run", [&] { model.observe("arch", "codex/q", "run-1"); });
+    steady("observe renamed", [&] { model.observe("arch", "codex/q", "run-1"); });
+    step("create", [&] { project = model.createGroup("Infra"); });
+    step("move session", [&] { model.moveSession("arch\ncodex/q", project); });
+    steady("observe assigned", [&] { model.observe("arch", "codex/q", "run-1"); });
+    step("observe untracked", [&] { model.observe("arch", "sh/p", {}); });
+    steady("observe untracked again", [&] { model.observe("arch", "sh/p", {}); });
+    step("rename group", [&] { model.renameGroup(project, "Infrastructure"); });
+    step("collapse", [&] { model.setCollapsed(project, true); });
+    step("color", [&] { model.setColor(project, "#ff0000"); });
+    step("vivid", [&] { model.setVivid(project, true); });
+    step("move group", [&] { model.moveGroup(project); });
+    step("add folder", [&] { folder = model.addFolder(project, "arch", "/projects/infra"); });
+    step("edit folder", [&] { model.editFolder(project, folder, "arch", "/projects/infra2", "two"); });
+    step("create other", [&] { other = model.createGroup("Other"); });
+    step("copy folder", [&] { model.copyFolder(project, folder, other); });
+    step("move folder", [&] { model.moveFolder(project, folder, other); });
+    step("remove folder", [&] { model.removeFolder(other, model.group(other)->folders.first().id); });
+    step("imported", [&] { model.markImported("arch"); });
+    steady("imported again", [&] { model.markImported("arch"); });
+    step("default", [&] { model.setDefaultProject(other); });
+    step("rename session", [&] { model.renameSession("arch\ncodex/q", "arch\ncodex/r"); });
+    step("remove group", [&] { model.removeGroup(project, other); });
+    QVERIFY2(edits >= 20, qPrintable(QString::number(edits)));
+    // A copy keeps the revision of what it copied; a reloaded organization has its own.
+    const SessionOrganization copy = model; QCOMPARE(copy.revision(), model.revision());
+    QVERIFY(SessionOrganization(model.toJson()).revision() != model.revision());
+}
+
+void TestWorkspace::rowTextChangeTimesFollowTheClock()
+{
+    // Elapsed text changes when the shown value would.
+    const double started = 1000;
+    for (const qint64 offset : {0, 5, 59, 3599, 3600, 7300, 86399, 90000}) {
+        const qint64 now = qint64(started) + offset, at = SessionElapsed::changesAt(started, now * 1000 + 300);
+        QVERIFY2(at > now * 1000 + 300, qPrintable(QString::number(offset)));
+        QCOMPARE(SessionElapsed::text(started, at / 1000 - 1), SessionElapsed::text(started, now));
+        QVERIFY(SessionElapsed::text(started, at / 1000) != SessionElapsed::text(started, now));
+    }
+    QCOMPARE(SessionElapsed::changesAt(0, 5000), std::numeric_limits<qint64>::max());
+    // Rows: a retry countdown every second, a wait as its elapsed time, a
+    // scheduled run when it comes due; other rows not by the clock alone.
+    SessionInfo s; s.state = "running"; s.tracked = true; s.activity = "idle"; s.phase = "idle"; s.processState = "running";
+    s.runId = "run-1"; s.conversationId = "c-1";
+    const qint64 now = 1'800'000'000'000;
+    QCOMPARE(SessionPresentation::textChangesAt(s, now), std::numeric_limits<qint64>::max());
+    auto retry = s; retry.recovery = {{"state", "waiting"}, {"due_at", now / 1000.0 + 30}};
+    QCOMPARE(SessionPresentation::textChangesAt(retry, now), now);
+    auto waiting = s; waiting.coordinationWait = {{"schema", 1}, {"status", "ok"}, {"run_id", "run-1"}, {"conversation_id", "c-1"},
+        {"count", 1}, {"items", QJsonArray{QJsonObject{{"state", "awaiting_result"}, {"created_at", now / 1000.0 - 10}}}}};
+    QVERIFY(SessionPresentation::waitingIdle(waiting));
+    QCOMPARE(SessionPresentation::textChangesAt(waiting, now), now + 1000);
+    auto scheduled = s; scheduled.scheduledJobs = 1; scheduled.nextScheduledAt = now / 1000.0 + 120;
+    const auto due = SessionPresentation::textChangesAt(scheduled, now);
+    QVERIFY(due <= now + 120000); QVERIFY(due > now);
+    scheduled.nextScheduledAt = now / 1000.0 - 5;
+    QCOMPARE(SessionPresentation::textChangesAt(scheduled, now), std::numeric_limits<qint64>::max());
+    // A row that merges the same inspection again shows nothing new; only its
+    // observation times differ.
+    QJsonObject inspection{{"tracked", true}, {"run_id", "run-1"}, {"conversation_id", "c-1"},
+        {"process_work", QJsonObject{{"count", 1}, {"sampled_at", 20}, {"command", "build"}}}};
+    auto row = s; row.backgroundObservedAt = 10;
+    const auto merged = SessionPresentation::inspected(row, inspection);
+    auto later = row; later.backgroundObservedAt = 15;
+    QVERIFY(SessionPresentation::sameInspection(SessionPresentation::inspected(later, inspection), merged));
+    later.backgroundObservedAt = 25; // The listing's sample is newer: its own count shows.
+    QVERIFY(!SessionPresentation::sameInspection(SessionPresentation::inspected(later, inspection), merged));
+    auto tool = merged; tool.toolDetail = "cargo test";
+    QVERIFY(!SessionPresentation::sameInspection(tool, merged));
+}
 
 void TestWorkspace::sessionListDestructionStopsOwnedCallbacks_data()
 {

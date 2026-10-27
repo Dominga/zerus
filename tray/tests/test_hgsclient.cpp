@@ -42,6 +42,8 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settings->path());
     }
     void parsesBox();
+    void listingDigestIgnoresOnlyObservationFields();
+    void listingPollsCarryTheirDigest();
     void parsesSharedReadState();
     void parsesSharedNotificationsAndRejectsMalformedPreferences();
     void notificationsUseStdinAndRequireExactCasConfirmation();
@@ -1711,6 +1713,76 @@ void TestHgsClient::missingBinaryEmitsFailed()
 // уже "в полёте" -- независимо от того, успела ли ОС вообще стартовать процесс первого
 // вызова. Поэтому фейковый hgs ниже не спит вовсе: он сразу пишет метку в лог-файл и
 // отвечает валидным JSON, и дедупликация проверяется без единой искусственной паузы.
+namespace {
+QJsonObject digestListing()
+{
+    const QJsonObject row{{"name", "codex/p/one"}, {"cmd", "codex"}, {"run_id", "run-1"}, {"phase", "idle"},
+        {"goal_observed_at", 10.5}, {"process_work", QJsonObject{{"count", 1}, {"started_at", 4.0}, {"sampled_at", 10.5}}}};
+    return {{"host", "arch"}, {"ok", true}, {"peers", QJsonArray{"mac"}}, {"projects", QJsonObject{{"p", "/projects/p"}}},
+        {"metrics", QJsonObject{{"cpu_percent", 5.0}, {"sampled_at", 10.5}}},
+        {"desktop_presence", QJsonObject{{"idle_seconds", 3.0}}}, {"sessions", QJsonArray{row, QJsonObject{{"name", "sh/p"}}}}};
+}
+QJsonObject withRow(QJsonObject listing, int index, const QString &key, const QJsonValue &value)
+{
+    auto rows = listing["sessions"].toArray(); auto row = rows[index].toObject(); row[key] = value;
+    rows[index] = row; listing["sessions"] = rows; return listing;
+}
+}
+
+void TestHgsClient::listingDigestIgnoresOnlyObservationFields()
+{
+    const auto base = digestListing();
+    const auto digest = HgsClient::listingDigest(base);
+    QCOMPARE(digest.size(), 32);
+    // Observation fields that change on every read without news.
+    auto observed = withRow(base, 0, "goal_observed_at", 11.5);
+    observed = withRow(observed, 0, "process_work", QJsonObject{{"count", 1}, {"started_at", 4.0}, {"sampled_at", 12.5}});
+    observed["metrics"] = QJsonObject{{"cpu_percent", 70.0}, {"sampled_at", 12.5}};
+    observed["desktop_presence"] = QJsonObject{{"idle_seconds", 9.0}, {"locked", true}};
+    QCOMPARE(HgsClient::listingDigest(observed), digest);
+    // Everything else counts, including the rest of the process sample and row order.
+    QVERIFY(HgsClient::listingDigest(withRow(base, 0, "phase", "working")) != digest);
+    QVERIFY(HgsClient::listingDigest(withRow(base, 0, "process_work", QJsonObject{{"count", 2}, {"started_at", 4.0}, {"sampled_at", 10.5}})) != digest);
+    QVERIFY(HgsClient::listingDigest(withRow(base, 1, "goal", QJsonObject{{"text", "ship"}})) != digest);
+    auto reordered = base; reordered["sessions"] = QJsonArray{base["sessions"].toArray()[1], base["sessions"].toArray()[0]};
+    QVERIFY(HgsClient::listingDigest(reordered) != digest);
+    auto meta = base; meta["peers"] = QJsonArray{"mac", "air"};
+    QVERIFY(HgsClient::listingDigest(meta) != digest);
+    meta = base; meta["ok"] = false;
+    QVERIFY(HgsClient::listingDigest(meta) != digest);
+
+    QString error;
+    const auto parsed = HgsClient::parseListing(QJsonDocument(observed).toJson(), &error);
+    QVERIFY(error.isEmpty()); QCOMPARE(parsed.digest, digest); QCOMPARE(parsed.sessions.size(), 2);
+    QCOMPARE(parsed.metrics.value("cpu_percent").toDouble(), 70.0);
+    QVERIFY(HgsClient::parseBox(QJsonDocument(base).toJson(), &error).digest.isEmpty());
+    QVERIFY(HgsClient::parseListing("{", &error).digest.isEmpty()); QVERIFY(!error.isEmpty());
+}
+
+void TestHgsClient::listingPollsCarryTheirDigest()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const auto path = dir.filePath("hgs"), counter = dir.filePath("count");
+    // Each call answers with a later observation time; the third one with news.
+    QVERIFY(FakeCli::install(path, "#!/usr/bin/env python3\nimport json,os\n"
+        "p=" + FakeCli::pythonString(counter) + "\nn=int(open(p).read()) if os.path.exists(p) else 0\nopen(p,'w').write(str(n+1))\n"
+        "row={'name':'codex/p/one','cmd':'codex','phase':'working' if n>=2 else 'idle','goal_observed_at':n,"
+        "'process_work':{'count':0,'sampled_at':n}}\n"
+        "print(json.dumps({'host':'zpeer','ok':True,'metrics':{'sampled_at':n},'sessions':[row]}))\n"));
+    HgsClient client(FakeCli::program(path));
+    QList<BoxState> local, peer;
+    connect(&client, &HgsClient::localReady, this, [&local](const BoxState &box) { local << box; });
+    connect(&client, &HgsClient::peerReady, this, [&peer](const BoxState &box) { peer << box; });
+    client.requestLocal(); QTRY_COMPARE(local.size(), 1);
+    client.requestPeer("mac"); QTRY_COMPARE(peer.size(), 1);
+    client.requestLocal(); QTRY_COMPARE(local.size(), 2);
+    QCOMPARE(local[0].digest.size(), 32);
+    QCOMPARE(peer[0].digest, local[0].digest);
+    QCOMPARE(peer[0].host, QString("mac")); QCOMPARE(peer[0].reportedHost, QString("zpeer"));
+    QVERIFY(local[1].digest != local[0].digest);
+    QCOMPARE(local[0].sessions[0].backgroundObservedAt, 0.0); QCOMPARE(peer[0].sessions[0].backgroundObservedAt, 1.0);
+}
+
 void TestHgsClient::localPollingReportsStartAndRecoversFromFailure()
 {
     QTemporaryDir dir; const auto path = dir.filePath("hgs");

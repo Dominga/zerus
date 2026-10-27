@@ -274,7 +274,12 @@ void MachinesPage::selectMachine(const QString &host) {
     if (m_data.isEmpty() && target != "@local") { m_pendingSelection = target; reload(); return; }
     m_selected = target; m_new = false; renderRows(); loadSelection();
 }
-void MachinesPage::showEvent(QShowEvent *event) { QWidget::showEvent(event); reload(); }
+void MachinesPage::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (m_rowsStale) { renderRows(); updateAppearance(); }
+    reload();
+}
 void MachinesPage::setTheme(bool dark) {
     m_colorPreview->setTheme(dark);
     m_list->setProperty("hgsDark", dark); m_list->viewport()->update();
@@ -287,11 +292,14 @@ void MachinesPage::setFleet(const FleetState &fleet) {
     // Windows: its platform and session host decide what this computer offers.
     const bool host = fleet.local().localHost != m_fleet.local().localHost
         || MachinePlatform::of(fleet.local().metrics, true) != MachinePlatform::of(m_fleet.local().metrics, true);
-    m_fleet = fleet; renderRows(); updateAppearance();
+    m_fleet = fleet;
+    // A hidden page renders its rows when shown.
+    if (isVisible()) { renderRows(); updateAppearance(); } else m_rowsStale = true;
     if (console && !m_loading) { if (m_selected == "@local" && !m_new && !m_dirty) loadSelection(); else updateControls(); }
     else if (host && !m_loading) updateControls();
 }
 void MachinesPage::renderRows() {
+    m_rowsStale = false;
     const QSignalBlocker blocked(m_list);const QScopedValueRollback<bool> loading(m_loading,true);
     // A control console is listed for its color, but it is no machine of the
     // fleet: the counts match Overview, which leaves it out.

@@ -4,6 +4,7 @@
 #include <QTemporaryDir>
 
 #include "EventStream.h"
+#include "FleetState.h"
 #include "FakeCli.h"
 #include "JsonParse.h"
 
@@ -181,6 +182,16 @@ void TestEventStream::unchangedListingIsAppliedAgain()
     stream.start();
     QTRY_VERIFY(!listings.isEmpty());
     QTRY_VERIFY_WITH_TIMEOUT(listings.size() >= 3, 3000);
+    // The same listing has the same digest, so the desktop only refreshes its
+    // poll time (FleetState::refreshListing); a changed one has another.
+    const auto first = listings.first().first().value<BoxState>(), again = listings.at(2).first().value<BoxState>();
+    QCOMPARE(first.digest.size(), 32); QCOMPARE(again.digest, first.digest);
+    FleetState fleet; BoxState local; local.host = "arch"; local.ok = true; local.peersKnown = true; local.peers = {"laptop"};
+    fleet.setLocal(local, 0); fleet.setPeer(first, 1000);
+    QVERIFY(fleet.refreshListing("laptop", again, 2000)); QCOMPARE(fleet.peerPolledAt("laptop"), qint64(2000));
+    stream.follow(QStringLiteral("codex/Alpha"), QStringLiteral("r1"), QStringLiteral("c-r1"), 0);
+    QTRY_COMPARE(listings.last().first().value<BoxState>().sessions.size(), 1);
+    QVERIFY(listings.last().first().value<BoxState>().digest != first.digest);
     EventStream::setListingTimingForTests(2000, 10000);
 }
 

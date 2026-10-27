@@ -52,6 +52,15 @@ private:
     void observeAttention(const QString &host, const BoxState &box);
     void migrateReadMarks(const QString &host);
     void publishReadMarks();
+    // Stored read state: replies and attention marks this desktop keeps, and
+    // marks queued for hosts (ReadMarkStore). m_state reflects m_appliedReadState
+    // after each listing applied in full; while it is unchanged, a listing that
+    // FleetState::refreshListing accepts needs nothing else recomputed.
+    struct ReadState { QJsonObject replies, marks, pending; bool valid = false; };
+    static ReadState storedReadState();
+    bool readStateApplied(const ReadState &stored) const;
+    void listingRefreshed(const QString &host);
+    void updateLocalPoll(const BoxState &box);
     void resolveAttentionClick(bool final = false);
     // Одна строка, но своё имя: аргументы у TrayMenu::rebuild() одни и те же во всех
     // шести местах, откуда меню перестраивается, и перечислять их каждый раз -- шум.
@@ -110,6 +119,7 @@ private:
     QTimer m_peerTimer;
     QString m_lastError;
     QString m_localReadError;
+    ReadState m_appliedReadState;
     SessionsWindow *m_sessionsWindow = nullptr;
     // Records desktop activity for phone alerts; see DesktopPresence.h.
     std::unique_ptr<DesktopPresence> m_presence;

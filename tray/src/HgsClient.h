@@ -142,6 +142,9 @@ struct BoxState {
     // listing without a listed session or record ("name", "code" or null,
     // "output", its last lines). Empty from an older CLI.
     QHash<QString, QJsonObject> endedLaunches;
+    // The listing this box was prepared from, without its observation fields
+    // (HgsClient::listingDigest). Empty when it came from anywhere else.
+    QByteArray digest;
 };
 
 struct ProjectInfo {
@@ -302,6 +305,15 @@ public:
     static BoxState parseBox(const QByteArray &json, QString *error);
     // A listing that is already an object, as tests and prepared values hold it.
     static BoxState box(const QJsonObject &object);
+    // A computer's listing (`ls --json`, or the event stream's catalog) with
+    // its digest: SHA-256 of the listing without the fields that change on
+    // every read without news (rows' goal_observed_at and
+    // process_work.sampled_at; metrics and desktop_presence). Equal digests
+    // let the desktop skip all but the observation fields (FleetState::refreshListing).
+    // Runs on a preparation thread.
+    static BoxState parseListing(const QByteArray &json, QString *error);
+    static BoxState listing(const QJsonObject &object);
+    static QByteArray listingDigest(const QJsonObject &listing);
     // How the client starts hgs with these arguments: its environment without
     // an agent's attribution, and macOS argument handling.
     static ProcessRunner::Request commandRequest(const QString &hgs, const QStringList &arguments);

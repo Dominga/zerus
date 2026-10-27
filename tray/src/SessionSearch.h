@@ -16,6 +16,8 @@ public:
     void setQuery(const QString &query);
     void setScope(const FleetState &fleet, const QString &filter, const QString &host, const QSet<QString> &drafts = {});
     void setHostsScope(const FleetState &fleet, const QString &filter, const QSet<QString> &hosts, const QSet<QString> &drafts = {});
+    // The same scope with a refreshed fleet (newer poll times).
+    void refreshFleet(const FleetState &fleet) { setHostsScope(fleet, m_filter, m_hosts, m_drafts); }
     void setProjectScope(const QSet<QString> &sessionKeys, bool enabled);
     void setAccountScope(const QSet<QString> &bindings);
     void setTheme(bool dark);

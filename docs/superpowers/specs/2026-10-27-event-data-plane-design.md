@@ -133,6 +133,19 @@ Read marks and attention marks are held in memory, written through on change,
 and never re-parsed from QSettings per poll. Account and row-preference
 identity hashes are computed once per identity, on the worker.
 
+M2a, the first step, keeps the existing models. Each listing carries a digest
+prepared off the GUI thread, with the observation fields masked. A listing equal
+to the last one, with unchanged stored read state, only refreshes poll times,
+metrics and background observations: rows rebuild only when the clock changes
+their text, a peer crosses the staleness age, or the selected session's latest
+inspection reads differently. Accounts and Machines render only while shown,
+the tray menu rebuilds only when its contents change, the organization is
+serialized and sent to the swarm only when it changed, and read replies,
+attention marks and pending reads are applied in one unread pass. On arch, GUI
+time per unchanged listing fell from 5.5 ms to 0.36 ms with the window shown
+and per changed listing from 5.6 ms to 4.1 ms; M2b moves the remaining rebuild
+off the GUI thread.
+
 ## Event stream: `hgs [@host] watch --json`
 
 ### Transport
@@ -211,15 +224,22 @@ on a 250 ms pulse:
   cursor keyed on device, inode, prefix hash and offset (the existing
   tail-reader pattern). DeepSeek and OpenCode keep their inspect RPCs, polled
   only while subscribed.
-- **Catalog**: a stamp vector over the binding directories, `renames/`,
-  `name_routes/`, `read-marks.json`, `notifications.json`, `waits.sqlite3`,
-  `launches/`, the archive revision and the provider binding directories. When
-  the stamp changes (150 ms debounce, at most every 500 ms), or after a 5 s
-  safety tick, the watcher re-runs the in-process listing builder that
-  `ls --json --local --no-archives` uses and diffs rows by key. The safety tick
-  covers what hooks never report: process exit, tmux kill or rename, ended
-  background jobs and terminal choosers. Bindings are replaced by rename;
-  temporary `.hgs-*` files are ignored.
+- **Catalog**: per-binding stamps plus stamps of `renames/`, `name_routes/`,
+  `read-marks.json`, `notifications.json`, `waits.sqlite3`, `launches/`, the
+  archive revision and the provider binding directories. A changed binding,
+  or new journal rows of its session, re-derives only that session's row
+  through the listing's own row steps under the same lock (150 ms debounce, at
+  most every 500 ms); any other change lists all rows again. A 5 s probe covers
+  what no file shows: tmux sessions that start, end, are renamed, attached or
+  detached, exited agent processes, ended background work, sessions without a
+  hook event yet, and DeepSeek and OpenCode hosts. All rows are listed again
+  every 5 s for terminal choosers and status lines of sessions that already
+  reported hooks; 15 s would roughly halve the watcher's CPU but delay such a
+  chooser, and waits for the owner. Within one status observation the effort
+  footer and every terminal chooser share one capture per pane (35 instead of
+  62 `capture-pane` per listing on arch). Bindings are replaced by rename;
+  temporary `.hgs-*` files are ignored. Measured on arch: the watcher used
+  12.9 % of a core with whole listings on every change and 6.1 % after.
 - **Processes**: hook-recorded shell jobs (the binding stamp) plus one `ps`
   work sample every 2 s per subscribed session. The full snapshot, which
   re-reads the transcript tail, runs at most every 10 s.
@@ -278,7 +298,9 @@ the same frames. The protocol does not depend on how changes are detected.
   holds its stdin open.
 - Session counts may reach tens of thousands. The live catalog is bounded by
   live sessions, archives stay paged, Activity is cursor-based, and the
-  watcher holds no unbounded per-session state.
+  watcher holds no unbounded per-session state: its only per-session map,
+  from binding file to session and journal name, is bounded by the binding
+  files.
 
 ## Milestones
 

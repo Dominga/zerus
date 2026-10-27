@@ -51,6 +51,10 @@ private slots:
     void idleShellWorkKeepsActiveAndPreservesInputAndAttention();
     void processInspectionUpdatesWithoutNewHookAndRejectsOtherRuns();
     void intermediateRepliesStayUnreadUntilWorkFinishes();
+    void unchangedListingRefreshesOnlyObservationFields();
+    void refreshedPeersStayFreshAndChangedListingsApplyInFull();
+    void viewCopiesTakeRefreshedObservations();
+    void combinedReadStateMatchesSeparatePasses();
 };
 
 void TestFleetState::intermediateRepliesStayUnreadUntilWorkFinishes()
@@ -440,6 +444,203 @@ void TestFleetState::tooltipCountsUseSingularForOne()
     SessionInfo other; other.name = "codex/b";
     local.sessions = {waiting, other}; state.setLocal(local, 2000);
     QCOMPARE(state.tooltip(2000).section('\n', 0, 0), QString("1 needs attention, 2 sessions total"));
+}
+
+namespace {
+QString key(const QJsonArray &parts) { return QString::fromUtf8(QJsonDocument(parts).toJson(QJsonDocument::Compact)); }
+// Everything the read inputs decide, as one comparable text.
+QString readOutcome(const FleetState &f, qint64 now)
+{
+    QStringList lines;
+    const auto rows = [&lines](const QString &host, const BoxState &b) {
+        for (const auto &s : b.sessions)
+            lines << QStringLiteral("%1/%2 unread=%3 acknowledged=%4 review=%5 attention=%6")
+                         .arg(host, s.name).arg(s.unreadReply).arg(s.attentionAcknowledged).arg(s.reviewLater).arg(s.needsAttention());
+    };
+    rows({}, f.local());
+    for (const auto &peer : f.peerNames()) rows(peer, *f.peer(peer));
+    for (const auto &object : {f.readReplies(), f.attentionMarks(), f.pendingReads(), f.unreadReplies()})
+        lines << QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
+    lines << QString::number(f.attentionSessions(now));
+    return lines.join('\n');
+}
+// The stored queue after the caller removes the settled marks (ReadMarkStore::remove).
+QJsonObject afterRemoval(QJsonObject stored, const QList<ReadMark> &settled)
+{
+    for (const auto &mark : settled)
+        if (ReadMark::fromJson(stored.value(mark.key()).toObject()) == mark) stored.remove(mark.key());
+    return stored;
+}
+}
+
+void TestFleetState::unchangedListingRefreshesOnlyObservationFields()
+{
+    BoxState local = box("arch", true, 0); local.digest = "listing-1"; local.metrics = {{"cpu_percent", 5}};
+    auto s = shared(); s.backgroundObservedAt = 10; local.sessions = {s};
+    FleetState fleet; QVERIFY(!fleet.refreshListing({}, local, 0)); // nothing listed yet
+    fleet.setLocal(local, 0);
+    QVERIFY(fleet.local().sessions[0].unreadReply);
+    QVERIFY(fleet.markReplyRead({}, s.name, s.conversationId, s.replyId));
+    const auto pending = fleet.pendingReads(), read = fleet.readReplies(); QVERIFY(!pending.isEmpty());
+    // The same listing, observed later: new metrics and process sample time.
+    auto later = local; later.metrics = {{"cpu_percent", 50}}; later.sessions[0].backgroundObservedAt = 12;
+    QVERIFY(fleet.refreshListing({}, later, 100));
+    QCOMPARE(fleet.local().metrics.value("cpu_percent").toInt(), 50);
+    QCOMPARE(fleet.local().sessions[0].backgroundObservedAt, 12.0);
+    QVERIFY(!fleet.local().sessions[0].unreadReply);
+    QCOMPARE(fleet.pendingReads(), pending); QCOMPARE(fleet.readReplies(), read);
+    QVERIFY(fleet.takeSettledReadMarks().isEmpty());
+    // Any other listing is applied in full by the caller; refresh changes nothing.
+    auto changed = later; changed.digest = "listing-2"; changed.sessions[0].backgroundObservedAt = 14;
+    QVERIFY(!fleet.refreshListing({}, changed, 200));
+    auto unprepared = later; unprepared.digest.clear(); unprepared.sessions[0].backgroundObservedAt = 14;
+    QVERIFY(!fleet.refreshListing({}, unprepared, 200));
+    QCOMPARE(fleet.local().sessions[0].backgroundObservedAt, 12.0);
+    // A confirmed preference write changes the row: the next listing is applied in full.
+    const QJsonObject suppressed{{"reply_id", QJsonValue()}, {"attention_signature", QJsonValue()},
+        {"optional_question_ids", QJsonArray()}, {"main_attention", QJsonValue()}, {"child_attention", QJsonObject()}};
+    const QJsonObject confirmed{{"conversation_id", s.conversationId}, {"muted", false}, {"revision", 0}, {"suppressed", suppressed}};
+    auto preferred = local; preferred.sessions[0].sharedNotifications = true; preferred.sessions[0].notificationPreferences = confirmed;
+    fleet.setLocal(preferred, 300); QVERIFY(fleet.refreshListing({}, preferred, 350));
+    auto muted = confirmed; muted["muted"] = true; muted["revision"] = 1;
+    QVERIFY(fleet.applyNotificationPreferences({}, fleet.local().sessions[0], muted));
+    QVERIFY(!fleet.refreshListing({}, preferred, 400));
+}
+
+void TestFleetState::refreshedPeersStayFreshAndChangedListingsApplyInFull()
+{
+    BoxState local = box("arch", true, 0); local.peersKnown = true; local.peers = {"mac"}; local.digest = "arch";
+    FleetState fleet; fleet.setLocal(local, 0);
+    BoxState mac = box("mac", true, 2); mac.digest = "mac-1"; mac.sessions[0].phase = "approval"; mac.sessions[0].state = "running";
+    QVERIFY(!fleet.refreshListing("mac", mac, 1000)); // never polled
+    fleet.setPeer(mac, 1000);
+    const qint64 late = 1000 + FleetState::kPeerStaleMs + 1;
+    QVERIFY(fleet.isStale(late)); QCOMPARE(fleet.attentionSessions(late), 0);
+    QVERIFY(fleet.refreshListing("mac", mac, late - 10));
+    QCOMPARE(fleet.peerPolledAt("mac"), late - 10);
+    QVERIFY(!fleet.isStale(late)); QCOMPARE(fleet.attentionSessions(late), 1);
+    QVERIFY(fleet.tooltip(late).contains("2 on mac (just now)"));
+    QVERIFY(fleet.freshness(late) != fleet.freshness(late + FleetState::kPeerStaleMs));
+    // A real change is not a refresh.
+    auto news = mac; news.digest = "mac-2"; news.sessions[0].phase = "idle";
+    QVERIFY(!fleet.refreshListing("mac", news, late));
+    fleet.setPeer(news, late); QCOMPARE(fleet.attentionSessions(late), 0);
+    // A machine outside the configured list is ignored, as setPeer ignores it.
+    BoxState air = box("air", true, 1); air.digest = "air";
+    QVERIFY(!fleet.refreshListing("air", air, late)); QVERIFY(!fleet.peer("air"));
+    // The same offline answer again refreshes the poll time; the last rows stay.
+    BoxState offline; offline.host = "mac"; offline.error = "offline"; offline.digest = "mac-offline";
+    fleet.setPeer(offline, late + 1);
+    QVERIFY(fleet.refreshListing("mac", offline, late + 2));
+    QCOMPARE(fleet.peerPolledAt("mac"), late + 2); QVERIFY(!fleet.peer("mac")->ok); QCOMPARE(fleet.peer("mac")->sessions.size(), 2);
+    // A failed read the caller records (no listing, no digest) makes the next one apply in full.
+    BoxState failed; failed.host = "mac"; failed.error = "timed out";
+    fleet.setPeer(failed, late + 3);
+    QVERIFY(!fleet.refreshListing("mac", offline, late + 4)); QCOMPARE(fleet.peerPolledAt("mac"), late + 3);
+}
+
+void TestFleetState::viewCopiesTakeRefreshedObservations()
+{
+    BoxState local = box("arch", true, 0); local.peersKnown = true; local.peers = {"mac"}; local.digest = "arch";
+    auto s = shared(); local.sessions = {s};
+    BoxState mac = box("mac", true, 1); mac.digest = "mac"; mac.metrics = {{"load_1", 1.0}};
+    FleetState source; source.setLocal(local, 0); source.setPeer(mac, 1000);
+    // A view's copy with its own read state, as SessionsWindow keeps one.
+    FleetState view = source;
+    QVERIFY(view.markReplyRead({}, s.name, s.conversationId, s.replyId));
+    auto later = local; later.sessions[0].backgroundObservedAt = 20; later.metrics = {{"cpu_percent", 9}};
+    auto macLater = mac; macLater.metrics = {{"load_1", 2.0}};
+    QVERIFY(source.refreshListing({}, later, 5000)); QVERIFY(source.refreshListing("mac", macLater, 6000));
+    QVERIFY(view.refreshObservations(source));
+    QCOMPARE(view.peerPolledAt("mac"), qint64(6000));
+    QCOMPARE(view.peer("mac")->metrics.value("load_1").toDouble(), 2.0);
+    QCOMPARE(view.local().metrics.value("cpu_percent").toInt(), 9);
+    QCOMPARE(view.local().sessions[0].backgroundObservedAt, 20.0);
+    QVERIFY(!view.local().sessions[0].unreadReply); QVERIFY(source.local().sessions[0].unreadReply);
+    QCOMPARE(view.freshness(6000), source.freshness(6000));
+    // A listing applied in full is no refresh of the view's copy.
+    source.setPeer(macLater, 7000);
+    QVERIFY(!view.refreshObservations(source)); QCOMPARE(view.peerPolledAt("mac"), qint64(6000));
+    view = source; source.setLocal(later, 8000);
+    QVERIFY(!view.refreshObservations(source));
+}
+
+void TestFleetState::combinedReadStateMatchesSeparatePasses()
+{
+    const QString signature(64, 'a'), newer(64, 'b');
+    // This computer: shared-read rows (read on the host, queued, superseded by a
+    // listing that shows it read) and an older host's rows (local reply marks, an
+    // acknowledgement stored under the fallback key, review later).
+    auto queued = shared("5:50.5"); queued.name = "codex/project/queued"; queued.conversationId = "c-queued";
+    auto shown = shared("6:60.5", signature); shown.name = "codex/project/shown"; shown.conversationId = "c-shown";
+    shown.readReplyId = "6:60.5"; shown.readAttentionSignature = signature;
+    auto moved = shared("8:80.5", newer); moved.name = "codex/project/moved"; moved.conversationId = "c-moved";
+    auto legacy = shared("2:20.5"); legacy.sharedRead = false; legacy.name = "claude/project/legacy"; legacy.cmd = "claude"; legacy.conversationId = "c-legacy";
+    auto asking = shared(); asking.sharedRead = false; asking.name = "claude/project/asking"; asking.cmd = "claude";
+    asking.conversationId = "c-asking"; asking.phase = "approval"; asking.attentionId = "call-9"; asking.lastEventAt = 9;
+    auto later = shared("4:40.5"); later.sharedRead = false; later.name = "claude/project/later"; later.cmd = "claude"; later.conversationId = "c-later";
+    BoxState before = box("arch", true, 0); before.peersKnown = true; before.peers = {"mac", "air"};
+    before.sessions = {queued, shown, moved, legacy, asking, later};
+    // The poll's listing: the host now shows one queued mark.
+    BoxState local = before; local.sessions[2].readReplyId = "8:80.5"; local.sessions[2].readAttentionSignature = newer;
+    // A reachable peer whose host no longer lists a queued session, and an offline one.
+    auto peerRow = shared("1:10.5"); peerRow.name = "codex/remote/one"; peerRow.conversationId = "c-remote";
+    BoxState mac = box("mac", true, 0); mac.sessions = {peerRow};
+    BoxState air = box("air", false, 0); air.error = "offline";
+
+    const auto mark = [](const QString &host, const SessionInfo &s, const QString &reply, const QString &attention = {}) {
+        return ReadMark{host, s.name, s.runId, s.conversationId, reply, attention};
+    };
+    QJsonObject oldPending;
+    for (const auto &m : {mark({}, queued, "5:50.5"), mark({}, shown, "6:60.5", signature), mark({}, moved, "8:80.5", newer),
+                          mark("mac", peerRow, "1:10.5")})
+        oldPending[m.key()] = m.toJson();
+    auto pending = oldPending;
+    const auto gone = ReadMark{"mac", "codex/remote/gone", "run-1", "c-gone", "3:30.5", {}};
+    const auto offline = ReadMark{"air", "codex/remote/off", "run-1", "c-off", "3:30.5", {}};
+    pending[gone.key()] = gone.toJson(); pending[offline.key()] = offline.toJson();
+    pending.remove(mark("mac", peerRow, {}).key());
+
+    FleetState probe; probe.setLocal(before, 0);
+    QVERIFY(probe.markSessionRead({}, probe.local().sessions[4]));
+    const auto acknowledged = probe.attentionMarks().value(key({"", "claude", "c-asking"})).toObject().value("acknowledged").toString();
+    QVERIFY(!acknowledged.isEmpty());
+    const QJsonObject oldReplies{{key({"", "claude", "c-later"}), "4:40.5"}};
+    const QJsonObject replies{{key({"", "claude", "c-legacy"}), "2:20.5"}, {key({"", "claude", "c-later"}), "4:40.5"}};
+    const QJsonObject oldMarks{{key({"", "claude", "claude/project/later", 100}), QJsonObject{{"review", true}}}};
+    const QJsonObject marks{{key({"", "claude", "claude/project/asking", 100}), QJsonObject{{"acknowledged", acknowledged}}},
+                            {key({"", "claude", "c-later"}), QJsonObject{{"review", true}}}};
+
+    const auto initial = [&] {
+        FleetState f; f.setReadReplies(oldReplies); f.setAttentionMarks(oldMarks); f.setPendingReads(oldPending);
+        f.setLocal(before, 1000); f.setPeer(mac, 1000); f.setPeer(air, 1000);
+        f.takeSettledReadMarks(); f.takeNewReadMarks();
+        return f;
+    };
+    FleetState separate = initial(), combined = initial();
+    QCOMPARE(readOutcome(combined, 1000), readOutcome(separate, 1000));
+    QVERIFY(combined.pendingReads().contains(mark({}, moved, {}).key()));
+    // The read inputs of a poll, then its listing and the reloaded queue (TrayAgent).
+    separate.setReadReplies(replies); separate.setAttentionMarks(marks); separate.setPendingReads(pending);
+    combined.setReadState(replies, marks, pending);
+    QCOMPARE(readOutcome(combined, 2000), readOutcome(separate, 2000));
+    for (auto *f : {&separate, &combined}) { f->setLocal(local, 2000); f->setPendingReads(pending); }
+    QCOMPARE(readOutcome(combined, 2000), readOutcome(separate, 2000));
+    const auto separateSettled = separate.takeSettledReadMarks(), combinedSettled = combined.takeSettledReadMarks();
+    QCOMPARE(afterRemoval(pending, combinedSettled), afterRemoval(pending, separateSettled));
+    for (const auto &settled : combinedSettled) QVERIFY(separateSettled.contains(settled));
+    // The fixture covers what the passes decide: marks settled by either
+    // listing, dropped and kept, a queued read, a local acknowledgement under
+    // its fallback key, local reply marks and review later.
+    const auto remaining = afterRemoval(pending, combinedSettled);
+    QVERIFY(!remaining.contains(mark({}, shown, {}).key())); QVERIFY(!remaining.contains(mark({}, moved, {}).key()));
+    QVERIFY(!remaining.contains(gone.key())); QVERIFY(remaining.contains(offline.key()));
+    QVERIFY(remaining.contains(mark({}, queued, {}).key()));
+    QVERIFY(!combined.local().sessions[0].unreadReply); QVERIFY(!combined.local().sessions[2].unreadReply);
+    QVERIFY(combined.local().sessions[4].needsAction()); QVERIFY(combined.local().sessions[4].attentionAcknowledged);
+    QVERIFY(combined.local().sessions[5].reviewLater); QVERIFY(!combined.local().sessions[3].unreadReply);
+    QVERIFY(combined.peer("mac")->sessions[0].unreadReply);
+    QVERIFY(combined.attentionMarks().contains(key({"", "claude", "c-asking"})));
 }
 
 QTEST_APPLESS_MAIN(TestFleetState)

@@ -1678,6 +1678,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_swarm=new SwarmController(projectClient,this);
     connect(m_projectsPage,&ProjectsDialog::catalogDraftEditing,m_swarm,&SwarmController::setDraftEditing);
     connect(m_swarm,&SwarmController::organizationReady,this,[this](const QJsonObject &organization){
+        // The controller now holds the catalog's form; the next save sends this desktop's again.
+        m_savedOrganizationRevision = 0;
         const SessionOrganization updated(organization);
         if(updated.toJson()==m_organization.toJson())return;
         m_organization=updated;saveOrganization();m_projectsPage->refresh();rebuild();
@@ -2508,12 +2510,17 @@ void SessionsWindow::updateSessionRowPresentation()
 
 void SessionsWindow::saveOrganization()
 {
-    if(m_swarm)m_swarm->edit(m_organization.toJson());
-    const auto data = QJsonDocument(m_organization.toJson()).toJson(QJsonDocument::Compact);
-    if (data == m_savedOrganization) return;
+    // Every rebuild saves; an organization unchanged since its last save is
+    // neither serialized nor sent to the swarm again.
+    const auto revision = m_organization.revision();
+    if (revision == m_savedOrganizationRevision) return;
+    const auto organization = m_organization.toJson();
+    if(m_swarm)m_swarm->edit(organization);
+    const auto data = QJsonDocument(organization).toJson(QJsonDocument::Compact);
+    if (data == m_savedOrganization) { m_savedOrganizationRevision = revision; return; }
     QSettings settings; settings.setValue("workspace/organization", data); settings.sync();
-    SettingsJson::remember("workspace/organization", data, QJsonDocument(m_organization.toJson()));
-    if (settings.status() == QSettings::NoError) m_savedOrganization = data;
+    SettingsJson::remember("workspace/organization", data, QJsonDocument(organization));
+    if (settings.status() == QSettings::NoError) { m_savedOrganization = data; m_savedOrganizationRevision = revision; }
     else showNotice(tr("Could not save the session layout. Check the settings file permissions."), true);
 }
 
@@ -2683,7 +2690,13 @@ void SessionsWindow::showWorkspaceSettings()
     m_pages->setCurrentIndex(5);m_settingsPage->refresh();
 }
 
-void SessionsWindow::setFleet(const FleetState &fleet) {
+void SessionsWindow::setFleet(const FleetState &fleet) { applyFleet(fleet, false); }
+void SessionsWindow::refreshFleet(const FleetState &fleet) { applyFleet(fleet, true); }
+void SessionsWindow::applyFleet(const FleetState &fleet, bool refresh) {
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    // A refresh changed observation fields only. A peer whose poll age crossed
+    // FleetState::kPeerStaleMs since the rows were rendered changes reachability.
+    if (refresh && (!m_fleet.refreshObservations(fleet) || m_fleet.freshness(now) != m_renderedFreshness)) refresh = false;
     // A native clean exit may remove its managed checkout without a GUI write.
     // Expire only repositories whose exact live run has newly reached Archive.
     QSet<QString> expired;
@@ -2697,12 +2710,21 @@ void SessionsWindow::setFleet(const FleetState &fleet) {
             }
         }
     };
-    completed(m_fleet.local(),fleet.local(),{});
-    for (const auto &host : fleet.peerNames()) if (const auto *before=m_fleet.peer(host)) completed(*before,*fleet.peer(host),host);
+    if (!refresh) {
+        completed(m_fleet.local(),fleet.local(),{});
+        for (const auto &host : fleet.peerNames()) if (const auto *before=m_fleet.peer(host)) completed(*before,*fleet.peer(host),host);
+    }
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions, LocalSessionHost::canEnable(fleet.local())); m_settingsPage->setPeers(fleet.peerNames());
     m_settingsPage->setMobileGateway(fleet.local().localSessions||MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Windows);
-    m_fleet = fleet; m_fleet.setAttentionMarks(SettingsJson::object("attention/sessionMarks")); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
+    if (!refresh) { m_fleet = fleet; m_fleet.setReadState(m_fleet.readReplies(), SettingsJson::object("attention/sessionMarks"), ReadMarkStore::load()); }
+    reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet);
+    // Unchanged rows keep their entries unless the clock or the selected
+    // session's latest inspection changes what they show.
+    if (isVisible() && (!refresh || now >= m_rowsChangeAt || !refreshEntries())) rebuild();
+    else if (refresh && isVisible()) { m_searchResults->refreshFleet(m_fleet); updateWorktreeCleanupOffer(); }
+    m_renderedFreshness = m_fleet.freshness(now);
+    applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
         for (const auto &entry : m_entries) if (entry.session.launchId==m_nativeLaunchToOpen) {
@@ -2710,6 +2732,27 @@ void SessionsWindow::setFleet(const FleetState &fleet) {
             m_nativeLaunchToOpen.clear();showSession(host,name);break;
         }
     }
+}
+// After a refresh: each entry takes its row's new observation times. False when
+// one would read differently from its rendering, as rebuild() makes it: the
+// selected session merges its latest inspection, which may also have changed.
+bool SessionsWindow::refreshEntries()
+{
+    QHash<QString, const SessionInfo *> rows;
+    const auto collect = [&rows](const QString &host, const BoxState &box) {
+        for (const auto &s : box.sessions) if (s.state != "archived") rows.insert(host + '\n' + s.name, &s);
+    };
+    collect({}, m_fleet.local());
+    for (const auto &peer : m_fleet.peerNames()) collect(peer, *m_fleet.peer(peer));
+    for (auto &entry : m_entries) {
+        if (entry.session.state == "archived") continue;
+        const auto *row = rows.value(entry.key);
+        if (!row) return false;
+        const auto current = entry.key == m_selectedKey && m_inspectError.isEmpty() ? SessionPresentation::inspected(*row, m_details) : *row;
+        if (!SessionPresentation::sameInspection(current, entry.session)) return false;
+        entry.session.backgroundObservedAt = current.backgroundObservedAt; entry.session.providerStatusAt = current.providerStatusAt;
+    }
+    return true;
 }
 void SessionsWindow::setClipboardMode(bool clipboard) { m_clipboard = clipboard; renderDetails(); }
 void SessionsWindow::updateDashboard()
@@ -3208,11 +3251,10 @@ bool SessionsWindow::entryHasDraft(const Entry &entry) const
             && m_subagentComposer->hasDraft(entry.machine + '\n' + entry.session.name + '\n' + conversation + '\n' + it.key())) return true;
     return false;
 }
-QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
+QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e, bool includeCompleted) const
 {
     QMap<int, QVariant> roles;
     const auto &s = e.session;
-    const bool includeCompleted = QSettings().value("workspace/showCompletedSubagents", false).toBool();
     const bool terminating=isTerminating(e);
     const QString rowStatus=terminating?tr("Terminating…"):status(s,e.online);
     const QString desc = terminating?tr("Waiting for the session to stop"):currentAction(s, e.online).simplified();
@@ -3303,6 +3345,11 @@ void SessionsWindow::rebuild()
     };
     withArchive({},m_fleet.local());
     for(const auto &peer:m_fleet.peerNames())withArchive(peer,*m_fleet.peer(peer));
+    // A refreshed listing (refreshFleet) renders these rows again by then.
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    m_renderedFreshness = m_fleet.freshness(now);
+    m_rowsChangeAt = m_pendingLaunches.isEmpty() ? std::numeric_limits<qint64>::max() : now;
+    for (const auto &entry : m_entries) m_rowsChangeAt = qMin(m_rowsChangeAt, SessionPresentation::textChangesAt(entry.session, now));
     updateWorktreeCleanupOffer();
     m_archiveBrowser->configure(archiveHosts,m_filter=="archived"&&m_pages->currentIndex()==0);
     updateAttentionIndicator();
@@ -3624,7 +3671,7 @@ void SessionsWindow::rebuild()
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled | Qt::ItemIsDropEnabled);
         item->setData(SessionRoles::Identity, e.identity);
         item->setData(SessionRoles::RowCollapsed, m_sessionRowPreferences.collapsed(e.host, s));
-        const auto roles = sessionCardRoles(e);
+        const auto roles = sessionCardRoles(e, includeCompleted);
         for (auto role = roles.cbegin(); role != roles.cend(); ++role) item->setData(role.key(), role.value());
         if (item->data(SessionRoles::RowCollapsed).toBool()) item->setData(Qt::AccessibleDescriptionRole, tr("Collapsed session row. Press Right to expand."));
         const auto rowStatus = roles.value(StatusRole).toString(), desc = roles.value(DetailRole).toString();

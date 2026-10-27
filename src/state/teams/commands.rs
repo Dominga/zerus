@@ -3278,6 +3278,9 @@ mod tests {
             assert!(super::super::dispatcher::steps(&launched, &[free], 100.0).contains(&crate::state::teams::dispatcher::Step::Brief));
             let brief = super::super::dispatcher::brief_text(&launched);
             assert!(brief.contains("hgs guide designer") && brief.contains(&id), "{brief}");
+        });
+    }
+
     // ---- #480: the phase 35 review's findings through the real entry point
     // (commands::run on a private store), as the owner, the lead and members.
 
@@ -3567,7 +3570,9 @@ mod tests {
         with_review_team(&team, || {
             let status = run("status", &json!({"team":"rv"}), false).unwrap();
             let phase = status["phases"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap().clone();
-            assert!(phase["waiting"].is_null(), "{phase}");
+            // #515: it says it can run alongside, not that it waits.
+            assert_eq!(phase["waiting"]["alongside"], true, "{phase}");
+            assert_eq!(phase["waiting"]["text"], "Can run alongside phase 1", "{phase}");
             call("approve-phase", json!({"phase":2,"by":"human"})).unwrap();
         });
     }

@@ -39,7 +39,8 @@ design work reaches the product.
 | Palette (round 4) | Zerus Dark and Light take Qt's colours: `SessionsWindow::applyTheme` (background, surface, border, accent, muted, hover, selected, field), `IdentityBadges::paintRow` (row hover and selection), `ActivityView` (message, notice and code surfaces) and `MessageComposer` (editor). Project header bands use the project's own colour, as in Qt |
 | Panel edges (round 4) | The session list and side panel edges show only a centred grip (4×52) under the pointer and while dragging; no line, no tooltip. The composer grip has no tooltip |
 | Goal (round 4) | "Pursuing goal" is a floating pill over the top of Activity that never shifts the header or the conversation |
-| Usage limits (round 4) | Account name, then its type (provider badge), then the 5 h and 7 d meters; no plan. Account filters and chips start with the provider glyph, then the name |
+| Usage limits (round 5) | As Qt draws them today (`AccountUsage::Button`): the provider badge, then per window a meter and "5h 34%" in the pace colour, then refresh; no account name, no plan. Rails (default): usage 3 px in the pace colour above the window's elapsed share 2 px; the marker variants, loading placeholders and stale windows ("5h refresh") follow the same code. Pace tones: normal, warning when the average pace exhausts the limit before reset, critical when that happens in under half the remaining time, at least warning from 90%. New session and Overview use the compact form (20 px meters, no badge). Account filters and chips start with the provider glyph, then the name |
+| Attachments (round 5) | The composer chip opens the attachment list (thumbnail, reference and name, size, a separate remove); a row opens its file, hover or focus shows a preview up to 320 px beside the list, removal can be undone, arrows, Delete and Esc work. The chip's click never removes |
 | List organisation (round 4) | Ctrl/Cmd-click, Shift-click and Esc select as in `SessionList.cpp`, with the batch action bar; drag and drop reorders sessions, moves them between projects and reorders projects, with Qt's line and header-frame indicators |
 | Filters (round 4) | Counts in the text colour, glyphs muted, the checked filter in the accent; the bell turns yellow while sessions need attention (Qt) and the bolt violet while sessions are active (owner request) |
 | Decisions (round 4) | Zerus mark: the two-turn spin-up. Linux: system WebKitGTK first, CEF as the fallback. User-imported JSON skins (tokens and enumerated variants, validated) are in v1 |
@@ -381,7 +382,7 @@ installing Qt until the owner switches the default.
 
 ## Open questions for the owner
 
-1. Approve the round 4 design, or what to change. This is the only open question.
+1. Approve the round 5 design, or what to change. This is the only open question.
 
 Decided on 2026-10-27: the WebKit preference fix on macOS with the criteria
 above, falling back to Chromium on macOS (CEF once beta, otherwise Electron);

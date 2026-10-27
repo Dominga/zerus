@@ -1513,6 +1513,13 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
     ensure!(!task.status.finished(), "The parent task is already decided");
     let member = if link.member.is_empty() { task.assignee.clone() } else { link.member.clone() };
     let text: String = format!("[Sub-team {} {}] {}", child.id, child.name, summary).chars().take(4000).collect();
+    // N23: a replayed finish (or a second call after the report landed) files
+    // no second report.
+    if task.attempts.iter().any(|attempt| {
+        attempt.report.as_ref().is_some_and(|report| report.text.starts_with(&format!("[Sub-team {} ", child.id)))
+    }) {
+        return Ok(task.id);
+    }
     let n = task.attempts.len() as u32 + 1;
     task.attempts.push(Attempt {
         n,
@@ -1520,7 +1527,9 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
         member,
         sent_at: now(),
         delivered_at: Some(now()),
-        state: AttemptState::Delivered,
+        // N22: a filed sub-team report is a report waiting for the parent lead,
+        // not an open delivery.
+        state: AttemptState::Reported,
         report: Some(Report { text, at: now(), ..Default::default() }),
         ..Default::default()
     });
@@ -1532,7 +1541,8 @@ pub(crate) fn file_subteam_report(child: &Team, parent: &mut Team) -> anyhow::Re
 /// that carries the reason for its lead.
 pub(crate) fn reopen_subteam(child: &mut Team, reason: &str) -> anyhow::Result<u32> {
     ensure!(child.parent.is_some(), "The team is not a sub-team");
-    ensure!(matches!(child.status, TeamStatus::Done | TeamStatus::Stopped), "The sub-team is not finished");
+    // N24: only a finished sub-team reopens; a stopped one stays stopped.
+    ensure!(child.status == TeamStatus::Done, "The sub-team is not finished");
     let n = child
         .phases
         .iter()
@@ -1570,6 +1580,8 @@ pub(crate) fn answer_forwarded(child: &mut Team, parent_question: &str, answer: 
                     question.answer = answer.to_owned();
                     question.answered_at = Some(now());
                     question.by = "Lead".into();
+                    // N21: the dispatcher delivers a Pending answer to the member.
+                    question.notice = Notice::Pending;
                     return true;
                 }
             }
@@ -2038,30 +2050,47 @@ pub(crate) fn depth_of(team: &Team, all: &[Team]) -> u32 {
 
 /// The sessions a team binds (its lead included), without removed members.
 pub(crate) fn session_count(team: &Team) -> usize {
-    team.members.iter().filter(|member| member.state != MemberState::Removed && member.session.is_some()).count()
+    // N26: a planned member without a session still gets launched, so it binds
+    // a session in the tree budget.
+    team.members.iter().filter(|member| member.state != MemberState::Removed).count()
 }
 
-/// The sessions the whole tree rooted at `master` binds.
+/// The sessions the whole tree rooted at `master` binds. A shared sub-lead
+/// session counts once, and finished teams no longer bind sessions (N26).
 pub(crate) fn tree_session_count(master: &Team, all: &[Team]) -> usize {
     let mut seen = BTreeSet::new();
+    let mut sessions = BTreeSet::new();
     let mut queue = vec![master.id.clone()];
-    let mut total = 0;
     while let Some(id) = queue.pop() {
         if !seen.insert(id.clone()) {
             continue;
         }
         if let Some(team) = all.iter().find(|team| team.id == id) {
-            total += session_count(team);
+            if !matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived) {
+                for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+                    let key = member.session.as_ref().map_or_else(
+                        || format!("member:{}:{}", team.id, member.id),
+                        |session| format!("session:{}:{}", session.host, session.name),
+                    );
+                    sessions.insert(key);
+                }
+            }
             queue.extend(team.children.iter().cloned());
         }
     }
     // Parent links are the truth even if a children list was not kept.
     for team in all.iter().filter(|team| !seen.contains(&team.id)) {
-        if root_of(team, all).id == master.id {
-            total += session_count(team);
+        if root_of(team, all).id == master.id && !matches!(team.status, TeamStatus::Done | TeamStatus::Stopped | TeamStatus::Archived) {
+            for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+                let key = member.session.as_ref().map_or_else(
+                    || format!("member:{}:{}", team.id, member.id),
+                    |session| format!("session:{}:{}", session.host, session.name),
+                );
+                sessions.insert(key);
+            }
         }
     }
-    total
+    sessions.len()
 }
 
 /// Section 9.2: a sub-team may be created only within the master's depth, its
@@ -5741,6 +5770,12 @@ mod tests {
         let report = parent_task.attempts.last().unwrap().report.as_ref().unwrap();
         assert!(report.text.contains("[Sub-team child Child]") && report.text.contains("Sub work is done"), "{}", report.text);
         assert_eq!(parent_task.attempts.last().unwrap().member, "dev");
+        // N22: the filed report waits for the parent lead; it is not open.
+        assert_eq!(parent_task.attempts.last().unwrap().state, AttemptState::Reported);
+        // N23: a replay files no second report.
+        let before = parent_task.attempts.len();
+        file_subteam_report(&child, &mut parent).unwrap();
+        assert_eq!(parent.task(1).unwrap().attempts.len(), before);
         // Section 9.5: the rejection reopens the sub-team with a Rework draft
         // that carries the reason for its lead.
         let phase = reopen_subteam(&mut child, "Fix the migration").unwrap();
@@ -5748,6 +5783,9 @@ mod tests {
         assert!(child.finish.is_none());
         let draft = child.phases.iter().find(|p| p.n == phase).unwrap();
         assert_eq!((draft.title.as_str(), draft.reason.as_str(), draft.state), ("Rework", "Fix the migration", PhaseState::Draft));
+        // N24: a stopped sub-team stays stopped on a reject.
+        child.status = TeamStatus::Stopped;
+        assert!(reopen_subteam(&mut child, "again").is_err());
         // A flat team cannot be reopened.
         assert!(reopen_subteam(&mut Team::default(), "x").is_err());
     }
@@ -5767,6 +5805,8 @@ mod tests {
         let question = &child.tasks[0].attempts[0].questions[0];
         assert_eq!((question.answer.as_str(), question.by.as_str()), ("Postgres", "Lead"));
         assert!(question.answered_at.is_some());
+        // N21: the answer is pending for the member's dispatcher.
+        assert_eq!(question.notice, Notice::Pending);
         assert!(!answer_forwarded(&mut child, &forwarded, "again"));
         // Section 9.7: a task with a sub-team asks how to treat it.
         let mut task = Task { id: 1, title: "Work".into(), assignee: "dev".into(), ..Default::default() };

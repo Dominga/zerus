@@ -835,6 +835,8 @@ fn added_sessions(team: &Team, op: &str, filled: &Value) -> usize {
         "swap-member" => usize::from(
             filled["session"].is_object() && team.member(text(filled, "member")).is_none_or(|member| member.session.is_none()),
         ),
+        // N26: a plan can add a whole roster before any session exists.
+        "plan" => filled["members"].as_array().map_or(0, Vec::len),
         _ => 0,
     }
 }
@@ -1042,6 +1044,8 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
         .context("The parent task number is required")?;
     let task = parent.task(number).context("Unknown parent task")?;
     ensure!(!task.status.finished(), "The parent task is already decided");
+    // N25: one sub-team per parent task; a second create must not overwrite it.
+    ensure!(task.subteam.is_none(), "The parent task already has a sub-team");
     let member = parent
         .member(&task.assignee)
         .with_context(|| format!("The parent task #{} has no assignee", task.id))?
@@ -1975,6 +1979,7 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         }
     };
     let parent_question = ops::forward_question(&team, &question);
+    ensure!(question.forwarded.is_empty(), "This question was already escalated");
     let child_name = team.name.clone();
     let child_id = team.id.clone();
     store.mutate(None, &child_id, None, |team, events| {
@@ -1991,7 +1996,22 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
         Ok(Value::Null)
     })?;
     let _ = child_name;
-    forward_to_parent(&mut store, &team, &parent_question, question_id, &question.text, &link)?;
+    if let Err(error) = forward_to_parent(&mut store, &team, &parent_question, question_id, &question.text, &link) {
+        // N28: a failure upstream must not leave the child marked forwarded.
+        let _ = store.mutate(None, &child_id, None, |team, _| {
+            for task in &mut team.tasks {
+                for attempt in &mut task.attempts {
+                    for question in &mut attempt.questions {
+                        if question.forwarded == parent_question {
+                            question.forwarded.clear();
+                        }
+                    }
+                }
+            }
+            Ok(Value::Null)
+        });
+        return Err(error);
+    }
     Ok(json!({"status":"escalated","team":child_id,"question":parent_question,"parent":link.team}))
 }
 
@@ -2241,7 +2261,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // Section 9.2: a change that can bind a new session keeps the whole
             // tree within its master's budget (extend binds none, and is
             // checked for a tree already over it).
-            if matches!(op, "add-member" | "swap-member" | "extend") {
+            if matches!(op, "plan" | "approve" | "add-member" | "swap-member" | "extend") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 // Bounded: ancestors by id and children by id; a flat team
                 // reads nothing beyond the team itself.

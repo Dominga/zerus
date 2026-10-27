@@ -3527,6 +3527,21 @@ a local tracking ref counts as absent (`changed` while the remote branch exists)
 only when its lookup completes without finding it. A failed or timed-out upstream
 or tracking ref lookup leaves `remote_state: unknown`.
 
+A checkout with changes also carries `changes` for the inspector's Changes card:
+`{"added":A,"deleted":D,"tracked_files":N,"untracked_files":U,"truncated":bool,
+"files":[{"path":"src/a.rs","added":12,"deleted":3},...]}`. The counts compare
+the work tree and index with HEAD (`git diff --numstat`); a binary file has null
+counts and an untracked file is listed with `"untracked":true` and null counts.
+At most 50 files are listed (paths clipped to 300 characters); the totals cover
+every tracked change.
+
+`hgs [@host] git-diff --path /absolute/checkout --json` returns that diff as
+text: `{"state":"ok","path":...,"diff":"...","truncated":bool,"bytes":N}`, at
+most 256 KiB of it (`truncated` and the full `bytes` say when it is cut). Both
+commands run Git directly, without a shell or external diff or text converters,
+and never write the checkout, its index or its configuration. A diff over the
+1 MiB Git output cap answers `"state":"too_large"`.
+
 Subagent count fields distinguish active, completed, total, completeness and
 source; unknown totals are null. Up to six active/unreviewed previews accompany
 the available full roster. Profile groups without individual IDs remain groups.

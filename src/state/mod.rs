@@ -707,6 +707,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     };
     if command == "worktrees" { return worktrees::dispatch(args); }
     if command == "git-status" { return git_status::dispatch(args); }
+    if command == "git-diff" { return git_status::dispatch_diff(args); }
     if command == "dirs" {
         if args.first().map(String::as_str) == Some("--create") {
             let request_id;

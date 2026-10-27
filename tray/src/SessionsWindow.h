@@ -600,7 +600,20 @@ private:
     TerminalView *m_terminal = nullptr;
     NativeUiView *m_nativeUi = nullptr;
     QTabWidget *m_detailTabs = nullptr;
-    QTabWidget *m_inspector = nullptr;
+    // U25 part 6 (spec 6): the inspector's column of cards.
+    class InspectorCards *m_inspector = nullptr;
+    QMap<QString, class InspectorValue *> m_environment;
+    QLabel *m_contextUsed = nullptr, *m_contextTokens = nullptr, *m_contextLeft = nullptr;
+    class ContextBar *m_contextBar = nullptr;
+    QWidget *m_contextRows = nullptr, *m_changesList = nullptr;
+    QLabel *m_changesEmpty = nullptr;
+    QPushButton *m_commitChanges = nullptr, *m_openDiff = nullptr;
+    quint64 m_diffRequest = 0;
+    void openInspectorCard(int card);
+    void updateEnvironmentCard();
+    void updateContextCard();
+    void updateChangesCard();
+    void showDiff(const QJsonObject &data, const QString &error);
     QLabel *m_detailsContext = nullptr;
     QLabel *m_detailsIdTitle = nullptr, *m_detailsIdValue = nullptr;
     QPushButton *m_copySessionId = nullptr;

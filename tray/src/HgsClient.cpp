@@ -1338,6 +1338,19 @@ void HgsClient::pumpGitStatus()
     }
 }
 
+quint64 HgsClient::requestGitDiff(const QString &host, const QString &path)
+{
+    const quint64 request = ++m_gitDiffRequest;
+    QStringList args{"git-diff", "--path", path, "--json"};
+    if (!host.isEmpty()) args.prepend('@' + host);
+    runHgs(m_hgs, args, host.isEmpty() ? 8000 : 15000, this,
+        [this, request](const QByteArray &out) {
+            emit gitDiffReady(request, out.size() <= 512 * 1024 ? QJsonDocument::fromJson(out).object() : QJsonObject(), {});
+        },
+        [this, request](const QString &, const QString &error) { emit gitDiffReady(request, {}, error); });
+    return request;
+}
+
 quint64 HgsClient::requestWorktrees(const QString &host,const QString &path,bool refresh)
 {
     const quint64 request=++m_worktreeRequest;

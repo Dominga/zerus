@@ -58,6 +58,8 @@ signals:
     void groupMoved(const QString &group, const QString &before);
     // WhiteWh fork: a lead's team strip was clicked.
     void teamActivated(const QString &team);
+    // U25 part 6: a card's git chip was clicked (the session's key).
+    void gitActivated(const QString &key);
     void dragFinished();
 protected:
     QStringList mimeTypes() const override { return {QStringLiteral("application/x-hgs-session-placement")}; }

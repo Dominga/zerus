@@ -22,6 +22,9 @@ class TeamPanel : public QWidget {
 public:
     explicit TeamPanel(TeamController *controller, QWidget *parent = nullptr);
     void setTheme(bool dark);
+    // U25 part 6: inside the inspector's Team card the column scrolls, so the
+    // panel is as tall as its content instead of scrolling on its own.
+    void setEmbedded(bool on);
     // The member sessions as the fleet shows them.
     void setLive(const Teams::LiveLookup &live) { m_live = live; scheduleRender(); }
     // Shows a team, or the team of a session; empty shows the empty state.
@@ -119,7 +122,8 @@ private:
     TeamController *m_controller;
     Teams::LiveLookup m_live;
     QString m_team, m_filter = QStringLiteral("all"), m_feedMember, m_notice;
-    bool m_dark = true, m_showBlockers = false, m_pending = false, m_dirty = false;
+    bool m_dark = true, m_showBlockers = false, m_pending = false, m_dirty = false, m_embedded = false;
+    void fitEmbedded();
     int m_confirming = 0;
     void releaseHold();
     // Releases the hold once the event loop is back at `level` (the one the menu opened from).

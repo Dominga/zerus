@@ -651,6 +651,8 @@ private slots:
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
     void catalogEditorMarksManualEdits();
+    void boardScrollsInsteadOfSqueezingColumns();
+    void planningBoardScrollsInsteadOfSqueezingColumns();
     void catalogRoleEditorEditsEveryField();
     void catalogTemplateEditorRosterSkeletonAndChecks();
     void catalogRoutingEditsAndTriesAGoal();
@@ -1496,7 +1498,8 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
     for (auto *b : views->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
     QCOMPARE(workspace.findChildren<QFrame *>("teamBoardCard").size(), 5);
-    // Role and state share a line on a wide card and wrap on a narrow one.
+    // Role and state share a line. U33: a narrow window no longer squeezes
+    // the card until they wrap; the Board scrolls sideways instead.
     {
         // Reads the first card afresh: a resize may render the board again.
         const auto oneLine = [&workspace] {
@@ -1507,7 +1510,8 @@ void TestTeamsUi::workspaceShowsGraphBoardAndFocus()
         };
         const QSize before = workspace.size();
         workspace.resize(700, before.height());
-        QTRY_COMPARE(oneLine(), 0);
+        QTRY_COMPARE(oneLine(), 1);
+        QTRY_VERIFY(workspace.findChild<QScrollArea *>("teamWorkspaceBoard")->horizontalScrollBar()->isVisible());
         workspace.resize(1800, before.height());
         QTRY_COMPARE(oneLine(), 1);
         workspace.resize(before);
@@ -6285,6 +6289,130 @@ void TestTeamsUi::sideListsAndMemberTasks()
     if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) lightShot(&workspace, "ux-4-planning-light");
     darkPalette();
     QSettings().remove("workspace/skin");
+}
+
+// U33: the Board scrolls sideways instead of squeezing its columns. At 700 px
+// every column keeps its readable width and the thin bar shows; the columns of
+// two open phases share their x positions; the horizontal place survives a
+// poll with a new revision and a phase collapsed; at 1600 px there is no bar.
+// Graph and Layers keep their columns without a horizontal bar.
+void TestTeamsUi::boardScrollsInsteadOfSqueezingColumns()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    setTeam(prototypeTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(prototypeLive);
+    workspace.resize(700, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamPhaseScrolls"));
+    const auto view = [&](const char *segment) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == segment) { b->click(); return; }
+    };
+    // Graph and Layers fit the column: no horizontal bar on their page.
+    QCOMPARE(workspace.findChild<QScrollArea *>("teamWorkspacePhases")->horizontalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+    view("layers");
+    QTRY_VERIFY(workspace.findChild<QScrollArea *>("teamWorkspaceLayers"));
+    QCOMPARE(workspace.findChild<QScrollArea *>("teamWorkspaceLayers")->horizontalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+    view("board");
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && !area()->findChildren<QFrame *>("teamBoardColumn").isEmpty());
+    QCOMPARE(area()->horizontalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+    if (auto *all = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll"); all->text() == QStringLiteral("Expand all")) all->click();
+    const auto columns = [&] { return area()->findChildren<QFrame *>("teamBoardColumn"); };
+    const auto phasesOpen = [&] { QSet<int> open; for (auto *col : columns()) open.insert(col->property("phase").toInt()); return open.size(); };
+    QTRY_VERIFY(phasesOpen() >= 2);
+    // Narrow: every column keeps its readable width; the bar scrolls the Board.
+    const auto readable = [&] {
+        for (auto *col : columns()) if (col->width() < 200) return false;
+        return true;
+    };
+    QTRY_VERIFY(readable());
+    QTRY_VERIFY(area()->horizontalScrollBar()->isVisible() && area()->horizontalScrollBar()->maximum() > 0);
+    // The columns of every open phase line up: the same set at the same x.
+    const auto positions = [&] {
+        QMap<int, QList<int>> xs;
+        for (auto *col : columns()) xs[col->property("phase").toInt()] << col->mapTo(area()->widget(), QPoint(0, 0)).x();
+        for (auto &list : xs) std::sort(list.begin(), list.end());
+        return xs;
+    };
+    const auto xs = positions();
+    QVERIFY(xs.size() >= 2);
+    for (const auto &list : xs) QCOMPARE(list, xs.first());
+    // The horizontal place survives a poll with a new revision and a phase collapsed.
+    area()->horizontalScrollBar()->setValue(120);
+    QCOMPARE(area()->horizontalScrollBar()->value(), 120);
+    auto *before = area();
+    auto next = prototypeTeam(); next["revision"] = 21; setTeam(next);
+    controller.refresh();
+    QTRY_VERIFY(area() && area() != before);
+    QTRY_COMPARE(area()->horizontalScrollBar()->value(), 120);
+    shot(&workspace, "u33-board-narrow-dark");
+    QFrame *firstOpen = nullptr;
+    for (auto *frame : area()->findChildren<QFrame *>("teamPhaseScroll")) if (frame->findChild<QWidget *>("teamPhaseBody")) { firstOpen = frame; break; }
+    QVERIFY(firstOpen);
+    const int collapsed = firstOpen->property("phase").toInt();
+    before = area();
+    firstOpen->findChild<QToolButton *>("teamPhaseToggle")->click();
+    QTRY_VERIFY(area() && area() != before);
+    QTRY_VERIFY(!positions().contains(collapsed));
+    QTRY_COMPARE(area()->horizontalScrollBar()->value(), 120);
+    firstOpen = nullptr;
+    for (auto *frame : area()->findChildren<QFrame *>("teamPhaseScroll")) if (frame->property("phase").toInt() == collapsed) firstOpen = frame;
+    firstOpen->findChild<QToolButton *>("teamPhaseToggle")->click();
+    QTRY_VERIFY(positions().contains(collapsed));
+    workspace.setTheme(false);
+    lightShot(&workspace, "u33-board-narrow-light");
+    // Wide: the columns share the room, no bar.
+    workspace.resize(1600, 900);
+    QTRY_VERIFY2(!area()->horizontalScrollBar()->isVisible(), qPrintable(QStringLiteral("viewport %1, content min %2, columns %3")
+        .arg(area()->viewport()->width()).arg(area()->widget()->minimumSizeHint().width()).arg(columns().size())));
+    QVERIFY(readable());
+    QSet<int> widths; for (auto *col : columns()) widths.insert(col->width());
+    QVERIFY2(widths.size() <= 2, "the columns share the width");   // integer rounding at most
+    lightShot(&workspace, "u33-board-wide-light");
+    darkPalette(); workspace.setTheme(true);
+    QTRY_VERIFY(area() && !area()->horizontalScrollBar()->isVisible());
+    shot(&workspace, "u33-board-wide-dark");
+}
+
+// U33: the planning team's Board (no phases) gets the same: readable columns
+// and one horizontal scroll at 700 px, none at 1600 px, the place kept.
+void TestTeamsUi::planningBoardScrollsInsteadOfSqueezingColumns()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    auto planning = team(); planning["status"] = "planning";
+    setTeam(planning);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(700, 800); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY_WITH_TIMEOUT(workspace.findChild<QWidget *>("teamWorkspaceView"), 20000);
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>()) if (b->property("segment") == "board") { b->click(); break; }
+    const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
+    QTRY_VERIFY(area() && area()->findChildren<QScrollArea *>("teamBoardColumn").size() == 5);   // no Decided task, no Decided column
+    const auto readable = [&] {
+        for (auto *col : area()->findChildren<QScrollArea *>("teamBoardColumn")) if (col->width() < 200) return false;
+        return true;
+    };
+    QTRY_VERIFY(readable());
+    QTRY_VERIFY(area()->horizontalScrollBar()->isVisible());
+    area()->horizontalScrollBar()->setValue(90);
+    auto *before = area();
+    auto next = planning; next["revision"] = planning["revision"].toInt() + 1; setTeam(next);
+    controller.refresh();
+    QTRY_VERIFY(area() && area() != before);
+    QTRY_COMPARE(area()->horizontalScrollBar()->value(), 90);
+    workspace.resize(1600, 800);
+    QTRY_VERIFY(!area()->horizontalScrollBar()->isVisible());
+    QVERIFY(readable());
 }
 
 #include "test_teamsui.moc"

@@ -109,7 +109,11 @@ fn reviewer_of(team: &Team, item: &Item) -> String {
 }
 
 fn all_items(team: &Team) -> Vec<Item> {
-    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+    let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
+    // N5: a finished team has no open work, but the owner's decision on the
+    // lead's proposal is still the lead's to read (spec 4).
+    let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
+    if !active && !finished {
         return Vec::new();
     }
     let mut items: Vec<Item> = Vec::new();
@@ -118,6 +122,8 @@ fn all_items(team: &Team) -> Vec<Item> {
     for member in team
         .members
         .iter()
+        .filter(|member| member.id != team.lead)
+        .filter(|_| active)
         .filter(|member| member.state != MemberState::Removed && !member.error.is_empty() && member.session.is_none())
     {
         let role = team.role_of(&member.id);
@@ -160,6 +166,10 @@ fn all_items(team: &Team) -> Vec<Item> {
             command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
             detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
         });
+    }
+    if !active {
+        // N5: the decision above is all a finished team still has to say.
+        return items;
     }
     // U25: a phase the owner sent back is a review item: the comment and the
     // command that returns the reworked phase to the owner as a draft.

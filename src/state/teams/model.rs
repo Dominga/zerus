@@ -1087,6 +1087,9 @@ pub(crate) struct Team {
     pub previous: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub next: String,
+    /// N7: why a stopped team stopped ("draft_discarded"), empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stop_reason: String,
     /// F8: membership and next-goal proposals the lead made.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proposals: Vec<serde_json::Value>,

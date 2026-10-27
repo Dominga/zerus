@@ -461,6 +461,24 @@ fn create_session(record: &mut Value) -> Result<()> {
     save(record)
 }
 
+/// U34: a DeepSeek session's sandbox needs full control (WRITE_DAC and
+/// WRITE_OWNER) of the folder it confines. On Windows a folder Zerus did not
+/// create may lack it — a worktree on a second drive inherits only
+/// Authenticated Users Modify — and every command then fails before it runs, so
+/// the session does not start and the owner gets the exact one-line fix. Other
+/// systems compile the check out.
+#[cfg(windows)]
+fn ensure_sandbox_folder(folder: &Path) -> Result<()> {
+    if let Some(problem) = crate::platform::sandbox_folder_problem(folder).map_err(|e| e.to_string())? {
+        return Err(problem);
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+fn ensure_sandbox_folder(_: &Path) -> Result<()> {
+    Ok(())
+}
+
 pub(crate) fn launch(
     name: &str,
     cwd: &str,
@@ -486,6 +504,7 @@ pub(crate) fn launch(
         return Ok(());
     }
     let cwd = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
+    ensure_sandbox_folder(&cwd)?;
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
         "created":now(),"launch_id":launch_id,"paused":false});

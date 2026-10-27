@@ -3220,6 +3220,16 @@ Windows Error Reporting restarts the app with the same settings in the backgroun
 (`--background`, never `--sessions`): a window that opens by itself after a crash
 would be a surprise.
 
+**DeepSeek members' folders.** A DeepSeek session's sandbox needs full control
+(WRITE_DAC and WRITE_OWNER) of the folder it confines. When Zerus creates a
+member's worktree or clone it adds this user's explicit, inheritable FullControl
+entry to that new folder, so the sandbox starts there. A folder Zerus did not
+create (a direct, existing or custom folder) is checked first: when a right is
+missing the session does not start, and the member's error — shown in the Lead's
+inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
+one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
+ACLs itself: it reports the exact error to the Lead.
+
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. A portable
 installation starts on the stable channel; choose Nightly to hear about nightly

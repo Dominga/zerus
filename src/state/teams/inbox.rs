@@ -700,6 +700,25 @@ mod tests {
         assert_eq!(found.detail, "/x belongs to another repository");
     }
 
+    /// U34: a DeepSeek member whose folder the sandbox cannot use is not
+    /// started; the Lead's inbox carries the reason and the one-line fix.
+    #[test]
+    fn a_deepseek_sandbox_folder_error_names_the_fix_in_the_inbox() {
+        let mut team = team();
+        let error = "the DeepSeek sandbox needs full control of D:\\work\\team-abcdef12-dev (missing WRITE_OWNER); fix it for this folder with:\n  icacls \"D:\\work\\team-abcdef12-dev\" /grant *S-1-5-21-1-2-3-1001:(OI)(CI)F";
+        {
+            let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.agent = "dsh".into();
+            dev.session = None;
+            dev.error = error.into();
+        }
+        let items = items(&team);
+        let found = items.iter().find(|item| item.kind == "member_error").unwrap();
+        assert!(found.summary.contains("the DeepSeek sandbox needs full control of"), "{}", found.summary);
+        assert!(found.detail.contains("/grant *S-1-5-21-1-2-3-1001:(OI)(CI)F"), "{}", found.detail);
+        assert!(found.command.contains("relaunch"), "{}", found.command);
+    }
+
     fn delivered(team: &mut Team, id: u32) {
         let task = team.task_mut(id).unwrap();
         task.attempts.push(Attempt {

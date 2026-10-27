@@ -269,6 +269,10 @@ pub(crate) struct Member {
     pub directory: String,
     #[serde(default)]
     pub session: Option<SessionRef>,
+    /// U32: how the member joined on the owner's verified word:
+    /// `{by, owner_word, at}`; absent when the owner added it directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<Value>,
     #[serde(default)]
     pub state: MemberState,
     /// Recorded before the dispatcher starts the member's session, which

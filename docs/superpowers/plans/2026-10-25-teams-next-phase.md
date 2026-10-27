@@ -844,6 +844,23 @@ answered; a denial cannot carry an explanation.
   designer agent proposes changes that the owner keeps or rejects. The Team
   designer shows them in their own tab, Planning rules. Owner: yes.
 
+- **U29. A task added to a running phase, on the owner's word twice (users,
+  2026-10-27).** A phase stays fixed once approved, but sometimes a critical
+  fix or a forgotten task belongs in it (phase 36's checkpoint fixes had to go
+  to a new phase because a running phase takes no tasks). An `add-to-phase`
+  operation adds tasks to a running phase only when: (1) the owner explicitly
+  asked to add a task to the running phase (an owner_word from the lead's
+  session, U26 rules, naming the phase or "the current phase"); (2) Zerus then
+  answers with a warning the lead must show the owner: the load balance of the
+  lanes shifts and members may sit idle, because members do not work ahead
+  and later phases are not approved; (3) the owner confirms again in text, a
+  second word newer than the warning, before anything changes (the desktop
+  asks the same: the warning, then the owner types the confirmation). Added
+  tasks carry `added_late` (by, at, the quotes) and show an "out of the
+  phase's original scope" icon in Graph, Board, Layers and the task card; the
+  phase's health and the lane balance are recomputed and the change is in the
+  feed. Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

@@ -1020,6 +1020,28 @@ a suggestion, list navigation keys, Menu and Shift+F10, Ctrl/Command-click,
 Space and Escape during voice capture, Ctrl+Shift+C/V (⌘C/⌘V on macOS) and
 Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the Projects dialog's list.
 
+<a id="agent-teams"></a>
+
+## Agent teams
+
+### The Team designer's folder
+
+The Team designer runs in Zerus's own folder,
+`<state>/hgs/sessions/team-designer` (`HGS_STATE_DIR` when set, else
+`~/.local/state/hgs/sessions`). Zerus creates and owns that folder: it belongs
+to no project, and the desktop shows the designer's session in General.
+
+At `hgs team catalog designer` Zerus trusts exactly that folder in the Claude
+account config the launch reads, so Claude's start-up "Trust this folder?"
+prompt no longer stops the designer, and gives the session narrow permission
+rules: Bash for `hgs team catalog get`, `propose` and `route` and for
+`hgs guide`, plus read-only file tools (Read, Glob, Grep). The rules grant no
+writing tool; the designer's only change is a catalog proposal that the owner
+keeps or rejects.
+
+Claude's start-up trust stays manual for every other folder. No other agent
+(Codex, DeepSeek, Kimi, OpenCode) gets folder trust or rules from Zerus.
+
 <a id="activity"></a>
 
 ## Activity, messages and native controls

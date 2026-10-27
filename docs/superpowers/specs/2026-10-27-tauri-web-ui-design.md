@@ -33,6 +33,9 @@ design work reaches the product.
 | Row density (round 2) | The compact 94 px card is the only density; the non-compact 104 px card and its setting are dropped |
 | Icons (round 2) | Zerus's own glyphs from `tray/src/WorkspaceIcons.h`, the provider glyphs from `IdentityBadge.h` and the status glyphs from `SessionStatusBadge.h`; a substitute icon set is used only where Qt has no glyph |
 | Side panel (round 2) | The prototype's Environment/Context card styling (raised cards, radii, collapsible blocks, show/hide motion) with today's content only |
+| macOS refresh fix (round 3) | Decided: disable WebKit's near-60 fps page rendering preference before each UI webview is created; if the measurement fails the criteria or the preference disappears, evaluate Chromium on macOS |
+| Account type (round 3) | Every usage limit in the status bar names its account type: the provider badge and the plan when known, next to the numbers |
+| Resizing (round 3) | The composer height (76-720 px) has a visible grip; the side panel width is draggable (default 400, at least 240) and remembered |
 
 Non-goals: replacing the Qt client in one step; changing `hgs` CLI, API v1,
 state paths or status semantics; plugins (a separate design, see the 2026-10-27
@@ -178,12 +181,27 @@ adds no new action semantics.
   together, double-click resets, Full-width Activity and Reset Activity width in
   the context menu; the composer, questions and banners share the column.
 - **Zerus mark**: tinted with the attention colour and turning while any session
-  needs attention, as `SwarmButton` does; each blade is its own layer animated
-  by transform and opacity, paused while the window is hidden and static under
-  Reduce motion. When attention clears, the current turn finishes and the mark
-  settles. The owner chooses among the mockup's three motions.
+  needs attention, as `SwarmButton` does. The mark is one layer promoted ahead
+  of time and animated by transform only, with no glow; it is paused while the
+  window is hidden and static under Reduce motion. When attention clears, the
+  current cycle finishes and the mark settles. The default motion spins up from
+  rest to two turns and settles with a 6° overshoot; the owner chooses between
+  it, a stronger three-turn spin-up and the Qt turn.
+- **Session rows**: the emphasis edge is 4 px, 6 px from the card's top and
+  bottom and 4 px in the compact row. Switching a card and its compact row
+  morphs in 220 ms: the card's height eases, the title and badges move from
+  their old place by transform, the detail lines fade and the rows below slide
+  with the same timing, so the title never jumps.
+- **Session header**: agent and machine badges, then the git branch as a
+  labelled chip with the branch glyph, then folder, worktree and model.
+- **Media messages**: the voice player and the round video note both keep the
+  transcript button on the right; the video note plays in place with a progress
+  ring. The voice/video mode switch is always beside the record button and is
+  locked while recording, as in Qt.
 - **Motion** uses only opacity and transforms, honors `prefers-reduced-motion`
-  and the existing Reduce motion and Animate working sessions settings.
+  and the existing Reduce motion and Animate working sessions settings. The one
+  exception is the compact-row morph, which eases a single card's height for
+  220 ms inside a layout-contained row.
 - **Heavy parts load on demand**: xterm.js when Terminal first opens.
 - **Embedded Terminal**: xterm.js 6 (DOM renderer by default on Linux, WebGL
   addon on macOS and Windows with context-loss handling); PTY in Rust with
@@ -286,7 +304,8 @@ One JSON document per skin, independent of the UI stack.
   blank windows and crashes, silent software WebGL and GTK 3's integer scaling on
   KDE fractional scales remain. Fallbacks in order: the Tauri 3 CEF runtime
   (GTK 4, Chromium; about +120 MB; alpha today) for Linux only, then Electron.
-- **macOS refresh rate (hard requirement).** WKWebView keeps page rendering
+- **macOS refresh rate (hard requirement; the owner chose this fix on
+  2026-10-27).** WKWebView keeps page rendering
   updates near 60 fps through the internal preference
   `PreferPageRenderingUpdatesNear60FPSEnabled`, on by default in current WebKit
   including macOS 26 and 27 (WebKit bug 294338; WebKit's animation-frame-rate
@@ -353,9 +372,9 @@ installing Qt until the owner switches the default.
 
 ## Open questions for the owner
 
-1. Approve the round 2 design, or what to change; which Zerus mark motion to keep.
-2. macOS refresh rate: the WebKit SPI route with the criteria above, falling
-   back to Chromium on macOS (CEF once beta, otherwise Electron).
+1. Approve the round 3 design, or what to change; which Zerus mark motion to keep.
+2. Decided 2026-10-27: the WebKit preference fix with the criteria above,
+   falling back to Chromium on macOS (CEF once beta, otherwise Electron).
 3. Linux runtime: start on WebKitGTK and measure, with CEF as the fallback
    (pending since round 1).
 4. User-imported skins in v1, or built-in skins first (pending since round 1).

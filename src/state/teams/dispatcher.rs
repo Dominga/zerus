@@ -3820,7 +3820,7 @@ pub(crate) fn worker_run() -> Result<i32> {
     let folder = std::env::current_dir().map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
     std::io::stdin().take(super::outbox::REQUEST_BYTES + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
-    let request: Value = match serde_json::from_slice(&bytes) {
+    let request: Value = match serde_json::from_slice(crate::state::without_bom(&bytes)) {
         Ok(value) => value,
         Err(error) => return Err(format!("The run request is not JSON: {error}")),
     };

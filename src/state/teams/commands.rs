@@ -3570,7 +3570,9 @@ mod tests {
         with_review_team(&team, || {
             let status = run("status", &json!({"team":"rv"}), false).unwrap();
             let phase = status["phases"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap().clone();
-            assert!(phase["waiting"].is_null(), "{phase}");
+            // #515: it says it can run alongside, not that it waits.
+            assert_eq!(phase["waiting"]["alongside"], true, "{phase}");
+            assert_eq!(phase["waiting"]["text"], "Can run alongside phase 1", "{phase}");
             call("approve-phase", json!({"phase":2,"by":"human"})).unwrap();
         });
     }

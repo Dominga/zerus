@@ -39,6 +39,10 @@ import app.zerus.mobile.replica.TaskTarget
 class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val store = PrivateStore(application)
     private val api = RelayApi(workspace = store.workspaceJournal)
+    override fun onCleared() {
+        api.closeResultStreams()
+        super.onCleared()
+    }
     private val gitStatusRelay = GitStatusRelay(api)
     private fun gitStatusCatalog() = GitStatusCatalog(connections, machines, relayOperations, machineOperations, demo, storageReady)
     private fun gitStatusAccess(key: MachineKey) = gitStatusCatalog().access(key)
@@ -2283,6 +2287,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 ConnectionRemoval.forget(connection,current,{ store.workspaceJournal.forget(it) },store::saveConnections)
             }
             connections = next
+            api.closeResultStreams(connection.id)
             pendingEncryptedPairings-=connection.id
             sharedReadRetries.forget(connection.id); scheduleSharedReadRetries()
             if (catalogErrorOwner == connection.id || detailReadErrorOwner?.first?.connectionId == connection.id) error = ""

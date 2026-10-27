@@ -27,6 +27,8 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false).build(),
     internal val workspace: WorkspaceJournal? = null,
     internal val catalogNowSeconds: () -> Long = { System.currentTimeMillis()/1000 }) {
+    private val resultStream = RelayResultStream(client)
+    internal fun closeResultStreams(connectionId: String? = null) = resultStream.close(connectionId)
     suspend fun call(url: String, token: String, path: String, body: JSONObject? = null, delete: Boolean = false): JSONObject = RelayReadTiming.measure(RelayReadTiming.httpStage(path, body != null)) { withContext(Dispatchers.IO) {
         val request = Request.Builder().url(ManagedRelay.transport(url) + path).header("Accept", "application/json")
         if (token.isNotBlank()) request.header("Authorization", "Bearer $token")
@@ -74,7 +76,11 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
     suspend fun computers(connection: Connection) = RelayReadTiming.read(RelayReadTiming.Operation.Catalog) {
         if(connection.protocolVersion==2) encryptedComputers(connection) else call(connection.url, connection.token, "/v1/computers")
     }
-    suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, if(connection.protocolVersion==2) "/v2/capabilities" else "/v1/capabilities")
+    suspend fun capabilities(connection: Connection) = call(connection.url, connection.token, if(connection.protocolVersion==2) "/v2/capabilities" else "/v1/capabilities").also { value ->
+        val stream = value.optJSONObject("encrypted_transport")?.optJSONObject("result_stream")
+        resultStream.configure(connection, connection.protocolVersion == 2 && stream?.optInt("version") == 1 &&
+            stream.optString("path") == "/v2/stream" && stream.optInt("max_requests") >= 16)
+    }
     suspend fun revoke(connection:Connection):JSONObject {
         check(connection.protocolVersion==1) { "Encrypted connections are forgotten locally. Remove this phone from an enrolled computer to revoke it globally." }
         return call(connection.url,connection.token,"/v1/device",delete=true)
@@ -128,9 +134,29 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
         check(it.string("request_id") == id) { "Gateway returned a mismatched receipt. Delivery remains unconfirmed." }
     }
     suspend fun await(connection: Connection, initial: JSONObject, maxPolls: Int = 35, pollDelayMs:Long = 800,
-        firstPollDelayMs:Long = pollDelayMs): JSONObject = ReceiptPolling.await(initial,maxPolls,pollDelayMs,firstPollDelayMs,
-        pause={ RelayReadTiming.measure(RelayReadTiming.Stage.PollDelay) { delay(it) } },
-        receipt={ receipt(connection,it) })
+        firstPollDelayMs:Long = pollDelayMs): JSONObject {
+        var current = initial
+        var polls = maxPolls
+        if (connection.protocolVersion == 2 && resultStream.available(connection) && maxPolls > 0 && current.string("state") in listOf("queued", "claimed")) {
+            val id = current.getString("request_id")
+            prepareReceiptWatch(connection, id)
+            val ordinary = pollDelayMs.coerceIn(50, 1000)
+            val started = System.nanoTime()
+            // A readiness hint never bypasses fresh membership, signature,
+            // request/route binding or journal settlement in receipt().
+            RelayReadTiming.measure(RelayReadTiming.Stage.ResultSignalWait) {
+                resultStream.ready(connection, id, minOf(25_000L, maxPolls * ordinary))
+            }
+            // Also reconcile once after a dropped/unsupported/silent stream.
+            // The elapsed stream wait consumes the EXISTING wait budget rather
+            // than adding another complete polling campaign after a timeout.
+            polls = (maxPolls - 1 - (System.nanoTime() - started) / 1_000_000 / ordinary).coerceAtLeast(0).toInt()
+            current = receipt(connection, id)
+        }
+        return ReceiptPolling.await(current,polls,pollDelayMs,firstPollDelayMs,
+            pause={ RelayReadTiming.measure(RelayReadTiming.Stage.PollDelay) { delay(it) } },
+            receipt={ receipt(connection,it) })
+    }
     suspend fun inspect(connection: Connection, target: Target): JSONObject = RelayReadTiming.read(RelayReadTiming.Operation.Inspect) {
         val payload = JSONObject().also {
             if (target.archiveId.isNotBlank()) it.put("archive_id", target.archiveId)

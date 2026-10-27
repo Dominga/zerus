@@ -18,6 +18,8 @@ mod common;
 mod support;
 use common::Backend;
 use support::Server;
+#[path = "public_workspace/stream.rs"]
+mod result_stream_tests;
 fn id() -> String {
     Uuid::new_v4().to_string()
 }
@@ -2121,6 +2123,11 @@ mod encrypted_read_retention_controls {
         store
             .db
             .exec("DROP INDEX encrypted_payload_classification", &[])
+            .await
+            .unwrap();
+        store
+            .db
+            .exec("DROP INDEX encrypted_read_cache_pressure", &[])
             .await
             .unwrap();
         store

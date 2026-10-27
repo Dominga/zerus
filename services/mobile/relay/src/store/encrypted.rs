@@ -13,6 +13,34 @@ use zerus_mobile_crypto::{
 
 pub const ENCRYPTED_REQUEST_MAX: usize = 41 * MIB;
 pub const ENCRYPTED_SMALL_MAX: usize = 2 * MIB;
+
+impl Store {
+    /// Metadata-only readiness hints, scoped to this authenticated phone. The
+    /// normal receipt endpoint remains the only path to retained ciphertext.
+    /// Re-registering these durable IDs closes every disconnect/subscription
+    /// race without reposting or claiming a command.
+    pub async fn encrypted_result_hints(
+        &self,
+        c: &Credential,
+        ids: &[String],
+    ) -> Result<Vec<Value>> {
+        if c.role != Role::Device || ids.len() > 16 {
+            return Err(Error::BAD);
+        }
+        let mut t = self.db.begin().await?;
+        self.authorized_tx(&mut t, c).await?;
+        let mut rows = Vec::new();
+        if !ids.is_empty() {
+            let placeholders = vec!["?"; ids.len()].join(",");
+            let sql = format!("SELECT id,state FROM encrypted_requests WHERE workspace_id=? AND device_id=? AND id IN ({placeholders}) AND state NOT IN ('queued','claimed')");
+            let mut args = args![&c.workspace, &c.id].to_vec();
+            args.extend(ids.iter().map(crate::db::Arg::from));
+            rows = t.all(&sql, &args).await?;
+        }
+        t.commit().await?;
+        Ok(rows)
+    }
+}
 // Payload caches are separate from the permanent request identity/receipt.
 // Only a phone's accepted Read AND the computer's authenticated Read result
 // qualify. Neither a delivery GET nor a relay hint acknowledges receipt.

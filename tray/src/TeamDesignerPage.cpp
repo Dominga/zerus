@@ -61,6 +61,8 @@ TeamDesignerPage::TeamDesignerPage(TeamController *teams, QWidget *parent) : QWi
     m_proposals = new QScrollArea; m_proposals->setObjectName("teamDesignerProposals"); m_proposals->setWidgetResizable(true);
     m_proposals->setFrameShape(QFrame::NoFrame); m_proposals->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_chat = new TeamConversation(teams->client());
+    // U16: the designer's questions and permission requests are answered here.
+    m_chat->setQuestionsShown(true);
     m_chat->setPlaceholder(tr("Ask for changes…"));
     m_chat->setQuickAsks({tr("Explain current roles"), tr("Make a cheaper team for docs")});
     m_chatSplit->addWidget(m_chat); m_chatSplit->addWidget(m_proposals);

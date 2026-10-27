@@ -11163,9 +11163,10 @@ void TestSessionsWindow::launchListsSurviveFleetRefreshes()
     auto offline=fleet();BoxState mac;mac.host="mac";mac.ok=false;offline.setPeer(mac,QDateTime::currentMSecsSinceEpoch());
     dialog.setFleet(offline);
     QCOMPARE(folderRows.count(),0);QCOMPARE(machineRows.count(),0);QCOMPARE(folder->currentData().toString(),two);
-    QVERIFY(!folder->currentData(Qt::UserRole+3).toBool());QVERIFY(machine->currentText().endsWith(" (offline)"));
-    QVERIFY(!dialog.findChild<QPushButton *>("primary")->isEnabled());
-    dialog.setFleet(fleet());QVERIFY(folder->currentData(Qt::UserRole+3).toBool());QCOMPARE(machine->currentText(),QString("mac"));
+    // U25 part 8: the dense dialog keeps the name and frames an offline computer in warn.
+    QVERIFY(!folder->currentData(Qt::UserRole+3).toBool());QCOMPARE(machine->currentText(),QString("mac"));QVERIFY(machine->property("denseBad").toBool());
+    QVERIFY(!dialog.findChild<QPushButton *>("primary")->isEnabled());QCOMPARE(dialog.findChild<QPushButton *>("primary")->toolTip(),QString("mac is offline"));
+    dialog.setFleet(fleet());QVERIFY(folder->currentData(Qt::UserRole+3).toBool());QCOMPARE(machine->currentText(),QString("mac"));QVERIFY(!machine->property("denseBad").toBool());
     // A changed folder list is still shown.
     projects.addFolder(id,"mac","/remote/three");dialog.setGroups(projects,id);
     QVERIFY(folder->findData("/remote/three",Qt::UserRole+2)>=0);

@@ -147,6 +147,8 @@ struct Attempt {
     // Delivery and start (A1); zero or false in an older team file.
     double deliveredAt = 0, startedAt = 0, replyAt = 0, turnEndedAt = 0;
     bool startWarned = false;
+    // U31: this attempt worked a task of a draft phase.
+    bool workedAhead = false;
     // The reply id kept with turn_ended_at, so a newer turn is not captured (A2).
     QString turnReply;
     double reportAt = 0;
@@ -214,6 +216,7 @@ struct Task {
     Subteam subteam;
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
+    bool workedAhead() const { const auto *a = last(); return a && a->workedAhead; }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
     QJsonObject json() const;
 };
@@ -370,6 +373,8 @@ struct Team {
     // U25: the owner's auto-accept of error-free phase drafts (settings.auto_accept),
     // and the open tasks of running phases, the only ones that make a team Stuck.
     bool autoAccept = false;
+    // U31: idle members may take independent tasks of the next draft phase.
+    bool workAhead = false;
     QList<int> stuckScope;
     // The settings as stored, so a change sends them back whole.
     QJsonObject settingsJson;

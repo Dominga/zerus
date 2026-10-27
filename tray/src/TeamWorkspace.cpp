@@ -970,6 +970,13 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         QObject::connect(autoSwitch, &QAbstractButton::clicked, this, [this, id = team.id](bool on) { if (const auto *t = currentTeam(id)) setAutoAccept(*t, on); });
         h->addWidget(autoSwitch);
         h->addWidget(label(tr("Auto-accept drafts"), c.text3, 11));
+        auto *aheadSwitch = new ToggleSwitch(c); aheadSwitch->setObjectName("teamWorkspaceWorkAhead"); aheadSwitch->setChecked(team.workAhead);
+        aheadSwitch->setAccessibleName(tr("Work ahead"));
+        aheadSwitch->setToolTip(tr("On: an idle member may take an independent task of the next draft phase; its report waits for your approval"));
+        aheadSwitch->setEnabled(settingsOpen(team));
+        QObject::connect(aheadSwitch, &QAbstractButton::clicked, this, [this, id = team.id](bool on) { if (const auto *t = currentTeam(id)) setWorkAhead(*t, on); });
+        h->addWidget(aheadSwitch);
+        h->addWidget(label(tr("Work ahead"), c.text3, 11));
     }
     if (!groups.isEmpty()) {
         bool allOpen = true;
@@ -1395,6 +1402,12 @@ void TeamWorkspace::setAutoAccept(const Team &team, bool on)
     // lead's change after the last poll stays.
     if (!settingsOpen(team)) return;
     m_panel->act("settings", {{"settings", QJsonObject{{"auto_accept", on}}}});
+}
+
+void TeamWorkspace::setWorkAhead(const Team &team, bool on)
+{
+    if (!settingsOpen(team)) return;
+    m_panel->act("settings", {{"settings", QJsonObject{{"work_ahead", on}}}});
 }
 
 // Spec 5.2: Reject… sends the draft back to the lead with the owner's words.

@@ -97,6 +97,13 @@ void TeamTaskCard::rebuild()
     head->addWidget(backButton);
     auto *idLabel = label(QStringLiteral("#%1").arg(task->id), c.dim, 13); idLabel->setFont(NewSessionDense::mono(13));
     head->addWidget(idLabel);
+    // U31: a task worked before its phase was approved.
+    if (task->workedAhead()) {
+        auto *badge = label(tr("worked ahead"), c.dim, 11);
+        badge->setObjectName("teamTaskWorkedAhead");
+        badge->setToolTip(tr("Worked ahead of a draft phase; its report waits for the owner's phase approval"));
+        head->addWidget(badge);
+    }
     auto *title = elided(task->title, c.fg, 14); QFont tf = title->font(); tf.setWeight(QFont::DemiBold); title->setFont(tf);
     title->setObjectName("teamTaskTitle");
     head->addWidget(title, 1);

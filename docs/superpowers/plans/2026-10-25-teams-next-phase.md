@@ -917,6 +917,18 @@ answered; a denial cannot carry an explanation.
   Remove and swap keep U26's rule of naming the member. The feed and status
   say "Added by Lead on your word" with the quote. Owner: yes.
 
+- **U33. The Board scrolls instead of squeezing its columns (owner,
+  2026-10-27).** The Board fits every column into the window: the phase
+  scrolls turn the horizontal scroll bar off (TeamWorkspace.cpp
+  phaseColumn) and the columns stretch with no minimum width
+  (boardColumns), so on a narrow window the cards shrink to unreadable
+  titles and the layout jumps as tasks move between columns. Each column
+  gets a fixed readable width (about 240 px, the cards' two lines unelided
+  up to it), the whole Board scrolls horizontally as one page (every phase's
+  columns line up and move together), the thin bar of spec 1.2, and the
+  horizontal position is kept across renders and polls like the vertical
+  one. Graph and Layers keep their behaviour. Owner: yes.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

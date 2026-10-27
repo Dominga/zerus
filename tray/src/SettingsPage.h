@@ -175,6 +175,16 @@ public:
             subagentSetting(executable,{QStringLiteral("subagents-confirm"),QStringLiteral("set"),QStringLiteral("--json")},
                 QJsonDocument(input).toJson(QJsonDocument::Compact));
         });
+        // U22: block DeepSeek's own session-log upload; on by default.
+        auto *upload=new QCheckBox(tr("Block DeepSeek session-log upload"));upload->setObjectName("workspaceSessionUploadBlock");
+        const auto uploadCurrent=subagentSetting(executable,{QStringLiteral("session-upload-block"),QStringLiteral("get"),QStringLiteral("--json")});
+        upload->setChecked(uploadCurrent.value("block").toBool(true));sessions->addWidget(upload);
+        auto *uploadHint=new QLabel(tr("On by default. Zerus starts and resumes every DeepSeek session with the official session-log upload off, without editing your dsh configuration. Off restores dsh's own behaviour."));uploadHint->setWordWrap(true);sessions->addWidget(uploadHint);
+        connect(upload,&QCheckBox::toggled,this,[executable](bool on){
+            const QJsonObject input{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"block",on}};
+            subagentSetting(executable,{QStringLiteral("session-upload-block"),QStringLiteral("set"),QStringLiteral("--json")},
+                QJsonDocument(input).toJson(QJsonDocument::Compact));
+        });
 #ifdef Q_OS_WIN
         // WhiteWh fork: other computers start sessions here over SSH (src/windows_peer.rs).
         auto *residentHost=new QCheckBox(tr("Keep the session host running for other computers"));residentHost->setObjectName("residentSessionHost");

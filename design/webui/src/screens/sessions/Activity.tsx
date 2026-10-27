@@ -1,7 +1,6 @@
 import { For, Show, createEffect, createRoot, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../../lib/icons";
-import { Dialog } from "../../components/Overlays";
-import { selected, toast, setDetailTab, contentScale, subagentOpen, setSubagentOpen, setMenu, dialog, setDialog, type MenuEntry } from "../../state";
+import { selected, toast, setDetailTab, contentScale, subagentOpen, setSubagentOpen, setMenu, type MenuEntry } from "../../state";
 import { skin } from "../../skin/runtime";
 import { demoTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue, type MediaMessage, type TranscriptItem } from "../../mock/activity-extra";
 import type { Session } from "../../mock/types";
@@ -151,7 +150,6 @@ const mediaTime = (ms: number) => {
 
 // One recording plays at a time, as with the view's single media player.
 const [playing, setPlaying] = createSignal<string>();
-const [videoOpen, setVideoOpen] = createSignal<MediaMessage>();
 
 /** Delivery state glyph (18 px); media state never claims reading or completion. */
 function DeliveryGlyph(props: { item: MediaMessage }) {
@@ -248,46 +246,29 @@ function MediaCard(props: { item: MediaMessage }) {
           <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
         </div>
       }>
-        <button class="vm-poster" aria-label="Play video message" data-tip="Play video message" onClick={() => { setVideoOpen(it); setDialog("video-message"); }}>
-          <span class="vm-play" aria-hidden="true"><svg width="48" height="48" viewBox="0 0 48 48"><path d="M18 12L36 24L18 36Z" /></svg></span>
-        </button>
-        <div class="vm-meta">
+        {/* The round video plays in place: click plays or pauses; a ring shows progress. */}
+        <div class="vm-row video">
+          <button class="vm-poster" classList={{ playing: isPlaying(), started: position() > 0 && position() < it.durationMs }}
+            style={{ "--p": String(position() / it.durationMs) }} aria-pressed={isPlaying()}
+            aria-label={`${isPlaying() ? "Pause" : "Play"} video message (${mediaTime(it.durationMs)})`} onClick={() => (isPlaying() ? stop() : play())}>
+            <span class="vm-frames" aria-hidden="true" />
+            <svg class="vm-ring" viewBox="0 0 200 200" aria-hidden="true">
+              <circle class="vm-ring-track" cx="100" cy="100" r="97" pathLength="100" />
+              <circle class="vm-ring-done" cx="100" cy="100" r="97" pathLength="100" style={{ "stroke-dashoffset": String(100 - (100 * position()) / it.durationMs) }} />
+            </svg>
+            <span class="vm-play" aria-hidden="true">
+              <svg width="48" height="48" viewBox="0 0 48 48">
+                <Show when={isPlaying()} fallback={<path d="M18 12L36 24L18 36Z" />}><rect x="15" y="13" width="6" height="22" rx="1.5" /><rect x="27" y="13" width="6" height="22" rx="1.5" /></Show>
+              </svg>
+            </span>
+            <span class="vm-time tabular">{position() > 0 ? `${mediaTime(position())} / ` : ""}{mediaTime(it.durationMs)}</span>
+          </button>
           <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
-          <span class="tabular">{mediaTime(it.durationMs)}</span>
         </div>
       </Show>
       <Show when={transcript() && it.transcript}><p class="vm-text">{it.transcript}</p></Show>
       <Show when={it.error}><p class="vm-error">{it.error}</p></Show>
     </article>
-  );
-}
-
-/** "Video message": the round view and a Play / pause button. */
-function VideoDialog() {
-  const [position, setPosition] = createSignal(0);
-  const [running, setRunning] = createSignal(false);
-  let timer: number | undefined;
-  const halt = () => { clearInterval(timer); timer = undefined; setRunning(false); };
-  const toggle = () => {
-    const v = videoOpen();
-    if (!v) return;
-    if (running()) return halt();
-    if (position() >= v.durationMs) setPosition(0);
-    setRunning(true);
-    timer = window.setInterval(() => { const next = position() + 100; if (next >= v.durationMs) { setPosition(v.durationMs); halt(); } else setPosition(next); }, 100);
-  };
-  // Closing the dialog stops playback, like the view's single player.
-  createEffect(on(dialog, (d) => { if (d !== "video-message") { halt(); setPosition(0); } }));
-  onCleanup(halt);
-  return (
-    <Dialog id="video-message" title="Video message" width="400px" icon="video">
-      <div class="vd">
-        <div class="vd-round" classList={{ playing: running() }} role="img" aria-label="Round video">
-          <span class="vd-time tabular">{mediaTime(position())} / {mediaTime(videoOpen()?.durationMs ?? 0)}</span>
-        </div>
-        <button class="btn" onClick={toggle}><Icon name={running() ? "pause" : "play"} size={13} />Play / pause</button>
-      </div>
-    </Dialog>
   );
 }
 
@@ -435,13 +416,9 @@ export function ActivityView() {
             <Show when={s()?.status === "offline"}>
               <div class="notice warn"><Icon name="wifi-off" size={14} /><div><b>{s()?.machine} is offline.</b> This is the last activity received {s()?.lastEvent}. Messages you write stay as a draft until it reconnects.</div></div>
             </Show>
-            <Show when={s()?.unread}>
-              <button class="mark-read" onClick={() => toast("Marked as read", "Reply marked as read on all devices")}><Icon name="check-check" size={13} />Mark as read</button>
-            </Show>
           </Show>
         </div>
       </div>
-      <VideoDialog />
     </div>
   );
 }

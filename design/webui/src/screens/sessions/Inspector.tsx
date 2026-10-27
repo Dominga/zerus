@@ -1,7 +1,7 @@
 import { For, Show, Switch, Match, createMemo, createSignal, type JSX } from "solid-js";
 import { createStore } from "solid-js/store";
 import { Icon } from "../../lib/icons";
-import { selected, inspectorTab, setInspectorTab, setInspectorOpen, setSelectedKey, setDetailTab, setMenu, toast, setDialog, type InspectorTab } from "../../state";
+import { selected, inspectorTab, setInspectorTab, setInspectorOpen, setSelectedKey, setDetailTab, setMenu, toast, setDialog, inspectorWidth, setInspectorWidth, INSPECTOR_WIDTH, type InspectorTab } from "../../state";
 import { accounts, projects } from "../../mock/data";
 import { catalogFor, type Checkout } from "../../mock/setup-extra";
 import { statusLine } from "../setup/WorktreePanel";
@@ -194,10 +194,44 @@ function Worktrees() {
   );
 }
 
+/** Splitter handle on the panel's left edge: drag to resize, double-click to
+ *  restore 400 px. Activity keeps at least 360 px beside it. */
+function WidthHandle() {
+  const [dragging, setDragging] = createSignal(false);
+  const down = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const work = el.closest(".work")?.getBoundingClientRect().width ?? innerWidth;
+    const max = Math.max(INSPECTOR_WIDTH.min, Math.min(INSPECTOR_WIDTH.max, work - 16 - 360));
+    const startX = e.clientX, start = Math.min(inspectorWidth(), max);
+    setDragging(true);
+    const move = (m: PointerEvent) => setInspectorWidth(Math.round(Math.max(INSPECTOR_WIDTH.min, Math.min(max, start + startX - m.clientX))));
+    const up = () => { setDragging(false); el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); el.removeEventListener("pointercancel", up); };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  };
+  const key = (e: KeyboardEvent) => {
+    if (e.key === "ArrowLeft") setInspectorWidth(Math.min(INSPECTOR_WIDTH.max, inspectorWidth() + 20));
+    else if (e.key === "ArrowRight") setInspectorWidth(Math.max(INSPECTOR_WIDTH.min, inspectorWidth() - 20));
+    else if (e.key === "Home") setInspectorWidth(INSPECTOR_WIDTH.initial);
+    else return;
+    e.preventDefault();
+  };
+  return (
+    <div class="insp-resize" classList={{ dragging: dragging() }} tabindex="0" role="separator" aria-orientation="vertical" aria-label="Side panel width"
+      aria-valuemin={INSPECTOR_WIDTH.min} aria-valuemax={INSPECTOR_WIDTH.max} aria-valuenow={inspectorWidth()}
+      data-tip="Drag to resize the side panel. Double-click to restore the default width." data-tip-pos="left"
+      onPointerDown={down} onDblClick={() => setInspectorWidth(INSPECTOR_WIDTH.initial)} onKeyDown={key}><i /></div>
+  );
+}
+
 export function Inspector(props: { leaving?: boolean; onLeft?: () => void }) {
   return (
-    <aside class="inspector" classList={{ leaving: props.leaving }} aria-label="Side panel" aria-hidden={props.leaving}
+    <aside class="inspector" classList={{ leaving: props.leaving }} style={{ width: `${inspectorWidth()}px` }} aria-label="Side panel" aria-hidden={props.leaving}
       onAnimationEnd={(e) => { if (e.target === e.currentTarget && props.leaving) props.onLeft?.(); }}>
+      <WidthHandle />
       <div class="insp-tabs tabs" role="tablist">
         <For each={TABS}>{(t) => (
           <button class="tab" role="tab" classList={{ on: inspectorTab() === t.id }} aria-selected={inspectorTab() === t.id} onClick={() => setInspectorTab(t.id)}>{t.label}{t.id === "tasks" ? <TaskTabBadge /> : null}</button>

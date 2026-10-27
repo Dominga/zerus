@@ -22,8 +22,9 @@ npm run skins:check # validate, resolve and compile the built-in skins
   `?page=settings`, `?dialog=new-session`, `?itab=tasks&tab=taskview`,
   `?select=mac:1`, `?filter=archived`, `?strip=1`, `?q=pagination`,
   `?demo=empty|loading|error`, `?skin=zerus-dark|zerus-light|fjord|paper`,
-  `?logo=qt|blades|ripple` (Zerus mark motion) and `#item-<id>` (scroll
-  Activity to an item, for example `#item-a3c` for the voice and video notes).
+  `?logo=spin|turbine|qt` (Zerus mark motion) and `#item-<id>` (scroll
+  Activity to an item, for example `#item-a3c` for the voice note and
+  `#item-a3d` for the round video note).
 - `skins/*.json`: skin format v1 (tokens, component variants and layout
   variants; no CSS). `src/skin/skin.ts` validates, resolves `extends` and
   compiles a skin to CSS custom properties.
@@ -33,6 +34,11 @@ npm run skins:check # validate, resolve and compile the built-in skins
   installed `lucide-solid` (ISC).
 
 Session list geometry follows `tray/src/SessionCardDelegate.h` at the compact
-density (the only one), and the panel modes follow `SessionPanelDock.h`. The
+density (the only one), and the panel modes follow `SessionPanelDock.h`. Two
+deliberate departures from Qt, both owner requests: the emphasis edge is 4 px
+and sits closer to the card's top and bottom, and switching a card to its
+compact row morphs in 220 ms instead of swapping. The composer height (76-720),
+side panel width (default 400, at least 240), list width and Activity width are
+remembered in browser storage. The
 dashed MOCK UP button in the rail, its popover and the dashed outcome switches in
 some dialogs are review aids, not product UI.

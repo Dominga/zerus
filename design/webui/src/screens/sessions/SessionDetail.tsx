@@ -146,10 +146,11 @@ function Header() {
       <div class="dh-row2">
         <AgentBadge agent={s().agent} />
         <MachineBadge alias={s().machine} />
-        <span class="dh-chip ell" title={s().cwd}><Icon name="folder" size={13} />{s().cwd.split(/[\\/]/).pop()}</span>
+        {/* The branch is a label beside the agent and machine badges, with the branch glyph. */}
         <Show when={s().branch}>
-          <span class="dh-chip ell" title={`Git branch ${s().branch}`}><Icon name="git-branch" size={13} />{s().branch}</span>
+          <span class="dh-branch" title={`Git branch ${s().branch}`}><Icon name="git-branch" size={12} /><span class="ell">{s().branch}</span></span>
         </Show>
+        <span class="dh-chip ell" title={s().cwd}><Icon name="folder" size={13} />{s().cwd.split(/[\\/]/).pop()}</span>
         <Show when={s().worktree}>
           <span class="dh-chip ell" title={`Linked worktree ${s().worktree}`}><Icon name="folder-git-2" size={13} />worktree {s().worktree}</span>
         </Show>

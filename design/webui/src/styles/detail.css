@@ -21,6 +21,9 @@
   .dh-chip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; height: 18px; color: var(--z-color-muted); }
   .dh-chip svg { flex: none; opacity: .85; }
   .dh-model { flex: 0 1 260px; text-align: right; }
+  /* Branch label: an 18 px chip like the provider badge (radius 4), glyph then name. */
+  .dh-branch { flex: 0 1 auto; min-width: 48px; max-width: 40%; display: inline-flex; align-items: center; gap: 5px; height: 18px; padding: 0 7px 0 6px; border-radius: 4px; background: var(--z-list-provider-bg); color: var(--z-list-text); font-size: 11px; font-weight: 500; white-space: nowrap; }
+  .dh-branch svg { flex: none; color: var(--z-list-muted); }
   .goal-btn { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px; border-radius: var(--z-radius-md); background: var(--z-color-tile); border-left: 3px solid var(--z-color-violet); font-size: var(--fs-sm); text-align: left; }
   .goal-btn b { color: var(--z-color-violet); font-weight: 600; }
 
@@ -107,29 +110,38 @@
   .vm-tbtn { --tb: color-mix(in srgb, var(--z-color-accent) 14%, transparent); flex: none; width: 32px; height: 32px; border-radius: var(--z-radius-md); display: grid; place-items: center; color: var(--z-color-accent); background: var(--tb); transition: background var(--z-motion-fast); }
   :root[data-appearance="light"] .vm-tbtn { --tb: color-mix(in srgb, var(--z-color-accent) 9%, transparent); }
   .vm-tbtn:hover { background: color-mix(in srgb, var(--z-color-accent) 22%, transparent); }
-  .vm-poster { --ring: var(--z-color-entity-ink-base); position: relative; display: grid; place-items: center; width: 200px; height: 200px; margin: 4px 0; border-radius: 50%; overflow: hidden;
-    background:
-      radial-gradient(70% 60% at 32% 28%, color-mix(in srgb, var(--z-color-accent) 70%, transparent), transparent 70%),
-      radial-gradient(80% 70% at 75% 80%, color-mix(in srgb, var(--z-color-violet) 60%, transparent), transparent 75%),
-      linear-gradient(160deg, color-mix(in srgb, var(--z-color-info) 55%, var(--z-color-tile)), color-mix(in srgb, var(--z-color-accent-muted) 45%, var(--z-color-terminal-bg))); }
+  /* Round video note: a 200 px circle that plays in place. While it plays, the
+     frame layer drifts (transform only) and a ring traces progress; the
+     transcript button sits on the right, as in the voice player. */
+  .vm-row.video { align-items: flex-end; gap: 10px; margin: 6px 0 4px; }
+  .vm-row.video .vm-tbtn { margin-bottom: 6px; }
+  .vm-poster { --ring: var(--z-color-entity-ink-base); position: relative; flex: none; display: grid; place-items: center; width: 200px; height: 200px; border-radius: 50%; overflow: hidden; isolation: isolate;
+    background: linear-gradient(160deg, color-mix(in srgb, var(--z-color-info) 55%, var(--z-color-tile)), color-mix(in srgb, var(--z-color-accent-muted) 45%, var(--z-color-terminal-bg))); }
   :root[data-appearance="light"] .vm-poster { --ring: var(--z-color-surface); }
-  .vm-play { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; background: var(--z-color-backdrop); color: var(--ring); transition: scale var(--z-motion-fast) var(--ease); }
+  .vm-poster > * { grid-area: 1 / 1; }
+  .vm-frames { position: absolute; inset: -25%; z-index: -1; will-change: transform;
+    background:
+      radial-gradient(42% 36% at 36% 34%, color-mix(in srgb, var(--z-color-accent) 70%, transparent), transparent 70%),
+      radial-gradient(48% 42% at 68% 70%, color-mix(in srgb, var(--z-color-violet) 60%, transparent), transparent 75%); }
+  .vm-poster.playing .vm-frames { animation: vm-drift 6s linear infinite; }
+  .vm-poster.started:not(.playing) .vm-frames { animation: vm-drift 6s linear infinite paused; }
+  .vm-ring { position: absolute; inset: 0; width: 100%; height: 100%; rotate: -90deg; pointer-events: none; }
+  .vm-ring circle { fill: none; stroke-width: 4; }
+  .vm-ring-track { stroke: color-mix(in srgb, var(--ring) 22%, transparent); opacity: 0; transition: opacity var(--z-motion-base); }
+  .vm-ring-done { stroke: var(--ring); stroke-linecap: round; stroke-dasharray: 100 100; opacity: 0; transition: stroke-dashoffset 100ms linear, opacity var(--z-motion-base); }
+  .vm-poster.playing .vm-ring circle, .vm-poster.started .vm-ring circle { opacity: 1; }
+  .vm-play { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; background: var(--z-color-backdrop); color: var(--ring); transition: scale var(--z-motion-fast) var(--ease), opacity var(--z-motion-base); }
   :root[data-appearance="light"] .vm-play { background: color-mix(in srgb, var(--z-color-entity-ink-base) 52%, transparent); }
   .vm-play svg { fill: currentColor; }
   .vm-poster:hover .vm-play { scale: 1.06; }
-  .vm-meta { display: flex; align-items: center; gap: 8px; margin: 0 0 2px; font-size: 11px; color: var(--z-color-muted); }
+  .vm-poster.playing .vm-play { opacity: 0; }
+  .vm-poster.playing:hover .vm-play, .vm-poster.playing:focus-visible .vm-play { opacity: 1; }
+  .vm-time { align-self: end; margin-bottom: 14px; padding: 1px 8px; border-radius: 10px; background: var(--z-color-backdrop); color: var(--ring); font-size: 11px; }
+  :root[data-appearance="light"] .vm-time { background: color-mix(in srgb, var(--z-color-entity-ink-base) 52%, transparent); }
   .vm-text { margin-top: 6px; white-space: pre-wrap; line-height: 1.5; color: var(--z-color-text); animation: fadeIn var(--z-motion-base) both; }
   .vm-error { margin-top: 6px; color: var(--z-color-warn); }
-  .vd { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 8px 0 4px; }
-  .vd-round { position: relative; width: 320px; max-width: 100%; aspect-ratio: 1; border-radius: 50%; display: grid; place-items: end center; padding-bottom: 22px;
-    background:
-      radial-gradient(70% 60% at 32% 28%, color-mix(in srgb, var(--z-color-accent) 70%, transparent), transparent 70%),
-      radial-gradient(80% 70% at 75% 80%, color-mix(in srgb, var(--z-color-violet) 60%, transparent), transparent 75%),
-      linear-gradient(160deg, color-mix(in srgb, var(--z-color-info) 55%, var(--z-color-tile)), color-mix(in srgb, var(--z-color-accent-muted) 45%, var(--z-color-terminal-bg))); }
-  .vd-time { padding: 2px 8px; border-radius: 10px; background: var(--z-color-backdrop); color: var(--z-color-text); font-size: var(--fs-xs); }
   .subagent-bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: var(--z-radius-lg); background: var(--z-color-tile); font-size: var(--fs-sm); }
   .queued { padding: 8px 12px; border-radius: var(--z-radius-lg); border: 1px dashed var(--z-color-border); font-size: var(--fs-sm); display: grid; gap: 4px; }
-  .mark-read { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; border-radius: 13px; border: 1px solid var(--z-color-accent-muted); color: var(--z-color-accent); font-size: var(--fs-xs); background: var(--z-color-accent-bg); }
 
   .question-card { border: 1px solid color-mix(in srgb, var(--z-color-accent-muted) 60%, transparent); border-radius: var(--z-radius-xl); padding: 12px 14px; background: color-mix(in srgb, var(--z-color-accent-bg) 60%, var(--z-color-surface)); display: flex; flex-direction: column; gap: 10px; animation: rise var(--z-motion-slow) var(--ease) both; }
   .question-card header { display: flex; align-items: center; font-size: var(--fs-sm); }
@@ -149,7 +161,13 @@
   .composer { border: 1px solid var(--z-color-border); border-radius: var(--z-radius-xl); background: var(--z-color-field); transition: border-color var(--z-motion-fast), box-shadow var(--z-motion-fast); }
   .composer:focus-within { border-color: var(--z-color-accent-muted); box-shadow: var(--z-shadow-focus-ring); }
   .composer.disabled { opacity: .8; }
-  .cmp-resize { height: 6px; cursor: ns-resize; }
+  /* Height handle: 10 px strip, 36×3 grip; the grip takes the accent on hover,
+     focus and drag (ComposerResizeHandle). A wider hit area keeps it easy to grab. */
+  .cmp-resize { position: relative; height: 12px; display: grid; place-items: center; cursor: ns-resize; touch-action: none; outline: none; border-radius: var(--z-radius-xl) var(--z-radius-xl) 0 0; }
+  .cmp-grip { width: 40px; height: 4px; border-radius: 2px; background: var(--z-color-grip); transition: background var(--z-motion-fast), width var(--z-motion-fast); }
+  .cmp-resize:hover .cmp-grip, .cmp-resize:focus-visible .cmp-grip { width: 52px; background: var(--z-color-accent); }
+  .cmp-resize.dragging .cmp-grip { width: 52px; background: var(--z-color-accent); transition: none; }
+  .tchip:disabled { opacity: .45; cursor: default; }
   .cmp-toolbar { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; overflow: hidden; }
   .tchip { flex: none; display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 9px; border-radius: 12px; font-size: var(--fs-xs); color: var(--z-color-muted); background: var(--z-color-hover); transition: background var(--z-motion-fast), color var(--z-motion-fast); }
   .tchip:hover { color: var(--z-color-text); }
@@ -161,7 +179,7 @@
   .tchip.rec { color: var(--z-color-danger); background: var(--z-color-danger-bg); }
   .tchip.rec svg { animation: pulse 1.2s ease-in-out infinite; }
   .ctx-ring { width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(currentColor var(--p), color-mix(in srgb, currentColor 20%, transparent) 0); }
-  .cmp-editor { display: block; width: 100%; height: 76px; padding: 6px 14px; border: 0; background: transparent; resize: none; outline: none; color: var(--z-color-text); font-size: calc(var(--fs-base) * var(--content-scale, 1)); line-height: 1.45; }
+  .cmp-editor { display: block; width: 100%; height: 76px; max-height: none; padding: 6px 14px; border: 0; background: transparent; resize: none; outline: none; color: var(--z-color-text); font-size: calc(var(--fs-base) * var(--content-scale, 1)); line-height: 1.45; }
   .cmp-editor::placeholder { color: var(--z-color-dim); }
   .cmp-actions { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 8px 6px 6px; }
   .cmp-attach { width: 32px; height: 32px; }
@@ -172,11 +190,20 @@
      in from the right and fades (~200 ms); while leaving it is taken out of
      the flow so Activity reflows once, then only transform/opacity move. */
   .inspector { --insp-motion: calc((var(--z-motion-base) + var(--z-motion-slow)) / 2);
-    width: 400px; min-width: 240px; flex: none; display: flex; flex-direction: column; margin: 0 8px 8px 0;
+    position: relative; width: 400px; min-width: 240px; flex: 0 1 auto; display: flex; flex-direction: column; margin: 0 8px 8px 0;
     border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-dialog); background: var(--z-color-pane); overflow: hidden;
     animation: insp-in var(--insp-motion) var(--ease) both; }
   .inspector.leaving { position: absolute; z-index: 2; top: 0; right: 0; bottom: 8px; pointer-events: none; animation: insp-out var(--insp-motion) var(--ease) both; }
   :root[data-skin] .app:has(.layout-right) .inspector { margin-left: 0; }
+  /* Width handle: the panel's left 8 px. A 2 px accent line and a grip show on
+     hover and while dragging; nothing else moves. */
+  .insp-resize { position: absolute; z-index: 3; top: 0; bottom: 0; left: 0; width: 8px; cursor: col-resize; touch-action: none; outline: none; }
+  .insp-resize::before { content: ""; position: absolute; top: 10px; bottom: 10px; left: 0; width: 2px; border-radius: 1px; background: var(--z-color-accent); opacity: 0; transition: opacity var(--z-motion-fast); }
+  .insp-resize > i { position: absolute; top: 50%; left: 2px; width: 4px; height: 36px; margin-top: -18px; border-radius: 2px; background: var(--z-color-grip); opacity: 0; transition: opacity var(--z-motion-fast), background var(--z-motion-fast); }
+  .insp-resize:hover::before, .insp-resize:focus-visible::before { opacity: .55; }
+  .insp-resize:hover > i, .insp-resize:focus-visible > i { opacity: 1; background: var(--z-color-accent); }
+  .insp-resize.dragging::before, .insp-resize.dragging > i { opacity: 1; transition: none; }
+  .inspector.leaving .insp-resize { display: none; }
   .insp-tabs { padding: 0 6px 0 8px; border-bottom: 1px solid var(--z-color-divider); align-items: center; height: 34px; }
   .insp-tabs .tab { font-size: var(--fs-xs); padding: 0 7px; }
   .insp-scroll { flex: 1; min-height: 0; overflow-y: auto; }
@@ -270,8 +297,9 @@
 }
 
 @keyframes insp-in { from { opacity: 0; translate: 24px 0; } }
+@keyframes vm-drift { to { transform: rotate(360deg); } }
 @keyframes insp-out { to { opacity: 0; translate: 24px 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .inspector, .icard, .icard-body, .vm-text { animation: none; }
-  .icard-chev, .col-edge::before { transition: none; }
+  .inspector, .icard, .icard-body, .vm-text, .vm-frames { animation: none !important; }
+  .icard-chev, .col-edge::before, .insp-resize::before, .insp-resize > i { transition: none; }
 }

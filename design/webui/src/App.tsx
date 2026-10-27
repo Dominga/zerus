@@ -15,7 +15,8 @@ const ProjectsScreen = lazy(() => import("./screens/Projects").then((m) => ({ de
 const MachinesScreen = lazy(() => import("./screens/Machines").then((m) => ({ default: m.MachinesScreen })));
 const AccountsScreen = lazy(() => import("./screens/Accounts").then((m) => ({ default: m.AccountsScreen })));
 const SettingsScreen = lazy(() => import("./screens/Settings").then((m) => ({ default: m.SettingsScreen })));
-import { Icon } from "./lib/icons";
+import { AGENT_LABEL, Icon } from "./lib/icons";
+import { AgentBadge } from "./screens/sessions/SessionCard";
 import { skinList, skin, setSkin, applySkin } from "./skin/runtime";
 import { setSection } from "./screens/settings/store";
 import {
@@ -42,8 +43,10 @@ function StatusBar() {
       </Show>
       <span class="grow" />
       <Show when={acc() && acc()!.fiveHour > 0}>
-        <button class="sb-usage" title="5-hour and weekly limits; at the current pace the limit runs out in about 3 h" onClick={() => setPage("accounts")}>
-          <span>{acc()!.label}</span>
+        <button class="sb-usage" title={`${AGENT_LABEL[acc()!.agent]} ${acc()!.plan} · ${acc()!.label}: 5-hour and weekly limits; at the current pace the limit runs out in about 3 h`} onClick={() => setPage("accounts")}>
+          {/* The account type always leads the numbers: provider glyph and name, then the plan. */}
+          <AgentBadge agent={acc()!.agent} plan={acc()!.plan} max={180} />
+          <span class="sb-account ell">{acc()!.label}</span>
           <span class="meter" classList={{ warn: acc()!.fiveHour > 50 }}><i style={{ width: `${acc()!.fiveHour}%` }} /></span><span class="tabular">5h {acc()!.fiveHour}%</span>
           <span class="meter"><i style={{ width: `${acc()!.week}%` }} /></span><span class="tabular">7d {acc()!.week}%</span>
         </button>
@@ -78,8 +81,8 @@ function ReviewTools() {
           <label>Zerus mark motion (while sessions need attention)
             <select value={logoMotion()} onChange={(e) => setLogoMotion(e.currentTarget.value as LogoMotion)}>
               <option value="qt">As in Qt: one turn, pause</option>
-              <option value="blades">Blades: staggered spring + glow</option>
-              <option value="ripple">Ripple: calm turn + rings</option>
+              <option value="spin">Spin-up: two turns, settle</option>
+              <option value="turbine">Strong spin-up: three turns</option>
             </select>
           </label>
           <div class="rp-row">

@@ -57,9 +57,19 @@ export function setSessionsWidth(width: number) {
   try { localStorage.setItem("zerus-mock-sessions-width", String(width)); } catch { /* ignore */ }
 }
 
+// Side panel width (workspace/inspectorWidth: default 400, at least 240).
+const savedInspector = (() => { try { return Number(localStorage.getItem("zerus-mock-inspector-width")) || 0; } catch { return 0; } })();
+export const INSPECTOR_WIDTH = { initial: 400, min: 240, max: 900 } as const;
+export const [inspectorWidth, setInspectorWidthRaw] = createSignal(savedInspector >= INSPECTOR_WIDTH.min ? Math.min(INSPECTOR_WIDTH.max, savedInspector) : INSPECTOR_WIDTH.initial);
+export function setInspectorWidth(width: number) {
+  setInspectorWidthRaw(width);
+  try { localStorage.setItem("zerus-mock-inspector-width", String(width)); } catch { /* ignore */ }
+}
+
 /** Mockup-only choice between Zerus mark animations (review toolbar). */
-export type LogoMotion = "qt" | "blades" | "ripple";
-export const [logoMotion, setLogoMotion] = createSignal<LogoMotion>(param<LogoMotion>("logo", "blades"));
+export type LogoMotion = "qt" | "spin" | "turbine";
+const logoParam = params.get("logo");
+export const [logoMotion, setLogoMotion] = createSignal<LogoMotion>(logoParam === "qt" || logoParam === "turbine" ? logoParam : "spin");
 
 let toastId = 0;
 export function toast(title: string, text: string) {

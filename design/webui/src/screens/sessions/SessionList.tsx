@@ -49,10 +49,56 @@ const openMenu = (e: MouseEvent, items: MenuEntry[]) => {
   setMenu({ x: e.clientX, y: e.clientY, items });
 };
 
+// Card <-> compact row. The swap is instant in Qt; here it morphs in 220 ms so
+// the title never jumps: the card's height eases to the new size, the title and
+// badges glide from their old place (FLIP, transform only), the detail lines
+// fade, and the rows below slide with the same timing.
+const MORPH = { duration: 220, easing: "cubic-bezier(.33, 1, .68, 1)" } as const;
+const FLIP = [".sc-title", ".sbadge", ".agent-badge", ".sc-mute"];
+const DETAIL_LINES = ".sc-l2, .sc-l3, .sc-foot";
+const [morphing, setMorphing] = createSignal(false);
+let morphTimer: number | undefined;
+
+function setRowCompact(key: string, compact: boolean) {
+  if (!!compactRows[key] === compact) return;
+  const row = document.querySelector<HTMLElement>(`.sp-scroll .vrow[data-key="${CSS.escape(key)}"]`);
+  const card = row?.querySelector<HTMLElement>(".scard");
+  if (!row || !card || stripMode() || reducedMotion()) { setCompactRows(key, compact); return; }
+  const before = FLIP.map((sel) => row.querySelector(sel)?.getBoundingClientRect());
+  const from = card.getBoundingClientRect().height;
+  const ghosts = compact ? [...card.querySelectorAll<HTMLElement>(DETAIL_LINES)].map((n) => n.cloneNode(true) as HTMLElement) : [];
+  clearTimeout(morphTimer);
+  setMorphing(true);
+  setCompactRows(key, compact); // Solid updates the row synchronously.
+  const next = row.querySelector<HTMLElement>(".scard");
+  if (next) {
+    const to = next.getBoundingClientRect().height;
+    next.classList.add("morph");
+    next.animate([{ height: `${from}px` }, { height: `${to}px` }], MORPH).finished.catch(() => {}).finally(() => next.classList.remove("morph"));
+    FLIP.forEach((sel, i) => {
+      const el = row.querySelector<HTMLElement>(sel), a = before[i];
+      if (!el || !a) return;
+      const b = el.getBoundingClientRect();
+      if (a.left !== b.left || a.top !== b.top) el.animate([{ transform: `translate(${a.left - b.left}px, ${a.top - b.top}px)` }, { transform: "none" }], MORPH);
+    });
+    if (compact) {
+      for (const g of ghosts) {
+        g.setAttribute("aria-hidden", "true");
+        g.style.pointerEvents = "none";
+        next.append(g);
+        g.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: "ease-out", fill: "forwards" }).finished.catch(() => {}).finally(() => g.remove());
+      }
+    } else {
+      next.querySelectorAll<HTMLElement>(DETAIL_LINES).forEach((n) => n.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, delay: 60, easing: "ease-out", fill: "backwards" }));
+    }
+  }
+  morphTimer = window.setTimeout(() => setMorphing(false), MORPH.duration + 40);
+}
+
 function sessionMenu(s: Session): MenuEntry[] {
   const live = s.status !== "paused" && s.status !== "ended";
   return [
-    { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setCompactRows(s.key, !compactRows[s.key]) },
+    { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     { separator: true },
     s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link" } : { label: "Open terminal", icon: "square-terminal", action: () => setDetailTab("terminal") },
@@ -357,7 +403,7 @@ export function SessionList() {
       }
     } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && i >= 0) {
       const r = nav[i];
-      if (r.type === "card" && r.compactRow && e.key === "ArrowRight") setCompactRows(r.session.key, false);
+      if (r.type === "card" && r.compactRow && e.key === "ArrowRight") setRowCompact(r.session.key, false);
       else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, e.key === "ArrowRight");
       else if (r.type === "child" && e.key === "ArrowLeft") setSelectedKey(r.parent.key);
     } else if (e.key === "Escape") {
@@ -408,7 +454,7 @@ export function SessionList() {
         <Show when={stateFilter() !== "archived"} fallback={<ArchiveList />}>
           <Show when={!searching()} fallback={<SearchResults />}>
             <Show when={demoState() === "normal" || demoState() === "error"} fallback={<ListPlaceholder />}>
-              <div class="sp-scroll" ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
+              <div class="sp-scroll" classList={{ morphing: morphing() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
                 aria-label="Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group">
                 <Show when={list.rows().length} fallback={<NoMatches />}>
                   <div style={{ height: `${list.virtualizer.getTotalSize()}px`, position: "relative" }}>
@@ -460,7 +506,7 @@ function ListRow(props: { id: string; list: RowSource }) {
   const row = () => props.list.byId().get(props.id);
   const top = () => props.list.startOf().get(props.id) ?? 0;
   return (
-    <div class="vrow" data-type={row()?.type} style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}
+    <div class="vrow" data-type={row()?.type} data-key={props.id} style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}
       role="treeitem" aria-selected={props.id === selectedKey()}>
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
@@ -475,8 +521,8 @@ function ListRow(props: { id: string; list: RowSource }) {
           <div class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key] }} onClick={(e) => selectSession(v().session.key, e)}
             onDragOver={taskDragOver} onDragLeave={taskDragLeave} onDrop={(e) => taskDrop(e, v().session.name)}
             onContextMenu={(e) => { if (!multi[v().session.key]) selectSession(v().session.key); openMenu(e, sessionMenu(v().session)); }}
-            onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setCompactRows(v().session.key, !compactRows[v().session.key]); }}>
-            <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setCompactRows(v().session.key, false)} />}>
+            onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
+            <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
                 expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])} />
             </Show>

@@ -47,6 +47,7 @@
       "entity-ink-base": "#111820",
       "tree-line": "#cfd7df",
       "scrollbar": "rgba(85,102,118,.37)",
+      "grip": "#b1bdc8",
       "scrollbar-hover": "rgba(85,102,118,.57)",
       "terminal-bg": "#fbfcfd",
       "terminal-fg": "#1a2733",

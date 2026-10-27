@@ -4,6 +4,7 @@
 #include <QSplitter>
 #include <QInputDialog>
 #include <QScrollBar>
+#include <QScopeGuard>
 #include <QSpinBox>
 #include "HgsClient.h"
 #include "MessageComposer.h"
@@ -67,6 +68,7 @@ private slots:
     void taskDocumentAndDiscussionUseActivityComposition();
     void taskTitleRenamesInPlaceAndKeepsRefusedEdits();
     void newCommentRecoversPreviousWithoutResending();
+    void slowDetailsPublishDuringBoardRefreshesAndRejectOldSelections();
     void firstActiveFilterCombinesReviewAndWorkWithoutChangingSelection();
     void mutationAfterCapturedListAlwaysGetsAFreshReadWithoutPolling();
     void init() { ComposerDraftStore::flushWrites(); QDir(ComposerDraftStore::directory()).removeRecursively(); QSettings().remove("tasks"); }
@@ -168,7 +170,7 @@ void TestTasksView::taskTitleRenamesInPlaceAndKeepsRefusedEdits() {
 
 void TestTasksView::newCommentRecoversPreviousWithoutResending() {
     QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
-    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); board.setPolling(false);
     TaskInspector inspector(&client, &board); inspector.resize(700, 850); inspector.show();
     board.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); inspector.setContext("project-1", "", "codex/api", sessions());
     QTRY_COMPARE(inspector.displayedCount(), 1); inspector.selectTask("uuid-1");
@@ -176,15 +178,58 @@ void TestTasksView::newCommentRecoversPreviousWithoutResending() {
     QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("message"); fail.close();
     composer->editor()->setPlainText("Previous comment with a lost response"); composer->findChild<QPushButton *>("sendMessage")->click();
     QTRY_VERIFY(inspector.findChild<QLabel *>("taskInspectorNoteError")->isVisible()); QVERIFY(fail.remove());
+    // Hold a captured old detail response across recovery and the new write.
+    QFile gate(dir.filePath("get-gate")); QVERIFY(gate.open(QIODevice::WriteOnly)); gate.close();
+    const auto releaseGate=qScopeGuard([&] { gate.remove(); });
+    board.refresh(); QTRY_VERIFY(QFileInfo::exists(dir.filePath("get-snapshot")));
     composer->editor()->setPlainText("A new ordinary comment"); composer->findChild<QPushButton *>("sendMessage")->click();
     QTRY_VERIFY(composer->editor()->toPlainText().isEmpty());
+    QFile state(dir.filePath("tasks.json")); QVERIFY(state.open(QIODevice::ReadOnly));
+    const auto persisted=QJsonDocument::fromJson(state.readAll()).object().value("tasks").toArray().first().toObject().value("log").toArray();
+    QStringList texts; for (const auto &entry:persisted) if(entry.toObject().value("kind")=="message") texts<<entry.toObject().value("text").toString();
+    QCOMPARE(texts,QStringList({"Previous comment with a lost response","A new ordinary comment"}));
+    QVERIFY(gate.remove());
+    auto *discussion = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
+    QTRY_VERIFY(discussion->toPlainText().contains("Previous comment with a lost response") && discussion->toPlainText().contains("A new ordinary comment"));
     const auto calls = FakeTasksCli::calls(dir.path()); QList<QStringList> messages;
     for (const auto &call : calls) if (call.value(1) == "message") messages << call;
     QCOMPARE(messages.size(), 3); QVERIFY(messages[1].contains("--recover-only"));
     const auto id = [](const QStringList &call) { return call.value(call.indexOf("--request-id") + 1); };
     QCOMPARE(id(messages[0]), id(messages[1])); QVERIFY(id(messages[2]) != id(messages[0])); QVERIFY(!messages[2].contains("--recover-only"));
-    auto *discussion = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
-    QTRY_VERIFY(discussion->toPlainText().contains("Previous comment with a lost response")); QVERIFY(discussion->toPlainText().contains("A new ordinary comment"));
+}
+
+void TestTasksView::slowDetailsPublishDuringBoardRefreshesAndRejectOldSelections() {
+    QTemporaryDir dir; auto one=FakeTasksCli::task(1,"todo"),two=FakeTasksCli::task(2,"todo");
+    one["title"]="First snapshot"; two["title"]="Other task";
+    QVERIFY(FakeTasksCli::install(dir.path(),{one,two}));
+    const auto gate=dir.filePath("gated-gets"); QVERIFY(FakeCli::replace(gate,"gate"));
+    const auto releaseAll=qScopeGuard([&] { QFile::remove(gate); });
+    const auto started=[&](int n) { return QFileInfo::exists(dir.filePath(QString("get-started-%1").arg(n))); };
+    const auto release=[&](int n) { return FakeCli::replace(dir.filePath(QString("get-release-%1").arg(n)),"release"); };
+    const auto retitle=[&](const QString &title) {
+        QFile file(dir.filePath("tasks.json")); if(!file.open(QIODevice::ReadOnly))return false;
+        auto data=QJsonDocument::fromJson(file.readAll()).object(); file.close();
+        auto tasks=data.value("tasks").toArray(); auto task=tasks[0].toObject(); task["title"]=title; tasks[0]=task; data["tasks"]=tasks;
+        return FakeCli::replace(dir.filePath("tasks.json"),QJsonDocument(data).toJson());
+    };
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); board.setPolling(false);
+    TaskInspector inspector(&client,&board); inspector.resize(700,850); inspector.show();
+    board.setContext("project-1","orchard","","codex/api","key",sessions()); inspector.setContext("project-1","","codex/api",sessions());
+    QTRY_COMPARE(inspector.displayedCount(),2); inspector.selectTask("uuid-1"); QTRY_VERIFY(started(1));
+    auto *title=inspector.findChild<QLabel *>("taskViewTitle"); QVERIFY(title);
+    QSignalSpy updates(&board,&TasksView::boardChanged);
+    // An unchanged list arrives before every slow detail reply. Each valid
+    // same-selection snapshot must still publish while its next read is held.
+    board.refresh(); QTRY_VERIFY(!updates.isEmpty()); QVERIFY(retitle("Second snapshot"));
+    QVERIFY(release(1)); QTRY_VERIFY(started(2)); QTRY_COMPARE(title->text(),QString("First snapshot"));
+    const int before=updates.size(); board.refresh(); QTRY_VERIFY(updates.size()>before); QVERIFY(retitle("Old selection must not publish"));
+    QVERIFY(release(2)); QTRY_VERIFY(started(3)); QTRY_COMPARE(title->text(),QString("Second snapshot"));
+    // Progress does not authorize a late reply for a different selection.
+    inspector.selectTask("uuid-2"); QVERIFY(release(3)); QTRY_VERIFY(started(4));
+    QCOMPARE(title->text(),QString("Second snapshot"));
+    QVERIFY(release(4)); QTRY_COMPARE(title->text(),QString("Other task"));
+    int reads=0; for(const auto &call:FakeTasksCli::calls(dir.path())) { QVERIFY(call.value(1)=="list" || call.value(1)=="get"); reads+=call.value(1)=="get"; }
+    QCOMPARE(reads,4);
 }
 
 void TestTasksView::mutationAfterCapturedListAlwaysGetsAFreshReadWithoutPolling() {

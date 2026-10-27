@@ -1071,7 +1071,8 @@ pub(crate) fn hand_off_text_with(
         let ids: Vec<&str> = super::templates::BUILTIN.iter().map(|template| template.id).collect();
         text += &format!(
             "\nZerus runs these commands for you, outside your sandbox, without an approval: {}.\n\
-             Ask for one with {run} | hgs team run --json: the exit code and the output tail come back.\n\
+             Ask for one with {run} | hgs team run --json: a new request_id for every run; --wait returns the exit code as soon as it is ready.\n\
+             Ask again with the same request_id to read the result - it never runs the command twice.\n\
              Anything else still asks the lead.",
             ids.join(", "),
             run = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"attempt":attempt.id,"template":"cargo-test","args":{}})
@@ -2714,73 +2715,44 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
 /// U21: the git route of the built-in template, run the way commit_in runs git
 /// (C2): the repository's own config may name neither a hook path, fsmonitor,
 /// an include, a filter nor a signing program, and hooks are disabled outright;
-/// a clone member owns its .git, so its config must never run code here.
-pub(crate) fn merge_lead(folder: &str, timeout: Duration) -> super::templates::Outcome {
+/// a clone member owns its .git, so its config must never run code here. N1: the
+/// branch is the lead's own, passed in, never a name built into Zerus.
+pub(crate) fn merge_lead(folder: &str, branch: &str, timeout: Duration) -> super::templates::Outcome {
     let started = Instant::now();
-    let run = |args: &[&str]| -> anyhow::Result<Output> {
-        let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
-        let mut child = std::process::Command::new("git")
-            .arg("-C")
-            .arg(folder)
-            .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "gpg.program="])
-            .arg("--no-optional-locks")
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|error| anyhow::anyhow!("git did not run: {error}"))?;
-        let out_pipe = child.stdout.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        });
-        let err_pipe = child.stderr.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        });
-        loop {
-            if child.try_wait()?.is_some() {
-                break;
+    let deadline = started + timeout;
+    let elapsed = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A read, not a run: `worktrees::git` bounds it in time and output.
+    let listing = match super::super::worktrees::git(Path::new(folder), &["config", "--list", "--show-scope", "--name-only"], deadline) {
+        Ok(out) => String::from_utf8_lossy(&out).into_owned(),
+        Err(error) => {
+            return super::templates::Outcome {
+                exit: Some(1),
+                tail: format!("This repository's config was not read: {}", error.detail),
+                ms: elapsed(),
+                ..Default::default()
             }
-            if started.elapsed() >= timeout {
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!("git {args:?} did not finish in {} s and was stopped", timeout.as_secs());
-            }
-            std::thread::sleep(Duration::from_millis(20));
         }
-        let status = child.wait()?;
-        let stdout = out_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
-        let stderr = err_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
-        Ok(Output { status, stdout, stderr })
     };
-    let outcome = (|| -> anyhow::Result<(Option<i32>, String)> {
-        let listed = run(&["config", "--list", "--show-scope", "--name-only"])?;
-        anyhow::ensure!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr).trim());
-        if let Some(reason) = refused_repository_config(&String::from_utf8_lossy(&listed.stdout)) {
-            anyhow::bail!("This repository {reason}; Zerus merges without it");
-        }
-        let merged = run(&["merge", "--no-edit", "teams-v2/lead"])?;
-        let mut tail = String::from_utf8_lossy(&merged.stdout).into_owned();
-        let error = String::from_utf8_lossy(&merged.stderr).into_owned();
-        if !error.trim().is_empty() {
-            if !tail.is_empty() && !tail.ends_with('\n') {
-                tail.push('\n');
-            }
-            tail.push_str(&error);
-        }
-        Ok((merged.status.code(), tail))
-    })();
-    let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match outcome {
-        Ok((exit, tail)) => super::templates::Outcome { exit, tail: super::templates::last_chars(&tail, 4000), ms, ..Default::default() },
-        Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ms, ..Default::default() },
+    if let Some(reason) = refused_repository_config(&listing) {
+        return super::templates::Outcome {
+            exit: Some(1),
+            tail: format!("This repository {reason}; Zerus merges without it"),
+            ms: elapsed(),
+            ..Default::default()
+        };
     }
+    let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(folder)
+        .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "gpg.program="])
+        .arg("--no-optional-locks")
+        .args(["merge", "--no-edit", branch]);
+    let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
+    let mut outcome = super::templates::run_tree(&mut command, remaining, None);
+    outcome.ms = elapsed();
+    outcome
 }
 
 fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
@@ -3322,16 +3294,45 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
 /// Applies the requests members left in their folders: a sandbox may not write
 /// the team store, but it can write its own folder (U20). The folder proves the
 /// member; the request must name that member and one of its running attempts.
+/// C1: a run is only claimed and started here; a detached runner executes it and
+/// settles the request, so no template can hold the tick.
 fn take_outbox(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<()> {
+    take_outbox_with(store, team, seen, &spawn_runner)
+}
+
+fn take_outbox_with(
+    store: &mut Store,
+    team: &Team,
+    seen: &[Seen],
+    spawn: &dyn Fn(&Path, &Value) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     if team.status != TeamStatus::Running && team.status != TeamStatus::Paused {
         return Ok(());
     }
     for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
         let Some(found) = session_of(member, seen).filter(|found| !found.cwd.is_empty() && found.host.is_empty()) else { continue };
         let folder = Path::new(&found.cwd);
+        // C1: a runner that died leaves its claim behind; the member then hears
+        // that the run stopped instead of waiting for a result that never comes.
+        settle_stale_runs(folder, team);
         let Ok(requests) = super::outbox::pending(folder, super::outbox::PER_TICK) else { continue };
         for (path, request) in requests {
-            let outcome = match apply_outbox(store, team, member, folder, &request) {
+            if request["op"] == "run" {
+                match start_run(store, team, member, folder, &request, spawn) {
+                    // A refusal is answered now; a claim needs no answer - the
+                    // runner writes it, and a claim that could not start stays
+                    // queued for the next tick.
+                    Ok(Some(outcome)) => {
+                        if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
+                            eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("hgs team worker: {}: run {}: {error:#}", team.name, request["request_id"]),
+                }
+                continue;
+            }
+            let outcome = match apply_outbox(store, team, member, &request) {
                 Ok(value) => value,
                 // A refusal is final: the request leaves the outbox as well, or
                 // the worker would try it again every tick.
@@ -3345,12 +3346,58 @@ fn take_outbox(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<
     Ok(())
 }
 
-/// U21: one queued template run, executed here (the worker is not confined, so
-/// the command runs outside the member's sandbox) and recorded on its attempt.
-fn apply_run(store: &mut Store, team: &Team, member: &Member, task_id: u32, folder: &Path, request: &Value) -> anyhow::Result<Value> {
+/// N1: the branch the lead's own folder is on: what a member merges. It is read
+/// from the team's folder, never built into Zerus, so another project gets its
+/// own branch.
+fn lead_branch(team: &Team) -> anyhow::Result<String> {
+    anyhow::ensure!(!team.folder.is_empty(), "The team has no folder to merge from");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let out = super::super::worktrees::git(Path::new(&team.folder), &["rev-parse", "--abbrev-ref", "HEAD"], deadline)
+        .map_err(|error| anyhow::anyhow!("the lead's branch was not read: {}", error.detail))?;
+    let branch = String::from_utf8_lossy(&out).trim().to_owned();
+    super::templates::check_branch(&branch)?;
+    Ok(branch)
+}
+
+/// Whether `folder` is inside `root` (a shared member in a subfolder of the
+/// team's checkout, not an own worktree or clone beside it).
+fn inside(folder: &str, root: &str) -> bool {
+    let (Ok(folder), Ok(root)) = (crate::platform::canonical(Path::new(folder)), crate::platform::canonical(Path::new(root))) else {
+        return false;
+    };
+    folder != root && folder.starts_with(&root)
+}
+
+/// U21/C1: one queued run, executed outside the member's sandbox. N1: the merge
+/// runs in the member's own folder and only when that is not the team's.
+fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<super::templates::Outcome> {
     let template = request["template"].as_str().unwrap_or_default();
     let args = request["args"].clone();
     let plan = super::templates::plan(template, &args, folder)?;
+    let timeout = Duration::from_secs(super::templates::timeout_for(template));
+    if template == "git-merge-lead" {
+        let mine = member_folder_path(team, member)?;
+        anyhow::ensure!(
+            !mine.is_empty() && !same_path(&mine, &team.folder) && !inside(&mine, &team.folder),
+            "This team works in one shared folder; Zerus does not merge the lead's branch into it"
+        );
+        let branch = lead_branch(team)?;
+        return Ok(merge_lead(&mine, &branch, timeout));
+    }
+    if let Some(payload) = &plan.commit {
+        // B4/U21: the commit template is Zerus' own code, not a subprocess: the
+        // identity is the one the outbox proved.
+        let input = json!({"request_id":request["request_id"],"team":team.id,"attempt":request["attempt"],
+            "message":payload["message"],"paths":payload["paths"]});
+        return Ok(match super::commands::commit_in_team(team, &member.id, &input) {
+            Ok(result) => super::templates::Outcome {
+                exit: Some(0),
+                tail: format!("{} {}", result["status"].as_str().unwrap_or_default(), result["sha"].as_str().unwrap_or_default()).trim().to_owned(),
+                ..Default::default()
+            },
+            Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ..Default::default() },
+        });
+    }
     let mut env: Vec<(&str, String)> = Vec::new();
     if template == "qt-test" && args["shots"].as_str() == Some("true") {
         // U21: the shots go into the member's own folder, never the team's.
@@ -3358,37 +3405,29 @@ fn apply_run(store: &mut Store, team: &Team, member: &Member, task_id: u32, fold
         let _ = fs::create_dir_all(&shots);
         env.push(("ZERUS_TEAM_SHOTS", shots.display().to_string()));
     }
-    let timeout = Duration::from_secs(super::templates::timeout_for(template));
-    let outcome = if template == "git-merge-lead" {
-        // U21, attempt 2: a clone member owns its .git, so this git route is
-        // run the way commit_in runs git, with the repository's own config
-        // refused and its hooks disabled.
-        merge_lead(&folder.display().to_string(), timeout)
-    } else if let Some(payload) = &plan.commit {
-        // B4/U21: the commit template is Zerus' own code, not a subprocess: the
-        // identity is the one the outbox proved.
-        let input = json!({"request_id":request["request_id"],"team":team.id,"attempt":request["attempt"],
-            "message":payload["message"],"paths":payload["paths"]});
-        match super::commands::commit_in_team(team, &member.id, &input) {
-            Ok(result) => super::templates::Outcome {
-                exit: Some(0),
-                tail: format!("{} {}", result["status"].as_str().unwrap_or_default(), result["sha"].as_str().unwrap_or_default()).trim().to_owned(),
-                ..Default::default()
-            },
-            Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ..Default::default() },
-        }
-    } else {
-        super::templates::execute(&plan, folder, timeout, &env)
-    };
+    Ok(super::templates::execute(&plan, folder, timeout, &env))
+}
+
+/// U21/C1: records one run on its attempt - even when the attempt ended while
+/// the command ran, so its exit code and tail are never lost - and answers the
+/// member with them.
+fn record_run(store: &mut Store, team: &Team, member: &Member, request: &Value, outcome: &super::templates::Outcome) -> Value {
+    let template = request["template"].as_str().unwrap_or_default();
+    let args = request["args"].clone();
     let attempt_id = request["attempt"].as_str().unwrap_or_default().to_owned();
     let role = team.role_of(&member.id);
-    change(store, &team.id, |team, events| {
-        let task = team.task_mut(task_id).context("unknown task")?;
-        let attempt = task.open_attempt_mut().filter(|attempt| attempt.id == attempt_id).context("the attempt ended")?;
+    let recorded = change(store, &team.id, |team, events| {
+        let task = team
+            .tasks
+            .iter_mut()
+            .find(|task| task.attempts.iter().any(|attempt| attempt.id == attempt_id))
+            .context("unknown attempt")?;
+        let task_id = task.id;
+        let attempt = task.attempts.iter_mut().find(|attempt| attempt.id == attempt_id).context("unknown attempt")?;
         let n = attempt.n;
         attempt.runs.push(RunRecord {
             template: template.to_owned(),
-            args: args.clone(),
+            args,
             exit: outcome.exit,
             at: now(),
             ms: outcome.ms,
@@ -3401,17 +3440,173 @@ fn apply_run(store: &mut Store, team: &Team, member: &Member, task_id: u32, fold
             json!({"member":role,"task":task_id,"attempt":n,"template":template,"exit":outcome.exit,"timed_out":outcome.timed_out}),
         ));
         Ok(())
-    })?;
-    Ok(json!({"status":"ran","template":template,"exit":outcome.exit,"tail":outcome.tail,"ms":outcome.ms,
-        "timed_out":outcome.timed_out,"error":outcome.error}))
+    });
+    if let Err(error) = recorded {
+        eprintln!("hgs team worker: {}: ran: {error:#}", team.name);
+    }
+    json!({"status":"ran","template":template,"exit":outcome.exit,"tail":outcome.tail,"ms":outcome.ms,
+        "timed_out":outcome.timed_out,"error":outcome.error})
+}
+
+/// C1: claims a queued run and starts the detached runner. None means claimed
+/// (the runner settles it); Some is a refusal to answer now.
+fn start_run(
+    store: &mut Store,
+    team: &Team,
+    member: &Member,
+    folder: &Path,
+    request: &Value,
+    spawn: &dyn Fn(&Path, &Value) -> anyhow::Result<()>,
+) -> anyhow::Result<Option<Value>> {
+    let _ = store;
+    let id = request["request_id"].as_str().unwrap_or_default().to_owned();
+    let refuse = |error: String| Ok(Some(json!({"status":"refused","request_id":id,"error":error})));
+    if !super::store::canonical_uuid(&id) {
+        return refuse("An outbox request needs a canonical request_id".into());
+    }
+    // N4: an answer that is already there is the answer; it never runs twice.
+    if super::outbox::result(folder, &id).is_some() {
+        let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
+        return Ok(None);
+    }
+    if super::outbox::running(folder, &id).is_some() {
+        // A push of the same id while the runner works: keep the claim, drop the copy.
+        let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
+        return Ok(None);
+    }
+    if request["team"].as_str() != Some(team.id.as_str()) {
+        return refuse("a request for another team".into());
+    }
+    if request["member"].as_str() != Some(member.id.as_str()) {
+        return refuse(format!("the folder belongs to {}", team.role_of(&member.id)));
+    }
+    let attempt = request["attempt"].as_str().unwrap_or_default();
+    if !team.tasks.iter().any(|task| task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member.id)) {
+        return refuse(format!("attempt {attempt} does not run for this member"));
+    }
+    let template = request["template"].as_str().unwrap_or_default();
+    if let Err(error) = super::templates::plan(template, &request["args"], folder) {
+        return refuse(format!("{error:#}"));
+    }
+    let marker = json!({"request_id":id,"started":now(),"timeout_secs":super::templates::timeout_for(template)});
+    super::outbox::write_running(folder, &id, &marker)?;
+    let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
+    if let Err(error) = spawn(folder, request) {
+        // Nobody took the claim: put the request back for the next tick.
+        let _ = std::fs::remove_file(super::outbox::running_path(folder, &id));
+        super::outbox::push(folder, request)?;
+        return Err(error.context("the runner did not start"));
+    }
+    Ok(None)
+}
+
+/// C1: starts one detached runner for a claimed request; the worker never waits
+/// for a template. The request goes to the runner on its standard input, never
+/// through the member's folder, so the folder cannot change what runs.
+fn spawn_runner(folder: &Path, request: &Value) -> anyhow::Result<()> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(["team", "worker", "--run"])
+        .current_dir(folder)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID"] {
+        command.env_remove(name);
+    }
+    let mut child = crate::platform::spawn_detached(&mut command)?;
+    if let Some(mut pipe) = child.stdin.take() {
+        use std::io::Write;
+        let _ = pipe.write_all(&serde_json::to_vec(request)?);
+    }
+    Ok(())
+}
+
+/// C1: a claim whose runner never settled (it crashed, the computer restarted)
+/// is answered once its own bound has long passed, so a member never waits on a
+/// result that cannot come.
+fn settle_stale_runs(folder: &Path, team: &Team) {
+    const GRACE_SECONDS: f64 = 120.0;
+    for (_, marker) in super::outbox::running_all(folder) {
+        let id = marker["request_id"].as_str().unwrap_or_default();
+        let started = marker["started"].as_f64().unwrap_or(0.0);
+        let bound = marker["timeout_secs"].as_u64().unwrap_or(1800) as f64;
+        if !id.is_empty() && now() > started + bound + GRACE_SECONDS {
+            let outcome = json!({"status":"refused","request_id":id,
+                "error":"the run stopped without a result (the runner ended, this computer restarted, or the command outlived its bound); ask again with a new request_id"});
+            let _ = super::outbox::settle_running(folder, id, &outcome);
+            eprintln!("hgs team worker: {}: run {id} stopped without a result", team.name);
+        }
+    }
+}
+
+/// C1: the detached runner for one claimed request, read from its standard
+/// input: execute it, record it and leave the outcome where the member polls.
+pub(crate) fn worker_run() -> Result<i32> {
+    use std::io::Read;
+    let folder = std::env::current_dir().map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    std::io::stdin().take(super::outbox::REQUEST_BYTES + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    let request: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => return Err(format!("The run request is not JSON: {error}")),
+    };
+    let mut store = match Store::open(true) {
+        Ok(store) => store,
+        Err(error) => {
+            if let Some(id) = request["request_id"].as_str() {
+                let outcome = json!({"status":"refused","request_id":id,"error":format!("the team store was not opened: {error:#}")});
+                let _ = super::outbox::settle_running(&folder, id, &outcome);
+            }
+            return Ok(1);
+        }
+    };
+    run_request(&mut store, &folder, &request);
+    Ok(0)
+}
+
+/// C1: one claimed request from the runner's folder. Its outcome, good or bad,
+/// is left in the outbox; the runner never holds the worker or another team.
+fn run_request(store: &mut Store, folder: &Path, request: &Value) {
+    let id = request["request_id"].as_str().unwrap_or_default().to_owned();
+    let outcome = (|| -> anyhow::Result<Value> {
+        anyhow::ensure!(super::store::canonical_uuid(&id), "An outbox request needs a canonical request_id");
+        let team = store.load(request["team"].as_str().unwrap_or_default())?.context("Unknown team")?;
+        anyhow::ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+        let member = team.member(request["member"].as_str().unwrap_or_default()).context("Unknown member")?.clone();
+        // The folder still proves the member: it is the one Zerus gives it.
+        let mine = member_folder_path(&team, &member)?;
+        let here = folder.display().to_string();
+        anyhow::ensure!(
+            !mine.is_empty() && (same_path(&here, &mine) || inside(&here, &mine)),
+            "This folder is not {}'s own folder",
+            team.role_of(&member.id)
+        );
+        let attempt = request["attempt"].as_str().unwrap_or_default();
+        // C1: the attempt may have ended while the command ran; the result is
+        // still its own, so the claim is not refused for that.
+        anyhow::ensure!(
+            team.tasks.iter().any(|task| task.attempts.iter().any(|found| found.id == attempt && found.member == member.id)),
+            "attempt {attempt} is not this member's"
+        );
+        let outcome = run_outcome(&team, &member, folder, request)?;
+        Ok(record_run(store, &team, &member, request, &outcome))
+    })();
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => json!({"status":"refused","request_id":id,"error":format!("{error:#}")}),
+    };
+    if let Err(error) = super::outbox::settle_running(folder, &id, &outcome) {
+        eprintln!("hgs team worker: run {id}: {error}");
+    }
 }
 
 /// One queued request, applied as the member's own write (U20). The member's
 /// input keys the store receipt, so a request applied twice (a worker that died
 /// before it removed the file) is a replay, not a second report.
-fn apply_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<Value> {
+fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "run"), "Unknown outbox request {op}");
+    anyhow::ensure!(matches!(op, "report" | "ask" | "commit"), "Unknown outbox request {op}");
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.role_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
@@ -3434,9 +3629,6 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Path, 
     }
     if op == "commit" {
         return super::commands::commit_in_team(team, &member.id, &input);
-    }
-    if op == "run" {
-        return apply_run(store, team, member, task.id, folder, request);
     }
     let member_id = member.id.clone();
     store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {
@@ -4466,41 +4658,149 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_template_run_from_the_members_folder_runs_and_is_recorded() {
-        // U21: the member cannot run the command in its own sandbox; it queues
-        // the run and the worker executes it, recording exit and output tail.
+    fn a_queued_template_run_is_claimed_off_the_tick_and_runs_in_the_runner() {
+        // C1: the tick only claims the run and starts a runner; the runner (here
+        // called directly) executes it and records exit and output tail.
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         let mut t = team();
         t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
         let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
         task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
         task.status = TaskStatus::InProgress;
         let id = task.id;
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
-        let folder = dir.path().join("work");
-        std::fs::create_dir_all(folder.join(".zerus-team")).unwrap();
         // U21, attempt 2: additions come from Zerus state (the owner's), never
         // from the member's folder; the test points the state at its own file.
         let settings = dir.path().join("templates.json");
         crate::state::teams::templates::settings_override(Some(settings));
         crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo run-ok"]})]).unwrap();
-        let request = json!({"op":"run","request_id":"77777777-7777-4777-8777-777777777777",
+        let run_id = "77777777-7777-4777-8777-777777777777";
+        let request = json!({"op":"run","request_id":run_id,
             "team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
-            "input":{"request_id":"77777777-7777-4777-8777-777777777777","team":t.id,"attempt":"A1","template":"say","args":{}}});
-        super::super::outbox::push(&folder, &request).unwrap();
+            "input":{"request_id":run_id,"team":t.id,"attempt":"A1","template":"say","args":{}}});
+        let path = super::super::outbox::push(&folder, &request).unwrap();
         let mut member = session("codex/x/dev", "r1", true);
         member.cwd = folder.to_string_lossy().into_owned();
+        let started = std::cell::RefCell::new(Vec::<(std::path::PathBuf, Value)>::new());
+        let spawn = |folder: &Path, request: &Value| {
+            started.borrow_mut().push((folder.to_path_buf(), request.clone()));
+            Ok(())
+        };
         let current = store.load(&t.id).unwrap().unwrap();
-        take_outbox(&mut store, &current, &[member]).unwrap();
+        take_outbox_with(&mut store, &current, &[member.clone()], &spawn).unwrap();
+        // The tick claimed the request and returned; nothing ran yet.
+        let claims = started.borrow().clone();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].1["request_id"], run_id);
+        assert_eq!(claims[0].0, folder);
+        assert!(super::super::outbox::running_path(&folder, run_id).exists(), "the claim is not recorded");
+        assert!(!path.exists(), "the request left the queue");
+        assert!(super::super::outbox::result(&folder, run_id).is_none(), "the tick ran the command");
+        assert!(store.load(&t.id).unwrap().unwrap().task(id).unwrap().attempts.last().unwrap().runs.is_empty());
+        // A second tick starts nothing again: the claim is not a request.
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[member], &spawn).unwrap();
+        assert_eq!(started.borrow().len(), 1);
+        // The runner executes the claim and settles it.
+        run_request(&mut store, &folder, &claims[0].1);
+        assert!(super::super::outbox::running(&folder, run_id).is_none(), "the claim stays after the result");
         let saved = store.load(&t.id).unwrap().unwrap();
         let attempt = saved.task(id).unwrap().attempts.last().unwrap();
         assert_eq!(attempt.runs.len(), 1);
         assert_eq!((attempt.runs[0].template.as_str(), attempt.runs[0].exit), ("say", Some(0)));
-        let result = super::super::outbox::result(&folder, "77777777-7777-4777-8777-777777777777").unwrap();
+        let result = super::super::outbox::result(&folder, run_id).unwrap();
         assert_eq!(result["status"], "ran");
         assert_eq!(result["tail"].as_str().unwrap_or_default().trim(), "run-ok", "{result}");
         crate::state::teams::templates::settings_override(None);
+    }
+
+    #[test]
+    fn a_run_whose_attempt_ended_keeps_its_exit_code_and_tail() {
+        // C1: the attempt changing while the command runs must not lose the
+        // result; the run is recorded on the attempt it belonged to.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let settings = dir.path().join("templates.json");
+        crate::state::teams::templates::settings_override(Some(settings));
+        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo late-ok"]})]).unwrap();
+        let run_id = "77777777-7777-4777-8777-777777777778";
+        let request = json!({"op":"run","request_id":run_id,
+            "team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
+            "input":{"request_id":run_id,"team":t.id,"attempt":"A1","template":"say","args":{}}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let started = std::cell::RefCell::new(Vec::<Value>::new());
+        let spawn = |_: &Path, request: &Value| {
+            started.borrow_mut().push(request.clone());
+            Ok(())
+        };
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[member], &spawn).unwrap();
+        // The attempt is decided while the runner works.
+        let before = started.borrow().clone();
+        let mut ended = store.load(&t.id).unwrap().unwrap();
+        {
+            let task = ended.task_mut(id).unwrap();
+            task.attempts.last_mut().unwrap().state = AttemptState::Rejected;
+            task.status = TaskStatus::Pending;
+        }
+        store.mutate(None, &t.id, None, |team, _| {
+            *team = ended;
+            Ok(Value::Null)
+        })
+        .unwrap();
+        run_request(&mut store, &folder, &before[0]);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        assert_eq!((attempt.state, attempt.runs.len()), (AttemptState::Rejected, 1), "{attempt:?}");
+        assert_eq!(attempt.runs[0].exit, Some(0));
+        let result = super::super::outbox::result(&folder, run_id).unwrap();
+        assert_eq!(result["status"], "ran", "{result}");
+        assert_eq!(result["tail"].as_str().unwrap_or_default().trim(), "late-ok");
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    #[test]
+    fn a_claim_whose_runner_died_is_answered_on_a_later_tick() {
+        // C1: the worker settles a claim no live runner holds, once its bound
+        // has long passed; the member stops waiting for a result.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let run_id = "77777777-7777-4777-8777-777777777779";
+        let marker = json!({"request_id":run_id,"started":now()-7200.0,"timeout_secs":300});
+        super::super::outbox::write_running(&folder, run_id, &marker).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[member], &|_, _| panic!("a stale claim must not start a runner")).unwrap();
+        let result = super::super::outbox::result(&folder, run_id).unwrap();
+        assert_eq!(result["status"], "refused");
+        assert!(result["error"].as_str().unwrap_or_default().contains("stopped without a result"), "{result}");
+        assert!(super::super::outbox::running(&folder, run_id).is_none());
     }
 
     #[test]
@@ -4609,7 +4909,7 @@ mod tests {
             return;
         }
         assert!(hardened.join(".git").join("hooks").join("post-merge").exists());
-        let outcome = merge_lead(&hardened.display().to_string(), Duration::from_secs(60));
+        let outcome = merge_lead(&hardened.display().to_string(), "teams-v2/lead", Duration::from_secs(60));
         assert_eq!(outcome.exit, Some(0), "{outcome:?}");
         assert!(!marker.exists(), "the repository's post-merge hook ran");
     }
@@ -4637,10 +4937,65 @@ mod tests {
         }
         let program = format!("cmd /c echo x > \"{}\"", marker.display());
         assert!(git(&["config", "core.fsmonitor", &program]));
-        let outcome = merge_lead(&repo.display().to_string(), Duration::from_secs(60));
+        let outcome = merge_lead(&repo.display().to_string(), "main", Duration::from_secs(60));
         assert_eq!(outcome.exit, Some(1), "{outcome:?}");
         assert!(outcome.tail.contains("configures core.fsmonitor"), "{}", outcome.tail);
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_merge_uses_the_leads_own_branch_and_never_a_shared_folder() {
+        // N1: the branch comes from the lead's folder (never a name built into
+        // Zerus), and the merge runs in the member's own worktree - a member in
+        // the team's shared folder never merges into the owner's checkout.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.email=t@e", "-c", "user.name=T"])
+                .args(args)
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        if !(git(&["init", "-q"]) && git(&["add", "."]) && git(&["commit", "-qm", "A"]) && git(&["switch", "-qc", "feature/lead"])) {
+            eprintln!("git could not build the test repository; the sandbox blocks it");
+            return;
+        }
+        let member = Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), folder: MemberFolder::Worktree, ..Default::default() };
+        let t = folder_team(&repo, member.clone());
+        let mine = member_folder_path(&t, &member).unwrap();
+        if !git(&["worktree", "add", "--quiet", "-b", "team/abcdef12/dev", &mine, "HEAD"]) {
+            eprintln!("git could not create the member worktree; the sandbox blocks it");
+            return;
+        }
+        // The lead's branch moves after the member's folder was cut from it.
+        std::fs::write(repo.join("lead.txt"), "l").unwrap();
+        assert!(git(&["add", "."]) && git(&["commit", "-qm", "lead"]));
+        let request = json!({"template":"git-merge-lead","args":{}});
+        let outcome = run_outcome(&t, &member, Path::new(&mine), &request).unwrap();
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(Path::new(&mine).join("lead.txt").exists(), "the lead's branch was not merged: {}", outcome.tail);
+        // A shared member works in the team's own checkout: Zerus merges nothing there.
+        let shared = Member { folder: MemberFolder::Shared, ..member.clone() };
+        let shared_team = folder_team(&repo, shared.clone());
+        let error = run_outcome(&shared_team, &shared, &repo, &request).unwrap_err().to_string();
+        assert!(error.contains("shared folder"), "{error}");
+    }
+
+    #[test]
+    fn the_hand_out_says_how_to_read_a_run_result() {
+        // N4: a new UUID per run, and asking again with the same one only reads.
+        let t = team();
+        let task = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().clone();
+        let attempt = Attempt { n: 1, id: "A1".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.contains("a new request_id for every run"), "{text}");
+        assert!(text.contains("Ask again with the same request_id to read the result"), "{text}");
+        assert!(text.contains("it never runs the command twice"), "{text}");
     }
 
     #[test]

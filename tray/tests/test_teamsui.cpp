@@ -6882,7 +6882,8 @@ void TestTeamsUi::boardScrollsInsteadOfSqueezingColumns()
     view("board");
     const auto area = [&] { return workspace.findChild<QScrollArea *>("teamWorkspaceBoard"); };
     QTRY_VERIFY(area() && !area()->findChildren<QFrame *>("teamBoardColumn").isEmpty());
-    QCOMPARE(area()->horizontalScrollBarPolicy(), Qt::ScrollBarAsNeeded);
+    // The bar is on exactly while the columns need more room (it never flickers).
+    QVERIFY(area()->horizontalScrollBarPolicy() != Qt::ScrollBarAsNeeded);
     if (auto *all = workspace.findChild<QPushButton *>("teamWorkspaceExpandAll"); all->text() == QStringLiteral("Expand all")) all->click();
     const auto columns = [&] { return area()->findChildren<QFrame *>("teamBoardColumn"); };
     const auto phasesOpen = [&] { QSet<int> open; for (auto *col : columns()) open.insert(col->property("phase").toInt()); return open.size(); };

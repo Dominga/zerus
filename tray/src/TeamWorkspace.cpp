@@ -505,6 +505,7 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
             dialog->resize(680, 520);
             auto *outer = new QVBoxLayout(dialog);
             auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+            scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
             auto *body = new QWidget; body->setObjectName("teamFindingsList");
             auto *list = new QVBoxLayout(body); list->setContentsMargins(10, 10, 10, 10); list->setSpacing(8);
             const Colors fc = colorsFor(m_dark);
@@ -846,6 +847,7 @@ QWidget *TeamWorkspace::inboxStrip(const Team &team, const QList<InboxItem> &ite
     }
     rv->addStretch();
     auto *scroll = new QScrollArea; scroll->setWidget(rows); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFixedHeight(qMin(170, int(items.size()) * 24 + 6));
     keepScroll(scroll, QStringLiteral("inbox"));
     v->addWidget(scroll);
@@ -925,6 +927,45 @@ const Teams::Team *TeamWorkspace::currentTeam(const QString &id) const
     if (const auto *watched = m_teams->watched(); watched && watched->id == id) return watched;
     return m_teams->team(id);
 }
+
+// Owner, 2026-10-28: a sideways bar must not come and go. An as-needed bar
+// appeared a moment after each poll's rebuild and flipped at the edge of the
+// room; this one is on exactly while the content's minimum width is more
+// than the area's room, decided at once and again on each resize.
+class SideBarFit : public QObject {
+public:
+    SideBarFit(QScrollArea *area, QWidget *content) : QObject(area), m_area(area), m_content(content)
+    {
+        area->installEventFilter(this);
+        content->installEventFilter(this);
+        fit();
+    }
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        // Deferred: a resize or layout request can arrive while the area is
+        // being destroyed; the queued call dies with this object.
+        if ((event->type() == QEvent::Resize || event->type() == QEvent::LayoutRequest) && !m_pending) {
+            m_pending = true;
+            QMetaObject::invokeMethod(this, [this] { m_pending = false; fit(); }, Qt::QueuedConnection);
+        }
+        return QObject::eventFilter(watched, event);
+    }
+private:
+    void fit()
+    {
+        if (!m_content) return;
+        const int vbar = m_area->verticalScrollBar()->isVisible() ? m_area->verticalScrollBar()->width() : 0;
+        // A view laid out by hand (the phase graph) has no size hint, only its
+        // minimum width.
+        const int want = qMax(m_content->minimumSizeHint().width(), m_content->minimumWidth());
+        const bool need = want > m_area->width() - vbar - 2 * m_area->frameWidth();
+        const auto policy = need ? Qt::ScrollBarAlwaysOn : Qt::ScrollBarAlwaysOff;
+        if (m_area->horizontalScrollBarPolicy() != policy) m_area->setHorizontalScrollBarPolicy(policy);
+    }
+    QScrollArea *m_area;
+    QPointer<QWidget> m_content;
+    bool m_pending = false;
+};
 
 // Owner, 2026-10-28: on a narrow window the workspace toolbar keeps its icons
 // and drops their words. A button marked "compactText" shows its text only
@@ -1316,6 +1357,7 @@ QWidget *TeamWorkspace::board(const Team &team)
         auto *inner = new QWidget; inner->setLayout(list);
         auto *scroll = new QScrollArea; scroll->setWidget(inner); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
         scroll->setObjectName("teamBoardColumn"); scroll->setProperty("column", key);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         if (groups.isEmpty()) scroll->setProperty("phase", 0);
         else { scroll->setProperty("phase", phase); scroll->setMinimumHeight(150); }
         keepScroll(scroll, groups.isEmpty() ? QStringLiteral("board/") + key + QLatin1Char('/') + m_focus
@@ -1344,11 +1386,11 @@ QWidget *TeamWorkspace::board(const Team &team)
         auto *area = new QScrollArea; area->setObjectName("teamWorkspaceBoard");
         area->setWidgetResizable(true); area->setFrameShape(QFrame::NoFrame);
         area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        area->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         area->setStyleSheet(QStringLiteral("QScrollArea#teamWorkspaceBoard{background:transparent;} QScrollArea#teamWorkspaceBoard > QWidget > QWidget#teamBoardRow{background:transparent;}")
                             + workspaceScrollbars(m_dark));
         area->viewport()->setAutoFillBackground(false);
         area->setWidget(row);
+        new SideBarFit(area, row);
         keepScroll(area, QStringLiteral("board/row/") + m_focus);
         return area;
     }
@@ -1526,6 +1568,7 @@ QWidget *TeamWorkspace::phaseColumn(const Team &team)
     for (const auto &group : groups) v->addWidget(phaseScroll(team, group));
     v->addStretch();
     area->setWidget(content);
+    if (boardView) new SideBarFit(area, content);
     keepScroll(area, QStringLiteral("phases/") + m_view);
     return area;
 }
@@ -1807,6 +1850,8 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group)
     auto *area = new QScrollArea; area->setObjectName("teamPhaseGraphArea"); area->setFrameShape(QFrame::NoFrame);
     area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     area->setWidget(view); area->setWidgetResizable(false);
+    view->setMinimumWidth(view->width());
+    new SideBarFit(area, view);
     // Spec 1.2: the thin 8 px bar without arrows here too, also outside a
     // window that styles its bars.
     area->setStyleSheet(QStringLiteral("QScrollArea#teamPhaseGraphArea{background:transparent;} QScrollArea#teamPhaseGraphArea > QWidget > QWidget{background:transparent;}")
@@ -2800,6 +2845,7 @@ QWidget *TeamWorkspace::feed(const Team &team)
     }
     rv->addStretch();
     auto *scroll = new QScrollArea; scroll->setWidget(rows); scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFixedHeight(170);
     keepScroll(scroll, QStringLiteral("feed"));
     v->addWidget(scroll);

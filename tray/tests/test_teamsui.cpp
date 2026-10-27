@@ -505,6 +505,8 @@ private slots:
     void collapsibleBlockKeepsItsState();
     void agentWorkingIndicatorFollowsTheSetting();
     void foundationShots();
+    void leadHeaderFollowsTheTeamState();
+    void leadHeaderShots();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -3126,7 +3128,7 @@ void TestTeamsUi::workspaceAddsAMember()
     QCOMPARE(popover->findChild<QComboBox *>("teamAddMemberAgent")->currentData().toString(), QStringLiteral("kimi"));
     QCOMPARE(popover->findChild<QPlainTextEdit *>("teamAddMemberPrompt")->toPlainText(), QStringLiteral("Test it."));
     QCOMPARE(popover->findChild<QPushButton *>("teamAddMemberOk")->text(), QStringLiteral("Add Tester"));
-    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceBar")->isVisible());
+    QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceHeader")->isVisible());
     shot(&workspace, "d3-add-member");
     popover->findChild<QPushButton *>("teamAddMemberOk")->click();
     QTRY_COMPARE(calls(script(), "add-member").size(), 1);
@@ -4106,6 +4108,157 @@ void TestTeamsUi::foundationShots()
     std::unique_ptr<QWidget> light(foundationShowcase(false));
     light->resize(460, 600); light->show(); QTest::qWait(60);
     if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) lightShot(light.get(), "ux-1-foundation-light");
+    darkPalette();
+    QSettings().remove("workspace/skin");
+}
+
+// U25 (spec 3): the team's part of the lead session's header, in every state:
+// the status, the waiting links, the three bars and the actions by state.
+void TestTeamsUi::leadHeaderFollowsTheTeamState()
+{
+    setTeam(team("planning"));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    int opened = 0; workspace.openWorkspace = [&opened] { ++opened; };
+    workspace.resize(1500, 820); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    const auto find = [&workspace](const char *name) { return workspace.findChild<QWidget *>(name); };
+    const auto status = [&] { auto *badge = find("teamHeaderStatus"); return badge ? badge->property("status").toString() : QString(); };
+    const auto shows = [&](const char *name) { auto *w = find(name); return w && w->isVisible(); };
+    // Until a window takes it, the header shows above the canvas; no name bar.
+    QTRY_COMPARE(status(), QStringLiteral("planning"));
+    QVERIFY(find("teamWorkspaceHeader")->isVisible());
+    QVERIFY(!find("teamWorkspaceBar"));
+    // Planning: Discard plan…, Send back, Approve & Run held by the plan error.
+    QVERIFY(shows("teamWorkspaceDiscard") && shows("teamWorkspaceSendBack") && shows("teamWorkspaceApprove"));
+    auto *approve = workspace.findChild<QPushButton *>("teamWorkspaceApprove");
+    QVERIFY(!approve->isEnabled()); QCOMPARE(approve->toolTip(), QStringLiteral("Fix the plan errors first"));
+    QVERIFY(!find("teamWorkspacePause") && !find("teamWorkspaceStop") && !find("teamBarPendingPhase"));
+    // Running: Pause and Stop…; the bars count the team's tasks and phases.
+    setTeam(team());
+    QTRY_VERIFY(([&] { controller.refresh(); return status() == "running"; })());
+    QVERIFY(shows("teamWorkspacePause") && shows("teamWorkspaceStop"));
+    QVERIFY(!find("teamWorkspaceApprove") && !find("teamWorkspaceFinish") && !find("teamHeaderFinishWaits"));
+    QCOMPARE(find("teamHeaderTasks")->property("done").toInt(), 1);
+    QCOMPARE(find("teamHeaderTasks")->property("total").toInt(), 5);
+    QCOMPARE(find("teamHeaderPhases")->property("total").toInt(), 1);
+    QVERIFY(shows("teamHeaderElapsed"));
+    // Stop… asks first: a cancel sends nothing, a confirm sends stop once.
+    armConfirm(&panel, true);
+    workspace.findChild<QPushButton *>("teamWorkspaceStop")->click();
+    QTest::qWait(50); QCOMPARE(calls(script(), "stop").size(), 0);
+    armConfirm(&panel, false);
+    workspace.findChild<QPushButton *>("teamWorkspaceStop")->click();
+    QTRY_COMPARE(calls(script(), "stop").size(), 1);
+    // A draft phase waits: "Phase 3 waits for you" opens the Team tab on it, unfolded.
+    setTeam(phasedTeam());
+    QTRY_VERIFY(([&] { controller.refresh(); return find("teamBarPendingPhase") != nullptr; })());
+    auto *waits = workspace.findChild<QPushButton *>("teamBarPendingPhase");
+    QCOMPARE(waits->text(), QStringLiteral("Phase 3 waits for you"));
+    QCOMPARE(find("teamHeaderPhase")->property("caption").toString(), QStringLiteral("Phase 2 · QA fixes"));
+    QCOMPARE(find("teamHeaderPhases")->property("total").toInt(), 3);
+    waits->click();
+    QCOMPARE(opened, 1);
+    QTRY_VERIFY(([&] { const auto *t = controller.team("team-1"); if (!t) return false;
+                       for (const auto &g : phaseGroups(*t)) if (g.n == 3) return panel.phaseOpen(*t, g); return false; })());
+    // Every task decided: "Waiting for you to finish" and Finish….
+    auto decided = team();
+    auto tasks = decided["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) { auto t = tasks[i].toObject(); t["status"] = "accepted"; tasks[i] = t; }
+    decided["tasks"] = tasks;
+    setTeam(decided);
+    QTRY_VERIFY(([&] { controller.refresh(); return find("teamHeaderFinishWaits") != nullptr; })());
+    QCOMPARE(workspace.findChild<QPushButton *>("teamHeaderFinishWaits")->text(), QStringLiteral("Waiting for you to finish"));
+    QVERIFY(shows("teamWorkspaceFinish") && shows("teamWorkspacePause") && shows("teamWorkspaceStop"));
+    // Paused: Resume and Stop…; Done: Archive and Next goal…; Stopped: Archive.
+    auto paused = team(); paused["status"] = "paused"; setTeam(paused);
+    QTRY_VERIFY(([&] { controller.refresh(); return status() == "paused"; })());
+    QVERIFY(shows("teamWorkspaceResume") && shows("teamWorkspaceStop") && !find("teamWorkspacePause"));
+    auto done = decided; done["status"] = "done"; setTeam(done);
+    QTRY_VERIFY(([&] { controller.refresh(); return status() == "done"; })());
+    QVERIFY(shows("teamWorkspaceArchive") && shows("teamWorkspaceNextGoal"));
+    QVERIFY(!find("teamWorkspaceStop") && !find("teamWorkspaceFinish") && !find("teamHeaderFinishWaits") && !find("teamWorkspaceResumeLimits"));
+    auto stopped = team(); stopped["status"] = "stopped"; setTeam(stopped);
+    QTRY_VERIFY(([&] { controller.refresh(); return status() == "stopped"; })());
+    QVERIFY(shows("teamWorkspaceArchive") && !find("teamWorkspaceNextGoal") && !find("teamWorkspaceStop"));
+    // Not the lead's session: nothing; an archived team: nothing.
+    workspace.setHeaderShown(false);
+    QVERIFY(!find("teamHeaderStatus") && !workspace.headerStatus()->isVisible() && !find("teamWorkspaceHeader")->isVisible());
+    workspace.setHeaderShown(true);
+    QVERIFY(find("teamHeaderStatus"));
+    auto archived = team(); archived["status"] = "archived"; setTeam(archived);
+    QTRY_VERIFY(([&] { controller.refresh(); return !find("teamHeaderStatus"); })());
+    // A window takes the two parts into its own header.
+    workspace.takeHeader();
+    QVERIFY(!workspace.headerStatus()->parentWidget() && !workspace.headerActions()->parentWidget());
+    QVERIFY(!find("teamWorkspaceHeader")->isVisible());
+}
+
+namespace {
+// The lead session's header as the window lays it out (spec 3): the title, the
+// team after it and the session's pill; the chips, then the team's actions.
+QWidget *leadHeaderMock(TeamWorkspace &workspace, bool dark)
+{
+    const auto &skin = WorkspaceSkin::active();
+    const auto t = [&skin, dark](const char *name) { return WorkspaceSkin::color(skin, dark, QString::fromLatin1(name)).name(); };
+    auto *frame = new QFrame; frame->setObjectName("leadHeaderMock");
+    frame->setStyleSheet(QStringLiteral("QFrame#leadHeaderMock{background:%1;} QLabel#mockTitle{color:%2;font-size:16px;font-weight:600;}"
+                                        "QLabel[chip=\"true\"]{background:%3;color:%4;border-radius:6px;padding:2px 7px;font-size:11px;}"
+                                        "QLabel#mockMeta{color:%5;font-size:11px;} QLabel#mockPill{color:%4;border:1px solid %6;border-radius:12px;padding:3px 10px;font-size:11.5px;}")
+                             .arg(t("bg"), t("fg"), t("hover"), t("text3"), t("dim"), t("border")));
+    auto *v = new QVBoxLayout(frame); v->setContentsMargins(14, 10, 14, 10); v->setSpacing(6);
+    auto *top = new QHBoxLayout; top->setSpacing(4);
+    auto *title = new QLabel(QStringLiteral("Orbit platform / checkout")); title->setObjectName("mockTitle");
+    top->addWidget(title); top->addSpacing(10); top->addWidget(workspace.headerStatus()); top->addStretch(1);
+    auto *pill = new QLabel(QStringLiteral("Ready")); pill->setObjectName("mockPill"); top->addWidget(pill);
+    v->addLayout(top);
+    auto *chips = new QHBoxLayout; chips->setSpacing(5);
+    for (const auto &text : {QStringLiteral("Claude"), QStringLiteral("workstation"), QStringLiteral("feat/checkout-v2")}) {
+        auto *chip = new QLabel(text); chip->setProperty("chip", true); chips->addWidget(chip);
+    }
+    auto *meta = new QLabel(QStringLiteral("orbit / feat/checkout-v2")); meta->setObjectName("mockMeta"); chips->addWidget(meta);
+    chips->addStretch(1); chips->addWidget(workspace.headerActions());
+    v->addLayout(chips);
+    return frame;
+}
+}
+
+// U25: the lead header in the prototype's scenarios (shots 03, 24, 25), dark and light.
+void TestTeamsUi::leadHeaderShots()
+{
+    if (qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) QSKIP("Set ZERUS_TEAM_SHOTS=<dir> to keep the pictures.");
+    QSettings().setValue("workspace/skin", "whitewh");
+    auto phased = phasedTeam(); phased["created"] = QDateTime::currentSecsSinceEpoch() - 4140;
+    auto decided = team(); decided["created"] = QDateTime::currentSecsSinceEpoch() - 8940;
+    auto tasks = decided["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) { auto t = tasks[i].toObject(); t["status"] = "accepted"; tasks[i] = t; }
+    decided["tasks"] = tasks;
+    auto planning = team("planning"); planning["created"] = QDateTime::currentSecsSinceEpoch() - 720;
+    const QList<QPair<QString, QJsonObject>> scenarios{{"running", phased}, {"planning", planning}, {"done", decided}};
+    for (const auto &[name, json] : scenarios) {
+        for (const bool dark : {true, false}) {
+            setTeam(json);
+            HgsClient client(FakeCli::program(script()));
+            TeamController controller(&client);
+            TeamPanel panel(&controller);
+            TeamWorkspace workspace(&controller, &panel);
+            workspace.setLive(live);
+            workspace.takeHeader();
+            if (dark) darkPalette(); else lightPalette();
+            workspace.setTheme(dark);
+            std::unique_ptr<QWidget> header(leadHeaderMock(workspace, dark));
+            header->resize(1180, 76); header->show();
+            controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+            QTRY_VERIFY(workspace.headerStatus()->findChild<QWidget *>("teamHeaderStatus"));
+            QTest::qWait(100);
+            const QString file = QStringLiteral("ux-3-header-%1-%2").arg(name, dark ? "dark" : "light");
+            if (dark) shot(header.get(), file); else lightShot(header.get(), file);
+            header.reset();
+        }
+    }
     darkPalette();
     QSettings().remove("workspace/skin");
 }

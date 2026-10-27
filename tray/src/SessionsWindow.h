@@ -417,6 +417,8 @@ private:
     QString teamDesignerSession() const;
     class TeamCatalogEditor *m_teamCatalog=nullptr;
     class TeamWorkspace *m_teamWorkspace=nullptr;
+    // U25 (spec 3): the header rows that carry a lead session's team.
+    QHBoxLayout *m_titleRow=nullptr, *m_chipsRow=nullptr; bool m_teamHeader=false;
     // The Team designer mode on the rail, and New team next to Activity: the
     // selected session leads the team built there; once created, Team follows.
     class TeamDesignerPage *m_teamDesignerPage=nullptr;

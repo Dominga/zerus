@@ -17,6 +17,7 @@
 #include <QPainterPath>
 #include <QPointer>
 #include <QPushButton>
+#include <QSet>
 #include <QVBoxLayout>
 #include <QKeyEvent>
 #include <algorithm>
@@ -441,6 +442,93 @@ protected:
     }
 private:
     Colors m_c; Teams::PhaseProgress m_p; bool m_compact;
+};
+
+// U25 (spec 3): one of the lead header's three mini progress bars (the
+// prototype's .prog2): the caption at 9.5 px and the count above a 4 px bar.
+class MiniProgress : public QWidget {
+public:
+    MiniProgress(const Colors &colors, const QString &caption, int done, int total, const QColor &fill, int width, QWidget *parent = nullptr)
+        : QWidget(parent), m_c(colors), m_caption(caption), m_done(done), m_total(total), m_fill(fill)
+    {
+        setFixedSize(width, 16);
+        setProperty("done", done); setProperty("total", total); setProperty("caption", caption);
+        setAccessibleName(QStringLiteral("%1 %2/%3").arg(caption).arg(done).arg(total));
+    }
+    QString countText() const { return QStringLiteral("%1/%2").arg(m_done).arg(m_total); }
+    QSize sizeHint() const override { return size(); }
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
+        QFont mono(QStringLiteral("Cascadia Mono")); mono.setStyleHint(QFont::Monospace); mono.setPixelSize(10); mono.setWeight(QFont::DemiBold);
+        const int countWidth = QFontMetrics(mono).horizontalAdvance(countText());
+        p.setFont(mono); p.setPen(m_c.text3);
+        p.drawText(QRect(width() - countWidth, 0, countWidth, 10), Qt::AlignRight | Qt::AlignVCenter, countText());
+        QFont f = font(); f.setPixelSize(10); p.setFont(f); p.setPen(m_c.dim);
+        const int room = width() - countWidth - 6;
+        p.drawText(QRect(0, 0, room, 10), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(f).elidedText(m_caption, Qt::ElideRight, room));
+        const QRectF track(0, 12, width(), 4);
+        p.setPen(Qt::NoPen); p.setBrush(m_c.border); p.drawRoundedRect(track, 2, 2);
+        const double fraction = m_total > 0 ? qBound(0.0, m_done / double(m_total), 1.0) : 0.0;
+        if (fraction > 0) { p.setBrush(m_fill); p.drawRoundedRect(QRectF(0, 12, width() * fraction, 4), 2, 2); }
+    }
+private:
+    Colors m_c; QString m_caption; int m_done, m_total; QColor m_fill;
+};
+
+// U25: a row that hides its least important items when it is narrower than
+// they need, instead of squeezing them (the lead header's team progress). An
+// item of priority 0 always shows; higher numbers go first. Its size hint
+// counts every item, so hiding never changes it.
+class FitRow : public QWidget {
+public:
+    explicit FitRow(int gap, QWidget *parent = nullptr) : QWidget(parent), m_gap(gap) { setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed); }
+    void add(QWidget *item, int priority)
+    {
+        item->setParent(this); m_items.append({item, priority}); item->show();
+        updateGeometry(); place();
+    }
+    QSize sizeHint() const override { return measure(false); }
+    QSize minimumSizeHint() const override { return measure(true); }
+protected:
+    void resizeEvent(QResizeEvent *event) override { QWidget::resizeEvent(event); place(); }
+private:
+    struct Item { QPointer<QWidget> widget; int priority = 0; };
+    static QSize hintOf(const QWidget *widget) { return widget->sizeHint().expandedTo(widget->minimumSize()).expandedTo(QSize(0, 0)); }
+    QSize measure(bool required) const
+    {
+        int w = 0, h = 0, n = 0;
+        for (const auto &item : m_items) {
+            if (!item.widget || (required && item.priority)) continue;
+            const auto hint = hintOf(item.widget); w += hint.width(); h = qMax(h, hint.height()); ++n;
+        }
+        return {w + qMax(0, n - 1) * m_gap, qMax(h, 24)};
+    }
+    void place()
+    {
+        // Keep items by priority while they fit, then lay the kept ones out in order.
+        QList<int> order; for (int i = 0; i < m_items.size(); ++i) if (m_items[i].widget) order << i;
+        std::stable_sort(order.begin(), order.end(), [this](int a, int b) { return m_items[a].priority < m_items[b].priority; });
+        QSet<int> kept; int used = 0;
+        for (int i : order) {
+            const int w = hintOf(m_items[i].widget).width() + (kept.isEmpty() ? 0 : m_gap);
+            if (m_items[i].priority && used + w > width()) continue;
+            kept.insert(i); used += w;
+        }
+        int x = 0;
+        for (int i = 0; i < m_items.size(); ++i) {
+            auto *widget = m_items[i].widget.data();
+            if (!widget) continue;
+            widget->setVisible(kept.contains(i));
+            if (!kept.contains(i)) continue;
+            const auto hint = hintOf(widget);
+            widget->setGeometry(x, (height() - hint.height()) / 2, hint.width(), hint.height());
+            x += hint.width() + m_gap;
+        }
+    }
+    int m_gap;
+    QList<Item> m_items;
 };
 
 // Tasks as a graph or as a list by layer. Painted, so hovering a task lights

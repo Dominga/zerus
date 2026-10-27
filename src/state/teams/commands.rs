@@ -691,9 +691,12 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     }
     let old = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
+    let accepted = old.proposals.iter().any(|proposal| {
+        proposal["kind"] == "next-goal" && proposal["state"] == "accepted"
+    });
     ensure!(
-        matches!(caller, Actor::Human) || matches!(caller, Actor::Member(member) if *member == old.lead),
-        "Only the lead or you start the next goal"
+        matches!(caller, Actor::Human) || (matches!(caller, Actor::Member(member) if *member == old.lead) && accepted),
+        "Only you, or the lead with an accepted next-goal proposal, start the next goal"
     );
     let goal = text(input, "goal").trim().to_owned();
     ensure!(!goal.is_empty(), "A next goal needs its goal");
@@ -990,6 +993,10 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
     } else if filled["settings"].get("subteam_approval").is_none() {
         filled["settings"]["subteam_approval"] = json!(parent.settings.subteam_approval);
     }
+    // N27: a sub-team's plan and phases are approved by its parent lead (or
+    // you), never auto; its create input cannot turn approval off.
+    filled["settings"]["approval"] = json!("review");
+    filled["settings"]["phase_approval"] = json!("review");
     Ok(Some((parent.id.clone(), task.id)))
 }
 
@@ -2245,6 +2252,38 @@ mod tests {
         assert_eq!((next.previous.as_str(), next.goal.as_str()), (old_id, "two"));
         assert_eq!(next.member("dev").unwrap().session.as_ref().map(|session| session.name.as_str()), Some("claude/x/dev"));
         assert_eq!(store.load(old_id).unwrap().unwrap().next, next_id);
+    }
+
+    #[test]
+    fn a_lead_starts_the_next_goal_only_after_an_accepted_proposal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let mut done = Team { id: "done".into(), name: "Done".into(), lead: "lead".into(), status: TeamStatus::Done, goal: "one".into(), ..Default::default() };
+        done.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        store.create("66666666-6666-4666-8666-666666666666", &json!({}), done.clone(), Vec::new()).unwrap();
+        // N1: the lead alone cannot start the next goal.
+        let error = super::next_goal_as(
+            &mut store,
+            "77777777-7777-4777-8777-777777777777",
+            &json!({"request_id":"77777777-7777-4777-8777-777777777777","team":"done","goal":"two"}),
+            &Actor::Member("lead".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("accepted next-goal proposal"), "{error}");
+        // With the owner's accepted proposal it can.
+        let mut with_proposal = done.clone();
+        with_proposal.id = "done2".into();
+        with_proposal.proposals.push(json!({"id":"p1","kind":"next-goal","state":"accepted","goal":"two"}));
+        store.create("88888888-8888-4888-8888-888888888888", &json!({}), with_proposal, Vec::new()).unwrap();
+        let value = super::next_goal_as(
+            &mut store,
+            "99999999-9999-4999-8999-999999999999",
+            &json!({"request_id":"99999999-9999-4999-8999-999999999999","team":"done2","goal":"two"}),
+            &Actor::Member("lead".into()),
+        )
+        .unwrap();
+        assert_eq!(value["status"], "planned");
     }
 
     #[test]

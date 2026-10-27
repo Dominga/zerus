@@ -532,6 +532,14 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
         validate_settings(&updated)?;
         ensure_lead_settings(&team.settings, &updated, actor)?;
+        // N27: a sub-team's own lead cannot turn its approvals to auto; its
+        // plan and phases stay with the parent lead or you.
+        if team.parent.is_some() {
+            ensure!(
+                updated.approval != Approval::Auto && updated.phase_approval != Some(Approval::Auto),
+                "A sub-team's plan and phases are approved by its parent lead or you, never auto"
+            );
+        }
         team.settings = updated;
     }
     if changed.is_empty() && input.get("settings").is_none() {
@@ -4424,6 +4432,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("Draft numbers changed"), "{error}");
+    }
+
+    #[test]
+    fn a_subteam_cannot_turn_its_own_approvals_to_auto() {
+        let mut team = Team {
+            id: "child".into(), name: "Child".into(), lead: "dev".into(), status: TeamStatus::Running,
+            parent: Some(Parent { team: "parent".into(), task: 1, lead: "lead".into(), member: "dev".into() }),
+            ..Default::default()
+        };
+        team.members.push(Member { id: "dev".into(), role: "Lead".into(), agent: "codex".into(), ..Default::default() });
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let error = apply(&mut team, "settings", &json!({"settings":{"approval":"auto"}}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("never auto"), "{error}");
+        // The same team's phase approval cannot be auto either.
+        let error = apply(&mut team, "settings", &json!({"settings":{"phase_approval":"auto"}}), &Actor::Human, &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("never auto"), "{error}");
     }
 
     #[test]

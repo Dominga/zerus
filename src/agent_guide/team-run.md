@@ -17,6 +17,8 @@ Ask for one as the member (identity as report; a sandbox needs no approval):
 It answers with the exit code and the last 4000 characters of output, and
 records the run on the attempt. Values are typed: an unknown template, a
 value outside its type, a path outside your folder or a shell metacharacter is
-refused. The owner turns the set off for every team in Settings > Teams; a
-project may add fixed templates in .zerus-team/templates.json. Anything else
-still asks the lead.
+refused. What you build is your own code: cargo, cmake and qt-test run your
+build scripts, tests, CMakeLists and .cargo/config outside the sandbox, by the
+owner's rule. The owner turns the set off for every team in Settings > Teams,
+and may add fixed templates (their own program and argv) in Zerus state; those
+are listed as the owner's additions. Anything else still asks the lead.

@@ -18,6 +18,9 @@ public:
     void setForegroundOverride(const QString &colorName);
 
     static QColor foreground(const QString &override);
+    // Windows: the taskbar's theme (1 light, 0 dark) instead of the registry,
+    // so a test does not depend on the machine's theme; -1 reads it again.
+    static void setTaskbarLightForTests(int light);
 
     // Badge text: "0".."99", then "99+". The tooltip retains the exact count.
     static QString countText(int count);

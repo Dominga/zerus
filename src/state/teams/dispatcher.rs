@@ -1170,6 +1170,10 @@ pub(crate) fn hand_off_text_with(
             run = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"attempt":attempt.id,"template":"cargo-test","args":{}})
         );
     }
+    // U30: a build Zerus runs is work; a job left in the member's own shell is a service.
+    text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \
+             as Building and your reply waits for them; a job you leave in your own shell after your turn counts as a \
+             service, and your session looks idle.";
     text
 }
 
@@ -3779,10 +3783,14 @@ fn start_run(
         return refuse(format!("attempt {attempt} does not run for this member"));
     }
     let template = request["template"].as_str().unwrap_or_default();
-    if let Err(error) = super::templates::plan(template, &request["args"], folder) {
-        return refuse(format!("{error:#}"));
-    }
-    let marker = json!({"request_id":id,"started":now(),"timeout_secs":super::templates::timeout_for(template)});
+    let plan = match super::templates::plan(template, &request["args"], folder) {
+        Ok(plan) => plan,
+        Err(error) => return refuse(format!("{error:#}")),
+    };
+    // U30: the label and command show the member's session as Building.
+    let command = std::iter::once(plan.program.as_str()).chain(plan.argv.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
+    let marker = json!({"request_id":id,"started":now(),"timeout_secs":super::templates::timeout_for(template),
+        "label":template,"command":command});
     super::outbox::write_running(folder, &id, &marker)?;
     let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
     if let Err(error) = spawn(folder, request) {
@@ -5152,6 +5160,8 @@ mod tests {
         assert!(text.starts_with(&format!("[Zerus team \u{b7} from: QA lead \u{b7} task: #{qa} \u{b7} attempt: 1]")), "{text}");
         assert!(text.contains("Questions for QA lead:"), "{text}");
         assert!(text.contains("Zerus gives it to QA lead. A blocker goes to QA lead too"), "{text}");
+        // U30: every hand-out says how a build shows as work.
+        assert!(text.contains("(hgs team run, or hgs run: hgs guide run) so your session shows as Building"), "{text}");
         // The lead's own reports keep the old words.
         t.members.iter_mut().find(|member| member.id == "dev").unwrap().parent.clear();
         assert!(hand_off_text(&t, &task, &attempt, "", "").contains("Questions for the lead:"));

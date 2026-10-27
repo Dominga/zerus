@@ -77,6 +77,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] graph snapshot --json   bounded saved relationship metadata (partial coverage)
        hgs [@host] wait begin|ack|finish|cancel|list --json   explicit independent-agent waits (JSON stdin)
        hgs [@host] team OPERATION --json   agent teams: plan, run, report and decide tasks (JSON stdin)
+       hgs run --json [--wait] | --list --json   a build Zerus tracks as this session's work (JSON stdin)
        hgs [@host] terminal <session> --json scoped terminal screen/input
        hgs [@host] AGENT DIRECTORY --new -n TAG -d --launch-id UUID
        hgs [@host] session-action <session> --json scoped native lifecycle action
@@ -510,6 +511,16 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
         // Read-only on every machine; never routed as an agent launch.
         "status" => return crate::status::run(&config, &target, args, dry),
         // Text compiled into this hgs; a peer answers with its own.
+        // WhiteWh fork: a build or long test Zerus tracks as this session's work.
+        "run" => {
+            if !target.is_empty() && !config.is_self(&target) {
+                return Err(Error::new(1, "hgs run tracks the calling session's build; run it on that session's computer"));
+            }
+            if dry {
+                return Err(Error::new(1, "hgs run does not support --dry-run"));
+            }
+            return state_command("build", args);
+        }
         "guide" => {
             if !target.is_empty() && !config.is_self(&target) {
                 return remote(&config, &target, command, args, dry);

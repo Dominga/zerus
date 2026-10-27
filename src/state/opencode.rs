@@ -1005,6 +1005,7 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     notifications::enrich(&mut value, notifications::load().as_ref(), journal::journal_name(&record));
     inspector.finish();
     waits::decorate(std::slice::from_mut(&mut value));
+    session_state::decorate(std::slice::from_mut(&mut value));
     Ok(value)
 }
 /// The session's own state for delivery, answer, interrupt and lifecycle

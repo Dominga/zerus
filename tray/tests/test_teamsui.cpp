@@ -47,6 +47,8 @@
 #include <QClipboard>
 #include "TeamController.h"
 #include "TeamDesignerPage.h"
+#include "TeamConversation.h"
+#include "QuestionCard.h"
 #include "TeamDesignerPanel.h"
 #include "TeamModel.h"
 #include "TeamNewDialog.h"
@@ -650,6 +652,7 @@ private slots:
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
+    void designerQuestionIsAnsweredInTheWindow();
     void catalogEditorMarksManualEdits();
     void boardColumnsKeepTheirScroll();
     void skinTokensMatchThePrototype();
@@ -4112,6 +4115,90 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
     QVERIFY(apply && apply->isVisible() && apply->isEnabled()); QCOMPARE(apply->text(), QStringLiteral("Apply 1 change"));
     apply->click();
     QTRY_COMPARE(calls(script(), "catalog apply").size(), 1);
+}
+
+// U16: the Team designer's own session waits at Claude's folder trust. The
+// window shows its recorded activity and the question as the session view's
+// card, in place of the composer; answering it there sends the native answer
+// with the question's id, hash and run, and the card goes once it is answered.
+void TestTeamsUi::designerQuestionIsAnsweredInTheWindow()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+h='a'*64
+if a[:1]==['answer']:
+ body=json.load(sys.stdin)
+ open(here+'.answers','a').write(json.dumps({'name':a[1],'body':body})+'\n')
+ open(here+'.answered','w').write('1')
+ print(json.dumps({'status':'answered','request_id':body['request_id'],'name':a[1],'question_id':body['question_id'],
+  'question_hash':body['expected_question_hash'],'run_id':body['expected_run_id'],'conversation_id':body['expected_conversation_id']}))
+elif a[:1]==['inspect']:
+ q={'question_id':'claude-trust:'+h,'question_hash':h,'source':'claude_folder_trust','answer_transport':'claude_tui',
+    'run_id':'run-1','conversation_id':None,'can_answer':True,'created_at':1791018100,
+    'questions':[{'id':'trust','question':'Do you trust the files in this folder?','body':'/zerus/team-designer','allow_other':False,
+                  'options':[{'id':'trust_0','label':'Yes, proceed'},{'id':'trust_1','label':'No, exit'}]}]}
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':None,'runtime_state':'live','process_state':'running','cursor':1,
+  'events':[{'seq':1,'at':1791018101,'type':'UserPromptSubmit','detail':'Design a security reviewer for payment code.'}],
+  'pending_questions':[] if os.path.exists(here+'.answered') else [q]}))
+else:print('{}')
+)PY"));
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    // Its own name each run: the card keeps answered drafts by session.
+    const QString designer = "claude/checkout/team-designer-" + QUuid::createUuid().toString(QUuid::Id128).left(8);
+    bool waiting = true;
+    page.designerSession = [&] { return designer; };
+    page.designerLive = [&] { Teams::Live live; live.known = true; live.attention = waiting; return live; };
+    page.setContext("/work/checkout", "checkout");
+    page.resize(1400, 860); page.show();
+    auto *card = page.findChild<QuestionCard *>("teamConversationQuestion");
+    QVERIFY(card); card->setReviewDelayForTests(0);
+    auto *input = page.findChild<QPlainTextEdit *>("teamConversationInput");
+    // The question replaces the composer; the recorded activity stays above it.
+    QTRY_VERIFY(card->isVisible());
+    QVERIFY(!input->isVisible());
+    QCOMPARE(page.findChild<QLabel *>("teamDesignerAgentStatus")->text(), QStringLiteral("Needs your answer"));
+    // The Activity render is slow on a loaded machine.
+    QTRY_VERIFY_WITH_TIMEOUT(page.findChild<QTextBrowser *>("teamConversationText")->toPlainText().contains("Design a security reviewer"), 20000);
+    QCOMPARE(card->findChild<QLabel *>("questionPrompt")->text(), QStringLiteral("Do you trust the files in this folder?"));
+    shot(&page, "u16-designer-question-dark");
+    lightPalette(); page.setDark(false); lightShot(&page, "u16-designer-question-light"); darkPalette(); page.setDark(true);
+    // Answered here: the native answer names the very question it answers.
+    QAbstractButton *yes = nullptr;
+    for (auto *option : card->findChildren<QAbstractButton *>("questionOption"))
+        if (option->property("optionId").toString() == "trust_0") yes = option;
+    QVERIFY(yes); yes->click();
+    auto *submit = card->findChild<QPushButton *>("submitQuestionAnswer");
+    QTRY_VERIFY(submit->isVisible() && submit->isEnabled());
+    submit->click();
+    QTRY_VERIFY(QFile::exists(program + ".answers"));
+    QFile log(program + ".answers"); QVERIFY(log.open(QIODevice::ReadOnly));
+    const auto lines = log.readAll().split('\n');
+    QCOMPARE(lines.size() - (lines.last().isEmpty() ? 1 : 0), 1);
+    const auto answer = QJsonDocument::fromJson(lines.first()).object();
+    QCOMPARE(answer["name"].toString(), designer);
+    const auto body = answer["body"].toObject();
+    QCOMPARE(body["question_id"].toString(), QStringLiteral("claude-trust:") + QString(64, 'a'));
+    QCOMPARE(body["expected_question_hash"].toString(), QString(64, 'a'));
+    QCOMPARE(body["expected_run_id"].toString(), QStringLiteral("run-1"));
+    QCOMPARE(body["expected_conversation_id"].toString(), QString());
+    const auto chosen = body["answers"].toArray().first().toObject();
+    QCOMPARE(chosen["question_id"].toString(), QStringLiteral("trust"));
+    QVERIFY2(QJsonDocument(chosen).toJson().contains("trust_0"), QJsonDocument(chosen).toJson().constData());
+    // Once the session no longer asks, the composer is back and nothing is sent again.
+    waiting = false;
+    QTRY_VERIFY(!card->isVisible());
+    QTRY_VERIFY(input->isVisible());
+    QTest::qWait(300);
+    log.seek(0); QCOMPARE(log.readAll().count('\n'), 1);
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()

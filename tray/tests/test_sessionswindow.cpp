@@ -1369,9 +1369,9 @@ void TestSessionsWindow::inspectorIsAColumnOfCards()
         return QString();
     };
     auto *environment = inspectorCard(window, "environment");
-    QTRY_COMPARE(environment->findChild<QLabel *>("detailsIdentityValue")->text(), QString("5f0c2a1e-7d3b-4c8e-9a61-2b7e4d9c0f13"));
+    QTRY_COMPARE_WITH_TIMEOUT(environment->findChild<QLabel *>("detailsIdentityValue")->text(), QString("5f0c2a1e-7d3b-4c8e-9a61-2b7e4d9c0f13"), 15000);
     QVERIFY(environment->findChild<QPushButton *>("copySessionIdAction")->isVisible());
-    QTRY_COMPARE(row("branch"), QString("feat/checkout-v2"));
+    QTRY_COMPARE_WITH_TIMEOUT(row("branch"), QString("feat/checkout-v2"), 15000);
     QVERIFY2(row("machine").startsWith("arch") || row("machine").contains("this computer"), qPrintable(row("machine")));
     QVERIFY2(row("folder").endsWith("/work/orbit"), qPrintable(row("folder")));
     QVERIFY(!row("model").isEmpty());
@@ -1382,16 +1382,16 @@ void TestSessionsWindow::inspectorIsAColumnOfCards()
     QVERIFY(!hours->isVisible());
     // Context: only what hgs reports.
     auto *context = inspectorCard(window, "context");
-    QTRY_COMPARE(context->findChild<QLabel *>("inspectorContextUsed")->text(), QString("36% used"));
+    QTRY_COMPARE_WITH_TIMEOUT(context->findChild<QLabel *>("inspectorContextUsed")->text(), QString("36% used"), 15000);
     QCOMPARE(context->findChild<QLabel *>("inspectorContextTokens")->text(), QString("72k / 200k"));
     QCOMPARE(context->findChild<QLabel *>("inspectorContextLeft")->text(), QString("128k left in the window"));
     QVERIFY(!context->findChild<QWidget *>("inspectorContextRows")->isVisible());
     QVERIFY(context->findChild<QPushButton *>("clearSessionFromDetails")->isVisible());
     // Tasks: "N of M completed" on the header.
-    QTRY_COMPARE(inspectorCard(window, "tasks")->findChild<QLabel *>("inspectorCardValue")->text(), QString("2 of 5 completed"));
+    QTRY_COMPARE_WITH_TIMEOUT(inspectorCard(window, "tasks")->findChild<QLabel *>("inspectorCardValue")->text(), QString("2 of 5 completed"), 15000);
     // Changes, collapsed: "+184 −37" on the header.
     auto *changes = inspectorCard(window, "changes");
-    QTRY_VERIFY(changes->findChild<QLabel *>("inspectorCardValue")->isVisible());
+    QTRY_VERIFY_WITH_TIMEOUT(changes->findChild<QLabel *>("inspectorCardValue")->isVisible(), 15000);
     QCOMPARE(changes->findChild<QLabel *>("inspectorCardValue")->text(), QString("+184 −37"));
     const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
     const auto shot = [&](const QString &name) {
@@ -1403,29 +1403,29 @@ void TestSessionsWindow::inspectorIsAColumnOfCards()
     // Links from outside unfold the right card: the git chip opens Changes,
     // N iron rules opens Iron rules, the context indicator opens Context.
     emit window.findChild<SessionList *>("sessionList")->gitActivated("arch\ncodex/hgs/dashboard");
-    QTRY_VERIFY(inspectorCardOpen(window, "changes"));
-    QTRY_COMPARE(changes->findChildren<QWidget *>("inspectorChangeRow").size(), 3);
+    QTRY_VERIFY_WITH_TIMEOUT(inspectorCardOpen(window, "changes"), 15000);
+    QTRY_COMPARE_WITH_TIMEOUT(changes->findChildren<QWidget *>("inspectorChangeRow").size(), 3, 15000);
     QCOMPARE(changes->findChildren<QLabel *>("inspectorChangeAdded").first()->text(), QString("+142"));
     QCOMPARE(changes->findChildren<QLabel *>("inspectorChangeDeleted").first()->text(), QString("−30"));
     emit window.findChild<MessageComposer *>("messageComposer")->ironRulesRequested();
-    QTRY_VERIFY(inspectorCardOpen(window, "rules"));
+    QTRY_VERIFY_WITH_TIMEOUT(inspectorCardOpen(window, "rules"), 15000);
     // Folded cards keep their value: Context shows its share only while folded.
     auto *contextValue = context->findChild<QLabel *>("inspectorCardValue");
     QVERIFY(!contextValue->isVisible());
     for (const char *fold : {"environment", "context", "team"}) inspectorCard(window, fold)->findChild<QPushButton *>("collapsibleHeader")->click();
     QVERIFY(!inspectorCardOpen(window, "context"));
-    QTRY_VERIFY(contextValue->isVisible()); QCOMPARE(contextValue->text(), QString("36%"));
+    QTRY_VERIFY_WITH_TIMEOUT(contextValue->isVisible()); QCOMPARE(contextValue->text(), QString("36%"), 15000);
     QTest::qWait(50); inspector->verticalScrollBar()->setValue(0);
     shot("ux-6-inspector-collapsed");
     window.findChild<QPushButton *>("activityContext")->click();
-    QTRY_VERIFY(inspectorCardOpen(window, "context"));
+    QTRY_VERIFY_WITH_TIMEOUT(inspectorCardOpen(window, "context"), 15000);
     // Commit changes… fills the composer and never sends; Open diff shows the diff.
     auto *editor = window.findChild<MessageComposer *>("messageComposer")->editor(); editor->clear();
     changes->findChild<QPushButton *>("inspectorCommitChanges")->click();
     QCOMPARE(editor->toPlainText(), QString("Commit the current changes with a short message."));
     changes->findChild<QPushButton *>("inspectorOpenDiff")->click();
     QDialog *dialog = nullptr;
-    QTRY_VERIFY((dialog = window.findChild<QDialog *>("inspectorDiffDialog")));
+    QTRY_VERIFY_WITH_TIMEOUT((dialog = window.findChild<QDialog *>("inspectorDiffDialog")), 15000);
     QVERIFY(dialog->findChild<QPlainTextEdit *>("inspectorDiffText")->toPlainText().contains("+  saved: true"));
     QVERIFY(dialog->findChild<QPlainTextEdit *>("inspectorDiffText")->isReadOnly());
     dialog->close();

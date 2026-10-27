@@ -1308,23 +1308,38 @@ pub(super) fn hook() -> Result<i32> {
         && !external_agents::main_start(&record, &event) {
         return Ok(0);
     }
-    let agent = string(&record, "agent");
-    if !events(agent).contains(&kind)
-        && !versioned_events(agent).iter().any(|(event, _)| *event == kind)
+    let agent = string(&record, "agent").to_owned();
+    if !events(&agent).contains(&kind)
+        && !versioned_events(&agent).iter().any(|(event, _)| *event == kind)
     {
         return Ok(0);
     }
     // U19: the owner confirms subagents before Claude starts them.
-    if agent == "claude" && subagents_confirm::confirm() {
-        if kind == "UserPromptSubmit" {
-            subagents_confirm::group_reset(sid);
+    if subagents_confirm::confirm() {
+        if agent != "claude" && kind == "SessionStart" {
+            record["subagent_confirm"] = json!(format!("subagent confirmation not supported by {agent}"));
         }
-        if subagents_confirm::subagent_call(&event) {
-            let calls = subagents_confirm::group_add(sid, &event["tool_input"]);
-            let folder = string(&record, "cwd");
-            let model = string(&record, "model");
-            let model = if model.is_empty() { "the session model" } else { model };
-            println!("{}", subagents_confirm::decision(&calls, folder, model));
+        if agent == "claude" {
+            if matches!(kind, "UserPromptSubmit" | "Stop" | "SessionEnd") {
+                subagents_confirm::group_reset(sid);
+            }
+            if subagents_confirm::subagent_call(&event) {
+                let tool = ["tool_use_id", "tool_call_id"].iter().map(|key| string(&event, key)).find(|id| !id.is_empty()).unwrap_or_default();
+                let calls = subagents_confirm::group_add(sid, tool, &event["tool_input"]);
+                let folder = string(&record, "cwd");
+                let model = string(&record, "model");
+                let model = if model.is_empty() { "the session model" } else { model };
+                if subagents_confirm::can_ask() {
+                    println!("{}", subagents_confirm::decision(&calls, folder, model));
+                } else {
+                    // No one can answer a native ask in print mode; never block it.
+                    record["subagent_confirm"] = json!("ask skipped in a non-interactive Claude run");
+                }
+            }
+            if kind == "PostToolUse" && subagents_confirm::subagent_tool(&event) {
+                let tool = ["tool_use_id", "tool_call_id"].iter().map(|key| string(&event, key)).find(|id| !id.is_empty()).unwrap_or_default();
+                subagents_confirm::group_remove(sid, tool);
+            }
         }
     }
     if pause_active(&record) && ["UserPromptSubmit", "PreToolUse", "TurnStarted"].contains(&kind) {

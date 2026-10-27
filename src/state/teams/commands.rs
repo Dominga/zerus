@@ -10,11 +10,11 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
-    "rework-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
+    "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose",
@@ -1630,8 +1630,8 @@ fn list_items(teams: &[Team]) -> Value {
 /// The lead's inbox (C2): every report, question, permission request, its own
 /// task and stopped member, oldest first. Read only; the coalesced message the
 /// dispatcher sends lists the new ones.
-fn inbox_view(team: &Team) -> Value {
-    json!({"items": super::inbox::items(team).iter().map(super::inbox::Item::value).collect::<Vec<_>>()})
+fn inbox_view_for(team: &Team, reviewer: &str) -> Value {
+    json!({"items": super::inbox::items_for(team, reviewer).iter().map(super::inbox::Item::value).collect::<Vec<_>>()})
 }
 
 /// 9.5: files a finished sub-team's summary on its parent task.
@@ -2076,7 +2076,17 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "inbox" => {
             let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
-            Ok(inbox_view(&team))
+            // Spec 5.6: a sub-lead reads its own inbox; you may name one.
+            let named = text(input, "member").to_owned();
+            let reviewer = if !named.is_empty() {
+                named
+            } else {
+                match actor(&team, "inbox", input) {
+                    Ok(Actor::Member(id)) if team.member(&id).is_some_and(|member| member.sub) => id,
+                    _ => team.lead.clone(),
+                }
+            };
+            Ok(inbox_view_for(&team, &reviewer))
         }
         "events" => {
             let before = match &input["before"] {
@@ -3301,7 +3311,7 @@ mod tests {
             attempt.report = Some(Report { text: "Done and checked".into(), at: 10.0, ..Default::default() });
         }
         team.task_mut(1).unwrap().status = TaskStatus::Submitted;
-        let inbox = inbox_view(&team);
+        let inbox = inbox_view_for(&team, &team.lead);
         assert_eq!(inbox["items"][0]["kind"], "report");
         assert_eq!((inbox["items"][0]["task"].as_u64(), inbox["items"][0]["member"].as_str()), (Some(1), Some("Backend")));
         assert!(inbox["items"][0]["command"].as_str().unwrap().contains("hgs team accept --json"));

@@ -80,8 +80,32 @@ fn decide_command(team: &Team, task: &Task, accept: bool) -> String {
 /// How many decided proposals the lead's inbox lists (C9), the latest first.
 const DECIDED_PROPOSALS: usize = 5;
 
-/// The items waiting for the lead, oldest first, at most `ITEM_LIMIT`.
+/// The items waiting for the lead, oldest first, at most `ITEM_LIMIT`: the
+/// team's own and those of its direct reports (spec 5.6).
 pub(crate) fn items(team: &Team) -> Vec<Item> {
+    items_for(team, &team.lead)
+}
+
+/// The items waiting for `reviewer` - the lead or a sub-lead (spec 5.6): a
+/// report, question or stall goes to whoever reviews the task's assignee;
+/// everything else is the lead's.
+pub(crate) fn items_for(team: &Team, reviewer: &str) -> Vec<Item> {
+    let mut items = all_items(team);
+    items.retain(|item| reviewer_of(team, item) == reviewer);
+    items
+}
+
+fn reviewer_of(team: &Team, item: &Item) -> String {
+    match (item.kind, item.task.and_then(|id| team.task(id))) {
+        // The lead's own task has no reviewer: it stays the lead's.
+        ("report" | "question" | "stalled", Some(task)) if !task.assignee.is_empty() && task.assignee != team.lead => {
+            team.reviewer_of(&task.assignee)
+        }
+        _ => team.lead.clone(),
+    }
+}
+
+fn all_items(team: &Team) -> Vec<Item> {
     if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
     }

@@ -280,6 +280,9 @@ pub(crate) enum Step {
     /// Tells the lead, in one message, which open tasks Zerus gave to
     /// another member with the same role.
     Rebalanced { tasks: Vec<u32> },
+    /// Spec 5.6: one coalesced message to a free sub-lead about its reports'
+    /// reports, questions and stalls.
+    SubInbox { member: String },
     /// Mutes a member's notifications (unless they already are): its
     /// replies are for the lead.
     Quiet { member: String, session: SessionRef, muted: bool, revision: u64 },
@@ -601,7 +604,9 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     if lead_free && team.settings.remind_lead_minutes > 0 {
         let after = team.settings.remind_lead_minutes as f64 * 60.0;
         for task in &team.tasks {
-            if task.status != TaskStatus::Submitted {
+            // Spec 5.6: a sub-lead's reports are its own to decide.
+            let sub = task.assignee != team.lead && team.reviewer_of(&task.assignee) != team.lead;
+            if task.status != TaskStatus::Submitted || sub {
                 continue;
             }
             let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) else { continue };
@@ -618,6 +623,17 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         let interval = team.settings.inbox_interval_seconds as f64;
         if new > 0 && (team.inbox.told_at == 0.0 || now - team.inbox.told_at >= interval) {
             steps.push(Step::Inbox);
+        }
+    }
+    // Spec 5.6: each free sub-lead hears about its own reports the same way.
+    for sub in team.members.iter().filter(|member| member.sub && member.state != MemberState::Removed) {
+        if !session_of(sub, seen).is_some_and(|found| found.free) {
+            continue;
+        }
+        let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).count();
+        let interval = team.settings.inbox_interval_seconds as f64;
+        if new > 0 && (sub.inbox.told_at == 0.0 || now - sub.inbox.told_at >= interval) {
+            steps.push(Step::SubInbox { member: sub.id.clone() });
         }
     }
     if team.status != TeamStatus::Running {
@@ -936,8 +952,18 @@ pub(crate) fn hand_off_text_with(
     member_host: &str,
     extra: &str,
 ) -> String {
+    // Spec 5.6: a member that reports to a sub-lead gets its tasks from it,
+    // and its questions, report and blockers go there.
+    let reviewer = team.reviewer_of(&attempt.member);
+    let (from, boss) = if reviewer.is_empty() || reviewer == team.lead {
+        ("Lead".to_owned(), "the lead".to_owned())
+    } else {
+        let role = team.role_of(&reviewer);
+        (role.clone(), role)
+    };
     let mut text = format!(
-        "[Zerus team \u{b7} from: Lead \u{b7} task: #{} \u{b7} attempt: {}]\nTeam: {}. Your role: {}.\n",        task.id,
+        "[Zerus team \u{b7} from: {from} \u{b7} task: #{} \u{b7} attempt: {}]\nTeam: {}. Your role: {}.\n",
+        task.id,
         attempt.n,
         team.name,
         team.role_of(&attempt.member)
@@ -999,12 +1025,12 @@ pub(crate) fn hand_off_text_with(
     // H5: every hand-out names the question route, the current-attempt route
     // and the report command.
     text += &format!(
-        "\nQuestions for the lead: {ask} | hgs {at}team ask --json\n\
+        "\nQuestions for {boss}: {ask} | hgs {at}team ask --json\n\
          Your task and attempt again: {current} | hgs {at}team current --json\n\
          Report once at the end: hgs {at}team report --json, with JSON on stdin:\n  {report}\n\
          A progress line is not a report; a question is not a report.\n\
          Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
-         the report as your last message: Zerus gives it to the lead. A blocker goes to the lead too: ask it, not the owner.",
+         the report as your last message: Zerus gives it to {boss}. A blocker goes to {boss} too: ask it, not the owner.",
         ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."}),
         current = json!({"attempt":attempt.id}),
         report = report
@@ -1931,7 +1957,10 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
                 task.reopen_note.clear();
             }
         }
-        events.push(Event::new("handed_out", json!({"by":"Lead","task":task_id,"to":team.role_of(member_id),"attempt":n})));
+        // Spec 5.6: "QA lead: Task to Tester" when a sub-lead hands it out.
+        let reviewer = team.reviewer_of(member_id);
+        let by = if reviewer.is_empty() { "Lead".to_owned() } else { team.role_of(&reviewer) };
+        events.push(Event::new("handed_out", json!({"by":by,"task":task_id,"to":team.role_of(member_id),"attempt":n})));
         Ok(())
     })?;
     let (session, mut text) = message.unwrap();
@@ -2254,6 +2283,30 @@ fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
         inbox::mark_told(&mut team.inbox.told, &new, &open);
         team.inbox.told_at = now();
         events.push(Event::new("inbox_told", json!({"items":named})));
+        Ok(())
+    })
+}
+
+/// Spec 5.6: the sub-lead's coalesced inbox message, as `tell_lead_inbox`
+/// sends the lead's.
+fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Result<()> {
+    let sub = team.member(member).filter(|found| found.sub).context("not a sub-lead")?;
+    let session = sub.session.clone().context("the sub-lead has no session")?;
+    let new: Vec<inbox::Item> =
+        inbox::items_for(team, member).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).collect();
+    anyhow::ensure!(!new.is_empty(), "no new inbox items");
+    let outcome = send(&session, &uuid::Uuid::new_v4().to_string(), &inbox::text(team, &new, now()));
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let member = member.to_owned();
+    change(store, &team.id, |team, events| {
+        let open: BTreeSet<String> = inbox::items_for(team, &member).into_iter().map(|item| item.key).collect();
+        let role = team.role_of(&member);
+        let Some(sub) = team.members.iter_mut().find(|found| found.id == member) else { return Ok(()) };
+        inbox::mark_told(&mut sub.inbox.told, &new, &open);
+        sub.inbox.told_at = now();
+        events.push(Event::new("inbox_told", json!({"items":new.len(),"member":role})));
         Ok(())
     })
 }
@@ -2754,6 +2807,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }),
         Step::Inbox => tell_lead_inbox(store, team),
+        Step::SubInbox { member } => tell_sub_inbox(store, team, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
         Step::Starving { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
@@ -4142,6 +4196,40 @@ mod tests {
         let result = super::super::outbox::result(&folder, "33333333-3333-4333-8333-333333333333").unwrap();
         assert_eq!(result["status"], "submitted");
         assert_eq!(result["request_id"], "33333333-3333-4333-8333-333333333333");
+    }
+
+    #[test]
+    fn a_sub_lead_hands_out_its_reports_tasks_and_hears_its_own_inbox() {
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let qa = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().id;
+        t.members.push(Member { id: "qalead".into(), role: "QA lead".into(), agent: "codex".into(), sub: true,
+            session: Some(SessionRef { name: "codex/x/qalead".into(), run_id: "r9".into(), ..Default::default() }),
+            state: MemberState::Active, ..Default::default() });
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().parent = "qalead".into();
+        let task = t.task(qa).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "A1".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.starts_with(&format!("[Zerus team \u{b7} from: QA lead \u{b7} task: #{qa} \u{b7} attempt: 1]")), "{text}");
+        assert!(text.contains("Questions for QA lead:"), "{text}");
+        assert!(text.contains("Zerus gives it to QA lead. A blocker goes to QA lead too"), "{text}");
+        // The lead's own reports keep the old words.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().parent.clear();
+        assert!(hand_off_text(&t, &task, &attempt, "", "").contains("Questions for the lead:"));
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().parent = "qalead".into();
+        // The Tester's report waits in the free sub-lead's inbox, not the lead's.
+        let task = t.task_mut(qa).unwrap();
+        task.status = TaskStatus::Submitted;
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Reported,
+            report: Some(Report { text: "Done".into(), at: 1.0, ..Default::default() }), ..Default::default() });
+        let seen = [session("claude/x/lead", "r0", true), session("codex/x/qalead", "r9", true)];
+        let found = steps(&t, &seen, 10.0);
+        assert!(found.contains(&Step::SubInbox { member: "qalead".into() }), "{found:?}");
+        assert!(!found.contains(&Step::Inbox), "{found:?}");
+        // Once told, it is quiet until a new item.
+        let told: Vec<String> = super::inbox::items_for(&t, "qalead").into_iter().map(|item| item.key).collect();
+        t.members.iter_mut().find(|member| member.id == "qalead").unwrap().inbox = Inbox { told_at: 10.0, told };
+        assert!(!steps(&t, &seen, 20.0).iter().any(|step| matches!(step, Step::SubInbox { .. })));
     }
 
     #[test]

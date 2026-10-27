@@ -328,6 +328,17 @@ pub(crate) struct Member {
     /// H6: a swapped member's new session starts even before its next task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub launch_after_swap: bool,
+    /// Spec 5.6 (U25): the member it reports to - the lead (empty) or a
+    /// sub-lead of the same team.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent: String,
+    /// Spec 5.6: a sub-lead hands out, reviews and accepts the tasks of the
+    /// members that report to it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sub: bool,
+    /// A sub-lead's own coalesced inbox, as the team's is the lead's (C2).
+    #[serde(default, skip_serializing_if = "Inbox::is_empty")]
+    pub inbox: Inbox,
 }
 
 /// U21: one built-in command template Zerus ran for this attempt, outside the
@@ -1130,6 +1141,28 @@ impl Team {
             return "Lead".into();
         }
         self.member(member).map(|m| m.role.clone()).unwrap_or_else(|| member.to_owned())
+    }
+
+    /// Spec 5.6: who reviews a member's work - its parent when that is a
+    /// sub-lead still in the team, else the lead. The lead has no reviewer.
+    pub(crate) fn reviewer_of(&self, member: &str) -> String {
+        if member == self.lead {
+            return String::new();
+        }
+        let parent = self.member(member).map(|m| m.parent.as_str()).unwrap_or_default();
+        match self.member(parent) {
+            Some(found) if found.sub && found.state != MemberState::Removed && found.id != member && found.id != self.lead => found.id.clone(),
+            _ => self.lead.clone(),
+        }
+    }
+
+    /// The members that report directly to `member` (spec 5.6), in roster
+    /// order; the lead's are those without a sub-lead parent.
+    pub(crate) fn reports_of(&self, member: &str) -> Vec<&Member> {
+        self.members
+            .iter()
+            .filter(|m| m.id != self.lead && m.state != MemberState::Removed && self.reviewer_of(&m.id) == member)
+            .collect()
     }
 }
 

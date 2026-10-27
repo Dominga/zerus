@@ -153,6 +153,7 @@ QWidget *TeamPanel::planMembers(const Team &team, bool narrow)
                 for (auto &t : edited.tasks) if (t.assignee == id) t.assignee.clear();
                 savePlan(edited);
             });
+            holdWhileOpen(menu);
             more->setMenu(menu);
             h->addWidget(more, 0, Qt::AlignTop);
         }
@@ -197,6 +198,7 @@ void TeamPanel::addMember(const Team &team, const QPoint &global)
         addWith(m);
     });
     if (!m_controller->catalogReady()) m_controller->refreshCatalog();
+    RenderHold hold(this);
     menu.exec(global);
 }
 
@@ -250,7 +252,10 @@ void TeamPanel::editTask(const Team &team, int taskId)
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     if (remove) QObject::connect(remove, &QPushButton::clicked, &dialog, [&] { removed = true; dialog.accept(); });
     form->addRow(buttons);
-    if (dialog.exec() != QDialog::Accepted) return;
+    {
+        RenderHold hold(this);
+        if (dialog.exec() != QDialog::Accepted) return;
+    }
     Team edited = team;
     if (removed) {
         edited.tasks.erase(std::remove_if(edited.tasks.begin(), edited.tasks.end(), [&](const Task &t) { return t.id == task.id; }), edited.tasks.end());

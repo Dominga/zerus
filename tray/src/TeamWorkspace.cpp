@@ -413,6 +413,7 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
         discard->setProperty("danger", true);
         add(tr("Send back"), "teamWorkspaceSendBack", false, [this] {
             bool ok = false;
+            TeamPanel::RenderHold hold(m_panel);
             const auto comment = QInputDialog::getMultiLineText(this, tr("Send back to the coordinator"), tr("What should change in the plan?"), {}, &ok);
             if (ok && !comment.trimmed().isEmpty()) m_conversation->send(tr("Your plan needs changes before I approve it: %1").arg(comment.trimmed()));
         });
@@ -1408,6 +1409,9 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         swap->setToolTip(tr("Keeps its role, tasks, folder and branch; an open task goes to the new session with what was done so far"));
     }
     menu.setToolTipsVisible(true);
+    // The menu runs its own event loop: a poll under it must not rebuild the
+    // members column and delete the "…" button whose click opened it.
+    TeamPanel::RenderHold hold(m_panel);
     menu.exec(global);
 }
 
@@ -1656,6 +1660,7 @@ void TeamWorkspace::assignMenu(const Team &team, const QString &member, const QP
         });
     }
     if (menu.isEmpty()) menu.addAction(tr("No open task"))->setEnabled(false);
+    TeamPanel::RenderHold hold(m_panel);
     menu.exec(global);
 }
 

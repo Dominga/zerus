@@ -1,4 +1,5 @@
 #include "TeamPanel.h"
+#include <memory>
 #include "TeamTreeIndent.h"
 #include "TeamDesignerPanel.h"
 #include "TeamTaskCard.h"
@@ -133,13 +134,30 @@ bool TeamPanel::confirm(const QString &name, const QString &title, const QString
     auto *ok = dialog.addButton(action, QMessageBox::DestructiveRole);
     auto *cancel = dialog.addButton(QMessageBox::Cancel);
     dialog.setDefaultButton(cancel); dialog.setEscapeButton(cancel);
-    ++m_confirming;
+    RenderHold hold(this);
     dialog.exec();
-    const bool yes = dialog.clickedButton() == ok;
+    return dialog.clickedButton() == ok;
+}
+
+void TeamPanel::holdWhileOpen(QMenu *menu)
+{
+    auto held = std::make_shared<bool>(false);
+    const auto release = [this, held] {
+        if (!*held) return;
+        *held = false;
+        // After aboutToHide the triggered action still runs: release after it.
+        QTimer::singleShot(0, this, [this] { releaseHold(); });
+    };
+    QObject::connect(menu, &QMenu::aboutToShow, this, [this, held] { if (!*held) { *held = true; ++m_confirming; } });
+    QObject::connect(menu, &QMenu::aboutToHide, this, release);
+    QObject::connect(menu, &QObject::destroyed, this, release);
+}
+
+void TeamPanel::releaseHold()
+{
     // The polls kept coming: the views catch up once the caller has returned.
     if (--m_confirming == 0)
         QTimer::singleShot(0, this, [this] { scheduleRender(); if (confirmClosed) confirmClosed(); });
-    return yes;
 }
 
 void TeamPanel::act(const QString &operation, const QJsonObject &input, const std::function<void(bool, const QString &)> &done)
@@ -531,6 +549,7 @@ QWidget *TeamPanel::header(const Team &team, const QString &status, bool narrow)
             if (confirm("teamStopConfirm", tr("Stop team?"), text, tr("Stop team")))
                 act("stop", {});
         });
+    holdWhileOpen(menu);
     more->setMenu(menu);
     top->addWidget(more);
     v->addLayout(top);
@@ -845,6 +864,7 @@ QWidget *TeamPanel::memberRow(const Team &team, const Member &member, bool narro
                 act("remove-member", {{"member", id}});
         });
     }
+    holdWhileOpen(menu);
     more->setMenu(menu);
     h->addWidget(more, 0, Qt::AlignTop);
     outer->addLayout(h);
@@ -922,6 +942,7 @@ void TeamPanel::reassignMenu(const Team &team, int taskId, const QPoint &global)
         });
     }
     if (menu.isEmpty()) menu.addAction(tr("No other member"))->setEnabled(false);
+    RenderHold hold(this);
     menu.exec(global);
 }
 
@@ -976,6 +997,7 @@ void TeamPanel::taskMenu(const Team &team, int taskId, const QPoint &global)
         auto *none = menu.addAction(tr("Decided — no actions"));
         none->setEnabled(false);
     }
+    RenderHold hold(this);
     menu.exec(global);
 }
 

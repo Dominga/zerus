@@ -575,6 +575,7 @@ private slots:
     void graphEdgesAreEditedByHandleAndSelection();
     void graphNodesInTwoLinesWithDraftEdits();
     void subLeadsAreATreeInMembersAndTheInspector();
+    void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
     void catalogEditorMarksManualEdits();
     void boardColumnsKeepTheirScroll();
@@ -2012,7 +2013,12 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
     auto *lightFooter = lightPanel.findChild<QWidget *>("teamPlanFooter");
     QTRY_VERIFY(lightFooter && lightFooter->isVisible() && lightFooter->height() > 24);
     QCoreApplication::processEvents(); QTest::qWait(300);
-    QVERIFY(visibleLabel(&lightPanel, "teamPlanCheck")->mapTo(&lightPanel, QPoint(0, 0)).y() < lightPanel.height());
+    // A late poll may re-render the panel here: wait for the shown label
+    // instead of dereferencing a lookup that found none mid-render.
+    QTRY_VERIFY(([&] {
+        auto *shown = visibleLabel(&lightPanel, "teamPlanCheck");
+        return shown && shown->mapTo(&lightPanel, QPoint(0, 0)).y() < lightPanel.height();
+    })());
     shot(&lightPanel, "permission-answer-plan-checks");
     planPanel.setTheme(true); darkPalette(); planPanel.showTeam("team-1"); QTest::qWait(200);
     // N8: the footer's Approve asks for the widening confirmation.
@@ -3497,6 +3503,76 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
     shot(&workspace, "ux-5-graph-dark");
     workspace.setTheme(false);
     lightShot(&workspace, "ux-5-graph-light");
+}
+
+// #380 attempt 2: the member's "…" menu and the swap dialog run their own
+// event loops. A poll that changes the team arrives under each: the menu, the
+// button that opened it and the open dialog stay alive, and the views catch
+// up once the menu has closed.
+void TestTeamsUi::aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog()
+{
+    setTeam(subLeadTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.resize(420, 900); panel.show();
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    const auto visibleMore = [&](const QString &member) -> QToolButton * {
+        for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+            if (card->property("teamMember") == member && card->isVisibleTo(&workspace)) return card->findChild<QToolButton *>("teamWorkspaceMemberMenu");
+        return nullptr;
+    };
+    QTRY_VERIFY(controller.watched() && visibleMore("backend"));
+    QPointer<QToolButton> more = visibleMore("backend");
+    // The next poll brings a changed team: without the hold it rebuilds the
+    // members column and deletes the button under its open menu.
+    auto changed = subLeadTeam();
+    changed["revision"] = 13;
+    auto members = changed["members"].toArray();
+    auto backend = members[1].toObject(); backend["model"] = "gpt-6.1-sol"; members[1] = backend;
+    changed["members"] = members;
+    setTeam(changed);
+    bool checked = false;
+    QPointer<QMenu> open;
+    std::function<void(int)> look = [&](int tries) {
+        QTimer::singleShot(10, qApp, [&, tries] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) { if (tries > 0) look(tries - 1); return; }
+            open = menu;
+            QVERIFY(panel.confirming());
+            controller.refresh();
+            QTest::qWait(600);   // the poll lands and a render is asked for
+            QVERIFY(more);
+            QVERIFY(open && open->isVisible());
+            QCOMPARE(controller.team("team-1")->revision, 13);
+            checked = true;
+            // Open the swap dialog from the same menu.
+            for (auto *action : menu->actions()) if (action->objectName() == "teamWorkspaceMemberSwap") action->trigger();
+            menu->hide();
+        });
+    };
+    look(300);
+    more->click();
+    QTRY_VERIFY(checked);
+    QPointer<QDialog> dialog;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamSwapDialog")) && dialog->isVisible());
+    // The views catch up once the menu has closed: the column is rebuilt
+    // with the new team, so the old button is not the one shown any more.
+    QTRY_VERIFY(!panel.confirming());
+    QTRY_VERIFY(visibleMore("backend") && visibleMore("backend") != more.data());
+    // A poll while the swap dialog is open leaves it open.
+    changed["revision"] = 14;
+    setTeam(changed);
+    controller.refresh();
+    QTRY_COMPARE(controller.team("team-1")->revision, 14);
+    QTest::qWait(300);
+    QVERIFY(dialog && dialog->isVisible());
+    dialog->close();
 }
 
 void TestTeamsUi::designerPageStartsOrOpensTheDesigner()

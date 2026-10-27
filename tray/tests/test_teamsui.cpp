@@ -675,6 +675,7 @@ private slots:
     void graphEdgesAreEditedByHandleAndSelection();
     void graphRoutingStaysFastForTheLargestPlan();
     void graphNodesInTwoLinesWithDraftEdits();
+    void workAheadSwitchAndBadge();
     void graphNodesCarryTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
@@ -4118,6 +4119,66 @@ void TestTeamsUi::graphEdgesAreEditedByHandleAndSelection()
     QCOMPARE(draft->connecting(), 0);
     QCOMPARE(draft->selectedEdge(), qMakePair(0, 0));
     QCOMPARE(calls(script(), "edit-draft").size(), 2);
+}
+
+// U31: the owner's Work ahead switch in the Team tab's toolbar and the
+// "worked ahead" mark on a task worked before its draft phase was approved,
+// in one picture per theme.
+void TestTeamsUi::workAheadSwitchAndBadge()
+{
+    auto t = graphTeam();
+    auto settings = t["settings"].toObject(); settings["work_ahead"] = true; t["settings"] = settings;
+    auto tasks = t["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() != 8) continue;
+        task["status"] = "submitted";
+        task["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a8"}, {"member", "backend"}, {"state", "reported"}, {"worked_ahead", true},
+            {"report", QJsonObject{{"text", "Rate limits on /v1/cards are in"}, {"at", 1750}}}}};
+        tasks[i] = task;
+    }
+    t["tasks"] = tasks;
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1500, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QAbstractButton *ahead = nullptr;
+    QTRY_VERIFY((ahead = workspace.findChild<QAbstractButton *>("teamWorkspaceWorkAhead")));
+    QTRY_VERIFY(ahead->isChecked());
+    QCOMPARE(ahead->accessibleName(), QString("Work ahead"));
+    const auto parsed = Teams::parse(t);
+    QVERIFY(parsed.task(8) && parsed.task(8)->workedAhead());
+    const auto live = [](const Member &) { Live state; state.known = true; return state; };
+    TeamTaskCard card;
+    card.resize(560, 420); card.show();
+    for (const bool dark : {true, false}) {
+        if (dark) darkPalette(); else lightPalette();
+        workspace.setTheme(dark);
+        card.setTask(parsed, 8, live, dark);
+        QLabel *badge = nullptr;
+        QTRY_VERIFY((badge = card.findChild<QLabel *>("teamTaskWorkedAhead")));
+        QCOMPARE(badge->text(), QString("worked ahead"));
+        QTRY_VERIFY(workspace.findChild<QAbstractButton *>("teamWorkspaceWorkAhead"));
+        const auto dir = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+        if (dir.isEmpty()) continue;
+        QTest::qWait(250);
+        // The toolbar with the switch above the task card with the mark.
+        auto *toolbar = workspace.findChild<QWidget *>("teamWorkspaceToolbar");
+        QVERIFY(toolbar);
+        const QPixmap top = toolbar->grab(), bottom = card.grab();
+        QPixmap picture(qMax(top.width(), bottom.width()), top.height() + 12 + bottom.height());
+        picture.fill(dark ? QColor("#15191f") : QColor("#f5f7f9"));
+        QPainter painter(&picture);
+        painter.drawPixmap(0, 0, top);
+        painter.drawPixmap(0, top.height() + 12, bottom);
+        painter.end();
+        QVERIFY(picture.save(QDir(dir).filePath(QStringLiteral("ux-31-work-ahead-%1.png").arg(dark ? "dark" : "light"))));
+    }
 }
 
 void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()

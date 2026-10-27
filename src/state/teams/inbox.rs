@@ -203,7 +203,13 @@ fn all_items(team: &Team) -> Vec<Item> {
                         task: Some(task.id),
                         member: team.role_of(&attempt.member),
                         since: report.at,
-                        summary: summary(&report.text),
+                        // U31: a report made ahead of its draft phase waits for
+                        // the owner's approval of that phase.
+                        summary: if attempt.worked_ahead {
+                            format!("worked ahead of phase {}: {}", task.phase, summary(&report.text))
+                        } else {
+                            summary(&report.text)
+                        },
                         command: decide_command(team, task, true),
                         detail: String::new(),
                     });

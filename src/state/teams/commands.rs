@@ -3476,6 +3476,36 @@ mod tests {
         });
     }
 
+    /// U31: the lead's inbox names a report made ahead of its draft phase as
+    /// "worked ahead of phase N", through `hgs team inbox`.
+    #[test]
+    fn a_worked_ahead_report_says_so_in_the_leads_inbox() {
+        use crate::state::teams::model::{Attempt, AttemptState, Report, TaskStatus};
+        let (mut team, _, _) = review_team();
+        let task = team.task_mut(3).unwrap();
+        task.status = TaskStatus::Submitted;
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "00000000-0000-4000-8000-000000000301".into(),
+            member: "dev".into(),
+            state: AttemptState::Reported,
+            worked_ahead: true,
+            report: Some(Report { text: "Docs written".into(), at: 1.0, ..Default::default() }),
+            ..Default::default()
+        });
+        with_review_team(&team, || {
+            let inbox = run("inbox", &json!({"team":"rv"}), false).unwrap();
+            let items = inbox["items"].as_array().cloned().unwrap_or_default();
+            let item = items.iter().find(|item| item["task"] == 3).cloned().unwrap_or_else(|| panic!("{inbox}"));
+            assert_eq!(item["summary"], "worked ahead of phase 2: Docs written", "{item}");
+            // An ordinary report keeps its text alone.
+            let mut team = stored();
+            team.task_mut(3).unwrap().attempts[0].worked_ahead = false;
+            let ordinary = super::inbox_view_for(&team, &team.lead);
+            assert!(!ordinary.to_string().contains("worked ahead"), "{ordinary}");
+        });
+    }
+
     #[test]
     fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
         // N13: "high" is no severity: the member hears it at once, and the

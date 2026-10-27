@@ -558,7 +558,9 @@ elif a and a[0]=='worktrees':
         QCOMPARE(skins[1].view("newSession"),QString("dense"));QVERIFY(skins[1].framelessDialogs());
         // WhiteWh has its own dark palette and the Zerus light one.
         QCOMPARE(skins[1].dark.accent,QString("#7dd3b0"));QCOMPARE(skins[1].view("sessions"),QString("cards"));
-        QCOMPARE(skins[1].named(true,"card"),QString("#181c22"));QVERIFY(skins[1].stylesheet.contains("QScrollBar"));
+        QCOMPARE(skins[1].named(true,"card"),QString("#181c22"));QVERIFY(skins[1].stylesheet.contains("composerCard"));
+        // U25: the thin scroll bars come from workspaceScrollbars for every skin, not from this one.
+        QVERIFY(!skins[1].stylesheet.contains("QScrollBar"));
         QCOMPARE(WorkspaceSkin::toJson(skins[1].light),WorkspaceSkin::toJson(WorkspaceSkin::zerus(false)));
         const QJsonObject unsafe{{"schema",1},{"name","T"},{"dark",QJsonObject{{"accent","#ff00aa"},{"border","red; background:url(x)"}}},
                                  {"views",QJsonObject{{"newSession","Dense!"}}}};

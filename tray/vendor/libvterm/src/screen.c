@@ -596,7 +596,8 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
 #endif
 
     if(new_row_start < 0) {
-      if(old_row_start <= old_cursor.row && old_cursor.row < old_row_end) {
+      /* Zerus local patch (UPSTREAM.md): the line's last row counts too. */
+      if(old_row_start <= old_cursor.row && old_cursor.row <= old_row_end) {
         new_cursor.row = 0;
         new_cursor.col = old_cursor.col;
         if(new_cursor.col >= new_cols)

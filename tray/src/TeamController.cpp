@@ -168,6 +168,7 @@ void TeamController::refreshCatalog()
             if (same) return;
         }
         m_catalog = Teams::parseCatalog(result);
+        Teams::rememberRoleColors(m_catalog);
         m_catalogReady = true;
         emit catalogChanged();
     }, false);

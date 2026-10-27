@@ -1,5 +1,6 @@
 #pragma once
 #include <QCoreApplication>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
@@ -555,6 +556,13 @@ Role parseRole(const QJsonObject &value);
 Template parseTemplate(const QJsonObject &value);
 Rule parseRule(const QJsonObject &value);
 Catalog parseCatalog(const QJsonObject &get);
+// U25: the colors the catalog gives its roles (Team designer), under the role's
+// id and name, lowercased with only letters and digits ("Lead (GPT)" is
+// "leadgpt"). TeamController keeps them current; the desktop's role colors read
+// them before the skin's palette.
+QHash<QString, QString> &catalogRoleColors();
+void rememberRoleColors(const Catalog &catalog);
+QString roleColorKey(const QString &role);
 // The catalog with the kept (or also the undecided) changes of its draft applied.
 Catalog withProposals(const Catalog &catalog, bool includeUndecided);
 

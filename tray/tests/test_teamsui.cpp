@@ -463,6 +463,25 @@ void armConfirm(TeamPanel *panel, bool cancel, int tries = 300)
     });
 }
 
+// Answers the next confirmation after recording its title and text: Cancel
+// clicks the reject button, otherwise the destructive action. F12/N40 uses it
+// to check what the owner is warned about.
+void armConfirmRecord(TeamPanel *panel, bool cancel, QString *title, QString *text, int delay = 0, int tries = 300)
+{
+    QTimer::singleShot(delay, panel, [panel, cancel, title, text, tries] {
+        auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        if (!box) {
+            if (tries > 0) armConfirmRecord(panel, cancel, title, text, 10, tries - 1);
+            return;
+        }
+        if (title) *title = box->windowTitle();
+        if (text) *text = box->text();
+        for (auto *button : box->buttons())
+            if (cancel ? box->buttonRole(button) == QMessageBox::RejectRole
+                       : box->buttonRole(button) == QMessageBox::DestructiveRole) { button->click(); return; }
+    });
+}
+
 // Answers the next confirmation after running `during` while it is open, as a
 // poll arriving under the dialog does.
 void armConfirmAfter(TeamPanel *panel, std::function<void()> during, int tries = 300)
@@ -584,6 +603,7 @@ private slots:
     void workspaceShowsGraphBoardAndFocus();
     void workspaceGroupsTasksByPhase();
     void phaseApprovalAndFinishAskTheOwner();
+    void phaseApprovalAlongsideARunningPhaseAsksFirst();
     void aRefreshUnderThePhaseConfirmationKeepsItsAsker();
     void leftoverMembersAreShownApart();
     void memberEditorPicksAnExistingSession();
@@ -1600,6 +1620,75 @@ void TestTeamsUi::aRefreshUnderThePhaseConfirmationKeepsItsAsker()
     QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept") && !phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
 }
 
+void TestTeamsUi::phaseApprovalAlongsideARunningPhaseAsksFirst()
+{
+    // F12/N40: a draft behind an approved phase that still runs stays
+    // approvable; the owner is warned before it runs alongside, Cancel sends
+    // nothing, Approve now sends one approve-phase.
+    auto t = phasedTeam();   // phase 2 approved with #4 in progress, phase 3 draft
+    auto phases = t["phases"].toArray();
+    auto polish = phases[1].toObject();
+    polish["waiting"] = QJsonObject{{"text", "Can run alongside phase 2"}, {"phase", 2},
+                                    {"open", QJsonArray{4}}, {"alongside", true}};
+    phases[1] = polish;
+    t["phases"] = phases;
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 820);
+    workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    // The model neither blocks the phase nor the band; it names the phase it
+    // runs beside.
+    const auto along = parse(t);
+    QCOMPARE(approveBlocked(along, 3), QString());
+    QCOMPARE(alongsidePhase(along, 3), 2);
+    bool bandSeen = false;
+    for (const auto &band : TeamUi::phaseBands(along, [](const PhaseGroup &) { return true; }))
+        if (band.n == 3) { bandSeen = true; QVERIFY2(band.blocked.isEmpty(), qPrintable(band.blocked)); QVERIFY(band.alongside); }
+    QVERIFY(bandSeen);
+    // The phase's own Accept stays enabled with the alongside hint: the same
+    // button the strip and the session header carry.
+    QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept") && phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
+    QVERIFY2(phaseAction(&workspace, 3, "teamPhaseAccept")->toolTip().contains(QStringLiteral("alongside phase 2")),
+             qPrintable(phaseAction(&workspace, 3, "teamPhaseAccept")->toolTip()));
+    // Shots of the draft with its approvable phase, both themes.
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "ux-approve-alongside");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "ux-approve-alongside-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // Cancel: the warning names the cost and nothing is sent.
+    QString title, text;
+    armConfirmRecord(&panel, true, &title, &text);
+    phaseAction(&workspace, 3, "teamPhaseAccept")->click();
+    QTest::qWait(150);
+    QVERIFY2(title.contains(QStringLiteral("Approve phase 3 now?")), qPrintable(title));
+    QVERIFY2(text.contains(QStringLiteral("while phase 2 still runs")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("can no longer edit this phase")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("Are you sure?")), qPrintable(text));
+    QCOMPARE(calls(script(), "approve-phase").size(), 0);
+    // Approve now: one request, for phase 3.
+    QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept") && phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
+    armConfirmRecord(&panel, false, nullptr, nullptr);
+    phaseAction(&workspace, 3, "teamPhaseAccept")->click();
+    QTRY_COMPARE(calls(script(), "approve-phase").size(), 1);
+    QCOMPARE(calls(script(), "approve-phase").first()["phase"].toInt(), 3);
+    QCOMPARE(calls(script(), "approve-phase").first()["team"].toString(), QStringLiteral("team-1"));
+}
+
 void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
 {
     // Spec 10: phase 3 opens only after phase 2 is approved and its tasks are
@@ -2358,7 +2447,8 @@ void TestTeamsUi::leadLoadViewsShowInTheDesktop()
     load["attention"] = QJsonArray{QJsonObject{{"kind", "report"}, {"task", 2}, {"member", "Frontend"}, {"since", 1792868400.0}, {"minutes", 70}}};
     auto phases = load["phases"].toArray();
     auto draftPhase = phases[1].toObject();   // the draft (phase 3)
-    draftPhase["waiting"] = QJsonObject{{"text", "Waiting for the previous phase to be ready"}, {"phase", 2}, {"open", QJsonArray{3, 4}}};
+    draftPhase["waiting"] = QJsonObject{{"text", "Can run alongside phase 2"}, {"phase", 2}, {"open", QJsonArray{3, 4}},
+                                        {"alongside", true}};
     phases[1] = draftPhase; load["phases"] = phases;
     QJsonObject loadMember{{"Backend", QJsonObject{{"tasks", 3}, {"on_critical_path", 2}}}};
     QJsonObject loadStarved{{"member", "tester"}, {"role", "Tester"}, {"minutes", 25}, {"blocking", QJsonArray{4}}};
@@ -2420,12 +2510,13 @@ void TestTeamsUi::leadLoadViewsShowInTheDesktop()
     workspace.resize(1300, 900); workspace.show();
     workspace.showTeam("team-1");
     QTRY_VERIFY(([&] { controller.refresh(); return phaseScrollOf(&workspace, 3) != nullptr; })());
-    // F12: the draft's header carries the whole waiting sentence, and the
-    // details stay in its tooltip.
-    QTRY_VERIFY(phaseScrollOf(&workspace, 3) && phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseWaiting"));
-    auto *waiting = phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseWaiting");
-    QCOMPARE(waiting->text(), QStringLiteral("Waiting for the previous phase to be ready"));
-    QVERIFY(waiting->toolTip().contains(QStringLiteral("is not ready")));
+    // N40: the draft's header no longer blocks it - it can run alongside phase
+    // 2 - so it carries no waiting sentence and its Accept stays enabled.
+    QTRY_VERIFY(phaseScrollOf(&workspace, 3) && phaseAction(&workspace, 3, "teamPhaseAccept"));
+    QVERIFY(!phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseWaiting"));
+    QVERIFY(phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
+    QVERIFY2(phaseAction(&workspace, 3, "teamPhaseAccept")->toolTip().contains(QStringLiteral("alongside phase 2")),
+             qPrintable(phaseAction(&workspace, 3, "teamPhaseAccept")->toolTip()));
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberServices"));
     QVERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberBudget"));
     QVERIFY(workspace.findChild<QFrame *>("teamAttentionStrip"));
@@ -3990,8 +4081,8 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
         QJsonObject{{"n", 3}, {"title", "Polish"}, {"state", "approved"}, {"tasks", QJsonArray{5}}},
         QJsonObject{{"n", 4}, {"title", "Review"}, {"barrier", true}, {"state", "approved"}, {"tasks", QJsonArray{6}}},
         QJsonObject{{"n", 5}, {"title", "Docs"}, {"state", "draft"}, {"tasks", QJsonArray{7}},
-                    {"waiting", QJsonObject{{"text", "Waiting for the previous phase to be ready"}, {"phase", 4},
-                                            {"open", QJsonArray{6}}}},
+                    {"waiting", QJsonObject{{"text", "Can run alongside phase 4"}, {"phase", 4},
+                                            {"open", QJsonArray{6}}, {"alongside", true}}},
                     {"changes", QJsonArray{QJsonObject{{"kind", "added"}, {"task", 7}, {"title", "Screenshots"}},
                                            QJsonObject{{"kind", "changed"}, {"task", 7}, {"title", "Screenshots"}, {"from", "backend"}, {"to", "tester"}}}}}};
     t["tasks"] = QJsonArray{
@@ -4050,9 +4141,10 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
         QCOMPARE(frame->x(), phaseScrollOf(&workspace, 1)->x());
         lastTop = frame->y();
     }
-    // The blocked draft says the F12 sentence; the lead's changes read as a
-    // diff in a tooltip.
-    QCOMPARE(phaseScrollOf(&workspace, 5)->findChild<QLabel *>("teamPhaseWaiting")->text(), QStringLiteral("Waiting for the previous phase to be ready"));
+    // N40: the draft runs alongside phase 4, so it carries no waiting sentence
+    // and its owner decisions stay usable; the lead's changes read as a diff.
+    QVERIFY(!phaseScrollOf(&workspace, 5)->findChild<QLabel *>("teamPhaseWaiting"));
+    QVERIFY(phaseAction(&workspace, 5, "teamPhaseAccept") && phaseAction(&workspace, 5, "teamPhaseAccept")->isEnabled());
     QVERIFY(phaseScrollOf(&workspace, 5)->findChild<QLabel *>("teamPhaseChanges")->toolTip().contains(QStringLiteral("+ #7 Screenshots\n~ #7 Screenshots: backend → tester")));
     // Default: finished phases start collapsed; the rest are open (both states
     // in one picture, dark and light).

@@ -435,10 +435,14 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
                     "open":open
                 });
             } else if !open.is_empty() {
+                // F12/N40: an approved phase that is still running does not
+                // block the draft - the owner may approve it to run alongside
+                // (the desktop warns before sending).
                 value["waiting"] = json!({
-                    "text":"Waiting for the previous phase to be ready",
+                    "text":format!("Can run alongside phase {previous}"),
                     "phase":previous,
-                    "open":open
+                    "open":open,
+                    "alongside":true
                 });
             }
         }
@@ -4446,9 +4450,10 @@ mod tests {
     }
 
     #[test]
-    fn a_draft_phase_says_it_waits_for_the_previous_phase() {
+    fn a_draft_phase_can_run_alongside_a_running_phase() {
         let mut team = running_team();
-        // Phase 1 still has open tasks, so the draft after it cannot open (F12).
+        // F12/N40: phase 1 still runs, and the draft after it says it can run
+        // alongside - not that it waits; the owner is warned by the desktop.
         team.tasks.push(Task { id: 3, title: "Fix".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
         team.phases.push(Phase {
             n: 2,
@@ -4461,12 +4466,20 @@ mod tests {
         });
         let value = view_with(&team, &[], None);
         let phase = &value["phases"][0];
-        assert_eq!(phase["waiting"]["text"], "Waiting for the previous phase to be ready");
+        assert_eq!(phase["waiting"]["text"], "Can run alongside phase 1");
+        assert_eq!(phase["waiting"]["alongside"], true);
         assert_eq!((phase["waiting"]["phase"].as_u64(), phase["waiting"]["open"].clone()), (Some(1), json!([1])));
+        // The server's rule is unchanged: a draft opens when no earlier phase is
+        // a draft, so this one can be approved while phase 1 still runs (it is
+        // queued until the dispatcher hands it out).
+        let mut approved = team.clone();
+        let mut events = Vec::new();
+        ops::apply(&mut approved, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert_eq!(approved.phases[0].state, PhaseState::Queued);
         // Once the previous phase is decided, the draft is simply a draft.
         team.task_mut(1).unwrap().status = TaskStatus::Accepted;
         let value = view_with(&team, &[], None);
-        assert!(value["phases"][0].get("waiting").is_none());
+        assert!(value["phases"][0].get("waiting").is_none(), "{value}");
         // A second draft waits for the first draft by its number.
         team.phases.push(Phase {
             n: 3,
@@ -4483,6 +4496,7 @@ mod tests {
         assert_eq!(value["phases"][1]["waiting"]["phase"], 2);
         assert_eq!(value["phases"][1]["waiting"]["open"], json!([3]));
         assert_eq!(value["phases"][1]["waiting"]["text"], "Waiting for the previous phase to be approved");
+        assert!(value["phases"][1]["waiting"].get("alongside").is_none(), "{value}");
         // The approval refusal stays specific about which phase is in the way.
         let mut events = Vec::new();
         let error = ops::apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &BTreeSet::new(), &mut events)

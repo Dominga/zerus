@@ -783,6 +783,17 @@ answered; a denial cannot carry an explanation.
   today, needs the word too. The event and status say "Changed by Lead on your
   word" with the quote. Owner: yes.
 
+- **U27. Visual lanes for a readable plan (owner, 2026-10-27).** The plan's
+  layers come only from dependencies, so a phase without many dependencies is
+  one endless first layer; the lead added soft dependencies just to make the
+  graph readable. A task gets an optional `lane` (a number with an optional
+  label, such as "Checkpoint 1") that the lead or the owner sets in the plan
+  and in drafts; Graph, Board and Layers group a phase's tasks into its lanes,
+  in order, each lane a labelled row that can collapse (lanes without a value
+  fall back to the dependency layer). Lanes never change hand-out: only
+  dependencies, phases and barriers do. Status and the desktop show and edit
+  them (drag a task to another lane, rename a lane). Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

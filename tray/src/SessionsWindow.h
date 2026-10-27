@@ -420,6 +420,10 @@ private:
     QJsonArray m_sessionAccountDetailsProfiles;
     QString selectedHostTarget() const;
     void updateDashboard();
+    // Gives each computer's live event stream the checkout folders of its
+    // sessions (selected, then shown rows, then the rest); those need no
+    // git-status poll while it follows them.
+    void updateGitWatch();
     QJsonObject m_details;
     QHash<QString, QString> m_questionSelections;
     QJsonArray m_events;

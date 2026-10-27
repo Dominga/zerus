@@ -29,6 +29,8 @@ pub const QUEUE_BYTES: usize = 4 << 20;
 pub const HEARTBEAT_MS: u64 = 10_000;
 /// Concurrent Activity subscriptions per stream.
 pub const ACTIVITY_SUBSCRIPTIONS: usize = 16;
+/// Concurrent git subscriptions (checkout folders) per stream.
+pub const GIT_SUBSCRIPTIONS: usize = 64;
 /// The most events an Activity tail or tail snapshot carries.
 pub const ACTIVITY_TAIL: usize = 100;
 /// The most journal rows one Activity read returns.
@@ -44,6 +46,9 @@ pub mod topic {
     pub const CATALOG_META: &str = "catalog.meta";
     /// One session's Activity events and inspection summary.
     pub const ACTIVITY: &str = "activity";
+    /// One checkout folder's `hgs git-status --json` object, keyed by the
+    /// folder as subscribed.
+    pub const GIT: &str = "git";
 }
 
 /// Why a catalog key was removed. Clients treat an unknown reason as unknown.
@@ -113,6 +118,9 @@ pub struct Limits {
     pub activity_tail: usize,
     pub activity_read: usize,
     pub control_line_bytes: usize,
+    /// 0 from a server without the git topic.
+    #[serde(default)]
+    pub git_subscriptions: usize,
 }
 
 impl Default for Limits {
@@ -124,6 +132,7 @@ impl Default for Limits {
             activity_tail: ACTIVITY_TAIL,
             activity_read: ACTIVITY_READ,
             control_line_bytes: CONTROL_LINE_BYTES,
+            git_subscriptions: GIT_SUBSCRIPTIONS,
         }
     }
 }
@@ -194,7 +203,8 @@ pub struct EventUpdate {
     pub event: Value,
 }
 
-/// A replacement of one keyed object, such as a session's inspection summary.
+/// A replacement of one keyed object: a session's inspection summary, or a
+/// checkout folder's git status.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub topic: String,
@@ -247,8 +257,8 @@ pub enum Control {
     Ping(Ping),
 }
 
-/// A topic and its key. Activity takes `session`; later topics take `path`
-/// (git) or `project` (tasks).
+/// A topic and its key. Activity takes `session`, git takes `path` (an
+/// absolute folder); later topics take `project` (tasks).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
     pub topic: String,
@@ -406,6 +416,7 @@ mod tests {
                     topic::CATALOG.into(),
                     topic::CATALOG_META.into(),
                     topic::ACTIVITY.into(),
+                    topic::GIT.into(),
                 ],
                 limits: Limits::default(),
             }),
@@ -465,6 +476,12 @@ mod tests {
                 key: "run:r1".into(),
                 value: json!({"phase":"idle"}),
                 rev: 4,
+            }),
+            Body::State(State {
+                topic: topic::GIT.into(),
+                key: "/work/sample-project".into(),
+                value: json!({"state":"ok","branch":"main","changed_files":2,"sampled_at":1787840176.5}),
+                rev: 5,
             }),
             Body::Heartbeat(Heartbeat { at: 1787840176.5 }),
             Body::Gap(Gap {
@@ -596,6 +613,32 @@ mod tests {
             decode_control(&long),
             Err(FrameError::TooLarge(_))
         ));
+    }
+
+    #[test]
+    fn git_subscriptions_take_a_path_and_older_hellos_offer_none() {
+        let Control::Subscribe(subscription) =
+            decode_control(r#"{"op":"subscribe","topic":"git","path":"/work/sample-project"}"#)
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(subscription.topic, topic::GIT);
+        assert_eq!(subscription.path.as_deref(), Some("/work/sample-project"));
+        assert!(subscription.session.is_none());
+        let Control::Unsubscribe(gone) =
+            decode_control(r#"{"op":"unsubscribe","topic":"git","path":"/work/sample-project"}"#)
+                .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(gone.path.as_deref(), Some("/work/sample-project"));
+        assert_eq!(Limits::default().git_subscriptions, GIT_SUBSCRIPTIONS);
+        // A watch-v1 server without the git topic sends no git limit.
+        let older: Limits = serde_json::from_value(json!({"activity_subscriptions":16,"page_bytes":524288,
+            "queue_bytes":4194304,"activity_tail":100,"activity_read":200,"control_line_bytes":65536}))
+        .unwrap();
+        assert_eq!(older.git_subscriptions, 0);
     }
 
     #[test]

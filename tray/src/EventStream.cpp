@@ -97,6 +97,26 @@ public:
         write(subscribe);
     }
 
+    // Unsubscribes folders no longer wanted and subscribes new ones, in the
+    // caller's order, up to the stream's limit.
+    void watchGit(const QStringList &paths)
+    {
+        if (!m_gitTopic) return;
+        const QSet<QString> wanted(paths.cbegin(), paths.cend());
+        for (auto it = m_gitSubscribed.begin(); it != m_gitSubscribed.end();) {
+            if (wanted.contains(*it)) { ++it; continue; }
+            write(QJsonObject{{"op", "unsubscribe"}, {"topic", "git"}, {"path", *it}});
+            m_gitStates.remove(*it);
+            it = m_gitSubscribed.erase(it);
+        }
+        for (const auto &path : paths) {
+            if (m_gitSubscribed.size() >= EventStream::GitFolders) break;
+            if (m_gitSubscribed.contains(path)) continue;
+            m_gitSubscribed.insert(path);
+            write(QJsonObject{{"op", "subscribe"}, {"topic", "git"}, {"path", path}});
+        }
+    }
+
 private:
     struct Activity {
         QString key, name, run;
@@ -110,6 +130,7 @@ private:
     {
         m_buffer.clear(); m_stderr.clear(); m_rows.clear(); m_pending.clear(); m_meta = {};
         m_catalog = m_haveMeta = m_listingDirty = m_ready = m_failed = false; m_activity = {};
+        m_gitTopic = m_gitDirty = false; m_gitSubscribed.clear(); m_gitStates.clear();
     }
     void stopProcess()
     {
@@ -132,7 +153,7 @@ private:
     {
         if (m_failed) return;
         // Nothing this stream prepared reaches the GUI after its failure.
-        m_failed = true; m_publish->stop(); m_listingDirty = m_activity.dirty = false;
+        m_failed = true; m_publish->stop(); m_listingDirty = m_activity.dirty = m_gitDirty = false;
         stopProcess();
         QMetaObject::invokeMethod(m_front, [front = m_front, reason] { front->failed(reason); }, Qt::QueuedConnection);
     }
@@ -160,7 +181,13 @@ private:
     {
         if (frame.value("v").toInt() != 1) return fail(QStringLiteral("unsupported stream version"));
         const auto type = frame.value("t").toString(), topic = frame.value("topic").toString();
-        if (type == "snapshot" && topic == "catalog") {
+        if (type == "hello") {
+            m_gitTopic = frame.value("topics").toArray().contains(QJsonValue(QStringLiteral("git")));
+            QMetaObject::invokeMethod(m_front, [front = m_front, git = m_gitTopic] { front->m_gitTopic = git; }, Qt::QueuedConnection);
+        } else if (type == "state" && topic == "git") {
+            const auto path = frame.value("key").toString();
+            if (m_gitSubscribed.contains(path)) { m_gitStates.insert(path, frame.value("value").toObject()); m_gitDirty = true; }
+        } else if (type == "snapshot" && topic == "catalog") {
             if (frame.value("page").toInt() == 0) m_pending.clear();
             for (const auto &value : frame.value("items").toArray()) {
                 const auto item = value.toObject();
@@ -191,7 +218,20 @@ private:
         } else if (type == "error") {
             if (frame.value("fatal").toBool()) return fail(frame.value("message").toString());
             const auto code = frame.value("code").toString();
-            if ((code == "subscription_ended" || code == "session_changed") && frame.value("key").toString() == m_activity.key
+            if (topic == "git") {
+                // A refused or failing folder is polled instead.
+                const auto path = frame.value("key").toString();
+                if (code == "unsupported_topic") {
+                    m_gitTopic = false; m_gitSubscribed.clear(); m_gitStates.clear();
+                    QMetaObject::invokeMethod(m_front, [front = m_front] { front->m_gitTopic = false; }, Qt::QueuedConnection);
+                } else if ((code == "too_many_subscriptions" || code == "bad_request" || code == "git_status_failed")
+                           && m_gitSubscribed.remove(path)) {
+                    // A folder whose checks fail stays subscribed on the server.
+                    if (code == "git_status_failed") write(QJsonObject{{"op", "unsubscribe"}, {"topic", "git"}, {"path", path}});
+                    m_gitStates.remove(path);
+                    QMetaObject::invokeMethod(m_front, [front = m_front, path] { front->m_gitRefused.insert(path); }, Qt::QueuedConnection);
+                }
+            } else if ((code == "subscription_ended" || code == "session_changed") && frame.value("key").toString() == m_activity.key
                 && !m_activity.key.isEmpty()) {
                 const auto name = m_activity.name; m_activity = {};
                 QMetaObject::invokeMethod(m_front, [front = m_front, name] { front->m_followedName.clear(); emit front->activityEnded(name); },
@@ -212,7 +252,7 @@ private:
     void schedule()
     {
         if (m_failed || m_publish->isActive()) return;
-        if (m_activity.dirty) m_publish->start(EventStream::PublishMs);
+        if (m_activity.dirty || m_gitDirty) m_publish->start(EventStream::PublishMs);
         else if (m_listingDirty) m_publish->start(int(qMax<qint64>(EventStream::PublishMs, listingWait())));
     }
     void publish()
@@ -251,6 +291,15 @@ private:
                 }
             }, Qt::QueuedConnection);
         }
+        if (std::exchange(m_gitDirty, false)) {
+            QList<std::pair<QString, QJsonObject>> states;
+            for (auto it = m_gitStates.cbegin(); it != m_gitStates.cend(); ++it) states.append({it.key(), it.value()});
+            m_gitStates.clear();
+            QMetaObject::invokeMethod(m_front, [front = m_front, states] {
+                for (const auto &[path, status] : states)
+                    if (front->m_gitWanted.contains(path)) emit front->gitStatusReady(path, status);
+            }, Qt::QueuedConnection);
+        }
         schedule();
     }
 
@@ -264,6 +313,11 @@ private:
     QJsonObject m_meta;
     bool m_catalog = false, m_haveMeta = false, m_listingDirty = false, m_ready = false, m_failed = false;
     Activity m_activity;
+    // Git: whether the stream offers the topic, the folders subscribed, and
+    // the latest state of each not yet published.
+    bool m_gitTopic = false, m_gitDirty = false;
+    QSet<QString> m_gitSubscribed;
+    QHash<QString, QJsonObject> m_gitStates;
 };
 
 EventStream::EventStream(const QString &hgs, const QString &host, QObject *parent)
@@ -300,7 +354,7 @@ void EventStream::setState(State state)
 {
     if (m_state == state) return;
     m_state = state;
-    if (state == State::Live) sendFollow();
+    if (state == State::Live) { sendFollow(); sendGit(); }
     emit stateChanged(state);
 }
 
@@ -326,6 +380,8 @@ void EventStream::start()
 
 void EventStream::launch()
 {
+    // A new stream answers again for the topics it offers and the folders it takes.
+    m_gitTopic = false; m_gitRefused.clear();
     setState(State::Starting);
     QStringList args{QStringLiteral("watch"), QStringLiteral("--json")};
     if (!m_host.isEmpty()) args.prepend(QLatin1Char('@') + m_host);
@@ -364,6 +420,30 @@ void EventStream::unfollow()
     if (m_followedName.isEmpty()) return;
     m_followedName.clear(); m_followedRun.clear(); m_followedConversation.clear(); m_followedAfter = 0;
     if (live()) sendFollow();
+}
+
+void EventStream::watchGit(const QStringList &paths)
+{
+    QStringList wanted; QSet<QString> set;
+    for (const auto &path : paths) {
+        if (wanted.size() >= GitFolders) break;
+        if (path.isEmpty() || set.contains(path)) continue;
+        set.insert(path); wanted.append(path);
+    }
+    if (wanted == m_gitPaths) return;
+    m_gitPaths = wanted; m_gitWanted = set;
+    m_gitRefused.intersect(m_gitWanted);
+    if (live()) sendGit();
+}
+
+bool EventStream::coversGit(const QString &path) const
+{
+    return live() && m_gitTopic && m_gitWanted.contains(path) && !m_gitRefused.contains(path);
+}
+
+void EventStream::sendGit()
+{
+    QMetaObject::invokeMethod(m_worker, [worker = m_worker, paths = m_gitPaths] { worker->watchGit(paths); }, Qt::QueuedConnection);
 }
 
 void EventStream::sendFollow()
@@ -409,6 +489,9 @@ void EventStreams::setHosts(const QStringList &hosts)
             emit activityReady(host, name, inspection);
         });
         connect(stream, &EventStream::activityEnded, this, [this, host](const QString &name) { emit activityEnded(host, name); });
+        connect(stream, &EventStream::gitStatusReady, this, [this, host](const QString &path, const QJsonObject &status) {
+            emit gitStatusReady(host, path, status);
+        });
         connect(stream, &EventStream::stateChanged, this, [this, host](EventStream::State state) { emit stateChanged(host, state); });
         stream->start();
     }
@@ -425,4 +508,9 @@ void EventStreams::follow(const QString &host, const QString &name, const QStrin
 void EventStreams::unfollowAll()
 {
     for (auto *stream : std::as_const(m_streams)) stream->unfollow();
+}
+
+void EventStreams::watchGit(const QHash<QString, QStringList> &pathsByHost)
+{
+    for (auto it = m_streams.cbegin(); it != m_streams.cend(); ++it) it.value()->watchGit(pathsByHost.value(it.key()));
 }

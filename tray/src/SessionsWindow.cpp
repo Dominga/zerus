@@ -1916,6 +1916,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 m_streamEnded.insert(host + '\n' + name + '\n' + entry->session.runId); inspect();
             }
         });
+        // Followed checkout folders replace their git-status polls (updateGitWatch).
+        connect(streams, &EventStreams::gitStatusReady, &m_client, &HgsClient::acceptGitStatus);
     }
     connect(&m_client, &HgsClient::subagentInspectionReady, this,
         [this](const QString &host,const QString &name,const QString &id,const QString &archive,const QJsonObject &data) {
@@ -2045,6 +2047,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if(!m_inspectionAge.isValid() || m_inspectionAge.elapsed()>=interval)inspect();
         if (++m_tick % 10 == 0) {
             emit refreshRequested();
+            updateGitWatch();
             for (const auto &entry : m_entries) {
                 const auto path = SessionPresentation::gitStatusPath(entry.session);
                 if (entry.online && !path.isEmpty()) m_client.requestGitStatus(entry.host, path);
@@ -3591,6 +3594,7 @@ void SessionsWindow::rebuild()
     const int scroll = m_sessions->verticalScrollBar()->value();
     if (!sameRows) m_sessions->clear();
     int selectedRow = -1, firstSession = -1, firstVisible = -1;
+    QList<std::pair<QString, QString>> gitReads;
     for (int i = 0; i < rows.size(); ++i) {
         const auto row = rows[i];
         auto *item = sameRows ? m_sessions->item(i) : new QListWidgetItem(m_sessions);
@@ -3676,7 +3680,7 @@ void SessionsWindow::rebuild()
         if (item->data(SessionRoles::RowCollapsed).toBool()) item->setData(Qt::AccessibleDescriptionRole, tr("Collapsed session row. Press Right to expand."));
         const auto rowStatus = roles.value(StatusRole).toString(), desc = roles.value(DetailRole).toString();
         const auto meta = roles.value(MetaRole).toString(), gitPath = roles.value(SessionRoles::GitPath).toString();
-        if (e.online && !gitPath.isEmpty()) m_client.requestGitStatus(e.host, gitPath);
+        if (e.online && !gitPath.isEmpty()) gitReads.append({e.host, gitPath});
         QStringList accessibleFields{s.name, e.machine + QStringLiteral(" / ") + s.cmd + QStringLiteral(" / ") + rowStatus, meta};
         if (item->data(SessionRoles::Working).toBool() && item->data(SessionRoles::WorkingSince).toDouble() > 0)
             accessibleFields << tr("%1 since %2").arg(SessionPresentation::backgroundIdle(s) ? tr("Background") : s.phase == "compacting" ? tr("Compacting") : tr("Working"), QDateTime::fromSecsSinceEpoch(qint64(item->data(SessionRoles::WorkingSince).toDouble())).toLocalTime().toString("d MMM HH:mm:ss"));
@@ -3695,6 +3699,9 @@ void SessionsWindow::rebuild()
         item->setData(Qt::AccessibleTextRole, sessionTooltip(accessibleFields, qBound(160, availableWidth - 40, 420)).plain);
         if (e.key == requestedSelection) selectedRow = i;
     }
+    // Live streams take their folders first; the others are polled.
+    updateGitWatch();
+    for (const auto &[host, path] : std::as_const(gitReads)) m_client.requestGitStatus(host, path);
     // List scopes do not choose a replacement for a conversation that still exists.
     const bool preserveConversation = selected();
     // Choose a first row only on initial load. A removed conversation leaves an
@@ -3741,6 +3748,30 @@ void SessionsWindow::rebuild()
     m_sessions->syncActivityAnimation();
     // A vanished target also clears while search results own the list.
     if ((selectedRow < 0 && !preserveConversation) || (selectedRow >= 0 && (!m_searchResults->active()||(!creationBeforePlacement.isEmpty()&&m_selectedCreation.isEmpty())))) selectSession(); else renderDetails();
+}
+
+void SessionsWindow::updateGitWatch()
+{
+    auto *streams = EventStreams::instance();
+    if (!streams) return;
+    QSet<QString> online, seen;
+    for (const auto &entry : std::as_const(m_entries)) {
+        const auto path = SessionPresentation::gitStatusPath(entry.session);
+        if (entry.online && !path.isEmpty()) online.insert(entry.host + '\n' + path);
+    }
+    QHash<QString, QStringList> paths;
+    const auto add = [&](const QString &host, const QString &path) {
+        const auto key = host + '\n' + path;
+        if (path.isEmpty() || !online.contains(key) || seen.contains(key)) return;
+        seen.insert(key); paths[host].append(path);
+    };
+    if (const auto *entry = selected()) add(entry->host, SessionPresentation::gitStatusPath(entry->session));
+    for (int i = 0; i < m_sessions->count(); ++i) {
+        const auto *item = m_sessions->item(i);
+        if (!item->isHidden()) add(item->data(SessionRoles::GitHost).toString(), item->data(SessionRoles::GitPath).toString());
+    }
+    for (const auto &entry : std::as_const(m_entries)) add(entry.host, SessionPresentation::gitStatusPath(entry.session));
+    streams->watchGit(paths);
 }
 
 void SessionsWindow::updateAttentionIndicator()

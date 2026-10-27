@@ -24,6 +24,7 @@
 #include <unistd.h>
 #endif
 #include "ChildProcess.h"
+#include "EventStream.h"
 #include "FakeCli.h"
 #include "FleetState.h"
 #include "HgsClient.h"
@@ -114,6 +115,7 @@ private slots:
     void cachedDownloadReuseCoalescesAndForceKeepsPriorCopy();
     void cachedDownloadFanoutStopsWhenOwnerIsDestroyed();
     void gitStatusReadsAreSharedAndScopedToMachineAndFolder();
+    void liveStreamGitStatusReplacesPollsUntilItStops();
     void pollsLaunchOffTheGuiThreadAndReportOnIt();
     void destroyedClientKillsItsPolls();
     void directChildrenSkipPipesTheRunnerIsCreating();
@@ -444,6 +446,75 @@ void TestHgsClient::gitStatusReadsAreSharedAndScopedToMachineAndFolder()
     const auto lines = calls.readAll(); QCOMPARE(lines.count('\n'), 2);
     QVERIFY(lines.contains("git-status --path /repo --json"));
     QVERIFY(lines.contains("@peer git-status --path /repo --json"));
+}
+
+void TestHgsClient::liveStreamGitStatusReplacesPollsUntilItStops()
+{
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto script = fixture.filePath("hgs");
+    QVERIFY(FakeCli::install(script, R"PY(#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:] == ['--help']:
+    print('usage: hgs ...\n       Event stream ABI: watch-v1')
+    sys.exit(0)
+if sys.argv[1:2] == ['git-status']:
+    open(__file__ + '.calls', 'a').write(' '.join(sys.argv[1:]) + '\n')
+    print(json.dumps({'state': 'ok', 'root': '/repo', 'branch': 'main', 'changed_files': 9, 'remote_state': 'verified', 'remote_age_seconds': 0}))
+    sys.exit(0)
+if sys.argv[1:] != ['watch', '--json']:
+    sys.exit(2)
+seq = 0
+def send(t, **fields):
+    global seq
+    seq += 1
+    print(json.dumps(dict(v=1, seq=seq, t=t, **fields)), flush=True)
+send('hello', machine_id=None, host='fixture', hgs_version='1.57.0', stream='s', heartbeat_ms=10000, max_frame_bytes=1048576,
+     topics=['catalog', 'catalog.meta', 'activity', 'git'], limits={'git_subscriptions': 64})
+send('snapshot', topic='catalog', items=[], page=0, last=True, cursor=1)
+send('snapshot', topic='catalog.meta', value={'host': 'fixture', 'ok': True}, page=0, last=True, cursor=1)
+for text in sys.stdin:
+    op = json.loads(text)
+    if op.get('topic') == 'git' and op.get('op') == 'subscribe':
+        send('state', topic='git', key=op['path'], rev=1, value={'state': 'ok', 'path': op['path'], 'root': op['path'],
+             'branch': 'main', 'changed_files': 4, 'ahead': 0, 'behind': 0, 'remote_state': 'verified',
+             'remote_checked_at': 100.0, 'remote_age_seconds': 10.0, 'sampled_at': 1.0})
+)PY"));
+    HgsClient::setGitStatusIntervalForTests(300);
+    EventStreams streams(FakeCli::program(script));
+    HgsClient client(FakeCli::program(script));
+    connect(&streams, &EventStreams::gitStatusReady, &client, &HgsClient::acceptGitStatus);
+    QSignalSpy changed(&client, &HgsClient::gitStatusChanged);
+    streams.setHosts({QString()});
+    streams.watchGit({{QString(), {QStringLiteral("/repo")}}});
+    QTRY_VERIFY(streams.live({}));
+    QVERIFY(streams.coversGit({}, "/repo")); QVERIFY(!streams.coversGit({}, "/other")); QVERIFY(!streams.coversGit("peer", "/repo"));
+    // The stream's state lands where a poll's would, with no git-status child.
+    QTRY_COMPARE(client.gitStatusSnapshot({}, "/repo")["changed_files"].toInt(), 4);
+    QCOMPARE(changed.size(), 1);
+    const auto streamed = client.gitStatusSnapshot({}, "/repo");
+    QVERIFY(streamed["received_at_ms"].toDouble() > 0);
+    client.requestGitStatus({}, "/repo");
+    QCOMPARE(changed.size(), 1);
+    // A covered value is dated anew each interval; the remote's age keeps
+    // counting, so verification still lapses 60 s after the remote check.
+    QTest::qWait(400);
+    client.requestGitStatus({}, "/repo");
+    QCOMPARE(changed.size(), 2);
+    const auto refreshed = client.gitStatusSnapshot({}, "/repo");
+    const double moved = refreshed["received_at_ms"].toDouble() - streamed["received_at_ms"].toDouble();
+    QVERIFY(moved >= 300);
+    QCOMPARE(refreshed["remote_age_seconds"].toDouble(), 10.0 + moved / 1000.);
+    QCOMPARE(refreshed["changed_files"].toInt(), 4);
+    QTest::qWait(200);
+    QVERIFY(!QFile::exists(script + ".calls"));
+
+    // Without a live stream, polling resumes.
+    streams.stream({})->stop();
+    QVERIFY(!streams.coversGit({}, "/repo"));
+    QTRY_VERIFY((client.requestGitStatus({}, "/repo"), client.gitStatusSnapshot({}, "/repo")["changed_files"].toInt() == 9));
+    QFile calls(script + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+    QCOMPARE(calls.readAll(), QByteArray("git-status --path /repo --json\n"));
+    HgsClient::setGitStatusIntervalForTests(15000);
 }
 
 void TestHgsClient::questionReplyPreviews_data()

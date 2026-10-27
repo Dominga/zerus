@@ -21,6 +21,7 @@ private slots:
     void endedStreamFailsAndRestarts();
     void streamEndingBeforePublicationNeverGoesLive();
     void unchangedListingIsAppliedAgain();
+    void gitFoldersFollowTheStreamAndResubscribeAfterRestart();
 
 private:
     QString install(const QString &script);
@@ -28,6 +29,9 @@ private:
 };
 
 namespace {
+// A stream starts two fake CLI processes (marker probe, then the stream); a
+// loaded runner needs more than QTRY's default 5 s.
+constexpr int StartupMs = 15000;
 const char *Stream = R"PY(#!/usr/bin/env python3
 import json, sys
 args = [a for a in sys.argv[1:] if not a.startswith('@')]
@@ -57,6 +61,48 @@ for text in sys.stdin:
         send('delta', topic='catalog', upsert=[{'key': 'run:r1', 'row': row('codex/Alpha', 'r1', 'busy')}], remove=[{'key': 'run:r2', 'reason': 'archived'}], cursor=2)
         send('events', topic='activity', key=key, events=[{'seq': 42, 'type': 'Stop', 'detail': 'done'}], cursor=42)
 )PY";
+
+// Answers git subscriptions with state frames and logs every git operation
+// as "RUN OP PATH". Its first run ends after it answers a folder named
+// "restart"; "refused" folders get too_many_subscriptions.
+const char *GitStream = R"PY(#!/usr/bin/env python3
+import json, os, sys
+args = [a for a in sys.argv[1:] if not a.startswith('@')]
+if args == ['--help']:
+    print('usage: hgs ...\n       Event stream ABI: watch-v1')
+    sys.exit(0)
+if args != ['watch', '--json']:
+    sys.exit(2)
+runs = __file__ + '.runs'
+run = (int(open(runs).read()) if os.path.exists(runs) else 0) + 1
+open(runs, 'w').write(str(run))
+seq = 0
+def send(t, **fields):
+    global seq
+    seq += 1
+    print(json.dumps(dict(v=1, seq=seq, t=t, **fields)), flush=True)
+send('hello', machine_id=None, host='fixture', hgs_version='1.57.0', stream='s%d' % run, heartbeat_ms=10000,
+     max_frame_bytes=1048576, topics=['catalog', 'catalog.meta', 'activity', 'git'], limits={'git_subscriptions': 64})
+send('snapshot', topic='catalog', items=[], page=0, last=True, cursor=1)
+send('snapshot', topic='catalog.meta', value={'host': 'fixture', 'ok': True}, page=0, last=True, cursor=1)
+rev = 0
+for text in sys.stdin:
+    op = json.loads(text)
+    if op.get('topic') != 'git':
+        continue
+    with open(__file__ + '.ops', 'a') as log:
+        log.write('%d %s %s\n' % (run, op['op'], op['path']))
+    if op['op'] != 'subscribe':
+        continue
+    if 'refused' in op['path']:
+        send('error', code='too_many_subscriptions', message='at most 64', topic='git', key=op['path'], fatal=False)
+        continue
+    rev += 1
+    send('state', topic='git', key=op['path'], rev=rev, value={'state': 'ok', 'path': op['path'], 'root': op['path'],
+         'branch': 'main', 'changed_files': rev, 'remote_state': 'no_upstream', 'sampled_at': 1.0})
+    if run == 1 and op['path'].endswith('/restart'):
+        sys.exit(0)
+)PY";
 }
 
 QString TestEventStream::install(const QString &script)
@@ -72,9 +118,12 @@ void TestEventStream::listingAndActivityArriveFromTheStream()
     JsonParse::setViolationHandler([&guiThreadParses](const char *, int) { ++guiThreadParses; });
     EventStream stream(install(QString::fromUtf8(Stream)), {});
     QSignalSpy listings(&stream, &EventStream::listingReady), activity(&stream, &EventStream::activityReady);
+    stream.watchGit({QStringLiteral("/repo")});
     stream.start();
-    QTRY_VERIFY(stream.live());
-    QTRY_VERIFY(!listings.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(stream.live(), StartupMs);
+    QTRY_VERIFY_WITH_TIMEOUT(!listings.isEmpty(), StartupMs);
+    // A stream without the git topic leaves its folders to git-status polls.
+    QVERIFY(!stream.coversGit(QStringLiteral("/repo")));
     auto box = listings.first().first().value<BoxState>();
     QCOMPARE(box.host, QStringLiteral("fixture"));
     QCOMPARE(box.sessions.size(), 2);
@@ -116,7 +165,7 @@ void TestEventStream::peerListingsKeepTheAlias()
     EventStream stream(install(QString::fromUtf8(Stream)), QStringLiteral("laptop"));
     QSignalSpy listings(&stream, &EventStream::listingReady);
     stream.start();
-    QTRY_VERIFY(!listings.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!listings.isEmpty(), StartupMs);
     const auto box = listings.first().first().value<BoxState>();
     // A peer is found, polled and addressed by its saved alias.
     QCOMPARE(box.host, QStringLiteral("laptop"));
@@ -128,7 +177,7 @@ void TestEventStream::computerWithoutTheMarkerIsUnsupported()
     // Fake CLIs are Python scripts, which the Windows fake runs too.
     EventStream stream(install(QStringLiteral("#!/usr/bin/env python3\nprint('usage: hgs ...')\n")), {});
     stream.start();
-    QTRY_COMPARE(stream.state(), EventStream::State::Unsupported);
+    QTRY_COMPARE_WITH_TIMEOUT(stream.state(), EventStream::State::Unsupported, StartupMs);
     QVERIFY(!stream.live());
 }
 
@@ -146,8 +195,8 @@ import time; time.sleep(1)
     EventStream stream(install(once), {});
     QSignalSpy states(&stream, &EventStream::stateChanged);
     stream.start();
-    QTRY_VERIFY(states.contains(QVariantList{QVariant::fromValue(EventStream::State::Live)}));
-    QTRY_COMPARE(stream.state(), EventStream::State::Failed);
+    QTRY_VERIFY_WITH_TIMEOUT(states.contains(QVariantList{QVariant::fromValue(EventStream::State::Live)}), StartupMs);
+    QTRY_COMPARE_WITH_TIMEOUT(stream.state(), EventStream::State::Failed, StartupMs);
     QCOMPARE(EventStream::restartDelayMs(1), 5000);
     QCOMPARE(EventStream::restartDelayMs(9), 300000);
 }
@@ -166,7 +215,7 @@ print(json.dumps({'v': 1, 'seq': 2, 't': 'snapshot', 'topic': 'catalog.meta', 'v
     EventStream stream(install(brief), {});
     QSignalSpy states(&stream, &EventStream::stateChanged);
     stream.start();
-    QTRY_COMPARE(stream.state(), EventStream::State::Failed);
+    QTRY_COMPARE_WITH_TIMEOUT(stream.state(), EventStream::State::Failed, StartupMs);
     QTest::qWait(200);
     QCOMPARE(stream.state(), EventStream::State::Failed);
     QVERIFY(!states.contains(QVariantList{QVariant::fromValue(EventStream::State::Live)}));
@@ -180,7 +229,7 @@ void TestEventStream::unchangedListingIsAppliedAgain()
     EventStream stream(install(QString::fromUtf8(Stream)), QStringLiteral("laptop"));
     QSignalSpy listings(&stream, &EventStream::listingReady);
     stream.start();
-    QTRY_VERIFY(!listings.isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!listings.isEmpty(), StartupMs);
     QTRY_VERIFY_WITH_TIMEOUT(listings.size() >= 3, 3000);
     // The same listing has the same digest, so the desktop only refreshes its
     // poll time (FleetState::refreshListing); a changed one has another.
@@ -193,6 +242,62 @@ void TestEventStream::unchangedListingIsAppliedAgain()
     QTRY_COMPARE(listings.last().first().value<BoxState>().sessions.size(), 1);
     QVERIFY(listings.last().first().value<BoxState>().digest != first.digest);
     EventStream::setListingTimingForTests(2000, 10000);
+}
+
+void TestEventStream::gitFoldersFollowTheStreamAndResubscribeAfterRestart()
+{
+    int guiThreadParses = 0;
+    JsonParse::setViolationHandler([&guiThreadParses](const char *, int) { ++guiThreadParses; });
+    const auto program = install(QString::fromUtf8(GitStream));
+    // The script beside the program (FakeCli.h), for its sidecar log.
+    auto script = program;
+    if (script.endsWith(QStringLiteral(".exe"))) script.chop(4);
+    const auto operations = [&] {
+        QFile log(script + QStringLiteral(".ops"));
+        return log.open(QIODevice::ReadOnly) ? QString::fromUtf8(log.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList();
+    };
+    EventStream stream(program, {});
+    QSignalSpy states(&stream, &EventStream::gitStatusReady);
+    // Duplicates and empty paths are dropped; nothing is covered before the stream is live.
+    stream.watchGit({"/repo/a", "/repo/a", "", "/repo/b", "/repo/refused"});
+    QVERIFY(!stream.coversGit("/repo/a"));
+    stream.start();
+    QTRY_VERIFY_WITH_TIMEOUT(stream.live(), StartupMs);
+    QTRY_COMPARE(states.size(), 2);
+    QSet<QString> paths;
+    for (const auto &arguments : std::as_const(states)) paths << arguments.at(0).toString();
+    QCOMPARE(paths, (QSet<QString>{"/repo/a", "/repo/b"}));
+    QCOMPARE(states.first().at(1).toJsonObject().value("branch").toString(), QStringLiteral("main"));
+    // A refused folder goes back to polling; the others need no poll.
+    QTRY_VERIFY(!stream.coversGit("/repo/refused"));
+    QVERIFY(stream.coversGit("/repo/a")); QVERIFY(stream.coversGit("/repo/b")); QVERIFY(!stream.coversGit("/repo/other"));
+    QCOMPARE(operations(), (QStringList{"1 subscribe /repo/a", "1 subscribe /repo/b", "1 subscribe /repo/refused"}));
+
+    // A new set unsubscribes the folders it leaves out and subscribes the new ones.
+    stream.watchGit({"/repo/b", "/repo/c"});
+    QVERIFY(!stream.coversGit("/repo/a")); QVERIFY(stream.coversGit("/repo/c"));
+    QTRY_COMPARE(states.size(), 3);
+    QCOMPARE(states.last().at(0).toString(), QStringLiteral("/repo/c"));
+    QTRY_COMPARE(operations().size(), 5);
+    QCOMPARE(operations().mid(3), (QStringList{"1 unsubscribe /repo/a", "1 subscribe /repo/c"}));
+
+    // The first 64 folders count; the caller passes its preferred ones first.
+    QStringList many;
+    for (int i = 0; i < EventStream::GitFolders + 6; ++i) many << QStringLiteral("/repo/many-%1").arg(i);
+    stream.watchGit(many);
+    QVERIFY(stream.coversGit("/repo/many-63")); QVERIFY(!stream.coversGit("/repo/many-64"));
+    QTRY_COMPARE(states.size(), 3 + EventStream::GitFolders);
+    QVERIFY(!operations().contains("1 subscribe /repo/many-64"));
+
+    // A restarted stream subscribes its folders again; meanwhile they are polled.
+    stream.watchGit({"/repo/b", "/repo/restart"});
+    QTRY_COMPARE_WITH_TIMEOUT(stream.state(), EventStream::State::Failed, StartupMs);
+    QVERIFY(!stream.coversGit("/repo/b"));
+    QTRY_VERIFY_WITH_TIMEOUT(stream.live(), 20000);
+    QTRY_VERIFY(operations().contains("2 subscribe /repo/b") && operations().contains("2 subscribe /repo/restart"));
+    QVERIFY(stream.coversGit("/repo/b"));
+    QCOMPARE(guiThreadParses, 0);
+    JsonParse::setViolationHandler({});
 }
 
 QTEST_MAIN(TestEventStream)

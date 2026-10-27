@@ -224,7 +224,13 @@ public:
     void setupMachine(const QString &alias, const QString &source = {});
     QJsonObject worktreeSnapshot(const QString &host, const QString &path) const;
     QJsonObject gitStatusSnapshot(const QString &host, const QString &path) const;
+    // `git-status` for a folder, at most every 15 s; none while a live event
+    // stream follows it (EventStreams::coversGit).
     void requestGitStatus(const QString &host, const QString &path);
+    // A folder's git status from a live event stream, kept as a poll's result.
+    void acceptGitStatus(const QString &host, const QString &path, const QJsonObject &status);
+    // Tests: the 15 s git-status interval.
+    static void setGitStatusIntervalForTests(int ms);
     quint64 requestWorktrees(const QString &host, const QString &path, bool refresh = false, const QString &expectedMachine = {});
     quint64 createWorktree(const QString &host, const QString &path, const QString &commonDir,
                            const QString &branch, const QString &base, const QString &destination,
@@ -441,7 +447,10 @@ private:
     QTimer *m_downloadCacheTimer = nullptr;
     bool m_downloadCacheTrimBusy = false;
     void pumpGitStatus();
+    void storeGitStatus(const QString &host, const QString &path, QJsonObject data);
     QHash<QString, QJsonObject> m_gitStatusCache;
+    // Cached values a stream delivered rather than a poll.
+    QSet<QString> m_gitStatusStreamed;
     QHash<QString, qint64> m_gitStatusRequestedAt;
     QList<QPair<QString, QString>> m_gitStatusQueue;
     QSet<QString> m_gitStatusInFlight;

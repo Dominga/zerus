@@ -3955,9 +3955,9 @@ hgs watch --json
 hgs @mac watch --json
 ```
 
-`watch --json` is a long-lived stream of one computer's live sessions and of the
-Activity of the sessions a client follows. It is additive: every command above
-keeps its output. `hgs -h` prints `Event stream ABI: watch-v1` where it exists.
+`watch --json` is a long-lived stream of one computer's live sessions, of the
+Activity of the sessions a client follows and of the Git status of the checkout
+folders it follows. It is additive: every command above keeps its output. `hgs -h` prints `Event stream ABI: watch-v1` where it exists.
 A client that does not find the line keeps polling that computer. `@host` runs
 the peer's stream over one SSH connection with `ServerAliveInterval=10` and
 `ServerAliveCountMax=3`. An older peer answers with an error, never a launch.
@@ -3977,7 +3977,7 @@ follows 10 s without other frames.
 | `snapshot` | `topic`, `key?`, `items` or `value`, `page`, `last`, `cursor` | a replacement; keep the previous display until `last` |
 | `delta` | `topic`, `upsert[]` of `{key, row}`, `remove[]` of `{key, reason}`, `cursor` | catalog changes |
 | `events` | `topic`, `key`, `events[]`, `cursor` | new Activity events, oldest first |
-| `state` | `topic`, `key`, `value`, `rev` | the latest summary of one session |
+| `state` | `topic`, `key`, `value`, `rev` | the latest summary of one session, or one folder's Git status |
 | `gap` | `topic`, `key?`, `reason` | discard the topic's state; a snapshot follows |
 | `error` | `code`, `message`, `topic?`, `key?`, `fatal` | a refused operation or a failed source |
 | `pong` | `id` | the answer to `ping` |
@@ -4010,8 +4010,32 @@ carries the `inspect --skip-processes` summary without `events`, `cursor` and
 `history_truncated`. It is sent when anything other than `goal_observed_at`
 changed. A session that leaves the catalog ends its subscription with the error
 `subscription_ended`. Unsubscribe stops it. A stream follows at most 16 sessions;
-more fail with `too_many_subscriptions`. Other topics fail with
-`unsupported_topic`; read them with their commands.
+more fail with `too_many_subscriptions`. Other topics (`processes`, `tasks`)
+fail with `unsupported_topic`; read them with their commands.
+
+```json
+{"op":"subscribe","topic":"git","path":"/home/user/sample-project"}
+{"op":"unsubscribe","topic":"git","path":"/home/user/sample-project"}
+```
+
+A git subscription follows one checkout folder, an absolute path of at most
+4096 bytes. Its `state` frames are keyed by the path as subscribed and carry
+exactly the object `git-status --path PATH --json` prints, also for a missing
+folder (`folder_unavailable`) or one outside a repository (`not_repo`). The
+first follows the subscription; later ones only when the object changed apart
+from `sampled_at` and `remote_age_seconds`. A new remote check changes
+`remote_checked_at` and is sent. The stream runs the checks of `git-status`
+itself, with its read-only Git options and 60 s remote cache, on two worker
+threads, so a slow check delays no other frame. A folder is checked again when
+a stat of `HEAD`, `index`, `packed-refs`, `FETCH_HEAD`, the reftable list, the
+current branch's ref or its upstream's tracking ref changes in the folder's Git
+and common directories; when a session working in the folder (its `cwd`,
+`cwd_canonical` or `git_root`) records a finished `Edit`, `Write`, `MultiEdit`,
+`NotebookEdit`, `apply_patch` or `Bash` call; when its remote check expires; and
+at least every 30 s. Checks of one folder start at least 1 s apart. Subscribing
+a followed folder again sends its state again. A stream follows at most 64
+folders (`limits.git_subscriptions`); more fail with `too_many_subscriptions`,
+and a missing or relative path fails with `bad_request`.
 
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive
@@ -4040,7 +4064,13 @@ are at most 64 KiB.
 The desktop runs one stream for each computer whose CLI prints the marker.
 While a computer's stream is live, the desktop stops polling that computer's
 listing and follows the selected session's Activity through the stream; the
-Processes tab keeps its own poll interval. Listings are applied at most every
+Processes tab keeps its own poll interval. When the stream offers the `git`
+topic, it also follows the checkout folders of that computer's sessions, the
+selected one first, then shown rows, at most 64, instead of starting
+`git-status` for each every 15 s. A followed value counts as checked every 15 s
+while the stream follows it; its remote's age keeps counting, so a remote shows
+verified for at most 60 s after its check. Refused folders, and all folders of
+a computer whose stream is not live, are polled as before. Listings are applied at most every
 2 s, Activity within 50 ms. A stream that fails or stays silent for 30 s
 restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the desktop polls
 meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`

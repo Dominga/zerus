@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 #include <QThread>
 #include <QTimer>
 
@@ -16,8 +17,8 @@ class EventStreamWorker;
 // One computer's `hgs [@host] watch --json` (docs/reference.md, Event stream).
 // The child process, NDJSON framing, JSON parsing and the computer's catalog
 // and Activity state live on the stream's own thread. The GUI thread receives
-// finished values: the same BoxState a listing poll delivers, and
-// inspect-shaped Activity increments, at most one of each every 50 ms.
+// finished values: the same BoxState a listing poll delivers, inspect-shaped
+// Activity increments and git-status objects, at most one of each every 50 ms.
 //
 // A computer whose CLI lacks the watch-v1 marker stays Unsupported and keeps
 // polling. A stream that fails restarts with a growing delay; while it is not
@@ -43,6 +44,15 @@ public:
     void unfollow();
     QString followed() const { return m_followedName; }
 
+    // Follows the git status of these checkout folders, preferred first; the
+    // first GitFolders count. A later call replaces the set. A computer whose
+    // stream lacks the git topic keeps polling them.
+    void watchGit(const QStringList &paths);
+    // Whether the live stream follows this folder, so it needs no git-status
+    // poll: its changes arrive as gitStatusReady.
+    bool coversGit(const QString &path) const;
+    static constexpr int GitFolders = 64;
+
     // Tests: frames and the delay before a restart.
     static constexpr int PublishMs = 50;
     static constexpr int SilenceMs = 30000;
@@ -57,6 +67,8 @@ signals:
     void activityReady(const QString &name, const QJsonObject &inspection);
     // The followed session left the catalog or changed run; poll it instead.
     void activityEnded(const QString &name);
+    // The `git-status --json` object of a followed folder, when it changed.
+    void gitStatusReady(const QString &path, const QJsonObject &status);
 
 private:
     friend class EventStreamWorker;
@@ -64,6 +76,7 @@ private:
     void launch();
     void failed(const QString &reason);
     void sendFollow();
+    void sendGit();
 
     QString m_hgs, m_host;
     State m_state = State::Stopped;
@@ -74,6 +87,10 @@ private:
     qint64 m_lastFailure = 0;
     QString m_followedName, m_followedRun, m_followedConversation;
     qint64 m_followedAfter = 0;
+    QStringList m_gitPaths;
+    QSet<QString> m_gitWanted, m_gitRefused;
+    // The running stream offers the git topic (its hello).
+    bool m_gitTopic = false;
 };
 
 // The desktop's streams by computer alias ("" is this computer), owned by the
@@ -95,11 +112,16 @@ public:
     // following on every other stream.
     void follow(const QString &host, const QString &name, const QString &runId, const QString &conversationId, qint64 after);
     void unfollowAll();
+    // Follows these checkout folders on each computer's stream (preferred
+    // first); a computer missing from the map follows none.
+    void watchGit(const QHash<QString, QStringList> &pathsByHost);
+    bool coversGit(const QString &host, const QString &path) const { const auto *s = stream(host); return s && s->coversGit(path); }
 
 signals:
     void listingReady(const QString &host, const BoxState &box);
     void activityReady(const QString &host, const QString &name, const QJsonObject &inspection);
     void activityEnded(const QString &host, const QString &name);
+    void gitStatusReady(const QString &host, const QString &path, const QJsonObject &status);
     void stateChanged(const QString &host, EventStream::State state);
 
 private:

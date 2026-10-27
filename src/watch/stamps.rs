@@ -44,6 +44,19 @@ fn entry(path: &Path, metadata: &fs::Metadata) -> u64 {
     hasher.finish()
 }
 
+/// One hash of these files' stamps; a missing file counts as missing. The git
+/// topic stats a checkout's Git metadata with it on every pulse.
+pub(super) fn files(paths: &[PathBuf]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for path in paths {
+        match fs::metadata(path) {
+            Ok(metadata) => entry(path, &metadata).hash(&mut hasher),
+            Err(_) => (path, u8::MAX).hash(&mut hasher),
+        }
+    }
+    hasher.finish()
+}
+
 /// An order-independent hash of every stamped entry, and their count.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Stamp {

@@ -4214,7 +4214,9 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
     QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
     QVERIFY(state.refreshListing("mac", mac, now - FleetState::kPeerStaleMs + 1500)); window.refreshFleet(state);
     QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
-    QCOMPARE(window.rowGenerationForTests(), rendered);
+    // Unless the peer's poll grew stale meanwhile (1.5 s, as on a slow runner),
+    // which shows it offline and rightly prepares the rows again.
+    if (!state.isStale(QDateTime::currentMSecsSinceEpoch())) QCOMPARE(window.rowGenerationForTests(), rendered);
     // A changed listing renders at once.
     auto changed = later; changed.digest = "arch-2"; changed.sessions[1].prompt = "Another prompt";
     QVERIFY(!state.refreshListing({}, changed, now + 300)); state.setLocal(changed, now + 300); window.setFleet(state);

@@ -86,7 +86,7 @@ export function TaskComposer(props: { task: TaskVM }) {
   return (
     <div class="tv-composer-wrap">
       <div class="composer tv-composer" classList={{ disabled: !t().writable, describing: desc() }}>
-        <div class="cmp-resize" title="Drag to resize. Double-click to reset." />
+        <div class="cmp-resize" />
         <div class="cmp-toolbar">
           <Show when={desc()} fallback={
             <button class="tchip tv-mode" disabled={!t().writable || !canLeave()} title={modeLabel()} aria-haspopup="menu" onClick={(e) => modeMenu(e.currentTarget)}>
@@ -120,7 +120,7 @@ export function TaskComposer(props: { task: TaskVM }) {
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } }} />
         <div class="cmp-actions">
           <button class="icon-btn cmp-attach" title="Attach files (up to 8 files, 10 MiB each, 20 MiB per task)" aria-label="Attach files" disabled={!t().writable} onClick={attach}><Icon name="paperclip" size={17} /></button>
-          <span class="cmp-status ell">{!t().writable ? "Update Zerus to comment on this task" : desc() ? "Save updates the canonical task document. Comments remain separate." : "Enter to send; Shift+Enter for a new line"}</span>
+          <span class="cmp-status ell">{!t().writable ? "Update Zerus to comment on this task" : desc() ? "Save updates the canonical task document. Comments remain separate." : ""}</span>
           <span class="grow" />
           <Show when={desc()} fallback={
             <button class="btn primary tv-send" disabled={!t().writable || busy() || (!draft().text.trim() && !draft().files.length)} title={sendLabel()} aria-label={sendLabel()} onClick={send}>

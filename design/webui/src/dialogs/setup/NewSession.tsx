@@ -280,6 +280,7 @@ function NewSessionForm() {
     value: m.alias, label: m.thisComputer ? `${m.alias} (this computer)` : m.alias,
     detail: m.connection === "offline" || (demoState() === "error" && !m.thisComputer) ? "(offline)" : m.connection === "reconnecting" ? "(stale)" : undefined,
     swatch: `var(--z-entity-palette-${m.colorIndex})`,
+    tile: { os: m.platform, state: m.connection === "offline" || (demoState() === "error" && !m.thisComputer) ? "offline" as const : m.connection === "reconnecting" ? "connecting" as const : "online" as const },
   }));
 
   const preview = () =>

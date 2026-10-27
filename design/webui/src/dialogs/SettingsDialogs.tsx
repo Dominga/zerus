@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
 import { Dialog, Confirm } from "../components/Overlays";
+import { AddToMachineDialog } from "./AddToMachine";
 import { Icon, AgentGlyph } from "../lib/icons";
 import { dialog, setDialog, toast, demoState } from "../state";
 import { resolveSkins, compileSkin, SkinError, type SkinFile, type ResolvedSkin } from "../skin/skin";
@@ -520,43 +521,6 @@ function AddAccountDialog() {
       <div class="form-row"><label for="aa-name">Account name</label>
         <input id="aa-name" class="field" maxLength={160} placeholder="Work, Personal, Team…" disabled={reuse()} value={reuse() ? "" : name()} onInput={(e) => setName(e.currentTarget.value)} />
       </div>
-    </Dialog>
-  );
-}
-
-function AddToMachineDialog() {
-  const a = () => currentAccount();
-  const targets = () => accountHosts().filter((h) => online(h) && !a()?.members.some((m) => m.host === h));
-  const [host, setHost] = createSignal("");
-  const [how, setHow] = createSignal<"saved" | "copy" | "signin">("copy");
-  createEffect(() => { if (dialog() === "accounts-add-to-machine") { setHost(addTarget() !== "*" ? addTarget() : targets()[0] ?? ""); setHow("copy"); } });
-  const sources = () => (a()?.members ?? []).filter((m) => online(m.host) && m.state === "ready");
-  const add = () => {
-    const ai = accounts.findIndex((x) => x.key === a()!.key);
-    const member: AccountMember = { host: host(), id: `${a()!.provider}-${host()}`, state: how() === "signin" ? "signed-out" : "ready", isDefault: false, permission: "provider" };
-    setAccounts(ai, "members", (list) => [...list, member]);
-    setSelectedHost(host());
-    setAccountNotice(how() === "copy" ? "Account copied into a new profile. It is available in New session on that machine." : how() === "saved" ? `Account added on ${host()} using its saved sign-in.` : `Complete ${PROVIDER_NAME[a()!.provider]} sign-in in the terminal on ${host()}, this page updates automatically.`);
-    setDialog(undefined);
-  };
-  return (
-    <Dialog id="accounts-add-to-machine" title="Add account to a machine" width="520px" icon="user-round-cog"
-      footer={<><span class="spacer" /><button class="btn" onClick={() => setDialog(undefined)}>Cancel</button><button class="btn primary" disabled={!host()} onClick={add}>Add</button></>}>
-      <p>Use {a()?.label} on another machine.</p>
-      <div class="form-row"><label for="atm-host">Machine</label>
-        <select id="atm-host" class="field" value={host()} onChange={(e) => setHost(e.currentTarget.value)}><For each={targets()}>{(h) => <option value={h}>{h}</option>}</For></select>
-      </div>
-      <div class="form-row"><label for="atm-src">Copy from</label>
-        <select id="atm-src" class="field" disabled={how() !== "copy" || !sources().length}><For each={sources()}>{(m) => <option>{m.host} / {a()?.label}</option>}</For></select>
-      </div>
-      <div class="col atm-how" role="radiogroup" aria-label="Sign-in">
-        <Show when={host() === "workstation" && a()?.provider === "claude"}>
-          <label class="check"><input type="radio" name="atm" checked={how() === "saved"} onChange={() => setHow("saved")} />Use saved sign-in on this machine</label>
-        </Show>
-        <label class="check"><input type="radio" name="atm" checked={how() === "copy"} disabled={!sources().length} onChange={() => setHow("copy")} />Copy existing sign-in over SSH</label>
-        <label class="check"><input type="radio" name="atm" checked={how() === "signin"} onChange={() => setHow("signin")} />Sign in on this machine</label>
-      </div>
-      <p class="hint">A separate profile keeps other accounts and sessions on that machine intact. After sign-in, the provider identity determines which account it belongs to.</p>
     </Dialog>
   );
 }

@@ -59,7 +59,7 @@ function Header() {
   return (
     <div class="tk-head">
       <Show when={creating() && c().project} fallback={<span class="tk-scope" aria-live="polite">{scope()}</span>}>
-        <input ref={input} class="field tk-newtitle" maxlength={512} placeholder="Task title · Enter to create" aria-label="New task title"
+        <input ref={input} class="field tk-newtitle" maxlength={512} placeholder="Task title" aria-label="New task title"
           value={draft()} readOnly={reserved()} autofocus onInput={(e) => setDrafts({ ...drafts(), [c().project]: e.currentTarget.value })}
           onKeyDown={(e) => {
             if (e.key === "Enter") { e.preventDefault(); submit(); }

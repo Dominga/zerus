@@ -3,6 +3,9 @@ import { createStore } from "solid-js/store";
 import { Icon } from "../lib/icons";
 import { demoState, setDialog, setPage, toast } from "../state";
 import { machines as fleet } from "../mock/data";
+import { ALL_MACHINES, anyMachine } from "../mock/lab-fleet";
+import { MachineTile } from "../components/MachineTile";
+import type { OsKind } from "../lib/os-icons";
 import { AGENT_ACCOUNTS, type AgentAccount, type AccountMember, type MemberState, type UsageWindow } from "../mock/settings-extra";
 import { AgentBadge } from "./sessions/SessionCard";
 import { MachineLabel } from "./settings/machine-label";
@@ -30,7 +33,7 @@ export const currentAccount = () => accounts.find((a) => a.key === selectedAccou
 export const currentMember = () => currentAccount()?.members.find((m) => m.host === selectedHost()) ?? currentAccount()?.members[0];
 
 const offlineHosts = () => (demoState() === "error" ? ["build-02", "macbook"] : ["build-02"]);
-export const online = (host: string) => !offlineHosts().includes(host) && fleet.find((m) => m.alias === host)?.connection !== "offline";
+export const online = (host: string) => !offlineHosts().includes(host) && anyMachine(host)?.connection !== "offline";
 const stateOf = (m: AccountMember): MemberState => (online(m.host) ? m.state : "offline");
 
 /** Machines that can run accounts: this computer (when it has local sessions) and every peer. */
@@ -151,6 +154,25 @@ function Detail() {
     return st() === "ready" ? `Sign in again on ${m().host}…` : `Sign in on ${m().host}…`;
   };
   const busy = () => st() === "checking";
+  // Machine chips: at most four, keeping the selected machine visible.
+  const VISIBLE = 4;
+  const visibleMembers = () => {
+    const all = a().members;
+    if (all.length <= VISIBLE + 1) return all;
+    const first = all.slice(0, VISIBLE);
+    const sel = all.find((x) => x.host === m().host);
+    return sel && !first.includes(sel) ? [...first.slice(0, VISIBLE - 1), sel] : first;
+  };
+  const [moreOpen, setMoreOpen] = createSignal(false);
+  const [moreQuery, setMoreQuery] = createSignal("");
+  const addable = () => ALL_MACHINES.filter((x) => !a().members.some((mm) => mm.host === x.alias) && online(x.alias) && x.connection === "online").length;
+  // AccountsPage default button: one default account per agent and machine.
+  const makeDefault = (host: string) => {
+    const ai = accounts.findIndex((x) => x.key === a().key);
+    for (const [oi, other] of accounts.entries())
+      if (other.provider === a().provider) other.members.forEach((mm, mi) => { if (mm.host === host) setAccounts(oi, "members", mi, "isDefault", oi === ai); });
+    setAccountNotice(`Default account saved for new sessions on ${host}.`);
+  };
   return (
     <div class="acct-detail">
       <div class="acct-title">
@@ -171,22 +193,53 @@ function Detail() {
       <section class="acct-card box">
         <h3>Machines</h3>
         <div class="acct-tags" role="radiogroup" aria-label="Machine profile">
-          <For each={a().members}>
+          <For each={visibleMembers()}>
             {(x) => (
-              <button class="acct-tag" role="radio" aria-checked={x.host === m().host} classList={{ on: x.host === m().host, offline: !online(x.host) }} onClick={() => { setSelectedHost(x.host); setAccountNotice(""); }}>
-                <MachineLabel alias={x.host} />{online(x.host) ? "" : " (offline)"}
-                <Show when={x.isDefault}><Icon name="star" size={11} class="accent" /></Show>
-              </button>
+              // Default for new sessions is spelled out: a "Default" chip where it is,
+              // a "Make default" action beside the other connected machines.
+              <span class="acct-tag-wrap">
+                <button class="acct-tag" role="radio" aria-checked={x.host === m().host} classList={{ on: x.host === m().host, offline: !online(x.host) }} onClick={() => { setSelectedHost(x.host); setAccountNotice(""); }}>
+                  <MachineLabel alias={x.host} />{online(x.host) ? "" : " (offline)"}
+                  <Show when={x.isDefault}><span class="acct-default" title={`Default for new ${PROVIDER_NAME[a().provider]} sessions on ${x.host} when no account is chosen`}>Default</span></Show>
+                </button>
+                <Show when={!x.isDefault && online(x.host) && x.state === "ready" && a().provider !== "deepseek" && a().provider !== "opencode"}>
+                  <button class="btn small ghost acct-make-default" title={`Use this account for new ${PROVIDER_NAME[a().provider]} sessions on ${x.host} when no account is specified. Existing sessions keep their account.`}
+                    onClick={() => makeDefault(x.host)}>Make default</button>
+                </Show>
+              </span>
             )}
           </For>
-          <For each={missing()}>
-            {(h) => (
-              <button class="acct-tag add" disabled={!online(h)} title={online(h) ? `Add this account to ${h}` : "Machine is offline"}
-                onClick={() => { setAddTarget(h); setDialog(a().provider === "deepseek" ? "accounts-api-key" : "accounts-add-to-machine"); }}>
-                + Add to {h}
+          {/* Large fleets: the first machines (always including the selected one), then the rest in a searchable list. */}
+          <Show when={a().members.length > visibleMembers().length}>
+            <span class="acct-more-anchor">
+              <button class="acct-tag more" aria-haspopup="dialog" aria-expanded={moreOpen()} onClick={() => { setMoreQuery(""); setMoreOpen(!moreOpen()); }}>
+                +{a().members.length - visibleMembers().length} more
               </button>
-            )}
-          </For>
+              <Show when={moreOpen()}>
+                <div class="acct-more" role="dialog" aria-label={`Machines with ${a().label}`} onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setMoreOpen(false); } }}>
+                  <input class="field" type="search" placeholder={`Search ${a().members.length} machines`} value={moreQuery()} onInput={(e) => setMoreQuery(e.currentTarget.value)} autofocus aria-label="Search machines" />
+                  <div class="acct-more-list">
+                    <For each={a().members.filter((x) => x.host.includes(moreQuery().trim().toLowerCase()))} fallback={<div class="dim acct-more-empty">No machine matches.</div>}>
+                      {(x) => (
+                        <button class="acct-more-row" classList={{ on: x.host === m().host }} onClick={() => { setSelectedHost(x.host); setAccountNotice(""); setMoreOpen(false); }}>
+                          <MachineTile os={anyMachine(x.host)?.platform as OsKind | undefined} state={online(x.host) ? (anyMachine(x.host)?.connection === "reconnecting" ? "connecting" : "online") : "offline"} size={22} />
+                          <MachineLabel alias={x.host} />
+                          <span class="grow" />
+                          <Show when={x.isDefault}><span class="acct-default">Default</span></Show>
+                          <span class="dim">{x.state === "ready" ? "" : x.state === "signed-out" ? "Sign-in needed" : x.state}</span>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </div>
+              </Show>
+            </span>
+          </Show>
+          <Show when={addable() > 0 || a().provider === "deepseek"}>
+            <button class="btn small acct-add" title="Choose machines, then how to add this account to them" onClick={() => { setAddTarget("*"); setDialog("accounts-add-to-machine"); }}>
+              <Icon name="plus" size={12} />Add to machine…<span class="dim">{addable()} available</span>
+            </button>
+          </Show>
         </div>
         <div class="acct-status">
           <Status kind={tone(st())}>{statusText(a(), m())}</Status>
@@ -231,13 +284,8 @@ function Detail() {
         <Actions>
           <button class="btn" disabled={m().isDefault || !online(m().host)}
             title={`Use this account for new ${PROVIDER_NAME[a().provider]} sessions on ${m().host} when no account is specified. Existing sessions keep their account.`}
-            onClick={() => {
-              const ai = accounts.findIndex((x) => x.key === a().key);
-              for (const [oi, other] of accounts.entries())
-                if (other.provider === a().provider) other.members.forEach((mm, mi) => { if (mm.host === m().host) setAccounts(oi, "members", mi, "isDefault", oi === ai); });
-              setAccountNotice(`Default account saved for new sessions on ${m().host}.`);
-            }}>
-            <Icon name="star" size={13} />{m().isDefault ? `Default on ${m().host}` : `Make default on ${m().host}`}
+            onClick={() => makeDefault(m().host)}>
+            {m().isDefault ? `Default on ${m().host}` : `Make default on ${m().host}`}
           </button>
           <button class="btn danger" disabled={!online(m().host)} title="Remove this profile from the selected machine's Zerus catalog. You will confirm the machine and consequences before anything changes." onClick={() => setDialog("accounts-remove")}>
             <Icon name="trash" size={13} />{a().members.length > 1 ? `Remove from ${m().host}…` : "Remove…"}

@@ -6,6 +6,8 @@ import { machines as fleet, sessions } from "../mock/data";
 import type { Machine } from "../mock/types";
 import { MACHINE_CONNECTIONS, INSTALL_LOG, type MachineConnection } from "../mock/settings-extra";
 import { platform } from "./settings/store";
+import { MachineTile, type MachineState } from "../components/MachineTile";
+import type { OsKind } from "../lib/os-icons";
 import { PhonesPanel } from "./settings/Phones";
 import { Actions, Status, Lines, Spinner } from "./settings/ui";
 import { MachineLabel, labels, setLabels, labelColor } from "./settings/machine-label";
@@ -109,24 +111,26 @@ function MachineCard(props: { alias: string; local?: boolean }) {
   const key = () => (props.local ? "@local" : props.alias);
   const m = () => machineOf(props.alias);
   const live = () => props.local || m()?.connection === "online";
+  const tileState = (): MachineState => {
+    if (props.local) return "online";
+    if (peers.find((p) => p.alias === props.alias)?.enabled === false) return "disabled";
+    return m()?.connection === "online" ? "online" : m()?.connection === "reconnecting" ? "connecting" : "offline";
+  };
   return (
     <button class="mach-card" classList={{ on: selectedMachine() === key(), offline: !live() }} aria-current={selectedMachine() === key()} onClick={() => selectMachine(key())}>
-      <span class="row">
-        <MachineLabel alias={props.alias} />
-        <span class="grow" />
-        <Show when={m()}>
-          <span class="mach-conn" classList={{ [m()!.connection]: true }} title={m()!.connection === "reconnecting" ? `Connecting… last answer ${m()!.lastSeen}` : m()!.connection === "offline" ? `Last answer ${m()!.lastSeen}` : "Connected"}>
-            <Show when={m()!.connection === "reconnecting"} fallback={<Icon name={m()!.connection === "offline" ? "wifi-off" : "wifi"} size={12} />}><Spinner size={11} /></Show>
+      {/* The OS in a rounded tile; the corner dot carries the connection state. */}
+      <MachineTile os={m() ? ((props.local ? platform : m()!.platform) as OsKind) : undefined} state={tileState()}
+        title={tileState() === "connecting" ? `Connecting… last answer ${m()?.lastSeen}` : tileState() === "offline" ? `Not connected · last answer ${m()?.lastSeen}` : undefined} />
+      <span class="mach-col">
+        <span class="row"><MachineLabel alias={props.alias} /></span>
+        <span class="mach-state">{props.local ? (isConsole() ? "This computer: control console" : "This machine") : stateLine(props.alias)}</span>
+        <Show when={m() && !(props.local && isConsole())}>
+          <span class="mach-meta tabular">
+            {{ macos: "macOS", windows: "Windows", linux: "Linux" }[props.local ? platform : m()!.platform]} · hgs {m()!.hgsVersion}
+            <Show when={!live()}> · last seen {m()!.lastSeen}</Show>
           </span>
         </Show>
       </span>
-      <span class="mach-state">{props.local ? (isConsole() ? "This computer: control console" : "This machine") : stateLine(props.alias)}</span>
-      <Show when={m() && !(props.local && isConsole())}>
-        <span class="mach-meta tabular">
-          {{ macos: "macOS", windows: "Windows", linux: "Linux" }[props.local ? platform : m()!.platform]} · hgs {m()!.hgsVersion}
-          <Show when={!live()}> · last seen {m()!.lastSeen}</Show>
-        </span>
-      </Show>
     </button>
   );
 }

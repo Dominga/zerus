@@ -41,8 +41,16 @@ export function AttachmentsChip(props: { items: DraftAttachment[]; onRemove: (id
   const [removed, setRemoved] = createSignal<{ item: DraftAttachment; index: number }>();
   // The toolbar clips its overflow, so the list is placed in the viewport above the chip;
   // the preview goes to the right of the list, or to the left when there is no room.
-  const [pos, setPos] = createSignal({ left: 0, bottom: 0, flip: false });
-  const place = () => { const r = chip.getBoundingClientRect(); setPos({ left: Math.max(8, Math.min(r.left, innerWidth - 368)), bottom: innerHeight - r.top + 6, flip: r.left + 360 + 344 > innerWidth }); };
+  // The preview takes the side with room for it (336 px), else goes above the list; it never covers the list.
+  const [pos, setPos] = createSignal<{ left: number; bottom: number; side: "right" | "left" | "above" }>({ left: 0, bottom: 0, side: "right" });
+  const place = () => {
+    const r = chip.getBoundingClientRect();
+    const left = Math.max(8, Math.min(r.left, innerWidth - 368));
+    setPos({ left, bottom: innerHeight - r.top + 6, side: innerWidth - (left + 360) >= 344 ? "right" : left >= 344 ? "left" : "above" });
+  };
+  // Focus alone never opens a preview: the pointer must rest on a row, or an
+  // arrow key must have moved to it. Opening the list shows no preview.
+  let arrowed = false;
   let chip!: HTMLButtonElement;
   let list: HTMLDivElement | undefined;
   const close = (refocus = false) => { setOpen(false); setPreview(undefined); if (refocus) chip.focus(); };
@@ -59,7 +67,7 @@ export function AttachmentsChip(props: { items: DraftAttachment[]; onRemove: (id
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(true); return; }
     const r = rows(), i = r.indexOf(document.activeElement as HTMLElement);
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); r[(i + (e.key === "ArrowDown" ? 1 : -1) + r.length) % r.length]?.focus(); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); arrowed = true; r[(i + (e.key === "ArrowDown" ? 1 : -1) + r.length) % r.length]?.focus(); }
   };
   const outside = (e: PointerEvent) => { if (open() && !list?.contains(e.target as Node) && !chip.contains(e.target as Node)) close(); };
   onMount(() => addEventListener("pointerdown", outside));
@@ -69,16 +77,21 @@ export function AttachmentsChip(props: { items: DraftAttachment[]; onRemove: (id
     <span class="att-anchor">
       <button ref={chip} class="tchip" classList={{ on: open() }} hidden={!props.items.length && !open()} aria-haspopup="dialog" aria-expanded={open()}
         title={props.items.map((a) => `${a.reference} ${a.name}`).join("\n")}
-        onClick={() => { setRemoved(undefined); place(); setOpen(!open()); if (!open()) return; queueMicrotask(() => rows()[0]?.focus()); }}>
+        onClick={(e) => {
+          setRemoved(undefined); setPreview(undefined); arrowed = false; place(); setOpen(!open());
+          if (!open()) return;
+          // A keyboard open (Enter/Space: detail 0) focuses the first row; a click focuses the list itself.
+          queueMicrotask(() => (e.detail === 0 ? rows()[0] : list)?.focus({ preventScroll: true }));
+        }}>
         <Icon name="paperclip" size={13} />{props.items.length} attached
       </button>
       <Show when={open()}>
-        <div class="att-pop" classList={{ flip: pos().flip }} ref={list} role="dialog" aria-label="Attachments" onKeyDown={onKey}
+        <div class="att-pop" classList={{ [`pv-${pos().side}`]: true }} ref={list} tabindex="-1" role="dialog" aria-label="Attachments" onKeyDown={onKey}
           style={{ left: `${pos().left}px`, bottom: `${pos().bottom}px` }}>
           <div class="att-head"><b>Attachments</b><span class="dim">{props.items.length} of 8 · up to 10 MiB each</span></div>
           <For each={props.items}>{(a, i) => (
             <div class="att-row" tabindex="0" role="button" aria-label={`Open ${a.name}`} title={`Open ${a.name}`}
-              onMouseEnter={() => setPreview(a.id)} onMouseLeave={() => setPreview(undefined)} onFocus={() => setPreview(a.id)}
+              onMouseEnter={() => setPreview(a.id)} onMouseLeave={() => setPreview(undefined)} onFocus={() => { if (arrowed) setPreview(a.id); }}
               onClick={() => openFile(a)}
               onKeyDown={(e) => {
                 if (e.target !== e.currentTarget) return;

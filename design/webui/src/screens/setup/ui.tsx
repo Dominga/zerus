@@ -1,5 +1,7 @@
 import { For, Show, createEffect, createRoot, createSignal, type JSX } from "solid-js";
 import { Icon } from "../../lib/icons";
+import { MachineTile, type MachineState } from "../../components/MachineTile";
+import type { OsKind } from "../../lib/os-icons";
 import { dialog, setDialog } from "../../state";
 import { projectColor, type EditableProject } from "./store";
 import "../../styles/setup.css";
@@ -95,7 +97,7 @@ export function SDialog(props: {
 // picker can show color swatches and badges. Browsers without it fall back to
 // the plain list with the same readable option text.
 
-export interface RichOption { value: string; label: string; swatch?: string; vivid?: boolean; detail?: string; icon?: string; disabled?: boolean }
+export interface RichOption { value: string; label: string; swatch?: string; vivid?: boolean; detail?: string; icon?: string; disabled?: boolean; tile?: { os?: OsKind; state: MachineState } }
 
 /** Progressive enhancement: the button and <selectedcontent> exist only where supported. */
 const richSelects = typeof CSS !== "undefined" && CSS.supports("appearance", "base-select");
@@ -124,6 +126,7 @@ export function RichSelect(props: {
       <For each={props.options}>
         {(o) => (
           <option value={o.value} disabled={o.disabled} aria-label={o.detail ? `${o.label} ${o.detail}` : o.label} selected={o.value === props.value}>
+            <Show when={o.tile}><MachineTile os={o.tile!.os} state={o.tile!.state} size={20} /></Show>
             <Show when={o.swatch}><span class="su-rssw entity" classList={{ vivid: o.vivid }} style={{ "--entity": o.swatch }}><Icon name="folder" size={11} /></span></Show>
             <Show when={o.icon}><Icon name={o.icon!} size={13} class="su-rsico" /></Show>
             <span class="su-rslabel">{o.label}</span>

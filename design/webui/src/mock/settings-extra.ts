@@ -247,7 +247,7 @@ export const AGENT_ACCOUNTS: AgentAccount[] = [
     key: "a-claude-eng", label: "Aurora engineering", provider: "claude", email: "eng@example.com", plan: "Max",
     members: [
       { host: "workstation", id: "acc-claude-ws", state: "ready", isDefault: true, permission: "provider", permissionDetail: "Ask before tools (default mode).", model: "claude-opus-4-6", effort: "high" },
-      { host: "build-01", id: "acc-claude-b1", state: "ready", isDefault: true, permission: "bypass" },
+      { host: "build-01", id: "acc-claude-b1", state: "ready", isDefault: false, permission: "bypass" },
       { host: "build-02", id: "acc-claude-b2", state: "offline", isDefault: false, permission: "provider" },
     ],
     usage: { windows: [{ label: "5h", used: 34, resets: "27 Oct 17:50", resetIn: "2h 8m", elapsed: 58 }, { label: "7d", used: 18, resets: "1 Nov 09:00", resetIn: "4d 17h", elapsed: 33 }], updated: "15:41" },

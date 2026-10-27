@@ -108,9 +108,12 @@ export function Composer() {
       <textarea class="cmp-editor" style={{ height: `${editorHeight() * contentScale()}px` }} placeholder={offline() ? "Machine unavailable. Your draft stays here." : "Message this agent…"} value={text()} onInput={(e) => setText(e.currentTarget.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
       <div class="cmp-actions">
-        <button class="icon-btn cmp-attach" title="Attach files (up to 8 files, 10 MiB each)"><Icon name="paperclip" size={17} /></button>
-        <button class="icon-btn cmp-attach" title="Reference an existing file without uploading it" onClick={() => setDialog("reference-file")}><Icon name="file-text" size={16} /></button>
-        <span class="cmp-status ell">{offline() ? "Machine unavailable. Your draft stays here." : "Enter to send; Shift+Enter for a new line"}</span>
+        {/* Attach and reference sit together as one group; 32 px hit areas, 2 px apart. */}
+        <span class="cmp-files">
+          <button class="icon-btn cmp-attach" title="Attach files (up to 8 files, 10 MiB each)"><Icon name="paperclip" size={17} /></button>
+          <button class="icon-btn cmp-attach" title="Reference an existing file without uploading it" onClick={() => setDialog("reference-file")}><Icon name="file-text" size={16} /></button>
+        </span>
+        <Show when={offline()}><span class="cmp-status ell">Machine unavailable. Your draft stays here.</span></Show>
         <span class="grow" />
         <button class="btn ghost cmp-model" onClick={() => setDialog("model")} title="Model and reasoning effort">
           {s()?.model} <span class="dim">{s()?.effort}</span><Icon name="chevron-down" size={12} />

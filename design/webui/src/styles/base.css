@@ -103,6 +103,15 @@
     background: var(--z-color-hover); color: var(--z-color-text-3); flex: none;
   }
   .chip.mono { font-size: var(--fs-2xs); }
+  /* Machine tile: the OS glyph in a rounded tile with the connection dot on its
+     corner. The dot's ring takes the colour behind the tile (--mt-ring). */
+  .mtile { --mt-ring: var(--z-color-pane); --mt-dot: var(--z-list-usage-normal); position: relative; flex: none; display: grid; place-items: center;
+    width: var(--mt); height: var(--mt); border-radius: calc(var(--mt) * .27); border: 1px solid var(--z-color-border); background: var(--z-color-field); color: var(--z-color-text-2); }
+  .mtile.s-offline { --mt-dot: var(--z-list-usage-critical); color: var(--z-color-muted); }
+  .mtile.s-connecting { --mt-dot: var(--z-list-usage-warning); }
+  .mtile.s-disabled { --mt-dot: var(--z-color-dim); color: var(--z-color-dim); }
+  .mtile-dot { position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--mt-dot); box-shadow: 0 0 0 2px var(--mt-ring); }
+  .mtile.s-connecting .mtile-dot::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 1.5px solid var(--mt-dot); animation: mt-pulse 1.4s ease-out infinite; }
   .entity {
     --entity: var(--z-entity-palette-0);
     background: color-mix(in srgb, var(--entity) var(--z-entity-fill-mix), var(--z-color-entity-base));
@@ -257,3 +266,5 @@
   :root[data-status-badge="dot"] .status { background: transparent; padding: 0 2px; font-weight: 500; }
   :root[data-status-badge="dot"] .status .dot { width: 7px; height: 7px; }
 }
+@keyframes mt-pulse { from { transform: scale(.7); opacity: .9; } to { transform: scale(1.5); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .mtile.s-connecting .mtile-dot::after { animation: none; opacity: .6; } }

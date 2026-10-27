@@ -9,6 +9,7 @@ import {
   setProjectFilter,
 } from "../state";
 import { AgentBadge, MachineBadge, SessionCard } from "./sessions/SessionCard";
+import { MachineTile } from "../components/MachineTile";
 import { UsageMeters, type UsageIndicator } from "../components/UsageMeter";
 import { accountWindows } from "../lib/usage";
 import { prefs } from "./settings/store";
@@ -65,6 +66,7 @@ function MachineCard(props: { m: Machine; refreshedAt: number }) {
   return (
     <article class="ov-mcard box" classList={{ stale: !fresh() }} aria-label={props.m.thisComputer ? "This machine" : props.m.alias}>
       <header class="ov-mtop">
+        <MachineTile os={props.m.platform} state={fresh() ? "online" : f() === "stale" ? "connecting" : "offline"} size={28} />
         <MachineBadge alias={props.m.alias} />
         <span class="ov-mtitle ell" title={props.m.alias}>{props.m.thisComputer ? "This machine" : ""}</span>
         <span class="ov-mstatus" classList={{ online: fresh() }}>{fresh() ? "Connected" : f() === "stale" ? "Stale" : "Offline"}</span>

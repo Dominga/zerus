@@ -59,7 +59,6 @@ function ColumnEdge(props: { right?: boolean }) {
   return (
     <div class="col-edge" classList={{ right: props.right, dragging: dragging() }} role="separator" aria-orientation="vertical" tabindex="0"
       aria-label="Activity width" aria-valuemin={COLUMN.min} aria-valuemax={COLUMN.max} aria-valuenow={columnWidth()}
-      title="Drag to resize Activity. Double-click to restore the default width."
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         e.preventDefault();

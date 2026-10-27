@@ -39,7 +39,26 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QProcess>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QUuid>
 #include <QSignalBlocker>
+
+// U19: the subagent setting lives in hgs, not QSettings; one bounded call each
+// way. An unavailable hgs keeps the default (on) and changes nothing.
+inline QJsonObject subagentSetting(const QString &executable, const QStringList &args, const QByteArray &input = {})
+{
+    if (executable.isEmpty()) return {};
+    QProcess process;
+    process.start(executable, args);
+    if (!process.waitForStarted(3000)) return {};
+    if (!input.isEmpty()) process.write(input);
+    process.closeWriteChannel();
+    if (!process.waitForFinished(5000)) return {};
+    const auto document = QJsonDocument::fromJson(process.readAllStandardOutput());
+    return document.isObject() ? document.object() : QJsonObject{};
+}
 
 class SettingsPage : public QWidget {
 public:
@@ -146,6 +165,16 @@ public:
         auto *optionalQuestions=new QCheckBox(tr("Notify about optional questions"));optionalQuestions->setObjectName("notifyOptionalQuestions");optionalQuestions->setChecked(QuestionNotificationSettings::enabled());sessions->addWidget(optionalQuestions);
         auto *optionalHint=new QLabel(tr("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify."));optionalHint->setWordWrap(true);sessions->addWidget(optionalHint);
         connect(optionalQuestions,&QCheckBox::toggled,this,[](bool on){QuestionNotificationSettings::setEnabled(on);});
+        // U19: read and write the hgs setting; text says what the ask contains.
+        auto *subagents=new QCheckBox(tr("Ask before an agent starts subagents"));subagents->setObjectName("workspaceConfirmSubagents");
+        const auto current=subagentSetting(executable,{QStringLiteral("subagents-confirm"),QStringLiteral("get"),QStringLiteral("--json")});
+        subagents->setChecked(current.value("confirm").toBool(true));sessions->addWidget(subagents);
+        auto *subagentsHint=new QLabel(tr("Zerus asks you before a session starts subagents, with how many, which type and model."));subagentsHint->setWordWrap(true);sessions->addWidget(subagentsHint);
+        connect(subagents,&QCheckBox::toggled,this,[executable](bool on){
+            const QJsonObject input{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"confirm",on}};
+            subagentSetting(executable,{QStringLiteral("subagents-confirm"),QStringLiteral("set"),QStringLiteral("--json")},
+                QJsonDocument(input).toJson(QJsonDocument::Compact));
+        });
 #ifdef Q_OS_WIN
         // WhiteWh fork: other computers start sessions here over SSH (src/windows_peer.rs).
         auto *residentHost=new QCheckBox(tr("Keep the session host running for other computers"));residentHost->setObjectName("residentSessionHost");

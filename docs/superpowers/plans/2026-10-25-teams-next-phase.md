@@ -861,6 +861,26 @@ answered; a denial cannot carry an explanation.
   phase's health and the lane balance are recomputed and the change is in the
   feed. Owner: yes.
 
+- **U30. Six session states (owner, 2026-10-27; the owner's explicit
+  direction for the status contract).** The design is
+  `D:\Tools\Zerus-UI-handoff\Status\SESSION-STATES.md` with 13 shots. A
+  session is Working (the turn runs, with its timer), Waiting for you (an
+  approval, an input, a reply to read, or the lead's "Needs you"), Waiting
+  for dependencies (always with the reason: subagents by name, a long
+  operation with its command and duration, a usage limit, the phase or task
+  or role a team member waits for, a lead's reports), Cooling (done, the
+  prompt cache still warm, a countdown and a heat bar), Cold (done, the cache
+  expired: "+ New" opens New session prefilled, "Resume" keeps the session)
+  and Stopped (by you); Offline stays. The order of computing them and the
+  tokens are in that file; the cache TTL comes from the agent (Claude 5 min
+  or 1 h, Keep cache warm extends it). The former Background state becomes
+  Waiting for dependencies with the job named, and keeps its rules: it stays
+  in Active and accepts new messages, native work and explicit attention take
+  precedence, a native Stop does not prove the jobs finished, reply-only
+  badges wait until the work completes, and historical, unknown or offline
+  jobs never make a session wait. Desktop, Android, the shared fixtures and
+  the docs (CLAUDE.md and AGENTS.md included) change together. Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

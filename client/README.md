@@ -45,12 +45,18 @@ the frontend then uses its built-in replay.
 ## Headless runs
 
 Development windows never open on a desktop someone is using. On Linux run the
-app inside Xvfb with the desktop's displays removed:
+app inside Xvfb with GTK forced to X11 and the Wayland socket name pointing
+nowhere. Unsetting `WAYLAND_DISPLAY` is not enough: GTK then tries the default
+socket `wayland-0` and the window opens on the desktop while Xvfb stays empty.
 
 ```sh
-env -u WAYLAND_DISPLAY -u DISPLAY xvfb-run -a -s "-screen 0 1440x900x24" \
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+  xvfb-run -a -s "-screen 0 1440x900x24" \
   sh -c 'RUSTUP_TOOLCHAIN=1.99.1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson npx tauri dev'
 ```
+
+Without `WEBKIT_DISABLE_DMABUF_RENDERER=1` WebKitGTK paints a black window in
+Xvfb.
 
 Screenshots of real sessions are never committed; the fixtures are synthetic
 (example domains, `/home/example` paths).

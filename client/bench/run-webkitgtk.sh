@@ -23,7 +23,7 @@ done
 
 case "${ZERUS_BENCH_DISPLAY:-xvfb}" in
 xvfb)
-    exec env -u WAYLAND_DISPLAY -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
+    exec env -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY=zerus-none \
         GDK_BACKEND=x11 ZERUS_BENCH_XVFB=1 \
         xvfb-run -a -s "-screen 0 1440x900x24" \
         python3 "$here/run-webkitgtk.py" "$@"

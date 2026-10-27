@@ -42,7 +42,7 @@ real_display() {
 case "${ZERUS_BENCH_DISPLAY:-xvfb}" in
 xvfb)
     # Drop every display and the session bus, then start a private Xvfb.
-    exec env -u WAYLAND_DISPLAY -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS \
+    exec env -u DISPLAY -u DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY=zerus-none \
         QT_QPA_PLATFORM=xcb ZERUS_BENCH_XVFB=1 \
         xvfb-run -a -s "-screen 0 1440x900x24" "$program" "$@"
     ;;

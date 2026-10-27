@@ -38,6 +38,10 @@ public:
                      const QString &fallbackPrompt = {}, bool tracked = true);
     void setTimeline(const QJsonObject &details, const QJsonArray &events,
                      const QJsonArray &localMessages, const QString &fallbackPrompt = {}, bool tracked = true);
+    // Read-only task records using the same Markdown, message cards and copy UI.
+    // Entries: id, at (milliseconds), author, label, role (person/agent/event), text.
+    // These presentation records never become native session lifecycle events.
+    void setTaskJournal(const QString &key, const QJsonArray &entries, bool followLatest = true);
     // The owner reconciles these local acknowledgements with arriving hooks.
     // Items: id, text, submitted_at, status, attachments (file references), error.
     void setLocalMessages(const QJsonArray &messages);
@@ -70,6 +74,7 @@ public slots:
     void jumpToLatest();
 
 signals:
+    void taskDocumentEditRequested();
     // Files are routed to the session owner, which knows their machine and cwd.
     void fileReferenceActivated(const QString &href);
     void externalLinkActivated(const QUrl &url);
@@ -94,6 +99,8 @@ private:
     void render(bool contentUpdate);
     void startRender();
     void clearDocument();
+    void resetSessionKey(const QString &key, bool preserveDocument);
+    bool m_taskJournalReset = false;
     void commitRender(const std::shared_ptr<ActivityRenderResult> &result);
     void updateJumpButton();
     void positionJumpButton();

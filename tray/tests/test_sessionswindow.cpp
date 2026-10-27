@@ -30,6 +30,8 @@
 #include <QMenu>
 #include <QStackedWidget>
 #include <QSplitter>
+#include <QSplitterHandle>
+#include <QMouseEvent>
 #include <QScrollBar>
 #include <QListWidget>
 #include "GoToDialog.h"
@@ -61,6 +63,7 @@
 #include "DownloadCache.h"
 #include "ProcessView.h"
 #include "TasksView.h"
+#include "TaskInspector.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
 #include "ExternalFile.h"
@@ -355,6 +358,10 @@ private slots:
     void sessionRowsHaveNoHoverPopup();
     void subagentGroupsAndUnavailableActivity();
     void inspectorPreservesWorkspaceAndReportsTasks();
+    void inspectorWidthSurvivesResizeHideAndRestartAndResetsOnDoubleClick();
+    void taskExecutorStartsOnlyThroughTheLaunchDialog();
+    void restoredTaskLaunchDeliveryIsReservedAndNeverReplayed_data();
+    void restoredTaskLaunchDeliveryIsReservedAndNeverReplayed();
     void tasksTabFollowsTheOpenSessionsProject();
     void tasksDropOnTheirProjectsSessionsAndHeader();
     void tasksPreview();
@@ -1087,6 +1094,81 @@ void TestSessionsWindow::projectFilterCombinesScopesCountsAndNavigation()
     window.showSession("mac","claude/infra/review"); QVERIFY(projects->selection().isEmpty()); QCOMPARE(parents(),5);
 }
 
+void TestSessionsWindow::taskExecutorStartsOnlyThroughTheLaunchDialog()
+{
+    SessionOrganization org; const auto project = org.createGroup("Work");
+    org.moveSession(org.observe("arch", "codex/hgs/dashboard", ""), project);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    SessionsWindow window(program()); window.setFleet(fleet()); window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *tasks = window.findChild<TasksView *>(); QVERIFY(tasks);
+    QSignalSpy launches(&window, &SessionsWindow::newSessionRequested);
+    TaskItem task; task.uuid = "task-uuid"; task.targetKind = "new_session"; task.targetSession = "codex/hgs/dashboard";
+    task.targetId = "launch_id:parent"; task.targetMachine = "parent-node";
+    QVERIFY(QSettings().value("tasks/pendingExecutorLaunches").toByteArray().isEmpty()); QCOMPARE(launches.size(), 0);
+    bool submitted = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto *dialog = qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); if (!dialog) return;
+        const auto close = qScopeGuard([dialog] { dialog->reject(); });
+        QCOMPARE(launches.size(), 0);
+        QVERIFY(QSettings().value("tasks/pendingExecutorLaunches").toByteArray().isEmpty());
+        dialog->launchRequested({}, "codex", "/workspace/project", "task-helper", "native-codex", project, true, {}, {}, {});
+        submitted = true;
+    });
+    tasks->newExecutorRequested(task, project); QVERIFY(submitted); QCOMPARE(launches.size(), 1);
+    const auto records = QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object();
+    QCOMPARE(records.size(), 1); const auto record = records.begin().value().toObject();
+    QCOMPARE(record.value("task").toString(), task.uuid); QCOMPARE(record.value("parent").toString(), QString("parent-node/launch_id:parent"));
+    QCOMPARE(record.value("phase").toString(), QString("waiting"));
+    QVERIFY(tasks->hasExecutorLaunch(task.uuid));
+    const auto token = records.begin().key(); window.newSessionLaunchFailed(token, "Fixture launch failure");
+    const auto failed = QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().value(token).toObject();
+    QCOMPARE(failed.value("phase").toString(), QString("review"));
+}
+
+void TestSessionsWindow::restoredTaskLaunchDeliveryIsReservedAndNeverReplayed_data()
+{
+    QTest::addColumn<bool>("confirmed");
+    QTest::newRow("exact-receipt") << true;
+    QTest::newRow("unconfirmed-reply") << false;
+}
+void TestSessionsWindow::restoredTaskLaunchDeliveryIsReservedAndNeverReplayed()
+{
+    QFETCH(bool, confirmed);
+    const auto token = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    SessionOrganization org; const auto project = org.createGroup("Work");
+    org.moveSession(org.observe("arch", "codex/hgs/task-helper", token), project);
+    QSettings().setValue("workspace/organization", QJsonDocument(org.toJson()).toJson(QJsonDocument::Compact));
+    const QJsonObject record{{"task", "task-uuid"}, {"project", project}, {"host", ""}, {"cmd", "codex"}, {"tag", "task-helper"},
+        {"parent", "parent-node/launch_id:parent"}, {"phase", "waiting"}, {"created", QDateTime::currentSecsSinceEpoch()}};
+    QSettings().setValue("tasks/pendingExecutorLaunches", QJsonDocument(QJsonObject{{token, record}}).toJson(QJsonDocument::Compact));
+    const auto fixture = tasksFixture(confirmed ? "task-executor-confirmed" : "task-executor-unconfirmed", {}); QVERIFY(!fixture.isEmpty());
+    if (confirmed) {
+        const QJsonObject task{{"uuid", "task-uuid"}, {"stage", "active"}, {"session", QJsonObject{{"host", ""}, {"session_id", "launch_id:" + token}}},
+            {"log", QJsonArray{QJsonObject{{"kind", "sent"}, {"request_id", "exact-receipt"}}}}};
+        QVERIFY(FakeCli::replace(fixture + ".task-receipt", QJsonDocument(QJsonObject{{"task", task}, {"receipt", QJsonObject{{"request_id", "exact-receipt"}}}}).toJson()));
+    }
+    auto state = fleet(); auto box = state.local(); auto session = box.sessions.first();
+    session.name = "codex/hgs/task-helper"; session.cmd = "codex"; session.launchId = token;
+    box.sessions = {session}; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    {
+        SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(state); window.show();
+        auto *client = window.findChild<HgsClient *>(); QSignalSpy replied(client, &HgsClient::taskReady);
+        // A listing reply cannot be mistaken for a durable exact task-send receipt.
+        if (confirmed) QTRY_VERIFY(!QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().contains(token));
+        else QTRY_VERIFY(QJsonDocument::fromJson(QSettings().value("tasks/pendingExecutorLaunches").toByteArray()).object().value(token).toObject().value("phase") == "review");
+        QFile calls(fixture + ".tasks"); QVERIFY(calls.open(QIODevice::ReadOnly)); const auto text = calls.readAll();
+        QVERIFY(text.contains("--expect-new-session-parent")); QVERIFY(text.contains("parent-node/launch_id:parent"));
+        window.setFleet(state); QTest::qWait(80); window.close();
+    }
+    QFile before(fixture + ".tasks"); QVERIFY(before.open(QIODevice::ReadOnly)); const auto previous = before.readAll(); before.close();
+    {
+        SessionsWindow restored(FakeCli::program(fixture)); keepDetailsPollsOut(restored); restored.setFleet(state); restored.show(); QTest::qWait(120);
+    }
+    QFile after(fixture + ".tasks"); QVERIFY(after.open(QIODevice::ReadOnly)); const auto final = after.readAll();
+    int sends = 0; for (const auto &line : final.split('\n')) if (line.contains("\"send\"")) ++sends;
+    QCOMPARE(sends, 1); QVERIFY(final.startsWith(previous));
+}
+
 void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
 {
     SessionOrganization org; const auto work=org.createGroup("Work");
@@ -1106,47 +1188,44 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
     window.showSession({}, "codex/hgs/dashboard");
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>();
-    auto *badge = window.findChild<TaskTabBadge *>("taskTabBadge"); QVERIFY(tabs && view && badge);
-    QCOMPARE(tabs->tabBar()->tabButton(tabs->indexOf(view), QTabBar::RightSide), badge);
-    // The label counts the project's tasks in In review and To do.
-    QTRY_COMPARE(badge->property("todo").toInt(), 2); QCOMPARE(badge->property("review").toInt(), 1); QVERIFY(badge->isVisible());
-    // The counts take room in the label: the tab widens to hold the text and the badge.
-    QTRY_VERIFY(badge->width() >= badge->sizeHint().width() && badge->width() > 0);
-    QVERIFY(tabs->tabBar()->tabRect(tabs->indexOf(view)).width() > QFontMetrics(tabs->tabBar()->font()).horizontalAdvance("Tasks") + badge->width());
-    QVERIFY(tabs->tabBar()->tabRect(tabs->indexOf(view)).contains(badge->geometry()));
+    QVERIFY(tabs && view); QCOMPARE(tabs->indexOf(view), -1); QVERIFY(!view->isVisible());
+    for (int i = 0; i < tabs->count(); ++i) QVERIFY(tabs->tabText(i).compare("Task board", Qt::CaseInsensitive) != 0);
+    auto *board = window.findChild<TaskInspector *>(); QVERIFY(board);
+    auto *side = window.findChild<QTabWidget *>("sessionInspector");
+    if (!side->isVisible()) window.findChild<QAbstractButton *>("toggleInspector")->click();
+    side->setCurrentWidget(board); QTRY_VERIFY(board->isVisible());
+    QTRY_COMPARE(board->displayedCount(), 1); // Review is the initial stage.
     QFile calls(fixture + ".tasks"); QVERIFY(calls.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(calls.readLine()).array(), QJsonArray({"task", "list", "--project", work}));
-    tabs->setCurrentWidget(view); QTRY_VERIFY(view->isVisible());
-    // The tab keeps Activity's column: the task input lines up with the message input.
-    auto *messages = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(messages);
-    QTRY_COMPARE(view->composer()->mapTo(&window, QPoint()).x(), messages->mapTo(&window, QPoint()).x());
-    QCOMPARE(view->composer()->width(), messages->width());
-    QCOMPARE(view->findChild<QWidget *>("taskTile:review")->mapTo(&window, QPoint()).x(), messages->mapTo(&window, QPoint()).x());
-    QCOMPARE(view->composer()->sessionKey(), QString("task-draft\n\ncodex/hgs/dashboard"));
-    // The project's other session exists, so its pinned task can be sent.
-    view->findChild<QAbstractButton *>("taskTile:todo")->click();
-    auto *row = view->findChild<QWidget *>("taskRow:T-000002"); QVERIFY(row);
+    board->selectTask("T-000002"); QTRY_COMPARE(board->selectedStage(), QString("todo"));
+    auto *row = board->findChild<TaskRow *>("taskInspectorRow:T-000002"); QTRY_VERIFY(row);
     QVERIFY(row->findChild<QToolButton *>("taskAction:sendNow")->isEnabled());
-    QVERIFY(row->findChild<QLabel *>("taskMeta")->text().contains("→ research"));
+    auto *messages = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(messages);
     // The side panel's first tab is the agent's own plan, not the project's tasks.
     QCOMPARE(window.findChild<QTabWidget *>("sessionInspector")->tabText(0), QString("Plan && agents"));
     messages->editor()->setPlainText("Keep my Activity draft");
     QTest::mouseClick(row, Qt::LeftButton, {}, QPoint(60, row->height() - 15));
-    QTRY_COMPARE(tabs->currentIndex(), 0);
+    auto *taskView = window.findChild<QWidget *>("taskDetailsPane");
+    QTRY_COMPARE(tabs->currentWidget(), taskView); QCOMPARE(tabs->tabText(tabs->indexOf(taskView)), QString("Task View"));
+    auto *taskComposer = window.findChild<MessageComposer *>("taskCommentComposer"); QVERIFY(taskComposer && taskComposer->isVisible());
+    QVERIFY(taskComposer->findChild<ToolbarChip *>("voiceRecord"));
+    QTRY_VERIFY(taskComposer->sessionKey().endsWith("T-000002"));
+    taskComposer->editor()->setPlainText("A task comment draft");
+    tabs->setCurrentIndex(0); QCOMPARE(messages->editor()->toPlainText(), QString("Keep my Activity draft"));
+    tabs->setCurrentWidget(taskView); QCOMPARE(taskComposer->editor()->toPlainText(), QString("A task comment draft"));
     auto *inspector = window.findChild<QTabWidget *>("sessionInspector");
     QCOMPARE(inspector->currentWidget()->objectName(), QString("taskInspector"));
     QVERIFY(inspector->isVisible()); QCOMPARE(messages->editor()->toPlainText(), QString("Keep my Activity draft"));
     // A session in no project explains where tasks live.
     window.showSession({}, "codex/website/navigation");
     QTRY_VERIFY(view->findChild<QLabel *>("taskEmpty")->text().startsWith("Tasks belong to a project"));
-    QCOMPARE(badge->property("todo").toInt(), 0); QVERIFY(!badge->isVisible());
 }
 
 QString TestSessionsWindow::tasksFixture(const QString &name, const QJsonArray &tasks) const
 {
     QFile original(script()); if (!original.open(QIODevice::ReadOnly)) return {};
-    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':json.loads("
-        + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + "),'damaged':[]}))\n";
+    const QByteArray answer = "elif c=='task':\n open(__file__+'.tasks','a').write(json.dumps(a)+'\\n')\n if a[1:2]==['send'] and __import__('pathlib').Path(__file__+'.task-receipt').exists(): print(open(__file__+'.task-receipt').read())\n else:\n  tasks=json.loads("
+        + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(tasks).toJson(QJsonDocument::Compact))) + ")\n  if a[1:2]==['get']: print(json.dumps({'task':next(t for t in tasks if t['uuid']==a[2])}))\n  else: print(json.dumps({'project':{'id':a[a.index('--project')+1],'name':'Work'},'tasks':tasks,'damaged':[]}))\n";
     const QString fixture = m_dir->filePath(name);
     return FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)) ? fixture : QString();
 }
@@ -1895,10 +1974,11 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     };
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
     const auto editorPixels = [composer] { return QFontInfo(composer->editor()->font()).pixelSize(); };
-    const QStringList chrome{"sessionList", "search", "detailTitle", "sessionInspector", "sessionInfo", "terminalStatus", "sendMessage"};
+    const QStringList chrome{"sessionList", "search", "detailTitle", "sessionInspector", "sessionInfo", "terminalStatus", "sendMessage", "taskDetailTabs"};
     QMap<QString, int> before; for (const auto &name : chrome) { before.insert(name, pixels(name)); QVERIFY2(before.value(name) > 0, qPrintable(name)); }
     const int tabs = QFontInfo(window.findChild<QTabWidget *>("sessionDetailTabs")->tabBar()->font()).pixelSize();
     QCOMPARE(pixels("activity"), 13); QCOMPARE(pixels("terminalScreen"), 13); QCOMPARE(editorPixels(), 13);
+    QCOMPARE(pixels("taskInspectorDetail"), 13);
     window.findChild<QPushButton *>("workspaceSettings")->click();
     auto *settings = window.findChild<QWidget *>("settingsPage"); QVERIFY(settings && settings->isVisible());
     auto *slider = settings->findChild<QSlider *>("workspaceContentScale"); QVERIFY(slider && slider->isVisible());
@@ -1909,6 +1989,7 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     QCOMPARE(settings->findChild<QLabel *>("workspaceContentScaleValue")->text(), QString("75%"));
     QTRY_COMPARE(editorPixels(), 10);
     QCOMPARE(pixels("activity"), 10); QCOMPARE(pixels("subagentJournal"), 10); QCOMPARE(pixels("terminalScreen"), 10);
+    QCOMPARE(pixels("taskInspectorDetail"), 10);
     for (const auto &name : chrome) QCOMPARE(pixels(name), before.value(name));
     QCOMPARE(QFontInfo(window.findChild<QTabWidget *>("sessionDetailTabs")->tabBar()->font()).pixelSize(), tabs);
     QVERIFY(preview("content-scale-75.png"));
@@ -1920,6 +2001,7 @@ void TestSessionsWindow::contentScaleLeavesWorkspaceChrome()
     if (!qEnvironmentVariable("HGS_PREVIEW_DIR").isEmpty())
         QVERIFY(window.grab().save(qEnvironmentVariable("HGS_PREVIEW_DIR") + "/content-scale-settings.png"));
     QCOMPARE(pixels("activity"), 26); QCOMPARE(pixels("subagentJournal"), 26); QCOMPARE(pixels("terminalScreen"), 26);
+    QCOMPARE(pixels("taskInspectorDetail"), 26);
     for (const auto &name : chrome) QCOMPARE(pixels(name), before.value(name));
     QCOMPARE(QFontInfo(window.findChild<QTabWidget *>("sessionDetailTabs")->tabBar()->font()).pixelSize(), tabs);
     // Theme changes rebuild workspace styles without dropping the preference.
@@ -6655,14 +6737,18 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     auto *editor = window.findChild<MessageComposer *>("messageComposer")->findChild<QPlainTextEdit *>("messageInput");
     QVERIFY(tabs && inspector && toggle && panel && splitter && editor);
     QCOMPARE(tabs->count(), 5); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
-    QCOMPARE(tabs->tabText(2), QString("Task board")); QCOMPARE(tabs->tabText(3), QString("Native UI"));
-    QCOMPARE(tabs->tabText(4),QString("Processes"));QVERIFY(tabs->isTabVisible(4));
-    QVERIFY(tabs->isTabVisible(1)); QVERIFY(tabs->isTabVisible(2)); QVERIFY(!tabs->isTabVisible(3));
-    QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle);
+    QCOMPARE(tabs->tabText(2), QString("Native UI")); QCOMPARE(tabs->tabText(3), QString("Processes"));
+    QVERIFY(tabs->isTabVisible(1)); QVERIFY(!tabs->isTabVisible(2)); QVERIFY(tabs->isTabVisible(3));
+    QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle->parentWidget());
     editor->setPlainText("Keep this draft"); const int originalWidth = tabs->width();
     QTest::mouseClick(toggle, Qt::LeftButton); QTest::qWait(40);
     QVERIFY(inspector->isVisible()); QVERIFY(tabs->width() < originalWidth); QVERIFY(panel->width() >= 240);
-    QVERIFY(!tabs->cornerWidget()); QCOMPARE(inspector->cornerWidget(), toggle);
+    QVERIFY(!tabs->cornerWidget()); QCOMPARE(inspector->cornerWidget(), toggle->parentWidget());
+    auto *corner = inspector->cornerWidget();
+    QVERIFY(toggle->mapTo(corner, QPoint()).y() >= 4);
+    QVERIFY(toggle->mapTo(corner, toggle->rect().bottomRight()).y() <= corner->height() - 5);
+    QVERIFY(toggle->iconSize() == QSize(18, 18));
+
     QCOMPARE(tabs->currentIndex(), 0); QCOMPARE(editor->toPlainText(), QString("Keep this draft"));
     QJsonObject data{{"tracked", true}, {"run_id", "run-1"}, {"conversation_id", "conversation-one"},
         {"subagent_source", "hooks"}, {"subagents", QJsonObject{{"review", QJsonObject{{"name", "Reviewer"}, {"state", "working"}}}}},
@@ -6681,7 +6767,7 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     splitter->setSizes({420, 310});
     QTest::mouseClick(toggle, Qt::LeftButton); QTest::qWait(40);
     QVERIFY(panel->isHidden()); QVERIFY(!toggle->isChecked()); QCOMPARE(editor->toPlainText(), QString("Keep this draft"));
-    QCOMPARE(tabs->cornerWidget(), toggle); QVERIFY(!inspector->cornerWidget()); QVERIFY(toggle->isVisible());
+    QCOMPARE(tabs->cornerWidget(), toggle->parentWidget()); QVERIFY(!inspector->cornerWidget()); QVERIFY(toggle->isVisible());
     tabs->setCurrentIndex(1); QTest::mouseClick(toggle, Qt::LeftButton); QCOMPARE(tabs->currentIndex(), 1);
     QCOMPARE(inspector->currentIndex(), 2);
     data["processes"]=QJsonObject{{"active_count",1},{"items",QJsonArray{
@@ -6715,6 +6801,41 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     const auto inspectorPreview=qEnvironmentVariable("HGS_INSPECTOR_PREVIEW");if(!inspectorPreview.isEmpty())QVERIFY(reopened.grab().save(inspectorPreview));
     reopened.showSession({}, "kimi/docs/research"); QTest::qWait(50);
     QVERIFY(!reopened.findChild<QTextBrowser *>("subagents")->toPlainText().contains("Implement right panel"));
+}
+
+void TestSessionsWindow::inspectorWidthSurvivesResizeHideAndRestartAndResetsOnDoubleClick()
+{
+    QSettings().remove("workspace");
+    int preferred = 0;
+    {
+        SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.resize(1840, 900); window.show();
+        auto *toggle = window.findChild<QPushButton *>("toggleInspector");
+        auto *panel = window.findChild<QFrame *>("sessionInspectorPanel");
+        auto *splitter = window.findChild<QSplitter *>("sessionWorkSplitter");
+        toggle->click(); QTRY_VERIFY(panel->isVisible());
+        auto *handle = splitter->handle(1); QVERIFY(handle);
+        const auto from = handle->rect().center();
+        const auto destination = splitter->mapToGlobal(QPoint(splitter->width() - 760, handle->height() / 2));
+        QTest::mousePress(handle, Qt::LeftButton, {}, from);
+        QMouseEvent move(QEvent::MouseMove, QPointF(handle->mapFromGlobal(destination)), QPointF(destination), Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(handle, &move);
+        QTest::mouseRelease(handle, Qt::LeftButton, {}, handle->mapFromGlobal(destination));
+        QTRY_VERIFY(panel->width() > 600);
+        preferred = panel->width(); QTRY_COMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        window.resize(1100, 900); QTRY_VERIFY(panel->width() < preferred);
+        QCOMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        toggle->click(); toggle->click(); QTest::qWait(30);
+        QCOMPARE(QSettings().value("workspace/inspectorWidth").toInt(), preferred);
+        window.resize(1840, 900); QTRY_COMPARE(panel->width(), preferred);
+        toggle->click(); toggle->click(); QTRY_COMPARE(panel->width(), preferred);
+        window.close();
+    }
+    SessionsWindow restored(program()); keepDetailsPollsOut(restored); restored.setFleet(fleet()); restored.resize(1840, 900); restored.show();
+    auto *panel = restored.findChild<QFrame *>("sessionInspectorPanel"); auto *splitter = restored.findChild<QSplitter *>("sessionWorkSplitter");
+    QTRY_VERIFY(panel->isVisible()); QTRY_COMPARE(panel->width(), preferred);
+    auto *handle = splitter->handle(1); QTest::mouseDClick(handle, Qt::LeftButton); QTest::mouseRelease(handle, Qt::LeftButton);
+    QTRY_COMPARE(QSettings().value("workspace/inspectorWidth").toInt(), 400);
+    QTRY_COMPARE(panel->width(), qMax(400, panel->minimumWidth()));
 }
 
 void TestSessionsWindow::detailsPollingPreservesReadingPosition()

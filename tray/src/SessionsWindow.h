@@ -76,7 +76,7 @@ public:
     void showAttentionSession(const QString &host, const QString &name);
     void showNotificationNotice(const QString &message) { showNotice(message, false); }
     void showProjects(const QString &host = {});
-    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {}, const QJsonObject &recipe = {});
+    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {}, const QJsonObject &recipe = {}, const QString &taskUuid = {}, const QString &taskParentId = {});
     void newSessionLaunchFailed(const QString &launchId, const QString &error = {});
     void setClipboardMode(bool clipboard);
     void setConnectionError(const QString &error);
@@ -129,6 +129,11 @@ private:
     void saveSessionRowPreferences();
     void updateSessionRowPresentation();
     void savePendingLaunches();
+    void dispatchTaskLaunches();
+    bool saveTaskLaunches();
+    QJsonObject m_taskLaunches;
+    bool m_taskLaunchRecoveryBlocked = false;
+    QHash<quint64, QString> m_taskLaunchRequests;
     void renderCreation();
     void selectCreation(const QString &id);
     void placeLaunchedSessions();
@@ -327,6 +332,7 @@ private:
     void renderQuestion(const Entry &entry, int navigation = 0);
     void setInspectorVisible(bool visible);
     void updateInspectorMinimum();
+    void applyInspectorWidth();
     // Keyboard commands of the Window scope (Shortcuts.h), implemented in
     // SessionsWindowShortcuts.cpp. Every command's action stays enabled; a
     // command with nothing to do does nothing or shows a notice.
@@ -516,8 +522,8 @@ private:
     ActivityView *m_activityView = nullptr;
     class ProcessView *m_processes = nullptr;
     class TasksView *m_tasks = nullptr;
+    QWidget *m_taskView = nullptr;
     class TaskInspector *m_taskInspector = nullptr;
-    class TaskTabBadge *m_tasksBadge = nullptr;
     QWidget *m_nativeSignIn = nullptr;
     // A stopped OpenCode service: started only by this explicit action.
     QWidget *m_openCodeService = nullptr;
@@ -551,7 +557,10 @@ private:
     QFrame *m_inspectorPanel = nullptr;
     QSplitter *m_workSplitter = nullptr;
     QPushButton *m_inspectorToggle = nullptr;
-    int m_inspectorWidth = 290;
+    QWidget *m_inspectorCorner = nullptr;
+    static constexpr int DefaultInspectorWidth = 400;
+    int m_inspectorWidth = DefaultInspectorWidth;
+    bool m_inspectorWidthPending = false;
     struct PendingMessage { QString key, runId, conversationId; };
     QHash<quint64, PendingMessage> m_pendingMessages;
     QHash<QString, QJsonArray> m_localMessages;

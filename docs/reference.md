@@ -916,7 +916,7 @@ application and window switchers.
 | Rename session | F2 | F2 |
 | Search sessions | Ctrl+F | ⌘F |
 | Refresh | Ctrl+R, F5 | ⌘R, F5 |
-| Next / previous tab (Activity, Terminal, Task board, Native UI, Processes) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
+| Next / previous tab (Activity, Terminal, Native UI, Processes, Task View) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
 | Switch between Activity and Terminal | Ctrl+` | ⌃` |
 | Show or hide the side panel | Ctrl+I | ⌘I |
 | Next / previous area (list, conversation, message field, side panel) | F6 / Shift+F6 | F6 / ⇧F6 |
@@ -2491,6 +2491,8 @@ JSON. Tasks belong to a catalog project, named by its ID or name; a task is
 
 ```sh
 hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS]] [--position N] < prompt.txt
+hgs task add --project orchard --title "Task title" --request-id UUID < description.txt
+hgs task rename orchard/T-a1b2c3 < title.txt
 hgs task list --project orchard [--stage todo]
 hgs task get orchard/T-a1b2c3
 hgs task send orchard/T-a1b2c3 [--session codex/api [--host ALIAS]]
@@ -2501,8 +2503,10 @@ hgs task cancel orchard/T-a1b2c3 [--reason "Wrong approach"]
 hgs task stage orchard/T-a1b2c3 backlog|todo|done
 hgs task move orchard/T-a1b2c3 --top|--before REF|--after REF
 hgs task edit orchard/T-a1b2c3 < prompt.txt
-hgs task comment orchard/T-a1b2c3 < comment.txt
+hgs task comment orchard/T-a1b2c3 [--content-json] < comment.txt
 hgs task target orchard/T-a1b2c3 codex/api|any [--host ALIAS]
+hgs task target orchard/T-a1b2c3 new-session|subagent --parent codex/api [--host ALIAS] [--session-id ID]
+hgs task worker orchard/T-a1b2c3 --subagent CHILD_ID --request-id SENT_REQUEST_ID
 hgs task settings --project orchard [--set < settings.json]
 ```
 
@@ -2526,27 +2530,105 @@ use a uniquely retained rename alias; an unresolved identity cannot receive inpu
 
 An agent recording a direct request it is already doing uses `add --start`, or
 `start REF` for a queued task. This records In progress without sending the same
-instruction into its conversation again. Plain `add` remains a queue operation.
+instruction into its conversation again. For a dispatched active task, its exact current agent can acknowledge `start` once without a resend or a new attempt. Plain `add` remains a queue operation.
 A report by the exact pinned agent also moves its unsent queued task to In review;
 a report from another session remains a history note. `handoff` is explicit: only
 the current agent owner (or the person) can transfer an active task, and both its
 pinned target and working session change only after confirmed native submission.
 Failed or uncertain delivery never authorizes an automatic retry.
 
-Desktop task descriptions support attached files, including pasted or dropped
-images. The task dialog previews images, opens retained copies and edits files
-alongside the text in To do and Backlog. Limits match message attachments: up to
-eight files, 10 MiB per file and 20 MiB total. Immutable bytes replicate with the
-task and travel through the ordinary native attachment path when it is sent.
-CLI `add` and `edit` accept `--content-json` with
+The central Task View shows a canonical description document followed by
+Activity-style discussion. The task menu opens the result and audit history;
+Review foregrounds the result on the main page. Explicit **Edit description**
+uses Save/Cancel; ordinary messages never rewrite the document. Task input uses
+Activity's centered column, composer skin, attachments, voice preview and private
+durable drafts keyed by project and task UUID. Lifecycle controls are separate
+from message submission. The compact executor field distinguishes planned,
+current and last execution. Clicking planned assignment changes only that field.
+Its choices are the main session, a subagent, a new session, searchable existing
+sessions and Any session. Choosing
+an executor plan stores intent without starting anything. **Start task** for a
+new session opens the standard session dialog; after its explicit launch, delivery
+requires that exact new launch ID, computer, project, and unchanged parent
+computer/session identity. A private record is reserved before task delivery;
+restored reserved or uncertain deliveries are never retried automatically. Use
+**Review executor launch** to inspect a failed or uncertain launch. Explicitly
+releasing a reviewed record neither stops an agent nor sends the task again.
+
+`hgs task message REF --request-id UUID --mode queue|send|reopen|note
+--expect-dispatch ID --content-json` is a distinct discussion operation. `get`
+returns the current `dispatch_id` (a native send receipt or an explicit direct-work
+acknowledgement). Queue messages wait for the next explicit Start; their original
+IDs, text and files are included in that dispatch, within the native text/media
+limits. Exceeding those limits refuses the dispatch rather than dropping context.
+Notes remain saved without delivery. In-progress feedback addresses the immutable
+owner and captures its current run/conversation before transport. A native dispatch
+receipt, when present, must match that live run and any recorded conversation.
+Review/Done feedback explicitly uses reopen; only a confirmed submission returns
+the task to In progress. Submission does not establish model consumption.
+
+The replicated schema-five outbox is reserved durably before native input. A
+repeated request verifies the original content, mode and execution and reads the
+receipt; it never retries a reserved native send, even if no receipt survived.
+SSH failures retain the desktop's original request for **Recover saved comment**.
+That check uses `--recover-only` and cannot initiate a missing send. If no
+reservation can be found, it retains the original comment in the discussion with
+an unconfirmed outcome and no native submission authority. A different new
+comment first completes that read-only recovery, then reserves its own identity.
+An executor precondition refusal saves the comment with a failed delivery, leaves
+the task's stage unchanged, and does not submit native input. Original
+payloads are private per-task files read and written off the UI thread; settings
+contain only small markers. Explicitly releasing a local recovery record neither
+cancels nor resends native input.
+Handoff cannot retarget a reserved message. Failed and unknown outcomes remain
+visible in the same discussion. This is transport attribution, not a distributed
+lease, per-task pause or a revision scheduler. Legacy direct-work acknowledgements
+have an immutable owner and acknowledgement anchor, but no historical native-run
+receipt; a message captures that owner's current verified run explicitly.
+
+A subagent plan dispatches a creation request to its coordinator only on Start.
+The coordinator creates the native child and records `task worker` with the
+current durable `sent` request ID. Registration verifies its live parent run and
+conversation and the child's presence in that native roster. The card displays
+“child unconfirmed” until registration; the parent remains coordinator and task
+reporter. This is explicit attribution, not the full per-worker scheduler or an
+implementation of per-task Pause.
+
+Descriptions and immutable comments support up to eight attachments per message,
+10 MiB per file, with a cumulative 20 MiB across the task's current description
+and its comment history. Bytes replicate with the document. Description files
+travel through the ordinary native attachment path when the task is sent;
+comments remain in task history and are not automatically delivered as new native
+input. CLI `add`, `edit` and `comment` accept `--content-json` with
 `{"text":"Inspect [Image #1]","attachments":[{"name":"screen.png","mime":"image/png","reference":"[Image #1]","data_base64":"..."}]}`
-on stdin. Omit `attachments` to keep them while editing, or pass an empty array
-to remove them. Listings contain only file metadata; `get` includes the bytes.
-Tasks with immutable session identities or media use task schema 2: older clients
-show their text read-only and cannot send a partial payload. Project documents
-and the paged exchange wire protocol remain schema 1. Mobile attachment pickers
-and previews are not part of the desktop editor; host-side mobile sends retain
-the task's complete attachment payload.
+on stdin. Omit `attachments` to keep description files while editing, or pass an
+empty array to remove them. Listings contain file metadata and omit history;
+`get` includes the retained bytes.
+
+The desktop right-hand Tasks board has a New task (+) button. Enter a title and
+confirm it to create a shared To do card (Backlog in that list), then fill its
+description in the central Task View. Subsequent input adds comments; Edit
+description explicitly returns the same composer to the description draft.
+Rename changes only the title. Creation and discussion never start an executor.
+Task View retains separate drafts from Activity, supports description and comment
+attachments, and offers voice recording with preview and transcription into the
+draft before the person sends it. Task comments remain history-only.
+
+Named cards use `--title`; description stdin may be empty. `--request-id` reserves
+the card UUID and binds the original creation input. Repeating that input recovers
+the existing card without reverting later edits or lifecycle changes. Reusing the
+UUID for a different creation is refused. A title is one nonblank line, at most
+512 UTF-8 bytes. Legacy cards keep their first description line as the displayed
+title until an explicit Rename gives them an independent one.
+
+Immutable session identities and description media use task schema 2. Comment
+media, executor plans and native worker bindings require task schema 3. Independent
+titles and title-only creation require task schema 4. Durable discussion identities
+and delivery reservations require task schema 5. A later edit never downgrades that schema. Older readers and the current mobile ABI show
+tasks newer than schema two read-only; named cards keep a visible title in
+the existing text field. Project documents and the paged exchange protocol
+remain schema 1. Mobile picker/preview and executor-plan presentation are separate
+work; host-side mobile sends keep the complete description attachment payload.
 
 `--host ALIAS` names a session on another computer of the swarm that this
 computer verified itself. A send or cancel for such a session runs on that
@@ -2602,31 +2684,51 @@ task list from Zerus's SessionStart hook; `hgs guide tasks` lists the commands.
 There is no MCP server; sessions without bypassed permissions are not covered
 (Claude Code asks first, Codex's sandbox blocks the task store and SSH).
 
-In the desktop, the **Task board** tab beside Activity and Terminal shows the open
-session's project. Stage tiles (In review, In progress, To do, Backlog, Done)
-filter one list; the funnel tile keeps only the open session's tasks and the Any
-session tasks it can take, and the gear opens the project's task settings. A row
-shows its actions on hover, and a click returns to Activity with that task selected
-in the right **Tasks** inspector. **Edit / actions** opens its prompt and session
-(editable in To do and Backlog), attachments, history and comments. The input below files a
-task for the open session in To do, or in Backlog while Backlog is open. The tab
-label counts the tasks In review and in To do. Done lists the last 7 days, and
-Show older adds the rest. A session outside every project has no tasks.
-To do and Backlog rows can be dragged: onto the other list's tile to move them
-there, within To do to reorder it, onto a session of the project in the session
-list to pin them to it, or onto the project's header to make them Any session.
+In the desktop, the right **Tasks** inspector is the project board. There is no
+Task Board tab beside Activity. The first filter, **Active**, combines In review
+and In progress without changing either workflow stage. Individual stage tiles
+(In review, In progress, To do, Backlog, Done) remain available; the funnel keeps
+this session's tasks and Any
+session tasks it can take, and the gear opens project settings. Narrow filters
+keep icons and counts; wider filters include captions. The plus replaces the
+count label with a title field in the same header: Enter creates the named card
+and opens its description for editing. Escape closes the field and keeps its
+local draft. Adding a card does not move the filters or list viewport. The chosen
+side-panel width is local and survives hiding, resizing and application restart.
+Double-click its divider to reset to 400 logical pixels, subject to available
+space and the panel header minimum.
 
-The **Tasks** inspector shows the current session's tasks by default; uncheck
-**This session** to see the project. In progress and In review precede the ordered
-To do and Backlog lists. It retains at most 100 listed tasks and 80 selected-task
-history entries; the full history is available through **Edit / actions**.
-**Assigned to** identifies routing; **Executor** requires a recorded start.
-An unconfirmed start is labelled explicitly. **Agent report** is the saved report,
-not proof that a commit was merged or a build installed. **Open Activity** follows
-the retained executor identity, including after a rename. This first inspector
-slice shares the existing board poll; To do still starts through **Send now**.
-Automatic dispatch, task-scoped Activity discussion and verified result milestones
-are specified in `superpowers/specs/2026-10-26-activity-task-execution-design.md`.
+Clicking a card opens the reusable central **Task View**, preserving the Activity
+conversation and its input draft. Click the task heading to rename it in place,
+or choose Rename in the card menu. Enter or leaving the heading saves; Escape
+cancels. A refused rename retains the edit. Description is a document followed by
+the discussion; editing it is an explicit Save/Cancel operation available in To
+do and Backlog. The assignment control changes the executor plan separately.
+Workflow commands remain separate from unsaved description edits. Result and
+History open through the task menu. Reports are not proof of a merge or install.
+
+The Task View uses Activity's Markdown renderer, content width and rich input,
+including attachment previews, voice drafts and per-task local recovery. The
+input explicitly names whether it edits the description, saves a note, queues
+context for Start, sends feedback, or requests changes. Comments stay in the
+discussion with their delivery status; a refused executor check saves the comment
+without sending it or reopening work. Recovery never replays unknown input.
+Selection retains the previous painted document until the exact selected reply
+arrives. Earlier history pages load in the same view; Latest returns to the tail.
+The GUI retains at most 100 listed tasks and 80 selected-task history entries.
+Legacy CLI reads still transfer the full journal; indexed backend reads remain a
+separate tracked change.
+
+Rows in every writable stage can be reordered with an insertion marker and edge
+scrolling. This does not change execution or interrupt work. To do and Backlog
+also accept stage and assignment drops. Right-click a card for its actions.
+Compact cards expose Start task for To do/Backlog, Accept for Review and Back to
+To do for Done. Task pause is disabled until independent execution accounting
+exists. Executor labels and Open Activity follow retained immutable session
+identity across renames. An unconfirmed start is labelled explicitly. The board
+and selected Task View share one polling controller. Full execution and result
+milestones remain specified in
+`superpowers/specs/2026-10-26-activity-task-execution-design.md`.
 
 ## Machines and accounts
 

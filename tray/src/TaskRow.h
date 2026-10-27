@@ -6,6 +6,9 @@
 
 class QLabel;
 class QToolButton;
+class QHBoxLayout;
+class QVBoxLayout;
+class QMenu;
 
 // The Tasks tab's colours, from design/task-tracker/index.html.
 struct TaskColors {
@@ -22,11 +25,14 @@ struct TaskRowState {
     int statusKind = 0;              // and its SessionStatusBadge::Kind
     QHash<int, QString> blocked;     // TaskAction → why it is unavailable now
     QString anyNow;                  // To do and Backlog: the session an Any task goes to now
+    bool showStage = false;          // mixed-stage filter: retain each card's workflow label
 };
 
 // One task in the list: a fixed-height header with the meta on the left and the
 // stage's action icons on the right (shown on hover), then the text clamped to
-// two lines, and for In review the report or the cancellation.
+// two lines, and for In review the report or the cancellation. Compact inspector
+// cards show the title, worker, primary action and context menu;
+// their full report belongs in the selected task's Result section.
 class TaskGlyph;
 class TaskStatusPill;
 
@@ -37,12 +43,13 @@ public:
     void setTask(const TaskItem &task, const TaskRowState &state, const TaskColors &colors, qint64 now);
     const TaskItem &task() const { return m_task; }
     static QString actionKey(TaskAction action);
+    void setCompact(bool compact);
     // While its drag runs the row stays in its place, faded.
     void setDragging(bool dragging);
 signals:
     void actionRequested(TaskAction action);
     void opened();
-    // A To do or Backlog row was pressed and moved: the owner drags it from hotSpot.
+    // A writable row was pressed and moved: the owner drags it from hotSpot.
     void dragStarted(const QPoint &hotSpot);
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -51,6 +58,7 @@ protected:
     void focusInEvent(QFocusEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -61,6 +69,7 @@ private:
     // The actions show while the pointer is over the row or the focus is in it.
     void updateActions();
     void layoutText();
+    void rebuildMenu();
     TaskItem m_task;
     TaskRowState m_state;
     TaskColors m_colors;
@@ -68,7 +77,11 @@ private:
     TaskStatusPill *m_status;
     QLabel *m_meta, *m_tail, *m_text, *m_summary;
     QWidget *m_actions;
+    QHBoxLayout *m_headerLayout;
+    QVBoxLayout *m_mainLayout;
     QHash<int, QToolButton *> m_buttons;
+    QToolButton *m_more;
+    QMenu *m_menu;
     QPoint m_pressAt;
     bool m_hovered = false, m_pressed = false;
 };

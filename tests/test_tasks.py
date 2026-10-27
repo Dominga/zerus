@@ -209,6 +209,36 @@ class TaskCommands(Fixture):
         self.assertIn("base64", self.hgs("edit", task["ref"], "--content-json", text=json.dumps(dict(text="Bad", attachments=[bad])), ok=False))
         self.assertEqual(self.hgs("get", task["ref"])["task"]["text"], "Updated text")
 
+    def test_comment_media_is_immutable_and_not_expanded_in_listing(self):
+        task = self.add("Inspect the screenshot")
+        file = dict(name="screen.png", mime="image/png", reference="[Image #1]",
+                    data_base64=base64.b64encode(b"comment image bytes").decode())
+        noted = self.hgs("comment", task["ref"], "--content-json", text=json.dumps(dict(text="See [Image #1]", attachments=[file])))["task"]
+        self.assertEqual(noted["schema"], 3)
+        self.assertEqual(noted["log"][-1]["attachments"], [file])
+        self.hgs("edit", task["ref"], text="Revised description")
+        restored = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(restored["schema"], 3)
+        self.assertEqual(restored["log"][1]["attachments"], [file])
+        self.assertNotIn("log", self.hgs("list", "--project", "orchard")["tasks"][0])
+        bad = dict(file, data_base64="%%%")
+        self.assertIn("base64", self.hgs("comment", task["ref"], "--content-json", text=json.dumps(dict(text="Bad", attachments=[bad])), ok=False))
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["log"], restored["log"])
+
+    def test_executor_plans_are_saved_without_starting_and_keep_parent_identity(self):
+        self.agent("codex/api")
+        task = self.add("Delegate after explicit start")
+        for mode in ("new-session", "subagent"):
+            planned = self.hgs("target", task["ref"], mode, "--parent", "codex/api")["task"]
+            self.assertEqual(planned["stage"], "todo")
+            self.assertIsNone(planned["session"])
+            self.assertEqual(planned["target"]["kind"], mode.replace("-", "_"))
+            self.assertEqual(planned["target"]["parent"]["session_id"], "run_id:" + self.runs["codex/api"])
+            self.assertNotIn("sent", [entry["kind"] for entry in planned["log"]])
+        self.assertIn("selected executor plan", self.hgs("start", task["ref"], session="codex/api", ok=False))
+        self.assertIn("task assignment changed", self.hgs("send", task["ref"], "--session", "codex/api", "--expect-new-session-parent", "run_id:other", ok=False))
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "todo")
+
     def test_add_list_and_get(self):
         task = self.add("Add rate limiting")
         self.assertRegex(task["id"], r"^T-[0-9a-z]{6}$")
@@ -223,6 +253,23 @@ class TaskCommands(Fixture):
         self.assertEqual(self.hgs("get", task["id"], "--project", "project-1")["task"]["uuid"], got["uuid"])
         self.assertIn("no project", self.hgs("list", "--project", "missing", ok=False))
         self.assertIn("no task", self.hgs("get", "orchard/T-zzzzzz", ok=False))
+
+    def test_named_card_creation_recovery_and_independent_rename(self):
+        request = str(uuid.uuid4())
+        args = ("add", "--project", "project-1", "--title", "Title only", "--request-id", request)
+        first = self.hgs(*args, text="")["task"]
+        self.assertEqual((first["uuid"], first["title"], first["text"], first["stage"]), (request, "Title only", "", "todo"))
+        self.hgs("edit", first["ref"], text="Detailed task content")
+        self.hgs("rename", first["ref"], text="Independent title")
+        self.hgs("stage", first["ref"], "backlog")
+        before = self.hgs("get", first["ref"])["task"]
+        recovered = self.hgs(*args, text="")["task"]
+        self.assertEqual(recovered, before)
+        self.assertEqual(len(self.hgs("list", "--project", "project-1")["tasks"]), 1)
+        self.assertIn("another input", self.hgs("add", "--project", "project-1", "--title", "Changed intent", "--request-id", request, text="", ok=False))
+        self.hgs("edit", first["ref"], text="")
+        final = self.hgs("get", first["ref"])["task"]
+        self.assertEqual((final["title"], final["text"]), ("Independent title", ""))
 
     def test_order_and_positions(self):
         first, second, third = (self.add(t)["id"] for t in ("one", "two", "three"))
@@ -529,6 +576,120 @@ class DeliveryFixture(Fixture):
         self.hgs("settings", "--project", "orchard", "--set", text=json.dumps(settings))
 
 class TaskDelivery(DeliveryFixture):
+    def message(self, task, text, mode="send", identity=None, dispatch=None, **kw):
+        return self.hgs("message", task["ref"], "--content-json", "--mode", mode,
+                        "--request-id", identity or str(uuid.uuid4()), "--expect-dispatch", dispatch or task.get("dispatch_id") or "",
+                        text=json.dumps(dict(text=text, attachments=[])), **kw)
+
+    def test_queued_context_is_included_once_in_first_dispatch(self):
+        task = self.add("Canonical description", "--target", self.name)
+        queued = self.message(task, "Include this clarification", mode="queue")
+        self.assertEqual(queued["message"]["delivery"]["state"], "queued")
+        self.assertEqual(self.received(), "")
+        note = self.message(task, "Private task note", mode="note")
+        sent = self.hgs("send", task["ref"])["task"]
+        self.wait_received("Include this clarification")
+        self.assertNotIn("Private task note", self.received())
+        self.assertEqual(sent["text"], "Canonical description")
+        messages = [e for e in sent["log"] if e["kind"] == "message"]
+        self.assertEqual([e["delivery"]["state"] for e in messages], ["submitted", "note"])
+        self.confirm()
+        self.as_agent("report", task["ref"], text="Ready for review")
+        self.hgs("stage", task["ref"], "todo")
+        self.hgs("send", task["ref"])
+        self.assertEqual(self.received().count("Include this clarification"), 1)
+
+    def test_feedback_has_a_durable_receipt_and_explicit_review_reopening(self):
+        task = self.add("Work on this", "--target", self.name)
+        task = self.hgs("send", task["ref"])["task"]; self.confirm()
+        identity = str(uuid.uuid4())
+        sent = self.message(task, "Active feedback", identity=identity)
+        self.assertEqual(sent["message"]["delivery"]["state"], "submitted")
+        self.wait_received("Active feedback"); self.confirm()
+        again = self.message(task, "Active feedback", identity=identity)
+        self.assertEqual(again["message"]["request_id"], identity)
+        self.assertEqual(self.received().count("Active feedback"), 1)
+        self.assertIn("different content", self.message(task, "Altered feedback", identity=identity, ok=False))
+        self.as_agent("report", task["ref"], text="Result for review")
+        reviewed = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(self.message(reviewed, "Just a note", mode="note")["task"]["stage"], "review")
+        changed = self.message(reviewed, "Please revise", mode="reopen")
+        self.assertEqual(changed["task"]["stage"], "active")
+        self.assertEqual(changed["task"]["session"]["session_id"], task["session"]["session_id"])
+        self.wait_received("Please revise")
+
+    def test_unknown_feedback_is_recovered_without_another_paste(self):
+        task = self.add("Task for crash recovery", "--target", self.name)
+        task = self.hgs("send", task["ref"])["task"]; self.confirm()
+        identity = str(uuid.uuid4())
+        # The isolated shim lets the original paste through, then kills just
+        # its hgs parent before Enter/receipt completion. Never touches live tmux.
+        shim = "#!/usr/bin/env python3\nimport os,signal,subprocess,sys\na=sys.argv[1:]\n"
+        shim += "r=subprocess.run([" + repr(TMUX) + ",'-S'," + repr(str(self.socket)) + ",'-f','/dev/null',*a])\n"
+        shim += "if a and a[0]=='paste-buffer': os.kill(os.getppid(),signal.SIGKILL)\nsys.exit(r.returncode)\n"
+        self.script("tmux", shim)
+        self.message(task, "Never paste twice", identity=identity, ok=False)
+        self.wait_received("Never paste twice")
+        self.script("tmux", '#!/bin/sh\nexec ' + TMUX + ' -S "' + str(self.socket) + '" -f /dev/null "$@"\n')
+        recovered = self.message(task, "Never paste twice", identity=identity)
+        self.assertEqual(recovered["message"]["delivery"]["state"], "uncertain")
+        self.assertEqual(self.received().count("Never paste twice"), 1)
+        self.message(task, "Never paste twice", identity=identity)
+        self.assertEqual(self.received().count("Never paste twice"), 1)
+
+    def test_queued_images_keep_their_message_scoped_references(self):
+        image = dict(name="description.png",mime="image/png",reference="[Image #1]",data_base64=base64.b64encode(b"description-image").decode())
+        task = self.add(json.dumps(dict(text="Description [Image #1]",attachments=[image])), "--content-json", "--target", self.name)
+        queued_image = dict(image,name="clarification.png",data_base64=base64.b64encode(b"clarification-image").decode())
+        self.hgs("message",task["ref"],"--content-json","--mode","queue","--request-id",str(uuid.uuid4()),
+                 text=json.dumps(dict(text="Clarification [Image #1]",attachments=[queued_image])))
+        out = self.hgs("send",task["ref"])
+        self.wait_received("Clarification [Image #2]")
+        self.assertIn("Description [Image #1]",self.received())
+        self.assertEqual([a["reference"] for a in out["receipt"]["attachments"]],["[Image #1]","[Image #2]"])
+        self.assertEqual([Path(a["path"]).read_bytes() for a in out["receipt"]["attachments"]],[b"description-image",b"clarification-image"])
+        self.assertEqual(out["task"]["text"],"Description [Image #1]")
+
+    def test_feedback_follows_renames_but_refuses_a_changed_conversation(self):
+        task = self.add("Owned task", "--target", self.name)
+        task = self.hgs("send",task["ref"])["task"]; self.confirm()
+        old_name=self.name; self.name="codex/renamed-worker"
+        self.tmux("rename-session","-t","="+old_name+":",self.name)
+        record=json.loads(self.record_path.read_text()); self.record_path.unlink(); record["name"]=self.name; record["journal_name"]=old_name
+        self.record_path=self.state/(hashlib.sha256(self.name.encode()).hexdigest()+".json"); self.record_path.write_text(json.dumps(record))
+        sent=self.message(task,"Feedback after rename")
+        self.assertEqual(sent["message"]["delivery"]["state"],"submitted"); self.wait_received("Feedback after rename"); self.confirm()
+        record=json.loads(self.record_path.read_text()); record["conversation_id"]=str(uuid.uuid4()); self.record_path.write_text(json.dumps(record))
+        refused=self.message(task,"Wrong conversation")
+        self.assertEqual(refused["message"]["delivery"]["state"],"failed")
+        self.assertIn("conversation changed",refused["message"]["delivery"]["error"])
+        self.assertEqual(refused["message"]["text"],"Wrong conversation")
+        self.assertNotIn("Wrong conversation",self.received())
+
+    def test_a_recovery_check_without_a_reservation_never_sends(self):
+        task=self.add("Task", "--target",self.name); task=self.hgs("send",task["ref"])["task"]; self.confirm()
+        identity=str(uuid.uuid4())
+        recovered=self.hgs("message",task["ref"],"--request-id",identity,"--mode","send","--expect-dispatch",task["dispatch_id"],
+                "--recover-only",text="Do not send this check")
+        self.assertEqual(recovered["message"]["delivery"]["state"],"uncertain")
+        self.assertEqual(recovered["message"]["text"],"Do not send this check")
+        self.assertEqual(self.message(task,"Do not send this check",identity=identity)["message"]["delivery"]["state"],"uncertain")
+        self.assertNotIn("Do not send this check",self.received())
+
+    def test_stale_execution_comment_is_saved_without_sending_or_reopening(self):
+        task=self.add("Owned task", "--target",self.name)
+        task=self.hgs("send",task["ref"])["task"]; self.confirm()
+        self.hgs("report",task["ref"],text="Ready for review")
+        reviewed=self.hgs("get",task["ref"])["task"]
+        identity=str(uuid.uuid4())
+        saved=self.message(reviewed,"Ordinary review comment",mode="reopen",dispatch=str(uuid.uuid4()),identity=identity)
+        self.assertEqual(saved["message"]["delivery"]["state"],"failed")
+        self.assertEqual(saved["task"]["stage"],"review")
+        self.assertEqual(saved["message"]["text"],"Ordinary review comment")
+        again=self.message(reviewed,"Ordinary review comment",mode="reopen",dispatch=saved["message"]["delivery"]["dispatch_id"],identity=identity)
+        self.assertEqual(len([e for e in again["task"]["log"] if e.get("request_id")==identity]),1)
+        self.assertNotIn("Ordinary review comment",self.received())
+
     def test_a_renamed_task_is_delivered_to_the_same_native_run(self):
         task = self.add("Follow the immutable run", "--target", self.name)
         old = self.name

@@ -287,6 +287,7 @@ private slots:
     void contentScaleScalesMarkupOnly();
     void contentScaleEnlargesTranscriptAndQueue();
     void agentMarkdownLooksLikeGitHub();
+    void taskJournalUsesMarkdownAndActualAuthors();
     void searchResultKeepsInlineCodeSearchable();
     void copyGivesVisibleText();
     void agentRepliesCopyAsMarkdown();
@@ -316,6 +317,29 @@ QJsonArray longHistory()
     }
     return events;
 }
+}
+
+void TestActivityView::taskJournalUsesMarkdownAndActualAuthors()
+{
+    SettledActivityView view; view.resize(360, 300);
+    const QJsonArray entries{
+        QJsonObject{{"id", "1"}, {"at", 1791018000000.0}, {"author", "reviewer"}, {"label", "Report"}, {"role", "agent"},
+            {"text", "**Implemented** `ownership_id`\n\n- First change\n- Second change"}},
+        QJsonObject{{"id", "2"}, {"at", 1791018001000.0}, {"author", "You"}, {"label", "Comment"}, {"role", "person"},
+            {"text", "Please check `stable_id` and **history**."}},
+        QJsonObject{{"id", "3"}, {"at", 1791018002000.0}, {"author", "reviewer"}, {"role", "event"}, {"text", "moved it to In review"}}};
+    view.setTaskJournal("task-a/history", entries); settle(view);
+    const auto plain = view.plainText();
+    QVERIFY(plain.contains("reviewer · Report")); QVERIFY(plain.contains("You · Comment"));
+    QVERIFY(plain.contains("ownership_id")); QVERIFY(plain.contains("stable_id")); QVERIFY(!plain.contains("**Implemented**"));
+    QVERIFY(plain.contains("moved it to In review")); QVERIFY(!plain.contains("RECORDED ACTIVITY"));
+    QVERIFY(!plain.contains("Sent")); QVERIFY(!plain.contains("tool calls"));
+    const int passes = view.renderPasses(); view.setTaskJournal("task-a/history", entries); settle(view); QCOMPARE(view.renderPasses(), passes);
+    view.setTaskJournal("task-b/result", {QJsonObject{{"id", "result"}, {"author", "worker"}, {"label", "Report"}, {"role", "agent"},
+        {"text", QString("A long report with `readable_code`.\n\n").repeated(80)}}}, false);
+    QCOMPARE(view.plainText(), plain); // The prepared replacement never publishes an empty frame.
+    settle(view);
+    QCOMPARE(view.browser()->verticalScrollBar()->value(), 0); QVERIFY(!view.plainText().contains("ownership_id"));
 }
 
 void TestActivityView::archiveRestoreKeepsVisibleHistoryAndSelection()

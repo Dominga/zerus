@@ -61,7 +61,9 @@ internal class RelayResultStream(private val client: OkHttpClient) {
         }
         override fun onOpen(webSocket: WebSocket, response: Response) = synchronized(lock) {
             if (sessions[key] !== this) { webSocket.cancel(); return@synchronized }
-            socket = webSocket; connected = true; publish()
+            socket = webSocket; connected = true
+            RelayReadTiming.point(RelayReadTiming.Stage.ResultStreamOpen)
+            publish()
         }
         override fun onMessage(webSocket: WebSocket, text: String) = synchronized(lock) {
             if (sessions[key] !== this) return@synchronized

@@ -13,6 +13,7 @@
 class HgsClient;
 class MessageComposer;
 class QAbstractButton;
+class QBoxLayout;
 class QDrag;
 class QLabel;
 class QPushButton;
@@ -30,13 +31,15 @@ struct TaskSession {
     bool working = false; // whether its agent is in a turn, for the cancel dialog
     int kind = 0;         // the status's SessionStatusBadge::Kind, as the session list shows it
     QString id;          // immutable launch identity, run identity for legacy bindings
+    QString conversation;
     bool operator==(const TaskSession &other) const {
         return host == other.host && name == other.name && status == other.status && blocker == other.blocker
-            && running == other.running && working == other.working && kind == other.kind && id == other.id;
+            && conversation == other.conversation && running == other.running && working == other.working && kind == other.kind && id == other.id;
     }
 };
 
 struct TaskEdits;
+struct TaskTarget;
 
 // The Tasks tab label's counts: In review as an attention badge, then To do.
 class TaskTabBadge : public QWidget {
@@ -79,7 +82,33 @@ public:
     void setInspectorVisible(bool visible);
     void setOpenInInspector(bool enabled) { m_openInInspector = enabled; }
     void editTask(const TaskItem &task) { openTask(task); }
+    void actOnTask(const TaskItem &task, TaskAction action) { act(task, action); }
+    // Both board surfaces use the same drag lifetime and guarded mutations.
+    void dragTask(TaskRow *row, const QPoint &hotSpot) { startDrag(row, hotSpot); }
+    void retireTaskRow(TaskRow *row) { retire(row); }
+    bool canReorderTask(const TaskDrag &drag, const QString &stage) const;
+    bool canStageTask(const TaskDrag &drag, const QString &stage) const;
+    void reorderTask(const TaskDrag &drag, const QString &anchor, bool before);
+    void stageTask(const TaskDrag &drag, const QString &stage);
+    TaskRowState rowState(const TaskItem &task) const;
+    void setDescriptionDraft(const QString &uuid, bool unsaved);
+    void setExecutorLaunches(const QJsonObject &launches);
+    bool hasExecutorLaunch(const QString &uuid) const { return m_executorLaunchBlockers.contains(uuid); }
+    void reviewExecutorLaunch(const QString &uuid) { emit executorLaunchReviewRequested(uuid); }
+    void createNamedTask(const QJsonObject &intent, std::function<void(const QJsonObject &)> saved, std::function<void(const QString &)> refused);
+    void saveTaskEdits(const TaskItem &task, const TaskEdits &edits, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void renameTask(const QString &uuid, const QString &title, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void saveTaskAssignment(const TaskItem &task, const TaskTarget &target, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void saveTaskNote(const QString &uuid, const QString &text, const QList<MessageAttachment> &files, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void saveTaskMessage(const QString &uuid, const QString &mode, const QString &dispatch, const QString &text, const QList<MessageAttachment> &files, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void recoverTaskMessage(const QString &uuid, std::function<void(const QJsonObject &)> checked, std::function<void(const QString &)> refused);
+    void releaseTaskMessage(const QString &uuid, std::function<void()> released, std::function<void(const QString &)> refused);
+    QString taskSendBlocker(const TaskItem &task, const TaskTarget &target) const;
     QString selectedStage() const { return m_stage; }
+    // The Activity sidebar hosts the board's existing scope/settings controls.
+    void moveControlsTo(QBoxLayout *toolbar);
+    bool onlyThisSession() const;
+    void setOnlyThisSession(bool only);
     MessageComposer *composer() const { return m_composer; }
 signals:
     // The project's tasks in In review and in To do, for the tab label.
@@ -87,25 +116,31 @@ signals:
     void notice(const QString &text, bool error);
     void boardChanged();
     void taskSelected(const QString &uuid);
+    void taskEditRequested(const QString &uuid);
+    void taskRenameRequested(const QString &uuid);
+    void executorLaunchReviewRequested(const QString &uuid);
+    void newExecutorRequested(const TaskItem &task, const QString &project);
+    void taskDragFinished();
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
-    // Drops on the stage tiles and on the To do list.
+    // Drops on the stage tiles and on every stage list.
     bool eventFilter(QObject *watched, QEvent *event) override;
     // The platform's drag loop; listings and other events arrive while it runs.
     virtual Qt::DropAction execDrag(QDrag *drag);
 private:
-    // Drags a To do or Backlog row; the tiles and the session list take it.
+    void submitTaskMessage(const QString &project, const QString &uuid, const QJsonObject &record, bool recovery, std::function<void()> saved, std::function<void(const QString &)> refused);
+    // Every stage can be dragged to reorder; other targets keep their own guards.
     void startDrag(TaskRow *row, const QPoint &hotSpot);
     // A row leaves the list. The row a drag runs from stays, hidden, until the drag
     // ends: Qt is still delivering the move that started it.
     void retire(TaskRow *row);
     // The To do and Backlog tiles take a task of this project from the other list.
     bool takesOnTile(const TaskDrag &drag, const QString &stage) const;
-    // The To do list takes its own tasks to reorder them.
+    // Each stage list takes its own tasks to reorder them.
     bool takesInList(const TaskDrag &drag) const;
     QList<TaskRow *> shownRows() const;
-    // Where a To do task dropped at `point` of the list page goes: the index of the
+    // Where a task dropped at `point` of its stage list goes: the index of the
     // shown row it goes before, or their count below the last one; -1 where it is now.
     int dropGap(const QString &uuid, const QPoint &point) const;
     // Shows where the task would go and scrolls while the pointer is at an edge.
@@ -123,7 +158,7 @@ private:
     QList<Step> steps(const TaskItem &task, TaskAction action) const;
     QList<Step> editSteps(const TaskItem &task, const TaskEdits &edits) const;
     // `target REF SESSION|any [--host ALIAS]` without the project.
-    static QStringList targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id = {});
+    static QStringList targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id = {}, const QString &mode = {});
     // Runs the steps in order and refreshes after. `finished` follows the last
     // success; `failed` replaces the notice for the first refusal.
     void run(QList<Step> steps, std::function<void()> finished = {}, std::function<void(const QString &)> failed = {});
@@ -141,6 +176,8 @@ private:
     TaskBoard::View view() const;
     HgsClient *m_client;
     TaskBoard m_board;
+    QHash<QString, QString> m_executorLaunchBlockers;
+    QString m_descriptionDraft;
     QString m_projectId, m_projectName, m_host, m_session, m_sessionKey, m_stage, m_error;
     QList<TaskSession> m_sessions;
     QHash<QString, TaskTile *> m_tiles;
@@ -162,5 +199,6 @@ private:
     quint64 m_generation = 0, m_listing = 0;
     int m_visibleMs = 2500, m_hiddenMs = 15000;
     bool m_polling = true, m_dark = true, m_showOlder = false, m_loaded = false, m_failing = false;
+    bool m_refreshPending = false;
     bool m_inspectorVisible = false, m_openInInspector = false;
 };

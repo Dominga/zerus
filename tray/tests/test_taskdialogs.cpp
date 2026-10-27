@@ -1,4 +1,5 @@
 #include "FakeTasksCli.h"
+#include "ActivityView.h"
 #include "HgsClient.h"
 #include "TaskDialogs.h"
 #include "SessionStatusBadge.h"
@@ -46,6 +47,9 @@ private slots:
     void initTestCase();
     void theTaskDialogEditsAListedTaskAndShowsItsHistory();
     void aReviewTaskIsReadOnlyWithItsActions();
+    void refusedNotesKeepTheirDraftAndDoNotSubmitEdits();
+    void savingNotesDoesNotTriggerTheDialogsDefaultButton();
+    void longResultsStayBoundedAndRoutingIsSeparateFromExecutor();
     void theCancelAndProjectSettingsDialogs();
     void theTabOpensTheDialogsAndAppliesThem();
     void manySessionsWrapInTheDialog();
@@ -149,12 +153,55 @@ void TestTaskDialogs::aReviewTaskIsReadOnlyWithItsActions() {
     QCOMPARE(todo.findChild<QPushButton *>("taskSession:/codex/web")->text(), QString("codex/web"));
     QCOMPARE(todo.findChild<QPushButton *>("taskSession:/claude/web")->text(), QString("claude/web"));
     QCOMPARE(todo.findChild<QPushButton *>("taskSession:/codex/api")->text(), QString("api"));
-    QVERIFY(dialog.findChild<QLabel *>("taskDialogSummary")->text().contains("Token bucket; 6 tests."));
+    auto *result = dialog.findChild<ActivityView *>("taskDialogSummary"); QVERIFY(result);
+    QTRY_VERIFY(result->plainText().contains("Token bucket; 6 tests."));
     QSignalSpy acted(&dialog, &TaskDialog::actionRequested);
     QVERIFY(dialog.findChild<QPushButton *>("taskDialogAction:backToTodo"));
     dialog.findChild<QPushButton *>("taskDialogAction:accept")->click();
     QCOMPARE(acted.size(), 1); QCOMPARE(acted[0][1].value<TaskAction>(), TaskAction::Accept);
     const auto edits = acted[0][0].value<TaskEdits>(); QVERIFY(!edits.text && !edits.target);
+}
+
+void TestTaskDialogs::refusedNotesKeepTheirDraftAndDoNotSubmitEdits() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView view(&client); view.resize(800, 600); view.show();
+    view.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); QTRY_VERIFY(row(view, 1)); click(row(view, 1));
+    QPointer<TaskDialog> dialog; QTRY_VERIFY((dialog = view.findChild<TaskDialog *>()));
+    auto *description = dialog->findChild<QPlainTextEdit *>("taskPrompt"); description->setPlainText("Unsaved description");
+    auto *note = dialog->findChild<QLineEdit *>("taskComment"); auto *add = dialog->findChild<QPushButton *>("addTaskComment");
+    QVERIFY(note->placeholderText().contains("not sent")); note->setText("Keep this note if saving fails.");
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("comment"); fail.close();
+    add->click(); add->click(); QTRY_VERIFY(dialog->findChild<QLabel *>("taskDialogError")->isVisible());
+    QCOMPARE(note->text(), QString("Keep this note if saving fails.")); QCOMPARE(description->toPlainText(), QString("Unsaved description")); QVERIFY(add->isEnabled());
+    int comments = 0; for (const auto &call : FakeTasksCli::calls(dir.path())) comments += call.value(1) == "comment"; QCOMPARE(comments, 1);
+    QVERIFY(fail.remove()); QSignalSpy saved(dialog, &TaskDialog::saveRequested);
+    QTest::keyClick(note, Qt::Key_Return); QTRY_VERIFY(note->text().isEmpty()); QVERIFY(dialog && dialog->isVisible());
+    QCOMPARE(saved.size(), 0); QCOMPARE(description->toPlainText(), QString("Unsaved description"));
+    for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) != "edit");
+}
+
+void TestTaskDialogs::savingNotesDoesNotTriggerTheDialogsDefaultButton() {
+    for (const auto &stage : {QString("todo"), QString("review")}) {
+        TaskDialog dialog(FakeTasksCli::task(1, stage), sessions(), {}, true); dialog.show();
+        QSignalSpy saved(&dialog, &TaskDialog::saveRequested), closed(&dialog, &QDialog::finished), noted(&dialog, &TaskDialog::commentRequested);
+        auto *note = dialog.findChild<QLineEdit *>("taskComment"); note->setText("A task note");
+        QTest::keyClick(note, Qt::Key_Return); QCOMPARE(noted.size(), 1); QCOMPARE(saved.size(), 0); QCOMPARE(closed.size(), 0);
+        QVERIFY(dialog.isVisible()); QVERIFY(!note->isEnabled());
+        dialog.clearComment(); QVERIFY(note->text().isEmpty()); QVERIFY(note->isEnabled());
+    }
+}
+
+void TestTaskDialogs::longResultsStayBoundedAndRoutingIsSeparateFromExecutor() {
+    const QString report = QString("**Delivered** `result_id`.\n\n- Checked the behavior.\n- Recorded the result.\n\n").repeated(100);
+    const QJsonObject worker{{"kind", "agent"}, {"host", ""}, {"session", "codex/api"}};
+    auto task = FakeTasksCli::task(1, "review", {{"target", FakeTasksCli::pinned("codex/web")}, {"session", FakeTasksCli::pinned("codex/api")},
+        {"summary", report}, {"log", QJsonArray{QJsonObject{{"kind", "report"}, {"text", report}, {"actor", worker}, {"at", 1791018000000.0}}}}});
+    TaskDialog dialog(task, sessions(), {}, true); dialog.show();
+    QVERIFY(dialog.windowTitle().startsWith("Task details")); QVERIFY(dialog.findChild<QLabel *>("taskEditReason"));
+    QCOMPARE(dialog.findChild<QLabel *>("taskDialogAssigned")->text(), QString("web"));
+    QCOMPARE(dialog.findChild<QLabel *>("taskDialogSession")->text(), QString("api"));
+    auto *summary = dialog.findChild<ActivityView *>("taskDialogSummary"); QVERIFY(summary);
+    QTRY_VERIFY(summary->plainText().contains("result_id")); QVERIFY(summary->height() <= 150); QVERIFY(dialog.height() <= 800);
 }
 
 void TestTaskDialogs::theCancelAndProjectSettingsDialogs() {
@@ -277,7 +324,7 @@ void TestTaskDialogs::sendNowFollowsTheChosenSession() {
 void TestTaskDialogs::anEmptyPromptCannotBeApplied() {
     TaskDialog dialog(withLog(FakeTasksCli::task(1, "todo"), {}), sessions(), {}, true); dialog.show();
     auto *prompt = dialog.findChild<QPlainTextEdit *>("taskPrompt"); auto *save = dialog.findChild<QPushButton *>("saveTask");
-    prompt->setPlainText("   \n "); QVERIFY(!save->isEnabled()); QCOMPARE(save->toolTip(), QString("The prompt is empty."));
+    prompt->setPlainText("   \n "); QVERIFY(!save->isEnabled()); QCOMPARE(save->toolTip(), QString("The description is empty."));
     QVERIFY(!dialog.findChild<QPushButton *>("taskDialogAction:sendNow")->isEnabled());
     prompt->setPlainText("Back again"); QVERIFY(save->isEnabled()); QVERIFY(dialog.findChild<QPushButton *>("taskDialogAction:sendNow")->isEnabled());
 }

@@ -144,9 +144,10 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
             val started = System.nanoTime()
             // A readiness hint never bypasses fresh membership, signature,
             // request/route binding or journal settlement in receipt().
-            RelayReadTiming.measure(RelayReadTiming.Stage.ResultSignalWait) {
+            val signaled = RelayReadTiming.measure(RelayReadTiming.Stage.ResultSignalWait) {
                 resultStream.ready(connection, id, minOf(25_000L, maxPolls * ordinary))
             }
+            RelayReadTiming.point(if (signaled) RelayReadTiming.Stage.ResultSignalReady else RelayReadTiming.Stage.ResultSignalFallback)
             // Also reconcile once after a dropped/unsupported/silent stream.
             // The elapsed stream wait consumes the EXISTING wait budget rather
             // than adding another complete polling campaign after a timeout.

@@ -54,6 +54,7 @@ pub(super) fn answer(action: &str, out: &Value, place: usize, caller: &str, dest
         "start" => format!("{it} is In progress in {caller}."),
         "add" => format!("Filed {it} in {}, position {place}, for {caller}.", label(task)),
         "move" => format!("{it} is position {place} in {}.", label(task)),
+        "rename" => format!("{it} has the new title."),
         "edit" => format!("{it} has the new prompt."),
         "stage" => format!("{it} is in {}.", label(task)),
         "target" if task["target"]["session"].is_string() => {

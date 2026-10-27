@@ -247,10 +247,16 @@ ComposerDraftOwner ComposerDraftStore::owner(const QString &key)
 {
     static const QString Voice = QStringLiteral("voice-message-draft\n"), Question = QStringLiteral("question\n");
     static const QString Task = QStringLiteral("task-draft\n");
+    for (const auto &[prefix, kind] : {std::pair{QStringLiteral("task-description\n"), ComposerDraftOwner::Kind::TaskDescription}, std::pair{QStringLiteral("task-comment\n"), ComposerDraftOwner::Kind::TaskComment}}) {
+        if (!key.startsWith(prefix)) continue;
+        const auto parts = key.mid(prefix.size()).split('\n');
+        if (parts.size() != 2 || parts[0].isEmpty() || parts[1].isEmpty()) return {};
+        ComposerDraftOwner result; result.kind = kind; result.project = parts[0]; result.task = parts[1]; return result;
+    }
     for (const auto &[prefix, kind] : {std::pair{Voice, ComposerDraftOwner::Kind::Voice}, std::pair{Task, ComposerDraftOwner::Kind::Task}}) {
         if (!key.startsWith(prefix)) continue;
         auto result = owner(key.mid(prefix.size()));
-        if (result.kind == ComposerDraftOwner::Kind::Message) { result.kind = kind; return result; }
+        if (result.kind == ComposerDraftOwner::Kind::Message || (prefix == Voice && (result.kind == ComposerDraftOwner::Kind::TaskDescription || result.kind == ComposerDraftOwner::Kind::TaskComment))) { result.kind = kind; return result; }
     }
     if (key.startsWith(Question)) {
         // A question identity is a compact JSON array, so it holds no line break.

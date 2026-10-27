@@ -62,12 +62,14 @@ void TestTaskBoard::readsTheListing() {
 
 void TestTaskBoard::rowsFollowEachStageOrder() {
     const auto b = board(); const TaskBoard::View all{"", "codex/api", false, Now};
-    QCOMPARE(ids(b.rows("review", all)), QStringList({"T-r1", "T-r2"}));       // oldest report first
+    QCOMPARE(ids(b.rows("review", all)), QStringList({"T-r2", "T-r1"}));       // persisted board rank
     QCOMPARE(ids(b.rows("todo", all)), QStringList({"T-t1", "T-t2", "T-t3"})); // the queue
-    // Done shows the last 7 days, newest first; older ones come apart.
-    QCOMPARE(ids(b.rows("done", all)), QStringList({"T-d2", "T-d1"}));
+    // Done retains the board order, with the last 7 days and older tasks apart.
+    QCOMPARE(ids(b.rows("done", all)), QStringList({"T-d1", "T-d2"}));
     QCOMPARE(ids(b.rows("done", all, true)), QStringList({"T-d3"}));
     QCOMPARE(b.count("done", all), 2); QCOMPARE(b.count("active", all), 1);
+    QCOMPARE(ids(b.rows("current", all)), QStringList({"T-r2", "T-r1", "T-a1"}));
+    QCOMPARE(b.count("current", all), b.count("review", all) + b.count("active", all));
 }
 
 void TestTaskBoard::theOpenSessionsTasksAndTheFilter() {
@@ -84,17 +86,20 @@ void TestTaskBoard::theOpenSessionsTasksAndTheFilter() {
     QCOMPARE(b.count("backlog", only), 0);
     // Queue numbers stay project-wide while others are hidden.
     QCOMPARE(b.rows("todo", only).at(1).queue, 2);
+    QCOMPARE(b.count("current", only), b.count("review", only) + b.count("active", only));
 }
 
 void TestTaskBoard::actionsFollowTheStage() {
     using A = TaskAction;
-    QCOMPARE(TaskBoard::actions("todo"), QList<A>({A::Edit, A::ToBacklog, A::Top, A::SendNow}));
-    QCOMPARE(TaskBoard::actions("backlog"), QList<A>({A::Edit, A::ToTodo, A::SendNow}));
-    QCOMPARE(TaskBoard::actions("active"), QList<A>({A::Cancel}));
-    QCOMPARE(TaskBoard::actions("review"), QList<A>({A::BackToTodo, A::Accept}));
-    QCOMPARE(TaskBoard::actions("done"), QList<A>({A::BackToTodo}));
+    QCOMPARE(TaskBoard::actions("todo"), QList<A>({A::Edit, A::Rename, A::ToBacklog, A::Top, A::SendNow}));
+    QCOMPARE(TaskBoard::actions("backlog"), QList<A>({A::Edit, A::Rename, A::ToTodo, A::SendNow}));
+    QCOMPARE(TaskBoard::actions("active"), QList<A>({A::Rename, A::Cancel}));
+    QCOMPARE(TaskBoard::actions("review"), QList<A>({A::Rename, A::BackToTodo, A::Accept}));
+    QCOMPARE(TaskBoard::actions("done"), QList<A>({A::Rename, A::BackToTodo}));
     QCOMPARE(TaskBoard::stages(), QStringList({"review", "active", "todo", "backlog", "done"}));
     QCOMPARE(TaskBoard::stageLabel("active"), QString("In progress"));
+    QCOMPARE(TaskBoard::filters().first(), QString("current")); QCOMPARE(TaskBoard::stageLabel("current"), QString("Active"));
+    QVERIFY(TaskBoard::actions("current").isEmpty());
     QCOMPARE(TaskBoard::actionLabel(A::Top), QString("Move to the top of To do"));
 }
 

@@ -355,7 +355,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         let mut bytes = Vec::new();
         io::stdin().take(30 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
         if bytes.len() > 30 * 1024 * 1024 { return Err("Attachment request is too large".into()); }
-        let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let request: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
         let native = dsh::exists(name);
         if let (false, Some(created)) = (native, untracked_request(&request)) {
             let _guard = lock(None)?;

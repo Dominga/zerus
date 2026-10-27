@@ -364,8 +364,15 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
 pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&BTreeSet<String>>) -> Vec<Step> {
     let mut steps = Vec::new();
     let planning = team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending);
+    // N6: a draft team starts its lead and gives it the draft brief, then it
+    // waits for the owner to create it.
+    let drafting = team.status == TeamStatus::Draft && matches!(team.brief, Notice::Pending | Notice::Sending);
     let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
-    if !active && !planning {
+    if !active && !planning && !drafting {
+        // N29: a team that ended withdraws its members' reset waits.
+        for member in team.members.iter().filter(|member| member.limit_resume) {
+            steps.push(Step::StopLimitResume { member: member.id.clone() });
+        }
         return steps;
     }
     let mut launching = BTreeSet::new();
@@ -425,9 +432,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             detail: limit.detail.clone(),
         });
         if member.limited != limited {
-            steps.push(Step::Limited { member: member.id.clone(), limited });
+            steps.push(Step::Limited { member: member.id.clone(), limited: limited.clone() });
         }
-        let desired = member.limited.as_ref().is_some_and(|limit| limit.resets_at.is_some())
+        // N29: the limit seen now decides, so the pass that sees the episode
+        // end also withdraws its recovery request.
+        let desired = limited.as_ref().is_some_and(|limit| limit.resets_at.is_some())
             && team.settings.resume_after_limits
             && member.agent != "dsh"
             && member.session.is_some()
@@ -452,13 +461,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
     }
     // H6: a swapped lead is briefed once, also while the team runs.
-    let briefing = matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused)
-        && matches!(team.brief, Notice::Pending | Notice::Sending);
+    let briefing = (active || planning || drafting) && matches!(team.brief, Notice::Pending | Notice::Sending);
     if briefing {
         // A desktop team starts only its lead, then briefs it once.
         if let Some(lead) = team.member(&team.lead) {
             if lead.session.is_none() {
-                if planning
+                if (planning || drafting)
                     && lead.launch_id.is_empty()
                     && lead.error.is_empty()
                     && launching.insert(lead.id.clone())
@@ -469,7 +477,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 steps.push(if lead.needs_settings() { Step::Settings { member: lead.id.clone() } } else { Step::Brief });
             }
         }
-        if planning {
+        if planning || drafting {
             return steps;
         }
     }
@@ -733,7 +741,8 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
     }
     if team.status != TeamStatus::Running {
-        return steps;
+        // N35 (spec 2.5): a paused team's lead also hears one message a tick.
+        return coalesce_lead(steps);
     }
     // The lead hears once that every task is decided; the next work re-arms it.
     if team.idle == Notice::Pending && lead_free {
@@ -1250,6 +1259,16 @@ fn git_continuation(folder: &str, since: f64) -> String {
 /// goal, the members and tasks proposed so far, and how to plan. A lead
 /// swapped into a running team gets the short brief (H6).
 pub(crate) fn brief_text(team: &Team) -> String {
+    // N6: a draft's lead gets the draft brief once: the protocol, the designer
+    // guide and the draft id; nothing runs before the owner creates the team.
+    if team.status == TeamStatus::Draft {
+        return format!(
+            "[Zerus team \u{b7} from: You \u{b7} draft]\nYou lead the draft team {} ({}). Read the built-in lead protocol \
+             (hgs guide team-lead) and hgs guide designer. The owner and you edit the draft with hgs team draft --json \
+             (get or update); nothing runs until the owner creates the team.\n",
+            team.name, team.id
+        );
+    }
     if matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return format!(
             "[Zerus team \u{b7} from: Zerus \u{b7} brief]\nYou are now the lead of the team {} ({}). \
@@ -1486,6 +1505,10 @@ pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> Strin
 
 /// Runs this hgs with JSON on stdin; the child is no session's own.
 pub(crate) fn hgs(host: &str, args: &[&str], input: Option<&Value>, timeout: Duration) -> anyhow::Result<Output> {
+    #[cfg(test)]
+    if let Some(result) = FAKE_HGS.with(|fake| fake.borrow_mut().as_mut().map(|fake| fake(host, args, input))) {
+        return result;
+    }
     let mut command = Command::new(std::env::current_exe()?);
     if !host.is_empty() {
         command.arg(format!("@{host}"));
@@ -1717,6 +1740,31 @@ fn git_command(folder: &str) -> std::process::Command {
 #[cfg(test)]
 thread_local! {
     static GIT_CEILING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A test's stand-in for the `hgs` child this thread would run: a send, a
+/// listing or a request on another computer.
+#[cfg(test)]
+pub(crate) type FakeHgs = Box<dyn FnMut(&str, &[&str], Option<&Value>) -> anyhow::Result<Output>>;
+
+#[cfg(test)]
+thread_local! {
+    static FAKE_HGS: std::cell::RefCell<Option<FakeHgs>> = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn set_fake_hgs(fake: Option<FakeHgs>) {
+    FAKE_HGS.with(|value| *value.borrow_mut() = fake);
+}
+
+/// A finished child's output with this exit code.
+#[cfg(test)]
+pub(crate) fn fake_output(code: i32, stdout: &str, stderr: &str) -> Output {
+    #[cfg(unix)]
+    let status = std::os::unix::process::ExitStatusExt::from_raw(code << 8);
+    #[cfg(windows)]
+    let status = std::os::windows::process::ExitStatusExt::from_raw(code as u32);
+    Output { status, stdout: stdout.as_bytes().to_vec(), stderr: stderr.as_bytes().to_vec() }
 }
 
 /// The ceiling this test thread's git reads use; call it at the start of a test
@@ -2117,11 +2165,18 @@ fn set_limit_resume(store: &mut Store, team: &str, member: &str, on: bool) -> an
             return Ok(());
         }
         found.limit_resume = on;
-        session = found.session.clone();
+        // N29: the request is withdrawn for the session it named, even after
+        // a swap gave the member another one.
+        session = if on {
+            found.limit_session = found.session.clone();
+            found.session.clone()
+        } else {
+            found.limit_session.take().or_else(|| found.session.clone())
+        };
         Ok(())
     })?;
     let Some(session) = session else { return Ok(()) };
-    if let Err(error) = super::super::recovery::set_team_override(&session.name, &session.run_id, on) {
+    if let Err(error) = team_override(&session, on) {
         eprintln!(
             "hgs: the team could not {} automatic recovery for {}: {error}",
             if on { "start" } else { "stop" },
@@ -2131,10 +2186,24 @@ fn set_limit_resume(store: &mut Store, team: &str, member: &str, on: bool) -> an
     Ok(())
 }
 
+/// H1: the recovery service of the session's computer waits for its reset;
+/// a member on another computer is asked there (N30).
+fn team_override(session: &SessionRef, on: bool) -> anyhow::Result<()> {
+    if session.host.is_empty() {
+        return super::super::recovery::set_team_override(&session.name, &session.run_id, on).map_err(|error| anyhow::anyhow!("{error}"));
+    }
+    let input = json!({"name":session.name,"run_id":session.run_id,"on":on});
+    let output = hgs(&session.host, &["recovery", "team-override"], Some(&input), Duration::from_secs(60))?;
+    anyhow::ensure!(output.status.success(), "{}: {}", session.host, String::from_utf8_lossy(&output.stderr).trim());
+    Ok(())
+}
+
 fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, from: Option<&str>, host: &str) -> anyhow::Result<()> {
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
+    // N16: the finding this hand-out carries comes back if the send is refused.
+    let mut note = String::new();
     let mut extra = String::new();
     let mut git_job: Option<(String, f64)> = None;
     change(store, team_id, |team, events| {
@@ -2179,7 +2248,7 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
         // D2: the finding goes with this one hand-out only.
         if !task.reopen_note.is_empty() {
             if let Some(task) = team.task_mut(task_id) {
-                task.reopen_note.clear();
+                note = std::mem::take(&mut task.reopen_note);
             }
         }
         // Spec 5.6: "QA lead: Task to Tester" when a sub-lead hands it out.
@@ -2211,6 +2280,9 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
                 attempt.state = AttemptState::Refused;
                 attempt.error = error.clone();
                 task.status = TaskStatus::Pending;
+                if task.reopen_note.is_empty() {
+                    task.reopen_note = note.clone();
+                }
                 events.push(Event::new("refused", json!({"task":task_id,"attempt":n,"error":error})));
             }
             Sent::Uncertain(error) => {
@@ -3302,9 +3374,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             let role = team.role_of(member);
             let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
             let new_episode = limited.is_some() && found.limited.is_none();
-            if limited.is_none() {
-                found.limit_resume = false;
-            }
+            // N29: the end of the episode is withdrawn by StopLimitResume in
+            // the same pass, with the session the request names.
             if let (true, Some(limit)) = (new_episode, limited.as_ref()) {
                 events.push(Event::new(
                     "member_limited",
@@ -3318,8 +3389,9 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::RefreshLimitResume { member } => {
             // No team write: the recovery service ignores a refresh younger
             // than a minute, so this is cheap.
-            if let Some(session) = team.member(member).and_then(|member| member.session.clone()) {
-                if let Err(error) = super::super::recovery::set_team_override(&session.name, &session.run_id, true) {
+            let named = team.member(member).and_then(|member| member.limit_session.clone().or_else(|| member.session.clone()));
+            if let Some(session) = named {
+                if let Err(error) = team_override(&session, true) {
                     eprintln!("hgs: the team could not refresh automatic recovery for {}: {error}", session.name);
                 }
             }
@@ -3457,7 +3529,11 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         .into_iter()
         .filter(|team| {
             matches!(team.status, TeamStatus::Running | TeamStatus::Paused)
-                || (team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending))
+                // N6: a draft still starting (or briefing) its lead is ticked too.
+                || (matches!(team.status, TeamStatus::Planning | TeamStatus::Draft)
+                    && matches!(team.brief, Notice::Pending | Notice::Sending))
+                // N29: an ended team still withdraws its members' reset waits.
+                || team.members.iter().any(|member| member.limit_resume)
         })
         .collect();
     if teams.is_empty() {
@@ -4085,6 +4161,16 @@ pub(crate) fn stop_worker() -> Result<i32> {
 /// Starts a detached worker unless one runs. It exits by itself once no team
 /// runs.
 pub(crate) fn ensure_worker() -> anyhow::Result<()> {
+    // A command test runs the real entry point; its executable is the test
+    // binary, which must not start as a worker.
+    #[cfg(test)]
+    return Ok(());
+    #[cfg(not(test))]
+    ensure_worker_now()
+}
+
+#[cfg(not(test))]
+fn ensure_worker_now() -> anyhow::Result<()> {
     if crate::status::locked(&lock_path()) {
         return Ok(());
     }
@@ -4586,6 +4672,244 @@ mod tests {
         busy.phase = "working".into();
         let found = steps(&report_team, &[busy], late);
         assert!(!found.iter().any(|step| matches!(step, Step::Inbox | Step::RemindReport { .. })), "{found:?}");
+    }
+
+    // ---- #480: the phase 35 review's dispatcher findings, through steps()
+    // and run_step() on a private store.
+
+    #[test]
+    fn an_urgent_task_goes_before_the_members_other_ready_tasks() {
+        // N11 (spec 8): dispatch_order keeps ready's urgent-first order. The
+        // urgent phase is the one a finding's "urgent" action appends.
+        let mut team = team();
+        let mut events = Vec::new();
+        team.findings.push(crate::state::teams::model::Finding {
+            id: "f1".into(),
+            severity: "critical".into(),
+            title: "Lost write".into(),
+            scenario: "two saves".into(),
+            state: "open".into(),
+            ..Default::default()
+        });
+        ops::apply(
+            &mut team,
+            "finding",
+            &json!({"finding":"f1","action":"urgent","tasks":[{"id":4,"title":"Hotfix","assignee":"dev"}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        let hotfix = team.tasks.iter().find(|task| task.title == "Hotfix").unwrap().id;
+        assert_eq!(plan::ready(&team)[0], hotfix, "{:?}", team.phases);
+        let seen = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        let found = steps(&team, &seen, 100.0);
+        assert!(found.contains(&Step::HandOut { task: hotfix, member: "dev".into() }), "{found:?}");
+        assert!(!found.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{found:?}");
+    }
+
+    #[test]
+    fn a_paused_teams_lead_hears_one_message_a_tick() {
+        // N35 (spec 2.5): the inbox and the late-report reminder do not both
+        // go out in one tick because the team is paused.
+        let mut team = team();
+        team.status = TeamStatus::Paused;
+        {
+            let task = team.task_mut(1).unwrap();
+            task.attempts.push(Attempt {
+                n: 1,
+                id: "A1".into(),
+                member: "dev".into(),
+                state: AttemptState::Reported,
+                notice: Notice::Pending,
+                report: Some(crate::state::teams::model::Report { text: "Done".into(), at: 10.0, ..Default::default() }),
+                ..Default::default()
+            });
+            task.status = TaskStatus::Submitted;
+        }
+        {
+            // A turn blocked far longer than the blocked warning allows.
+            let task = team.task_mut(2).unwrap();
+            task.attempts.push(Attempt {
+                n: 1,
+                id: "A2".into(),
+                member: "dev".into(),
+                state: AttemptState::Delivered,
+                sent_at: 10.0,
+                delivered_at: Some(10.0),
+                blocked_since: Some(20.0),
+                ..Default::default()
+            });
+            task.status = TaskStatus::InProgress;
+        }
+        let lead = session("claude/x/lead", "r0", true);
+        let found = steps(&team, &[lead, session("codex/x/dev", "r1", false)], 100_000.0);
+        let lead_messages = found
+            .iter()
+            .filter(|step| matches!(step, Step::Inbox | Step::RemindReport { .. } | Step::BlockedLate { .. } | Step::TellStartLate { .. }))
+            .count();
+        assert_eq!(lead_messages, 1, "{found:?}");
+    }
+
+    fn reopen_store(dir: &std::path::Path) -> (Store, Team) {
+        let mut store = Store::open_at(&dir.join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        let task = t.task_mut(1).unwrap();
+        task.reopen_note = "Finding f1 (critical): Lost write\nScenario: two saves at once".into();
+        task.pinned = true;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        (store, t)
+    }
+
+    #[test]
+    fn a_refused_hand_out_keeps_the_finding_for_the_next_one() {
+        // N16: the reopen note goes with the hand-out that is delivered.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, t) = reopen_store(dir.path());
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let record = sent.clone();
+        let refuse = std::rc::Rc::new(std::cell::Cell::new(true));
+        let refusing = refuse.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            assert_eq!(args.first().copied(), Some("send"));
+            record.borrow_mut().push(input.map(|input| input["text"].as_str().unwrap_or_default().to_owned()).unwrap_or_default());
+            Ok(if refusing.get() { fake_output(1, "", "hgs: the session is busy") } else { fake_output(0, r#"{"status":"submitted"}"#, "") })
+        })));
+        let result = hand_out(&mut store, &t.id, 1, "dev", None, "");
+        let after_refusal = store.load(&t.id).unwrap().unwrap();
+        refuse.set(false);
+        let second = hand_out(&mut store, &t.id, 1, "dev", None, "");
+        set_fake_hgs(None);
+        result.unwrap();
+        second.unwrap();
+        let task = after_refusal.task(1).unwrap();
+        assert_eq!(task.attempts.last().unwrap().state, AttemptState::Refused);
+        assert!(task.reopen_note.contains("Finding f1"), "{task:?}");
+        let sent = sent.borrow();
+        assert_eq!(sent.len(), 2);
+        assert!(sent[0].contains("Finding f1") && sent[1].contains("Finding f1"), "{sent:?}");
+        // Delivered once, the finding is not sent again.
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+        assert!(saved.task(1).unwrap().reopen_note.is_empty());
+    }
+
+    /// The sessions the local recovery service is asked to wait for.
+    fn local_overrides() -> Vec<String> {
+        let path = crate::state::storage::root().join("recovery/team.json");
+        let value: Value = std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        value["items"].as_object().map(|items| items.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    fn limited_dev(name: &str, run: &str) -> Seen {
+        let mut dev = session(name, run, false);
+        dev.phase = "error".into();
+        dev.limited = Some(SeenLimit { at: 100.0, resets_at: Some(200.0), detail: "session limit".into() });
+        dev
+    }
+
+    /// Every step of one pass, as the worker runs them.
+    fn pass(store: &mut Store, id: &str, seen: &[Seen]) -> Vec<Step> {
+        let team = store.load(id).unwrap().unwrap();
+        let found = steps(&team, seen, 300.0);
+        for step in &found {
+            run_step(store, &team, step, "").unwrap();
+        }
+        found
+    }
+
+    #[test]
+    fn the_recovery_request_leaves_with_a_swap_the_episode_and_the_team() {
+        // N29: the request names the session it was made for, and is withdrawn
+        // when the member is swapped, when the limit ends and when the team ends.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            t.settings.resume_after_limits = true;
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let lead = session("claude/x/lead", "r0", true);
+            // The limit is seen: the same pass stores it and asks for the wait.
+            let found = pass(&mut store, &t.id, &[lead.clone(), limited_dev("codex/x/dev", "r1")]);
+            assert!(found.contains(&Step::StartLimitResume { member: "dev".into() }), "{found:?}");
+            assert_eq!(local_overrides(), vec!["codex/x/dev".to_owned()]);
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert_eq!(saved.member("dev").unwrap().limit_session.as_ref().map(|session| session.name.as_str()), Some("codex/x/dev"));
+            // A swap gives dev a new session: the next pass withdraws the old one's wait.
+            store
+                .mutate(Some(("22222222-2222-4222-8222-222222222222", &json!({}))), &t.id, None, |team, events| {
+                    ops::apply(
+                        team,
+                        "swap-member",
+                        &json!({"member":"dev","session":{"name":"codex/x/dev2","run_id":"r2","conversation_id":"c2"}}),
+                        &Actor::Human,
+                        &BTreeSet::new(),
+                        events,
+                    )
+                })
+                .unwrap();
+            let found = pass(&mut store, &t.id, &[lead.clone(), session("codex/x/dev2", "r2", true)]);
+            assert!(found.contains(&Step::StopLimitResume { member: "dev".into() }), "{found:?}");
+            assert!(local_overrides().is_empty(), "{:?}", local_overrides());
+            let saved = store.load(&t.id).unwrap().unwrap();
+            assert!(!saved.member("dev").unwrap().limit_resume && saved.member("dev").unwrap().limit_session.is_none());
+            // The end of an episode: the pass that sees it withdraws the wait.
+            pass(&mut store, &t.id, &[lead.clone(), limited_dev("codex/x/dev2", "r2")]);
+            assert_eq!(local_overrides(), vec!["codex/x/dev2".to_owned()]);
+            let found = pass(&mut store, &t.id, &[lead.clone(), session("codex/x/dev2", "r2", true)]);
+            assert!(found.contains(&Step::Limited { member: "dev".into(), limited: None }), "{found:?}");
+            assert!(found.contains(&Step::StopLimitResume { member: "dev".into() }), "{found:?}");
+            assert!(local_overrides().is_empty());
+            // The end of the team: a stopped team still withdraws it.
+            pass(&mut store, &t.id, &[lead.clone(), limited_dev("codex/x/dev2", "r2")]);
+            assert_eq!(local_overrides().len(), 1);
+            store
+                .mutate(Some(("33333333-3333-4333-8333-333333333333", &json!({}))), &t.id, None, |team, _| {
+                    team.status = TeamStatus::Stopped;
+                    Ok(json!({}))
+                })
+                .unwrap();
+            let found = pass(&mut store, &t.id, &[lead.clone(), limited_dev("codex/x/dev2", "r2")]);
+            assert_eq!(found, vec![Step::StopLimitResume { member: "dev".into() }]);
+            assert!(local_overrides().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_member_on_another_computer_is_resumed_by_that_computer() {
+        // N30: the request goes to the member's computer, not to this one's
+        // recovery service.
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+            let mut t = team();
+            t.settings.resume_after_limits = true;
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.computer = "msi".into();
+            dev.session.as_mut().unwrap().host = "msi".into();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, Vec<String>, Value)>::new()));
+            let record = calls.clone();
+            set_fake_hgs(Some(Box::new(move |host: &str, args: &[&str], input: Option<&Value>| {
+                record.borrow_mut().push((host.to_owned(), args.iter().map(|arg| arg.to_string()).collect(), input.cloned().unwrap_or_default()));
+                Ok(fake_output(0, r#"{"status":"ok"}"#, ""))
+            })));
+            let mut remote = limited_dev("codex/x/dev", "r1");
+            remote.host = "msi".into();
+            let lead = session("claude/x/lead", "r0", true);
+            pass(&mut store, &t.id, &[lead.clone(), remote]);
+            let mut back = session("codex/x/dev", "r1", true);
+            back.host = "msi".into();
+            pass(&mut store, &t.id, &[lead, back]);
+            set_fake_hgs(None);
+            assert!(local_overrides().is_empty(), "{:?}", local_overrides());
+            let calls = calls.borrow();
+            let overrides: Vec<_> = calls.iter().filter(|(_, args, _)| args.first().map(String::as_str) == Some("recovery")).collect();
+            assert_eq!(overrides.len(), 2, "{calls:?}");
+            assert_eq!((overrides[0].0.as_str(), overrides[0].1.clone()), ("msi", vec!["recovery".to_owned(), "team-override".to_owned()]));
+            assert_eq!(overrides[0].2, json!({"name":"codex/x/dev","run_id":"r1","on":true}));
+            assert_eq!(overrides[1].2["on"], false);
+        });
     }
 
     #[test]
@@ -5293,6 +5617,39 @@ mod tests {
         assert!(!waiting.iter().any(|step| matches!(step, Step::NoReport { .. })), "{waiting:?}");
         let late = steps(&t, &[seen], 10.0 + timeout + 1.0);
         assert!(late.contains(&Step::NoReport { task: 1 }), "{late:?}");
+    }
+
+    #[test]
+    fn a_draft_starts_and_briefs_its_lead() {
+        // N6: a draft team launches its lead in the team's folder and gives it
+        // the draft brief once (spec 3); no plan work is handed out before the
+        // owner creates the team.
+        let mut t = Team {
+            id: "d1".into(),
+            name: "New team".into(),
+            folder: "D:/work/shop".into(),
+            status: TeamStatus::Draft,
+            lead: "lead".into(),
+            brief: Notice::Pending,
+            draft: Some(Draft { revision: 1, ..Default::default() }),
+            ..Default::default()
+        };
+        t.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        t.tasks.push(Task { id: 1, title: "Drafted".into(), assignee: "lead".into(), status: TaskStatus::Draft, ..Default::default() });
+        let found = steps(&t, &[], 100.0);
+        assert!(found.contains(&Step::Launch { member: "lead".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::HandOut { .. })), "{found:?}");
+        // Launched and free: the draft brief, once.
+        t.members[0].launch_id = "L".into();
+        t.members[0].session = Some(SessionRef { name: "claude/x/lead".into(), run_id: "r1".into(), ..Default::default() });
+        let free = session("claude/x/lead", "r1", true);
+        assert!(steps(&t, &[free], 100.0).contains(&Step::Brief));
+        let brief = brief_text(&t);
+        assert!(brief.contains("hgs guide designer") && brief.contains("d1"), "{brief}");
+        assert!(!brief.contains("Plan the work"), "the draft brief is not the planning brief: {brief}");
+        // A created team is Planning with its planning brief, not a draft brief.
+        t.status = TeamStatus::Planning;
+        assert!(brief_text(&t).contains("Plan the work"), "{}", brief_text(&t));
     }
 
     #[test]

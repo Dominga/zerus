@@ -101,8 +101,14 @@ fn host_arguments(overlay: &Path, default_profile: bool) -> Vec<String> {
 }
 
 /// H4: the one overlay Zerus writes for the host: its private bridge only.
-fn host_overlay(script: &Path, socket: &Path) -> Value {
-    json!([{"insert":[{"id":"hgs-native-dsh","name":script,"config":{"socket":socket,"recoveryPolicy":recovery::policy_path()}}]}])
+fn host_overlay(script: &Path, socket: &Path, block_upload: bool) -> Value {
+    let mut insert = vec![json!({"id":"hgs-native-dsh","name":script,"config":{"socket":socket,"recoveryPolicy":recovery::policy_path()}})];
+    if block_upload {
+        // U22: the row replaces the shipped plugin's config; the user's global
+        // dsh configuration is never edited.
+        insert.push(session_upload::overlay_row()["insert"][0].clone());
+    }
+    json!([{"insert":insert}])
 }
 
 fn host_dir(record: &Value) -> PathBuf {
@@ -259,7 +265,7 @@ fn ensure_host(record: &Value) -> Result<()> {
     let overlay = dir.join("hgs.patch.json");
     atomic(
         &overlay,
-        &host_overlay(&script, &socket).to_string(),
+        &host_overlay(&script, &socket, session_upload::block()).to_string(),
     )?;
     let log = crate::platform::private_open(OpenOptions::new().create(true).truncate(true).write(true))
         .open(dir.join("host.log"))
@@ -1348,7 +1354,7 @@ fn checked_request(record: &Value) -> Result<Value> {
     if bytes.len() > 30 * 1024 * 1024 {
         return Err("Native request is too large".into());
     }
-    let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     uuid::Uuid::parse_str(string(&request, "request_id")).map_err(|_| "Invalid request ID")?;
     if request["expected_run_id"] != record["run_id"]
         || request["expected_conversation_id"] != record["conversation_id"]
@@ -1903,10 +1909,13 @@ mod notification_tests {
             }
             assert!(args.contains("--patch") && args.contains("--profile hgs"), "{kind}: {args}");
         }
-        let overlay = host_overlay(Path::new("state/bridge.mjs"), Path::new("state/socket")).to_string().to_lowercase();
+        let overlay = host_overlay(Path::new("state/bridge.mjs"), Path::new("state/socket"), false).to_string().to_lowercase();
         assert!(overlay.contains("hgs-native-dsh"), "{overlay}");
         for forbidden in ["session-log", "sessionlog", "logupload", "upload"] {
             assert!(!overlay.contains(forbidden), "{overlay}");
         }
+        // U22: the block overlay disables the shipped plugin; off leaves dsh alone.
+        let blocked = host_overlay(Path::new("state/bridge.mjs"), Path::new("state/socket"), true).to_string();
+        assert!(blocked.contains("session-log-deepseek") && blocked.contains("\"enabled\":false"), "{blocked}");
     }
 }

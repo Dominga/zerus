@@ -320,7 +320,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 512 * 1024 {
         return Err("Terminal request exceeds size limit".into());
     }
-    let request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request: Request = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     validate(&request)?;
     let name = &args[0];
     let mut answer = if request.action == "snapshot" {

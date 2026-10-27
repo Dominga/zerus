@@ -42,6 +42,21 @@ sessions have been safely closed to load the guard; upgrading Zerus never
 restarts or hot-reloads a host that owns live agents. The shared acceptance
 corpus is `tests/fixtures/command-guard.json`.
 
+## Subagent confirmation
+
+Zerus asks the owner before an agent starts subagents. The global setting is on
+by default for every computer and account, including existing installs, and is
+kept by hgs: `hgs subagents-confirm get --json` and a bounded set request
+`{"request_id":"UUID","confirm":false} | hgs subagents-confirm set --json`.
+When it is on, Claude's `PreToolUse` hook answers an `Agent`/`Task` call with
+`permissionDecision: "ask"` and a reason naming the subagent type, its model
+(the tool input, else the definition in `.claude/agents/<type>.md`, else
+"inherits <session model>"), its effort when known and the description.
+Subagent calls of one turn are grouped as "Start N subagents: ...". Automatic
+tool approvals never answer this request; a team member's request reaches its
+lead like any other permission request. Agents without a pre-tool subagent
+approval are not blocked; their status says the confirmation is not supported.
+
 ## CLI sessions
 
 `hgs` starts a command in a named project tmux session and attaches locally or

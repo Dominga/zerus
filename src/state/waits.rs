@@ -291,7 +291,7 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 16_384 {
         return Err("Wait request exceeds 16 KiB".into());
     }
-    let input: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let input: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     if !input.is_object() {
         return Err("A JSON object is required".into());
     }

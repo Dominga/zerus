@@ -420,7 +420,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if args.len()!=2 || args[1]!="--json" {return Err("usage: hgs clear-context <session> --json".into());}
     let mut bytes=Vec::new();io::stdin().take(8193).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
     if bytes.len()>8192 {return Err("Clear request is too large".into());}
-    let request:Request=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+    let request:Request=serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e|e.to_string())?;
     let uuid=uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
     let name=&args[0];
     if opencode::exists(name) {return Err("OpenCode context reset is not supported by this adapter".into());}

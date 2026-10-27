@@ -564,7 +564,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > video::MAX_REQUEST_BYTES {
         return Err("Voice request is too large".into());
     }
-    let request: Value = serde_json::from_slice(&bytes).map_err(err)?;
+    let request: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(err)?;
     let video = prepare_request(&request)?;
     let target = checked(&args[0], &request)?;
     let config = crate::config::Config::load().map_err(|e| e.message)?;

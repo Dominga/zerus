@@ -1323,22 +1323,10 @@ pub(super) fn hook() -> Result<i32> {
             if matches!(kind, "UserPromptSubmit" | "Stop" | "SessionEnd") {
                 subagents_confirm::group_reset(sid);
             }
-            if subagents_confirm::subagent_call(&event) {
-                let tool = ["tool_use_id", "tool_call_id"].iter().map(|key| string(&event, key)).find(|id| !id.is_empty()).unwrap_or_default();
-                let calls = subagents_confirm::group_add(sid, tool, &event["tool_input"]);
-                let folder = string(&record, "cwd");
-                let model = string(&record, "model");
-                let model = if model.is_empty() { "the session model" } else { model };
-                if subagents_confirm::team_member(string(&record, "name"), string(&record, "run_id")) {
-                    // The team lead routing arrives in phase 39; a native ask
-                    // would wait for someone the team cannot see.
-                    record["subagent_confirm"] = json!("subagent confirmation for team members comes with the lead routing");
-                } else if subagents_confirm::can_ask() {
-                    println!("{}", subagents_confirm::decision(&calls, folder, model));
-                } else {
-                    // No one can answer a native ask in print mode; never block it.
-                    record["subagent_confirm"] = json!("ask skipped in a non-interactive Claude run");
-                }
+            // U19: the ask becomes Claude's permission request, which the
+            // approval channel brings to the owner, or to a member's lead.
+            if let Some(output) = subagents_confirm::pre_tool(&mut record, &event, sid) {
+                println!("{output}");
             }
             if kind == "PostToolUse" && subagents_confirm::subagent_tool(&event) {
                 let tool = ["tool_use_id", "tool_call_id"].iter().map(|key| string(&event, key)).find(|id| !id.is_empty()).unwrap_or_default();

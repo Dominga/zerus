@@ -3350,6 +3350,46 @@ mod tests {
         json!({"severity":severity,"title":title,"scenario":"two saves at once","task":1})
     }
 
+    /// U19 (2): the lead answers a member's subagent request with hgs team
+    /// answer; the answer goes to that member's session for that exact card
+    /// (its tool use), as `hgs answer` with the card's id and hash.
+    #[test]
+    fn the_leads_answer_reaches_the_members_subagent_card() {
+        use crate::state::teams::model::SessionRef;
+        let (mut team, _, _) = review_team();
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session =
+            Some(SessionRef { name: "claude/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+        let card = super::super::dispatcher::subagent_card();
+        with_review_team(&team, || {
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(Vec<String>, Value)>::new()));
+            let record = calls.clone();
+            let inspected = json!({"pending_questions":[card.clone()]}).to_string();
+            super::super::dispatcher::set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+                record.borrow_mut().push((args.iter().map(|arg| arg.to_string()).collect(), input.cloned().unwrap_or_default()));
+                Ok(match args.first().copied() {
+                    Some("inspect") => super::super::dispatcher::fake_output(0, &inspected, ""),
+                    _ => super::super::dispatcher::fake_output(0, r#"{"status":"answered"}"#, ""),
+                })
+            })));
+            let result = as_lead(|| {
+                call(
+                    "answer",
+                    json!({"member":"dev","question_id":card["question_id"],"expected_question_hash":card["question_hash"],
+                        "answers":[{"question_id":"approval","selected_option_ids":["1"]}]}),
+                )
+            });
+            super::super::dispatcher::set_fake_hgs(None);
+            result.unwrap();
+            let calls = calls.borrow();
+            let answer = calls.iter().find(|(args, _)| args.first().map(String::as_str) == Some("answer")).expect("hgs answer was called");
+            assert_eq!(answer.0, vec!["answer".to_owned(), "claude/x/dev".to_owned(), "--json".to_owned()]);
+            assert_eq!(answer.1["question_id"], card["question_id"]);
+            assert_eq!(answer.1["expected_question_hash"], card["question_hash"]);
+            assert_eq!(answer.1["answers"][0]["selected_option_ids"], json!(["1"]));
+            assert_eq!(answer.1["expected_run_id"], "r1");
+        });
+    }
+
     #[test]
     fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
         // N13: "high" is no severity: the member hears it at once, and the

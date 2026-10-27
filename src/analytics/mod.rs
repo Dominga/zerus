@@ -163,7 +163,7 @@ pub(crate) fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i3
     if bytes.len() > 4096 {
         return Err(bad("Analytics request exceeds 4 KiB"));
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| bad("Invalid analytics JSON"))?;
+    let value: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|_| bad("Invalid analytics JSON"))?;
     validate_request(&value)?;
     if read_only && value["action"] != "summary" {
         return Err(bad("Remote analytics only permits summary reads"));

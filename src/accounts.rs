@@ -671,7 +671,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             use std::io::{IsTerminal,Read};
             if std::io::stdin().is_terminal() || dry {return Err(Error::new(1,"Credential transport requires a private input pipe. Use account copy."));}
             let mut payload=Vec::new();std::io::stdin().take((MAX_TRANSFER+1)as u64).read_to_end(&mut payload)?;
-            println!("{}",import(config,id,arg(args,"--label").unwrap_or(id),&payload)?);
+            println!("{}",import(config,id,arg(args,"--label").unwrap_or(id),crate::state::without_bom(&payload))?);
         },
         "login"=>{
             if id=="native-dsh" {return crate::native_ui::open(config,"","@account",dry);}

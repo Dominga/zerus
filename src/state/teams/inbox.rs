@@ -574,6 +574,15 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
         out.push(json!({"kind":"findings","count":deferred.len(),"since":latest,
             "summary":format!("{} findings deferred", deferred.len())}));
     }
+    // N17 (spec 8): a replan pauses the team for the owner's proposal; the
+    // owner sees it here until the team runs again.
+    if team.status == crate::state::teams::model::TeamStatus::Paused {
+        for finding in team.findings.iter().filter(|finding| finding.state == "replan" && !finding.proposal.is_empty()) {
+            out.push(json!({"kind":"replan","finding":finding.id,"title":finding.title,"severity":finding.severity,
+                "proposal":finding.proposal,"since":finding.at,
+                "summary":format!("Replan proposed for {}: {}", finding.id, finding.proposal)}));
+        }
+    }
     // U18: a member's permission request the lead has not answered for
     // `remind_owner_permission_minutes` goes to the owner, with the member, the
     // command and its age; the owner may answer it from here.

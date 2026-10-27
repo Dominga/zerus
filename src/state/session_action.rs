@@ -377,7 +377,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 8192 {
         return Err("Action request is too large".into());
     }
-    let request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request: Request = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     let name = &args[0];
     validate(&request, name)?;
     let hash = format!(

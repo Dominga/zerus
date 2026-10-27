@@ -318,7 +318,7 @@ pub(super) fn run() -> Result<i32> {
         .read_to_end(&mut input)
         .is_ok_and(|read| read as u64 <= MAX_INPUT);
     let parsed = complete
-        .then(|| serde_json::from_slice::<Value>(&input).ok())
+        .then(|| serde_json::from_slice::<Value>(crate::state::without_bom(&input)).ok())
         .flatten();
     if let Some(parsed) = &parsed {
         let _ = record(parsed, observed_at);

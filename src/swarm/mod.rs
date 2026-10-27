@@ -117,7 +117,7 @@ fn input() -> Result<Value> {
         bytes.len() as u64 <= transport::MAX_BYTES,
         "swarm request is too large"
     );
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(serde_json::from_slice(crate::state::without_bom(&bytes))?)
 }
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> cli::Result<i32> {

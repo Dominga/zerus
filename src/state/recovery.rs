@@ -1018,6 +1018,21 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
             println!("{}", json!({"order":policy_order(&p),"policy":p}));
         }
+        // N30: a team on another computer asks this one's recovery service to
+        // wait for (or stop waiting for) a member session's reset.
+        Some("team-override") if args.len() == 1 => {
+            let request = stdin_json()?;
+            let name = string(&request, "name");
+            if name.is_empty() {
+                return Err("A team override names its session".into());
+            }
+            let on = request["on"].as_bool().ok_or("A team override says \"on\": true or false")?;
+            set_team_override(name, string(&request, "run_id"), on)?;
+            if on {
+                ensure_worker()?;
+            }
+            println!("{}", json!({"status":"ok","name":name,"on":on}));
+        }
         Some("action") if args.len()==2 && args[1]=="--scoped-json" => {scoped_action(stdin_json()?)?;}
         Some("action") if args.len() == 1 => {
             let request = stdin_json()?;

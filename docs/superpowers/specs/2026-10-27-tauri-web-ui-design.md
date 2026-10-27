@@ -42,6 +42,8 @@ design work reaches the product.
 | Usage limits (round 5) | As Qt draws them today (`AccountUsage::Button`): the provider badge, then per window a meter and "5h 34%" in the pace colour, then refresh; no account name, no plan. Rails (default): usage 3 px in the pace colour above the window's elapsed share 2 px; the marker variants, loading placeholders and stale windows ("5h refresh") follow the same code. Pace tones: normal, warning when the average pace exhausts the limit before reset, critical when that happens in under half the remaining time, at least warning from 90%. New session and Overview use the compact form (20 px meters, no badge). Account filters and chips start with the provider glyph, then the name |
 | Machines (round 6) | Each machine shows its operating system in a rounded tile (Linux, macOS, Windows, or a generic computer) with the connection state as a dot on its corner: connected green, not connected red, connecting amber with a pulsing ring, disabled grey; no wifi glyph. The same tile appears in Overview machine cards and the New session computer chooser. Glyphs are monochrome outlines (Tabler Icons for macOS and Windows under MIT, an original penguin for Linux) |
 | Accounts default (round 6) | The default account for new sessions on a machine is spelled out: a "Default" chip on that machine and a "Make default" action beside the other connected machines, matching Qt's Default on/Make default on button |
+| Text separators (round 8) | Never separate values with dots (middle dot, bullet or similar). Values sit apart through layout (spacing, columns, labelled fields, chips) or line breaks; where words must be joined, use ordinary prose (a comma, "on", parentheses), never a dot. This holds for cards, headers, status lines, menus, tooltips, accessible names, dialog titles and mock data. `design/webui/scripts/check-separators.ts` enforces it: it runs after every build and publish and fails on U+00B7, U+2022, U+2219, U+22C5, U+2027, U+2981 or U+30FB in the sources or the built page (licences and third-party-only chunks excepted); the client build keeps the same check |
+| Overview cards (round 8) | Machine cards on Overview show no operating system or architecture (that belongs to Machines); the OS tile with its status dot remains the state indicator. CPU and memory percentages are each card's main figures (22 px in the load colour), with the bar and details secondary |
 | Overview (round 7) | Overview is a centred column like Activity: both edges drag together, double-click returns to the default width, the width is remembered; Settings > Appearance sets the default (1200 px, 720-2400) and Full-width Overview. Machine cards are compact (identity, OS and architecture, state and settings; CPU and memory meters with their values, cores, load and totals; sessions and attention), several per row. The sample time is shown only when it is not current, as "Last sample <date time>" |
 | Add to machine (round 6) | Adding an account to machines is a three-step flow that scales to large fleets: (1) a searchable, virtualized machine list with the OS tile and status dot, multi-select, and machines that already have the account or cannot take it (offline, connecting, agent not installed) shown with the reason and not selectable; (2) how hgs adds the profile (an existing saved sign-in on the target, copying the sign-in over SSH from a chosen source, or creating the profile and signing in there; an API key for DeepSeek) with the account name and profile ID; (3) per-machine progress and outcome (added, needs sign-in, failed with reason, unknown), with Retry only for failures verified to have changed nothing and problems listed first. An account's machines show at most four chips, keeping the selected one, plus "+N more" with a searchable list |
 | Hint text (round 6) | No obvious keyboard hints in composers, grips or placeholders ("Enter to send", "Enter to create", resize tooltips); shortcuts stay in Settings > Keyboard and F1. Attachment previews appear only on hover or after an arrow-key move and never cover the list |
@@ -229,6 +231,8 @@ components move into the client package; its mock data is replaced by the store.
 
 ## Skin format v1
 
+Skins change tokens and enumerated variants only; they never add text, and no token or variant introduces dot separators between values (see the text separator rule above).
+
 One JSON document per skin, independent of the UI stack.
 
 ```json
@@ -387,7 +391,7 @@ installing Qt until the owner switches the default.
 
 ## Open questions for the owner
 
-1. Approve the round 7 design, or what to change. This is the only open question.
+1. Approve the round 8 design, or what to change. This is the only open question.
 
 Decided on 2026-10-27: the WebKit preference fix on macOS with the criteria
 above, falling back to Chromium on macOS (CEF once beta, otherwise Electron);

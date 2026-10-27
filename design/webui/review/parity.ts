@@ -39,7 +39,7 @@ export const PARITY: ParityGroup[] = [
     { what: "Виртуализация: 20 000 сессий без потери плавности", where: "Кнопка «20k» в панели MOCKUP", status: "mock" },
   ] },
   { id: "status", title: "Статусы и признаки", rows: [
-    { what: "Полный порядок статусов: Offline, Archived, Paused, Stopped, Agent exited, Not tracked, Needs approval, Sign in, Needs input, ошибки провайдера, Retry in N s, Retrying, Error, Interrupted, Compacting, Starting, Using a tool, Working, Background, Waiting for result, Scheduled · HH:mm, Ready", where: "Бейджи карточки и шапки", status: "partial", note: "В мокапе показаны основные; полный порядок — данные из hgs без изменений" },
+    { what: "Полный порядок статусов: Offline, Archived, Paused, Stopped, Agent exited, Not tracked, Needs approval, Sign in, Needs input, ошибки провайдера, Retry in N s, Retrying, Error, Interrupted, Compacting, Starting, Using a tool, Working, Background, Waiting for result, Scheduled for HH:mm, Ready", where: "Бейджи карточки и шапки", status: "partial", note: "В мокапе показаны основные; полный порядок — данные из hgs без изменений" },
     { what: "Приоритет бейджа: внимание/ошибка → работа/фон → черновик → новый ответ → по расписанию → ожидание → пауза → нейтральный", where: "Карточка", status: "mock" },
     { what: "Метка края 4 px (в Qt 3 px): внимание, ошибка, непрочитанное, черновик, без звука; 6 px от краёв карточки, 4 px в компактной строке", where: "Карточка и компактная строка", status: "mock" },
     { what: "Background = простаивает, но есть свои живые задачи; остаётся в Active и принимает сообщения", where: "cursor-bench", status: "mock" },
@@ -87,7 +87,7 @@ export const PARITY: ParityGroup[] = [
     { what: "Не переносим: команды, лиды, фазы, граф, слои, iron rules, удержание кэша, автоприём, дизайнер", where: "—", status: "mock", note: "Сознательно отсутствуют" },
   ] },
   { id: "pages", title: "Overview, Projects, New session, Machines, Accounts", rows: [
-    { what: "Overview: колонка по центру с перетаскиваемыми краями и шириной по умолчанию в Settings; плитки (внимание, работают, машины онлайн, сессии), компактные карточки машин (система и архитектура, состояние, CPU с ядрами и нагрузкой, память, сессии; время замера только когда он не текущий), аккаунты, «Attention & in progress»", where: "Логотип в рейле", status: "mock", link: app("page=dashboard") },
+    { what: "Overview: колонка по центру с перетаскиваемыми краями и шириной по умолчанию в Settings; плитки (внимание, работают, машины онлайн, сессии), компактные карточки машин (состояние, крупные проценты CPU и памяти цветом нагрузки, ядра и нагрузка, объём памяти, сессии; без системы — она на странице Machines; время замера только когда он не текущий), аккаунты, «Attention & in progress»", where: "Логотип в рейле", status: "mock", link: app("page=dashboard") },
     { what: "Projects: проекты, цвета, папки, Clone repository, Worktrees, Swarm…", where: "Projects", status: "mock", link: app("page=projects") },
     { what: "Очистка worktree: просмотр, согласия, исходы «удалено/оставлено/неизвестно», ветки и игнорируемые данные сохраняются", where: "Worktrees → Clean up", status: "mock", link: app("dialog=worktree-cleanup") },
     { what: "New session: машина, агент, аккаунт (жирное имя и компактные полоски лимитов, как в Qt), папка, worktree (создаётся только после Start), прямой запуск, своя/существующая worktree, модель, предупреждения", where: "Кнопка «+» в рейле, Ctrl+N", status: "mock", link: app("dialog=new-session") },

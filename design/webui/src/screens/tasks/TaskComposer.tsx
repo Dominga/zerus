@@ -86,7 +86,6 @@ export function TaskComposer(props: { task: TaskVM }) {
   return (
     <div class="tv-composer-wrap">
       <div class="composer tv-composer" classList={{ disabled: !t().writable, describing: desc() }}>
-        <div class="cmp-resize" />
         <div class="cmp-toolbar">
           <Show when={desc()} fallback={
             <button class="tchip tv-mode" disabled={!t().writable || !canLeave()} title={modeLabel()} aria-haspopup="menu" onClick={(e) => modeMenu(e.currentTarget)}>

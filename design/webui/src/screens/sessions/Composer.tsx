@@ -22,14 +22,17 @@ const setEditorHeight = (h: number) => {
 const [videoMode, setVideoModeRaw] = createSignal((() => { try { return localStorage.getItem("zerus-mock-video-mode") === "1"; } catch { return false; } })());
 const setVideoMode = (on: boolean) => { setVideoModeRaw(on); try { localStorage.setItem("zerus-mock-video-mode", on ? "1" : "0"); } catch { /* ignore */ } };
 
-/** ComposerResizeHandle: a 10 px strip with a centred grip. Drag up to grow the
- *  field, double-click or Home to reset, Up/Down resize by 20 px. The field
- *  never grows past the room above it, so Activity keeps at least 120 px. */
-function ResizeHandle() {
+/** ComposerResizeHandle, placed in the toolbar: the free space between the left
+ *  and right chips is the drag area, with the grip centred in it (it shrinks
+ *  away when the composer is narrow). The "edge" variant is an invisible strip
+ *  along the composer's top border that stays draggable in any width. Drag up
+ *  to grow the field, double-click or Home to reset, Up/Down resize by 20 px.
+ *  The field never grows past the room above it; Activity keeps at least 120 px. */
+function ResizeHandle(props: { edge?: boolean }) {
   const [dragging, setDragging] = createSignal(false);
   const limit = (el: HTMLElement) => {
     const pane = el.closest(".activity-wrap")?.getBoundingClientRect();
-    const editor = el.parentElement?.querySelector(".cmp-editor")?.getBoundingClientRect();
+    const editor = el.closest(".composer")?.querySelector(".cmp-editor")?.getBoundingClientRect();
     if (!pane || !editor) return EDITOR.max;
     // Room = current editor height plus whatever Activity can give up above 120 px.
     const activity = pane.height - (el.closest(".cmp-col")?.getBoundingClientRect().height ?? 0);
@@ -56,10 +59,10 @@ function ResizeHandle() {
     e.preventDefault();
   };
   return (
-    <div class="cmp-resize" classList={{ dragging: dragging() }} tabindex="0" role="separator" aria-orientation="horizontal"
+    <div class="cmp-resize" classList={{ dragging: dragging(), edge: props.edge, gap: !props.edge }} tabindex={props.edge ? -1 : 0} role="separator" aria-orientation="horizontal"
       aria-label="Message field height" aria-valuemin={EDITOR.min} aria-valuemax={EDITOR.max} aria-valuenow={editorHeight()}
       onPointerDown={down} onDblClick={() => setEditorHeight(EDITOR.initial)} onKeyDown={key}>
-      <i class="cmp-grip" />
+      <Show when={!props.edge}><i class="cmp-grip" /></Show>
     </div>
   );
 }
@@ -80,7 +83,7 @@ export function Composer() {
   };
   return (
     <div class="composer" classList={{ disabled: offline() }}>
-      <ResizeHandle />
+      <ResizeHandle edge />
       <div class="cmp-toolbar">
         <AttachmentsChip items={attachments()} onRemove={(id) => setAttachments(attachments().filter((a) => a.id !== id))}
           onRestore={(item, index) => { const next = [...attachments()]; next.splice(index, 0, item); setAttachments(next); }} />
@@ -95,7 +98,7 @@ export function Composer() {
         </button>
         <Show when={s()?.unread}><button class="tchip accent" onClick={() => toast("Marked as read", "Reply marked as read")}><Icon name="check-check" size={13} />Mark as read</button></Show>
         <button class="tchip icon" title="Jump to latest activity (2 new)"><Icon name="chevrons-down" size={13} /></button>
-        <span class="grow" />
+        <ResizeHandle />
         <Show when={s()?.status === "error"}>
           <button class="tchip danger" title="Automatic recovery"><Icon name="rotate-ccw" size={13} />Retry 14:20</button>
         </Show>

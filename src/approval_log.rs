@@ -51,6 +51,10 @@ fn answers(question: &Value) -> Option<Value> {
     if question["approval"] != true
         || question["can_answer"] != true
         || question["trust_request"] == true
+        // U19: the owner (or a member's lead) confirms subagents; an
+        // automatic approval never does.
+        || question["subagent_confirmation"] == true
+        || matches!(question["questions"][0]["header"].as_str(), Some("Agent" | "Task" | "Subagents"))
     {
         return None;
     }
@@ -456,6 +460,32 @@ mod tests {
         );
         dsh["questions"][0]["options"][0]["label"] = json!("Always allow");
         assert!(answers(&dsh).is_none());
+    }
+
+    /// U19 (1): an automatic approval never answers a subagent confirmation,
+    /// even one shaped like a grantable hook card.
+    #[test]
+    fn a_subagent_confirmation_is_never_approved_automatically() {
+        let card = |subagents: bool| {
+            let mut card = json!({"approval":true,"can_answer":true,"source":"claude_tool_approval","answer_transport":"claude_hook",
+                "panel_verified":true,"approval_choices":true,"question_id":"claude-approval:x","question_hash":"a".repeat(64),
+                "run_id":"run","conversation_id":"conversation",
+                "questions":[{"id":"approval","header":"Bash","question":"Run it?","allow_other":true,
+                    "options":[{"id":"1","label":"Yes","scope":"once"},{"id":"2","label":"No","scope":"once"}]}]});
+            if subagents {
+                card["subagent_confirmation"] = json!(true);
+                card["questions"][0]["header"] = json!("Subagents");
+            }
+            card
+        };
+        assert!(answers(&card(false)).is_some(), "the same card for another tool is grantable");
+        assert!(answers(&card(true)).is_none());
+        let mut flagged_only = card(false);
+        flagged_only["subagent_confirmation"] = json!(true);
+        assert!(answers(&flagged_only).is_none());
+        let mut agent = card(false);
+        agent["questions"][0]["header"] = json!("Agent");
+        assert!(answers(&agent).is_none(), "an Agent request without the mark is refused as well");
     }
 
     #[test]

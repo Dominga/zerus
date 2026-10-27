@@ -573,8 +573,11 @@ public:
     struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip, subteam; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0;
         // U25 part 5 (spec 5.4): "↤#2" - only the dependencies from other
         // phases (the ones inside it are edges); the problem text on the
-        // second line; whether the assignee's agent really works on it.
-        QString ext, problemText; bool working = false; };
+        // second line; whether the assignee's agent really works on it. The
+        // owner's 2026-10-27 addition: a small activity label ("review",
+        // "attempt 2", "held", "sub-team 1/2") right of the role chip and the
+        // model tile; a problem text wins over it.
+        QString ext, problemText, activity; bool working = false; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -1042,6 +1045,16 @@ protected:
             AgentWorking::paintTile(p, tile, agentLogo(n.agent, m_c.fg), m_c.dark, n.working, AgentWorking::phase());
             right = tile.right() + 6;
         }
+        if (!n.activity.isEmpty()) {
+            // The owner's small activity label: muted text3 at 11 px, right of
+            // the role chip and the model tile, and elided before a problem
+            // text would lose room to it.
+            QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(m_c.text3);
+            const double w = qMax(0.0, r.right() - 8 - right);
+            const QString shown = QFontMetrics(meta).elidedText(n.activity, Qt::ElideRight, int(w));
+            p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, shown);
+            right += qMin(w, double(QFontMetrics(meta).horizontalAdvance(shown))) + 6;
+        }
         if (!n.problemText.isEmpty()) {
             QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
             const double w = qMax(0.0, r.right() - 8 - right);
@@ -1199,7 +1212,16 @@ protected:
         const double titleW = pill.left() - 32 - idw;
         p.drawText(QRectF(26 + idw, r.top() + 2, titleW, 18), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(title).elidedText(n.title, Qt::ElideRight, int(titleW)));
         QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
-        p.drawText(QRectF(26, r.top() + 19, width() - 120, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
+        const int statusW = qMin(int(width() - 150), QFontMetrics(meta).horizontalAdvance(n.statusText) + 2);
+        p.drawText(QRectF(26, r.top() + 19, statusW, 16), Qt::AlignLeft | Qt::AlignVCenter, n.statusText);
+        if (!n.activity.isEmpty()) {
+            // The same small activity label as the graph, muted, before the deps.
+            p.setPen(m_c.text3);
+            const double left = 26 + statusW + 8;
+            const double w = qMax(0.0, width() - 112 - left);
+            p.drawText(QRectF(left, r.top() + 19, w, 16), Qt::AlignLeft | Qt::AlignVCenter,
+                       QFontMetrics(meta).elidedText(n.activity, Qt::ElideRight, int(w)));
+        }
         if (!n.deps.isEmpty()) {
             p.setFont(NewSessionDense::mono(10)); p.setPen(m_c.dim);
             p.drawText(QRectF(width() - 112, r.top() + 19, 104, 16), Qt::AlignRight | Qt::AlignVCenter, n.deps);
@@ -1693,6 +1715,14 @@ inline QLabel *label(const QString &text, const QColor &color, int pixels = 12, 
     QPalette pal = l->palette(); pal.setColor(QPalette::WindowText, color); l->setPalette(pal);
     l->setTextFormat(Qt::PlainText);
     if (name) l->setObjectName(name);
+    return l;
+}
+
+// U15: what hgs refused, shown next to what was tried.
+inline QLabel *refusal(const QString &error, const Colors &c, const char *name)
+{
+    auto *l = label(QStringLiteral("⚠ ") + error, c.danger, 11, false, name);
+    l->setWordWrap(true);
     return l;
 }
 

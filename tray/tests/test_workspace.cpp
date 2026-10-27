@@ -436,10 +436,11 @@ void TestWorkspace::mutedAttentionUsesNeutralPresentation()
     QCOMPARE(normal.kind,SessionStatusBadge::Attention); QCOMPARE(normal.emphasis,IdentityBadges::Attention);
     row->setData(SessionRoles::Muted,true);
     const auto muted=SessionDelegate::statusOf(index,false);
-    QCOMPARE(muted.kind,SessionStatusBadge::MutedAttention); QCOMPARE(muted.emphasis,IdentityBadges::Muted);
+    // U25 (spec 2.3): the badge keeps its colour; only the edge turns `dim`.
+    QCOMPARE(muted.kind,SessionStatusBadge::Attention); QCOMPARE(muted.emphasis,IdentityBadges::Muted);
     QCOMPARE(muted.caption,normal.caption); QVERIFY(muted.attention); QVERIFY(muted.unread);
-    QCOMPARE(IdentityBadges::emphasisColor(dark,muted.emphasis),SessionStatusBadge::mutedTone(dark));
-    QVERIFY(SessionStatusBadge::edge(muted.kind,dark)!=SessionStatusBadge::edge(normal.kind,dark));
+    QCOMPARE(IdentityBadges::emphasisColor(dark,muted.emphasis),WorkspaceSkin::color(WorkspaceSkin::active(),dark,"dim"));
+    QCOMPARE(SessionStatusBadge::edge(muted.kind,dark),SessionStatusBadge::edge(normal.kind,dark));
     const QRect bounds(0,0,480,104);
     const auto layout=SessionDelegate::titleLayout(bounds,list.font(),false,index,muted);
     QVERIFY(layout.title.left()>=sessionCardRect(bounds).left()+30); // The mute icon has reserved space.
@@ -460,13 +461,16 @@ void TestWorkspace::mutedAttentionUsesNeutralPresentation()
         QVERIFY(hasColor(render(expansion),OptionalQuestionBadge::fill(dark)));
         row->setData(SessionRoles::Muted,true);
         const auto image=render(expansion);
-        QVERIFY(!hasColor(image,OptionalQuestionBadge::fill(dark)));
+        // U25 (spec 2.3): the status badge keeps its amber; the questions chip greys.
+        QVERIFY(hasColor(image,OptionalQuestionBadge::fill(dark)));
         QVERIFY(hasColor(image,OptionalQuestionBadge::fill(dark,true)));
-        QVERIFY(hasColor(image,SessionStatusBadge::mutedTone(dark)));
+        // The grey edge on the card; the tile's frame is grey too.
+        if(expansion>=1) QVERIFY(hasColor(image,WorkspaceSkin::color(WorkspaceSkin::active(),dark,"dim")));
+        else QCOMPARE(SessionDelegate::tileEdge(SessionDelegate::statusOf(index,false),dark),WorkspaceSkin::color(WorkspaceSkin::active(),dark,"dim"));
         QCOMPARE(index.data(SessionRoles::OptionalQuestions).toInt(),1);
     }
     row->setData(SessionRoles::Attention,false); row->setData(SessionRoles::ReviewLater,false);
-    QCOMPARE(SessionDelegate::statusOf(index,false).kind,SessionStatusBadge::MutedUnread);
+    QCOMPARE(SessionDelegate::statusOf(index,false).kind,SessionStatusBadge::Unread);
     row->setData(SessionRoles::Working,true); row->setData(SessionRoles::Status,"Working");
     QCOMPARE(SessionDelegate::statusOf(index,false).kind,SessionStatusBadge::Working);
     row->setData(SessionRoles::Attention,true); row->setData(SessionRoles::Failure,true);

@@ -2,6 +2,7 @@
 
 #include <QList>
 #include <QMap>
+#include <QSet>
 #include <QString>
 
 #include "HgsClient.h"
@@ -42,6 +43,11 @@ public:
     bool markSessionRead(const QString &host, const SessionInfo &expected);
     bool setReviewLater(const QString &host, const SessionInfo &expected, bool marked);
     bool applyNotificationPreferences(const QString &host, const SessionInfo &expected, const QJsonObject &preferences);
+    // U25 (spec 2.3): team members other than the lead (host + '\n' + name)
+    // are muted until their session carries its own choice: a host preference
+    // written at least once (revision > 0) wins over the team default.
+    bool setTeamMembers(const QSet<QString> &members);
+    const QSet<QString> &teamMembers() const { return m_teamMembers; }
     // Shared read state. Hosts with `hgs read` own unread/acknowledged state;
     // marks this GUI queued but no snapshot shows yet keep the UI read.
     void setPendingReads(const QJsonObject &pending);
@@ -74,6 +80,9 @@ private:
     QJsonObject m_readReplies;
     QJsonObject m_attentionMarks;
     SessionInfo *matchingSession(const QString &host, const SessionInfo &expected);
+    void applyMutes(const QString &host, BoxState &box) const;
+    void applyMute(const QString &host, SessionInfo &s) const;
+    QSet<QString> m_teamMembers;
     struct PeerEntry { BoxState box; qint64 polledAt = 0; bool everPolled = false; };
     BoxState m_local;
     bool m_haveLocal = false;

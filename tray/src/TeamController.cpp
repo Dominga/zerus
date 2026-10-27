@@ -157,8 +157,12 @@ void TeamController::call(const QString &operation, QJsonObject input, const Rep
 
 void TeamController::refreshCatalog()
 {
+    // A poll's read started before a decision may land after the read that
+    // follows the decision; it would show the draft as it was.
+    const quint64 read = ++m_catalogRead;
     m_catalogInFlight = true;
-    call(QStringLiteral("catalog get"), {}, [this](bool ok, const QJsonObject &result, const QString &) {
+    call(QStringLiteral("catalog get"), {}, [this, read](bool ok, const QJsonObject &result, const QString &) {
+        if (read != m_catalogRead) return;
         m_catalogInFlight = false;
         if (!ok) return;
         const auto next = Teams::parseCatalog(result);
@@ -172,6 +176,33 @@ void TeamController::refreshCatalog()
         m_catalogReady = true;
         emit catalogChanged();
     }, false);
+}
+
+void TeamController::decideProposal(const QString &proposal, const QString &decision, const Reply &done)
+{
+    call(QStringLiteral("catalog decide"), {{"proposal", proposal}, {"decision", decision}}, [this, proposal, done](bool ok, const QJsonObject &result, const QString &error) {
+        if (!ok) { m_proposalErrors.insert(proposal, error); refreshCatalog(); emit catalogChanged(); }
+        else if (m_proposalErrors.remove(proposal)) emit catalogChanged();
+        if (done) done(ok, result, error);
+    });
+}
+
+void TeamController::applyDraft(const Reply &done) { draftCall(QStringLiteral("catalog apply"), done); }
+
+void TeamController::discardDraft(const Reply &done) { draftCall(QStringLiteral("catalog discard"), done); }
+
+void TeamController::draftCall(const QString &operation, const Reply &done)
+{
+    call(operation, {}, [this, done](bool ok, const QJsonObject &result, const QString &error) {
+        // Applied or discarded, the draft and its refusals are gone.
+        if (ok) m_proposalErrors.clear();
+        if (!ok || !m_draftError.isEmpty()) {
+            m_draftError = ok ? QString() : error;
+            if (!ok) refreshCatalog();
+            emit catalogChanged();
+        }
+        if (done) done(ok, result, error);
+    });
 }
 
 void TeamController::received(quint64 request, const QString &operation, const QJsonObject &result)

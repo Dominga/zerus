@@ -26,6 +26,14 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             // bools, TeamTree::through).
             TeamDepth,
             TeamLines,
+            // U25 (spec 2.2): current background commands (count and the
+            // first command) for the card's chip; 0 when none are confirmed.
+            BackgroundJobs,
+            BackgroundCommand,
+            // U25 (spec 2.3): muted by its team's default, not by its own choice.
+            TeamMuted,
+            // U25 (spec 2.1): a project's first folder, for its '+' tooltip.
+            ProjectFolder,
             Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
 }
 class QToolButton;
@@ -58,6 +66,11 @@ signals:
     void groupMoved(const QString &group, const QString &before);
     // WhiteWh fork: a lead's team strip was clicked.
     void teamActivated(const QString &team);
+    // U25: a project's '+' (spec 2.1) and a card's chip (spec 2.2) were clicked.
+    void projectNewSession(const QString &group);
+    void chipActivated(const QString &key, int kind);
+    // U25 part 6: a card's git chip was clicked (the session's key).
+    void gitActivated(const QString &key);
     void dragFinished();
 protected:
     QStringList mimeTypes() const override { return {QStringLiteral("application/x-hgs-session-placement")}; }
@@ -74,8 +87,10 @@ protected:
     void keyPressEvent(QKeyEvent *) override;
 public:
     // The team strip at the bottom of a lead's card; a click opens the team.
-    static constexpr int TeamStripHeight = 28;
-    static QRect teamStripRect(const QRect &row) { return {row.left() + 12, row.bottom() - 6 - 22, row.width() - 24, 22}; }
+    static constexpr int TeamStripHeight = 32;
+    static QRect teamStripRect(const QRect &row) { return {row.left() + 8, row.bottom() - 6 - 26, row.width() - 16, 26}; }
+    // U25 (spec 2.1): the 28 px '+' at the right end of a project's band.
+    static QRect projectAddRect(const QRect &row) { const QRect band = row.adjusted(2, 5, -2, -3); return {band.right() - 27, band.y(), 28, band.height()}; }
 protected:
     void paintEvent(QPaintEvent *) override;
     void showEvent(QShowEvent *) override;
@@ -107,7 +122,8 @@ private:
     struct Placement { QString group, before; QRect indicator; bool onGroup = false; };
     Placement placement(const QPoint &point, bool group) const;
     QPoint m_press;
-    QString m_pressedTeam, m_pressedGroup;
+    QString m_pressedTeam, m_pressedGroup, m_pressedAdd, m_pressedChip;
+    QString hoverTarget(const QPoint &point) const;
     QString m_pressedParent;
     bool m_dragging = false;
     QRect m_indicator;

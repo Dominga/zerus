@@ -26,7 +26,8 @@
 // from the workspace tokens, and override the design tokens below (U25), for
 // instance "text3" or a role's "roleCoder".
 // A view arranges a screen's widgets; its logic stays the same. Missing or
-// invalid tokens keep the Zerus colors, and unknown views the classic ones.
+// invalid tokens keep the Zerus colors, and unknown views the classic ones;
+// a missing newSession view is the dense one (U25), classic only when named.
 namespace WorkspaceSkin {
 
 struct Palette {
@@ -43,7 +44,11 @@ struct Skin {
     // A view color the skin names, or an empty string for the view's own default.
     QString named(bool darkTheme, const QString &name) const { return (darkTheme ? darkViewColors : lightViewColors).value(name); }
     const Palette &palette(bool darkTheme) const { return darkTheme ? dark : light; }
-    QString view(const QString &screen) const { return views[screen].toString(QStringLiteral("classic")); }
+    // U25 part 8: New session is the dense dialog unless a skin chooses classic.
+    QString view(const QString &screen) const
+    {
+        return views[screen].toString(screen == QLatin1String("newSession") ? QStringLiteral("dense") : QStringLiteral("classic"));
+    }
     bool framelessDialogs() const { return dialogFrame == QLatin1String("frameless"); }
     bool framelessMain() const { return mainFrame == QLatin1String("frameless"); }
 };
@@ -119,8 +124,7 @@ inline const char *whiteWhJson()
 "light":{"background":"#f5f7f9","foreground":"#1a2733","muted":"#627082","surface":"#ffffff","border":"#dce2e8","accent":"#167357",
          "accentText":"#ffffff","accentHover":"#115d46","hover":"#edf2f5","selected":"#e0f0e9","inset":"#f3f6f8"},
 "views":{"newSession":"dense","sessions":"cards","composer":"compact","inspector":"foldable","activity":"bubbles"},"window":{"dialogs":"frameless","main":"frameless"},
-"viewColors":{"dark":{"dialog":"#1b1f26","field":"#11151a","selectedAgent":"#1f3a31","segmentOn":"#26443a","buttonNeutral":"#232830",
-  "disabled":"#2a3038","border":"#2c323b","fieldBorder":"#39404a","neutralBorder":"#4a525d","track":"#2c323b","foreground":"#e6e8eb",
+"viewColors":{"dark":{"field":"#11151a","selectedAgent":"#1f3a31","segmentOn":"#26443a","border":"#2c323b","foreground":"#e6e8eb",
   "text2":"#c4cad1","text3":"#aab1ba","muted":"#9aa3ad","label":"#8f97a2","dim":"#7b8590","accent":"#7dd3b0","accentText":"#0f1a16",
   "warn":"#e8a75a","danger":"#ef7d6d","folder":"#7fb6e0",
   "card":"#181c22","cardBorder":"#232932","cardHover":"#1e232b","cardSelected":"#1b2621","cardSelectedBorder":"#2f5a4a"},
@@ -152,6 +156,8 @@ inline const QList<std::tuple<const char *, const char *, const char *>> &design
         {"text2", "#c4cad1", "#2c3a47"}, {"text3", "#aab1ba", "#415060"}, {"muted", "#9aa3ad", "#5d6b7c"},
         {"label", "#8f97a2", "#647181"}, {"dim", "#7b8590", "#6f7b88"}, {"tile", "#0f1318", "#eef2f5"},
         {"page", "#0e1115", "#e4e9ee"}, {"bubble", "#1f3a31", "#e0f0e9"}, {"bubbleBorder", "#2f5a4a", "#9fd3bd"},
+        // The session card's background-commands chip (`.gchip.bg`), one colour in both themes.
+        {"bgChip", "#6fa8ff", "#6fa8ff"},
         {"roleLead", "#b79cff", "#6f4fd8"}, {"roleArchitect", "#8e9bff", "#3d4bc4"}, {"roleBackend", "#6fa8ff", "#2f66c9"},
         {"roleFrontend", "#f08bb4", "#b83a72"}, {"roleTester", "#56c8e0", "#137f95"}, {"roleReviewer", "#d9b38c", "#8a5a2b"},
         {"roleIntegrator", "#a3b1c6", "#4d5d75"}, {"roleResearcher", "#b9d36b", "#5f7a12"}, {"roleSecurity", "#e48de0", "#a2349c"},

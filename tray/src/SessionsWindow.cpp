@@ -3,6 +3,7 @@
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "EventStream.h"
 #include <QStandardPaths>
 #include "WorktreeBatchCleanupDialog.h"
 #include "WorktreeCleanupStatus.h"
@@ -1903,6 +1904,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested();
     });
     connect(&m_client, &HgsClient::inspectionReady, this, &SessionsWindow::acceptInspection);
+    if (auto *streams = EventStreams::instance()) {
+        connect(streams, &EventStreams::activityReady, this, [this](const QString &host, const QString &name, const QJsonObject &inspection) {
+            acceptInspection(host, name, inspection, {});
+        });
+        // The stream stopped following this run (it ended or changed): poll it instead.
+        connect(streams, &EventStreams::activityEnded, this, [this](const QString &host, const QString &name) {
+            if (const auto *entry = selected(); entry && entry->host == host && entry->session.name == name) {
+                m_streamEnded.insert(host + '\n' + name + '\n' + entry->session.runId); inspect();
+            }
+        });
+    }
     connect(&m_client, &HgsClient::subagentInspectionReady, this,
         [this](const QString &host,const QString &name,const QString &id,const QString &archive,const QJsonObject &data) {
             const auto *entry = selected();
@@ -3786,7 +3798,19 @@ void SessionsWindow::inspect()
     if (!isVisible() || m_pages->currentIndex() != 0 || !entry || !entry->online) return;
     const int processInterval=m_detailTabs->currentWidget()==m_processes?ProcessSettings::activeMs():ProcessSettings::backgroundMs();
     const bool processes=ProcessSettings::enabled() && (!m_processPollAge.isValid() || m_processPollAge.elapsed()>=processInterval);
-    if(m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId,processes)) {
+    // A live event stream brings Activity as it happens (EventStream.h); only
+    // the process section is still polled, at its own interval.
+    auto *streams = EventStreams::instance();
+    const bool streamed = streams && streams->live(entry->host) && entry->session.archiveId.isEmpty()
+        && !m_streamEnded.contains(entry->host + '\n' + entry->session.name + '\n' + entry->session.runId);
+    if (streams) {
+        if (streamed) streams->follow(entry->host, entry->session.name, entry->session.runId, entry->session.conversationId, m_cursor);
+        else streams->unfollowAll();
+    }
+    if (streamed) {
+        m_inspectionAge.start();
+        if (processes && m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId, true)) m_processPollAge.start();
+    } else if(m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId,processes)) {
         m_inspectionAge.start();if(processes)m_processPollAge.start();
     }
     refreshAccountUsage();

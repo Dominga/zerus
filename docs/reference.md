@@ -4031,6 +4031,15 @@ and summaries coalesce per key. When the queue overflows, the topic receives
 `gap` (`overflow`) and a fresh snapshot once the client catches up. Control lines
 are at most 64 KiB.
 
+The desktop runs one stream for each computer whose CLI prints the marker.
+While a computer's stream is live, the desktop stops polling that computer's
+listing and follows the selected session's Activity through the stream; the
+Processes tab keeps its own poll interval. Listings are applied at most every
+2 s, Activity within 50 ms. A stream that fails or stays silent for 30 s
+restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the desktop polls
+meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`
+keeps the desktop on polling.
+
 ## Validation
 
 Use [CONTRIBUTING.md](../CONTRIBUTING.md) for standard checks. Integration tests

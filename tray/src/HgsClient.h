@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ProcessRunner.h"
+
 #include <QHash>
 #include <QByteArray>
 #include <QList>
@@ -300,6 +302,9 @@ public:
     static BoxState parseBox(const QByteArray &json, QString *error);
     // A listing that is already an object, as tests and prepared values hold it.
     static BoxState box(const QJsonObject &object);
+    // How the client starts hgs with these arguments: its environment without
+    // an agent's attribution, and macOS argument handling.
+    static ProcessRunner::Request commandRequest(const QString &hgs, const QStringList &arguments);
     static QList<BoxState> parseFleet(const QByteArray &json, QString *error);
     static QList<ProjectInfo> parseProjects(const QByteArray &json, QString *error);
 

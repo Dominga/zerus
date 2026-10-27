@@ -286,9 +286,36 @@ One JSON document per skin, independent of the UI stack.
   blank windows and crashes, silent software WebGL and GTK 3's integer scaling on
   KDE fractional scales remain. Fallbacks in order: the Tauri 3 CEF runtime
   (GTK 4, Chromium; about +120 MB; alpha today) for Linux only, then Electron.
-- **macOS.** WKWebView caps `requestAnimationFrame` at 60 fps on ProMotion
-  (WebKit bug 294338; no public API). Native scrolling smoothness must be judged
-  separately.
+- **macOS refresh rate (hard requirement).** WKWebView keeps page rendering
+  updates near 60 fps through the internal preference
+  `PreferPageRenderingUpdatesNear60FPSEnabled`, on by default in current WebKit
+  including macOS 26 and 27 (WebKit bug 294338; WebKit's animation-frame-rate
+  explainer cites power use). Scrolling of painted content and accelerated
+  (transform and opacity) CSS animations already run at the display rate;
+  `requestAnimationFrame`, JS-driven drag and resize, newly painted virtual rows,
+  xterm.js and non-accelerated animations stay near 60. There is no public API.
+  The plan:
+  - Create each window that shows our own UI with a `WKWebViewConfiguration`
+    whose preferences have that key disabled through the WebKit SPI
+    `+[WKPreferences _features]` and `-[WKPreferences _setEnabled:forFeature:]`
+    (macOS 13.3+; the Zerus floor is 14), passed in before creation with
+    `WebviewWindowBuilder::with_webview_configuration` (Tauri 2.8+, wry 0.53+).
+    Toggling a live page is unreliable. Feature-detect the selectors and the
+    key, read the value back, log a failure and keep running; never panic
+    across the Objective-C boundary. Leave third-party pages at the default.
+  - Developer ID builds with notarization may call the SPI; the Mac App Store
+    would reject it and is not a Zerus channel. `macOSPrivateApi` does not
+    affect the frame rate.
+  - Animate only transform and opacity, so scrolling and motion stay at the
+    display rate if WebKit removes or renames the key (it was renamed once, in
+    2021). Ship a frame-rate self-check in diagnostics.
+  - Fallback if the SPI fails the criteria below or disappears: Chromium on
+    macOS, which paces rAF and compositing from the display link. Prefer the
+    Tauri 3 CEF runtime once it is beta and within one Chrome major (alpha
+    today, pinned to Chromium 154 against Chrome 156); otherwise Electron. Either
+    adds roughly 200-300 MB per install, several times the memory, helper apps
+    to sign and Chromium security releases we ship ourselves; Electron also
+    moves the Rust core into a sidecar.
 - **Measurement (two weeks, one heavy screen: session list plus long Activity,
   on the same data plane):** p95 frame time while scrolling with a trackpad, input
   to frame latency, session open time, idle CPU and RSS; Channel throughput at
@@ -296,6 +323,24 @@ One JSON document per skin, independent of the UI stack.
   xterm.js WebGL versus DOM. Devices: the owner's Mac (ProMotion) and Arch with
   KDE Plasma at 100%, 125% and 150% scale, NVIDIA and integrated GPUs; WebView2
   on Windows for IPC p99. Decision by numbers against the tuned Qt client.
+- **macOS pass/fail: frame pacing equals the display refresh rate.** On the
+  owner's ProMotion Mac, on AC power with Low Power Mode off and a nominal
+  thermal state, the window fully visible, a release build, a cross-origin
+  isolated page; three 10 s runs after a 2 s warm-up, worst run counts;
+  T = 1000 / `NSScreen.maximumFramesPerSecond` (8.33 ms at 120 Hz). All must pass:
+  1. rAF on a light page and during a CSS transform animation: mean interval
+     within T ± 1%, median within T ± 0.5 ms, at least 99% of intervals at most
+     1.5 T, at most 0.2% above 2.5 T, under 1% in the 15.0-18.5 ms band.
+  2. A window capture shows at least 117.6 changed frames per second, with at
+     most 1% of gaps above 1.5 T, for a transform animation, for a
+     non-accelerated animation (the real test of the SPI) and for smooth and
+     synthetic trackpad scrolling of a long virtualized list; rAF and scroll
+     events during the scroll meet criterion 1.
+  3. Validity: a native display-link counter in the same window reads at least
+     117.6 Hz, and a run with the preference left at its default fails
+     criterion 1; otherwise the harness is invalid. Power use with the
+     preference on and off is reported, not gated.
+  The same harness qualifies the Chromium fallback.
 
 ## Migration
 
@@ -308,7 +353,9 @@ installing Qt until the owner switches the default.
 
 ## Open questions for the owner
 
-1. Approve the design, or what to change.
-2. Linux runtime: start on WebKitGTK and measure, with CEF as the fallback.
-3. The 60 Hz animation cap on macOS.
-4. User-imported skins in v1, or built-in skins first.
+1. Approve the round 2 design, or what to change; which Zerus mark motion to keep.
+2. macOS refresh rate: the WebKit SPI route with the criteria above, falling
+   back to Chromium on macOS (CEF once beta, otherwise Electron).
+3. Linux runtime: start on WebKitGTK and measure, with CEF as the fallback
+   (pending since round 1).
+4. User-imported skins in v1, or built-in skins first (pending since round 1).

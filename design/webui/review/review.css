@@ -29,6 +29,7 @@
   .rv-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
   .rv-table td { padding: 8px 10px 8px 0; border-bottom: 1px solid color-mix(in srgb, var(--z-color-divider) 70%, transparent); vertical-align: top; line-height: 1.5; color: var(--z-color-text-2); }
   .rv-table td:first-child { width: 56%; }
+  .rv-compare td:first-child { width: 26%; }
   .rv-where a { color: var(--z-color-accent); text-decoration: none; }
   .rv-where a:hover { text-decoration: underline; }
   .rv-badge { display: inline-block; white-space: nowrap; padding: 2px 8px; border-radius: 10px; font-size: var(--fs-xs); font-weight: 600; }

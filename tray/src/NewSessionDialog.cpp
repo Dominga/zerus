@@ -974,6 +974,11 @@ void NewSessionDialog::requestUsage(bool force)
         }
 }
 
+void NewSessionDialog::setSessionName(const QString &name)
+{
+    m_name->setText(name);
+}
+
 void NewSessionDialog::selectAccount(const QString &account)
 {
     m_preferredAccount=account.isEmpty()?"native-"+m_preferredAgent:account;

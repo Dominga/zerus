@@ -13,6 +13,7 @@ class SwarmController;
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QTimer>
+#include "SessionStates.h"
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
 #include <QWidget>
@@ -78,7 +79,7 @@ public:
     // N7: a click on a team attention notification opens that team.
     void showTeamAttention(const QString &token);
     void showProjects(const QString &host = {});
-    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {});
+    void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {}, const QString &name = {});
     void newSessionLaunchFailed(const QString &launchId, const QString &error = {});
     void setClipboardMode(bool clipboard);
     void setConnectionError(const QString &error);
@@ -429,6 +430,11 @@ private:
     class TeamWorkspace *m_teamWorkspace=nullptr;
     // U25 (spec 3): the header rows that carry a lead session's team.
     QHBoxLayout *m_titleRow=nullptr, *m_chipsRow=nullptr; bool m_teamHeader=false;
+    // U30 (#508): the header pill's state, its glyph and the clock that keeps
+    // Cooling counting down between polls.
+    SessionStates::Shown m_badgeState;
+    QLabel *m_badgeGlyph=nullptr;
+    QTimer m_stateClock;
     // The Team designer mode on the rail, and New team next to Activity: the
     // selected session leads the team built there; once created, Team follows.
     class TeamDesignerPage *m_teamDesignerPage=nullptr;

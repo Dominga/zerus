@@ -34,7 +34,9 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             TeamMuted,
             // U25 (spec 2.1): a project's first folder, for its '+' tooltip.
             ProjectFolder,
-            Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
+            Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51,
+            // U30 (#508): the facts of the session's state (SessionStates::facts).
+            SessionState = Qt::UserRole + 52 };
 }
 class QToolButton;
 
@@ -71,6 +73,8 @@ signals:
     void chipActivated(const QString &key, int kind);
     // U25 part 6: a card's git chip was clicked (the session's key).
     void gitActivated(const QString &key);
+    // U30 (#508): a cold card's + New ("new") or Resume ("resume").
+    void coldActionRequested(const QString &key, const QString &action);
     void dragFinished();
 protected:
     QStringList mimeTypes() const override { return {QStringLiteral("application/x-hgs-session-placement")}; }
@@ -122,7 +126,7 @@ private:
     struct Placement { QString group, before; QRect indicator; bool onGroup = false; };
     Placement placement(const QPoint &point, bool group) const;
     QPoint m_press;
-    QString m_pressedTeam, m_pressedGroup, m_pressedAdd, m_pressedChip;
+    QString m_pressedTeam, m_pressedGroup, m_pressedAdd, m_pressedChip, m_pressedCold;
     QString hoverTarget(const QPoint &point) const;
     QString m_pressedParent;
     bool m_dragging = false;

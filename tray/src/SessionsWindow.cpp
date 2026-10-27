@@ -17,6 +17,7 @@
 #include "AccountUsage.h"
 #include "SessionUsage.h"
 #include "CacheKeepalive.h"
+#include "SessionStates.h"
 #include "CacheStatus.h"
 #include "ComposerToolbar.h"
 #include "AccountUsageStore.h"
@@ -655,6 +656,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client,&HgsClient::sessionReferenceReady,this,[this](const QString &uri){emit copyTextRequested(uri);showNotice(tr("Session reference copied"));});
     connect(&m_client,&HgsClient::sessionReferenceFailed,this,[this](const QString &error){showNotice(error,true);});
     m_badge = label({}, "badge"); m_badge->setFixedHeight(24);
+    m_badgeGlyph = new QLabel(m_badge); m_badgeGlyph->setObjectName("badgeGlyph"); m_badgeGlyph->setGeometry(9, 6, 12, 12);
+    m_badgeGlyph->setAttribute(Qt::WA_TransparentForMouseEvents); m_badgeGlyph->hide();
+    // Its own style: the pill's frame and padding must not reach the glyph.
+    m_badgeGlyph->setStyleSheet(QStringLiteral("border:none; background:transparent; padding:0;"));
     badges->addWidget(m_badge, 0, Qt::AlignVCenter); badges->addSpacing(6);
     m_model = label({}, "sessionModel", details); m_model->setMaximumWidth(260);
     m_shell = iconButton("terminal", tr("Open shell in session folder"), "openFolderShellAction");
@@ -1599,6 +1604,25 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_sessions,&SessionList::projectNewSession,this,[this](const QString &group){showNewSession({},group,selectedHostTarget());});
     // U25 (spec 2.2): a chip opens where its count lives: services and
     // background commands in Processes (or Terminal), git in the inspector.
+    // U30 (#508): a cold card's + New starts a session in the same folder and
+    // machine, with its agent and the name "<name>-2"; Resume opens it.
+    connect(m_sessions,&SessionList::coldActionRequested,this,[this](const QString &key,const QString &action){
+        const auto found=std::find_if(m_entries.cbegin(),m_entries.cend(),[&](const Entry &e){return e.key==key;});
+        if(found==m_entries.cend())return;
+        const Entry entry=*found;
+        if(action=="new"){
+            const QString name=sessionLabel(entry.session);
+            showNewSession(entry.session.cmd,m_organization.groupFor(entry.identity),entry.host,{},entry.session.cwd,{},name+QStringLiteral("-2"));
+            return;
+        }
+        for(int row=0;row<m_sessions->count();++row)if(m_sessions->item(row)->data(KeyRole).toString()==key){m_sessions->setCurrentRow(row);break;}
+        showNotice(tr("Continuing %1 · the first message rebuilds the cache").arg(sessionLabel(entry.session)));
+        m_composer->setFocus();
+    });
+    // Cooling counts down and turns Cold by itself between polls.
+    m_stateClock.setInterval(30000);
+    connect(&m_stateClock,&QTimer::timeout,this,[this]{if(m_sessions->isVisible())m_sessions->viewport()->update();});
+    m_stateClock.start();
     connect(m_sessions,&SessionList::chipActivated,this,[this](const QString &key,int kind){
         for(int row=0;row<m_sessions->count();++row)if(m_sessions->item(row)->data(KeyRole).toString()==key){m_sessions->setCurrentRow(row);break;}
         const auto *entry=selected();if(!entry||entry->key!=key)return;
@@ -3025,7 +3049,7 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
     menu->addAction(m_clearArchiveAction);
 }
 
-void SessionsWindow::showNewSession(const QString &agent, const QString &project, const QString &host, const QString &folder, const QString &path, const QString &account)
+void SessionsWindow::showNewSession(const QString &agent, const QString &project, const QString &host, const QString &folder, const QString &path, const QString &account, const QString &name)
 {
     QString group = m_organization.defaultProject();
     if (const auto *row = m_sessions->currentItem()) group = row->data(SessionRoles::Group).toString();
@@ -3046,6 +3070,7 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!folder.isEmpty()&&!dialog.selectFolder(folder)){showNotice(tr("This project folder changed. Select it again."),true);return;}
     if(!path.isEmpty())dialog.selectPath(path, false);
     if(!account.isNull())dialog.selectAccount(account);
+    if(!name.isEmpty())dialog.setSessionName(name);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
         [this,&dialog](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort, const QString &permissions) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -3371,6 +3396,8 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     }
     // F4: and its own colour, so nobody takes it for a work session.
     if (designer) { roles.insert(SessionRoles::ProjectColor, QColor(Teams::designerColor())); roles.insert(SessionRoles::ProjectVivid, true); }
+    // U30 (#508): the session's state; Keep cache warm counts its hours.
+    roles.insert(SessionRoles::SessionState, SessionStates::facts(s, e.online, CacheKeepalive::hours(e.host, s) * 3600.0));
     return roles;
 }
 
@@ -4483,6 +4510,35 @@ void SessionsWindow::renderDetails()
     setWorkspaceStyle(m_badge, QString("color:%1; background:%2; border-radius:5px; padding:4px 8px; font-size:11px; font-weight:600;")
                           .arg(color.name(), m_dark ? "#2b323d" : "#edf1f5"));
     m_badge->setMinimumWidth(state == "Background" ? m_badge->fontMetrics().horizontalAdvance(state) + 16 : 0);
+    // U30 (#508): the header pill shows the card's state, its text and glyph,
+    // in the state's tone; its tooltip is the reason (see below).
+    m_badgeState = {};
+    {
+        const auto shown = SessionStates::present(SessionStates::facts(s, entry->online, CacheKeepalive::hours(entry->host, s) * 3600.0),
+                                                  double(QDateTime::currentSecsSinceEpoch()));
+        const auto kind = shown.key == "deps" ? SessionStatusBadge::Deps : shown.key == "build" ? SessionStatusBadge::Build
+                        : shown.key == "cooling" ? SessionStatusBadge::Cooling : shown.key == "cold" ? SessionStatusBadge::Cold
+                        : shown.key == "stopped" ? SessionStatusBadge::Stopped : SessionStatusBadge::Neutral;
+        const bool needsYou = shown.key == "user" && shown.badge == tr("Needs you") && !s.needsAction();
+        if ((kind != SessionStatusBadge::Neutral && !s.needsAction() && s.state != "archived") || needsYou) {
+            m_badgeState = shown;
+            const QColor tone = needsYou ? QColor(m_dark ? "#f0c77b" : "#885400") : SessionStatusBadge::stateTone(kind, m_dark);
+            m_badge->setText(shown.badge);
+            // The badge's glyph, drawn as the card draws it.
+            if (!shown.icon.isEmpty()) {
+                const qreal ratio = devicePixelRatioF();
+                QPixmap pixmap(QSize(12, 12) * ratio); pixmap.setDevicePixelRatio(ratio); pixmap.fill(Qt::transparent);
+                QPainter painter(&pixmap); SessionStatusBadge::glyph(&painter, QPointF(6, 6), 11, shown.icon, tone); painter.end();
+                m_badgeGlyph->setPixmap(pixmap);
+            }
+            m_badgeGlyph->setVisible(!shown.icon.isEmpty());
+            QColor edge = tone; edge.setAlphaF(.5);
+            QColor fill = tone; fill.setAlphaF(kind == SessionStatusBadge::Deps || kind == SessionStatusBadge::Cold || needsYou ? .11 : 0);
+            setWorkspaceStyle(m_badge, QString("color:%1; background:%3; border:1px solid %2; border-radius:9px; padding:3px 9px 3px %4px; font-size:11px; font-weight:600;")
+                                  .arg(tone.name(), edge.name(QColor::HexArgb), fill.name(QColor::HexArgb)).arg(shown.icon.isEmpty() ? 9 : 24));
+            m_badge->setProperty("sessionState", shown.key);
+        } else { m_badge->setProperty("sessionState", shown.key); m_badgeGlyph->hide(); }
+    }
     s.model = m_details.value("model").toString(s.model); s.effort = m_details.value("effort").toString(s.effort);
     const QString modelText = s.model + (s.effort.isEmpty() ? QString() : "  " + s.effort);
     // Details render on every poll; elide again only when the text or font changes.
@@ -4563,6 +4619,8 @@ void SessionsWindow::renderDetails()
         setWorkspaceStyle(m_goal, QString("QPushButton { text-align:left; color:%1; background:transparent; border:0; border-left:3px solid %1; border-radius:0; padding:7px 10px; } QPushButton:hover { background:%2; }").arg(goalColor, m_dark ? "#29323d" : "#e9eef4"));
     }
     m_badge->setToolTip(sessionTooltip({hint, m_model->text()}, 380).html);
+    // U30 §5: the pill's tooltip is the state and its reason.
+    if (!m_badgeState.key.isEmpty()) m_badge->setToolTip(sessionTooltip({m_badgeState.tooltip, m_badgeState.reason == m_badgeState.tooltip ? QString() : m_badgeState.reason}, 380).html);
     m_changeAction->setToolTip(sessionTooltip({pauseCaption, !NativeSessionCapabilities::action(s,archived?"restore":s.state=="running"?"pause":"resume",m_details) ? NativeSessionCapabilities::actionReason(s,archived?"restore":s.state=="running"?"pause":"resume",m_details) : canPause
         ? tr("Close the idle agent and save its conversation. Resume starts it again with the same history.") : hint}, 380).html);
     m_restore->setToolTip(m_changeAction->toolTip());

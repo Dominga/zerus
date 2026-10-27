@@ -88,7 +88,9 @@
 #include "MessageBoxIcons.h"
 #include "ComposerToolbar.h"
 #include "SessionList.h"
+#include "SessionStates.h"
 #include "TeamController.h"
+#include <QTextDocumentFragment>
 #include <QToolTip>
 #include "TeamPanel.h"    // N7: the leftover Stop lives in the Team tab
 #include "TeamNewTab.h"   // WhiteWh fork: agent teams
@@ -277,6 +279,9 @@ private slots:
     void teamTreeShowsSubteamsAndRollsUp();
     void teamMembersFollowTheirSubLead_data();
     void teamMembersFollowTheirSubLead();
+    void sessionStatesAreComputedAndCountDown();
+    void sessionStatesShowOnCardsAndHeader_data();
+    void sessionStatesShowOnCardsAndHeader();
     void sessionListFollowsThePrototype_data();
     void sessionListFollowsThePrototype();
     void teamMemberUnmuteRecordsItsChoice();
@@ -1519,6 +1524,249 @@ void TestSessionsWindow::teamMembersFollowTheirSubLead()
 // U25 part 2 (spec 2.1-2.4) on the README workspace: the project's '+', the
 // metadata chips with their counts, team members muted by default with a grey
 // edge and a coloured badge, and the lead's strip with the team icon only.
+// U30 (#508): the session states from the host's fields: each state's badge
+// and line 3, deps always with its reason, a build with what runs, Cooling's
+// countdown and heat turning into Cold by the clock, Keep cache warm's hours,
+// the tooltips of §5, and an older host keeping today's presentation.
+void TestSessionsWindow::sessionStatesAreComputedAndCountDown()
+{
+    const double now = 1'800'000'000;
+    SessionInfo base; base.name = "claude/orbit/release"; base.cmd = "claude"; base.state = "running"; base.processState = "running";
+    base.activity = "idle"; base.phase = "idle"; base.runId = "run"; base.conversationId = "conversation";
+    const auto shown = [&](const SessionInfo &s, double at, double keepWarm = 0) { return SessionStates::present(SessionStates::facts(s, true, keepWarm), at); };
+    // An older host: no state, nothing changes.
+    QVERIFY(shown(base, now).key.isEmpty());
+    QCOMPARE(SessionStates::present(SessionStates::facts(base, false), now).key, QString("offline"));
+    // Working, and the user's four kinds.
+    auto working = base; working.sessionState = "working"; working.activity = "busy";
+    QCOMPARE(shown(working, now).key, QString("working"));
+    QCOMPARE(shown(working, now).tooltip, QString("Working — the model is writing code or running tools"));
+    auto approval = base; approval.sessionState = "user"; approval.phase = "approval";
+    approval.stateReason = QJsonObject{{"kind", "approval"}, {"text", "Bash: cargo sqlx migrate run"}};
+    QCOMPARE(shown(approval, now).badge, QString("Needs approval")); QCOMPARE(shown(approval, now).line, QString("Bash: cargo sqlx migrate run"));
+    auto input = base; input.sessionState = "user"; input.phase = "input";
+    QCOMPARE(shown(input, now).badge, QString("Needs input"));
+    auto reply = base; reply.sessionState = "user"; reply.stateReason = QJsonObject{{"kind", "reply"}};
+    QCOMPARE(shown(reply, now).badge, QString("New reply")); QCOMPARE(shown(reply, now).line, QString("Response ready to read"));
+    auto lead = base; lead.sessionState = "user"; lead.stateReason = QJsonObject{{"kind", "team_review"}, {"text", "Waiting for you to approve phase 2 · Checkout"}};
+    QCOMPARE(shown(lead, now).badge, QString("Needs you")); QCOMPARE(shown(lead, now).line, QString("Waiting for you to approve phase 2 · Checkout"));
+    // Deps: always the reason; the tooltip of §5.
+    auto deps = base; deps.sessionState = "deps";
+    deps.stateReason = QJsonObject{{"kind", "long_operation"}, {"text", "Waiting for cargo test --workspace · long operation, 6m so far"}, {"command", "cargo test --workspace"}};
+    QCOMPARE(shown(deps, now).badge, QString("Waiting")); QCOMPARE(shown(deps, now).icon, QString("hourglass"));
+    QCOMPARE(shown(deps, now).line, QString("Waiting for cargo test --workspace · long operation, 6m so far"));
+    QCOMPARE(shown(deps, now).tooltip, QString("Waiting for dependencies — subagents, a long operation, other members or the lead"));
+    auto bare = deps; bare.stateReason = {};
+    QVERIFY(!shown(bare, now).line.isEmpty());
+    // A build: what runs and for how long.
+    auto build = base; build.sessionState = "build";
+    build.build = QJsonObject{{"source", "hgs_run"}, {"label", "cargo test"}, {"command", "cargo test --workspace"}, {"since", now - 6 * 60}};
+    QCOMPARE(shown(build, now).badge, QString("Building")); QCOMPARE(shown(build, now).line, QString("Running cargo test · 6m so far"));
+    build.stateReason = QJsonObject{{"kind", "build"}, {"text", "Running cargo test · 6m so far"}};
+    QCOMPARE(shown(build, now).line, QString("Running cargo test · 6m so far"));
+    // Cooling counts down with its heat; at the TTL it is Cold by itself.
+    auto idle = base; idle.sessionState = "cooling"; idle.lastActive = now - 19 * 60; idle.cacheTtl = QJsonObject{{"seconds", 3600}};
+    auto cooling = shown(idle, now);
+    QCOMPARE(cooling.key, QString("cooling")); QCOMPARE(cooling.badge, QString("Cooling 41m")); QCOMPARE(cooling.icon, QString("thermo"));
+    QCOMPARE(cooling.line, QString("Done · waiting for a new task · cache warm for 41m"));
+    QVERIFY(qAbs(cooling.heat - 41.0 / 60) < .01);
+    QVERIFY(qAbs(shown(idle, now + 40 * 60 + 50).heat - .04) < .001);   // never below 4 %
+    const auto later = shown(idle, now + 41 * 60);
+    QCOMPARE(later.key, QString("cold")); QCOMPARE(later.badge, QString("Cold"));
+    QCOMPARE(shown(idle, now + 41 * 60 + 2 * 3600 + 10 * 60).line, QString("Cache cold 2h 10m"));
+    QVERIFY(later.coldActions); QVERIFY(!cooling.coldActions);
+    // The host's cold, and Keep cache warm's hours as the TTL.
+    auto cold = idle; cold.sessionState = "cold";
+    QCOMPARE(shown(cold, now).key, QString("cooling"));   // the clock decides between the two
+    QCOMPARE(shown(idle, now + 2 * 3600, 3 * 3600).key, QString("cooling"));
+    QVERIFY(shown(idle, now + 2 * 3600, 3 * 3600).line.endsWith("(kept warm)"));
+    // A five-minute cache with no last activity is cold, not cooling.
+    auto unknown = base; unknown.sessionState = "cold";
+    QCOMPARE(shown(unknown, now).key, QString("cold")); QCOMPARE(shown(unknown, now).line, QString("Cache cold"));
+    // Stopped by you, or the agent exited.
+    auto paused = base; paused.sessionState = "stopped"; paused.state = "paused";
+    QCOMPARE(shown(paused, now).badge, QString("Stopped")); QCOMPARE(shown(paused, now).line, QString("Stopped by you · resume to continue"));
+    auto exited = base; exited.sessionState = "stopped"; exited.processState = "exited";
+    QCOMPARE(shown(exited, now).badge, QString("Agent exited"));
+    // The minutes the design shows.
+    QCOMPARE(SessionStates::minutes(41 * 60 + 30), QString("41m")); QCOMPARE(SessionStates::minutes(2 * 3600 + 5 * 60), QString("2h 05m"));
+}
+
+// U30 (#508): the cards, the avatar dots and the header pill for every
+// state in both themes, the Background rules (a dev server after the turn is
+// Cooling with its services chip and never defers the reply; a Zerus build
+// does), and a cold card's + New (New session with the project, machine,
+// agent and "<name>-2") and Resume (opens it, the toast), neither opening the
+// card by its click.
+void TestSessionsWindow::sessionStatesShowOnCardsAndHeader_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QStringLiteral("dark");
+    QTest::newRow("light") << QStringLiteral("light");
+}
+
+void TestSessionsWindow::sessionStatesShowOnCardsAndHeader()
+{
+    QFETCH(QString, theme);
+    const auto restore = qScopeGuard([] { for (const auto *key : {"workspace/skin", "workspace/theme"}) QSettings().remove(key); });
+    QSettings().setValue("workspace/skin", "whitewh"); QSettings().setValue("workspace/theme", theme);
+    const double now = QDateTime::currentSecsSinceEpoch();
+    const auto make = [now](const QString &tag, const QString &state) {
+        SessionInfo s; s.name = "claude/orbit/" + tag; s.cmd = "claude"; s.project = "orbit"; s.tag = tag; s.tracked = true; s.resumable = true;
+        s.state = "running"; s.processState = "running"; s.runtimeState = "live"; s.activity = "idle"; s.phase = "idle";
+        s.runId = "run-" + tag; s.conversationId = "conversation-" + tag; s.model = "claude-opus-4-6"; s.effort = "high";
+        s.cwd = "D:\\work\\orbit"; s.gitBranch = "main"; s.created = qint64(now) - 5 * 3600; s.lastEventAt = now - 60;
+        s.sessionState = state; s.lastActive = now - 60; s.cacheTtl = QJsonObject{{"seconds", 3600}, {"source", "native_usage"}};
+        return s;
+    };
+    auto working = make("checkout", "working"); working.activity = "busy"; working.phase = "tool"; working.currentTool = "Edit";
+    working.toolDetail = "web/checkout/address.tsx"; working.turnStarted = now - 65;
+    auto approval = make("migrate", "user"); approval.activity = "waiting"; approval.phase = "approval"; approval.attentionId = "perm-1";
+    approval.currentTool = "Bash"; approval.toolDetail = "cargo sqlx migrate run";
+    approval.stateReason = QJsonObject{{"kind", "approval"}, {"text", "Bash: cargo sqlx migrate run"}};
+    auto longOp = make("api-refactor", "deps"); longOp.activity = "busy"; longOp.phase = "tool"; longOp.currentTool = "Bash"; longOp.turnStarted = now - 400;
+    longOp.stateReason = QJsonObject{{"kind", "long_operation"}, {"text", "Waiting for cargo test --workspace · long operation, 6m so far"}, {"command", "cargo test --workspace"}};
+    auto build = make("ledger", "build");
+    build.build = QJsonObject{{"source", "hgs_run"}, {"label", "cargo test"}, {"command", "cargo test --workspace"}, {"since", now - 360}};
+    build.stateReason = QJsonObject{{"kind", "build"}, {"text", "Running cargo test · 6m so far"}};
+    build.unreadReply = true; build.replyId = "r-build"; build.replyAt = now - 120;   // waits for the build
+    auto devServer = make("release", "cooling"); devServer.lastActive = now - 18 * 60 - 30;   // 41m 30s left
+    devServer.backgroundProcesses = 0;   // the host moved the dev server to the services
+    devServer.services = {SessionInfo::Service{"vite", "vite --port 5173", now - 1200}};
+    auto replied = make("docs", "user"); replied.stateReason = QJsonObject{{"kind", "reply"}};
+    replied.unreadReply = true; replied.replyId = "r-docs"; replied.replyAt = now - 30; replied.backgroundProcesses = 0;
+    replied.services = {SessionInfo::Service{"mkdocs", "mkdocs serve", now - 900}};
+    auto cold = make("staging", "cold"); cold.lastActive = now - 3600 - (2 * 3600 + 10 * 60) - 20; cold.cmd = "codex"; cold.name = "codex/orbit/staging";
+    auto stopped = make("archive-job", "stopped"); stopped.state = "paused";
+    auto asking = make("onboarding", "user"); asking.activity = "waiting"; asking.phase = "input"; asking.attentionId = "question-1";
+    asking.stateReason = QJsonObject{{"kind", "input"}, {"text", "Which payment provider should the checkout use?"}};
+    auto subagents = make("search", "deps"); subagents.activity = "busy"; subagents.phase = "tool"; subagents.turnStarted = now - 90;
+    subagents.stateReason = QJsonObject{{"kind", "subagents"}, {"text", "Waiting for 2 subagents: Explore, reviewer"}};
+    auto member = make("checkout-ui", "deps");
+    member.stateReason = QJsonObject{{"kind", "team_dependency"}, {"text", "Waiting for #2 Saved cards API (Backend)"}};
+    auto fresh = make("notes", "cooling"); fresh.lastActive = now - 50;
+    BoxState box; box.host = "workstation"; box.ok = true; box.metrics = QJsonObject{{"platform", "windows"}, {"sampled_at", now - 4}};
+    box.sessions = {working, approval, longOp, build, devServer, replied, cold, stopped, asking, subagents, member, fresh};
+    FleetState state; state.setLocal(box, qint64(now * 1000));
+    SessionsWindow window(FakeCli::program(script())); window.resize(1440, 960); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    const auto rowOf = [&](const QString &name) { for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString() == "\n" + name) return i; return -1; };
+    const auto keys = [&] { QStringList all; for (int i = 0; i < list->count(); ++i) all << list->item(i)->data(SessionRoles::Key).toString().replace(QLatin1Char(10), QLatin1Char(124)); return all.join(", "); };
+    QTRY_VERIFY2(rowOf("codex/orbit/staging") >= 0 && rowOf("claude/orbit/ledger") >= 0, qPrintable(keys()));
+    // The design's list width, once the window has laid out.
+    if (auto *slot = window.findChild<QWidget *>("sessionListSlot"))
+        if (auto *splitter = qobject_cast<QSplitter *>(slot->parentWidget())) splitter->setSizes({380, splitter->sizes().value(0) + splitter->sizes().value(1) - 380});
+    QTest::qWait(100);
+    const auto statusOf = [&](const QString &name) { return SessionDelegate::statusOf(list->model()->index(rowOf(name), 0), false); };
+    // The badges and line 3.
+    QCOMPARE(statusOf("claude/orbit/checkout").kind, SessionStatusBadge::Working);
+    QCOMPARE(statusOf("claude/orbit/migrate").kind, SessionStatusBadge::Attention);
+    QCOMPARE(statusOf("claude/orbit/migrate").caption, QString("Needs approval"));
+    QCOMPARE(statusOf("claude/orbit/api-refactor").kind, SessionStatusBadge::Deps);
+    QCOMPARE(statusOf("claude/orbit/api-refactor").caption, QString("Waiting"));
+    QCOMPARE(statusOf("claude/orbit/api-refactor").shown.line, QString("Waiting for cargo test --workspace · long operation, 6m so far"));
+    QCOMPARE(statusOf("claude/orbit/ledger").kind, SessionStatusBadge::Build);
+    QCOMPARE(statusOf("claude/orbit/ledger").shown.line, QString("Running cargo test · 6m so far"));
+    QCOMPARE(statusOf("claude/orbit/release").kind, SessionStatusBadge::Cooling);
+    QCOMPARE(statusOf("claude/orbit/release").caption, QString("Cooling 41m"));
+    QCOMPARE(statusOf("codex/orbit/staging").kind, SessionStatusBadge::Cold);
+    QCOMPARE(statusOf("codex/orbit/staging").shown.line, QString("Cache cold 2h 10m"));
+    QCOMPARE(statusOf("claude/orbit/archive-job").kind, SessionStatusBadge::Stopped);
+    // The Background rules: a dev server after the turn is a service (its
+    // chip), never deps, and the reply of a session with only services shows;
+    // a Zerus build keeps its reply waiting.
+    const auto services = [&](const QString &name) { return list->item(rowOf(name))->data(SessionRoles::Services).toList().size(); };
+    QCOMPARE(services("claude/orbit/release"), 1);
+    QVERIFY(list->item(rowOf("claude/orbit/docs"))->data(SessionRoles::Unread).toBool());
+    QCOMPARE(statusOf("claude/orbit/docs").caption, QString("New reply"));
+    QVERIFY(!list->item(rowOf("claude/orbit/ledger"))->data(SessionRoles::Unread).toBool());
+    // Counters stay as they were: deps, cooling and cold are not attention.
+    QVERIFY(!list->item(rowOf("claude/orbit/api-refactor"))->data(SessionRoles::Attention).toBool());
+    QVERIFY(!list->item(rowOf("codex/orbit/staging"))->data(SessionRoles::Attention).toBool());
+    // The badge's tooltip (§5), with the reason.
+    const auto tip = [&](const QPoint &point) {
+        QHelpEvent help(QEvent::ToolTip, point, list->viewport()->mapToGlobal(point)); QApplication::sendEvent(list->viewport(), &help);
+        return QToolTip::text();
+    };
+    const auto optionFor = [&](const QString &name) {
+        auto *item = list->item(rowOf(name)); list->scrollToItem(item);
+        QStyleOptionViewItem option; option.initFrom(list->viewport()); option.rect = list->visualItemRect(item);
+        option.font = list->font(); option.widget = list;
+        return option;
+    };
+    {
+        const auto option = optionFor("claude/orbit/api-refactor");
+        const auto index = list->model()->index(rowOf("claude/orbit/api-refactor"), 0);
+        const QRect badgeRect = SessionDelegate::titleLayout(option, index, SessionDelegate::statusForView(option, index)).status;
+        // Plain text, as Qt's rich tooltip keeps it (its spaces may be non-breaking).
+        const QString text = QTextDocumentFragment::fromHtml(tip(badgeRect.center())).toPlainText().replace(QChar(0xa0), QLatin1Char(' '));
+        QVERIFY2(text.contains("Waiting for dependencies") && text.contains("cargo test --workspace"), qPrintable(text));
+    }
+    // Shots of each card, the way the design's are cut.
+    const QString shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+    const auto cardShot = [&](const QString &name, const QString &file) {
+        if (shots.isEmpty()) return;
+        auto *item = list->item(rowOf(name)); list->scrollToItem(item); QTest::qWait(60);
+        QVERIFY(list->viewport()->grab(list->visualItemRect(item)).save(QDir(shots).filePath(file + "-" + theme + ".png")));
+    };
+    cardShot("claude/orbit/checkout", "u30-10-working");
+    cardShot("claude/orbit/migrate", "u30-12-user-approval");
+    cardShot("claude/orbit/docs", "u30-14-user-reply");
+    cardShot("claude/orbit/api-refactor", "u30-20-deps-long-op");
+    cardShot("claude/orbit/ledger", "u30-25-build");
+    cardShot("claude/orbit/release", "u30-30-cooling");
+    cardShot("codex/orbit/staging", "u30-40-cold");
+    cardShot("claude/orbit/archive-job", "u30-50-stopped");
+    cardShot("claude/orbit/onboarding", "u30-13-user-input");
+    cardShot("claude/orbit/search", "u30-21-deps-subagents");
+    cardShot("claude/orbit/checkout-ui", "u30-22-deps-team");
+    cardShot("claude/orbit/notes", "u30-31-cooling-fresh");
+    QCOMPARE(statusOf("claude/orbit/onboarding").caption, QString("Needs input"));
+    QCOMPARE(statusOf("claude/orbit/search").shown.line, QString("Waiting for 2 subagents: Explore, reviewer"));
+    QCOMPARE(statusOf("claude/orbit/checkout-ui").shown.line, QString("Waiting for #2 Saved cards API (Backend)"));
+    QVERIFY(statusOf("claude/orbit/notes").heat > .95);
+    // The header pill: the state's text, its tone and its reason.
+    window.showSession({}, "claude/orbit/api-refactor");
+    auto *badge = window.findChild<QLabel *>("badge"); QVERIFY(badge);
+    QTRY_COMPARE(badge->property("sessionState").toString(), QString("deps"));
+    QCOMPARE(badge->text(), QString("Waiting"));
+    QVERIFY(badge->toolTip().contains("cargo test --workspace"));
+    if (!shots.isEmpty()) { QTest::qWait(60); QVERIFY(badge->grab().save(QDir(shots).filePath("u30-61-header-deps-" + theme + ".png"))); }
+    window.showSession({}, "claude/orbit/release");
+    QTRY_COMPARE(badge->property("sessionState").toString(), QString("cooling"));
+    QCOMPARE(badge->text(), QString("Cooling 41m"));
+    window.showSession({}, "codex/orbit/staging");
+    QTRY_COMPARE(badge->property("sessionState").toString(), QString("cold"));
+    QCOMPARE(badge->text(), QString("Cold"));
+    if (!shots.isEmpty()) { QTest::qWait(60); QVERIFY(badge->grab().save(QDir(shots).filePath("u30-63-header-cold-" + theme + ".png"))); }
+    // Cold: + New opens New session for the same project, machine and agent,
+    // named "<name>-2"; Resume opens the session with its toast. Neither click
+    // selects the card by itself.
+    window.showSession({}, "claude/orbit/checkout");
+    QTRY_COMPARE(list->currentItem()->data(SessionRoles::Key).toString(), QString("\nclaude/orbit/checkout"));
+    const auto coldIndex = list->model()->index(rowOf("codex/orbit/staging"), 0);
+    const auto option = optionFor("codex/orbit/staging"); QTest::qWait(60);
+    const auto actions = SessionDelegate::coldActionRects(option, coldIndex);
+    QVERIFY(!actions.first.isEmpty() && !actions.second.isEmpty());
+    QVERIFY(SessionDelegate::coldActionRects(optionFor("claude/orbit/release"), list->model()->index(rowOf("claude/orbit/release"), 0)).first.isEmpty());
+    list->scrollToItem(list->item(rowOf("codex/orbit/staging"))); QTest::qWait(60);
+    QVERIFY(tip(actions.first.center()).contains("Start a new session in the same folder and machine"));
+    QString name;
+    QTimer::singleShot(0, &window, [&] {
+        if (auto *dialog = qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget())) {
+            name = dialog->findChild<QLineEdit *>("launchName")->text();
+            if (!shots.isEmpty()) { QTest::qWait(150); dialog->grab().save(QDir(shots).filePath("u30-41-cold-new-session-" + theme + ".png")); }
+            dialog->reject();
+        }
+    });
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, actions.first.center());
+    QCOMPARE(name, QString("staging-2"));
+    QCOMPARE(list->currentItem()->data(SessionRoles::Key).toString(), QString("\nclaude/orbit/checkout"));
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, {}, actions.second.center());
+    QTRY_COMPARE(list->currentItem()->data(SessionRoles::Key).toString(), QString("\ncodex/orbit/staging"));
+    QTRY_COMPARE(window.findChild<QLabel *>("notice")->text(), QString("Continuing staging · the first message rebuilds the cache"));
+}
+
 void TestSessionsWindow::sessionListFollowsThePrototype_data()
 {
     QTest::addColumn<QString>("theme");

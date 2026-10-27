@@ -1,9 +1,52 @@
 #pragma once
 #include "CachedText.h"
 #include <QPainter>
+#include <QPolygonF>
+#include <cmath>
 
 namespace SessionStatusBadge {
-enum Kind { Neutral, Working, Attention, Error, Paused, Unread, Draft, Scheduled, Background, Waiting, MutedAttention, MutedUnread };
+enum Kind { Neutral, Working, Attention, Error, Paused, Unread, Draft, Scheduled, Background, Waiting, MutedAttention, MutedUnread,
+            // U30 (#508): the session states of SESSION-STATES.md.
+            Deps, Build, Cooling, Cold, Stopped };
+// U30 §6: the state tokens, dark and light.
+inline QColor stateTone(Kind kind, bool dark) {
+    switch (kind) {
+    case Deps: return QColor(dark ? "#6fa8ff" : "#2f66c9");
+    case Cooling: return QColor(dark ? "#56c8e0" : "#137f95");
+    case Cold: return QColor(dark ? "#8fa6c4" : "#55708f");
+    case Build: return QColor(dark ? "#4cc98a" : "#2a9d63");
+    case Stopped: return QColor(dark ? "#8b939e" : "#6b7785");
+    default: break;
+    }
+    return {};
+}
+inline bool isState(Kind kind) { return kind == Deps || kind == Build || kind == Cooling || kind == Cold || kind == Stopped; }
+// The state glyphs: hourglass, build, thermo, snow, stop (10 px in a badge, 12 px on line 3).
+inline void glyph(QPainter *p, const QPointF &c, qreal size, const QString &name, const QColor &color) {
+    p->save(); p->setRenderHint(QPainter::Antialiasing);
+    const qreal h = size / 2;
+    QPen pen(color, size >= 12 ? 1.3 : 1.15, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin); p->setPen(pen); p->setBrush(Qt::NoBrush);
+    if (name == QLatin1String("hourglass")) {
+        p->drawLine(c + QPointF(-h * .7, -h), c + QPointF(h * .7, -h)); p->drawLine(c + QPointF(-h * .7, h), c + QPointF(h * .7, h));
+        QPolygonF glass; glass << c + QPointF(-h * .55, -h) << c + QPointF(h * .55, h) << c + QPointF(-h * .55, h) << c + QPointF(h * .55, -h);
+        p->drawPolyline(glass);
+    } else if (name == QLatin1String("thermo")) {
+        p->drawLine(c + QPointF(0, -h), c + QPointF(0, h * .35));
+        p->setBrush(color); p->drawEllipse(c + QPointF(0, h * .55), h * .38, h * .38);
+    } else if (name == QLatin1String("snow")) {
+        for (int i = 0; i < 3; ++i) {
+            const qreal a = i * M_PI / 3;
+            p->drawLine(c + QPointF(std::cos(a) * h, std::sin(a) * h), c - QPointF(std::cos(a) * h, std::sin(a) * h));
+        }
+    } else if (name == QLatin1String("stop")) {
+        p->setBrush(color); p->drawRoundedRect(QRectF(c.x() - h * .65, c.y() - h * .65, h * 1.3, h * 1.3), 1, 1);
+    } else if (name == QLatin1String("build")) {
+        // A terminal prompt: the build runs in its own shell.
+        p->drawLine(c + QPointF(-h * .8, -h * .55), c + QPointF(-h * .15, 0)); p->drawLine(c + QPointF(-h * .15, 0), c + QPointF(-h * .8, h * .55));
+        p->drawLine(c + QPointF(h * .1, h * .6), c + QPointF(h * .85, h * .6));
+    }
+    p->restore();
+}
 inline QColor mutedTone(bool dark) { return QColor(dark ? "#c4ccd5" : "#637080"); }
 inline QFont font(QFont base) { base.setPixelSize(11); base.setWeight(QFont::Medium); return base; }
 // The state's color for a frame around the session; invalid for Neutral.
@@ -18,13 +61,15 @@ inline QColor edge(Kind kind, bool dark) {
     case Draft: return QColor(dark ? "#6b9bd8" : "#5b8cc9");
     case Scheduled: return QColor(dark ? "#5ab8cf" : "#2b8aa1");
     case Waiting: return QColor(dark ? "#d4ae65" : "#a37a24");
+    case Deps: case Build: case Cooling: case Cold: case Stopped: return stateTone(kind, dark);
     case Neutral: break;
     }
     return {};
 }
 inline int width(const QString &text, Kind kind, const QFont &base) {
     // Leave room for fractional glyph advances before elidedText rounds them.
-    return CachedText::width(font(base), text) + 16 + (kind == Neutral ? 0 : 16);
+    // Cooling's 16 px heat bar sits after its caption.
+    return CachedText::width(font(base), text) + 16 + (kind == Neutral ? 0 : 16) + (kind == Cooling ? 22 : 0);
 }
 // The maximum halo is a 5px ellipse. Include its antialiasing fringe.
 inline QPointF indicatorCenter(const QRect &rect) { return {qreal(rect.x() + 11), rect.center().y() + .5}; }
@@ -36,8 +81,34 @@ inline QRect workingIndicatorRect(const QRect &rect) {
 // ask for the user filled. Set by the window with the skin.
 inline bool &outlined() { static bool value = false; return value; }
 // labelOpacity fades the caption while the collapsed session strip grows into cards.
-inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind, bool dark, qreal pulse = 0, qreal labelOpacity = 1, bool indicatorOnly = false) {
+inline void paint(QPainter *p, const QRect &rect, const QString &text, Kind kind, bool dark, qreal pulse = 0, qreal labelOpacity = 1, bool indicatorOnly = false, qreal heat = -1) {
     p->save(); p->setRenderHint(QPainter::Antialiasing); p->setClipRect(rect, Qt::IntersectClip);
+    if (isState(kind)) {
+        // U30 §6: a frame in the state's tone (about half), a light fill for
+        // deps and cold, the glyph and the caption in the tone; Cooling's heat
+        // bar shows the warmth left.
+        const QColor tone = stateTone(kind, dark);
+        QColor line = tone; line.setAlphaF(.5);
+        QColor fill = tone; fill.setAlphaF(kind == Deps || kind == Cold ? .11 : 0);
+        p->setPen(QPen(line, 1)); p->setBrush(fill);
+        p->drawRoundedRect(QRectF(rect).adjusted(.5, .5, -.5, -.5), rect.height() / 2., rect.height() / 2.);
+        const QPointF center = indicatorCenter(rect);
+        glyph(p, center, 10, kind == Deps ? QStringLiteral("hourglass") : kind == Cooling ? QStringLiteral("thermo") : kind == Cold ? QStringLiteral("snow")
+                             : kind == Stopped ? QStringLiteral("stop") : QStringLiteral("build"), tone);
+        if (indicatorOnly) { p->restore(); return; }
+        p->setPen(tone); p->setFont(font(p->font())); p->setOpacity(p->opacity() * labelOpacity);
+        const int bar = kind == Cooling ? 22 : 0;
+        const QRect label = rect.adjusted(23, 0, -7 - bar, 0);
+        CachedText::draw(p, label, Qt::AlignVCenter, labelOpacity < 1 ? text : CachedText::elided(p->font(), text, Qt::ElideRight, qMax(0, label.width())));
+        if (kind == Cooling && heat >= 0) {
+            const QRectF track(rect.right() - 7 - 16, rect.center().y() - 1, 16, 3);
+            QColor back = tone; back.setAlphaF(.25);
+            p->setPen(Qt::NoPen); p->setBrush(back); p->drawRoundedRect(track, 1.5, 1.5);
+            p->setBrush(tone); p->drawRoundedRect(QRectF(track.x(), track.y(), track.width() * qBound<qreal>(.04, heat, 1), track.height()), 1.5, 1.5);
+        }
+        p->restore();
+        return;
+    }
     const QColor background = kind == Working ? QColor(dark ? "#194d36" : "#ccefdc")
         : kind == Waiting ? QColor(dark ? "#443a25" : "#f5e8c7")
         : kind == Background ? QColor(dark ? "#273544" : "#e9f0f8")

@@ -121,6 +121,12 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.recurringSchedules = schedules.value("recurring").toInt(-1);
     s.nextScheduledAt = schedules.value("next_at").toDouble();
     s.coordinationWait = obj.value("coordination_wait").toObject();
+    // U30 (#506): the host's state; an older host sends none.
+    s.sessionState = obj.value("session_state").toString();
+    s.stateReason = obj.value("state_reason").toObject();
+    s.cacheTtl = obj.value("cache_ttl").toObject();
+    s.build = obj.value("build").toObject();
+    s.lastActive = obj.value("last_active").toDouble();
     const auto work = obj.value("process_work").toObject();
     s.backgroundProcesses = work.value("count").toInt(-1);
     s.backgroundStarted = work.value("started_at").toDouble();

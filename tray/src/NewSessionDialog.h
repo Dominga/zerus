@@ -41,6 +41,8 @@ public:
     void selectPath(const QString &path, bool automaticWorktree = true);
     void prefillSessionFolder(const QString &path, const QString &canonicalPath = {});
     void selectAccount(const QString &account);
+    // U30 (#508): a cold card's + New names the session "<name>-2".
+    void setSessionName(const QString &name);
     void setProjectExplicit(bool explicitChoice) { m_projectExplicit = explicitChoice; }
     bool implicitInbox() const;
     void setProjectCatalogSwarm(const QString &swarm) { m_projectCatalogSwarm = swarm; }

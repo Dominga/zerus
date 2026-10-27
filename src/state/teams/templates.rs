@@ -158,88 +158,102 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn settings_override(path: Option<PathBuf>) {
+pub(crate) fn settings_override(path: Option<PathBuf>) {
     SETTINGS.with(|settings| *settings.borrow_mut() = path);
 }
 
-pub(crate) fn enabled() -> bool {
+/// The settings file: the global switch and the owner's additions. It lives in
+/// Zerus state, never in a member's folder, so a sandboxed member can neither
+/// read nor write it (U21, attempt 2).
+fn read_settings() -> Value {
     std::fs::read(settings_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|value| value["enabled"].as_bool())
-        .unwrap_or(true)
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({"enabled":true}))
 }
 
-/// Turns the built-in set on or off for every team.
-pub(crate) fn set_enabled(enabled: bool) -> anyhow::Result<()> {
+fn write_settings(value: &Value) -> anyhow::Result<()> {
     let path = settings_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, serde_json::to_vec(&json!({"enabled":enabled}))?)?;
+    std::fs::write(&path, serde_json::to_vec(value)?)?;
     Ok(())
 }
 
-/// The project's own additions: `<team folder>/.zerus-team/templates.json`, a
-/// list of fixed programs and argv. They are shown to the owner as additions;
-/// their ids never shadow a built-in one.
-pub(crate) fn additions(folder: &Path) -> anyhow::Result<Vec<Value>> {
-    let path = folder.join(".zerus-team").join("templates.json");
-    let Ok(bytes) = std::fs::read(&path) else { return Ok(Vec::new()) };
-    let value: Value = serde_json::from_slice(&bytes).context("project templates are invalid JSON")?;
-    let list = value["templates"].as_array().context("project templates need a \"templates\" list")?;
-    ensure!(list.len() <= 50, "A project adds at most 50 templates");
+pub(crate) fn enabled() -> bool {
+    read_settings()["enabled"].as_bool().unwrap_or(true)
+}
+
+/// Turns the built-in set on or off for every team, keeping the additions.
+pub(crate) fn set_enabled(enabled: bool) -> anyhow::Result<()> {
+    let mut settings = read_settings();
+    settings["enabled"] = json!(enabled);
+    write_settings(&settings)
+}
+
+/// The owner's additions: fixed programs and argv kept in Zerus state and set
+/// only with `hgs team templates set` (owner-only). Their ids never shadow a
+/// built-in one.
+pub(crate) fn additions() -> Vec<Value> {
+    read_settings()["templates"].as_array().cloned().unwrap_or_default()
+}
+
+/// Replaces the additions, validated the same way a run is: a fixed program,
+/// argv strings, a bounded timeout, an id that is not a built-in.
+pub(crate) fn set_additions(list: &[Value]) -> anyhow::Result<()> {
+    ensure!(list.len() <= 50, "The owner adds at most 50 templates");
     let mut ids = std::collections::BTreeSet::new();
     for template in list {
-        let id = template["id"].as_str().context("A project template names its id")?;
+        let id = template["id"].as_str().context("An added template names its id")?;
         check_identifier(id, "id")?;
         ensure!(builtin(id).is_none(), "Template {id} is built in");
         ensure!(ids.insert(id.to_owned()), "Template {id} is listed twice");
-        let program = template["program"].as_str().context("A project template names its program")?;
-        ensure!(!program.trim().is_empty() && program.chars().count() <= 200, "A project template has a program");
-        ensure!(!program.contains('{') && !program.contains('}'), "A project template's program has no placeholders");
+        let program = template["program"].as_str().context("An added template names its program")?;
+        ensure!(!program.trim().is_empty() && program.chars().count() <= 200, "An added template has a program");
+        ensure!(!program.contains('{') && !program.contains('}'), "An added template's program has no placeholders");
         let args = template["args"].as_array().cloned().unwrap_or_default();
-        ensure!(args.len() <= 64, "A project template has at most 64 arguments");
+        ensure!(args.len() <= 64, "An added template has at most 64 arguments");
         for arg in &args {
-            let arg = arg.as_str().context("A project template's arguments are strings")?;
-            ensure!(arg.chars().count() <= 400 && !arg.contains('\0'), "A project template's argument is too long");
+            let arg = arg.as_str().context("An added template's arguments are strings")?;
+            ensure!(arg.chars().count() <= 400 && !arg.contains('\0'), "An added template's argument is too long");
         }
         if let Some(seconds) = template.get("timeout_secs").and_then(|seconds| seconds.as_u64()) {
-            ensure!((1..=86_400).contains(&seconds), "A project template's timeout_secs is 1-86400");
+            ensure!((1..=86_400).contains(&seconds), "An added template's timeout_secs is 1-86400");
         }
     }
-    Ok(list.clone())
+    let mut settings = read_settings();
+    settings["templates"] = json!(list);
+    write_settings(&settings)
 }
 
-/// How long Zerus lets a template run: the built-in's own bound, or the project
+/// How long Zerus lets a template run: the built-in's own bound, or the added
 /// template's `timeout_secs` (1-86400; an hour by default).
-pub(crate) fn timeout_for(id: &str, folder: &Path) -> u64 {
+pub(crate) fn timeout_for(id: &str) -> u64 {
     if let Some(template) = builtin(id) {
         return template.timeout_secs;
     }
-    additions(folder)
-        .ok()
-        .and_then(|list| {
-            list.iter()
-                .find(|template| template["id"].as_str() == Some(id))
-                .and_then(|template| template["timeout_secs"].as_u64())
-        })
+    additions()
+        .iter()
+        .find(|template| template["id"].as_str() == Some(id))
+        .and_then(|template| template["timeout_secs"].as_u64())
         .map(|seconds| seconds.clamp(1, 86_400))
         .unwrap_or(1800)
 }
 
 /// Every template a member may name: the built-ins (when the switch is on) and
-/// the project's additions, marked so the owner sees only the additions.
-pub(crate) fn listed(folder: &Path) -> Value {
+/// the owner's additions, marked so the owner sees only the additions.
+pub(crate) fn listed() -> Value {
     let mut items: Vec<Value> = Vec::new();
     if enabled() {
         for template in BUILTIN {
             items.push(described(template, "builtin"));
         }
     }
-    for template in additions(folder).unwrap_or_default() {
+    for template in additions() {
         let mut item = template.clone();
-        item["source"] = json!("project");
+        item["source"] = json!("owner");
         items.push(item);
     }
     json!({"enabled":enabled(), "items":items})
@@ -251,13 +265,13 @@ fn described(template: &Template, source: &str) -> Value {
         "params":template.params.iter().map(|param| json!({"name":param.name,"kind":format!("{:?}",param.kind).to_lowercase(),"required":param.required})).collect::<Vec<_>>()})
 }
 
-/// The project template with `id`, if the project added one.
-fn addition(folder: &Path, id: &str) -> anyhow::Result<Option<(String, Vec<String>)>> {
-    let list = additions(folder)?;
-    let Some(template) = list.iter().find(|template| template["id"].as_str() == Some(id)) else { return Ok(None) };
+/// The owner-added template with `id`, if there is one.
+fn addition(id: &str) -> Option<(String, Vec<String>)> {
+    let list = additions();
+    let template = list.iter().find(|template| template["id"].as_str() == Some(id))?;
     let program = template["program"].as_str().unwrap_or_default().to_owned();
     let args: Vec<String> = template["args"].as_array().into_iter().flatten().filter_map(|arg| arg.as_str()).map(str::to_owned).collect();
-    Ok(Some((program, args)))
+    Some((program, args))
 }
 
 /// U21: a value that fits one argv element and cannot be read as shell syntax.
@@ -353,10 +367,10 @@ fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow
 /// elements for the list placeholders.
 pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
     ensure!(args.is_object(), "The template's arguments are a JSON object");
-    // A built-in id always means the built-in template: a project addition may
+    // A built-in id always means the built-in template: an owner addition may
     // not shadow it.
     if builtin(id).is_none() {
-        if let Some((program, argv)) = addition(folder, id)? {
+        if let Some((program, argv)) = addition(id) {
             ensure!(enabled(), "The built-in command templates are turned off in Settings > Teams");
             if let Some((key, _)) = args.as_object().into_iter().flatten().next() {
                 bail!("The project template {id} takes no placeholders (got \"{key}\")");
@@ -674,26 +688,39 @@ mod tests {
     }
 
     #[test]
-    fn the_off_switch_and_project_additions_are_read_by_the_listing() {
-        let root = super::super::super::root();
-        let _ = root; // the listing reads the real state dir; only additions here
+    fn the_off_switch_and_the_owners_additions_are_read_by_the_listing() {
         let dir = temp();
-        std::fs::create_dir_all(dir.path().join(".zerus-team")).unwrap();
-        std::fs::write(
-            dir.path().join(".zerus-team").join("templates.json"),
-            serde_json::to_vec(&json!({"templates":[{"id":"make","program":"make","args":["-j2"]}]})).unwrap(),
-        )
-        .unwrap();
-        let listed = listed(dir.path());
-        assert!(listed["items"].as_array().unwrap().iter().any(|item| item["id"] == "make" && item["source"] == "project"));
-        // A project template cannot shadow a built-in one or carry a shell.
-        std::fs::write(
-            dir.path().join(".zerus-team").join("templates.json"),
-            serde_json::to_vec(&json!({"templates":[{"id":"cargo-build","program":"make","args":[]}]})).unwrap(),
-        )
-        .unwrap();
+        settings_override(Some(dir.path().join("templates.json")));
+        assert!(listed()["items"].as_array().unwrap().iter().all(|item| item["source"] == "builtin"));
+        // The owner adds one in Zerus state; it is listed as an addition.
+        set_additions(&[json!({"id":"make","program":"make","args":["-j2"]})]).unwrap();
+        let items = listed();
+        assert!(items["items"].as_array().unwrap().iter().any(|item| item["id"] == "make" && item["source"] == "owner"), "{items}");
+        // An addition cannot shadow a built-in one.
+        assert!(set_additions(&[json!({"id":"cargo-build","program":"make","args":[]})]).is_err());
         assert!(plan("cargo-build", &json!({"filter":"hgs"}), dir.path()).is_ok());
-        assert!(addition(dir.path(), "cargo-build").is_err());
+        assert!(addition("cargo-build").is_none());
+        settings_override(None);
+    }
+
+    #[test]
+    fn a_templates_file_in_the_members_folder_is_ignored() {
+        // U21, attempt 2: the folder is the member's, so a file there is not a
+        // template source; the owner's state is (set_additions above).
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        std::fs::create_dir_all(dir.path().join(".zerus-team")).unwrap();
+        let marker = dir.path().join("marker.txt");
+        std::fs::write(
+            dir.path().join(".zerus-team").join("templates.json"),
+            serde_json::to_vec(&json!({"templates":[{"id":"pwn","program":"cmd","args":["/c",format!("echo x > \"{}\"", marker.display())]}]})).unwrap(),
+        )
+        .unwrap();
+        let error = plan("pwn", &json!({}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("Unknown template"), "{error}");
+        assert!(!marker.exists());
+        assert!(listed()["items"].as_array().unwrap().iter().all(|item| item["id"] != "pwn"));
+        settings_override(None);
     }
 
     #[test]
@@ -706,7 +733,7 @@ mod tests {
         assert!(!enabled());
         let error = plan("cargo-build", &json!({}), dir.path()).unwrap_err().to_string();
         assert!(error.contains("turned off"), "{error}");
-        let listed = listed(dir.path());
+        let listed = listed();
         assert_eq!((listed["enabled"].as_bool(), listed["items"].as_array().map(Vec::len)), (Some(false), Some(0)));
         set_enabled(true).unwrap();
         assert!(plan("cargo-build", &json!({}), dir.path()).is_ok());
@@ -714,20 +741,17 @@ mod tests {
     }
 
     #[test]
-    fn a_project_template_runs_its_fixed_argv() {
+    fn an_owner_added_template_runs_its_fixed_argv() {
         let dir = temp();
-        std::fs::create_dir_all(dir.path().join(".zerus-team")).unwrap();
-        std::fs::write(
-            dir.path().join(".zerus-team").join("templates.json"),
-            serde_json::to_vec(&json!({"templates":[{"id":"say","program":"cmd","args":["/c","echo hello"]}]})).unwrap(),
-        )
-        .unwrap();
+        settings_override(Some(dir.path().join("templates.json")));
+        set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo hello"]})]).unwrap();
         let built = plan("say", &json!({}), dir.path()).unwrap();
         assert_eq!((built.program.as_str(), built.argv.as_slice()), ("cmd", ["/c".to_owned(), "echo hello".to_owned()].as_slice()));
         let outcome = execute(&built, dir.path(), Duration::from_secs(30), &[]);
         assert_eq!(outcome.exit, Some(0));
         assert_eq!(outcome.tail.trim(), "hello");
-        // No placeholders in a project template: an argument is refused.
+        // No placeholders in an addition: an argument is refused.
         assert!(plan("say", &json!({"x":"y"}), dir.path()).is_err());
+        settings_override(None);
     }
 }

@@ -320,7 +320,7 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     value["pending_phase"] = json!(pending_phase(team));
     // U21: the command templates Zerus runs outside a member's sandbox: the
     // built-ins (with the global switch) and the project's additions.
-    value["templates"] = super::templates::listed(std::path::Path::new(&team.folder));
+    value["templates"] = super::templates::listed();
     // C5: the plan approval view lists every check command with its expected
     // exit code, so the owner sees what will run and where.
     value["checks"] = json!(team
@@ -1885,7 +1885,7 @@ fn team_run(input: &Value, _wait: bool) -> anyhow::Result<Value> {
     let request = json!({"op":"run","request_id":request_id,"team":team.id,"member":member_id,"attempt":attempt_id,
         "template":template,"args":input["args"].clone(),"task":task.id,"input":input});
     let path = super::outbox::push(&folder, &request)?;
-    let bounded = super::templates::timeout_for(&template, &folder);
+    let bounded = super::templates::timeout_for(&template);
     let queued = json!({
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
         "note":"Zerus runs the template outside your sandbox; the result waits in your folder."
@@ -1894,23 +1894,24 @@ fn team_run(input: &Value, _wait: bool) -> anyhow::Result<Value> {
     Ok(super::outbox::wait(&folder, &request_id, bounded as f64 + 30.0).unwrap_or(queued))
 }
 
-/// U21: the built-in set, the project's additions and the global off switch.
-/// Only the owner (the desktop, not an agent) turns it off.
+/// U21: the built-in set, the owner's additions and the global off switch.
+/// Only the owner (the desktop, not an agent) changes them; they live in Zerus
+/// state, never in a member's folder, so a sandboxed member cannot add one.
 fn templates_command(input: &Value) -> anyhow::Result<Value> {
-    let folder = match text(input, "folder") {
-        "" => std::env::current_dir().context("The owner's settings need a folder")?,
-        folder => std::path::PathBuf::from(folder),
-    };
     match text(input, "action") {
-        "" | "get" => Ok(super::templates::listed(&folder)),
+        "" | "get" => Ok(super::templates::listed()),
         "set" => {
             ensure!(
                 caller_record().is_none() && nonempty_env("DSH_SESSION_ID").is_none(),
                 "Only the owner changes the command templates"
             );
-            let enabled = input["enabled"].as_bool().context("templates set names \"enabled\": true or false")?;
-            super::templates::set_enabled(enabled)?;
-            Ok(super::templates::listed(&folder))
+            if let Some(enabled) = input["enabled"].as_bool() {
+                super::templates::set_enabled(enabled)?;
+            }
+            if let Some(list) = input["templates"].as_array() {
+                super::templates::set_additions(list)?;
+            }
+            Ok(super::templates::listed())
         }
         other => bail!("templates action is get or set (got {other})"),
     }

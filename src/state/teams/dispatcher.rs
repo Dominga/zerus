@@ -2552,6 +2552,78 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
     Ok(json!({"status":"committed","sha":sha,"files":files}))
 }
 
+/// U21: the git route of the built-in template, run the way commit_in runs git
+/// (C2): the repository's own config may name neither a hook path, fsmonitor,
+/// an include, a filter nor a signing program, and hooks are disabled outright;
+/// a clone member owns its .git, so its config must never run code here.
+pub(crate) fn merge_lead(folder: &str, timeout: Duration) -> super::templates::Outcome {
+    let started = Instant::now();
+    let run = |args: &[&str]| -> anyhow::Result<Output> {
+        let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(folder)
+            .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "gpg.program="])
+            .arg("--no-optional-locks")
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| anyhow::anyhow!("git did not run: {error}"))?;
+        let out_pipe = child.stdout.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                buf
+            })
+        });
+        let err_pipe = child.stderr.take().map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+                buf
+            })
+        });
+        loop {
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            if started.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("git {args:?} did not finish in {} s and was stopped", timeout.as_secs());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let status = child.wait()?;
+        let stdout = out_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
+        let stderr = err_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
+        Ok(Output { status, stdout, stderr })
+    };
+    let outcome = (|| -> anyhow::Result<(Option<i32>, String)> {
+        let listed = run(&["config", "--list", "--show-scope", "--name-only"])?;
+        anyhow::ensure!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr).trim());
+        if let Some(reason) = refused_repository_config(&String::from_utf8_lossy(&listed.stdout)) {
+            anyhow::bail!("This repository {reason}; Zerus merges without it");
+        }
+        let merged = run(&["merge", "--no-edit", "teams-v2/lead"])?;
+        let mut tail = String::from_utf8_lossy(&merged.stdout).into_owned();
+        let error = String::from_utf8_lossy(&merged.stderr).into_owned();
+        if !error.trim().is_empty() {
+            if !tail.is_empty() && !tail.ends_with('\n') {
+                tail.push('\n');
+            }
+            tail.push_str(&error);
+        }
+        Ok((merged.status.code(), tail))
+    })();
+    let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match outcome {
+        Ok((exit, tail)) => super::templates::Outcome { exit, tail: super::templates::last_chars(&tail, 4000), ms, ..Default::default() },
+        Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ms, ..Default::default() },
+    }
+}
+
 fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     let brief_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -3124,23 +3196,27 @@ fn apply_run(store: &mut Store, team: &Team, member: &Member, task_id: u32, fold
         let _ = fs::create_dir_all(&shots);
         env.push(("ZERUS_TEAM_SHOTS", shots.display().to_string()));
     }
-    let timeout = Duration::from_secs(super::templates::timeout_for(template, folder));
-    let outcome = match &plan.commit {
+    let timeout = Duration::from_secs(super::templates::timeout_for(template));
+    let outcome = if template == "git-merge-lead" {
+        // U21, attempt 2: a clone member owns its .git, so this git route is
+        // run the way commit_in runs git, with the repository's own config
+        // refused and its hooks disabled.
+        merge_lead(&folder.display().to_string(), timeout)
+    } else if let Some(payload) = &plan.commit {
         // B4/U21: the commit template is Zerus' own code, not a subprocess: the
         // identity is the one the outbox proved.
-        Some(payload) => {
-            let input = json!({"request_id":request["request_id"],"team":team.id,"attempt":request["attempt"],
-                "message":payload["message"],"paths":payload["paths"]});
-            match super::commands::commit_in_team(team, &member.id, &input) {
-                Ok(result) => super::templates::Outcome {
-                    exit: Some(0),
-                    tail: format!("{} {}", result["status"].as_str().unwrap_or_default(), result["sha"].as_str().unwrap_or_default()).trim().to_owned(),
-                    ..Default::default()
-                },
-                Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ..Default::default() },
-            }
+        let input = json!({"request_id":request["request_id"],"team":team.id,"attempt":request["attempt"],
+            "message":payload["message"],"paths":payload["paths"]});
+        match super::commands::commit_in_team(team, &member.id, &input) {
+            Ok(result) => super::templates::Outcome {
+                exit: Some(0),
+                tail: format!("{} {}", result["status"].as_str().unwrap_or_default(), result["sha"].as_str().unwrap_or_default()).trim().to_owned(),
+                ..Default::default()
+            },
+            Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ..Default::default() },
         }
-        None => super::templates::execute(&plan, folder, timeout, &env),
+    } else {
+        super::templates::execute(&plan, folder, timeout, &env)
     };
     let attempt_id = request["attempt"].as_str().unwrap_or_default().to_owned();
     let role = team.role_of(&member.id);
@@ -4110,11 +4186,11 @@ mod tests {
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
         let folder = dir.path().join("work");
         std::fs::create_dir_all(folder.join(".zerus-team")).unwrap();
-        std::fs::write(
-            folder.join(".zerus-team").join("templates.json"),
-            serde_json::to_vec(&json!({"templates":[{"id":"say","program":"cmd","args":["/c","echo run-ok"]}]})).unwrap(),
-        )
-        .unwrap();
+        // U21, attempt 2: additions come from Zerus state (the owner's), never
+        // from the member's folder; the test points the state at its own file.
+        let settings = dir.path().join("templates.json");
+        crate::state::teams::templates::settings_override(Some(settings));
+        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo run-ok"]})]).unwrap();
         let request = json!({"op":"run","request_id":"77777777-7777-4777-8777-777777777777",
             "team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
             "input":{"request_id":"77777777-7777-4777-8777-777777777777","team":t.id,"attempt":"A1","template":"say","args":{}}});
@@ -4130,6 +4206,7 @@ mod tests {
         let result = super::super::outbox::result(&folder, "77777777-7777-4777-8777-777777777777").unwrap();
         assert_eq!(result["status"], "ran");
         assert_eq!(result["tail"].as_str().unwrap_or_default().trim(), "run-ok", "{result}");
+        crate::state::teams::templates::settings_override(None);
     }
 
     #[test]
@@ -4155,6 +4232,121 @@ mod tests {
         let result = super::super::outbox::result(&folder, "88888888-8888-4888-8888-888888888888").unwrap();
         assert_eq!(result["status"], "refused");
         assert!(result["error"].as_str().unwrap_or_default().contains("Unknown template"), "{result}");
+    }
+
+    #[test]
+    fn a_templates_file_in_the_members_folder_is_never_a_template_source() {
+        // U21, attempt 2: a sandboxed member can write its own folder; a queued
+        // run may name only the built-ins and the owner's additions, so a
+        // templates.json in the folder is ignored and its program never runs.
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("templates.json");
+        crate::state::teams::templates::settings_override(Some(settings));
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(folder.join(".zerus-team")).unwrap();
+        let marker = folder.join("pwned.txt");
+        std::fs::write(
+            folder.join(".zerus-team").join("templates.json"),
+            serde_json::to_vec(&json!({"templates":[{"id":"pwn","program":"cmd",
+                "args":["/c",format!("echo x > \"{}\"", marker.display())]}]})).unwrap(),
+        )
+        .unwrap();
+        let request = json!({"op":"run","request_id":"99999999-9999-4999-8999-999999999999",
+            "team":t.id,"member":"dev","attempt":"A1","template":"pwn","args":{},
+            "input":{"request_id":"99999999-9999-4999-8999-999999999999","team":t.id,"attempt":"A1","template":"pwn","args":{}}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox(&mut store, &current, &[member]).unwrap();
+        let result = super::super::outbox::result(&folder, "99999999-9999-4999-8999-999999999999").unwrap();
+        assert_eq!(result["status"], "refused");
+        assert!(result["error"].as_str().unwrap_or_default().contains("Unknown template"), "{result}");
+        assert!(!marker.exists(), "the folder's program ran");
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    /// U21: a repository whose `teams-v2/lead` branch diverged from the member's
+    /// branch, with a post-merge hook that writes `marker` when it runs.
+    fn diverged_repo(dir: &std::path::Path, marker: &std::path::Path) -> bool {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.email=t@e", "-c", "user.name=T"])
+                .args(args)
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        git(&["init", "-q"])
+            && git(&["add", "."])
+            && git(&["commit", "-qm", "A"])
+            && git(&["checkout", "-qb", "teams-v2/lead"])
+            && std::fs::write(dir.join("lead.txt"), "l").is_ok()
+            && git(&["add", "."])
+            && git(&["commit", "-qm", "lead"])
+            && git(&["checkout", "-q", "-"])
+            && std::fs::write(dir.join("mine.txt"), "m").is_ok()
+            && git(&["add", "."])
+            && git(&["commit", "-qm", "mine"])
+            && std::fs::create_dir_all(dir.join(".git").join("hooks")).is_ok()
+            && std::fs::write(dir.join(".git").join("hooks").join("post-merge"), format!("#!/bin/sh\necho x > \"{}\"\n", marker.display())).is_ok()
+    }
+
+    #[test]
+    fn a_merge_never_runs_the_repository_own_hook() {
+        // U21, attempt 2: a clone member owns its .git and can leave a hook
+        // there; the hardened route must never run it. (A hook only runs when
+        // git enables it; the assertion below is about git never doing that.)
+        let dir = tempfile::tempdir().unwrap();
+        let hardened = dir.path().join("hardened");
+        let marker = dir.path().join("marker.txt");
+        if !diverged_repo(&hardened, &marker) {
+            eprintln!("git could not build the test repository; the sandbox blocks it");
+            return;
+        }
+        assert!(hardened.join(".git").join("hooks").join("post-merge").exists());
+        let outcome = merge_lead(&hardened.display().to_string(), Duration::from_secs(60));
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(!marker.exists(), "the repository's post-merge hook ran");
+    }
+
+    #[test]
+    fn a_repository_config_that_names_fsmonitor_is_refused() {
+        // U21, attempt 2: the repository's own config must not name a program.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let marker = dir.path().join("marker.txt");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.email=t@e", "-c", "user.name=T"])
+                .args(args)
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        if !(git(&["init", "-q"]) && git(&["add", "."]) && git(&["commit", "-qm", "A"])) {
+            eprintln!("git could not build the test repository; the sandbox blocks it");
+            return;
+        }
+        let program = format!("cmd /c echo x > \"{}\"", marker.display());
+        assert!(git(&["config", "core.fsmonitor", &program]));
+        let outcome = merge_lead(&repo.display().to_string(), Duration::from_secs(60));
+        assert_eq!(outcome.exit, Some(1), "{outcome:?}");
+        assert!(outcome.tail.contains("configures core.fsmonitor"), "{}", outcome.tail);
+        assert!(!marker.exists());
     }
 
     #[test]

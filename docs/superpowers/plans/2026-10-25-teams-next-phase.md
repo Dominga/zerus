@@ -873,12 +873,19 @@ answered; a denial cannot carry an explanation.
   expired: "+ New" opens New session prefilled, "Resume" keeps the session)
   and Stopped (by you); Offline stays. The order of computing them and the
   tokens are in that file; the cache TTL comes from the agent (Claude 5 min
-  or 1 h, Keep cache warm extends it). The former Background state becomes
-  Waiting for dependencies with the job named, and keeps its rules: it stays
+  or 1 h, Keep cache warm extends it). A background job makes a session Wait
+  for dependencies only when the session waits for it: a tool call still
+  running past the threshold, subagents in flight, or a job the agent waits on
+  (hgs wait, a declared budget, a turn blocked on it). A long-lived process the
+  session started and does not wait for - a dev server, a watcher, a tunnel,
+  an MCP server (U11) - is a service: it never makes the session wait, the
+  session is Cooling or Cold by its idle time, the row-2 chip counts it, and
+  it never defers the reply badge. A job that outlives its declared budget, or
+  runs on after the turn ended with nothing waiting on it, counts as a
+  service. Of the former Background rules the rest stay: such a session stays
   in Active and accepts new messages, native work and explicit attention take
-  precedence, a native Stop does not prove the jobs finished, reply-only
-  badges wait until the work completes, and historical, unknown or offline
-  jobs never make a session wait. Desktop, Android, the shared fixtures and
+  precedence, a native Stop does not prove the jobs finished, and historical,
+  unknown or offline jobs never make a session wait. Desktop, Android, the shared fixtures and
   the docs (CLAUDE.md and AGENTS.md included) change together. Owner: yes.
 
 ## Order of work (proposal)

@@ -2331,18 +2331,30 @@ mod tests {
         use crate::state::teams::model::{Member, MemberFolder, Team, TeamStatus};
         let dir = tempfile::tempdir().unwrap();
         dispatcher::set_git_ceiling(&dir.path().display().to_string());
-        let make_repo = |path: &std::path::Path| {
+        // Two different repositories: distinct paths and distinct initial
+        // commits. Identical content committed in the same second makes the same
+        // root commit, and clone_of would rightly call them one repository, so
+        // the foreign repo must carry its own history (asserted below).
+        let make_repo = |path: &std::path::Path, name: &str| {
             std::fs::create_dir(path).unwrap();
             let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(path).args(args).status().unwrap();
             assert!(git(&["init", "-q"]).success());
             assert!(git(&["config", "user.email", "t@example.com"]).success());
             assert!(git(&["config", "user.name", "T"]).success());
-            std::fs::write(path.join("a.txt"), "a").unwrap();
-            assert!(git(&["add", "a.txt"]).success());
-            assert!(git(&["commit", "-qm", "one"]).success());
+            std::fs::write(path.join(format!("{name}.txt")), name).unwrap();
+            assert!(git(&["add", "."]).success());
+            assert!(git(&["commit", "-qm", name]).success());
+        };
+        let root = |path: &std::path::Path| {
+            String::from_utf8(
+                std::process::Command::new("git").arg("-C").arg(path).args(["rev-list", "--max-parents=0", "HEAD"]).output().unwrap().stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_owned()
         };
         let repo = dir.path().join("project");
-        make_repo(&repo);
+        make_repo(&repo, "project");
         let main = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "--abbrev-ref", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_owned();
         let folder = repo.display().to_string();
         let mut team = Team {
@@ -2359,7 +2371,8 @@ mod tests {
         team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "dsh".into(), folder: MemberFolder::Worktree, ..Default::default() });
         team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), ..Default::default() });
         let foreign = dir.path().join("sibling");
-        make_repo(&foreign);
+        make_repo(&foreign, "sibling");
+        assert_ne!(root(&repo), root(&foreign), "the foreign repository must have its own history");
         team.members.push(Member { id: "out".into(), role: "Ops".into(), agent: "codex".into(), directory: foreign.display().to_string(), ..Default::default() });
         // A member on another computer works in a folder this one cannot read.
         team.members.push(Member {

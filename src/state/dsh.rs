@@ -506,6 +506,8 @@ pub(crate) fn launch(
         create_session(&mut record)?;
         record["paused"] = json!(false);
         record["run_id"] = json!(uuid::Uuid::new_v4().to_string());
+        // U22: the verification reads records written after this launch.
+        record["upload_since"] = json!(now());
         save(&record)?;
         return Ok(());
     }
@@ -513,13 +515,50 @@ pub(crate) fn launch(
     ensure_sandbox_folder(&cwd)?;
     let mut record = json!({"backend":"dsh","name":name,"agent":"dsh","agent_home":native_home(),"cwd":cwd,
         "conversation_id":format!("session-{}",uuid::Uuid::new_v4()),"run_id":uuid::Uuid::new_v4().to_string(),
-        "created":now(),"launch_id":launch_id,"paused":false});
+        "created":now(),"upload_since":now(),"launch_id":launch_id,"paused":false});
     ensure_host(&record)?;
     create_session(&mut record)?;
     if let Ok(config) = crate::config::Config::load() {
         crate::swarm::infer_new_session(&config, name, &cwd);
     }
     Ok(())
+}
+
+/// U22: how often an unmarked session's own records are read again.
+const UPLOAD_CHECK_SECONDS: f64 = 60.0;
+
+/// U22: verifies the block from the session's own records. A session started or
+/// resumed with the block on that still writes a session-log-deepseek
+/// acceptance record after that launch is marked on its binding. One bounded
+/// pass per minute from the stored frame boundary (512 KiB, 200 frames), so an
+/// acceptance written later is found however large the store grows; this runs
+/// off the hook path, when the session list or a team status asks.
+pub(crate) fn check_upload(name: &str) -> Option<Value> {
+    if !super::session_upload::block() {
+        return None;
+    }
+    let mut record = binding(name).ok()?;
+    if let Some(seen) = record.get("upload_seen").filter(|seen| seen.is_object()) {
+        return Some(seen.clone());
+    }
+    let at = now();
+    if at - record["upload_checked_at"].as_f64().unwrap_or(0.0) < UPLOAD_CHECK_SECONDS {
+        return None;
+    }
+    let path = super::session_upload::file(string(&record, "agent_home"), string(&record, "conversation_id"))?;
+    let offset = record["upload_offset"].as_u64().unwrap_or(0);
+    let since = record["upload_since"].as_f64().or_else(|| record["created"].as_f64()).unwrap_or(0.0);
+    let Ok(tail) = super::session_upload::read_tail(&path, offset) else { return None };
+    record["upload_checked_at"] = json!(at);
+    record["upload_offset"] = json!(tail.offset);
+    if super::session_upload::uploaded_after(&tail.records, since) {
+        let seen = json!({"at":at,"plugin":"session-log-deepseek","offset":tail.offset});
+        record["upload_seen"] = seen.clone();
+        let _ = save(&record);
+        return Some(seen);
+    }
+    let _ = save(&record);
+    None
 }
 
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
@@ -544,6 +583,18 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         }
         records.push(record);
     }
+    // U22: a session whose own records still accept the upload is marked, so
+    // the session card and Accounts can say so. Bounded and throttled per
+    // session; only when the block is on and the session is not marked yet.
+    if super::session_upload::block() {
+        for record in &mut records {
+            if record.get("upload_seen").is_none() {
+                if let Some(seen) = check_upload(string(record, "name")) {
+                    record["upload_seen"] = seen;
+                }
+            }
+        }
+    }
     // One request per host home, for exactly the conversations bound here.
     let mut homes: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for record in &records {
@@ -566,7 +617,12 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
 /// The host's rows (or, on an older bridge, list) RPC and its generation
 /// semantics are unchanged.
 pub(super) fn snapshot(name: &str) -> Result<Value> {
-    let record = binding(name)?;
+    let mut record = binding(name)?;
+    if record.get("upload_seen").is_none() {
+        if let Some(seen) = check_upload(name) {
+            record["upload_seen"] = seen;
+        }
+    }
     let list = session_rows(&record, &[string(&record, "conversation_id")]).unwrap_or(Value::Null);
     Ok(snapshot_from(&record, &list))
 }
@@ -583,6 +639,10 @@ fn snapshot_from(record: &Value, list: &Value) -> Value {
     child_summaries(record, &mut value, list, &list["generation"]);
     if !list.is_null() {
         value["host_generation"] = list["generation"].clone();
+    }
+    // U22: the session still uploads session logs; the row says so with its time.
+    if let Some(seen) = record.get("upload_seen").filter(|seen| seen.is_object()) {
+        value["upload_seen"] = seen.clone();
     }
     value
 }

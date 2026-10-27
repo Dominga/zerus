@@ -266,7 +266,10 @@ mod tests {
         assert!(writer.offer(item("other", Some("state|activity|run:b"))));
         sink.open();
         assert!(writer.drain(Duration::from_secs(5)));
-        std::thread::sleep(Duration::from_millis(20));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sink.lines().len() < 4 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let lines = sink.lines();
         let ids: Vec<_> = lines.iter().map(|line| line["id"].as_str().unwrap().to_owned()).collect();
         assert_eq!(ids, ["first", "state-2", "events", "other"]);
@@ -302,7 +305,12 @@ mod tests {
         let sink = Sink::new(true);
         let (closed, was_closed) = mpsc::channel();
         let writer = Writer::spawn(sink.clone(), 1 << 20, Duration::from_millis(50), move || closed.send(()).unwrap());
-        std::thread::sleep(Duration::from_millis(180));
+        // A loaded runner can delay the writer thread; wait for two heartbeats
+        // rather than for a fixed time.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sink.lines().len() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let lines = sink.lines();
         assert!(lines.len() >= 2, "{lines:?}");
         assert!(lines.iter().all(|line| line["t"] == "heartbeat" && line["at"].as_f64().unwrap() > 1e9));

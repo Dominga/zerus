@@ -11,6 +11,10 @@
 #include "WorkspaceIcons.h"
 #include "WorkspaceList.h"
 #include "WorkspaceColorDialog.h"
+#include "CollapsibleBlock.h"
+#include "IronRulesPanel.h"
+#include "PageCards.h"
+#include <QRegularExpression>
 #include <QCollator>
 #include <QApplication>
 #include <QClipboard>
@@ -75,6 +79,53 @@ public:
         IdentityBadges::paint(p,QRect(option.rect.left()+10,option.rect.center().y()-9,width,18),IdentityBadges::Machine,machine,dark);
     }
 };
+// U25 (spec 7): a folder's name with the "team" chip of a team member's worktree.
+class FolderNameDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter *p,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
+        QStyleOptionViewItem base(option);initStyleOption(&base,index);base.text.clear();
+        option.widget->style()->drawControl(QStyle::CE_ItemViewItem,&base,p,option.widget);
+        const bool dark=option.widget->property("hgsDark").toBool();
+        const QRect r=option.rect.adjusted(10,0,-6,0);
+        int x=r.left();
+        if(!base.icon.isNull()){base.icon.paint(p,QRect(x,r.center().y()-7,14,14));x+=22;}
+        const QString name=index.data().toString();const bool team=index.data(Qt::UserRole+1).toBool();
+        QFont chipFont=option.font;chipFont.setPixelSize(11);
+        const int chip=team?QFontMetrics(chipFont).horizontalAdvance(QObject::tr("team"))+14:0;
+        p->setPen(PageCards::token(dark,"fg"));p->setFont(option.font);
+        const int room=qMax(0,r.right()-x-(team?chip+8:0));
+        const QString shown=QFontMetrics(option.font).elidedText(name,Qt::ElideRight,room);
+        p->drawText(QRect(x,r.top(),room,r.height()),Qt::AlignVCenter,shown);
+        if(team){
+            const int left=x+QFontMetrics(option.font).horizontalAdvance(shown)+8;
+            const QRect pill(left,r.center().y()-9,chip,18);
+            QColor fill=PageCards::token(dark,"accent");fill.setAlphaF(.14);
+            p->save();p->setRenderHint(QPainter::Antialiasing);p->setPen(Qt::NoPen);p->setBrush(fill);p->drawRoundedRect(pill,5,5);
+            p->setFont(chipFont);p->setPen(PageCards::token(dark,"accent"));p->drawText(pill,Qt::AlignCenter,QObject::tr("team"));p->restore();
+        }
+    }
+};
+// U25 (spec 7): a session's status as the session list's badge.
+class SessionStatusDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    void paint(QPainter *p,const QStyleOptionViewItem &option,const QModelIndex &index) const override {
+        QStyleOptionViewItem base(option);initStyleOption(&base,index);base.text.clear();
+        option.widget->style()->drawControl(QStyle::CE_ItemViewItem,&base,p,option.widget);
+        const QString text=index.data().toString();if(text.isEmpty())return;
+        const bool dark=option.widget->property("hgsDark").toBool();const auto tone=index.data(Qt::UserRole+1).toString();
+        const QColor color=PageCards::token(dark,tone=="active"?"accent":tone=="warn"?"warn":"muted");
+        QFont font=option.font;font.setPixelSize(11);font.setWeight(QFont::Medium);
+        const int w=QFontMetrics(font).horizontalAdvance(text)+16;
+        const QRect pill(option.rect.right()-10-w,option.rect.center().y()-10,w,20);
+        p->save();p->setRenderHint(QPainter::Antialiasing);
+        if(tone=="warn"){p->setPen(Qt::NoPen);p->setBrush(color);}
+        else{QColor fill=color;fill.setAlphaF(.10);p->setPen(QPen(color,1));p->setBrush(fill);}
+        p->drawRoundedRect(QRectF(pill).adjusted(.5,.5,-.5,-.5),10,10);
+        p->setFont(font);p->setPen(tone=="warn"?PageCards::token(dark,"bg"):color);p->drawText(pill,Qt::AlignCenter,text);p->restore();
+    }
+};
 class ProjectDelegate : public QStyledItemDelegate {
 public:
     using QStyledItemDelegate::QStyledItemDelegate;
@@ -99,7 +150,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     auto *heading = new QLabel(tr("Projects")); heading->setObjectName("heading");
     auto *headingRow=new QHBoxLayout;headingRow->addWidget(heading);headingRow->addStretch();
     auto *worktrees = new QPushButton(tr("Worktrees…")); worktrees->setObjectName("projectWorktrees"); worktrees->setAutoDefault(false);
-    worktrees->setToolTip(tr("View worktrees across projects and computers, and review cleanup.")); headingRow->addWidget(worktrees);
+    worktrees->setToolTip(tr("View worktrees across projects and computers, and review cleanup.")); worktrees->setFlat(true);
     connect(worktrees, &QPushButton::clicked, this, [this] {
         WorktreesDialog dialog(m_client, *m_projects, m_fleet, m_allProjects->isChecked(), this);
         dialog.sessionRequested = [this](const QString &host, const QString &name) { emit relatedSessionRequested(host, name, {}); };
@@ -108,7 +159,7 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
         m_worktreeOverview.clear();
         if (dialog.changed()) m_worktrees->refreshCatalog();
     });
-    auto *swarm=new QPushButton(tr("Swarm…"));swarm->setObjectName("projectSwarm");headingRow->addWidget(swarm);root->addLayout(headingRow);
+    auto *swarm=new QPushButton(tr("Swarm…"));swarm->setObjectName("projectSwarm");swarm->setFlat(true);root->addLayout(headingRow);
     connect(swarm,&QPushButton::clicked,this,&ProjectsDialog::swarmRequested);
     auto *hint = new QLabel(tr("Organize sessions and folders across your computers. A folder can be used by several projects."));
     hint->setWordWrap(true); hint->setObjectName("muted"); root->addWidget(hint);
@@ -157,48 +208,72 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     });
     auto *add = new QPushButton(tr("New project…")); add->setObjectName("newProject"); leftLayout->addWidget(add); split->addWidget(left);
     auto *right = new QWidget; auto *form = new QVBoxLayout(right); form->setContentsMargins(12,0,0,0); form->setSpacing(12);
+    // U25 (spec 7): the project as its icon and name, Color…, how many
+    // sessions and teams it has, then Worktrees…, Swarm…, New team… and the
+    // primary New session….
+    auto *header=new QHBoxLayout;header->setSpacing(10);
+    m_headerIcon=new QLabel;m_headerIcon->setObjectName("projectHeaderIcon");header->addWidget(m_headerIcon);
+    m_headerName=new QLabel;m_headerName->setObjectName("projectHeaderName");m_headerName->setTextFormat(Qt::PlainText);
+    m_headerName->setStyleSheet(QStringLiteral("font-size:20px;font-weight:600;"));header->addWidget(m_headerName);
+    m_color = new QPushButton(tr("Color…")); m_color->setObjectName("projectColor"); m_color->setFlat(true); header->addWidget(m_color);
+    m_summary=new QLabel;m_summary->setObjectName("projectSummary");m_summary->setTextFormat(Qt::PlainText);header->addWidget(m_summary);header->addStretch();
+    header->addWidget(worktrees);header->addWidget(swarm);
+    m_newTeam=new QPushButton(tr("New team…"));m_newTeam->setObjectName("projectNewTeam");m_newTeam->setAutoDefault(false);header->addWidget(m_newTeam);
+    connect(m_newTeam,&QPushButton::clicked,this,[this]{emit newTeamRequested(currentId());});
+    m_newSession=new QPushButton(tr("New session…"));m_newSession->setObjectName("newProjectFolderSession");m_newSession->setAutoDefault(false);
+    PageCards::primary(m_newSession);header->addWidget(m_newSession);
+    form->addLayout(header);
     auto *metadata = new QWidget; metadata->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Maximum);
     auto *fields = new QFormLayout(metadata); fields->setContentsMargins(0,0,0,0);
     m_name = new QLineEdit; m_name->setObjectName("projectName"); m_name->setMaxLength(80); m_name->setMaximumWidth(340);
     m_id = new QLabel; m_id->setObjectName("projectId"); m_id->setTextFormat(Qt::PlainText); m_id->setTextInteractionFlags(Qt::TextSelectableByMouse);
     auto *idLabel = new QLabel(tr("ID")); idLabel->setObjectName("muted");
     auto *nameRow = new QHBoxLayout; nameRow->setSpacing(8);
-    nameRow->addWidget(m_name,1); nameRow->addSpacing(8); nameRow->addWidget(idLabel); nameRow->addWidget(m_id); nameRow->addStretch();
-    m_color = new QPushButton(tr("Edit color…")); m_color->setObjectName("projectColor");
-    auto *colorRow=new QHBoxLayout; m_preview=new ProjectPreview; m_preview->setObjectName("projectColorPreview");
-    colorRow->addWidget(m_preview,1);colorRow->addWidget(m_color);colorRow->addStretch();
-    fields->addRow(tr("Name"),nameRow); fields->addRow(tr("Color"),colorRow); form->addWidget(metadata);
-    m_default=new QCheckBox(tr("Default for sessions started outside Zerus"));m_default->setObjectName("defaultProject");form->addWidget(m_default);
+    nameRow->addWidget(m_name,1); nameRow->addStretch();
+    // The color preview lives in the project list; Color… in the header opens it.
+    m_preview=new ProjectPreview(right); m_preview->setObjectName("projectColorPreview"); m_preview->hide();
+    fields->addRow(tr("Name"),nameRow); form->addWidget(metadata);
+    // The default checkbox, and the project ID at the right.
+    auto *defaultRow=new QHBoxLayout;defaultRow->setSpacing(8);
+    m_default=new QCheckBox(tr("Default for sessions started outside Zerus"));m_default->setObjectName("defaultProject");defaultRow->addWidget(m_default);defaultRow->addStretch();
+    m_id->setProperty("pageMono",true);defaultRow->addWidget(idLabel);defaultRow->addWidget(m_id);form->addLayout(defaultRow);
     connect(m_default,&QCheckBox::clicked,this,[this](bool checked){if(checked){m_projects->setDefaultProject(currentId());changed();}else showProject();});
     m_folderSplitter=new FolderSplitter(Qt::Vertical);m_folderSplitter->setObjectName("projectFolderSplitter");
     m_folderSplitter->setChildrenCollapsible(false);m_folderSplitter->setHandleWidth(16);
-    form->addWidget(m_folderSplitter,1);
+    // U25 (spec 7): Folders, Sessions and Iron rules, each a collapsible block.
+    m_foldersBlock=new CollapsibleBlock(QStringLiteral("projects/folders"),tr("Folders"));m_foldersBlock->setObjectName("projectFoldersBlock");
+    m_foldersBlock->body()->addWidget(m_folderSplitter,1);
+    // Each block sits in the prototype's card.
+    const auto inCard=[form](QWidget *block,const QString &name,int stretch){
+        QBoxLayout *box=nullptr;auto *card=PageCards::card(name,&box);box->addWidget(block,1);form->addWidget(card,stretch);
+    };
+    inCard(m_foldersBlock,QStringLiteral("projectFoldersCard"),1);
     auto *folderPane=new QWidget;auto *folderLayout=new QVBoxLayout(folderPane);folderLayout->setContentsMargins(0,0,0,0);folderLayout->setSpacing(8);
     m_folderSplitter->addWidget(folderPane);
-    auto *foldersLabel = new QLabel(tr("Folders")); foldersLabel->setObjectName("heading");
-    m_newSession=new QPushButton(tr("New session…"));m_newSession->setObjectName("newProjectFolderSession");m_newSession->setAutoDefault(false);
-    auto *foldersHeading=new QHBoxLayout;foldersHeading->addWidget(foldersLabel);foldersHeading->addStretch();foldersHeading->addWidget(m_newSession);folderLayout->addLayout(foldersHeading);
-    m_folders = new QTableWidget; m_folders->setObjectName("projectFolders"); m_folders->setColumnCount(3);
-    m_folders->setHorizontalHeaderLabels({tr("Name"),tr("Computer"),tr("Folder")});
+    m_folders = new QTableWidget; m_folders->setObjectName("projectFolders"); m_folders->setColumnCount(4);
+    m_folders->setHorizontalHeaderLabels({tr("Name"),tr("Computer"),tr("Folder"),tr("Kind")});
     m_folders->setSortingEnabled(true);m_folders->sortItems(0,Qt::AscendingOrder);
     m_folders->horizontalHeader()->setToolTip(tr("Click a column heading to sort folders."));
-    m_folders->horizontalHeader()->setSectionResizeMode(0,QHeaderView::Interactive); m_folders->setColumnWidth(0,160);
+    m_folders->horizontalHeader()->setSectionResizeMode(0,QHeaderView::Interactive); m_folders->setColumnWidth(0,260);
     m_folders->horizontalHeader()->setSectionResizeMode(1,QHeaderView::Interactive); m_folders->setColumnWidth(1,110);
     m_folders->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft|Qt::AlignVCenter);
     m_folders->horizontalHeader()->setSectionResizeMode(2,QHeaderView::Stretch);
+    m_folders->horizontalHeader()->setSectionResizeMode(3,QHeaderView::Interactive); m_folders->setColumnWidth(3,240);
+    m_folders->setItemDelegateForColumn(0,new FolderNameDelegate(m_folders));
     m_folders->verticalHeader()->hide(); m_folders->verticalHeader()->setDefaultSectionSize(38); m_folders->setShowGrid(false);
     m_folders->setSelectionBehavior(QAbstractItemView::SelectRows); m_folders->setSelectionMode(QAbstractItemView::SingleSelection);
     m_folders->setWordWrap(false); m_folders->setTextElideMode(Qt::ElideMiddle);
     m_folders->setItemDelegateForColumn(1,new FolderMachineDelegate(m_folders));
     m_folders->setEditTriggers(QAbstractItemView::NoEditTriggers); folderLayout->addWidget(m_folders,1);
-    auto *folderActions = new QHBoxLayout; auto *addFolderButton = new QPushButton(tr("Add folder…")); addFolderButton->setObjectName("addProjectFolder");
+    auto *folderActions = new QHBoxLayout; auto *addFolderButton = new QPushButton(tr("Folder")); addFolderButton->setObjectName("addProjectFolder");
+    addFolderButton->setFlat(true); addFolderButton->setToolTip(tr("Add a folder to this project"));
     m_openFolder = new QPushButton(tr("Open folder")); m_openFolder->setObjectName("openProjectFolder");
     m_editFolder = new QPushButton(tr("Edit folder…")); m_editFolder->setObjectName("editProjectFolder");
     m_removeFolder = new QPushButton(tr("Remove folder")); m_removeFolder->setObjectName("removeProjectFolder");
     m_removeFolder->setToolTip(tr("Remove this folder from the project. Files stay in place."));
     auto *clone=new QPushButton(tr("Clone repository…"));clone->setObjectName("cloneProjectRepository");clone->setAutoDefault(false);
     connect(clone,&QPushButton::clicked,this,&ProjectsDialog::cloneRepository);
-    foldersHeading->insertWidget(foldersHeading->count()-1,clone);folderActions->addWidget(addFolderButton); folderActions->addWidget(m_editFolder); folderActions->addWidget(m_removeFolder); folderActions->addStretch(); folderActions->addWidget(m_openFolder); folderLayout->addLayout(folderActions);
+    clone->setFlat(true);m_foldersBlock->trailing()->addWidget(clone);m_foldersBlock->trailing()->addWidget(addFolderButton);folderActions->addWidget(m_editFolder); folderActions->addWidget(m_removeFolder); folderActions->addStretch(); folderActions->addWidget(m_openFolder); folderLayout->addLayout(folderActions);
     m_folders->setMinimumHeight(140);
     m_worktrees=new WorktreePanel(m_client,false,nullptr,WorktreePanel::Layout::Compact);m_folderSplitter->addWidget(m_worktrees);
     // The entire gap belongs to the handle, so its line sits between both action rows.
@@ -211,7 +286,30 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     m_worktrees->filterRequested=[this](const QString &path,bool checkout){const auto folder=selectedFolder();emit folderSessionsRequested(folder.machine==m_fleet.local().host?QString():folder.machine,path,checkout);};
     m_worktrees->sessionRequested=[this](const QString &name,const QString &archive){const auto folder=selectedFolder();emit relatedSessionRequested(folder.machine==m_fleet.local().host?QString():folder.machine,name,archive);};
     m_worktrees->launchRequested=[this](const QString &path){const auto folder=selectedFolder();if(folderLaunchProblem(folder).isEmpty())emit newPathSessionRequested(currentId(),folder.machine==m_fleet.local().host?QString():folder.machine,path);};
-    auto *foot = new QHBoxLayout; m_remove = new QPushButton(tr("Delete project…")); foot->addWidget(m_remove); foot->addStretch(); form->addLayout(foot); split->addWidget(right); split->setSizes({230,600});
+    // Sessions: one row each - agent, name and team role, machine, branch, status.
+    m_sessionsBlock=new CollapsibleBlock(QStringLiteral("projects/sessions"),tr("Sessions"));m_sessionsBlock->setObjectName("projectSessionsBlock");
+    m_sessions=new QTableWidget;m_sessions->setObjectName("projectSessions");m_sessions->setColumnCount(4);
+    m_sessions->horizontalHeader()->hide();m_sessions->verticalHeader()->hide();m_sessions->verticalHeader()->setDefaultSectionSize(36);
+    m_sessions->setShowGrid(false);m_sessions->setSelectionBehavior(QAbstractItemView::SelectRows);m_sessions->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_sessions->setEditTriggers(QAbstractItemView::NoEditTriggers);m_sessions->setWordWrap(false);m_sessions->setTextElideMode(Qt::ElideMiddle);
+    m_sessions->horizontalHeader()->setSectionResizeMode(0,QHeaderView::Stretch);
+    m_sessions->horizontalHeader()->setSectionResizeMode(1,QHeaderView::Fixed);m_sessions->setColumnWidth(1,130);
+    m_sessions->horizontalHeader()->setSectionResizeMode(2,QHeaderView::Fixed);m_sessions->setColumnWidth(2,220);
+    m_sessions->horizontalHeader()->setSectionResizeMode(3,QHeaderView::Fixed);m_sessions->setColumnWidth(3,150);
+    m_sessions->setItemDelegateForColumn(1,new FolderMachineDelegate(m_sessions));m_sessions->setItemDelegateForColumn(3,new SessionStatusDelegate(m_sessions));
+    m_sessions->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);m_sessions->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents);
+    connect(m_sessions,&QTableWidget::cellDoubleClicked,this,[this](int row,int){
+        const auto *item=m_sessions->item(row,0);if(item)emit relatedSessionRequested(item->data(Qt::UserRole+1).toString(),item->data(Qt::UserRole).toString(),{});
+    });
+    m_sessionsBlock->body()->addWidget(m_sessions);inCard(m_sessionsBlock,QStringLiteral("projectSessionsCard"),0);
+    // Iron rules: the project's, as the session inspector edits them.
+    // Folded until opened (remembered): the folders keep the room.
+    m_rulesBlock=new CollapsibleBlock(QStringLiteral("projects/ironRules"),tr("Iron rules"),false);m_rulesBlock->setObjectName("projectRulesBlock");
+    m_rules=new IronRulesPanel;m_rules->setObjectName("projectIronRules");m_rulesBlock->body()->addWidget(m_rules);inCard(m_rulesBlock,QStringLiteral("projectRulesCard"),0);
+    // The block's header names them and counts them.
+    for(const char *name:{"inspectorPanelTitle","ironRulesCount"})if(auto *own=m_rules->findChild<QLabel *>(name))own->hide();
+    m_rules->changed=[this](int count){m_rulesBlock->setNote(QString::number(count));};
+    auto *foot = new QHBoxLayout; m_remove = new QPushButton(tr("Delete project…")); m_remove->setObjectName("deleteProject"); PageCards::danger(m_remove); foot->addWidget(m_remove); foot->addStretch(); form->addLayout(foot); split->addWidget(right); split->setSizes({230,600});
     m_status = new QLabel; m_status->setObjectName("projectsStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setMinimumHeight(22); root->addWidget(m_status);
     if (!embedded) { auto *close = new QDialogButtonBox(QDialogButtonBox::Close); connect(close,&QDialogButtonBox::rejected,this,&QDialog::accept); root->addWidget(close); }
     connect(add,&QPushButton::clicked,this,&ProjectsDialog::addProject);
@@ -219,7 +317,12 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(addFolderButton,&QPushButton::clicked,this,&ProjectsDialog::addFolder);
     connect(m_openFolder,&QPushButton::clicked,this,[this]{openFolder(selectedFolder());});
     connect(m_newSession,&QPushButton::clicked,this,[this]{newFolderSession(currentId(),selectedFolder());});
-    connect(m_removeFolder,&QPushButton::clicked,this,[this]{removeFolder(currentId(),selectedFolder().id);});
+    connect(m_removeFolder,&QPushButton::clicked,this,[this]{
+        // U25 (spec 7): a team member's worktree goes with its team.
+        bool team=false;folderKind(selectedFolder(),&team);
+        if(team){m_status->setText(tr("Team worktrees are removed with the team"));m_status->setProperty("pageError",true);return;}
+        removeFolder(currentId(),selectedFolder().id);
+    });
     connect(m_editFolder,&QPushButton::clicked,this,[this]{const int row=m_folders->currentRow();if(row>=0)editFolder(m_folders->item(row,0)->data(Qt::UserRole).toString());});
     connect(m_folders,&QTableWidget::cellDoubleClicked,this,[this](int row,int){editFolder(m_folders->item(row,0)->data(Qt::UserRole).toString());});
     connect(m_list,&QListWidget::currentRowChanged,this,&ProjectsDialog::showProject);
@@ -289,6 +392,30 @@ void ProjectsDialog::showProject()
     m_moveUp->setEnabled(m_list->currentRow()>0);m_moveDown->setEnabled(m_list->currentRow()>=0&&m_list->currentRow()+1<m_list->count());
     const auto *project = m_projects->group(currentId()); if (!project) return;
     m_name->setText(project->name); m_name->setEnabled(true); m_id->setText(project->id);
+    m_headerName->setText(project->name);
+    m_headerIcon->setPixmap(workspaceIcon("projects",QColor(project->color).isValid()?QColor(project->color):PageCards::token(m_dark,"folder")).pixmap(20,20));
+    m_rules->setProject(project->id,project->name);
+    // Sessions, how many of them are in teams, and in how many teams.
+    const auto sessions=m_sessionsProvider?m_sessionsProvider(project->id):QList<ProjectSession>{};
+    int inTeams=0;QSet<QString> teams;
+    for(const auto &session:sessions)if(!session.team.isEmpty()){++inTeams;teams.insert(session.team);}
+    const QString sessionCount=sessions.size()==1?tr("1 session"):tr("%1 sessions").arg(sessions.size());
+    const QString summary=tr("%1 · %2 in teams · %3").arg(sessionCount).arg(inTeams).arg(teams.size()==1?tr("1 team"):tr("%1 teams").arg(teams.size()));
+    m_summary->setText(summary);m_sessionsBlock->setNote(summary);
+    m_sessions->setRowCount(0);
+    for(const auto &session:sessions){
+        const int row=m_sessions->rowCount();m_sessions->insertRow(row);
+        auto *name=new QTableWidgetItem(session.title+(session.role.isEmpty()?QString():QStringLiteral("  ·  ")+session.role));
+        QFont bold=m_sessions->font();bold.setWeight(QFont::DemiBold);name->setFont(bold);
+        name->setData(Qt::UserRole,session.name);name->setData(Qt::UserRole+1,session.host);name->setToolTip(session.name);
+        m_sessions->setItem(row,0,name);
+        m_sessions->setItem(row,1,new QTableWidgetItem(session.machine));
+        auto *branch=new QTableWidgetItem(session.branch);branch->setForeground(PageCards::token(m_dark,"dim"));
+        QFont mono=m_sessions->font();mono.setFamilies({QStringLiteral("Cascadia Mono"),QStringLiteral("Consolas"),mono.family()});mono.setPixelSize(12);branch->setFont(mono);
+        m_sessions->setItem(row,2,branch);
+        auto *status=new QTableWidgetItem(session.status);status->setData(Qt::UserRole+1,session.tone);m_sessions->setItem(row,3,status);
+    }
+    m_sessions->setFixedHeight(qMax(36,m_sessions->rowCount()*m_sessions->verticalHeader()->defaultSectionSize()+4));
     m_preview->setProject(project->name,QColor(project->color),project->vivid,project->id==m_projects->defaultProject());
     m_default->setChecked(project->id==m_projects->defaultProject());
     const auto selected=selectedFolder().id;const QSignalBlocker blockFolders(m_folders);
@@ -300,12 +427,52 @@ void ProjectsDialog::showProject()
         m_folders->setItem(row,0,new FolderSortItem(name)); m_folders->item(row,0)->setData(Qt::UserRole,folder.id);
         m_folders->item(row,0)->setToolTip(name);
         m_folders->setItem(row,1,new FolderSortItem(folder.machineName.isEmpty()?folder.machine:folder.machineName)); m_folders->setItem(row,2,new FolderSortItem(path));
-        for(int column=1;column<3;++column)m_folders->item(row,column)->setData(Qt::UserRole,folder.id);
+        bool team=false;const QString kind=folderKind(folder,&team);
+        m_folders->item(row,0)->setData(Qt::UserRole+1,team);
+        auto *kindItem=new FolderSortItem(kind);kindItem->setForeground(PageCards::token(m_dark,"muted"));m_folders->setItem(row,3,kindItem);
+        for(int column=1;column<4;++column)m_folders->item(row,column)->setData(Qt::UserRole,folder.id);
         m_folders->item(row,2)->setToolTip(path);
     }
+    m_foldersBlock->setNote(QString::number(project->folders.size()));
     m_folders->setSortingEnabled(true);
     for(int row=0;row<m_folders->rowCount();++row)if(m_folders->item(row,0)->data(Qt::UserRole).toString()==selected){m_folders->setCurrentCell(row,0);break;}
     updateFolderActions();
+}
+QString ProjectsDialog::folderKind(const SessionOrganization::Folder &folder, bool *team) const
+{
+    // A session running in the folder knows its worktree and branch; without
+    // one, a team member's generated worktree is known by its name.
+    const auto git=[this](const SessionOrganization::Folder &target, QString *branch) {
+        bool worktree=false, seen=false;
+        const auto look=[&](const BoxState &box){
+            for(const auto &session:box.sessions){
+                if(seen)return;
+                const auto cwd=QDir::cleanPath(session.canonicalCwd.isEmpty()?session.cwd:session.canonicalCwd);
+                if(cwd.compare(QDir::cleanPath(target.path),Qt::CaseInsensitive)!=0&&QDir::cleanPath(session.gitRoot).compare(QDir::cleanPath(target.path),Qt::CaseInsensitive)!=0)continue;
+                seen=true;*branch=session.gitBranch;worktree=session.gitWorktree;
+            }
+        };
+        if(target.machine==m_fleet.local().host)look(m_fleet.local());
+        else if(const auto *peer=m_fleet.peer(target.machine))look(*peer);
+        static const QRegularExpression generated(QStringLiteral("-team-([0-9a-f]{8})-([A-Za-z0-9_.-]+)$"));
+        const auto match=generated.match(QDir::cleanPath(target.path));
+        if(!seen&&match.hasMatch()){worktree=true;*branch=QStringLiteral("team/%1/%2").arg(match.captured(1),match.captured(2));}
+        return worktree;
+    };
+    QString branch;const bool worktree=git(folder,&branch);
+    if(team)*team=worktree&&branch.startsWith(QStringLiteral("team/"));
+    QString kind;
+    if(worktree)kind=tr("Worktree");
+    else{
+        // The first plain folder of the project is its main checkout; the others are clones.
+        bool first=true;QString ignored;
+        if(const auto *project=m_projects->group(currentId()))for(const auto &other:project->folders){
+            if(other.id==folder.id)break;
+            if(!git(other,&ignored))first=false;
+        }
+        kind=first?tr("Main checkout"):tr("Clone");
+    }
+    return branch.isEmpty()?kind:tr("%1 · %2").arg(kind,branch);
 }
 void ProjectsDialog::changed()
 {
@@ -608,7 +775,14 @@ void ProjectsDialog::setTheme(bool dark)
     m_dark=dark;m_preview->setTheme(dark);m_list->setProperty("hgsDark",dark);m_list->viewport()->update();
     m_folders->setProperty("hgsDark",dark);m_folders->viewport()->setProperty("hgsDark",dark);m_folders->viewport()->update();
     m_openFolder->setIcon(workspaceIcon("folder",QColor(dark?"#a1adbb":"#647386")));
-    m_newSession->setIcon(workspaceIcon("add",QColor(dark?"#a1adbb":"#647386")));
+    // U25: the page's cards, blocks and primary New session from the skin.
+    setStyleSheet(PageCards::sheet(dark));
+    m_newSession->setIcon(workspaceIcon("add",PageCards::token(dark,"accentText")));
+    m_newTeam->setIcon(workspaceIcon("team",PageCards::token(dark,"text2")));
+    for(auto *block:{m_foldersBlock,m_sessionsBlock,m_rulesBlock})block->setDark(dark);
+    m_summary->setStyleSheet(QStringLiteral("color:%1;").arg(PageCards::token(dark,"muted").name()));
+    m_sessions->setProperty("hgsDark",dark);m_sessions->viewport()->setProperty("hgsDark",dark);m_sessions->viewport()->update();
+    showProject();
 }
 void ProjectsDialog::chooseColor()
 {

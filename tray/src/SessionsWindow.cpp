@@ -1628,6 +1628,27 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_projectsPage,&ProjectsDialog::relatedSessionRequested,this,&SessionsWindow::openRelatedSession);
     connect(m_projectsPage,&ProjectsDialog::newPathSessionRequested,this,[this](const QString &project,const QString &host,const QString &path){showNewSession({},project,host,{},path);});
     connect(m_projectsPage,&ProjectsDialog::newSessionRequested,this,[this](const QString &project,const QString &host,const QString &folder){showNewSession({},project,host,folder);});
+    // U25 part 7 (spec 7): New team… from a project, and its sessions with
+    // their team role, machine, branch and status.
+    connect(m_projectsPage,&ProjectsDialog::newTeamRequested,this,[this](const QString &){m_pages->setCurrentIndex(0);showNewTeam();});
+    m_projectsPage->setSessionsProvider([this](const QString &project){
+        QList<ProjectsDialog::ProjectSession> rows;
+        for(const auto &entry:m_entries){
+            if(m_organization.groupFor(entry.identity)!=project||entry.session.state=="archived")continue;
+            const auto &s=entry.session;
+            ProjectsDialog::ProjectSession row;
+            row.host=entry.host;row.name=s.name;row.agent=s.cmd;row.machine=entry.machine;row.branch=s.gitBranch;
+            row.title=s.tag.isEmpty()?s.name:s.tag;
+            if(m_teams)if(const auto *team=[&]()->const Teams::Team *{for(const auto &t:m_teams->teams())if(t.memberOfSession(entry.host,s.name))return &t;return nullptr;}()){
+                row.team=team->id;const auto *member=team->memberOfSession(entry.host,s.name);row.role=team->roleOf(member->id);
+            }
+            const bool attention=!s.attentionId.isEmpty();
+            row.status=!entry.online?tr("Offline"):s.state=="paused"?tr("Paused"):attention?tr("Needs input"):s.phase=="working"?tr("Working"):s.unreadReply?tr("New reply"):tr("Ready");
+            row.tone=attention||s.unreadReply?QStringLiteral("warn"):s.phase=="working"?QStringLiteral("active"):QStringLiteral("muted");
+            rows<<row;
+        }
+        return rows;
+    });
     m_machinesPage = new MachinesPage(hgsPath); m_pages->addWidget(m_machinesPage);
     connect(m_machinesPage, &MachinesPage::machinesChanged, this, &SessionsWindow::refreshRequested);
     connect(m_machinesPage, &MachinesPage::sshTerminalRequested, this, &SessionsWindow::machineSshRequested);
@@ -1686,6 +1707,26 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_accountsPage,&AccountsPage::accountsChanged,this,&SessionsWindow::refreshRequested);
     connect(m_accountsPage,&AccountsPage::notice,this,&SessionsWindow::showNotice);
     connect(m_accountsPage,&AccountsPage::catalogChanged,this,[this]{updateDashboardAccounts(m_pages->currentIndex()==3);});
+    // U25 part 7 (spec 9): "Used by teams" - the teams whose members run with
+    // this profile (its agent on its machine; no account means the default).
+    m_accountsPage->setTeamUses([this](const QJsonObject &profile){
+        QList<AccountsPage::TeamUse> uses;
+        if(!m_teams)return uses;
+        const auto provider=profile["provider"].toString(),host=profile["host"].toString();
+        const auto id=profile["id"].toString(),label=profile["label"].toString();
+        for(const auto &team:m_teams->teams()){
+            if(team.status=="done"||team.status=="stopped"||team.status=="archived")continue;
+            QStringList roles;
+            for(const auto &member:team.members){
+                if(member.agent!=provider||member.computer!=host)continue;
+                const bool same=member.account.isEmpty()?profile["is_default"].toBool():(member.account==id||member.account==label);
+                if(same)roles<<team.roleOf(member.id);
+            }
+            if(!roles.isEmpty())uses<<AccountsPage::TeamUse{team.id,team.name,roles.join(QStringLiteral(", "))};
+        }
+        return uses;
+    });
+    connect(m_accountsPage,&AccountsPage::openTeamRequested,this,[this](const QString &team){m_pages->setCurrentIndex(0);showTeam(team);});
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){renderAccountUsage();updateDashboardAccounts();});
     connect(m_machinesPage,&MachinesPage::accountsRequested,this,[this](const QString &host) { m_pages->setCurrentIndex(4); m_accountsPage->showMachine(host); });
     connect(m_machinesPage,&MachinesPage::appearanceChanged,this,[this] { m_machineFilter->refreshColors(); m_accountsPage->refreshAppearance(); rebuild(); updateDashboard(); });

@@ -426,15 +426,12 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             let drafted = team.phases.iter().any(|other| other.n == previous && other.state.is_draft());
             let open: Vec<u32> =
                 team.tasks.iter().filter(|task| task.phase == previous && !task.status.finished()).map(|task| task.id).collect();
+            // N40 (spec 2.6): behind an approved phase a draft can be approved
+            // now (F12), whatever that phase still runs; only a draft before
+            // it holds it.
             if drafted {
                 value["waiting"] = json!({
                     "text":"Waiting for the previous phase to be approved",
-                    "phase":previous,
-                    "open":open
-                });
-            } else if !open.is_empty() {
-                value["waiting"] = json!({
-                    "text":"Waiting for the previous phase to be ready",
                     "phase":previous,
                     "open":open
                 });
@@ -555,7 +552,7 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     let open = |severity: &str| {
         team.findings
             .iter()
-            .filter(|finding| finding.severity == severity && matches!(finding.state.as_str(), "open" | "reopened" | "urgent"))
+            .filter(|finding| finding.severity == severity && finding.unresolved())
             .count()
     };
     let deferred = team.findings.iter().filter(|finding| finding.state == "deferred").count();
@@ -1606,6 +1603,9 @@ fn adopt_existing_sessions(store: &Store, request: &str, input: &Value, op: &str
         let teams = store.active_teams(ACTIVE_TEAMS)?;
         let adopted = adopted_session(&team, &with_session, &teams, &sessions)?;
         filled["session"] = serde_json::to_value(&adopted.session)?;
+        // N32: the adopted session's own folder, as for a new member's.
+        filled["directory"] = json!(adopted.directory);
+        filled["folder"] = serde_json::to_value(if adopted.worktree { MemberFolder::Worktree } else { MemberFolder::Shared })?;
     }
     Ok(())
 }
@@ -2520,6 +2520,314 @@ mod tests {
         });
     }
 
+    // ---- #480: the phase 35 review's findings through the real entry point
+    // (commands::run on a private store), as the owner, the lead and members.
+
+    /// A running team: the lead (a dsh session, so a test can act as it),
+    /// dev and qa; #1 handed to dev, #2 to qa; phase 2 is a draft.
+    fn review_team() -> (Team, String, String) {
+        use crate::state::teams::model::{Attempt, AttemptState, TaskStatus};
+        let (mut team, _) = ops::create(
+            "rv",
+            &json!({"name":"Review","lead":{"id":"lead","agent":"dsh",
+                "session":{"name":"dsh/x/lead","run_id":"r0","conversation_id":"lead-conversation"}}}),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        ops::apply(
+            &mut team,
+            "plan",
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"},{"id":"qa","role":"Tester","agent":"kimi"}],
+                "phases":[{"n":2,"title":"Polish"}],
+                "tasks":[{"id":1,"title":"API","assignee":"dev"},{"id":2,"title":"Tests","assignee":"qa"},
+                    {"id":3,"title":"Docs","assignee":"dev","phase":2}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let mut attempts = Vec::new();
+        for id in [1u32, 2] {
+            let task = team.task_mut(id).unwrap();
+            let attempt = format!("00000000-0000-4000-8000-00000000010{id}");
+            task.attempts.push(Attempt { n: 1, id: attempt.clone(), member: task.assignee.clone(), state: AttemptState::Delivered, ..Default::default() });
+            task.status = TaskStatus::InProgress;
+            attempts.push(attempt);
+        }
+        (team, attempts[0].clone(), attempts[1].clone())
+    }
+
+    fn with_review_team<T>(team: &Team, body: impl FnOnce() -> T) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            Store::open(true).unwrap().create(&uuid::Uuid::new_v4().to_string(), &json!({}), team.clone(), vec![]).unwrap();
+            body()
+        })
+    }
+
+    /// One command, with a fresh request id, as the owner unless the input
+    /// names an attempt (a member) or the lead acts.
+    fn call(op: &str, mut input: Value) -> anyhow::Result<Value> {
+        input["request_id"] = json!(uuid::Uuid::new_v4().to_string());
+        input["team"] = json!("rv");
+        run(op, &input, false)
+    }
+
+    fn as_lead<T>(body: impl FnOnce() -> T) -> T {
+        set_test_caller_identities(Some((Some("lead-conversation".into()), None, None)));
+        let result = body();
+        set_test_caller_identities(Some((None, None, None)));
+        result
+    }
+
+    fn stored() -> Team {
+        Store::open(false).unwrap().load("rv").unwrap().unwrap()
+    }
+
+    fn finding(severity: &str, title: &str) -> Value {
+        json!({"severity":severity,"title":title,"scenario":"two saves at once","task":1})
+    }
+
+    #[test]
+    fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
+        // N13: "high" is no severity: the member hears it at once, and the
+        // corrected report is accepted.
+        let (team, attempt, _) = review_team();
+        with_review_team(&team, || {
+            let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("high","Lost write")]}}))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("A finding is critical, normal or later"), "{error}");
+            assert_eq!(stored().task(1).unwrap().attempts[0].report, None);
+            let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[{"severity":"normal","title":"No scenario"}]}}))
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("A finding needs its scenario"), "{error}");
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("critical","Lost write")]}}))
+            .unwrap();
+            call("accept", json!({"task":1,"by":"human"})).unwrap();
+            let team = stored();
+            assert_eq!(team.findings.len(), 1);
+            assert_eq!(team.findings[0].severity, "critical");
+        });
+    }
+
+    #[test]
+    fn fixed_and_dropped_findings_leave_room_under_the_cap() {
+        // N14: 1000 closed findings no longer block the next accept; the
+        // oldest closed ones make room and the store stays at 1000.
+        use crate::state::teams::model::Finding;
+        let (mut team, attempt, _) = review_team();
+        for n in 1..=1000 {
+            team.findings.push(Finding { id: format!("f{n}"), severity: "normal".into(), title: format!("F{n}"), scenario: "s".into(),
+                state: if n % 2 == 0 { "fixed".into() } else { "dropped".into() }, ..Default::default() });
+        }
+        team.findings_seq = 1000;
+        with_review_team(&team, || {
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("normal","New"),finding("later","Later")]}}))
+            .unwrap();
+            call("accept", json!({"task":1,"by":"human"})).unwrap();
+            let team = stored();
+            assert_eq!(team.findings.len(), 1000);
+            assert_eq!(team.findings.last().unwrap().id, "f1002");
+            assert!(!team.findings.iter().any(|finding| finding.id == "f1" || finding.id == "f2"));
+        });
+        // Live findings still count: 1000 open ones leave no room.
+        let (mut team, attempt, _) = review_team();
+        for n in 1..=1000 {
+            team.findings.push(Finding { id: format!("f{n}"), severity: "normal".into(), title: format!("F{n}"), scenario: "s".into(),
+                state: "open".into(), ..Default::default() });
+        }
+        with_review_team(&team, || {
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done","report":{"summary":"Done","findings":[finding("normal","New")]}}))
+                .unwrap();
+            let error = call("accept", json!({"task":1,"by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("at most 1000 findings that are not fixed or dropped"), "{error}");
+        });
+    }
+
+    #[test]
+    fn the_owners_accept_after_the_leads_files_the_findings_once() {
+        // N15
+        let (team, attempt, _) = review_team();
+        with_review_team(&team, || {
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("normal","Slow"),finding("critical","Lost write")]}}))
+            .unwrap();
+            as_lead(|| call("accept", json!({"task":1}))).unwrap();
+            assert_eq!(stored().findings.len(), 2);
+            call("accept", json!({"task":1,"by":"human"})).unwrap();
+            let team = stored();
+            assert_eq!(team.findings.len(), 2, "{:?}", team.findings);
+            assert_eq!(team.task(1).unwrap().decided_by, Some(crate::state::teams::model::Decider::Human));
+        });
+    }
+
+    #[test]
+    fn a_replan_keeps_its_proposal_and_fix_phase_its_phase() {
+        // N17, N18
+        let (team, attempt, _) = review_team();
+        with_review_team(&team, || {
+            call("report", json!({"task":1,"attempt":attempt,"text":"Done",
+                "report":{"summary":"Done","findings":[finding("critical","Lost write"),finding("normal","Slow")]}}))
+            .unwrap();
+            call("accept", json!({"task":1,"by":"human"})).unwrap();
+            // A critical finding is not parked in a draft phase.
+            let error = call("finding", json!({"finding":"f1","action":"fix_phase","phase":2,"by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("Only a normal finding"), "{error}");
+            call("finding", json!({"finding":"f2","action":"fix_phase","phase":2,"by":"human"})).unwrap();
+            call("finding", json!({"finding":"f1","action":"replan","proposal":"Split the save into two steps","by":"human"})).unwrap();
+            let team = stored();
+            assert_eq!(team.findings[1].phase, Some(2));
+            assert_eq!(team.findings[0].proposal, "Split the save into two steps");
+            // Status shows both, and a replanned critical finding is still open.
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            let items = status["findings"]["items"].as_array().unwrap();
+            let f1 = items.iter().find(|item| item["id"] == "f1").unwrap();
+            assert_eq!(f1["proposal"], "Split the save into two steps");
+            assert_eq!(items.iter().find(|item| item["id"] == "f2").unwrap()["phase"], 2);
+            assert_eq!(status["findings_summary"]["open"]["critical"], 1);
+            assert_eq!(status["findings_summary"]["open"]["normal"], 1);
+            // The team waits paused, and the owner's attention names the proposal.
+            assert_eq!(status["status"], "paused");
+            let replan = status["attention"].as_array().unwrap().iter().find(|item| item["kind"] == "replan").cloned();
+            assert_eq!(replan.as_ref().map(|item| item["proposal"].clone()), Some(json!("Split the save into two steps")), "{}", status["attention"]);
+        });
+    }
+
+    #[test]
+    fn a_finding_in_a_replan_or_a_draft_phase_still_blocks_the_finish() {
+        // N18: replan and fix_phase are not resolved.
+        use crate::state::teams::model::{Finding, TaskStatus};
+        for state in ["replan", "fix_phase"] {
+            let (mut team, _, _) = review_team();
+            for task in &mut team.tasks {
+                task.status = if task.phase == 1 { TaskStatus::Accepted } else { TaskStatus::Cancelled };
+            }
+            team.findings.push(Finding { id: "f1".into(), severity: "critical".into(), title: "Lost write".into(), scenario: "s".into(),
+                state: state.into(), ..Default::default() });
+            with_review_team(&team, || {
+                let error = call("finish", json!({"summary":"Done","by":"human"})).unwrap_err().to_string();
+                assert!(error.contains("A critical finding is open"), "{state}: {error}");
+            });
+        }
+    }
+
+    #[test]
+    fn evidence_folders_are_a_setting_status_carries() {
+        // N19
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            call("settings", json!({"settings":{"evidence_folders":["shots","D:/Tools/zerus-team-phases/shots-v2"]},"by":"human"})).unwrap();
+            assert_eq!(stored().settings.evidence_folders, vec!["shots".to_owned(), "D:/Tools/zerus-team-phases/shots-v2".to_owned()]);
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            assert_eq!(status["settings"]["evidence_folders"][1], "D:/Tools/zerus-team-phases/shots-v2");
+            let error = call("settings", json!({"settings":{"evidence_folders":["  "]},"by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("An evidence folder"), "{error}");
+        });
+    }
+
+    #[test]
+    fn a_finished_team_takes_no_reopen() {
+        // N20: reopen, urgent, replan and fix_phase need a running team;
+        // closing a finding still works.
+        use crate::state::teams::model::{Finding, TaskStatus, TeamStatus};
+        let (mut team, _, _) = review_team();
+        for task in &mut team.tasks {
+            task.status = TaskStatus::Accepted;
+        }
+        team.status = TeamStatus::Done;
+        team.findings.push(Finding { id: "f1".into(), severity: "normal".into(), title: "Slow".into(), scenario: "s".into(), task: Some(1),
+            state: "open".into(), ..Default::default() });
+        with_review_team(&team, || {
+            for action in [json!({"action":"reopen"}), json!({"action":"replan","proposal":"x"}), json!({"action":"fix_phase","phase":2})] {
+                let mut input = action.clone();
+                input["finding"] = json!("f1");
+                input["by"] = json!("human");
+                let error = call("finding", input).unwrap_err().to_string();
+                assert!(error.contains("need a running or paused team"), "{action}: {error}");
+            }
+            assert_eq!(stored().task(1).unwrap().status, TaskStatus::Accepted);
+            call("finding", json!({"finding":"f1","action":"fixed","by":"human"})).unwrap();
+            assert_eq!(stored().findings[0].state, "fixed");
+        });
+    }
+
+    #[test]
+    fn a_removed_or_paused_member_is_not_swapped() {
+        // N31
+        use crate::state::teams::model::MemberState;
+        let (mut team, _, _) = review_team();
+        team.members.iter_mut().find(|member| member.id == "qa").unwrap().state = MemberState::Removed;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().state = MemberState::Paused;
+        with_review_team(&team, || {
+            let error = call("swap-member", json!({"member":"qa","agent":"claude","by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("This member was removed"), "{error}");
+            let error = call("swap-member", json!({"member":"dev","agent":"claude","by":"human"})).unwrap_err().to_string();
+            assert!(error.contains("Resume dev before swapping it"), "{error}");
+            let team = stored();
+            assert_eq!(team.member("qa").unwrap().state, MemberState::Removed);
+            assert!(!team.member("qa").unwrap().launch_after_swap);
+            assert_eq!(team.member("dev").unwrap().state, MemberState::Paused);
+        });
+    }
+
+    #[test]
+    fn a_swap_to_an_existing_session_takes_its_folder() {
+        // N32: the adopted session's folder replaces the member's worktree.
+        use crate::state::teams::model::MemberFolder;
+        let (mut team, _, _) = review_team();
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.folder = MemberFolder::Worktree;
+        dev.directory = "/work/repo-team-rv-dev".into();
+        let mut events = Vec::new();
+        ops::apply(
+            &mut team,
+            "swap-member",
+            &json!({"member":"dev","session":{"name":"codex/x/other","run_id":"r9","conversation_id":"c9"},
+                "directory":"/work/other-checkout","folder":"shared"}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        let dev = team.member("dev").unwrap();
+        assert_eq!(dev.directory, "/work/other-checkout");
+        assert_eq!(dev.folder, MemberFolder::Shared);
+        assert_eq!(dev.session.as_ref().unwrap().name, "codex/x/other");
+    }
+
+    #[test]
+    fn a_draft_behind_an_approved_running_phase_does_not_wait() {
+        // N40 (spec 2.6): phase 1 still runs, phase 2 can be approved now.
+        let (team, _, _) = review_team();
+        with_review_team(&team, || {
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            let phase = status["phases"].as_array().unwrap().iter().find(|phase| phase["n"] == 2).unwrap().clone();
+            assert!(phase["waiting"].is_null(), "{phase}");
+            call("approve-phase", json!({"phase":2,"by":"human"})).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_planning_team_has_no_phase_in_work() {
+        // N41 (spec 10.2): before Approve & Run every phase waits for you.
+        let (mut team, _) = ops::create("rv", &json!({"name":"Review","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        ops::apply(&mut team, "plan", &json!({"tasks":[{"id":1,"title":"A","assignee":"lead"}]}), &Actor::Human, &BTreeSet::new(), &mut Vec::new())
+            .unwrap();
+        with_review_team(&team, || {
+            let status = run("status", &json!({"team":"rv"}), false).unwrap();
+            let first = status["phase_summary"].as_array().unwrap().iter().find(|phase| phase["n"] == 1).unwrap().clone();
+            assert_eq!(first["status"], "draft", "{first}");
+            assert_eq!(first["state"], "planned");
+        });
+    }
+
     #[test]
     fn findings_pages_are_stable_with_a_before_cursor() {
         use crate::state::teams::model::{Finding, Team};
@@ -2847,6 +3155,62 @@ mod tests {
         for part in ["Permission request from dev", "Bash", "cargo test --locked", "from the tool input", "Reason: Run the tests", "claude-approval:x", "\"h\"", "hgs team answer --json", "\"team\":\"child\""] {
             assert!(question.text.contains(part), "{part} missing in {}", question.text);
         }
+    }
+
+    /// N34 (spec 6.2): PowerShell 5.1 pipes JSON with a UTF-8 BOM. Every
+    /// reader that parses JSON from stdin drops it: here through the shared
+    /// helper, and below by reading each reader's source, so a new reader
+    /// that forgets it fails this test.
+    #[test]
+    fn every_stdin_json_reader_drops_a_bom() {
+        let bom = |text: &str| [&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat();
+        assert_eq!(crate::state::without_bom(&bom("{\"a\":1}")), b"{\"a\":1}");
+        assert_eq!(crate::state::without_bom(b"{}"), b"{}");
+        let parsed: Value = serde_json::from_slice(crate::state::without_bom(&bom("{\"text\":\"hi\"}"))).unwrap();
+        assert_eq!(parsed["text"], "hi");
+        assert!(serde_json::from_slice::<Value>(&bom("{}")).is_err(), "serde refuses a BOM, which is the bug");
+        // Streams and framed protocols that never parse JSON from stdin.
+        let streams = ["peer_channel.rs", "screen/mod.rs", "platform/windows.rs", "cli.rs"];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![root.clone()];
+        let mut missing = Vec::new();
+        let mut readers = 0;
+        while let Some(path) = files.pop() {
+            if path.is_dir() {
+                files.extend(std::fs::read_dir(&path).unwrap().flatten().map(|entry| entry.path()));
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let relative = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+            if streams.contains(&relative.as_str()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                if !line.contains("stdin()") || line.contains("Stdio::") || line.contains("is_terminal") || line.trim_start().starts_with("//") {
+                    continue;
+                }
+                let window = lines[at..(at + 12).min(lines.len())].join("\n");
+                if !(window.contains("from_slice") || window.contains("parse(") || window.contains("submit(") || window.contains("import(")
+                    || window.contains("enveloped("))
+                {
+                    continue;
+                }
+                readers += 1;
+                if !(window.contains("without_bom") || window.contains("json_request") || window.contains("submit(")) {
+                    missing.push(format!("{relative}:{}", at + 1));
+                }
+            }
+        }
+        assert!(readers >= 25, "only {readers} readers found");
+        assert!(missing.is_empty(), "stdin JSON readers that keep a BOM: {missing:?}");
+        // `send` strips it inside submit, before its digest.
+        let input = std::fs::read_to_string(root.join("state/input.rs")).unwrap();
+        let submit = input.find("pub(super) fn submit(").unwrap();
+        assert!(input[submit..submit + 400].contains("without_bom(input)"));
     }
 
     #[test]
@@ -3699,7 +4063,8 @@ mod tests {
     #[test]
     fn a_draft_phase_says_it_waits_for_the_previous_phase() {
         let mut team = running_team();
-        // Phase 1 still has open tasks, so the draft after it cannot open (F12).
+        // N40: phase 1 still has open tasks, yet it is approved, so the draft
+        // after it can be approved now (F12): it waits for nothing.
         team.tasks.push(Task { id: 3, title: "Fix".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
         team.phases.push(Phase {
             n: 2,
@@ -3711,9 +4076,7 @@ mod tests {
             ..Default::default()
         });
         let value = view_with(&team, &[], None);
-        let phase = &value["phases"][0];
-        assert_eq!(phase["waiting"]["text"], "Waiting for the previous phase to be ready");
-        assert_eq!((phase["waiting"]["phase"].as_u64(), phase["waiting"]["open"].clone()), (Some(1), json!([1])));
+        assert!(value["phases"][0].get("waiting").is_none(), "{}", value["phases"][0]);
         // Once the previous phase is decided, the draft is simply a draft.
         team.task_mut(1).unwrap().status = TaskStatus::Accepted;
         let value = view_with(&team, &[], None);

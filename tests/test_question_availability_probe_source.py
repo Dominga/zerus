@@ -30,7 +30,7 @@ TASK_TRACKER_UPDATES = ROOT / "tests/fixtures/question-availability-task-tracker
 TASK_TRACKER_UPDATES_SHA = "5cb5f076e3f176069d8e57d945f1286cea7763fcf37c3dbfb6f61383cf5c1e34"
 # Exact visible-refresh, foreground priority and frame-observer delta; keep historical policy pins.
 VISIBLE_REFRESH_UPDATES = ROOT / "tests/fixtures/question-availability-visible-refresh-updates.patch"
-VISIBLE_REFRESH_UPDATES_SHA = "f37a806faf4860472bccc0544b07ed35eff1df45b0d092669fac38095b823a4a"
+VISIBLE_REFRESH_UPDATES_SHA = "8bea4446f1bf9964d282dc0eb90bab41f7676f2b9d576fad237cb92846e8ca83"
 WORKSPACE_BASE_SHA = {
     "ZerusViewModel.kt": "5932d92ca74ccf37da9595a580bcb1457c93c83951976606c8defa8d1ee83326",
     "MainActivity.kt": "f68902349d1e0ac939582e9e139548663f5763c430a3c566f8823d9f045645f0",

@@ -1099,11 +1099,37 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
     Ok(Some((parent.id.clone(), task.id)))
 }
 
+/// N25: a create whose child landed but whose parent update failed is repaired
+/// on the replay: the reserved child id is already the request id.
+fn repair_parent_link(child_id: &str, input: &Value) -> anyhow::Result<()> {
+    let Some(parent_id) = input["parent"]["team"].as_str() else { return Ok(()) };
+    let Some(number) = input["parent"]["task"].as_u64().and_then(|n| u32::try_from(n).ok()) else { return Ok(()) };
+    let mut store = Store::open(true)?;
+    if store.load(child_id)?.is_none() {
+        return Ok(());
+    }
+    store.mutate(None, parent_id, None, |parent, events| {
+        if let Some(task) = parent.tasks.iter_mut().find(|task| task.id == number) {
+            task.subteam = Some(child_id.to_owned());
+        }
+        if !parent.children.iter().any(|id| id == child_id) {
+            parent.children.push(child_id.to_owned());
+        }
+        events.push(Event::new("subteam_repaired", json!({"team":child_id,"task":number})));
+        Ok(Value::Null)
+    })?;
+    Ok(())
+}
+
 fn create(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
-    // A replay returns the first receipt before validating the parent again.
+    // A replay returns the first receipt; a parent link is repaired first
+    // (N25: the child may exist from a create whose parent mutate failed).
     if let Some(receipt) = Store::open(false)?.receipt(request, input)? {
+        if input["parent"].is_object() {
+            repair_parent_link(request, input)?;
+        }
         return Ok(receipt);
     }
     let mut filled = input.clone();
@@ -1130,7 +1156,28 @@ fn create(input: &Value) -> anyhow::Result<Value> {
             .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
-    let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
+    let (team, events) = {
+        let mut child_id = uuid::Uuid::new_v4().to_string();
+        if let Some((parent_id, task)) = &parent_link {
+            // N25: reserve the parent link before the child exists. The request
+            // id is the child id, so a retry after a failed create reuses it;
+            // a different concurrent create sees the reservation and is refused.
+            child_id = request.to_owned();
+            let mut store = Store::open(true)?;
+            let pid = parent_id.clone();
+            let number = *task;
+            store.mutate(None, &pid, None, |parent, events| {
+                let parent_task = parent.tasks.iter_mut().find(|candidate| candidate.id == number).context("The parent task is missing")?;
+                match &parent_task.subteam {
+                    Some(existing) if existing != &child_id => bail!("The parent task already has a sub-team"),
+                    _ => parent_task.subteam = Some(child_id.clone()),
+                }
+                events.push(Event::new("subteam_reserved", json!({"team":child_id,"task":number})));
+                Ok(Value::Null)
+            })?;
+        }
+        ops::create(&child_id, &filled)?
+    };
     // Section 9.2: depth, children and tree sessions are checked at create.
     if let Some((parent_id, _)) = &parent_link {
         let store = Store::open(false)?;
@@ -1946,6 +1993,11 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
     let mut store = Store::open(true)?;
+    // N28: a replay returns the first receipt instead of duplicating the
+    // parent question.
+    if let Some(receipt) = store.receipt(request, input)? {
+        return Ok(receipt);
+    }
     let team = store.load(text(input, "team"))?.context("Unknown team")?;
     let link = team.parent.clone().context("Only a sub-team escalates a question")?;
     let by = actor(&team, "escalate", input)?;
@@ -1982,7 +2034,7 @@ fn escalate(input: &Value) -> anyhow::Result<Value> {
     ensure!(question.forwarded.is_empty(), "This question was already escalated");
     let child_name = team.name.clone();
     let child_id = team.id.clone();
-    store.mutate(None, &child_id, None, |team, events| {
+    store.mutate(Some((request, input)), &child_id, None, |team, events| {
         for task in &mut team.tasks {
             for attempt in &mut task.attempts {
                 for question in &mut attempt.questions {

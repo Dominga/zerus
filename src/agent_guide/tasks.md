@@ -1,68 +1,47 @@
 Project tasks (hgs guide tasks)
 
-The project's shared task list. Run these in your own session: they act as it
-and on its project unless a reference names another (PROJECT/T-xxxxxx). Texts
-go on stdin; a change prints one line saying what happened (--json: the task).
+Own session/project; PROJECT/T-xxxxxx selects another. Text: stdin; --json: task.
 
-  hgs task list [--stage review|active|todo|backlog|done]   the tasks, JSON
-  hgs task get REF                          one task with its history, JSON
-  hgs task add [--backlog] [--position N] <<'EOF'   file a task for yourself
-  hgs task add --start <<'EOF'               record work you are doing now
-  hgs task start REF                         take or acknowledge work without sending it again
-  hgs task report REF <<'EOF'               report a task you were sent
-  hgs task comment REF <<'EOF'              a note, never pasted into a session
-  hgs task rename REF <<'EOF'               an independent title (any stage)
-  hgs task add --title "Task title" [--request-id UUID]  title-first card; description on stdin
-  hgs task edit REF <<'EOF'                 a new prompt (To do, Backlog)
-  hgs task move REF --position N            priority within its current stage
-  hgs task stage REF todo|backlog|done      done only when the person asks
-  hgs task target REF SESSION|any [--host ALIAS]   where it will be sent
-  hgs task target REF new-session|subagent --parent SESSION [--host ALIAS]  plan an executor
-  hgs task worker REF --subagent ID --request-id SENT_REQUEST_ID  register a native child
-  hgs task send REF [--session SESSION [--host ALIAS]]   Send now
-  hgs task handoff REF --session SESSION [--host ALIAS]   transfer your active task
-  hgs task cancel REF [--reason TEXT]       stop another session's task
+  hgs task list [--stage review|active|todo|backlog|done]
+  hgs task get REF
+  hgs task add [--backlog] [--position N] [--title TEXT] [--request-id UUID]
+  hgs task add --start
+  hgs task start REF
+  hgs task report REF
+  hgs task comment REF
+  hgs task rename REF
+  hgs task edit REF
+  hgs task move REF --position N
+  hgs task stage REF todo|backlog|done
+  hgs task target REF SESSION|any [--host ALIAS]
+  hgs task target REF new-session|subagent --parent SESSION [--host ALIAS]
+  hgs task worker REF --subagent ID --request-id SENT_REQUEST_ID
+  hgs task send REF [--session SESSION [--host ALIAS]]
+  hgs task handoff REF --session SESSION [--host ALIAS]
+  hgs task cancel REF [--reason TEXT]
 
-Rules
-- Plain add queues a task for later; it does not mean work started. For a direct
-  request you are already doing, use add --start, or start REF for a queued task.
-- Handoff transfers your active task and its pinned target only after native
-  submission to the chosen session. A normal message does not change ownership.
-- A report says what changed, how it was checked and what is left undone or
-  why it cannot be done; it moves the task to In review.
-- You cannot cancel a task you were sent; report what is left undone instead.
-- When the person asks to keep something for later, file it with add, not in
-  your own plan.
-- Assignment plans save intent only; a new executor is created on explicit Start.
-  New-session plans start through the desktop launch dialog. Subagent plans go to
-  the parent coordinator, which creates the child and registers its observed live
-  ID against the current sent receipt before claiming it started. The parent
-  remains the coordinator/reporter; children must not impersonate that CLI identity.
-- start REF acknowledges a dispatched task once in its exact owner session. It
-  neither pastes another prompt nor creates a second dispatch.
-- add, edit and comment accept --content-json with text and attachments on stdin.
-  Comments retain their media in history; they are not new native input. Inspect
-  get REF for current comments before continuing work.
-- Each desktop reserves new-session delivery before transport. A restored or
-  uncertain reservation needs explicit review, never an automatic retry. These
-  local records do not provide a distributed execution lease or task-scoped Pause.
+Add queues later work; add --start or start REF records current work without
+resending. Report changes, checks and remaining work/blockers: it moves to Review.
+Only the person accepts Done.
+You cannot cancel your dispatched task; report instead. Handoff transfers active
+ownership after native submission; messages do not transfer it.
 
-Named cards keep title and description separate. Rename never changes the prompt
-body, task owner or lifecycle. A title-only card is valid. Creation request UUIDs
-bind the original title, content, target, initial stage and start intent; replay
-recovers that card without reverting later changes. A different input using the
-same UUID is refused. The rendered worker prompt includes title and description.
+Plans create no executor. Explicit Start opens the launch dialog or asks the
+parent to create a subagent. Register its observed live ID
+against the sent receipt. The parent reports; children never use its identity.
+Unknown launch state needs review, not retry; no distributed lease or task Pause.
 
-Task discussion and delivery
-- `hgs task message REF --request-id UUID --mode queue|send|reopen|note
-  --expect-dispatch ID --content-json` reads {"text":...,"attachments":[...]}.
-  Read get REF first for dispatch_id and the immutable executor. queue stores
-  clarification for the next explicit Start; note is saved without delivery.
-- send addresses the verified current execution; reopen deliberately requests
-  changes from Review/Done and returns to In progress only after submission.
-  The coordinator receives subagent feedback; child delivery is not established
-  by the coordinator's receipt. A task message does not change ownership.
-- Keep the original UUID, mode, execution anchor and content on an interrupted
-  call. Repeating that exact request reads its receipt and NEVER replays a
-  reserved native submission. Submitted means accepted by the input transport,
-  not read or incorporated by the model. Unknown delivery stays unknown.
+Rename changes neither description nor owner. Edit is for To do/Backlog.
+Creation UUIDs bind title, content, target, stage and start intent. Exact replay
+recovers the card without reverting edits; changed input with that UUID fails.
+Add/edit/comment accept --content-json with text and attachments. Comments retain
+media without native input; read get REF before continuing.
+
+Discussion: hgs task message REF --request-id UUID --mode queue|send|reopen|note
+  --expect-dispatch ID --content-json
+Read get REF for dispatch_id and immutable executor. Queue waits for explicit
+Start; note only saves. Send targets the current execution. Reopen leaves
+Review/Done only after submission. A coordinator receipt does not prove child
+delivery or change ownership. Retry only the SAME UUID, mode, anchor and content:
+it reads the receipt without repeating reserved native input. Submitted means
+transport accepted, not model-read. Unknown stays unknown.

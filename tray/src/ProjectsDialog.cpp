@@ -35,6 +35,7 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QScrollArea>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <QAction>
@@ -309,7 +310,13 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     // The block's header names them and counts them.
     for(const char *name:{"inspectorPanelTitle","ironRulesCount"})if(auto *own=m_rules->findChild<QLabel *>(name))own->hide();
     m_rules->changed=[this](int count){m_rulesBlock->setNote(QString::number(count));};
-    auto *foot = new QHBoxLayout; m_remove = new QPushButton(tr("Delete project…")); m_remove->setObjectName("deleteProject"); PageCards::danger(m_remove); foot->addWidget(m_remove); foot->addStretch(); form->addLayout(foot); split->addWidget(right); split->setSizes({230,600});
+    auto *foot = new QHBoxLayout; m_remove = new QPushButton(tr("Delete project…")); m_remove->setObjectName("deleteProject"); PageCards::danger(m_remove); foot->addWidget(m_remove); foot->addStretch(); form->addLayout(foot);
+    // U25: the blocks keep their own height; a short window scrolls the
+    // project instead of squeezing the folder table over its actions.
+    auto *rightScroll=new QScrollArea;rightScroll->setObjectName("projectDetailsScroll");rightScroll->setWidgetResizable(true);
+    rightScroll->setFrameShape(QFrame::NoFrame);rightScroll->setWidget(right);rightScroll->setAutoFillBackground(false);
+    rightScroll->viewport()->setAutoFillBackground(false);right->setAutoFillBackground(false);
+    split->addWidget(rightScroll); split->setSizes({230,600});
     m_status = new QLabel; m_status->setObjectName("projectsStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setMinimumHeight(22); root->addWidget(m_status);
     if (!embedded) { auto *close = new QDialogButtonBox(QDialogButtonBox::Close); connect(close,&QDialogButtonBox::rejected,this,&QDialog::accept); root->addWidget(close); }
     connect(add,&QPushButton::clicked,this,&ProjectsDialog::addProject);

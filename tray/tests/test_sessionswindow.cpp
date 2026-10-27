@@ -12837,13 +12837,16 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
     const auto rowFor=[&](const QString &id){for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->data(Qt::UserRole).toString()==id)return row;return -1;};
     QVERIFY(rowFor(localId)>=0);QVERIFY(rowFor(remoteId)>=0);
     QVERIFY(!create->isEnabled());table->setCurrentCell(rowFor(localId),0);QVERIFY(create->isEnabled());
-    auto *metadata=page->findChild<QPushButton *>("projectColor");auto *defaultProject=page->findChild<QCheckBox *>("defaultProject");
+    // U25 part 7 (spec 7): Color… lives in the project header now; the
+    // default checkbox stays right under the project's name field.
+    auto *metadata=page->findChild<QLineEdit *>("projectName");auto *defaultProject=page->findChild<QCheckBox *>("defaultProject");
     for(int height:{760,1100}) {
         window.resize(1150,height);table->clearSelection();QTest::qWait(30);
         QVERIFY(defaultProject->mapTo(page,QPoint()).y()-metadata->mapTo(page,QPoint(0,metadata->height())).y()<45);
         const int full=table->height();table->setCurrentCell(rowFor(localId),0);QTest::qWait(30);QVERIFY(full>=table->height());
         if(height==1100)QVERIFY(table->height()>230);
-        auto *folderActions=page->findChild<QPushButton *>("addProjectFolder");
+        // The folder actions under the table (Add folder moved to the Folders block's header).
+        auto *folderActions=page->findChild<QPushButton *>("editProjectFolder");
         QVERIFY(folderActions->mapTo(page,QPoint()).y()>=table->mapTo(page,QPoint(0,table->height())).y());
         auto *catalog=page->findChild<QTreeWidget *>("worktreeCatalog");auto *all=page->findChild<QPushButton *>("allWorktreeSessions");
         QVERIFY(all->mapTo(page,QPoint(0,all->height())).y()<=catalog->mapTo(page,QPoint()).y());

@@ -15,6 +15,7 @@ class TeamController;
 class TeamConversation;
 class TeamPanel;
 class TeamTaskCard;
+namespace TeamUi { class TaskView; }
 
 // WhiteWh fork: agent teams. The Team tab next to Activity (design D3, HANDOFF
 // §14): the Stuck and plan-error strips (the team's status and actions are in
@@ -102,12 +103,18 @@ private:
     QWidget *phaseColumn(const Teams::Team &team);
     QWidget *phaseScroll(const Teams::Team &team, const Teams::PhaseGroup &group);
     QWidget *phaseGraph(const Teams::Team &team, const Teams::PhaseGroup &group);
+    // U25 part 5 (spec 5.4): the nodes of `order` in two lines - the
+    // dependencies from other phases and the problem - with the working dots
+    // and the full tooltip. `phase` holds the tasks drawn in this view (empty:
+    // a team without phases).
+    void graphNodes(TeamUi::TaskView *view, const Teams::Team &team, const QList<int> &order, const QSet<int> &phase);
     QWidget *boardColumns(const Teams::Team &team, const QList<int> &ids, int phase);
     QWidget *layerRows(const Teams::Team &team, const QList<int> &ids);
     // The tasks with a problem and the tone each shows.
     QMap<int, Teams::Tone> problemTasks(const Teams::Team &team) const;
     // The text that names a task's problem on its card ("Needs your answer").
     QString problemText(const Teams::Team &team, int task) const;
+    QMap<int, QString> problemTexts(const Teams::Team &team) const;
     QSet<int> blockers(const Teams::Team &team) const;
     void setAutoAccept(const Teams::Team &team, bool on);
     void rejectPhase(const QString &team, int phase);

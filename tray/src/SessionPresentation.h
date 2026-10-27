@@ -76,7 +76,10 @@ inline SessionInfo inspected(SessionInfo s, const QJsonObject &details)
     s.providerError=details.value("provider_error").toObject();s.recovery=details.value("recovery").toObject();
     s.providerStatusAt=details.value("provider_status_at").toDouble();
     s.activitySummary=details.value("activity_summary").toString(s.activitySummary);
-    s.activityDetail=details.value("activity_detail").toString(s.activityDetail);
+    if(details.value("activity_detail").isString()){
+        s.activityDetail=details.value("activity_detail").toString();
+        s.activityAnswers=QuestionReply::prepared(details,QStringLiteral("activity_detail"));
+    }
     s.currentTool=details.value("current_tool").toString(s.currentTool);s.toolDetail=details.value("tool_detail").toString(s.toolDetail);
     const auto attention=details.value("attention_id").toString(s.attentionId);
     if(attention != s.attentionId)s.attentionAcknowledged=false;
@@ -91,7 +94,7 @@ inline bool sameInspection(const SessionInfo &a, const SessionInfo &b)
         && a.backgroundStarted == b.backgroundStarted && a.backgroundCommand == b.backgroundCommand
         && a.phase == b.phase && a.activity == b.activity && a.processState == b.processState
         && a.providerError == b.providerError && a.recovery == b.recovery
-        && a.activitySummary == b.activitySummary && a.activityDetail == b.activityDetail
+        && a.activitySummary == b.activitySummary && a.activityDetail == b.activityDetail && a.activityAnswers == b.activityAnswers
         && a.currentTool == b.currentTool && a.toolDetail == b.toolDetail
         && a.attentionId == b.attentionId && a.attentionAcknowledged == b.attentionAcknowledged;
 }
@@ -308,25 +311,20 @@ inline bool active(const SessionInfo &s, bool online = true, bool hasDraft = fal
         || (online && s.replyInProgress() && s.activity == "idle" && s.phase == "idle"));
 }
 
-inline QString promptPreview(const QString &text)
+inline QString promptPreview(const SessionInfo &s)
 {
-    const auto replies = QuestionReply::parse(text);
-    return replies.isEmpty() ? text : QuestionReply::preview(replies);
+    return s.promptAnswers.isEmpty() ? s.prompt : s.promptAnswers;
 }
 
 inline QString activityDetailPreview(const SessionInfo &s)
 {
-    const auto replies = QuestionReply::parse(s.activityDetail);
-    if (!replies.isEmpty()) return QuestionReply::preview(replies);
+    if (!s.activityAnswers.isEmpty()) return s.activityAnswers;
     // Telemetry clips the detail at 240 characters, often inside the JSON.
     // Use the complete prompt only when this detail is its actual excerpt;
     // an older answer must never replace the current tool or approval text.
     QString excerpt = s.activityDetail;
     if (excerpt.endsWith(QChar(0x2026))) excerpt.chop(1);
-    if (!excerpt.isEmpty() && s.prompt.startsWith(excerpt)) {
-        const auto promptReplies = QuestionReply::parse(s.prompt);
-        if (!promptReplies.isEmpty()) return QuestionReply::preview(promptReplies);
-    }
+    if (!excerpt.isEmpty() && s.prompt.startsWith(excerpt) && !s.promptAnswers.isEmpty()) return s.promptAnswers;
     return s.activityDetail;
 }
 
@@ -334,7 +332,7 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
 {
     // A tool excerpt must not hide the fact that the agent is waiting for us.
     if (online && s.needsAction()) {
-        const QString detail = !s.activityDetail.isEmpty() ? activityDetailPreview(s) : !s.toolDetail.isEmpty() ? s.toolDetail : promptPreview(s.prompt);
+        const QString detail = !s.activityDetail.isEmpty() ? activityDetailPreview(s) : !s.toolDetail.isEmpty() ? s.toolDetail : promptPreview(s);
         return status(s) + (detail.isEmpty() ? QString() : QStringLiteral(": ") + detail);
     }
     if (s.visibleUnreadReply(online) && !s.needsAction()) return status(s, online);
@@ -351,7 +349,7 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
 
     if (!s.activitySummary.isEmpty()) return s.activitySummary + (s.activityDetail.isEmpty() ? QString() : QStringLiteral(": ") + activityDetailPreview(s));
     if (!s.currentTool.isEmpty()) return s.currentTool + (s.toolDetail.isEmpty() ? QString() : QStringLiteral(": ") + s.toolDetail);
-    if (!s.prompt.isEmpty()) return status(s) + QStringLiteral(": ") + promptPreview(s.prompt);
+    if (!s.prompt.isEmpty()) return status(s) + QStringLiteral(": ") + promptPreview(s);
     return s.tracked ? status(s) : QObject::tr("Open terminal to view activity");
 }
 

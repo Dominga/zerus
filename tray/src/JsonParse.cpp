@@ -22,16 +22,16 @@ bool fatalChecks()
     return fatal;
 }
 
-void violation(const char *file, int line)
+void violation(const char *file, int line, const char *what = "JSON parsed on the GUI thread")
 {
     ++s_violations;
     QMutexLocker lock(&s_mutex);
     if (s_handler) { const auto handler = s_handler; lock.unlock(); handler(file, line); return; }
-    if (fatalChecks()) qFatal("JSON parsed on the GUI thread at %s:%d (JsonParse.h)", file, line);
+    if (fatalChecks()) qFatal("%s at %s:%d (JsonParse.h)", what, file, line);
     const QByteArray site = QByteArray(file) + ':' + QByteArray::number(line);
     if (s_reported.size() < 256 && !s_reported.contains(site)) {
         s_reported.insert(site);
-        qWarning("JSON parsed on the GUI thread at %s", site.constData());
+        qWarning("%s at %s", what, site.constData());
     }
 }
 
@@ -73,14 +73,10 @@ QJsonArray array(const QByteArray &bytes, QString *error, const char *file, int 
     return parseError.isEmpty() ? document.array() : QJsonArray();
 }
 
-QJsonDocument local(const QByteArray &bytes, QString *error, const char *file, int line)
+void reportUnprepared(const char *file, int line)
 {
-    if (bytes.size() > LocalLimit && onGuiThread()) violation(file, line);
-    return decode(bytes, error);
+    if (onGuiThread()) violation(file, line, "JSON value not prepared for the GUI thread");
 }
-
-QJsonObject localObject(const QByteArray &bytes, const char *file, int line) { return local(bytes, nullptr, file, line).object(); }
-QJsonArray localArray(const QByteArray &bytes, const char *file, int line) { return local(bytes, nullptr, file, line).array(); }
 
 int violations() { return s_violations; }
 

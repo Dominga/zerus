@@ -55,7 +55,7 @@ inline QJsonObject load() {
     return SettingsJson::object("attention/pendingReads");
 }
 inline void save(const QJsonObject &marks) {
-    QSettings().setValue("attention/pendingReads", QJsonDocument(marks).toJson(QJsonDocument::Compact));
+    SettingsJson::store(QStringLiteral("attention/pendingReads"), QJsonDocument(marks));
 }
 inline void add(const QList<ReadMark> &marks) {
     if (marks.isEmpty()) return;
@@ -80,6 +80,6 @@ inline bool migrated(const QString &host) { return migratedHosts().contains(host
 inline void setMigrated(const QString &host) {
     auto hosts = migratedHosts();
     if (!hosts.contains(host)) hosts.append(host);
-    QSettings().setValue("attention/sharedReadMigrated", QJsonDocument(hosts).toJson(QJsonDocument::Compact));
+    SettingsJson::store(QStringLiteral("attention/sharedReadMigrated"), QJsonDocument(hosts));
 }
 } // namespace ReadMarkStore

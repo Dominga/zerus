@@ -37,6 +37,9 @@ public:
     // Zerus has no parent widget and is deleted explicitly. Само меню удаляет TrayMenu или иконка трея -- кто из них,
     // см. ~TrayMenu и порядок m_menu/m_tray ниже.
     ~TrayAgent() override;
+    // The JSON values the desktop keeps in QSettings (SettingsJson.h): main()
+    // parses them before the tray and its windows read them.
+    static QStringList jsonSettings();
 
 public slots:
     void showSessions();
@@ -114,7 +117,9 @@ private:
     std::unique_ptr<AttentionNotifier> m_notifier;
     std::unique_ptr<ApplicationBadge> m_badge;
     AttentionTracker m_attention;
+    // The notification clicked last, until its session opens, and what its token names.
     QString m_pendingAttention;
+    QJsonObject m_pendingTarget;
     QTimer m_localTimer;
     QTimer m_peerTimer;
     QString m_lastError;

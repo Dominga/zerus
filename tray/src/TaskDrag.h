@@ -1,14 +1,15 @@
 #pragma once
-#include "JsonParse.h"
 #include "TaskBoard.h"
-#include <QJsonDocument>
-#include <QJsonObject>
+#include <QDataStream>
+#include <QIODevice>
 #include <QMetaType>
 #include <QMimeData>
 #include <optional>
 
 // A task dragged from either board surface. Every writable stage can be
-// reordered; stage changes and session routing have their own guards.
+// reordered; stage changes and session routing have their own guards. The
+// payload stays in this process, so it is a QDataStream that drops read
+// without a JSON parse.
 struct TaskDrag {
     QString projectId, uuid, id, stage;
     // Its pinned session; an empty name is Any session. targetKnown is false for a
@@ -26,18 +27,18 @@ struct TaskDrag {
     }
     QMimeData *mimeData() const {
         auto *mime = new QMimeData;
-        const QJsonObject data{{"project", projectId}, {"uuid", uuid}, {"id", id}, {"stage", stage},
-                               {"host", targetHost}, {"session", targetSession}, {"known", targetKnown}};
-        mime->setData(mimeType(), QJsonDocument(data).toJson(QJsonDocument::Compact));
+        QByteArray data;
+        QDataStream stream(&data, QIODevice::WriteOnly); stream.setVersion(QDataStream::Qt_6_0);
+        stream << projectId << uuid << id << stage << targetHost << targetSession << targetKnown;
+        mime->setData(mimeType(), data);
         return mime;
     }
     static std::optional<TaskDrag> from(const QMimeData *mime) {
         if (!mime || !mime->hasFormat(mimeType())) return std::nullopt;
-        const auto data = JsonParse::localObject(mime->data(mimeType()));
-        TaskDrag drag{data.value("project").toString(), data.value("uuid").toString(), data.value("id").toString(),
-                      data.value("stage").toString(), data.value("host").toString(), data.value("session").toString(),
-                      data.value("known").toBool(true)};
-        if (drag.projectId.isEmpty() || drag.uuid.isEmpty()) return std::nullopt;
+        QDataStream stream(mime->data(mimeType())); stream.setVersion(QDataStream::Qt_6_0);
+        TaskDrag drag;
+        stream >> drag.projectId >> drag.uuid >> drag.id >> drag.stage >> drag.targetHost >> drag.targetSession >> drag.targetKnown;
+        if (stream.status() != QDataStream::Ok || !stream.atEnd() || drag.projectId.isEmpty() || drag.uuid.isEmpty()) return std::nullopt;
         return drag;
     }
 };

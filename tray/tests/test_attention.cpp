@@ -628,6 +628,16 @@ void TestAttention::edgesOfflineRestartAndIdentity()
     QCOMPARE(AttentionTracker::target(remote.raised.first().token).value("host").toString(), QString("mac"));
     box.sessions.clear(); QCOMPARE(restarted.observe("mac", box).cleared.size(), 1);
     QVERIFY(AttentionTracker::target("malformed token").isEmpty());
+    // A token an earlier run handed to the notification center still opens its
+    // session: the encoding is base64url of the compact JSON target.
+    const QString earlier = QString::fromLatin1(QByteArray(R"({"created":5,"host":"mac","name":"codex/hgs/dashboard","notice":"5f0c7f1e-0000-4000-8000-000000000001","run":"run-1"})")
+        .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    const auto legacy = AttentionTracker::target(earlier);
+    QCOMPARE(legacy.value("host").toString(), QString("mac")); QCOMPARE(legacy.value("run").toString(), QString("run-1"));
+    SessionInfo named; named.name = "codex/hgs/dashboard"; named.runId = "run-1"; QVERIFY(AttentionTracker::matches(legacy, named));
+    // And the tokens this build creates keep that encoding.
+    const auto current = QByteArray::fromBase64(remote.raised.first().token.toLatin1(), QByteArray::Base64UrlEncoding);
+    QVERIFY(current.startsWith("{\"")); QVERIFY(!current.contains('\n'));
 }
 
 void TestAttention::countsOnlyActionableFreshSessions()

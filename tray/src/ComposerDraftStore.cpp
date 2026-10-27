@@ -18,6 +18,15 @@
 #include <memory>
 
 namespace {
+const QString QuestionPrefix = QStringLiteral("question\n");
+// The session key in each stored question-answer draft key, which holds it in a
+// compact JSON array (QuestionCard::identity). The draft index decodes them off
+// the GUI thread, and owner() reads them here: Saved drafts names only drafts
+// that index listed. Each index replaces them, so they stay as many as the
+// question-answer drafts on disk.
+QMutex s_questionsMutex;
+QHash<QString, QString> s_questionSessions;
+
 const auto PrivateDirectory = QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner;
 const auto PrivateFile = QFile::ReadOwner | QFile::WriteOwner;
 QString hash(const QByteArray &bytes) { return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()); }
@@ -247,12 +256,21 @@ QHash<QString, ComposerDraftSummary> ComposerDraftStore::indexDirect() const
         for (const auto &line : text.split('\n')) if (!line.trimmed().isEmpty()) { summary.preview = line.simplified().left(200); break; }
         result.insert(key, summary);
     }
+    QHash<QString, QString> questions;
+    for (auto it = result.cbegin(); it != result.cend(); ++it) {
+        if (!it.key().startsWith(QuestionPrefix)) continue;
+        // A question identity is a compact JSON array, so it holds no line break.
+        const auto identity = JsonParse::array(it.key().mid(QuestionPrefix.size()).section('\n', 0, 0).toUtf8());
+        questions.insert(it.key(), identity.at(0).toString());
+    }
+    QMutexLocker lock(&s_questionsMutex);
+    s_questionSessions = std::move(questions);
     return result;
 }
 
 ComposerDraftOwner ComposerDraftStore::owner(const QString &key)
 {
-    static const QString Voice = QStringLiteral("voice-message-draft\n"), Question = QStringLiteral("question\n");
+    static const QString Voice = QStringLiteral("voice-message-draft\n");
     static const QString Task = QStringLiteral("task-draft\n");
     for (const auto &[prefix, kind] : {std::pair{QStringLiteral("task-description\n"), ComposerDraftOwner::Kind::TaskDescription}, std::pair{QStringLiteral("task-comment\n"), ComposerDraftOwner::Kind::TaskComment}}) {
         if (!key.startsWith(prefix)) continue;
@@ -265,10 +283,10 @@ ComposerDraftOwner ComposerDraftStore::owner(const QString &key)
         auto result = owner(key.mid(prefix.size()));
         if (result.kind == ComposerDraftOwner::Kind::Message || (prefix == Voice && (result.kind == ComposerDraftOwner::Kind::TaskDescription || result.kind == ComposerDraftOwner::Kind::TaskComment))) { result.kind = kind; return result; }
     }
-    if (key.startsWith(Question)) {
-        // A question identity is a compact JSON array, so it holds no line break.
-        const auto identity = JsonParse::localArray(key.mid(Question.size()).section('\n', 0, 0).toUtf8());
-        auto result = owner(identity.at(0).toString());
+    if (key.startsWith(QuestionPrefix)) {
+        QString session;
+        { QMutexLocker lock(&s_questionsMutex); session = s_questionSessions.value(key); }
+        auto result = owner(session);
         if (result.kind != ComposerDraftOwner::Kind::Unknown) { result.kind = ComposerDraftOwner::Kind::Question; return result; }
     }
     const auto parts = key.split('\n');

@@ -14,6 +14,7 @@
 #include <QScrollBar>
 #include <QTreeWidget>
 #include <QUuid>
+#include "JsonSettings.h"
 #include "NewSessionDialog.h"
 #include "CloneRepositoryDialog.h"
 #include "OpenCodeModelPicker.h"
@@ -255,7 +256,7 @@ elif a and a[0]=='worktrees':
     void workspaceCreatesSelectableCardBeforeFolderCheckCompletes(){
         QFETCH(QString,theme);QFETCH(double,scale);QSettings().setValue("workspace/theme",theme);QSettings().setValue("workspace/contentScale",scale);
         SessionOrganization projects;const auto project=projects.createGroup("Creation fixture");projects.addFolder(project,"pc","/workspace/example");
-        QSettings().setValue("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+        setJsonSetting("workspace/organization",QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
         SessionsWindow window(program());window.resize(900,650);window.setFleet(fleet());window.show();
         const auto originalSearch=theme=="light"?QString("an existing search scope"):QString();
         window.findChild<QLineEdit *>("search")->setText(originalSearch);
@@ -415,7 +416,7 @@ elif a and a[0]=='worktrees':
             const QJsonArray source{program(),QString()};
             const auto key="workspace/repositoryClone/"+QString::fromLatin1(QJsonDocument(source).toJson(QJsonDocument::Compact).toHex());
             const QJsonObject pending{{"request_id",QUuid::createUuid().toString(QUuid::WithoutBraces)},{"url","git@example.invalid:team/fresh.git"},{"parent","/workspace"},{"name","fresh"},{"path","/workspace/fresh"}};
-            QSettings().setValue(key+"/pending",QJsonDocument(pending).toJson(QJsonDocument::Compact));
+            setJsonSetting(key+"/pending",QJsonDocument(pending).toJson(QJsonDocument::Compact));
         }
         SessionOrganization projects;const auto project=projects.createGroup("Example");projects.addFolder(project,"pc","/workspace/example");
         SessionsWindow workspace(program());workspace.setFleet(fleet());
@@ -674,7 +675,7 @@ elif a and a[0]=='worktrees':
         if(inferred)QVERIFY(launched[0][7].toString().isEmpty());
     }
     void rememberedAndExplicitMissingAccounts() {
-        QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));
+        setJsonSetting("workspace/launchAccounts",QByteArray(R"({"":{"codex":"gone"}})"));
         NewSessionDialog dialog(program(),fleet(),{},"codex");dialog.selectPath("/workspace/example",false);dialog.show();
         QTRY_VERIFY(row(dialog,"work")>=0);QTRY_COMPARE(choices(dialog)->count(),5);QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("other"));
         dialog.selectAccount("gone");QVERIFY(!choices(dialog)->currentItem());QVERIFY(!dialog.findChild<QPushButton *>("primary")->isEnabled());
@@ -721,7 +722,7 @@ elif a and a[0]=='worktrees':
         QTRY_COMPARE(choices(dialog)->count(),5);QTRY_VERIFY(row(dialog,"claude-copy")>=0);
         QCOMPARE(row(dialog,"claude"),-1);QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude-copy"));
         // Another form changing remembered defaults cannot retarget this form.
-        QSettings().setValue("workspace/launchAccounts",QByteArray(R"({"":{"claude":"claude"}})"));
+        setJsonSetting("workspace/launchAccounts",QByteArray(R"({"":{"claude":"claude"}})"));
         for(auto *timer:dialog.findChildren<QTimer *>())if(timer->interval()==60000)QMetaObject::invokeMethod(timer,"timeout");
         QCOMPARE(choices(dialog)->currentItem()->data(Qt::UserRole).toString(),QString("claude-copy"));
         dialog.selectAccount("claude");QVERIFY(row(dialog,"claude")>=0);QCOMPARE(row(dialog,"claude-copy"),-1);

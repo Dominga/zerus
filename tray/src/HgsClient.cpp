@@ -5,6 +5,7 @@
 #include "EventStream.h"
 #include "JsonParse.h"
 #include "ProcessRunner.h"
+#include "QuestionReply.h"
 #include "LocalFile.h"
 #include "MachinePlatform.h"
 #include "SessionNotifications.h"
@@ -55,6 +56,25 @@ ObjectReply objectReply(const QByteArray &bytes, qsizetype limit = 0)
     return reply;
 }
 const auto parseObject = [](const QByteArray &bytes) { return objectReply(bytes); };
+// An inspection with the previews of the user's answers it carries, which the
+// GUI thread reads without a parse (QuestionReply.h).
+const auto parseInspection = [](const QByteArray &bytes) {
+    auto reply = objectReply(bytes); QuestionReply::annotate(reply.object); return reply;
+};
+// Search results: a GUI-thread conversion reads their session rows.
+const auto parseSearch = [](const QByteArray &bytes) {
+    auto reply = objectReply(bytes);
+    if (!reply.object.value(QStringLiteral("results")).isArray()) return reply;
+    auto results = reply.object.value(QStringLiteral("results")).toArray();
+    for (qsizetype i = 0; i < results.size(); ++i) {
+        auto result = results.at(i).toObject();
+        if (!result.value(QStringLiteral("session")).isObject()) continue;
+        auto session = result.value(QStringLiteral("session")).toObject(); QuestionReply::annotate(session);
+        result.insert(QStringLiteral("session"), session); results.replace(i, result);
+    }
+    reply.object.insert(QStringLiteral("results"), results);
+    return reply;
+};
 // The reply as an object, or an empty object for anything else.
 const auto parseJsonObject = [](const QByteArray &bytes) { return JsonParse::object(bytes); };
 // A finished child's result with its standard output parsed as an object.
@@ -224,6 +244,8 @@ SessionInfo sessionFromJson(const QJsonObject &obj)
     s.gitWorktree = obj.value("git_worktree").toBool(); s.gitDetached = obj.value("git_detached").toBool();
     s.gitWorktreeName = obj.value("git_worktree_name").toString(); s.gitMetadataState = obj.value("git_metadata_state").toString();
     s.activitySummary = obj.value("activity_summary").toString(); s.activityDetail = obj.value("activity_detail").toString();
+    s.promptAnswers = QuestionReply::prepared(obj, QStringLiteral("prompt"));
+    s.activityAnswers = QuestionReply::prepared(obj, QStringLiteral("activity_detail"));
     s.providerError = obj.value("provider_error").toObject();
     s.providerStatusAt = obj.value("provider_status_at").toDouble();
     s.subagentSource = obj.value("subagent_source").toString();
@@ -538,7 +560,9 @@ quint64 HgsClient::requestArchivePage(const QString &host,const QJsonObject &que
     const auto finish=[this,owner,request,host](const QJsonObject &data,const QString &error){m_archiveJobs.remove(host);owner->deleteLater();emit archivePageReady(request,host,data,error);};
     struct Page { QJsonObject data; QString error; };
     runHgsParsed(m_hgs,args,30000,owner,[query](const QByteArray &out){
-        QString parseError;const auto data=JsonParse::object(out,&parseError);QString error;
+        QString parseError;auto data=JsonParse::object(out,&parseError);QString error;
+        // ArchiveBrowser converts the rows on the GUI thread (QuestionReply.h).
+        if(data["sessions"].isArray()){auto sessions=data["sessions"].toArray();QuestionReply::annotateRows(sessions);data["sessions"]=sessions;}
         const auto rows=data["sessions"].toArray();
         if(!parseError.isEmpty()||data["version"].toInt()!=1||!data["sessions"].isArray()||rows.size()>50||!data["next_cursor"].isString()||data["next_cursor"].toString().size()>1024||!data["total"].isDouble()||data["total"].toDouble()<rows.size()
             ||data["from"]!=query["from"]||data["until"]!=query["until"]||data["query"]!=query["query"]||rows.isEmpty()&&!data["next_cursor"].toString().isEmpty()||!query["cursor"].toString().isEmpty()&&query["cursor"]==data["next_cursor"])error=HgsClient::tr("Invalid archive page. Update the computer CLI and refresh.");
@@ -866,7 +890,7 @@ quint64 HgsClient::requestSearch(const QString &host, const QString &query)
     const auto id = ++m_searchRequest;
     QStringList args{"search", "--query", query, "--limit", "100"};
     if (!host.isEmpty()) args.prepend('@' + host);
-    runHgsParsed(m_hgs, args, host.isEmpty() ? 12000 : 20000, this, parseObject,
+    runHgsParsed(m_hgs, args, host.isEmpty() ? 12000 : 20000, this, parseSearch,
         [this, id, host](const ObjectReply &doc) {
             if (!doc.ok() || !doc.object.value("results").isArray())
                 emit searchFailed(id, host, tr("Invalid search response; update hgs on this machine."));
@@ -904,7 +928,7 @@ bool HgsClient::requestInspection(const QString &host, const QString &name, qint
         args << QStringLiteral("--archive") << archiveId;
     if (!host.isEmpty())
         args.prepend(QLatin1Char('@') + host);
-    runHgsParsed(m_hgs, args, host.isEmpty() ? 5000 : 15000, this, parseObject,
+    runHgsParsed(m_hgs, args, host.isEmpty() ? 5000 : 15000, this, parseInspection,
            [this, host, name, key, archiveId](const ObjectReply &doc) {
                m_inspectionsInFlight.remove(key);
                emit inspectionLoadingChanged(host, name, archiveId, {}, false);

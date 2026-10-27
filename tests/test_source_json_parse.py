@@ -14,7 +14,12 @@ class CurrentTreeTest(unittest.TestCase):
         files = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
                  for path in (ROOT / "tray/src").rglob("*") if path.suffix in {".cpp", ".h", ".mm"}}
         self.assertEqual(check.json_parse_findings(files), [])
-        self.assertLessEqual(set(check.LOCAL_JSON_CALLS), set(files), "remove allowances of deleted files")
+
+    def test_json_parse_has_no_gui_thread_exception(self):
+        # Owner decision, 2026-10-27: the JsonParse::local() list is empty at the end of M2.
+        self.assertFalse(hasattr(check, "LOCAL_JSON_CALLS"))
+        header = check.code_only((ROOT / "tray/src/JsonParse.h").read_text(encoding="utf-8"))
+        self.assertNotRegex(header, r"\blocal\w*\s*\(")
 
 
 class RuleTest(unittest.TestCase):
@@ -36,17 +41,25 @@ class RuleTest(unittest.TestCase):
         })
         self.assertEqual(problems, [])
 
-    def test_local_calls_must_match_the_allowance_exactly(self):
-        listed = next(iter(check.LOCAL_JSON_CALLS))
-        allowed = check.LOCAL_JSON_CALLS[listed]
-        extra = "".join("JsonParse::localObject(a);\n" for _ in range(allowed + 1))
-        fewer = "".join("JsonParse::local(a);\n" for _ in range(allowed - 1))
-        self.assertEqual(check.json_parse_findings({"tray/src/New.cpp": "JsonParse::localArray(key);\n"}),
-                         ["tray/src/New.cpp: 1 JsonParse::local() calls, 0 allowed; parse off the GUI thread instead"])
-        self.assertEqual(check.json_parse_findings({listed: extra}),
-                         [f"{listed}: {allowed + 1} JsonParse::local() calls, {allowed} allowed; parse off the GUI thread instead"])
-        self.assertEqual(check.json_parse_findings({listed: fewer}),
-                         [f"{listed}: lower LOCAL_JSON_CALLS to {allowed - 1} in scripts/ci/check-source.py"])
+    def test_every_local_call_is_rejected(self):
+        problems = check.json_parse_findings({
+            "tray/src/New.cpp": "JsonParse::localArray(key);\nauto v = JsonParse :: local(bytes);\n",
+            check.JSON_PARSER: "QJsonDocument local(const QByteArray &bytes) { return JsonParse::localObject(bytes); }\n",
+        })
+        self.assertEqual(problems, [
+            "tray/src/JsonParse.cpp:1: JsonParse::local() is gone; parse off the GUI thread (tray/src/JsonParse.h)",
+            "tray/src/New.cpp:1: JsonParse::local() is gone; parse off the GUI thread (tray/src/JsonParse.h)",
+            "tray/src/New.cpp:2: JsonParse::local() is gone; parse off the GUI thread (tray/src/JsonParse.h)",
+        ])
+
+    def test_findings_keep_source_order(self):
+        problems = check.json_parse_findings({
+            "tray/src/Mixed.cpp": "JsonParse::localObject(a);\nQJsonDocument::fromJson(b);\n",
+        })
+        self.assertEqual(problems, [
+            "tray/src/Mixed.cpp:1: JsonParse::local() is gone; parse off the GUI thread (tray/src/JsonParse.h)",
+            "tray/src/Mixed.cpp:2: parse JSON with JsonParse (tray/src/JsonParse.h), off the GUI thread",
+        ])
 
 
 if __name__ == "__main__":

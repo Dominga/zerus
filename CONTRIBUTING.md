@@ -115,12 +115,21 @@ otherwise, each with its reason.
 The desktop parses JSON only through [JsonParse.h](tray/src/JsonParse.h), off
 the GUI thread: `hgs` output in a `ProcessRunner` prepare step, other data
 through `ProcessRunner::post` or an existing worker, and QSettings values
-through `SettingsJson`. `check-source.py` rejects `QJsonDocument::fromJson` in
-`tray/src` outside `JsonParse.cpp`, and lists the files that may still call
-`JsonParse::local()` on the GUI thread and how often; that list only shrinks.
+through [SettingsJson.h](tray/src/SettingsJson.h), which the tray parses before
+its windows exist and whose writers record what they store
+(`SettingsJson::store`). The GUI thread has no exception: owner decision,
+2026-10-27, the list of files allowed to parse small values there was empty at
+the end of M2, so `JsonParse::local()` is gone. A value the GUI thread needs at
+once is prepared before it is read, or kept in a form that needs no parse, such
+as a `QDataStream` for drag data that stays in the process. `check-source.py`
+rejects `QJsonDocument::fromJson` and `QCborValue::fromCbor` in `tray/src`
+outside `JsonParse.cpp`, and any `JsonParse::local()` call.
 Every Qt suite runs with `ZERUS_GUI_THREAD_CHECKS=fatal`, so a parse on the GUI
-thread aborts the test with its call site. A GUI suite that checks a parser
-directly calls it through `offGuiThread()` (`tray/tests/support/OffGuiThread.h`).
+thread, or a GUI-thread read of a JSON setting nobody parsed, aborts the test
+with its call site. A GUI suite that checks a parser directly calls it through
+`offGuiThread()` (`tray/tests/support/OffGuiThread.h`); one that stores a JSON
+setting for a widget to read uses `SettingsJson::store`, or `SettingsJson::warm`
+followed by a `ProcessRunner::post` barrier.
 
 A change to tmux or `ps` call sites must keep Unix behaviour unchanged: compare a
 [tmux census](docs/ci-and-aur.md#unix-tmux-census) of the branch with one of main.

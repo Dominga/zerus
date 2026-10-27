@@ -38,7 +38,7 @@ void LinuxAttentionNotifier::save()
     QJsonObject tokens;
     for (auto it = m_tokens.begin(); it != m_tokens.end(); ++it) tokens[QString::number(it.key())] = it.value();
     QSettings settings; settings.setValue("attention/linuxOwner", m_owner);
-    settings.setValue("attention/linuxTokens", QJsonDocument(tokens).toJson(QJsonDocument::Compact));
+    SettingsJson::store(settings, QStringLiteral("attention/linuxTokens"), QJsonDocument(tokens));
 }
 
 void LinuxAttentionNotifier::post(const QString &token, const QString &title, const QString &body)

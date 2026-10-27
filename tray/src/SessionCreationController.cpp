@@ -1,6 +1,7 @@
 #include "JsonParse.h"
 #include "SessionCreationController.h"
 #include "MachinePlatform.h"
+#include "SettingsJson.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QFile>
@@ -243,9 +244,9 @@ void SessionCreationController::persist(const QString &id,std::function<void()> 
             QSettings settings;settings.setValue("workspace/launchOpenTerminal",choices.value("terminal").toBool());
             settings.setValue("workspace/launchAgent",choices.value("cmd").toString());
             if(!choices.value("account").toString().isEmpty()){
-                auto accounts=JsonParse::object(settings.value("workspace/launchAccounts").toByteArray());
+                auto accounts=SettingsJson::object(QStringLiteral("workspace/launchAccounts"));
                 auto machine=accounts[choices.value("host").toString()].toObject();machine[choices.value("cmd").toString()]=choices.value("account");
-                accounts[choices.value("host").toString()]=machine;settings.setValue("workspace/launchAccounts",QJsonDocument(accounts).toJson(QJsonDocument::Compact));
+                accounts[choices.value("host").toString()]=machine;SettingsJson::store(settings,QStringLiteral("workspace/launchAccounts"),QJsonDocument(accounts));
             }
         }
         QMetaObject::invokeMethod(QCoreApplication::instance(),[guard,id,revision,error,after]{

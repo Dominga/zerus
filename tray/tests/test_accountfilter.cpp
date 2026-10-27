@@ -17,6 +17,7 @@ private slots:
     void openMenuKeepsPresentationAndBindingsAcrossIdentitySplit();
     void coldOpenMenuReceivesGroupedAccountsWithoutReopening();
     void catalogChoicesExcludeSessionOnlyAccountsAndKeepHomeBindings();
+    void bindingsReadBackWithoutParsing();
 private:
     static QJsonObject profile(const QString &host, const QString &id, const QString &identity, const QString &email) {
         return {{"host",host},{"machine",host.isEmpty()?QString("workstation"):host},{"id",id},{"provider","codex"},{"label","Work"},
@@ -93,7 +94,7 @@ void TestAccountFilter::duplicateCaptionsNameTheSpecificProfile() {
     QVERIFY(choices[0]->text()!=choices[1]->text());QVERIFY(choices[0]->accessibleName()!=choices[1]->accessibleName());
     for(auto *choice:choices) {
         const auto members=choice->property("bindings").toStringList();QCOMPARE(members.size(),1);
-        const auto id=QJsonDocument::fromJson(members.first().toUtf8()).array()[3].toString();
+        const auto id=SessionAccounts::bindingParts(members.first()).value(3);
         QVERIFY(choice->text().contains(id));choice->click();QVERIFY(filter->selection().contains(members.first()));
     }
 }
@@ -129,7 +130,7 @@ void TestAccountFilter::openMenuKeepsPresentationAndBindingsAcrossIdentitySplit(
     const auto choices=menu->findChildren<QCheckBox *>("accountFilterChoice");QCOMPARE(choices.size(),2);
     for(auto *current:choices) {
         const auto binding=current->property("bindings").toStringList();QCOMPARE(binding.size(),1);
-        const auto profileId=QJsonDocument::fromJson(binding.first().toUtf8()).array()[3].toString();
+        const auto profileId=SessionAccounts::bindingParts(binding.first()).value(3);
         QVERIFY(current->toolTip().contains(profileId=="one"?"one@example.test":"two@example.test"));
         QVERIFY(current->isChecked());
     }
@@ -176,6 +177,20 @@ void TestAccountFilter::catalogChoicesExcludeSessionOnlyAccountsAndKeepHomeBindi
     catalog.reset({current,remote},{current,remote,removed});catalog.observe({},"workstation",legacy);
     QCOMPARE(catalog.catalogAccounts().size(),1);QCOMPARE(catalog.catalogAccounts().first().bindings.size(),2);
     QVERIFY(!catalog.catalogAccounts().first().bindings.contains(SessionAccounts::binding({},legacy)));
+}
+void TestAccountFilter::bindingsReadBackWithoutParsing() {
+    // Any host, profile or home round-trips, colons, digits and line breaks included.
+    for(const auto &fields:QList<QStringList>{{"","codex","id","one"},{"mac:2","claude","home","/fixture/12:34\nhome"},
+                                               {QString::fromUtf8("東京"),"","id",""},{"10:","4:x","home","3:abc"}}){
+        const auto key=fields[2]=="id"?SessionAccounts::binding(fields[0],fields[1],fields[3]):SessionAccounts::binding(fields[0],fields[1],{},fields[3]);
+        const auto expected=fields[2]=="id"&&fields[3].isEmpty()?QStringList({fields[0],fields[1],"home",""}):fields;
+        QCOMPARE(SessionAccounts::bindingParts(key),expected);
+    }
+    QVERIFY(SessionAccounts::binding("a","codex","x")!=SessionAccounts::binding("a","codex",{},"x"));
+    QVERIFY(SessionAccounts::binding("a:1","b","c")!=SessionAccounts::binding("a","1:b","c"));
+    for(const QString &other:{QString(),QString("plain"),QString("1:a1:b2:id"),QString("1:a1:b2:id1:cextra"),QString("9:short"),QString("x:a1:b2:id1:c")})
+        QVERIFY2(SessionAccounts::bindingParts(other).isEmpty(),qPrintable(other));
+    QCOMPARE(SessionAccounts::bindingParts("1:a1:b2:id1:c"),QStringList({"a","b","id","c"}));
 }
 QTEST_MAIN(TestAccountFilter)
 #include "test_accountfilter.moc"

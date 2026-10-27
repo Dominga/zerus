@@ -82,7 +82,7 @@ private:
     QStringList hosts()const{QStringList result;if(local)result<<QString();result.append(machines);return result;}
     QString label(const QString &host)const{return host.isEmpty()?tr("this machine"):host;}
     void send(const QString &host,const QString &op,const QJsonObject &data={}){pending.insert(client.requestRecovery(host,op,data),{host,op});}
-    void persist(){QSettings().setValue("recovery/sharedPolicy",QJsonDocument(best).toJson(QJsonDocument::Compact));}
+    void persist(){SettingsJson::store(QStringLiteral("recovery/sharedPolicy"),QJsonDocument(best));}
     void reconcile(){
         if(best.isEmpty())return;
         for(const auto &host:hosts())if(!errors.contains(host)&&copies.contains(host)&&compare(copies[host],best)<0)

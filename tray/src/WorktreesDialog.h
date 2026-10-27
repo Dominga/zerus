@@ -3,6 +3,7 @@
 #include "FleetState.h"
 #include "SessionOrganization.h"
 #include <QDialog>
+#include <QHash>
 #include <QMap>
 #include <QSet>
 #include <functional>
@@ -60,7 +61,11 @@ private:
     QMap<quint64, Request> m_requests;
     QMap<QString, QJsonObject> m_reviews;
     QMap<QString, QString> m_reviewErrors;
-    QSet<QString> m_reviewAttempted;
+    // Reviews attempted per repository key: the repository itself (an empty
+    // path) and single worktrees in it.
+    QHash<QString, QSet<QString>> m_reviewAttempted;
+    bool reviewAttempted(const QString &repository, const QString &path = {}) const
+    { const auto found = m_reviewAttempted.constFind(repository); return found != m_reviewAttempted.cend() && found->contains(path); }
     QSet<QString> m_checked;
     qint64 m_autoRefreshAt = 0;
     quint64 m_generation = 0, m_reviewRequest = 0, m_reviewGeneration = 0;

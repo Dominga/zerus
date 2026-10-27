@@ -18,13 +18,11 @@
 // ZERUS_GUI_THREAD_CHECKS=fatal, which every Qt suite sets, it aborts with that
 // call site. A command-line or test program without a GUI has no GUI thread.
 //
-// local() is the one exception, for small values the tray wrote itself
-// (preferences, drag data) that a widget needs synchronously. It is limited to
-// LocalLimit bytes, and check-source.py lists the files allowed to call it and
-// how often; that list only shrinks.
+// There is no exception: check-source.py rejects any other JSON decoder in
+// tray/src, and a value the GUI thread needs synchronously is prepared before
+// it is read (a prepare step, ProcessRunner::post, SettingsJson.h) or kept in a
+// form that needs no parse, such as QDataStream for in-process drag data.
 namespace JsonParse {
-
-constexpr qsizetype LocalLimit = 64 * 1024;
 
 // error, which may be null, receives the parse error or is cleared. object()
 // and array() also report a document of the other kind as an error.
@@ -35,13 +33,12 @@ QJsonObject object(const QByteArray &bytes, QString *error = nullptr,
 QJsonArray array(const QByteArray &bytes, QString *error = nullptr,
                  const char *file = __builtin_FILE(), int line = __builtin_LINE());
 
-QJsonDocument local(const QByteArray &bytes, QString *error = nullptr,
-                    const char *file = __builtin_FILE(), int line = __builtin_LINE());
-QJsonObject localObject(const QByteArray &bytes, const char *file = __builtin_FILE(), int line = __builtin_LINE());
-QJsonArray localArray(const QByteArray &bytes, const char *file = __builtin_FILE(), int line = __builtin_LINE());
-
 // True on the application thread of a GUI application.
 bool onGuiThread();
+
+// A GUI-thread reader that found a value it would have had to parse first, and
+// did not: counted, logged and fatal like a parse (SettingsJson.h).
+void reportUnprepared(const char *file, int line);
 
 // Tests: violations so far, and a handler that replaces logging and the fatal
 // check (an empty handler restores them).

@@ -848,7 +848,7 @@ void NewSessionDialog::launch(const QString &target,const QString &addFolder)
     if(const auto selectedAccount=account();!selectedAccount.isEmpty()){
         auto accounts=SettingsJson::object("workspace/launchAccounts");
         auto machine=accounts.value(host()).toObject();machine[agent()]=selectedAccount;accounts[host()]=machine;
-        settings.setValue("workspace/launchAccounts",QJsonDocument(accounts).toJson(QJsonDocument::Compact));
+        SettingsJson::store(settings,QStringLiteral("workspace/launchAccounts"),QJsonDocument(accounts));
     }
     const auto model=agent()=="opencode"?m_model->currentData().toString():QString();
     emit launchRequested(host(),agent(),target,m_name->text(),account(),m_project->currentData().toString(),m_openTerminal->isChecked()&&agent()!="dsh"&&agent()!="opencode",addFolder,

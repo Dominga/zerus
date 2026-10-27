@@ -55,6 +55,7 @@ public:
     void indexAsync(QObject *owner, std::function<void(const QHash<QString, ComposerDraftSummary> &)> done) const;
     void renameAsync(const QString &oldKey, const QString &newKey, const ComposerDraft &draft, QObject *owner,
                      std::function<void(bool, const ComposerDraft &)> done) const;
+    // A question-answer draft's owner is known once indexAsync() or keys() listed it.
     static ComposerDraftOwner owner(const QString &key);
     static void flushWrites();
     static void setWriteObserver(std::function<void()> observer); // isolated tests

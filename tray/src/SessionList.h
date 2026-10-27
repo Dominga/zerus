@@ -87,6 +87,9 @@ private:
     QTimer m_activityTimer, m_elapsedTimer;
     QElapsedTimer m_activityClock;
     bool m_animateActivity = true;
+    // A session or group this list dragged: a QDataStream, which stays in this process.
+    struct Dragged { QString token; bool group = false; QString id; };
+    static std::optional<Dragged> dragged(const QMimeData *mime);
     bool validDrop(const QMimeData *) const;
     // The row a dragged task would change: a live session of its project other than
     // its own, or the project's header for a pinned task; null elsewhere.

@@ -361,7 +361,7 @@ void SpeechSettings::operation(const QString &host, const QString &machine, QJso
     m_result->clear(); m_result->hide();
     const auto request = uuid(); payload["request_id"] = request; payload["expected_machine_id"] = machine;
     m_pending = {{"host", host}, {"computer", host.isEmpty() ? localComputerName() : host}, {"machine_id", machine}, {"request_id", request}, {"action", payload.value("action")}};
-    QSettings settings; settings.setValue(pendingKey, QJsonDocument(m_pending).toJson(QJsonDocument::Compact)); settings.sync();
+    QSettings settings; SettingsJson::store(settings, QString::fromLatin1(pendingKey), QJsonDocument(m_pending)); settings.sync();
     if (settings.status() != QSettings::NoError) { m_pending = {}; if (done) done({}, tr("Could not save the operation identity. No provider request was sent.")); controls(); return; }
     m_operationDone = std::move(done); m_busy = true; m_waiting = false; m_statusPolls = 0; m_statusClock.start(); controls();
     m_client->request(host, payload, [this](const QJsonObject &reply, const QString &error) { operationResult(reply, error, true); });

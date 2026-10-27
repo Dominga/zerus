@@ -1318,15 +1318,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_info = browser(); m_info->setObjectName("sessionInfo"); m_info->setAccessibleName(tr("Session details"));
     tabs->addTab(m_activityStack, tr("Activity")); tabs->addTab(m_terminal, tr("Terminal"));
-    // The open session's project tasks; the label counts In review and To do.
-    m_tasks = new TasksView(&m_client); tabs->addTab(m_tasks, tr("Task board"));
+    // The right inspector owns the only board surface. Keep its shared
+    // controller hidden; a selection opens the central Task View.
+    m_tasks = new TasksView(&m_client, this); m_tasks->hide();
     m_tasks->setOpenInInspector(true);
-    m_tasksBadge = new TaskTabBadge; tabs->tabBar()->setTabButton(tabs->indexOf(m_tasks), QTabBar::RightSide, m_tasksBadge);
-    connect(m_tasks, &TasksView::countsChanged, this, [this](int review, int todo) {
-        m_tasksBadge->setCounts(review, todo);
-        // The tab bar reads a button's size when it lays the tabs out: relayout for the new width.
-        const int index = m_detailTabs->indexOf(m_tasks); m_detailTabs->tabBar()->setTabText(index, m_detailTabs->tabBar()->tabText(index));
-    });
     connect(m_tasks, &TasksView::notice, this, [this](const QString &message, bool error) { showNotice(message, error); });
     m_nativeUi = new NativeUiView(&m_client, [] { return NativeBrowserPlugin::factory(); });
     tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(tabs->indexOf(m_nativeUi), false);
@@ -2146,7 +2141,7 @@ void SessionsWindow::applyTheme()
     m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_accountFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
-    m_tasks->setTheme(m_dark); m_tasksBadge->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
+    m_tasks->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
 }
 

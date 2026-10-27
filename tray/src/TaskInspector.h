@@ -14,6 +14,7 @@ class TaskTile;
 class QTabBar;
 class QFrame;
 class QLineEdit;
+class QPlainTextEdit;
 class QHBoxLayout;
 class QToolButton;
 class MessageComposer;
@@ -54,6 +55,9 @@ private:
     QString inputKey(const QJsonObject &task) const;
     void seedDescriptionDraft();
     void createCard();
+    void beginRename();
+    void finishRename();
+    void cancelRename();
     void restoreNewCard();
     void fetch();
     void renderDetail();
@@ -80,6 +84,10 @@ private:
     quint64 m_request = 0, m_generation = 0;
     QLabel *m_scope, *m_state;
     QLabel *m_title, *m_identity;
+    QPlainTextEdit *m_titleEditor;
+    QLabel *m_titleError;
+    QString m_renameRequested;
+    bool m_titleSaving = false;
     ActivityWidth::ColumnLayout *m_headerColumn, *m_inputColumn;
     ToolbarChip *m_messageMode;
     QPushButton *m_cancelDescription;
@@ -87,6 +95,7 @@ private:
     bool m_noteOnly = false;
     QToolButton *m_add;
     QLineEdit *m_newTitle;
+    QStackedWidget *m_creationHeader;
     QLabel *m_createError;
     QJsonObject m_creation;
     bool m_creating = false, m_detached = false, m_descriptionEditing = false, m_descriptionSeed = false;

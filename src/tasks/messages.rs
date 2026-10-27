@@ -22,20 +22,18 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         .log
         .iter()
         .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id));
+    let recovering = existing.is_some();
+    let missing_recovery = !recovering && flag(args, "--recover-only");
+    let mut routing_error = None;
     let to = if matches!(mode, "send" | "reopen") {
         let key = existing
             .and_then(|e| e.session.clone())
-            .or(before.session.clone())
-            .ok_or_else(|| fail("this task has no confirmed executor; start it explicitly"))?;
+            .or(before.session.clone());
         // An existing reservation retains the original name/run, including after
         // handoff. Recovery must read that receipt, never retarget the message.
-        Some(if existing.is_some() {
-            key
-        } else {
-            machines
-                .resolve(&key)
-                .ok_or_else(|| fail("the executor is unavailable"))?
-        })
+        let resolved = key.and_then(|key| if recovering { Some(key) } else { machines.resolve(&key) });
+        if resolved.is_none() { routing_error = Some("The task has no verified current executor. The comment is saved here; choose an executor and start the task to send feedback.".to_string()); }
+        resolved
     } else {
         None
     };
@@ -79,9 +77,6 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         let synced = crate::swarm::exchange_tasks(config, &alias, &r.project.0).is_ok();
         return Ok(json!({"task":reply["task"],"message":reply["message"],"synced":synced}));
     }
-    if existing.is_none() && flag(args, "--recover-only") {
-        return Err(fail("No reservation was found on this executor. This check sent nothing; the original outcome may still be unknown."));
-    }
     let mut delivery = TaskDelivery {
         mode: mode.into(),
         stage: before.stage.as_str().into(),
@@ -99,6 +94,12 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         prompt: String::new(),
         error: String::new(),
     };
+    if missing_recovery {
+        delivery.state = "uncertain".into();
+        delivery.error = "The previous delivery could not be confirmed. Your comment is kept in this task and was not resent. Check the executor Activity before sending it again.".into();
+    } else if let Some(error) = &routing_error {
+        refuse_delivery(&mut delivery, error);
+    }
     let request = if let Some(existing) = existing {
         delivery = existing
             .delivery
@@ -109,7 +110,7 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
             return Err(fail("message identity already belongs to another intent"));
         }
         None
-    } else if let Some(to) = &to {
+    } else if let Some(to) = to.as_ref().filter(|_| !missing_recovery && routing_error.is_none()) {
         let worker = before.worker.as_ref().map(|w| format!("\nCoordinator: relay this feedback to the registered child {} only if its exact current identity still matches; otherwise explain why it cannot be delivered.", w.id)).unwrap_or_default();
         delivery.prompt = format!("[Zerus task {}/{} message {id}]\n{}\n\n{}{}\n\n{}",
             r.project.1, before.id, if mode == "reopen" { "The person requests changes. Continue this task." } else { "The person added task feedback." },
@@ -119,23 +120,18 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
             .map(serde_json::to_value)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(fail)?;
-        let request =
-            crate::state::prepare_task_reply(to, dispatch, id, &delivery.prompt, &attachments)
-                .map_err(fail)?;
-        delivery.run_id = request["expected_run_id"]
-            .as_str()
-            .unwrap_or_default()
-            .into();
-        delivery.conversation_id = request["expected_conversation_id"]
-            .as_str()
-            .unwrap_or_default()
-            .into();
-        Some(request)
+        match crate::state::prepare_task_reply(to, dispatch, id, &delivery.prompt, &attachments) {
+            Ok(request) => {
+                delivery.run_id = request["expected_run_id"].as_str().unwrap_or_default().into();
+                delivery.conversation_id = request["expected_conversation_id"].as_str().unwrap_or_default().into();
+                Some(request)
+            },
+            Err(error) => { refuse_delivery(&mut delivery, &error); None },
+        }
     } else {
         None
     };
-    let fresh = task
-        .reserve_message(
+    let reserved = task.reserve_message(
             id,
             &content.text,
             &files,
@@ -143,11 +139,18 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
             to.as_ref(),
             &who,
             now(),
-        )
-        .map_err(fail)?;
+        );
+    let fresh = match reserved {
+        Ok(fresh) => fresh,
+        Err(error) if !recovering && matches!(mode, "send" | "reopen") && delivery.state == "reserved" => {
+            refuse_delivery(&mut delivery, &error.to_string());
+            task.reserve_message(id, &content.text, &files, &delivery, to.as_ref(), &who, now()).map_err(fail)?
+        },
+        Err(error) => return Err(fail(error)),
+    };
     // The project lock serializes local reservations. A save failure stops before input.
     store.save(&mut task).map_err(fail)?;
-    if let Some(to) = &to {
+    if let Some(to) = to.as_ref().filter(|_| !delivery.run_id.is_empty() && matches!(delivery.state.as_str(), "reserved" | "uncertain")) {
         let request = request.unwrap_or_else(|| {
             json!({"request_id":id,"text":delivery.prompt,"attachments":files,
             "expected_run_id":delivery.run_id,"expected_conversation_id":delivery.conversation_id})
@@ -192,4 +195,10 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         .iter()
         .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id));
     Ok(json!({"task":view(&task,&r.project.1,true,&machines)?,"message":message}))
+}
+
+fn refuse_delivery(delivery: &mut TaskDelivery, error: &str) {
+    delivery.state = "failed".into();
+    delivery.error = error.chars().take(1000).collect();
+    delivery.run_id.clear(); delivery.conversation_id.clear(); delivery.prompt.clear(); delivery.submitted_id.clear();
 }

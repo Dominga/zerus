@@ -816,6 +816,11 @@ impl TaskDoc {
         match delivery.mode.as_str() {
             "queue" if matches!(view.stage, Stage::Todo | Stage::Backlog) && delivery.state == "queued" => {},
             "note" if delivery.state == "note" => {},
+            // A refused delivery still belongs in the task discussion. It
+            // carries no native submission authority and cannot reopen work.
+            "queue" | "note" | "send" | "reopen" if matches!(delivery.state.as_str(), "failed" | "uncertain") && !delivery.error.is_empty()
+                && delivery.run_id.is_empty() && delivery.conversation_id.is_empty()
+                && delivery.prompt.is_empty() && delivery.submitted_id.is_empty() => {},
             "send" | "reopen" if delivery.state == "reserved" => {
                 let expected_stage = if delivery.mode == "send" { view.stage == Stage::Active } else { matches!(view.stage, Stage::Review | Stage::Done) };
                 if !expected_stage || delivery.stage != view.stage.as_str() || delivery.stage_at != view.stage_at
@@ -849,6 +854,7 @@ impl TaskDoc {
         let message = view.log.iter().find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id))
             .ok_or_else(|| Error::new("message reservation is missing"))?;
         let mut delivery = message.delivery.clone().ok_or_else(|| Error::new("message has no reservation"))?;
+        if state == "submitted" && delivery.run_id.is_empty() { return Err(Error::new("message has no native execution reservation")); }
         if delivery.state == "submitted" || delivery.state == state && delivery.error == error { return Ok(()); }
         if !matches!(delivery.state.as_str(), "reserved" | "uncertain") { return Err(Error::new("message is not awaiting a receipt")); }
         delivery.state = state.into(); delivery.error = error.chars().take(1000).collect();
@@ -1026,6 +1032,24 @@ mod tests {
         assert_eq!(task.session(),Some(owner));
         assert_eq!(task.view().unwrap().log.iter().find(|e| e.kind=="message").unwrap().delivery.as_ref().unwrap().state,"submitted", "clock changes cannot downgrade a native receipt");
         assert_eq!(task.view().unwrap().log.iter().find(|e| e.kind=="message").unwrap().delivery.as_ref().unwrap().prompt,"[Task feedback]");
+    }
+
+    #[test]
+    fn saved_refused_and_receiptless_comments_never_authorize_native_delivery() {
+        let mut task = task(Stage::Todo);
+        let owner = SessionKey { session_id:"launch_id:one".into(), ..api() };
+        task.record_send(&owner,"dispatch",&Actor::Person,2).unwrap();
+        task.record_report("Review",&Actor::Agent(owner.clone()),3).unwrap();
+        for state in ["failed", "uncertain"] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let delivery = crate::TaskDelivery { mode:"reopen".into(),state:state.into(),stage:"review".into(),stage_at:3,dispatch_id:"dispatch".into(),submitted_id:String::new(),
+                run_id:String::new(),conversation_id:String::new(),prompt:String::new(),error:"Executor could not be verified".into() };
+            assert!(task.reserve_message(&id,"Keep this comment",&[],&delivery,Some(&owner),&Actor::Person,4).unwrap());
+            assert!(!task.reserve_message(&id,"Keep this comment",&[],&delivery,Some(&owner),&Actor::Person,5).unwrap());
+            assert!(task.finish_message(&id,"submitted","",&Actor::Person,6).is_err());
+            assert_eq!(task.stage().unwrap(),Stage::Review);
+            assert_eq!(task.session(),Some(owner.clone()));
+        }
     }
 
     #[test]

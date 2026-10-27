@@ -1,5 +1,4 @@
 #include "TasksView.h"
-#include <QInputDialog>
 #include <QUuid>
 #include "TaskStageFilter.h"
 #include "TaskContent.h"
@@ -426,15 +425,7 @@ void TasksView::run(QList<Step> steps, std::function<void()> finished, std::func
 void TasksView::act(const TaskItem &task, TaskAction action) {
     if (action == TaskAction::Rename) {
         if (!task.writable) return;
-        auto *dialog = new QInputDialog(this); dialog->setAttribute(Qt::WA_DeleteOnClose);
-        dialog->setObjectName("taskRenameDialog"); dialog->setWindowTitle(tr("Rename task"));
-        dialog->setLabelText(tr("Title")); dialog->setTextValue(task.displayTitle()); dialog->setInputMode(QInputDialog::TextInput);
-        const auto project = m_projectId;
-        connect(dialog, &QDialog::accepted, this, [this, dialog, task, project] {
-            const auto title = dialog->textValue().trimmed();
-            if (!title.isEmpty()) run({{{"rename", task.uuid, "--project", project}, title}});
-        });
-        dialog->open(); return;
+        emit taskRenameRequested(task.uuid); return;
     }
     if (action == TaskAction::Pause) return; // Task-scoped execution accounting must precede pause.
     if (action == TaskAction::Edit) {
@@ -676,6 +667,10 @@ void TasksView::saveTaskEdits(const TaskItem &task, const TaskEdits &edits,
     run(editSteps(task, edits), saved, refused);
 }
 
+void TasksView::renameTask(const QString &uuid, const QString &title, std::function<void()> saved, std::function<void(const QString &)> refused) {
+    run({{withProject({"rename", uuid}), title}}, saved, refused);
+}
+
 void TasksView::saveTaskAssignment(const TaskItem &task, const TaskTarget &target, std::function<void()> saved, std::function<void(const QString &)> refused) {
     run({{withProject(targetArguments(task.uuid, target.host, target.any ? QString() : target.session, target.id, target.mode)), {}}}, saved, refused);
 }
@@ -698,9 +693,17 @@ void TasksView::saveTaskMessage(const QString &uuid, const QString &mode, const 
     const auto project = m_projectId;
     AttachmentFiles::runAsync<TaskMessageOutbox::Request>(this, [project, uuid, mode, dispatch, text, files] {
         return TaskMessageOutbox::reserve(project, uuid, {{"content", QJsonObject{{"text", text}, {"attachments", TaskContent::encode(files)}}}, {"mode", mode}, {"dispatch", dispatch}});
-    }, [this, project, uuid, saved, refused](const TaskMessageOutbox::Request &request) {
+    }, [this, project, uuid, mode, dispatch, text, files, saved, refused](const TaskMessageOutbox::Request &request) {
         if (!request.error.isEmpty()) { refused(request.error); return; }
         if (project != m_projectId) { refused(tr("The selected project changed; the original message was kept for recovery.")); return; }
+        if (request.differentIntent) {
+            // Retain the previous comment in the discussion using a read-only
+            // receipt check, then handle the new explicit submission separately.
+            submitTaskMessage(project, uuid, request.record, true, [this, project, uuid, mode, dispatch, text, files, saved, refused] {
+                if (project != m_projectId) { refused(tr("The selected project changed. Your new comment draft was kept.")); return; }
+                saveTaskMessage(uuid, mode, dispatch, text, files, saved, refused);
+            }, refused); return;
+        }
         submitTaskMessage(project, uuid, request.record, request.recovering, saved, refused);
     });
 }

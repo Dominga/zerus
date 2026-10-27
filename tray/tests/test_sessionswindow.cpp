@@ -61,6 +61,7 @@
 #include "DownloadCache.h"
 #include "ProcessView.h"
 #include "TasksView.h"
+#include "TaskInspector.h"
 #include "ActivityView.h"
 #include "AttachmentViewer.h"
 #include "ExternalFile.h"
@@ -1183,28 +1184,19 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     SessionsWindow window(FakeCli::program(fixture)); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
     window.showSession({}, "codex/hgs/dashboard");
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *view = window.findChild<TasksView *>();
-    auto *badge = window.findChild<TaskTabBadge *>("taskTabBadge"); QVERIFY(tabs && view && badge);
-    QCOMPARE(tabs->tabBar()->tabButton(tabs->indexOf(view), QTabBar::RightSide), badge);
-    // The label counts the project's tasks in In review and To do.
-    QTRY_COMPARE(badge->property("todo").toInt(), 2); QCOMPARE(badge->property("review").toInt(), 1); QVERIFY(badge->isVisible());
-    // The counts take room in the label: the tab widens to hold the text and the badge.
-    QTRY_VERIFY(badge->width() >= badge->sizeHint().width() && badge->width() > 0);
-    QVERIFY(tabs->tabBar()->tabRect(tabs->indexOf(view)).width() > QFontMetrics(tabs->tabBar()->font()).horizontalAdvance("Tasks") + badge->width());
-    QVERIFY(tabs->tabBar()->tabRect(tabs->indexOf(view)).contains(badge->geometry()));
+    QVERIFY(tabs && view); QCOMPARE(tabs->indexOf(view), -1); QVERIFY(!view->isVisible());
+    for (int i = 0; i < tabs->count(); ++i) QVERIFY(tabs->tabText(i).compare("Task board", Qt::CaseInsensitive) != 0);
+    auto *board = window.findChild<TaskInspector *>(); QVERIFY(board);
+    auto *side = window.findChild<QTabWidget *>("sessionInspector");
+    if (!side->isVisible()) window.findChild<QAbstractButton *>("toggleInspector")->click();
+    side->setCurrentWidget(board); QTRY_VERIFY(board->isVisible());
+    QTRY_COMPARE(board->displayedCount(), 1); // Review is the initial stage.
     QFile calls(fixture + ".tasks"); QVERIFY(calls.open(QIODevice::ReadOnly));
     QCOMPARE(QJsonDocument::fromJson(calls.readLine()).array(), QJsonArray({"task", "list", "--project", work}));
-    tabs->setCurrentWidget(view); QTRY_VERIFY(view->isVisible());
-    // The tab keeps Activity's column: the task input lines up with the message input.
-    auto *messages = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(messages);
-    QTRY_COMPARE(view->composer()->mapTo(&window, QPoint()).x(), messages->mapTo(&window, QPoint()).x());
-    QCOMPARE(view->composer()->width(), messages->width());
-    QCOMPARE(view->findChild<QWidget *>("taskTile:review")->mapTo(&window, QPoint()).x(), messages->mapTo(&window, QPoint()).x());
-    QCOMPARE(view->composer()->sessionKey(), QString("task-draft\n\ncodex/hgs/dashboard"));
-    // The project's other session exists, so its pinned task can be sent.
-    view->findChild<QAbstractButton *>("taskTile:todo")->click();
-    auto *row = view->findChild<QWidget *>("taskRow:T-000002"); QVERIFY(row);
+    board->selectTask("T-000002"); QTRY_COMPARE(board->selectedStage(), QString("todo"));
+    auto *row = board->findChild<TaskRow *>("taskInspectorRow:T-000002"); QTRY_VERIFY(row);
     QVERIFY(row->findChild<QToolButton *>("taskAction:sendNow")->isEnabled());
-    QVERIFY(row->findChild<QLabel *>("taskMeta")->text().contains("→ research"));
+    auto *messages = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(messages);
     // The side panel's first tab is the agent's own plan, not the project's tasks.
     QCOMPARE(window.findChild<QTabWidget *>("sessionInspector")->tabText(0), QString("Plan && agents"));
     messages->editor()->setPlainText("Keep my Activity draft");
@@ -1223,7 +1215,6 @@ void TestSessionsWindow::tasksTabFollowsTheOpenSessionsProject()
     // A session in no project explains where tasks live.
     window.showSession({}, "codex/website/navigation");
     QTRY_VERIFY(view->findChild<QLabel *>("taskEmpty")->text().startsWith("Tasks belong to a project"));
-    QCOMPARE(badge->property("todo").toInt(), 0); QVERIFY(!badge->isVisible());
 }
 
 QString TestSessionsWindow::tasksFixture(const QString &name, const QJsonArray &tasks) const
@@ -6741,10 +6732,9 @@ void TestSessionsWindow::inspectorPreservesWorkspaceAndReportsTasks()
     auto *splitter = window.findChild<QSplitter *>("sessionWorkSplitter");
     auto *editor = window.findChild<MessageComposer *>("messageComposer")->findChild<QPlainTextEdit *>("messageInput");
     QVERIFY(tabs && inspector && toggle && panel && splitter && editor);
-    QCOMPARE(tabs->count(), 6); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
-    QCOMPARE(tabs->tabText(2), QString("Task board")); QCOMPARE(tabs->tabText(3), QString("Native UI"));
-    QCOMPARE(tabs->tabText(4),QString("Processes"));QVERIFY(tabs->isTabVisible(4));
-    QVERIFY(tabs->isTabVisible(1)); QVERIFY(tabs->isTabVisible(2)); QVERIFY(!tabs->isTabVisible(3));
+    QCOMPARE(tabs->count(), 5); QCOMPARE(tabs->tabText(0), QString("Activity")); QCOMPARE(tabs->tabText(1), QString("Terminal"));
+    QCOMPARE(tabs->tabText(2), QString("Native UI")); QCOMPARE(tabs->tabText(3), QString("Processes"));
+    QVERIFY(tabs->isTabVisible(1)); QVERIFY(!tabs->isTabVisible(2)); QVERIFY(tabs->isTabVisible(3));
     QVERIFY(panel->isHidden()); QCOMPARE(tabs->cornerWidget(), toggle->parentWidget());
     editor->setPlainText("Keep this draft"); const int originalWidth = tabs->width();
     QTest::mouseClick(toggle, Qt::LeftButton); QTest::qWait(40);

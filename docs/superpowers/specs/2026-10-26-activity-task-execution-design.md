@@ -832,3 +832,22 @@ an initial send. A reserved request is never automatically replayed. Releasing a
 local recovery record requires explicit confirmation and neither cancels nor
 resends native input. Existing full-journal CLI reads remain `zerus-cg5h.2`;
 Task View retains only its bounded selected-task window.
+
+## Owner review follow-up: ordinary comments and stable creation (2026-10-27)
+
+The central Task Board tab is removed; the right inspector is the board, and a
+selected task opens the central Task View. Clicking its title or choosing Rename
+on a card edits the heading in place. Enter or focus departure saves; Escape
+cancels. Refused edits retain their text, and stale detail requests cannot replace
+a newly saved title. New-card input replaces the inspector's count label inside
+a fixed-height header, preserving the filters and list position.
+
+Executor preconditions apply to delivery, not to retaining a discussion entry.
+A refused native preflight saves a comment with a failed delivery and leaves the
+workflow state unchanged. A receipt check that finds no original reservation
+retains the original content with an uncertain outcome and no submission
+authority. It never starts a send. A different new explicit comment first
+recovers the previous comment read-only, then receives its own request identity.
+This removes technical recovery prerequisites from ordinary commenting while
+preserving the rule against replaying unknown native input. Verified submissions
+still follow the existing reopen and exact execution guards.

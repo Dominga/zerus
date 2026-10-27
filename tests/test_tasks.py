@@ -660,14 +660,35 @@ class TaskDelivery(DeliveryFixture):
         sent=self.message(task,"Feedback after rename")
         self.assertEqual(sent["message"]["delivery"]["state"],"submitted"); self.wait_received("Feedback after rename"); self.confirm()
         record=json.loads(self.record_path.read_text()); record["conversation_id"]=str(uuid.uuid4()); self.record_path.write_text(json.dumps(record))
-        self.assertIn("conversation changed",self.message(task,"Wrong conversation",ok=False))
+        refused=self.message(task,"Wrong conversation")
+        self.assertEqual(refused["message"]["delivery"]["state"],"failed")
+        self.assertIn("conversation changed",refused["message"]["delivery"]["error"])
+        self.assertEqual(refused["message"]["text"],"Wrong conversation")
         self.assertNotIn("Wrong conversation",self.received())
 
     def test_a_recovery_check_without_a_reservation_never_sends(self):
         task=self.add("Task", "--target",self.name); task=self.hgs("send",task["ref"])["task"]; self.confirm()
-        self.assertIn("check sent nothing",self.hgs("message",task["ref"],"--request-id",str(uuid.uuid4()),"--mode","send","--expect-dispatch",task["dispatch_id"],
-                "--recover-only",text="Do not send this check",ok=False))
+        identity=str(uuid.uuid4())
+        recovered=self.hgs("message",task["ref"],"--request-id",identity,"--mode","send","--expect-dispatch",task["dispatch_id"],
+                "--recover-only",text="Do not send this check")
+        self.assertEqual(recovered["message"]["delivery"]["state"],"uncertain")
+        self.assertEqual(recovered["message"]["text"],"Do not send this check")
+        self.assertEqual(self.message(task,"Do not send this check",identity=identity)["message"]["delivery"]["state"],"uncertain")
         self.assertNotIn("Do not send this check",self.received())
+
+    def test_stale_execution_comment_is_saved_without_sending_or_reopening(self):
+        task=self.add("Owned task", "--target",self.name)
+        task=self.hgs("send",task["ref"])["task"]; self.confirm()
+        self.hgs("report",task["ref"],text="Ready for review")
+        reviewed=self.hgs("get",task["ref"])["task"]
+        identity=str(uuid.uuid4())
+        saved=self.message(reviewed,"Ordinary review comment",mode="reopen",dispatch=str(uuid.uuid4()),identity=identity)
+        self.assertEqual(saved["message"]["delivery"]["state"],"failed")
+        self.assertEqual(saved["task"]["stage"],"review")
+        self.assertEqual(saved["message"]["text"],"Ordinary review comment")
+        again=self.message(reviewed,"Ordinary review comment",mode="reopen",dispatch=saved["message"]["delivery"]["dispatch_id"],identity=identity)
+        self.assertEqual(len([e for e in again["task"]["log"] if e.get("request_id")==identity]),1)
+        self.assertNotIn("Ordinary review comment",self.received())
 
     def test_a_renamed_task_is_delivered_to_the_same_native_run(self):
         task = self.add("Follow the immutable run", "--target", self.name)

@@ -508,7 +508,6 @@ private:
     class TasksView *m_tasks = nullptr;
     QWidget *m_taskView = nullptr;
     class TaskInspector *m_taskInspector = nullptr;
-    class TaskTabBadge *m_tasksBadge = nullptr;
     QWidget *m_nativeSignIn = nullptr;
     // A stopped OpenCode service: started only by this explicit action.
     QWidget *m_openCodeService = nullptr;

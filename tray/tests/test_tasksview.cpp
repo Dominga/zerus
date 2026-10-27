@@ -2,6 +2,7 @@
 #include "ActivityView.h"
 #include "TaskDialogs.h"
 #include <QSplitter>
+#include <QInputDialog>
 #include <QScrollBar>
 #include <QSpinBox>
 #include "HgsClient.h"
@@ -64,6 +65,8 @@ private slots:
     void initTestCase();
     void namedCardsOpenCentralViewAndRecoverTheOriginalIdentity();
     void taskDocumentAndDiscussionUseActivityComposition();
+    void taskTitleRenamesInPlaceAndKeepsRefusedEdits();
+    void newCommentRecoversPreviousWithoutResending();
     void init() { ComposerDraftStore::flushWrites(); QDir(ComposerDraftStore::directory()).removeRecursively(); QSettings().remove("tasks"); }
     void tilesCountAndChooseTheFirstStage();
     void rowsShowTheQueueAndTheOpenSessionsTasks();
@@ -102,9 +105,12 @@ void TestTasksView::namedCardsOpenCentralViewAndRecoverTheOriginalIdentity() {
     center.resize(750, 700); center.show(); inspector.resize(300, 700); inspector.show();
     board.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); inspector.setContext("project-1", "", "codex/api", sessions());
     QSignalSpy opened(&inspector, &TaskInspector::taskViewRequested);
-    auto *plus = inspector.findChild<QToolButton *>("taskNewCard"); QVERIFY(plus && plus->isEnabled()); plus->click();
+    auto *plus = inspector.findChild<QToolButton *>("taskNewCard"); QVERIFY(plus && plus->isEnabled());
+    auto *list = inspector.findChild<QScrollArea *>("taskInspectorList"); const auto listY = list->y();
+    plus->click(); QTest::qWait(20); QCOMPARE(list->y(), listY);
     auto *title = inspector.findChild<QLineEdit *>("taskNewTitle"); QVERIFY(title->isVisible()); title->setText("Named requirement");
-    QTest::keyClick(title, Qt::Key_Escape); QVERIFY(title->isHidden()); plus->click(); QCOMPARE(title->text(), QString("Named requirement"));
+    QTest::keyClick(title, Qt::Key_Escape); QVERIFY(title->isHidden()); QTest::qWait(20); QCOMPARE(list->y(), listY);
+    plus->click(); QCOMPARE(title->text(), QString("Named requirement")); QTest::qWait(20); QCOMPARE(list->y(), listY);
     QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("add"); fail.close();
     QTest::keyClick(title, Qt::Key_Return);
     auto *error = inspector.findChild<QLabel *>("taskCreateError"); QTRY_VERIFY(error->isVisible()); QVERIFY(title->isReadOnly());
@@ -134,6 +140,49 @@ void TestTasksView::namedCardsOpenCentralViewAndRecoverTheOriginalIdentity() {
     for (int index : {1, 2, 0}) { tabs->setCurrentIndex(index); QTest::qWait(20); QCOMPARE(taskView->height() - footer->mapTo(taskView, QPoint()).y(), footerBottom); }
     QTRY_VERIFY(taskView->findChild<QTextBrowser *>("taskInspectorDetail")->toPlainText().contains("Detailed content"));
     const auto preview = qEnvironmentVariable("HGS_TASK_VIEW_PREVIEW"); if (!preview.isEmpty()) QVERIFY(center.grab().save(preview));
+}
+
+void TestTasksView::taskTitleRenamesInPlaceAndKeepsRefusedEdits() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo", {{"title", "Original title"}})}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(700, 850); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    inspector.setContext("project-1", "", "codex/api", sessions()); QTRY_COMPARE(inspector.displayedCount(), 1); inspector.selectTask("uuid-1");
+    auto *title = inspector.findChild<QLabel *>("taskViewTitle"); auto *editor = inspector.findChild<QPlainTextEdit *>("taskTitleEditor");
+    QTRY_COMPARE(title->text(), QString("Original title"));
+    QTest::mouseClick(title, Qt::LeftButton); QVERIFY(editor->isVisible()); QVERIFY(!title->isVisible());
+    QVERIFY(inspector.findChildren<QInputDialog *>().isEmpty());
+    editor->setPlainText("A longer task title edited in the actual heading"); QTest::keyClick(editor, Qt::Key_Return);
+    QTRY_VERIFY(editor->isHidden()); QTRY_COMPARE(title->text(), QString("A longer task title edited in the actual heading"));
+    QTest::mouseClick(title, Qt::LeftButton); editor->setPlainText("Discard this edit"); QTest::keyClick(editor, Qt::Key_Escape);
+    QVERIFY(editor->isHidden()); QVERIFY(!title->text().contains("Discard"));
+    board.actOnTask(board.board().tasks.first(), TaskAction::Rename); QTRY_VERIFY(editor->isVisible());
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("rename"); fail.close();
+    editor->setPlainText("Keep a refused edit"); QTest::keyClick(editor, Qt::Key_Return);
+    QTRY_VERIFY(inspector.findChild<QLabel *>("taskTitleError")->isVisible()); QCOMPARE(editor->toPlainText(), QString("Keep a refused edit")); QVERIFY(!editor->isReadOnly());
+    QVERIFY(fail.remove()); QTest::keyClick(editor, Qt::Key_Return);
+    QTRY_VERIFY(editor->isHidden()); QTRY_COMPARE(title->text(), QString("Keep a refused edit"));
+}
+
+void TestTasksView::newCommentRecoversPreviousWithoutResending() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(700, 850); inspector.show();
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions()); inspector.setContext("project-1", "", "codex/api", sessions());
+    QTRY_COMPARE(inspector.displayedCount(), 1); inspector.selectTask("uuid-1");
+    auto *composer = inspector.composer(); QTRY_VERIFY(!composer->sessionKey().isEmpty() && !composer->isDraftLoading(composer->sessionKey()));
+    QFile fail(dir.filePath("fail")); QVERIFY(fail.open(QIODevice::WriteOnly)); fail.write("message"); fail.close();
+    composer->editor()->setPlainText("Previous comment with a lost response"); composer->findChild<QPushButton *>("sendMessage")->click();
+    QTRY_VERIFY(inspector.findChild<QLabel *>("taskInspectorNoteError")->isVisible()); QVERIFY(fail.remove());
+    composer->editor()->setPlainText("A new ordinary comment"); composer->findChild<QPushButton *>("sendMessage")->click();
+    QTRY_VERIFY(composer->editor()->toPlainText().isEmpty());
+    const auto calls = FakeTasksCli::calls(dir.path()); QList<QStringList> messages;
+    for (const auto &call : calls) if (call.value(1) == "message") messages << call;
+    QCOMPARE(messages.size(), 3); QVERIFY(messages[1].contains("--recover-only"));
+    const auto id = [](const QStringList &call) { return call.value(call.indexOf("--request-id") + 1); };
+    QCOMPARE(id(messages[0]), id(messages[1])); QVERIFY(id(messages[2]) != id(messages[0])); QVERIFY(!messages[2].contains("--recover-only"));
+    auto *discussion = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
+    QTRY_VERIFY(discussion->toPlainText().contains("Previous comment with a lost response")); QVERIFY(discussion->toPlainText().contains("A new ordinary comment"));
 }
 
 void TestTasksView::taskDocumentAndDiscussionUseActivityComposition() {

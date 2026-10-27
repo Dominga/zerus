@@ -13,7 +13,7 @@
 // QSettings: polling/navigation must never load every pending image into memory.
 // All methods that touch content run on the attachment worker, never the UI.
 namespace TaskMessageOutbox {
-struct Request { QJsonObject record; QString error; bool recovering = true; };
+struct Request { QJsonObject record; QString error; bool recovering = true, differentIntent = false; };
 inline QString key(const QString &project, const QString &task) { return "tasks/messageRequest/" + project + '/' + task; }
 inline QString path(const QString &project, const QString &task) {
     const auto digest = QCryptographicHash::hash((project + '\n' + task).toUtf8(), QCryptographicHash::Sha256).toHex();
@@ -38,8 +38,7 @@ inline Request reserve(const QString &project, const QString &task, const QJsonO
     Request request;
     if (QFileInfo::exists(file) || settings.contains(marker)) {
         request = read(file); if (!request.error.isEmpty()) return request;
-        if (request.record.value("intent").toObject() != intent)
-            return {{}, QObject::tr("Check the previous message before sending different content. Its delivery is still unconfirmed.")};
+        request.differentIntent = request.record.value("intent").toObject() != intent;
     } else {
         request.record = {{"id", QUuid::createUuid().toString(QUuid::WithoutBraces)}, {"intent", intent}}; request.recovering = false;
         QSaveFile output(file); const auto bytes = QJsonDocument(request.record).toJson(QJsonDocument::Compact);

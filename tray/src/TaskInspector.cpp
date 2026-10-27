@@ -8,6 +8,7 @@
 #include <QUuid>
 #include <QJsonDocument>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include "AttachmentViewer.h"
 #include <QMenu>
 #include <QWidgetAction>
@@ -78,14 +79,15 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(2, 10, 2, 0); layout->setSpacing(8);
     auto *header = new QHBoxLayout;
     m_scope = new QLabel; m_scope->setObjectName("taskInspectorScope"); m_scope->setTextFormat(Qt::PlainText); m_scope->setWordWrap(true);
-    header->addWidget(m_scope, 1);
+    m_creationHeader = new QStackedWidget; m_creationHeader->setObjectName("taskCreationHeader"); m_creationHeader->setFixedHeight(32);
+    m_creationHeader->addWidget(m_scope); header->addWidget(m_creationHeader, 1);
     m_add = new QToolButton; m_add->setObjectName("taskNewCard"); m_add->setFixedSize(32, 32); m_add->setIconSize({20, 20});
     m_add->setEnabled(false); m_add->setToolTip(tr("New task")); m_add->setAccessibleName(m_add->toolTip()); header->addWidget(m_add);
     m_board->moveControlsTo(header); layout->addLayout(header);
     m_newTitle = new QLineEdit; m_newTitle->setObjectName("taskNewTitle"); m_newTitle->setMaxLength(512);
-    m_newTitle->installEventFilter(this); m_newTitle->setPlaceholderText(tr("Task title · Enter to create")); m_newTitle->setAccessibleName(tr("New task title")); m_newTitle->hide(); layout->addWidget(m_newTitle);
-    m_createError = new QLabel; m_createError->setObjectName("taskCreateError"); m_createError->setWordWrap(true); m_createError->setTextFormat(Qt::PlainText); m_createError->hide(); layout->addWidget(m_createError);
-    connect(m_add, &QToolButton::clicked, this, [this] { m_newTitle->show(); m_newTitle->setFocus(); });
+    m_newTitle->installEventFilter(this); m_newTitle->setPlaceholderText(tr("Task title · Enter to create")); m_newTitle->setAccessibleName(tr("New task title")); m_creationHeader->addWidget(m_newTitle);
+    m_createError = new QLabel; m_createError->setObjectName("taskCreateError"); m_createError->setWordWrap(true); m_createError->setTextFormat(Qt::PlainText); m_createError->hide();
+    connect(m_add, &QToolButton::clicked, this, [this] { m_creationHeader->setCurrentWidget(m_newTitle); m_newTitle->setFocus(); });
     connect(m_newTitle, &QLineEdit::textEdited, this, [this](const QString &text) {
         if (m_creation.isEmpty()) QSettings().setValue("tasks/newCard/" + m_project + "/title", text);
     });
@@ -120,6 +122,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     auto *boardPane = new QWidget; auto *boardLayout = new QVBoxLayout(boardPane);
     boardLayout->setContentsMargins(0, 0, 0, 0); boardLayout->setSpacing(0); boardLayout->addWidget(m_scroll, 1);
     m_older = new QPushButton; m_older->setObjectName("taskInspectorOlder"); m_older->hide(); boardLayout->addWidget(m_older);
+    boardLayout->addWidget(m_createError);
     connect(m_older, &QPushButton::clicked, this, [this] { m_showOlder = !m_showOlder; refresh(); });
     m_splitter = new QSplitter(Qt::Vertical); m_splitter->setObjectName("taskInspectorSplit");
     m_splitter->setHandleWidth(7); m_splitter->setChildrenCollapsible(false); m_splitter->addWidget(boardPane);
@@ -129,7 +132,15 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_headerColumn = new ActivityWidth::ColumnLayout; details->addLayout(m_headerColumn);
     auto *heading = new QHBoxLayout; heading->setContentsMargins(14, 10, 14, 0); heading->setSpacing(12);
     m_title = new QLabel; m_title->setObjectName("taskViewTitle"); m_title->setTextFormat(Qt::PlainText); m_title->setWordWrap(true);
-    heading->addWidget(m_title, 1);
+    m_title->setCursor(Qt::IBeamCursor); m_title->installEventFilter(this);
+    auto *titleColumn = new QVBoxLayout; titleColumn->setContentsMargins(0, 0, 0, 0); titleColumn->setSpacing(4); titleColumn->addWidget(m_title);
+    m_titleEditor = new QPlainTextEdit; m_titleEditor->setObjectName("taskTitleEditor"); m_titleEditor->setAccessibleName(tr("Task title · Enter to save, Escape to cancel"));
+    m_titleEditor->setTabChangesFocus(true); m_titleEditor->installEventFilter(this); m_titleEditor->hide(); titleColumn->addWidget(m_titleEditor);
+    connect(m_titleEditor, &QPlainTextEdit::textChanged, this, [this] {
+        if (m_titleEditor->isVisible() && !m_titleSaving) QSettings().setValue("tasks/titleDraft/" + m_project + '/' + m_selected, m_titleEditor->toPlainText());
+    });
+    m_titleError = new QLabel; m_titleError->setObjectName("taskTitleError"); m_titleError->setTextFormat(Qt::PlainText); m_titleError->setWordWrap(true); m_titleError->hide(); titleColumn->addWidget(m_titleError);
+    heading->addLayout(titleColumn, 1);
     auto *rename = new QPushButton; rename->setObjectName("taskViewRename"); rename->setProperty("taskHeaderButton", true);
     rename->setFixedSize(32, 32); rename->setIconSize({20, 20}); rename->setToolTip(tr("Task actions")); rename->setAccessibleName(rename->toolTip());
     heading->addWidget(rename, 0, Qt::AlignTop); m_headerColumn->addLayout(heading);
@@ -142,7 +153,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
         if (selectionPending()) return;
         auto *menu = new QMenu(rename); menu->setAttribute(Qt::WA_DeleteOnClose);
         const auto task = TaskBoard::item(labels(m_detail));
-        menu->addAction(tr("Rename task…"), this, [this, task] { m_board->actOnTask(task, TaskAction::Rename); })->setEnabled(task.writable);
+        menu->addAction(tr("Rename task"), this, &TaskInspector::beginRename)->setEnabled(task.writable);
         menu->addAction(tr("Task and discussion"), this, [this] { m_detailTabs->setCurrentIndex(0); });
         menu->addAction(tr("Result"), this, [this] { m_detailTabs->setCurrentIndex(1); });
         menu->addAction(tr("History"), this, [this] { m_detailTabs->setCurrentIndex(2); });
@@ -222,10 +233,13 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     m_inputColumn = new ActivityWidth::ColumnLayout; details->addLayout(m_inputColumn);
     m_messageMode = new ToolbarChip; m_messageMode->setObjectName("taskMessageMode"); m_messageMode->setTone(ChipTone::Quiet); m_messageMode->setActive(true);
     m_commentComposer->toolbar()->add(ComposerToolbar::Slot::Recovery, m_messageMode);
-    m_checkMessage = new QPushButton(tr("Check previous message")); m_checkMessage->setObjectName("taskMessageCheck"); m_checkMessage->setProperty("taskHeaderButton", true);
+    m_checkMessage = new QPushButton(tr("Recover saved comment")); m_checkMessage->setObjectName("taskMessageCheck"); m_checkMessage->setProperty("taskHeaderButton", true);
     m_checkMessage->hide(); m_checkMessage->setFixedHeight(24); m_commentComposer->toolbar()->add(ComposerToolbar::Slot::Recovery, m_checkMessage);
-    auto *recoveryMenu = new QMenu(m_checkMessage); m_checkMessage->setMenu(recoveryMenu);
+    m_checkMessage->setToolTip(tr("Keep the previous comment in the task and check its delivery. It will not be sent again."));
+    auto *recoveryMenu = new QMenu(m_checkMessage); m_checkMessage->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_checkMessage, &QWidget::customContextMenuRequested, this, [this, recoveryMenu](const QPoint &point) { recoveryMenu->popup(m_checkMessage->mapToGlobal(point)); });
     auto *checkReceipt = recoveryMenu->addAction(tr("Check delivery receipt"));
+    connect(m_checkMessage, &QPushButton::clicked, checkReceipt, &QAction::trigger);
     auto *releaseRequest = recoveryMenu->addAction(tr("Release local recovery record…"));
     connect(releaseRequest, &QAction::triggered, this, [this] {
         if (!canLeaveDetails() || selectionPending()) return;
@@ -338,6 +352,10 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
         selectTask(uuid); if (m_selected != uuid) return;
         m_inlineRequested = uuid; openInlineDetails();
     });
+    connect(m_board, &TasksView::taskRenameRequested, this, [this](const QString &uuid) {
+        openTask(uuid); if (m_selected != uuid) return;
+        m_renameRequested = uuid; if (!selectionPending()) beginRename();
+    });
     connect(m_board, &TasksView::boardChanged, this, &TaskInspector::refresh);
     connect(m_client, &HgsClient::taskReady, this, [this](quint64 id, const QJsonObject &reply) {
         if (id != m_request) return;
@@ -384,7 +402,7 @@ void TaskInspector::setContext(const QString &project, const QString &host, cons
     const bool changed = project != m_project || host != m_host
         || (id.isEmpty() || m_sessionId.isEmpty() ? name != m_session : id != m_sessionId);
     if (changed && !canLeaveDetails()) return;
-    if (changed) closeInlineDetails();
+    if (changed) { closeInlineDetails(); m_titleEditor->hide(); m_title->show(); m_titleError->hide(); m_renameRequested.clear(); }
     m_project = project; m_host = host; m_session = name; m_sessionId = id; m_sessions = sessions;
     if (changed) { restoreNewCard(); m_descriptionEditing = false; ++m_generation; m_selected.clear(); m_detail = {}; m_stage.clear(); m_showOlder = false; }
     refresh();
@@ -408,6 +426,7 @@ void TaskInspector::selectTask(const QString &uuid) {
         break;
     }
     if (m_selected != uuid) {
+        m_titleEditor->hide(); m_title->show(); m_titleError->hide(); m_renameRequested.clear();
         m_noteError->hide(); m_descriptionEditing = false; m_descriptionSeed = false; m_pendingDetail = {}; m_selected = uuid; m_inlineRequested.clear(); ++m_generation; m_historyVisible = 8; m_historyBefore = {};
         const QSignalBlocker blocker(m_detailTabs); m_detailTabs->setCurrentIndex(0);
     }
@@ -517,9 +536,19 @@ void TaskInspector::endListDrag() { m_autoScroll.stop(); m_overList = false; m_s
 
 bool TaskInspector::eventFilter(QObject *watched, QEvent *event) {
     const auto type = event->type();
+    if (watched == m_title && type == QEvent::MouseButtonRelease && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton && !selectionPending()) { beginRename(); return true; }
+    if (watched == m_titleEditor) {
+        if (type == QEvent::KeyPress || type == QEvent::ShortcutOverride) {
+            const int key = static_cast<QKeyEvent *>(event)->key();
+            if (key == Qt::Key_Escape || key == Qt::Key_Return || key == Qt::Key_Enter) {
+                event->accept(); if (type == QEvent::KeyPress) { if (key == Qt::Key_Escape) cancelRename(); else finishRename(); } return true;
+            }
+        }
+        if (type == QEvent::FocusOut && m_titleEditor->isVisible()) finishRename();
+    }
     if (watched == m_newTitle && (type == QEvent::ShortcutOverride || type == QEvent::KeyPress)
         && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
-        event->accept(); if (type == QEvent::KeyPress && !m_creating) m_newTitle->hide(); return true;
+        event->accept(); if (type == QEvent::KeyPress && !m_creating) m_creationHeader->setCurrentWidget(m_scope); return true;
     }
     if (watched == m_details && (type == QEvent::Show || type == QEvent::Hide)) {
         QTimer::singleShot(0, this, [this] { m_board->setInspectorVisible(isVisible() || m_details->isVisible()); if (m_details->isVisible()) fetch(); });
@@ -600,7 +629,7 @@ void TaskInspector::renderDetail() {
     const auto data = labels(m_detail); auto task = TaskBoard::item(data);
     for (const auto &listed : m_board->board().tasks) if (listed.uuid == task.uuid) { task.queue = listed.queue; break; }
     m_identity->setText(task.id.isEmpty() ? QString() : task.id + " · " + TaskBoard::stageLabel(task.stage));
-    m_title->setText(task.displayTitle()); m_title->setToolTip(task.ref + " · " + TaskBoard::stageLabel(task.stage));
+    m_title->setText(task.displayTitle()); m_title->setToolTip(task.ref + " · " + TaskBoard::stageLabel(task.stage) + tr("\nClick to rename"));
     m_details->findChild<QPushButton *>("taskViewRename")->setEnabled(!m_detail.isEmpty() && task.writable);
     m_open->setEnabled(!m_detail.isEmpty() && executor()); m_edit->setEnabled(!m_detail.isEmpty() && task.writable && (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog")));
     m_detailTabs->setEnabled(!m_detail.isEmpty()); m_moreDetail->hide(); m_moreDetail->setEnabled(true);
@@ -685,11 +714,18 @@ void TaskInspector::renderDetail() {
             const auto delivery = record.value("delivery").toObject(); const auto state = delivery.value("state").toString();
             const auto status = kind == "comment" || state == "note" ? tr("Saved note · not sent")
                 : state == "queued" ? tr("Waiting for Start") : state == "submitted" ? (delivery.value("mode") == "queue" ? tr("Included in Start request") : task.worker.isEmpty() ? tr("Submitted to executor") : tr("Submitted to coordinator · child receipt unavailable"))
-                : state == "failed" ? tr("Not delivered") : tr("Delivery unconfirmed · not resent");
+                : state == "failed" ? tr("Saved in task · not sent") : tr("Saved in task · delivery unconfirmed");
             auto entry = journalEntry(record.value("request_id").toString(QString("comment-%1").arg(count)), record.value("actor").toObject(),
                 kind == "comment" || state == "note" ? tr("Note") : tr("Message"), record.value("text").toString(), record.value("at").toDouble());
             entry["attachments"] = record.value("attachments"); entry["delivery"] = status;
-            const auto error = delivery.value("error").toString(); if (!error.isEmpty()) entry["text"] = entry.value("text").toString() + "\n\n" + error;
+            const auto error = delivery.value("error").toString();
+            if (!error.isEmpty()) {
+                const auto reason = error.contains("execution changed") || error.contains("identity changed") || error.contains("conversation changed")
+                    || error.contains("dispatch receipt") || error.contains("dispatched run")
+                    ? tr("Your comment is saved here. The task’s previous executor could not be verified, so it was not sent. Open executor Activity to continue the discussion, or return the task to To do and start it with the current executor.")
+                    : error;
+                entry["text"] = entry.value("text").toString() + "\n\n" + reason;
+            }
             entries.append(entry); ++count;
         }
         if (!count) entries.append(QJsonObject{{"id", "discussion-empty"}, {"role", "event"}, {"text", tr("Messages and notes appear here.")}});
@@ -773,6 +809,7 @@ void TaskInspector::publishDetail(QJsonObject task) {
     m_pendingDetail = {};
     if (task != m_detail) { m_detail = task; renderDetail(); }
     if (m_inlineRequested == m_selected) openInlineDetails();
+    if (m_renameRequested == m_selected) beginRename();
 }
 
 void TaskInspector::showAssignment() {
@@ -827,7 +864,45 @@ void TaskInspector::showAssignment() {
 }
 
 bool TaskInspector::canLeaveDetails() {
-    return !m_noteBusy && !m_commentComposer->isRecording() && !m_commentComposer->isSending(m_commentComposer->sessionKey()) && !m_commentComposer->isPreparingSending(m_commentComposer->sessionKey());
+    return !m_titleSaving && !m_noteBusy && !m_commentComposer->isRecording() && !m_commentComposer->isSending(m_commentComposer->sessionKey()) && !m_commentComposer->isPreparingSending(m_commentComposer->sessionKey());
+}
+
+void TaskInspector::beginRename() {
+    if (selectionPending() || m_detail.isEmpty() || !m_detail.value("writable").toBool(true) || !canLeaveDetails()) return;
+    m_renameRequested.clear();
+    const auto key = "tasks/titleDraft/" + m_project + '/' + m_selected;
+    m_titleEditor->setPlainText(QSettings().value(key, TaskBoard::item(m_detail).displayTitle()).toString());
+    m_titleEditor->setFixedHeight(qMax(m_title->height() + 8, m_titleEditor->fontMetrics().lineSpacing() * 2 + 16));
+    m_title->hide(); m_titleEditor->setReadOnly(false); m_titleEditor->show(); m_titleEditor->setFocus(); m_titleEditor->selectAll(); m_titleError->hide();
+}
+
+void TaskInspector::cancelRename() {
+    if (m_titleSaving) return;
+    QSettings().remove("tasks/titleDraft/" + m_project + '/' + m_selected);
+    m_titleEditor->hide(); m_title->show(); m_titleError->hide(); m_renameRequested.clear();
+}
+
+void TaskInspector::finishRename() {
+    if (m_titleSaving || !m_titleEditor->isVisible() || selectionPending()) return;
+    const auto title = m_titleEditor->toPlainText().trimmed();
+    if (title.isEmpty() || title.toUtf8().size() > 512 || std::any_of(title.begin(), title.end(), [](QChar c) { return c.category() == QChar::Other_Control; })) {
+        m_titleError->setText(tr("Enter a single-line title, up to 512 bytes. Enter saves; Escape cancels.")); m_titleError->show(); return;
+    }
+    if (title == TaskBoard::item(m_detail).displayTitle()) { cancelRename(); return; }
+    m_titleSaving = true; m_titleEditor->setReadOnly(true); m_titleError->hide();
+    const auto uuid = m_selected; const auto project = m_project; QPointer<TaskInspector> guard(this);
+    m_board->renameTask(uuid, title, [guard, uuid, project, title] {
+        QSettings().remove("tasks/titleDraft/" + project + '/' + uuid);
+        if (!guard) return; guard->m_titleSaving = false;
+        if (guard->m_selected == uuid && guard->m_project == project) {
+            ++guard->m_generation; guard->m_detail["title"] = title; guard->cancelRename(); guard->renderDetail(); guard->fetch();
+        }
+    }, [guard, uuid, project](const QString &error) {
+        if (!guard) return; guard->m_titleSaving = false;
+        if (guard->m_selected == uuid && guard->m_project == project) {
+            guard->m_titleEditor->setReadOnly(false); guard->m_titleError->setText(tr("Title was not saved. Your edit is kept. Try Enter again.\n%1").arg(error)); guard->m_titleError->show();
+        }
+    });
 }
 
 void TaskInspector::closeInlineDetails() {
@@ -894,7 +969,7 @@ void TaskInspector::setTheme(bool dark) {
         "#taskInspector QLabel{color:%1;}QScrollArea,#taskInspectorCards{background:%2;border:0;}"
         "#taskDetailsPane{background:%6;color:%1;border:0;}#taskDetailsPane QLabel{color:%1;}"
         "#taskInspectorState,#taskDetailEmpty,#taskViewIdentity, #taskMessageMode{color:%4;font-size:11px;}"
-        "#taskViewTitle{color:%1;font-size:16px;font-weight:600;}"
+        "#taskViewTitle,#taskTitleEditor{color:%1;font-size:16px;font-weight:600;}"
         "#taskDetailsPane QPushButton[taskHeaderButton=\"true\"],#taskInspectorActions QPushButton{color:%1;background:%2;border:1px solid %3;border-radius:7px;padding:5px 9px;}"
         "#taskDetailsPane QPushButton[taskHeaderButton=\"true\"]:disabled,#taskInspectorActions QPushButton:disabled{color:%4;}"
         "#taskDetailsPane #taskOpenActivity,#taskDetailsPane #taskInspectorEdit{padding:0;border:0;background:transparent;}"
@@ -936,7 +1011,7 @@ void TaskInspector::restoreNewCard() {
     QSettings settings; const auto key = "tasks/newCard/" + m_project;
     m_creation = QJsonDocument::fromJson(settings.value(key + "/request").toByteArray()).object();
     m_newTitle->setText(m_creation.isEmpty() ? settings.value(key + "/title").toString() : m_creation.value("title").toString());
-    m_newTitle->setReadOnly(!m_creation.isEmpty()); m_newTitle->setVisible(!m_newTitle->text().isEmpty());
+    m_newTitle->setReadOnly(!m_creation.isEmpty()); m_creationHeader->setCurrentWidget(m_newTitle->text().isEmpty() ? static_cast<QWidget *>(m_scope) : m_newTitle);
     m_add->setEnabled(!m_project.isEmpty()); m_createError->hide();
     if (!m_creation.isEmpty()) { m_createError->setText(tr("Creation was interrupted. Press Enter to recover this same card.")); m_createError->show(); }
 }
@@ -960,7 +1035,7 @@ void TaskInspector::createCard() {
         if (!guard) return;
         guard->m_creating = false; QSettings settings; settings.remove(key); settings.sync();
         if (project != guard->m_project) return;
-        guard->m_creation = {}; guard->m_newTitle->clear(); guard->m_newTitle->setReadOnly(false); guard->m_newTitle->hide();
+        guard->m_creation = {}; guard->m_newTitle->clear(); guard->m_newTitle->setReadOnly(false); guard->m_creationHeader->setCurrentWidget(guard->m_scope);
         guard->openTask(task.value("uuid").toString()); guard->m_inlineRequested = task.value("uuid").toString(); guard->publishDetail(task); guard->m_commentComposer->editor()->setFocus();
     }, [guard, project](const QString &error) {
         if (!guard) return; guard->m_creating = false;

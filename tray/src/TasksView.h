@@ -97,6 +97,7 @@ public:
     void reviewExecutorLaunch(const QString &uuid) { emit executorLaunchReviewRequested(uuid); }
     void createNamedTask(const QJsonObject &intent, std::function<void(const QJsonObject &)> saved, std::function<void(const QString &)> refused);
     void saveTaskEdits(const TaskItem &task, const TaskEdits &edits, std::function<void()> saved, std::function<void(const QString &)> refused);
+    void renameTask(const QString &uuid, const QString &title, std::function<void()> saved, std::function<void(const QString &)> refused);
     void saveTaskAssignment(const TaskItem &task, const TaskTarget &target, std::function<void()> saved, std::function<void(const QString &)> refused);
     void saveTaskNote(const QString &uuid, const QString &text, const QList<MessageAttachment> &files, std::function<void()> saved, std::function<void(const QString &)> refused);
     void saveTaskMessage(const QString &uuid, const QString &mode, const QString &dispatch, const QString &text, const QList<MessageAttachment> &files, std::function<void()> saved, std::function<void(const QString &)> refused);
@@ -116,6 +117,7 @@ signals:
     void boardChanged();
     void taskSelected(const QString &uuid);
     void taskEditRequested(const QString &uuid);
+    void taskRenameRequested(const QString &uuid);
     void executorLaunchReviewRequested(const QString &uuid);
     void newExecutorRequested(const TaskItem &task, const QString &project);
     void taskDragFinished();

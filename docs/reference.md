@@ -900,7 +900,7 @@ application and window switchers.
 | Rename session | F2 | F2 |
 | Search sessions | Ctrl+F | ⌘F |
 | Refresh | Ctrl+R, F5 | ⌘R, F5 |
-| Next / previous tab (Activity, Terminal, Task board, Native UI, Processes) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
+| Next / previous tab (Activity, Terminal, Native UI, Processes, Task View) | Ctrl+Tab / Ctrl+Shift+Tab | ⌃Tab / ⌃⇧Tab |
 | Switch between Activity and Terminal | Ctrl+` | ⌃` |
 | Show or hide the side panel | Ctrl+I | ⌘I |
 | Next / previous area (list, conversation, message field, side panel) | F6 / Shift+F6 | F6 / ⇧F6 |
@@ -2472,8 +2472,13 @@ the task to In progress. Submission does not establish model consumption.
 The replicated schema-five outbox is reserved durably before native input. A
 repeated request verifies the original content, mode and execution and reads the
 receipt; it never retries a reserved native send, even if no receipt survived.
-SSH failures retain the desktop's original request for **Check previous message**.
-That check uses `--recover-only` and cannot initiate a missing send. Original
+SSH failures retain the desktop's original request for **Recover saved comment**.
+That check uses `--recover-only` and cannot initiate a missing send. If no
+reservation can be found, it retains the original comment in the discussion with
+an unconfirmed outcome and no native submission authority. A different new
+comment first completes that read-only recovery, then reserves its own identity.
+An executor precondition refusal saves the comment with a failed delivery, leaves
+the task's stage unchanged, and does not submit native input. Original
 payloads are private per-task files read and written off the UI thread; settings
 contain only small markers. Explicitly releasing a local recovery record neither
 cancels nor resends native input.
@@ -2581,64 +2586,46 @@ task list from Zerus's SessionStart hook; `hgs guide tasks` lists the commands.
 There is no MCP server; sessions without bypassed permissions are not covered
 (Claude Code asks first, Codex's sandbox blocks the task store and SSH).
 
-In the desktop, the **Task board** tab beside Activity and Terminal shows the open
-session's project. Stage tiles (In review, In progress, To do, Backlog, Done)
-filter one list; the funnel tile keeps only the open session's tasks and the Any
-session tasks it can take, and the gear opens the project's task settings. A row
-shows its actions on hover, and a click returns to Activity with that task selected
-in the right **Tasks** inspector. Its fixed lower pane contains description,
-attachments, assignment, result, history and task notes. The icon-only **Task details**
-action opens the inline description/attachment/assignment form (editable in To do
-and Backlog), without opening a duplicate window. The input below files a
-task for the open session in To do, or in Backlog while Backlog is open. The tab
-label counts the tasks In review and in To do. Done lists the last 7 days, and
-Show older adds the rest. A session outside every project has no tasks.
-Rows in every writable stage can be dragged within their current list to save
-their board order. This does not change execution or interrupt running work.
-To do and Backlog additionally support drops on the other list's stage tile,
-on a project session to assign them, or on the project header for Any session.
+In the desktop, the right **Tasks** inspector is the project board. There is no
+Task Board tab beside Activity. Stage tiles (In review, In progress, To do,
+Backlog, Done) filter one list; the funnel keeps this session's tasks and Any
+session tasks it can take, and the gear opens project settings. Narrow filters
+keep icons and counts; wider filters include captions. The plus replaces the
+count label with a title field in the same header: Enter creates the named card
+and opens its description for editing. Escape closes the field and keeps its
+local draft. Adding a card does not move the filters or list viewport.
 
-The **Tasks** inspector hosts the board's session filter and project settings
-buttons. The funnel switches between this session and all project tasks and keeps
-its saved setting. It uses the same stage filters and task cards as the project
-board. Stage labels appear when the panel is wide enough; narrow filters keep
-their icons, counts, tooltips and accessible names. The board occupies the upper
-pane; selecting a card updates the permanent lower details pane without moving
-cards or changing the list viewport. Drag the divider to resize these panes; its
-position is saved. Both board surfaces support ordering cards in every stage,
-with an insertion marker and edge scrolling. Stage and assignment drops retain
-their workflow guards. Right-click a card for the same actions as its menu.
-Compact cards expose their primary action: Start task for To do/Backlog, Accept
-for Review and Back to To do for Done. Task pause is disabled until independent
-task execution accounting exists; it never interrupts the whole session.
-The lower pane keeps a stable icon-only **Task details** action. Its inline form
-uses Save/Cancel and keeps edits on refusal. Assignment appears on Description;
-workflow commands stay in the bottom action bar on every tab, separately from
-unsaved description changes. Notes saved here enter task history and are not
-messages to the executor. Failed note saves retain the draft and show the error
-beside it. Note drafts survive task selection and application restart locally.
-Selection reads retain the previous document until the selected task's exact
-reply arrives, with controls disabled during the read; there is no blank loading
-frame or reconstruction of the command buttons.
-Full reports and cancellations appear only
-after selecting a task. Its **Description**, **Result** and **History** sections are
-separate, with complete tab captions. Task text, reports and comments use the same
-Markdown and message-card renderer as Activity, retaining authors and timestamps.
-Descriptions and results open at the beginning; history opens at its latest entry.
-History starts with eight recent events and offers earlier entries explicitly.
-Owner highlighting stays subtle;
-the selected task has the accent outline.
-It retains at most 100 listed tasks and 80 selected-task history entries. Earlier
-history pages load inside the same pane; Latest returns to the tail. Appended
-events do not shift an anchored older page. Legacy CLI reads still transfer the
-full journal; indexed backend reads remain a separate tracked change.
-**Assigned to** identifies routing; **Executor** requires a recorded start.
-An unconfirmed start is labelled explicitly. **Agent report** is the saved report,
-not proof that a commit was merged or a build installed. **Open Activity** follows
-the retained executor identity, including after a rename. This first inspector
-slice shares the existing board poll; To do starts through **Start task**.
-Automatic dispatch, task-scoped Activity discussion and verified result milestones
-are specified in `superpowers/specs/2026-10-26-activity-task-execution-design.md`.
+Clicking a card opens the reusable central **Task View**, preserving the Activity
+conversation and its input draft. Click the task heading to rename it in place,
+or choose Rename in the card menu. Enter or leaving the heading saves; Escape
+cancels. A refused rename retains the edit. Description is a document followed by
+the discussion; editing it is an explicit Save/Cancel operation available in To
+do and Backlog. The assignment control changes the executor plan separately.
+Workflow commands remain separate from unsaved description edits. Result and
+History open through the task menu. Reports are not proof of a merge or install.
+
+The Task View uses Activity's Markdown renderer, content width and rich input,
+including attachment previews, voice drafts and per-task local recovery. The
+input explicitly names whether it edits the description, saves a note, queues
+context for Start, sends feedback, or requests changes. Comments stay in the
+discussion with their delivery status; a refused executor check saves the comment
+without sending it or reopening work. Recovery never replays unknown input.
+Selection retains the previous painted document until the exact selected reply
+arrives. Earlier history pages load in the same view; Latest returns to the tail.
+The GUI retains at most 100 listed tasks and 80 selected-task history entries.
+Legacy CLI reads still transfer the full journal; indexed backend reads remain a
+separate tracked change.
+
+Rows in every writable stage can be reordered with an insertion marker and edge
+scrolling. This does not change execution or interrupt work. To do and Backlog
+also accept stage and assignment drops. Right-click a card for its actions.
+Compact cards expose Start task for To do/Backlog, Accept for Review and Back to
+To do for Done. Task pause is disabled until independent execution accounting
+exists. Executor labels and Open Activity follow retained immutable session
+identity across renames. An unconfirmed start is labelled explicitly. The board
+and selected Task View share one polling controller. Full execution and result
+milestones remain specified in
+`superpowers/specs/2026-10-26-activity-task-execution-design.md`.
 
 ## Machines and accounts
 

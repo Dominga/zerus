@@ -5,7 +5,7 @@
 use super::super::*;
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 pub(crate) fn path() -> PathBuf {
@@ -48,6 +48,34 @@ pub(crate) struct Role {
     /// Section 9.8: this role may lead a sub-team.
     #[serde(default)]
     pub can_lead_subteam: bool,
+    // U25: the editable role from the owner's designer.
+    #[serde(default)]
+    pub about: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub machines: Vec<String>,
+    /// lead, some or team.
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub message_to: Vec<String>,
+    #[serde(default)]
+    pub joins: String,
+    #[serde(default)]
+    pub danger: Value,
+    #[serde(default)]
+    pub protocol_extra: String,
+    #[serde(default)]
+    pub task_template: String,
+    #[serde(default)]
+    pub prompt_order: Vec<String>,
+    #[serde(default)]
+    pub prompt_off: Vec<String>,
+    #[serde(default)]
+    pub notes: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -73,13 +101,19 @@ pub(crate) struct SkeletonTask {
     /// Indexes of earlier skeleton tasks.
     #[serde(default)]
     pub deps: Vec<usize>,
+    /// U25: the phase this skeleton task belongs to.
+    #[serde(default = "one_phase")]
+    pub phase: u32,
+}
+fn one_phase() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Template {
     pub id: String,
     pub name: String,
-    #[serde(default)]
+    #[serde(default, alias = "desc")]
     pub description: String,
     #[serde(default)]
     pub lead_protocol: String,
@@ -98,6 +132,12 @@ pub(crate) struct Template {
     pub phase_approval: String,
     #[serde(default)]
     pub max_members: usize,
+    /// U25: worktree, clone, same or cloud.
+    #[serde(default)]
+    pub work: String,
+    /// U25: same, owner or lead (new phases).
+    #[serde(default)]
+    pub phases: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -108,6 +148,10 @@ pub(crate) struct Rule {
     pub template: String,
     #[serde(default)]
     pub approval: String,
+    /// U25: a template id (stops the search) or "+role" (adds a member and
+    /// keeps looking). Empty uses `template`.
+    #[serde(default, rename = "use")]
+    pub use_: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -213,7 +257,7 @@ pub(crate) fn builtin() -> Catalog {
         role("researcher", "Researcher", "#b9d36b", "claude", "", "read_only", &format!("You are the Researcher: find facts and options with sources; change no code. {finish}")),
     ];
     let seat = |role: &str, count: u32, optional: bool| Seat { role: role.into(), count, optional, subteam: String::new() };
-    let task = |title: &str, role: &str, deps: &[usize]| SkeletonTask { title: title.into(), role: role.into(), deps: deps.to_vec() };
+    let task = |title: &str, role: &str, deps: &[usize]| SkeletonTask { title: title.into(), role: role.into(), deps: deps.to_vec(), phase: 1 };
     let templates = vec![
         Template {
             id: "feature".into(),
@@ -243,7 +287,7 @@ pub(crate) fn builtin() -> Catalog {
             ..Default::default()
         },
     ];
-    let routing = vec![Rule { id: "bug".into(), when: "bug fix".into(), template: "bugfix".into(), approval: "review".into() }];
+    let routing = vec![Rule { id: "bug".into(), when: "bug fix".into(), template: "bugfix".into(), approval: "review".into(), use_: String::new() }];
     Catalog { version: 1, roles, templates, routing }
 }
 
@@ -265,7 +309,15 @@ fn load_draft() -> anyhow::Result<Draft> {
 
 fn save(catalog: &Catalog) -> anyhow::Result<()> {
     private_dir(&root().join("teams")).map_err(anyhow::Error::msg)?;
+    // U25 Revert: keep the previous version before the new one lands.
+    if path().exists() {
+        let _ = fs::copy(path(), prev_path());
+    }
     atomic(&path(), &serde_json::to_string_pretty(catalog)?).map_err(anyhow::Error::msg)
+}
+
+fn prev_path() -> PathBuf {
+    root().join("teams/catalog.prev.json")
 }
 
 fn save_draft(draft: &Draft) -> anyhow::Result<()> {
@@ -293,6 +345,20 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
         ensure!(!role.name.trim().is_empty(), "Role {} needs a name", role.id);
         ensure!(roles.insert(role.id.clone(), ()).is_none(), "Role {} is listed twice", role.id);
         ensure!(role.prompt.len() <= 8000, "The prompt of role {} is too long", role.id);
+        // U25: the role's editable prompt order and notes.
+        ensure!(role.about.chars().count() <= 500, "The about of role {} is too long", role.id);
+        ensure!(role.skills.len() <= 20, "Role {} has at most 20 skills", role.id);
+        ensure!(matches!(role.message.as_str(), "" | "lead" | "some" | "team"), "Role {}: message is lead, some or team", role.id);
+        for key in &role.prompt_off {
+            ensure!(role.prompt_order.contains(key) || role.notes.contains_key(key), "Role {} turns off unknown block {key}", role.id);
+        }
+        for key in &role.prompt_order {
+            ensure!(
+                matches!(key.as_str(), "rules" | "role" | "protocol" | "task") || role.notes.contains_key(key),
+                "Role {}: unknown prompt block {key}",
+                role.id
+            );
+        }
     }
     let mut templates = BTreeMap::new();
     for template in &catalog.templates {
@@ -307,10 +373,22 @@ pub(crate) fn validate(catalog: &Catalog) -> anyhow::Result<()> {
         }
         ensure!(matches!(template.phase_approval.as_str(), "" | "review" | "auto"),
             "Template {}: phase approval is \"\", review or auto", template.id);
+        ensure!(matches!(template.work.as_str(), "" | "worktree" | "clone" | "same" | "cloud"),
+            "Template {}: work is worktree, clone, same or cloud", template.id);
+        ensure!(matches!(template.phases.as_str(), "" | "same" | "owner" | "lead"),
+            "Template {}: phases is same, owner or lead", template.id);
+        for task in &template.tasks {
+            ensure!(task.phase >= 1, "Template {}: a task phase starts at 1", template.id);
+        }
     }
     for rule in &catalog.routing {
         clean_id(&rule.id)?;
-        ensure!(templates.contains_key(&rule.template), "Rule {} names unknown template {}", rule.id, rule.template);
+        let use_ = if rule.use_.is_empty() { &rule.template } else { &rule.use_ };
+        if let Some(role) = use_.strip_prefix('+') {
+            ensure!(roles.contains_key(role), "Rule {} names unknown role {}", rule.id, role);
+        } else {
+            ensure!(templates.contains_key(use_), "Rule {} names unknown template {}", rule.id, use_);
+        }
     }
     // Section 9.8: a seat may delegate to a template that exists, and no
     // template may lead back to itself.
@@ -379,16 +457,25 @@ fn apply_one(catalog: &mut Catalog, proposal: &Proposal) -> anyhow::Result<()> {
 /// The template a goal would use: the first rule whose words all appear.
 pub(crate) fn route(catalog: &Catalog, goal: &str) -> Value {
     let goal = goal.to_lowercase();
+    let mut added: Vec<String> = Vec::new();
     for rule in &catalog.routing {
         let words: Vec<String> = rule.when.to_lowercase().split_whitespace().map(str::to_owned).collect();
         if !words.is_empty() && words.iter().all(|w| goal.contains(w.as_str())) {
-            if let Some(template) = catalog.templates.iter().find(|t| t.id == rule.template) {
-                return json!({"rule":rule.id,"template":template,"approval":rule.approval});
+            let use_ = if rule.use_.is_empty() { &rule.template } else { &rule.use_ };
+            if let Some(role) = use_.strip_prefix('+') {
+                // U25: a "+ role" rule adds a member and keeps searching.
+                if !added.iter().any(|found| found == role) {
+                    added.push(role.to_owned());
+                }
+                continue;
+            }
+            if let Some(template) = catalog.templates.iter().find(|t| t.id == *use_) {
+                return json!({"rule":rule.id,"template":template,"approval":rule.approval,"added":added});
             }
         }
     }
     let fallback = catalog.templates.first();
-    json!({"rule":null,"template":fallback,"approval":fallback.map(|t| t.approval.clone())})
+    json!({"rule":null,"template":fallback,"approval":fallback.map(|t| t.approval.clone()),"added":added})
 }
 
 fn locked<T>(f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
@@ -548,6 +635,28 @@ pub(crate) fn run(op: &str, input: &Value, human: bool) -> anyhow::Result<Value>
             save_draft(&Draft::default())?;
             Ok(json!({"status":"applied","version":catalog.version,"changes":kept.len()}))
         }),
+        "export" => Ok(json!({"catalog":load()?})),
+        "revert" => locked(|| {
+            ensure!(human, "Only you revert the catalog");
+            let current = load()?;
+            let text = fs::read_to_string(prev_path()).context("There is no previous catalog version to revert to")?;
+            let mut previous: Catalog = serde_json::from_str(&text).context("Invalid previous catalog")?;
+            validate(&previous)?;
+            previous.version = current.version + 1;
+            save(&previous)?;
+            Ok(json!({"status":"reverted","version":previous.version}))
+        }),
+        "import" => locked(|| {
+            ensure!(human, "Only you import a catalog");
+            let current = load()?;
+            let expected = input["version"].as_u64().context("The catalog version you edited is required")?;
+            ensure!(expected == current.version, "The catalog changed (now v{}); refresh and try again", current.version);
+            let mut catalog: Catalog = serde_json::from_value(input["catalog"].clone()).context("Invalid catalog")?;
+            validate(&catalog)?;
+            catalog.version = current.version + 1;
+            save(&catalog)?;
+            Ok(json!({"status":"imported","version":catalog.version}))
+        }),
         "designer" => {
             ensure!(human, "Only you start the Team designer");
             designer(input)
@@ -571,6 +680,49 @@ mod tests {
         validate(&catalog).unwrap();
         assert_eq!(route(&catalog, "Fix the login bug")["template"]["id"], "bugfix");
         assert_eq!(route(&catalog, "New checkout")["template"]["id"], "feature");
+    }
+
+    #[test]
+    fn a_route_adds_a_role_and_the_next_template_rule_stops() {
+        let mut catalog = builtin();
+        catalog.routing.insert(0, Rule {
+            id: "security".into(), when: "secure".into(), template: String::new(), approval: String::new(),
+            use_: "+security".into(),
+        });
+        if !catalog.roles.iter().any(|role| role.id == "security") {
+            catalog.roles.push(Role { id: "security".into(), name: "Security".into(), ..Default::default() });
+        }
+        validate(&catalog).unwrap();
+        let found = route(&catalog, "secure login bug fix");
+        assert_eq!(found["added"], json!(["security"]));
+        assert_eq!(found["template"]["id"], "bugfix");
+        // A rule naming an unknown role or template is refused.
+        catalog.routing[0].use_ = "+nobody".into();
+        assert!(validate(&catalog).unwrap_err().to_string().contains("unknown role"));
+    }
+
+    #[test]
+    fn an_old_catalog_still_loads_and_prompt_order_is_checked() {
+        // A catalog from before U25: no new fields anywhere.
+        let old: Catalog = serde_json::from_value(json!({
+            "version": 3,
+            "roles": [{"id":"dev","name":"Dev","prompt":"Work","agent":"codex"}],
+            "templates": [{"id":"t","name":"T","description":"D","roster":[{"role":"dev"}],
+                "tasks":[{"title":"A","role":"dev"}]}],
+            "routing": [{"id":"r","when":"x","template":"t"}]
+        })).unwrap();
+        validate(&old).unwrap();
+        assert!(old.roles[0].prompt_order.is_empty());
+        assert!(old.templates[0].work.is_empty());
+        // A prompt block must be a known block or a note, and prompt_off may not
+        // turn off an unknown one.
+        let mut bad = old.clone();
+        bad.roles[0].prompt_order = vec!["unknown".into()];
+        assert!(validate(&bad).unwrap_err().to_string().contains("unknown prompt block"));
+        bad.roles[0].prompt_order = vec!["rules".into(), "note1".into()];
+        bad.roles[0].notes.insert("note1".into(), "Read the docs first".into());
+        bad.roles[0].prompt_off = vec!["rules".into()];
+        validate(&bad).unwrap();
     }
 
     #[test]

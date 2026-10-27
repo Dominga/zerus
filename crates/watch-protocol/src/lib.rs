@@ -652,7 +652,10 @@ mod tests {
         .unwrap();
         assert_eq!(older.git_subscriptions, 0);
         assert_eq!(older.processes_subscriptions, 0);
-        assert_eq!(Limits::default().processes_subscriptions, PROCESSES_SUBSCRIPTIONS);
+        assert_eq!(
+            Limits::default().processes_subscriptions,
+            PROCESSES_SUBSCRIPTIONS
+        );
     }
 
     #[test]

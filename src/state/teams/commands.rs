@@ -387,6 +387,29 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             }
         }
     }
+    // U17/B1: the answers stored on the member while an attempt ran belong to
+    // it; the task card lists them with that attempt (newest shown first).
+    if let Some(tasks) = value["tasks"].as_array_mut() {
+        for (task, value) in team.tasks.iter().zip(tasks) {
+            let Some(member) = team.member(&task.assignee) else { continue };
+            if member.permission_answers.is_empty() {
+                continue;
+            }
+            let Some(attempts) = value["attempts"].as_array_mut() else { continue };
+            for (index, attempt) in attempts.iter_mut().enumerate() {
+                let Some(sent) = task.attempts.get(index).map(|attempt| attempt.sent_at) else { continue };
+                let end = task.attempts.get(index + 1).map(|next| next.sent_at).unwrap_or(f64::INFINITY);
+                let answers: Vec<&Value> = member
+                    .permission_answers
+                    .iter()
+                    .filter(|answer| answer["at"].as_f64().is_some_and(|at| at >= sent && at < end))
+                    .collect();
+                if !answers.is_empty() {
+                    attempt["permissions"] = json!(answers);
+                }
+            }
+        }
+    }
     // C4: the reports the owner's attention list shows.
     value["attention"] = json!(super::inbox::attention(team, super::super::now()));
     // Section 9.4: a delegated task shows its sub-team, and the team lists its
@@ -501,6 +524,10 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
         for (member, value) in team.members.iter().zip(members) {
             value["host_shared"] = json!(shared.contains(&member.id));
             value["queue"] = json!(member_queue(team, &member.id));
+            // U32: how the member joined on the owner's word, with the quote.
+            if let Some(added) = &member.added {
+                value["added"] = added.clone();
+            }
             // C12: the declared budget, its state and the job it is tied to.
             if let Some(budget) = &member.budget {
                 let since = budget.job.as_ref().map(|job| job.since).unwrap_or(budget.declared_at);
@@ -1406,10 +1433,23 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     let mut store = Store::open(true)?;
     store.mutate(None, &team.id, None, |team, events| {
         let member = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        // U17: the stored answer keeps the tool and the command the agent asked
+        // about, so the desktop can list them beside the decision.
+        let (asked_tool, asked_command) = member
+            .permission
+            .as_ref()
+            .map(|pending| {
+                (
+                    pending["tool"].as_str().unwrap_or_default().to_owned(),
+                    pending["command"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .unwrap_or_default();
         if member.permission.as_ref().is_some_and(|pending| pending["question_id"] == question.as_str()) {
             member.permission = None;
         }
-        member.permission_answers.push(json!({"question_id":question,"decision":decision,"by":who,"at":now(),"reason":reason}));
+        member.permission_answers.push(json!({"question_id":question,"decision":decision,"by":who,"at":now(),"reason":reason,
+            "tool":asked_tool,"command":asked_command}));
         let excess = member.permission_answers.len().saturating_sub(20);
         member.permission_answers.drain(..excess);
         events.push(Event::new(
@@ -1979,31 +2019,48 @@ fn cascade_status(store: &mut Store, team_id: &str, op: &str, depth: usize) -> a
     Ok(())
 }
 
-/// U26: the values the owner's sentence must name for this roster change; empty
-/// when the request changes no roster or cap (so no word is needed).
-fn roster_word_names(team: &Team, op: &str, input: &Value) -> Vec<String> {
+/// U26/U32: the rule the owner's sentence must meet for this roster change; an
+/// empty rule when the request changes no roster or cap (so no word is needed).
+fn roster_word_rule(team: &Team, op: &str, input: &Value) -> super::owner_word::WordRule {
+    use super::owner_word::{WordRule, ROSTER_PHRASES};
     match op {
         "add-member" => {
             let member = &input["member"];
-            let id = text(member, "id");
-            if id.is_empty() { Vec::new() } else { vec!["add".to_owned(), id.to_owned()] }
+            if text(member, "id").is_empty() {
+                WordRule::default()
+            } else {
+                // U32: the sentence says to add and names the member's role or
+                // agent/model, never the generated id; that naming and the
+                // count are checked once the sentence is verified.
+                WordRule { phrases: &[], all: Vec::new(), add: true }
+            }
         }
         "remove-member" => {
             let id = text(input, "member");
-            if id.is_empty() { Vec::new() } else { vec!["remove".to_owned(), id.to_owned()] }
+            if id.is_empty() {
+                WordRule::default()
+            } else {
+                WordRule { phrases: ROSTER_PHRASES, all: vec!["remove".to_owned(), id.to_owned()], add: false }
+            }
         }
         "swap-member" => {
             let id = text(input, "member");
-            if id.is_empty() { Vec::new() } else { vec!["swap".to_owned(), id.to_owned()] }
+            if id.is_empty() {
+                WordRule::default()
+            } else {
+                WordRule { phrases: ROSTER_PHRASES, all: vec!["swap".to_owned(), id.to_owned()], add: false }
+            }
         }
         "settings" => {
             let cap = input["settings"]["max_members"].as_u64();
             match cap {
-                Some(cap) if cap as usize != team.settings.max_members => vec!["max".to_owned(), cap.to_string()],
-                _ => Vec::new(),
+                Some(cap) if cap as usize != team.settings.max_members => {
+                    WordRule { phrases: ROSTER_PHRASES, all: vec!["max".to_owned(), cap.to_string()], add: false }
+                }
+                _ => WordRule::default(),
             }
         }
-        _ => Vec::new(),
+        _ => WordRule::default(),
     }
 }
 
@@ -2015,13 +2072,13 @@ fn check_roster_word(
     input: &Value,
     filled: &mut Value,
     caller: &Actor,
-    verify: impl Fn(&Team, &Value, &[String], f64) -> anyhow::Result<super::model::OwnerWord>,
+    verify: impl Fn(&Team, &Value, &super::owner_word::WordRule, f64) -> anyhow::Result<super::model::OwnerWord>,
 ) -> anyhow::Result<()> {
     if !matches!(caller, Actor::Member(id) if *id == team.lead) {
         return Ok(());
     }
-    let needed = roster_word_names(team, op, filled);
-    if needed.is_empty() {
+    let rule = roster_word_rule(team, op, filled);
+    if !rule.needed() {
         return Ok(());
     }
     // `roster_word` itself is never the caller's to send: strip it first, so a
@@ -2029,14 +2086,38 @@ fn check_roster_word(
     if let Some(object) = filled.as_object_mut() {
         object.remove("roster_word");
     }
-    let word = verify(team, input, &needed, super::super::now())
+    // The sentence is the request's `owner_word` object, as `approve` takes it.
+    let word_input = input
+        .get("owner_word")
+        .filter(|word| word.is_object())
+        .context("The lead changes the roster only on your word: pass \"owner_word\" with the owner's sentence")?;
+    let word = verify(team, word_input, &rule, super::super::now())
         .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
     if let Some(used) = team.owner_word_used(word.event) {
         bail!("That word was already used for {used}; ask the owner again");
     }
+    if op == "add-member" {
+        // U32: the sentence names what is added by role or agent/model, in
+        // either language, and how many; the generated id is not needed.
+        let member = filled["member"].clone();
+        let (role, agent, model) =
+            (text(&member, "role").to_owned(), text(&member, "agent").to_owned(), text(&member, "model").to_owned());
+        let described = [role.as_str(), agent.as_str(), model.as_str()]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" / ");
+        ensure!(
+            super::owner_word::names_member(&word.text, &role, &agent, &model),
+            "The owner's sentence does not name the member to add ({described}); quote a sentence naming its role or agent"
+        );
+        filled["owner_word_count"] = json!(super::owner_word::add_count(&word.text));
+        filled["owner_word_change"] = json!(format!("adding {role}"));
+    } else {
+        filled["owner_word_change"] = json!("the roster change");
+    }
     filled["owner_word_checked"] = serde_json::to_value(&word)?;
     filled["owner_word_event"] = json!(word.event);
-    filled["owner_word_change"] = json!("the roster change");
     filled["roster_word"] = Value::Bool(true);
     Ok(())
 }
@@ -2514,6 +2595,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 // reads nothing beyond the team itself.
                 let tree = tree_around(&team, &mut |id| store.load(id))?;
                 ops::ensure_tree_sessions(&team, &tree, added_sessions(&team, op, &filled))?;
+                if op == "add-member" {
+                    // U32: a cap raise on the owner's word stays within the
+                    // master's session budget.
+                    filled["tree_sessions"] = json!(ops::root_of(&team, &tree).settings.tree_sessions);
+                }
             }
             if op == "archive" {
                 let team = store.load(team_id)?.context("Unknown team")?;
@@ -2551,8 +2637,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             if matches!(op, "add-member" | "swap-member" | "remove-member" | "settings") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
-                check_roster_word(&team, op, input, &mut filled, &caller, |team, input, needed, now| {
-                    super::owner_word::verify_roster(team, input, needed, now)
+                check_roster_word(&team, op, input, &mut filled, &caller, |team, input, rule, now| {
+                    super::owner_word::verify_roster(team, input, rule, now)
                 })?;
             }
             // N7: a replayed discard does not stop the lead's session twice.
@@ -3753,8 +3839,8 @@ mod tests {
                 rusqlite::params![json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":text}).to_string()],
             ).unwrap();
         };
-        add("Please add bob to the roster");
-        add("Please add alice to the roster");
+        add("Please add a backend to the roster");
+        add("Please add a frontend to the roster");
         add("Please swap dev for another member");
         add("Please remove dev from the roster");
         add("Please change max members to 5");
@@ -3763,19 +3849,19 @@ mod tests {
             session: Some(SessionRef { name: "claude/x/lead".into(), conversation_id: "c1".into(), ..Default::default() }), ..Default::default() });
         team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
         let caller = Actor::Member("lead".into());
-        let verify = |_: &Team, input: &Value, needed: &[String], now: f64| {
-            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", input["owner_word"]["text"].as_str().unwrap_or_default(), needed, now)
+        let verify = |_: &Team, word: &Value, rule: &super::super::owner_word::WordRule, now: f64| {
+            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", word["text"].as_str().unwrap_or_default(), rule, now)
         };
         let cases = [
-            ("add-member", json!({"member":{"id":"bob"}}), "Please add bob to the roster", "Please add alice to the roster"),
-            ("swap-member", json!({"member":"dev"}), "Please swap dev for another member", "Please add alice to the roster"),
-            ("remove-member", json!({"member":"dev"}), "Please remove dev from the roster", "Please add alice to the roster"),
-            ("settings", json!({"settings":{"max_members":5}}), "Please change max members to 5", "Please add alice to the roster"),
+            ("add-member", json!({"member":{"id":"bob","role":"Backend","agent":"codex"}}), "Please add a backend to the roster", "Please add a frontend to the roster"),
+            ("swap-member", json!({"member":"dev"}), "Please swap dev for another member", "Please add a frontend to the roster"),
+            ("remove-member", json!({"member":"dev"}), "Please remove dev from the roster", "Please add a frontend to the roster"),
+            ("settings", json!({"settings":{"max_members":5}}), "Please change max members to 5", "Please add a frontend to the roster"),
         ];
         for (op, base, sentence, other) in cases {
             let mut without = base.clone();
             let input = base.clone();
-            assert!(!super::roster_word_names(&team, op, &input).is_empty(), "{op}");
+            assert!(super::roster_word_rule(&team, op, &input).needed(), "{op}");
             let error = super::check_roster_word(&team, op, &input, &mut without, &caller, verify).unwrap_err().to_string();
             assert!(error.contains("your word"), "{op}: {error}");
             // A caller-supplied roster_word is not a word.
@@ -3789,7 +3875,7 @@ mod tests {
             wrong["owner_word"] = json!({"text": other});
             let input = wrong.clone();
             let error = super::check_roster_word(&team, op, &input, &mut wrong, &caller, verify).unwrap_err().to_string();
-            assert!(error.contains("your word") || error.contains("not in the lead session"), "{op}: {error}");
+            assert!(error.contains("your word") || error.contains("not in the lead session") || error.contains("does not name"), "{op}: {error}");
             // The fresh word naming the change fills the verified flag.
             let mut good = base.clone();
             good["owner_word"] = json!({"text": sentence});
@@ -3813,8 +3899,8 @@ mod tests {
         let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
         team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
         let caller = Actor::Member("lead".into());
-        let verify = |_: &Team, input: &Value, needed: &[String], now: f64| {
-            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", input["owner_word"]["text"].as_str().unwrap_or_default(), needed, now)
+        let verify = |_: &Team, word: &Value, rule: &super::super::owner_word::WordRule, now: f64| {
+            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", word["text"].as_str().unwrap_or_default(), rule, now)
         };
         let base = json!({"member":"dev"});
         let mut first = base.clone();
@@ -3834,6 +3920,125 @@ mod tests {
         third["owner_word"] = json!({"text":"Please remove dev from the roster again"});
         let input = third.clone();
         super::check_roster_word(&team, "remove-member", &input, &mut third, &caller, verify).unwrap();
+    }
+
+    /// U32: the events fixture the lead's own session reads owner words from.
+    fn owner_word_events(dir: &std::path::Path, prompts: &[(f64, &str)]) {
+        use rusqlite::Connection;
+        let db = Connection::open(dir.join("events.sqlite3")).unwrap();
+        db.execute_batch("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+        for (at, detail) in prompts {
+            db.execute(
+                "INSERT INTO events(name,conversation,payload) VALUES ('dsh/x/lead','c1',?1)",
+                rusqlite::params![json!({"type":"UserPromptSubmit","at":at,"agent_id":"","detail":detail}).to_string()],
+            ).unwrap();
+        }
+    }
+
+    /// U32: a running team whose member cap is already full (six members).
+    fn full_team() -> Team {
+        use crate::state::teams::model::{FolderPolicy, Settings};
+        let mut team = Team {
+            id: "abcdef12-0000-4000-8000-000000000000".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            settings: Settings { max_members: 6, folder_policy: FolderPolicy::Shared, ..Default::default() },
+            ..Default::default()
+        };
+        team.members.push(Member {
+            id: "lead".into(),
+            role: "Lead".into(),
+            agent: "dsh".into(),
+            session: Some(SessionRef { name: "dsh/x/lead".into(), conversation_id: "c1".into(), ..Default::default() }),
+            ..Default::default()
+        });
+        for index in 1..=5 {
+            team.members.push(Member { id: format!("m{index}"), role: "Backend".into(), agent: "dsh".into(), ..Default::default() });
+        }
+        team
+    }
+
+    /// U32: the owner's plain request adds a member by role or agent, raises a
+    /// full cap by the count the sentence names, and one word covers one add.
+    #[test]
+    fn the_owners_word_adds_a_member_by_role_and_raises_a_full_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = crate::state::now();
+        let sentence = "может еще одного дипсик бэкендера добавим?";
+        let frontend = "может еще одного фронтендера добавим?";
+        let stale = "еще одного дипсик бэкендера добавим";
+        let relayed = "[Zerus team · from: Zerus] should we add a backend?";
+        owner_word_events(dir.path(), &[
+            (now - 60.0, sentence),
+            (now - 60.0, frontend),
+            (now - super::super::owner_word::FRESH_SECONDS - 60.0, stale),
+            (now - 60.0, relayed),
+            (now - 60.0, "Please remove the backend from the roster"),
+        ]);
+        crate::state::with_test_state_root(dir.path(), || {
+            set_test_caller_identities(Some((Some("c1".into()), None, None)));
+            let mut store = Store::open(true).unwrap();
+            let team = full_team();
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let add = |request: &str, member: &str, text: &str| {
+                run(
+                    "add-member",
+                    &json!({"request_id":request,"team":id,"member":{"id":member,"role":"Backend","agent":"dsh"},
+                        "owner_word":{"text":text}}),
+                    false,
+                )
+            };
+            // A sentence naming another role does not add a backend.
+            let error = add("22222222-2222-4222-8222-222222222222", "backend4", frontend).unwrap_err();
+            let error = format!("{error:#}");
+            assert!(error.contains("does not name the member to add"), "{error}");
+            // A stale sentence and a relayed one are not the owner's word.
+            let error = add("33333333-3333-4333-8333-333333333333", "backend4", stale).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{error}");
+            let error = add("44444444-4444-4444-8444-444444444444", "backend4", relayed).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{error}");
+            // The owner's plain request adds a dsh Backend and raises the full cap by one.
+            let value = add("55555555-5555-4555-8555-555555555555", "backend4", sentence).unwrap();
+            assert_eq!(value["status"], "added");
+            assert_eq!(value["by"], "Lead on your word");
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert_eq!(saved.settings.max_members, 7);
+            let added = saved.member("backend4").unwrap().added.clone().unwrap();
+            assert_eq!(added["by"], "Lead on your word");
+            assert_eq!(added["owner_word"], sentence);
+            // Status shows how the member joined.
+            let status = run("status", &json!({"team":id}), false).unwrap();
+            assert_eq!(status["settings"]["max_members"], 7);
+            let member = status["members"].as_array().unwrap().iter().find(|member| member["id"] == "backend4").cloned().unwrap();
+            assert_eq!(member["added"]["by"], "Lead on your word");
+            assert_eq!(member["added"]["owner_word"], sentence);
+            // The feed names both caps and carries the quote.
+            let events = run("events", &json!({"team":id}), false).unwrap();
+            let items = events["items"].as_array().unwrap();
+            let raised = items.iter().find(|item| item["kind"] == "max_members_raised").unwrap();
+            assert_eq!((raised["detail"]["old"].as_u64(), raised["detail"]["new"].as_u64()), (Some(6), Some(7)));
+            let joined = items.iter().find(|item| item["kind"] == "member_added").unwrap();
+            assert_eq!(
+                (joined["detail"]["by"].as_str(), joined["detail"]["owner_word"].as_str()),
+                (Some("Lead on your word"), Some(sentence))
+            );
+            // One word covers one add: the same sentence adds no second member.
+            let error = add("66666666-6666-4666-8666-666666666666", "backend5", sentence).unwrap_err().to_string();
+            assert!(error.contains("already used"), "{error}");
+            assert!(Store::open(false).unwrap().load(&id).unwrap().unwrap().member("backend5").is_none());
+            // Remove still needs the member's id in the sentence.
+            let error = run(
+                "remove-member",
+                &json!({"request_id":"77777777-7777-4777-8777-777777777777","team":id,"member":"backend4",
+                    "owner_word":{"text":"Please remove the backend from the roster"}}),
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("your word"), "{error}");
+        });
     }
 
     #[test]
@@ -4537,7 +4742,13 @@ mod tests {
         let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
         member.permission = Some(json!({"question_id":"toolu_1","tool":"Bash","command":"rm -rf build",
             "command_source":"tool_input","reason":"clean the build","asked_at":30.0}));
-        member.permission_answers = vec![json!({"question_id":"q0","decision":"deny","by":"lead","at":25.0,"reason":"not now"})];
+        // U17: an answer keeps the tool and command it was asked about; the one
+        // from this attempt's window belongs to the attempt.
+        member.permission_answers = vec![
+            json!({"question_id":"q0","decision":"deny","by":"lead","at":25.0,"reason":"not now",
+                "tool":"Bash","command":"rm -rf build"}),
+            json!({"question_id":"q1","decision":"allow","by":"owner","at":5.0,"reason":"","tool":"Bash","command":"ls"}),
+        ];
         let value = view_with(&team, &[], None);
         let question = &value["members"][1]["question"];
         assert_eq!(
@@ -4546,6 +4757,12 @@ mod tests {
         );
         assert_eq!(value["members"][1]["permission_answers"][0]["by"], "lead");
         assert_eq!(value["members"][1]["permission_answers"][0]["decision"], "deny");
+        assert_eq!(value["members"][1]["permission_answers"][0]["command"], "rm -rf build");
+        // The attempt (sent at 10.0) carries the answer at 25.0, not the one at 5.0.
+        let attempt = &value["tasks"][0]["attempts"][0];
+        assert_eq!(attempt["permissions"].as_array().unwrap().len(), 1, "{attempt}");
+        assert_eq!(attempt["permissions"][0]["command"], "rm -rf build");
+        assert_eq!(attempt["permissions"][0]["at"], 25.0);
         assert!(denies("No") && denies("Deny") && !denies("Allow"));
     }
 

@@ -68,13 +68,13 @@ void TeamDesignerPanel::render()
         note->setWordWrap(true); v->addWidget(note);
     }
     v->addWidget(label(tr("The designer can only propose. Nothing changes before you apply; running teams keep their roster."), c.muted, 11));
-    if (!m_notice.isEmpty()) { auto *n = label(m_notice, c.danger, 12, false, "teamDesignerNotice"); n->setWordWrap(true); v->addWidget(n); }
+    if (!m_teams->draftError().isEmpty()) v->addWidget(refusal(m_teams->draftError(), c, "teamDesignerNotice"));
     auto *actions = row(6);
     auto *discard = button(tr("Discard draft"), "teamDesignerDiscard");
     discard->setEnabled(!catalog.proposals.isEmpty());
     QObject::connect(discard, &QPushButton::clicked, this, [this] {
         if (confirm && !confirm("teamDesignerDiscardConfirm", tr("Discard draft?"), tr("Discard every proposal of this draft? The catalog stays as it is."), tr("Discard draft"))) return;
-        m_teams->call(QStringLiteral("catalog discard"), {}, [this](bool ok, const QJsonObject &, const QString &error) { m_notice = ok ? QString() : error; render(); });
+        m_teams->discardDraft();
     });
     auto *apply = button(tr("Apply %n change(s)", nullptr, kept), "teamDesignerApply", true);
     apply->setEnabled(kept > 0 && !stale);
@@ -82,7 +82,7 @@ void TeamDesignerPanel::render()
     QObject::connect(apply, &QPushButton::clicked, this, [this, kept, version = catalog.version] {
         if (confirm && !confirm("teamDesignerApplyConfirm", tr("Apply changes?"),
                                 tr("Apply %1 kept change(s) as catalog v%2? Rejected and undecided proposals are dropped.").arg(kept).arg(version + 1), tr("Apply"))) return;
-        m_teams->call(QStringLiteral("catalog apply"), {}, [this](bool ok, const QJsonObject &, const QString &error) { m_notice = ok ? QString() : error; render(); });
+        m_teams->applyDraft();
     });
     actions->addWidget(discard); actions->addStretch(); actions->addWidget(apply);
     v->addLayout(actions);
@@ -163,10 +163,7 @@ QWidget *TeamDesignerPanel::proposalCard(const Proposal &p)
     buttons->addWidget(label(p.state == "kept" ? tr("Kept") : p.state == "rejected" ? tr("Rejected") : tr("Undecided"),
                              p.state == "kept" ? c.accent : p.state == "rejected" ? c.danger : c.muted, 11));
     buttons->addStretch();
-    const auto decide = [this, id = p.id](const QString &decision) {
-        m_teams->call(QStringLiteral("catalog decide"), {{"proposal", id}, {"decision", decision}},
-                      [this](bool ok, const QJsonObject &, const QString &error) { m_notice = ok ? QString() : error; if (!ok) render(); });
-    };
+    const auto decide = [this, id = p.id](const QString &decision) { m_teams->decideProposal(id, decision); };
     if (p.state == "proposed") {
         auto *reject = button(tr("Reject"), "teamProposalReject"); QObject::connect(reject, &QPushButton::clicked, this, [decide] { decide("reject"); });
         auto *keep = button(tr("Keep"), "teamProposalKeep", true); QObject::connect(keep, &QPushButton::clicked, this, [decide] { decide("keep"); });
@@ -176,5 +173,6 @@ QWidget *TeamDesignerPanel::proposalCard(const Proposal &p)
         buttons->addWidget(undo);
     }
     v->addLayout(buttons);
+    if (const auto error = m_teams->proposalError(p.id); !error.isEmpty()) v->addWidget(refusal(error, c, "teamProposalError"));
     return box;
 }

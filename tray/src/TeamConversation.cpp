@@ -1,6 +1,8 @@
 #include "TeamConversation.h"
 #include "ActivityView.h"
+#include "CacheStatus.h"
 #include "HgsClient.h"
+#include "QuestionCard.h"
 #include "TeamWidgets.h"
 #include "CacheStatus.h"
 #include "ComposerToolbar.h"
@@ -10,6 +12,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeyEvent>
+#include <QMessageBox>
+#include <QScopedValueRollback>
+#include <algorithm>
 #include <QMimeDatabase>
 #include <QScrollBar>
 #include <QStyle>
@@ -51,6 +56,9 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     // The window's own conversation is the one named "activity".
     if (auto *text = m_view->findChild<QTextBrowser *>("activity")) text->setObjectName("teamConversationText");
     v->addWidget(m_view, 1);
+    // U16: a pending question takes the composer's place, as in the session view.
+    m_question = new QuestionCard; m_question->setObjectName("teamConversationQuestion"); m_question->hide();
+    v->addWidget(m_question);
     auto *bottom = new QWidget; bottom->setObjectName("teamConversationBottom");
     auto *bv = new QVBoxLayout(bottom); bv->setContentsMargins(10, 6, 10, 10); bv->setSpacing(6);
     m_asks = new QWidget; m_asksLayout = new QHBoxLayout(m_asks); m_asksLayout->setContentsMargins(0, 0, 0, 0); m_asksLayout->setSpacing(6);
@@ -58,11 +66,12 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
     bv->addWidget(m_asks);
     m_status = new QLabel; m_status->setObjectName("teamConversationStatus"); m_status->setWordWrap(true); m_status->hide();
     bv->addWidget(m_status);
-    auto *row = new QHBoxLayout; row->setSpacing(6);
+    m_composerRow = new QWidget;
+    auto *row = new QHBoxLayout(m_composerRow); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(6);
     m_input = new QPlainTextEdit; m_input->setObjectName("teamConversationInput"); m_input->setFixedHeight(56);
     m_send = button(tr("Send"), "teamConversationSend", true);
     row->addWidget(m_input, 1); row->addWidget(m_send, 0, Qt::AlignBottom);
-    bv->addLayout(row);
+    bv->addWidget(m_composerRow);
     v->addWidget(bottom);
     m_input->installEventFilter(new ComposerFilter([this] { send(m_input->toPlainText()); }, this));
     QObject::connect(m_send, &QPushButton::clicked, this, [this] { send(m_input->toPlainText()); });
@@ -89,6 +98,16 @@ TeamConversation::TeamConversation(HgsClient *client, QWidget *parent) : QWidget
         m_status->show();
         if (sent) sent(error.isEmpty() ? tr("Not sent") : error);
     });
+    QObject::connect(m_question, &QuestionCard::answerRequested, this, [this](const QString &key, const QString &id, const QJsonArray &answers) {
+        answerQuestion(key, id, answers);
+    });
+    QObject::connect(m_question, &QuestionCard::queueNavigationRequested, this, [this](int direction) { renderQuestion(direction); });
+    QObject::connect(m_question, &QuestionCard::draftRestored, this, [this] { renderQuestion(); });
+    QObject::connect(m_client, &HgsClient::questionAnswered, this, [this](quint64 request) { finishAnswer(request, true); });
+    QObject::connect(m_client, &HgsClient::questionAnswerSubmitted, this, [this](quint64 request) { finishAnswer(request, true, {}, false, true); });
+    QObject::connect(m_client, &HgsClient::questionAnswerFailed, this, [this](quint64 request, const QString &, const QString &, const QString &error, bool uncertain) {
+        finishAnswer(request, false, error, uncertain);
+    });
     m_timer.setInterval(pollInterval);
     QObject::connect(&m_timer, &QTimer::timeout, this, [this] { poll(); });
     setTheme(true);
@@ -105,6 +124,7 @@ void TeamConversation::setSession(const QString &host, const QString &name)
     m_input->setEnabled(m_designer || !name.isEmpty()); m_send->setEnabled((m_designer || !name.isEmpty()) && !m_sendRequest && !m_starting);
     if (!name.isEmpty() && m_starting) { m_starting = false; m_input->clear(); }
     m_status->hide();
+    m_questionChoice.clear(); renderQuestion();
     if (m_designer) {
         static_cast<CacheStatus::Chip *>(m_cache)->setData({});
         static_cast<SessionUsage::ContextButton *>(m_context)->setData({});
@@ -124,6 +144,7 @@ void TeamConversation::setTheme(bool dark)
                       .arg(c.border.name(), c.surface.name(), c.fg.name()));
     // After the sheet: a repolish would reset the Activity canvas palette.
     m_view->setTheme(dark);
+    m_question->setTheme(dark);
     m_view->setBubbles(WorkspaceSkin::current().view(QStringLiteral("activity")) == QLatin1String("bubbles"));
     if (m_designer) {
         const Colors c = colorsFor(dark);
@@ -211,11 +232,13 @@ void TeamConversation::useDesignerLayout(QWidget *intro, QWidget *above)
     QObject::connect(m_input, &QPlainTextEdit::textChanged, this, [this] { updateSend(); });
     QObject::connect(m_input->document()->documentLayout(), &QAbstractTextDocumentLayout::documentSizeChanged, this, [this] { fitInput(); });
     // Rebuild the column: [space] intro, the messages, above, the composer [space].
-    v->removeWidget(m_view); if (oldBottom) { v->removeWidget(oldBottom); oldBottom->hide(); }
+    v->removeWidget(m_view); v->removeWidget(m_question); if (oldBottom) { v->removeWidget(oldBottom); oldBottom->hide(); }
     v->addStretch(1);
     if (m_intro) v->addWidget(m_intro);
     v->addWidget(m_view);
     if (m_above) v->addWidget(m_above);
+    // U16: a pending question takes the composer's place here too.
+    v->addWidget(m_question);
     v->addWidget(m_bottom);
     v->addStretch(1);
     m_view->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -292,7 +315,7 @@ void TeamConversation::fitDesigner()
     if (m_name.isEmpty()) { m_view->hide(); return; }
     auto *v = static_cast<QVBoxLayout *>(layout());
     int others = v->contentsMargins().top() + v->contentsMargins().bottom();
-    for (auto *w : {m_intro, m_above, m_bottom}) if (w && !w->isHidden()) others += w->sizeHint().height() + v->spacing();
+    for (auto *w : {m_intro, m_above, static_cast<QWidget *>(m_question), m_bottom}) if (w && !w->isHidden()) others += w->sizeHint().height() + v->spacing();
     const int available = qMax(80, height() - others);
     const int content = text ? int(text->document()->size().height()) + 24 : available;
     m_view->setFixedHeight(qBound(80, content, available));
@@ -349,6 +372,7 @@ void TeamConversation::received(const QString &host, const QString &name, const 
         && !data.value("cleared_conversations").toArray().contains(m_details.value("conversation_id"))) {
         m_events = data.value("events").toArray(); m_cursor = 0; m_details = data;
         m_view->setTimeline(m_details, m_events, {});
+        renderQuestion();
         poll();
         return;
     }
@@ -366,6 +390,7 @@ void TeamConversation::received(const QString &host, const QString &name, const 
     while (m_events.size() > 500) m_events.removeFirst();
     m_cursor = data.value("cursor").toInteger();
     m_view->setTimeline(m_details, m_events, {});
+    renderQuestion();
     if (m_designer) {
         static_cast<CacheStatus::Chip *>(m_cache)->setData(data);
         static_cast<SessionUsage::ContextButton *>(m_context)->setData(data.value("session_usage").toObject());
@@ -396,4 +421,144 @@ void TeamConversation::send(const QString &raw)
     m_send->setEnabled(false);
     m_pendingText = raw;
     updateSend();
+}
+
+void TeamConversation::setQuestionsShown(bool shown)
+{
+    m_questionsShown = shown;
+    renderQuestion();
+}
+
+namespace {
+// What the owner agreed to: an answer goes only to the very question shown.
+QJsonObject questionIdentity(const QJsonObject &question)
+{
+    QJsonObject identity;
+    for (const auto *field : {"question_id", "question_hash", "run_id", "conversation_id", "questions",
+            "source", "tool", "tool_name", "tool_call_id", "native_question_id", "agent_id",
+            "answer_transport", "approval", "approval_choices", "trust_request", "optional"}) {
+        const auto name = QString::fromLatin1(field);
+        if (question.contains(name)) identity.insert(name, question.value(name));
+    }
+    return identity;
+}
+}
+
+// As the session view: a required question first, else the optional ones,
+// newest first, in the order the owner steps through them.
+void TeamConversation::renderQuestion(int navigation)
+{
+    // The designer's composer is its card and row (#488), the others' the row.
+    QWidget *composer = m_designer ? m_bottom : m_composerRow;
+    if (!m_questionsShown || m_name.isEmpty()) { m_question->hide(); composer->show(); fitDesigner(); return; }
+    const QString key = sessionKey();
+    QJsonObject question;
+    QList<QJsonObject> optional;
+    int pending = 0; QSet<QString> seen;
+    for (const auto &value : m_details.value("pending_questions").toArray()) {
+        const auto candidate = value.toObject();
+        const auto id = candidate.value("question_id").toString();
+        if (id.isEmpty() || seen.contains(id) || (candidate.value("questions").toArray().isEmpty() && candidate.value("can_answer").toBool(true))) continue;
+        seen.insert(id);
+        if (m_question->hasSubmittedAnswer(key, candidate)) continue;
+        pending += qMax<qsizetype>(1, candidate.value("questions").toArray().size());
+        if (candidate.value("optional").toBool()) optional.append(candidate);
+        else if (question.isEmpty() || (!question.value("can_answer").toBool() && candidate.value("can_answer").toBool())) question = candidate;
+    }
+    std::stable_sort(optional.begin(), optional.end(), [](const QJsonObject &a, const QJsonObject &b) {
+        return a.value("created_at").toDouble() > b.value("created_at").toDouble();
+    });
+    int index = 0;
+    if (!m_questionChoice.isEmpty()) {
+        const auto found = std::find_if(optional.cbegin(), optional.cend(), [this](const QJsonObject &item) { return item.value("question_id").toString() == m_questionChoice; });
+        if (found == optional.cend()) m_questionChoice.clear(); else index = int(found - optional.cbegin());
+    }
+    if (question.isEmpty() && !optional.isEmpty()) {
+        if (navigation) {
+            index = qBound(0, index + navigation, int(optional.size()) - 1);
+            m_questionChoice = optional[index].value("question_id").toString();
+        }
+        question = optional[index];
+    }
+    const bool available = !question.isEmpty();
+    m_question->setTerminalAvailable(false, tr("Open the session in Activity for its terminal."));
+    m_question->setQuestion(key, question, pending);
+    m_question->setQueueNavigation(index, int(optional.size()));
+    m_question->setVisible(available);
+    composer->setVisible(!available || question.value("optional").toBool());
+    fitDesigner();
+    QString reason;
+    if (question.value("run_id") != m_details.value("run_id") || question.value("conversation_id") != m_details.value("conversation_id"))
+        reason = tr("Refresh the pending question before answering.");
+    else if (m_details.value("runtime_state").toString() != "live" || m_details.value("process_state").toString() != "running")
+        reason = tr("The agent is no longer running.");
+    m_question->setAvailability(reason.isEmpty(), reason);
+}
+
+// The shown question, only while its session is read live and nothing else is
+// being answered; the same checks as the session view.
+QJsonObject TeamConversation::actionableQuestion(const QString &key, const QString &questionId, bool skipping) const
+{
+    if (key != sessionKey() || m_answerRequest || m_details.value("runtime_state").toString() != "live"
+        || m_details.value("process_state").toString() != "running") return {};
+    QJsonObject question;
+    for (const auto &value : m_details.value("pending_questions").toArray())
+        if (value.toObject().value("question_id").toString() == questionId) { question = value.toObject(); break; }
+    if (question.isEmpty() || m_question->hasSubmittedAnswer(key, question)
+        || !(skipping ? question.value("can_skip").toBool() : question.value("can_answer").toBool())
+        || question.value("run_id") != m_details.value("run_id") || question.value("conversation_id") != m_details.value("conversation_id")) return {};
+    return question;
+}
+
+void TeamConversation::answerQuestion(const QString &key, const QString &questionId, const QJsonArray &answers)
+{
+    // Copies: a nested event loop may replace what the signal refers to.
+    const QString targetKey = key, targetId = questionId;
+    const QJsonArray requested = answers;
+    if (m_confirmingCache || m_answerRequest) return;
+    const bool skipping = !requested.isEmpty() && requested.first().toObject().value("skip").toBool();
+    const auto question = actionableQuestion(targetKey, targetId, skipping);
+    if (question.isEmpty()) { m_question->setError(targetKey, targetId, tr("This question changed. Refresh before answering.")); return; }
+    // A cold cache may resume the agent with its whole conversation: the owner agrees first.
+    const bool nativeCacheChoice = question.value("source") == "kimi_cache_hint" && question.value("answer_transport") == "kimi_tui";
+    if (!nativeCacheChoice && CacheStatus::expired(m_details)) {
+        const auto draft = m_question->submissionSnapshot(targetKey, targetId);
+        if (draft.isEmpty() || draft.value("sending").toBool() || draft.value("submitted").toBool() || draft.value("answered").toBool()
+            || draft.value("uncertain").toBool() || !draft.value("storage_error").toString().isEmpty()) return;
+        QScopedValueRollback<bool> confirming(m_confirmingCache, true);
+        QMessageBox box(QMessageBox::Warning, tr("Submit with a cold cache?"),
+            CacheStatus::warning(m_details) + "\n\n" + tr("Submitting this answer may resume the agent with the entire conversation, increasing token usage, cost or subscription usage. Compaction or clearing can invalidate the pending question. Cancel keeps your answers."),
+            QMessageBox::NoButton, this);
+        box.setObjectName("questionColdCacheConfirm");
+        auto *proceed = box.addButton(tr("Submit with full context"), QMessageBox::AcceptRole);
+        auto *cancel = box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(cancel); box.setEscapeButton(cancel);
+        box.exec();
+        if (box.clickedButton() != proceed) return;
+        if (questionIdentity(actionableQuestion(targetKey, targetId, skipping)) != questionIdentity(question)
+            || m_question->submissionSnapshot(targetKey, targetId) != draft) {
+            m_question->setError(targetKey, targetId, tr("The question or your answers changed. Your draft was kept; review it before submitting again."));
+            return;
+        }
+    }
+    m_question->prepareSendingAsync(targetKey, targetId, [this, targetKey, targetId, question, requested, skipping](bool okay) {
+        if (!okay) return;
+        if (questionIdentity(actionableQuestion(targetKey, targetId, skipping)) != questionIdentity(question)) {
+            m_question->setError(targetKey, targetId, tr("The question changed. Your answers were kept without submitting."));
+            return;
+        }
+        m_answerKey = targetKey; m_answerQuestion = targetId;
+        m_answerRequest = m_client->requestAnswerQuestion(m_host, m_name, question, requested);
+    });
+}
+
+void TeamConversation::finishAnswer(quint64 request, bool ok, const QString &error, bool uncertain, bool submitted)
+{
+    if (!request || request != m_answerRequest) return;
+    m_answerRequest = 0;
+    if (ok && submitted) m_question->setSubmitted(m_answerKey, m_answerQuestion);
+    else if (ok) m_question->setAnswered(m_answerKey, m_answerQuestion);
+    else m_question->setError(m_answerKey, m_answerQuestion, error, uncertain);
+    renderQuestion();
+    poll();
 }

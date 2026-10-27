@@ -352,6 +352,7 @@ Team parse(const QJsonObject &v)
             PermissionAnswer answer;
             answer.questionId = str(a, "question_id"); answer.decision = str(a, "decision");
             answer.by = str(a, "by"); answer.reason = str(a, "reason"); answer.at = a.value("at").toDouble();
+            answer.tool = str(a, "tool"); answer.command = str(a, "command");
             if (!answer.decision.isEmpty()) member.permissionAnswers.append(answer);
         }
         if (m.value("budget").isObject()) {
@@ -523,6 +524,9 @@ Team parse(const QJsonObject &v)
                 answer.decision = str(item, "decision");
                 answer.by = str(item, "by");
                 answer.reason = str(item, "reason");
+                // U17: the tool and command the agent asked about.
+                answer.tool = str(item, "tool");
+                answer.command = str(item, "command");
                 answer.at = item.value("at").toDouble();
                 attempt.permissions.append(answer);
             }
@@ -1409,6 +1413,15 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "relaunch") t = tr("Start %1 again").arg(d.value("member").toString());
     else if (k == "member_paused") t = tr("Paused %1").arg(d.value("member").toString());
     else if (k == "member_resumed") t = tr("Resumed %1").arg(d.value("member").toString());
+    else if (k == "member_added") {
+        // U32: the roster says how the member joined, with the owner's quote.
+        const QString by = d.value("by").toString();
+        const QString word = d.value("owner_word").toString();
+        t = word.isEmpty() ? tr("Added %1 by %2").arg(d.value("member").toString(), by)
+                           : tr("Added %1 by %2: “%3”").arg(d.value("member").toString(), by, word);
+        line.by = by;
+    }
+    else if (k == "max_members_raised") t = tr("Raised the member cap %1 → %2 on your word").arg(d.value("old").toInt()).arg(d.value("new").toInt());
     else if (k == "member_removed") t = tr("Removed %1 from the team").arg(d.value("member").toString());
     else t = k;
     return line;

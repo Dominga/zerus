@@ -2,6 +2,7 @@
 // rebound from ShortcutRegistry. See Shortcuts.h and
 // docs/superpowers/specs/2026-10-15-keyboard-shortcuts-design.md.
 #include "SessionsWindow.h"
+#include "InspectorCards.h"
 #include "ActivityView.h"
 #include "ContentScale.h"
 #include "MachinesPage.h"
@@ -424,7 +425,7 @@ void SessionsWindow::stepFocus(int direction)
     if (selected() && m_detailTabs->isVisible()) areas.append(Area{m_detailTabs->currentWidget(), viewFocusTarget()});
     auto *composer = m_activityStack->currentIndex() == 1 ? m_subagentComposer : m_composer;
     if (composer->isVisible() && composer->isEnabled() && composer->isInputVisible()) areas.append(Area{composer, composer->editor()});
-    if (m_inspectorPanel->isVisible()) areas.append(Area{m_inspectorPanel, focusTarget(m_inspector->currentWidget())});
+    if (m_inspectorPanel->isVisible()) areas.append(Area{m_inspectorPanel, focusTarget(m_inspector->widget())});
     if (areas.isEmpty()) return;
     const QWidget *focus = QApplication::focusWidget();
     int current = -1;

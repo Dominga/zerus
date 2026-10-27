@@ -50,6 +50,9 @@ struct SessionInfo {
     bool reviewLater = false, attentionAcknowledged = false;
     // Confirmed notification preference from the session's host, shared by devices.
     bool muted = false;
+    // U25 (spec 2.3): muted only because it is a team member other than the
+    // lead and its session carries no choice of its own (FleetState).
+    bool teamMuted = false;
     bool sharedNotifications = false;
     QJsonObject notificationPreferences;
     QString notificationPreferencesError;
@@ -231,6 +234,8 @@ public:
     QJsonObject gitStatusSnapshot(const QString &host, const QString &path) const;
     void requestGitStatus(const QString &host, const QString &path);
     quint64 requestWorktrees(const QString &host, const QString &path, bool refresh = false);
+    // U25 part 6: the read-only diff against HEAD for the inspector's Changes card.
+    quint64 requestGitDiff(const QString &host, const QString &path);
     quint64 createWorktree(const QString &host, const QString &path, const QString &commonDir,
                            const QString &branch, const QString &base, const QString &destination);
     // Cleanup verdicts are computed on the owning machine. Whole-repository reviews
@@ -402,6 +407,7 @@ signals:
     void worktreesReady(quint64 request, const QString &host, const QString &path, const QJsonObject &data);
     void worktreesFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
     void gitStatusChanged(const QString &host, const QString &path);
+    void gitDiffReady(quint64 request, const QJsonObject &data, const QString &error);
     void worktreeCreated(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void worktreeReviewReady(quint64 request, const QString &host, const QString &path, const QJsonObject &data);
     void worktreeReviewFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
@@ -457,7 +463,7 @@ private:
     bool m_localInFlight = false;
     bool m_versionInFlight = false;
     QSet<QString> m_inspectionsInFlight;
-    quint64 m_directoryRequest = 0, m_worktreeRequest = 0;
+    quint64 m_directoryRequest = 0, m_worktreeRequest = 0, m_gitDiffRequest = 0;
     QHash<QString, QList<QPair<quint64, QString>>> m_worktreesInFlight;
     QHash<QString, QList<quint64>> m_reviewsInFlight;
     QHash<QString, QJsonObject> m_worktreeReviews;

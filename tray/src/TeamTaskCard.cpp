@@ -18,6 +18,7 @@
 #include <QPlainTextEdit>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -244,20 +245,24 @@ void TeamTaskCard::rebuild()
             v->addWidget(box);
         }
     }
-    // B1: the permissions already answered for the attempt, with who answered
-    // and the deny text.
+    // U17: the stored answers of the attempt as one summary line, opened to all
+    // of them; the choice is kept for the team, the task and the attempt.
     for (auto it = task->attempts.crbegin(); it != task->attempts.crend(); ++it) {
         if (it->permissions.isEmpty()) continue;
         section(tr("Permissions"));
-        for (const auto &answer : it->permissions) {
-            const QString by = answer.by == "owner" ? tr("you") : answer.by == "lead" ? tr("the lead")
-                             : answer.by == "rule" ? tr("a rule") : answer.by == "timeout" ? tr("a timeout") : tr("unknown");
-            QString line = answer.denied() ? tr("Denied by %1").arg(by) : tr("Allowed by %1").arg(by);
-            if (answer.denied() && !answer.reason.isEmpty()) line += QStringLiteral(": ") + answer.reason;
-            auto *mark = label(line, answer.denied() ? c.warn : c.accent, 11, false, "teamPermissionAnswered");
-            mark->setWordWrap(true);
-            mark->setProperty("decision", answer.decision);
-            v->addWidget(mark);
+        const QString key = QStringLiteral("ui/expanded/taskPermissions/%1/%2/%3").arg(m_team.id).arg(task->id).arg(it->n);
+        const bool open = QSettings().value(key, false).toBool();
+        auto *summary = permissionToggle(it->permissions, c, open, "teamTaskPermissionsToggle");
+        summary->setProperty("attempt", it->n);
+        QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {
+            QSettings().setValue(key, expanded);
+            rebuild();
+        });
+        v->addWidget(summary, 0, Qt::AlignLeft);
+        if (open) {
+            auto *list = permissionAnswerList(it->permissions, c, QDateTime::currentSecsSinceEpoch(), 0, "teamTaskPermissions");
+            list->setProperty("attempt", it->n);
+            v->addWidget(list);
         }
         break;
     }

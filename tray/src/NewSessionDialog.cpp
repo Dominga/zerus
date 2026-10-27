@@ -47,7 +47,28 @@
 #include <QStackedWidget>
 #include <QUuid>
 #include <QVBoxLayout>
+#include <QInputDialog>
+#include <QWidgetAction>
 namespace {
+// U25 part 8: a dense menu's header ("Computer", "Project", ...), never chosen.
+QAction *denseMenuHeader(QMenu *menu,const QString &text)
+{
+    auto *label=new QLabel(text);label->setObjectName("denseMenuHeader");
+    auto *action=new QWidgetAction(menu);action->setDefaultWidget(label);action->setEnabled(false);action->setObjectName("denseMenuHeader");
+    return action;
+}
+// A row that cannot be chosen, with its reason under it ("studio is offline").
+QAction *denseMenuUnavailable(QMenu *menu,const QIcon &icon,const QString &text,const QString &reason)
+{
+    // Lined up with the menu's other rows: the icon, then the name in the text column.
+    auto *row=new QWidget;auto *layout=new QGridLayout(row);layout->setContentsMargins(8,4,14,4);layout->setHorizontalSpacing(17);layout->setVerticalSpacing(2);
+    layout->setColumnStretch(1,1);
+    auto *glyph=new QLabel;glyph->setFixedWidth(16);glyph->setPixmap(icon.pixmap(QSize(16,16),QIcon::Disabled));layout->addWidget(glyph,0,0);
+    auto *name=new QLabel(text);name->setObjectName("denseMenuUnavailable");layout->addWidget(name,0,1);
+    auto *why=new QLabel(reason);why->setObjectName("denseMenuReason");layout->addWidget(why,1,1);
+    auto *action=new QWidgetAction(menu);action->setDefaultWidget(row);action->setEnabled(false);action->setText(text);action->setToolTip(reason);
+    return action;
+}
 using namespace AccountChoice;
 constexpr int NewRepositoryProjectRole=Qt::UserRole+1;
 QLabel *plainLabel(const QString &text = {}) {auto *l=new QLabel(text);l->setTextFormat(Qt::PlainText);l->setWordWrap(true);return l;}
@@ -152,7 +173,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     setObjectName("newSessionDialog");setWindowTitle(tr("New session"));resize(660,730);setMinimumWidth(520);
     // The widgets and their logic are the same for every view; a skin's view
     // only arranges them (buildClassicLayout, buildDenseLayout).
-    m_project=new QComboBox;m_project->setObjectName("launchProject");m_project->setAccessibleName(tr("Project"));
+    m_project=new NewSessionDense::MenuCombo;m_project->setObjectName("launchProject");m_project->setAccessibleName(tr("Project"));
     m_project->setMinimumContentsLength(10);m_project->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     const auto theme=QSettings().value("workspace/theme","system").toString();
     const bool dark=theme=="dark"||(theme!="light"&&palette().color(QPalette::Window).lightness()<128);
@@ -161,7 +182,7 @@ NewSessionDialog::NewSessionDialog(const QString &hgsPath,const FleetState &flee
     m_manage=new QToolButton;m_manage->setObjectName("manageLaunchProject");
     m_manage->setAutoRaise(true);m_manage->setIcon(workspaceIcon("settings",iconColor));m_manage->setIconSize(QSize(18,18));m_manage->setFixedSize(34,34);
     m_manage->setToolTip(tr("Manage this project's folders"));m_manage->setAccessibleName(m_manage->toolTip());
-    m_machine=new QComboBox;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));m_machine->setMinimumContentsLength(6);m_machine->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_machine=new NewSessionDense::MenuCombo;m_machine->setObjectName("launchComputer");m_machine->setAccessibleName(tr("Computer"));m_machine->setMinimumContentsLength(6);m_machine->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_newProjectName=new QLineEdit;m_newProjectName->setObjectName("launchNewProjectName");m_newProjectName->setMaxLength(80);m_newProjectName->setPlaceholderText(tr("Project name"));
     m_newProjectField=new QStackedWidget;m_newProjectField->addWidget(m_newProjectName);m_newProjectField->addWidget(new QWidget);m_newProjectField->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
     m_newProjectLabel=new QStackedWidget;m_newProjectLabel->addWidget(new QLabel(tr("New project")));m_newProjectLabel->addWidget(new QWidget);m_newProjectLabel->setSizePolicy(QSizePolicy::Preferred,QSizePolicy::Fixed);
@@ -521,7 +542,7 @@ void NewSessionDialog::loadMachines()
         if(machine.isEmpty()||(!local&&machine==m_fleet.local().host))continue;
         const auto target=machine==m_fleet.local().host?QString():machine;
         const auto *box=target.isEmpty()?&m_fleet.local():m_fleet.peer(target);
-        items.append({machine+(box&&box->ok?QString():tr(" (offline)")),target});
+        items.append({machine+(box&&box->ok||m_denseHeader?QString():tr(" (offline)")),target});
     }
     // Fleet polls refresh labels in place: new rows would reset an open list's hovered row.
     const QSignalBlocker block(m_machine);
@@ -723,8 +744,17 @@ void NewSessionDialog::updateForm()
     const bool ready=repository?(online&&m_repository&&m_repository->canSubmit()&&(!newProject||!m_newProjectName->text().trimmed().isEmpty())):
         (!m_prefillRequest&&!path.isEmpty()&&m_folder->currentData(Qt::UserRole+3).toBool()&&(!m_autoPreferred||!m_catalogRequest)&&!(automatic&&m_creationFailed));
     m_start->setEnabled(!noMachine&&m_account->currentItem()&&(!m_accountRequest||agent()=="sh")&&!busy&&validName&&ready);
-    if(m_denseRail&&m_denseBlocked){m_start->setEnabled(false);m_start->setToolTip(tr("Connect the account first"));}
-    else if(m_denseRail)m_start->setToolTip(tr("Start session (Ctrl+Enter)"));
+    // The dense view says why Start is off: the computer, the folder, then the account.
+    if(m_denseRail){
+        const auto name=m_machine->currentText();
+        const QString reason=!noMachine&&!online?tr("%1 is offline").arg(name):!repository&&path.isEmpty()?tr("Pick a folder first"):
+            m_denseBlocked?tr("Sign in to the account first"):QString();
+        if(!reason.isEmpty())m_start->setEnabled(false);
+        m_start->setToolTip(reason.isEmpty()?tr("Start session (Ctrl+Enter)"):reason);
+        for(const auto &[combo,bad]:std::initializer_list<std::pair<QComboBox *,bool>>{{m_machine,!noMachine&&!online},{m_folder,!repository&&path.isEmpty()}})
+            if(combo->property("denseBad").toBool()!=bad){combo->setProperty("denseBad",bad);combo->style()->unpolish(combo);combo->style()->polish(combo);}
+        m_folder->setPlaceholderText(tr("No folder on %1").arg(name));
+    }
     m_start->setText(m_creation?tr("Creating worktree…"):m_validation?tr("Checking folder…"):
         repository?(m_repository&&m_repository->busy()?(m_repository->cloning()?tr("Cloning…"):tr("Checking…")):
             (m_repository&&!m_repository->createdPath().isEmpty()?tr("Use checkout and start"):tr("Clone and start"))):tr("Start session"));
@@ -752,7 +782,8 @@ void NewSessionDialog::updateForm()
     m_openTerminal->setEnabled(!busy&&agent()!="dsh"&&agent()!="opencode");
     m_openTerminal->setToolTip(agent()=="dsh"?tr("DeepSeek opens in the workspace's Native UI."):agent()=="opencode"?tr("OpenCode runs through its native server and opens in Activity."):tr("Also open an external terminal for this session."));
     const auto offline=tr("This computer is unavailable. Choose another folder or reconnect it.");
-    if(!repository&&!path.isEmpty()&&!m_folder->currentData(Qt::UserRole+3).toBool())m_error->setText(offline);
+    // The dense view's line under the agents says it instead.
+    if(!repository&&!path.isEmpty()&&!m_folder->currentData(Qt::UserRole+3).toBool()&&!m_denseRail)m_error->setText(offline);
     else if(m_error->text()==offline)m_error->clear();
     const auto noAccount=tr("Restore or add an account in Agent accounts to start this agent.");
     if(m_account->count()==0)m_error->setText(noAccount);else if(m_error->text()==noAccount)m_error->clear();
@@ -1299,7 +1330,8 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
     const auto &t=*m_denseTokens;
     m_denseDark=dark;
     auto *outer=new QVBoxLayout(this);outer->setContentsMargins(0,0,0,0);outer->setSpacing(0);outer->setSizeConstraint(QLayout::SetFixedSize);
-    if(skin.framelessDialogs()){setWindowFlag(Qt::FramelessWindowHint,true);setAttribute(Qt::WA_TranslucentBackground,true);}
+    // The dense dialog is its own frame (U25 part 8): Name, Close and the drag are in its header.
+    setWindowFlag(Qt::FramelessWindowHint,true);setAttribute(Qt::WA_TranslucentBackground,true);
     auto *frame=new QFrame;frame->setObjectName("newSessionDense");frame->setFixedWidth(520);outer->addWidget(frame);
     auto *layout=new QVBoxLayout(frame);layout->setContentsMargins(0,0,0,0);layout->setSpacing(0);
     // Widgets the design does not show keep working out of sight.
@@ -1311,15 +1343,23 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
         source->setText(m_repositorySource?tr("Use a working folder"):tr("Clone a Git repository…"));source->setEnabled(m_gitSource->isEnabled());
     });
     connect(source,&QAction::triggered,this,[this]{(m_repositorySource?m_folderSource:m_gitSource)->click();});
+    // The worktree menu as the design names it: New worktree…, then Use an existing worktree….
+    auto *worktreeMenu=m_worktreeOptions->menu();worktreeMenu->setObjectName("denseMenu");
+    m_newWorktree->setText(tr("New worktree…"));m_worktrees->setText(tr("Use an existing worktree…"));
+    worktreeMenu->removeAction(m_newWorktree);worktreeMenu->insertAction(m_worktrees,m_newWorktree);
+    worktreeMenu->insertAction(m_newWorktree,denseMenuHeader(worktreeMenu,tr("Worktree")));
+    m_worktreeOptions->setToolTip(tr("More worktree options"));m_worktreeOptions->setAccessibleName(m_worktreeOptions->toolTip());
+    // Project, computer and folder open the design's menus.
+    for(auto *combo:{m_project,m_machine,m_folder})static_cast<MenuCombo *>(combo)->menu=[this,combo]{showDenseMenu(combo);};
     const auto rule=[]{auto *line=new QFrame;line->setObjectName("denseRule");line->setFixedHeight(1);return line;};
     // Header, 52px: Name, the session name and Close.
     m_denseHeader=new QWidget;m_denseHeader->setObjectName("denseHeader");m_denseHeader->setFixedHeight(52);
     auto *top=new QHBoxLayout(m_denseHeader);top->setContentsMargins(16,0,8,0);top->setSpacing(6);
     top->addWidget(new Caption(tr("Name"),t.label));m_name->setFixedHeight(32);top->addWidget(m_name,1);
     auto *closeButton=new QToolButton;closeButton->setObjectName("denseClose");closeButton->setAutoRaise(true);closeButton->setFixedSize(32,32);
-    closeButton->setIcon(workspaceIcon("close",t.muted));closeButton->setIconSize(QSize(16,16));closeButton->setToolTip(tr("Close"));closeButton->setAccessibleName(tr("Close"));
+    closeButton->setIcon(workspaceIcon("close",t.muted));closeButton->setIconSize(QSize(14,14));closeButton->setToolTip(tr("Close"));closeButton->setAccessibleName(tr("Close"));
     connect(closeButton,&QToolButton::clicked,this,&QDialog::reject);top->addWidget(closeButton);
-    if(skin.framelessDialogs())m_denseHeader->installEventFilter(this);
+    m_denseHeader->installEventFilter(this);
     layout->addWidget(m_denseHeader);layout->addWidget(rule());
     // Body: one grid for every row.
     auto *grid=new QGridLayout;grid->setContentsMargins(16,16,16,16);grid->setHorizontalSpacing(6);grid->setVerticalSpacing(10);grid->setColumnStretch(1,1);
@@ -1335,7 +1375,7 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
     grid->addWidget(m_newProjectLabel,row,0);grid->addWidget(m_newProjectField,row++,1,1,3);
     grid->addWidget(new Caption(tr("Folder"),t.label),row,0);
     static_cast<PathCombo *>(m_folder)->setTail(Qt::UserRole+2,t.dim,t.text);grid->addWidget(m_folder,row,1);
-    iconButton(m_browse,"folder",tr("Browse…"));grid->addWidget(m_browse,row,2);
+    iconButton(m_browse,"group",tr("Browse for folder"));grid->addWidget(m_browse,row,2);
     // A repository's address takes the folder's place; where it is cloned to follows.
     auto *repositoryDetails=m_sourceDetails->widget(1);
     grid->addWidget(m_repositoryUrl,row,1,1,2);m_repositoryUrl->hide();
@@ -1353,6 +1393,8 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
     auto *agentColumn=new QVBoxLayout;agentColumn->setSpacing(6);agentColumn->setContentsMargins(0,0,0,0);
     m_denseRail=new AgentRail(t);
     m_denseRail->selected=[this](const QString &key){selectDenseAgent(key);};
+    // Another account choice (a preset, the account list) moves the rail with it.
+    connect(m_account,&QListWidget::currentRowChanged,this,[this](int row){if(row>=0)m_denseKey=denseKey(row);});
     agentColumn->addWidget(m_denseRail);
     auto *infoRow=new QHBoxLayout;infoRow->setSpacing(8);infoRow->setContentsMargins(0,0,0,0);
     m_denseInfo=new InfoLine(t);infoRow->addWidget(m_denseInfo,1);
@@ -1377,16 +1419,21 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
     // Model: the chosen Ollama model of this machine, or OpenCode's model and effort.
     m_denseModelCaption=new Caption(tr("Model"),t.label);grid->addWidget(m_denseModelCaption,row,0);
     m_localModel=new QComboBox;m_localModel->setObjectName("denseLocalModel");m_localModel->setAccessibleName(tr("Model"));m_localModel->setFont(mono(12));
-    auto *modelField=new QStackedWidget;modelField->setObjectName("denseModelField");modelField->addWidget(m_localModel);modelField->addWidget(m_model);m_denseModelField=modelField;
-    m_model->show();
+    // OpenCode's model is the classic picker button; its combo keeps the choice out of sight.
+    auto *modelField=new QStackedWidget;modelField->setObjectName("denseModelField");modelField->addWidget(m_localModel);modelField->addWidget(m_modelButton);m_denseModelField=modelField;
+    m_modelButton->show();unseenLayout->addWidget(m_model);
     grid->addWidget(modelField,row,1);
-    m_denseRescan=new QToolButton;m_denseRescan->setObjectName("denseRescan");iconButton(m_denseRescan,"refresh",tr("Rescan models"));
+    m_denseRescan=new QToolButton;m_denseRescan->setObjectName("denseRescan");iconButton(m_denseRescan,"refresh",tr("Rescan local models"));
     connect(m_denseRescan,&QToolButton::clicked,this,[this]{requestLocalModels();});
     grid->addWidget(m_denseRescan,row,2);
     m_denseModelMeta=new QLabel;m_denseModelMeta->setObjectName("denseModelMeta");m_denseModelMeta->setFont(mono(11));
     auto *metaStack=new QStackedWidget;metaStack->addWidget(m_denseModelMeta);metaStack->addWidget(m_effort);m_denseMetaField=metaStack;m_effort->show();
     m_denseMetaBox=right(metaStack);grid->addWidget(m_denseMetaBox,row++,3);
     connect(m_localModel,&QComboBox::currentIndexChanged,this,&NewSessionDialog::refreshDenseModel);
+    // Local models belong to their computer: another one lists its own.
+    connect(m_machine,&QComboBox::currentIndexChanged,this,[this]{
+        m_localModelRequest=0;m_localModelsListed=false;const QSignalBlocker blocker(m_localModel);m_localModel->clear();
+    });
     for(auto *widget:QList<QWidget *>{m_modelLabel,m_effortLabel})unseenLayout->addWidget(widget);
     grid->addWidget(m_openCodeService,row++,1,1,3);
     grid->addWidget(m_nameError,row++,1,1,3);
@@ -1433,9 +1480,21 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
         QToolButton#denseClose { border:0; background:transparent; }
         QFrame#newSessionDense QComboBox { min-height:28px; max-height:28px; padding:0 8px; background:%6; border:1px solid %3; border-radius:6px; color:%4; font-size:13px; }
         QFrame#newSessionDense QComboBox#denseLocalModel { font-size:12px; }
+        QFrame#newSessionDense QPushButton#launchModelButton { min-height:28px; max-height:28px; padding:0 8px; background:%6; border:1px solid %3; border-radius:6px; color:%4; font-size:12px; text-align:left; }
         QFrame#newSessionDense QComboBox::drop-down { border:0; width:22px; }
+        QFrame#newSessionDense QComboBox:hover { border-color:%10; }
+        QFrame#newSessionDense QComboBox[denseBad="true"] { border-color:%16; }
+        QMenu#denseMenu { background:%6; border:1px solid %2; border-radius:6px; padding:4px; color:%4; font-size:13px; }
+        QMenu#denseMenu::item { padding:5px 14px 5px 8px; border-radius:4px; }
+        QMenu#denseMenu::item:selected { background:%11; }
+        QMenu#denseMenu::item:disabled { color:%14; }
+        QMenu#denseMenu::separator { height:1px; background:%2; margin:4px 2px; }
+        QMenu#denseMenu QLabel { background:transparent; }
+        QLabel#denseMenuHeader { color:%9; font-size:11px; padding:4px 8px 2px 8px; }
+        QLabel#denseMenuUnavailable { color:%14; font-size:13px; }
+        QLabel#denseMenuReason { color:%9; font-size:11px; }
         QFrame#newSessionDense [denseIcon="true"] { background:transparent; border:1px solid %3; border-radius:6px; padding:0; }
-        QFrame#newSessionDense [denseIcon="true"]:hover { background:%6; }
+        QFrame#newSessionDense [denseIcon="true"]:hover { background:%6; border-color:%10; }
         QFrame#denseSegment { background:%6; border:1px solid %3; border-radius:6px; }
         QFrame#denseSegment QPushButton { min-height:24px; max-height:24px; padding:0 6px; border:0; border-radius:4px; background:transparent; color:%7; font-size:12px; }
         QFrame#denseSegment QPushButton:checked { background:%8; color:%5; font-weight:500; }
@@ -1453,7 +1512,8 @@ void NewSessionDialog::buildDenseLayout(QDialogButtonBox *buttons,bool dark,cons
         QFrame#newSessionDense QPushButton#primary { padding:0 64px 0 14px; border:0; background:%5; color:%12; font-weight:600; }
         QFrame#newSessionDense QPushButton#primary:disabled { background:%13; color:%14; }
     )").arg(t.dialog.name(),t.border.name(),t.borderField.name(),t.text.name(),t.accent.name(),t.field.name(),t.muted.name(),
-            t.segOn.name(),t.label.name(),t.borderNeutral.name(),t.btnNeutral.name(),t.onAccent.name(),t.disabled.name(),t.dim.name(),t.danger.name())+skin.stylesheet);
+            t.segOn.name(),t.label.name(),t.borderNeutral.name(),t.btnNeutral.name(),t.onAccent.name(),t.disabled.name(),t.dim.name(),t.danger.name())
+        .arg(QColor::fromRgbF(t.warn.redF()*0.6+t.border.redF()*0.4,t.warn.greenF()*0.6+t.border.greenF()*0.4,t.warn.blueF()*0.6+t.border.blueF()*0.4).name())+skin.stylesheet);
 }
 
 // The rail key of a listed account: Ollama accounts are Claude Code profiles.
@@ -1516,6 +1576,64 @@ void NewSessionDialog::refreshDenseModel()
     m_denseModelMeta->setToolTip(m_localModel->currentText());
 }
 
+// The design's menus for the project, the computer and the folder: a header,
+// a check at the current choice, unavailable computers with their reason, and
+// New project…, Browse… and Clone repository….
+void NewSessionDialog::showDenseMenu(QComboBox *combo)
+{
+    using namespace NewSessionDense;
+    const auto &t=*m_denseTokens;
+    auto *menu=new QMenu(this);menu->setObjectName("denseMenu");menu->setAttribute(Qt::WA_DeleteOnClose);
+    const auto choose=[this,combo](int index){combo->setCurrentIndex(index);emit combo->activated(index);};
+    const auto add=[&](int index,const QIcon &icon,const QString &text){
+        auto *action=menu->addAction(icon,(index==combo->currentIndex()?QStringLiteral("✓ "):QString())+text);
+        action->setProperty("denseIndex",index);connect(action,&QAction::triggered,this,[choose,index]{choose(index);});
+        return action;
+    };
+    if(combo==m_project){
+        menu->addAction(denseMenuHeader(menu,tr("Project")));
+        for(int index=0;index<m_project->count();++index)
+            if(!m_project->itemData(index,NewRepositoryProjectRole).toBool())add(index,m_project->itemIcon(index),m_project->itemText(index));
+        menu->addSeparator();
+        auto *create=menu->addAction(workspaceIcon("add",t.muted),tr("New project…"));create->setObjectName("denseNewProject");
+        connect(create,&QAction::triggered,this,&NewSessionDialog::createDenseProject);
+    } else if(combo==m_machine){
+        menu->addAction(denseMenuHeader(menu,tr("Computer")));
+        const auto glyph=workspaceIcon("machines",t.muted);
+        for(int index=0;index<m_machine->count();++index){
+            const auto target=m_machine->itemData(index).toString();const auto name=m_machine->itemText(index);
+            const auto *box=target.isEmpty()?&m_fleet.local():m_fleet.peer(target);
+            if(box&&box->ok)add(index,glyph,target.isEmpty()?tr("%1 (this computer)").arg(name):name);
+            else menu->addAction(denseMenuUnavailable(menu,glyph,name,tr("%1 is offline").arg(name)));
+        }
+    } else {
+        const auto machine=m_machine->currentText();
+        menu->addAction(denseMenuHeader(menu,tr("Working folder on %1").arg(machine)));
+        const auto style=folderStyle(m_fleet,host());const auto glyph=workspaceIcon("folder",t.folder);
+        for(int index=0;index<m_folder->count();++index)add(index,glyph,MachinePlatform::native(m_folder->itemData(index,Qt::UserRole+2).toString(),style));
+        if(m_folder->count()==0)menu->addAction(denseMenuUnavailable(menu,glyph,tr("No folder of %1 on %2").arg(m_project->currentText(),machine),tr("Browse, or clone the repository there")));
+        menu->addSeparator();
+        auto *browse=menu->addAction(workspaceIcon("add",t.muted),tr("Browse…"));browse->setEnabled(m_browse->isEnabled());
+        connect(browse,&QAction::triggered,this,&NewSessionDialog::browseFolder);
+        auto *clone=menu->addAction(workspaceIcon("git-branch",t.muted),tr("Clone repository…"));clone->setEnabled(m_gitSource->isEnabled());
+        connect(clone,&QAction::triggered,m_gitSource,&QPushButton::click);
+    }
+    menu->setMinimumWidth(combo->width());
+    menu->popup(combo->mapToGlobal(QPoint(combo==m_machine?combo->width()-qMax(menu->sizeHint().width(),combo->width()):0,combo->height()+3)));
+}
+
+// New project… in the project menu: named here, it joins the projects and is chosen.
+void NewSessionDialog::createDenseProject()
+{
+    bool ok=false;
+    const auto name=QInputDialog::getText(this,tr("New project"),tr("Project name"),QLineEdit::Normal,{},&ok).trimmed();
+    if(!ok||name.isEmpty())return;
+    auto *projects=m_liveProjects?m_liveProjects:&m_projects;
+    const auto id=projects->createGroup(name);if(id.isEmpty())return;
+    emit organizationChanged();
+    const auto snapshot=*projects;setGroups(snapshot,id);setProjectExplicit(true);updateForm();
+}
+
 // Sign in to the chosen account here, or set one up in Accounts.
 void NewSessionDialog::denseAccountAction()
 {
@@ -1529,12 +1647,15 @@ void NewSessionDialog::denseAccountAction()
 }
 
 namespace {
-QString resetText(const QJsonObject &window)
+// The time left until a window resets: "01:40" on the tiles and in the
+// account list (the design), "1h 40m" in sentences.
+QString resetText(const QJsonObject &window,bool words=false)
 {
     const auto at=AccountUsage::reset(window["resets_at"]);
     if(!at.isValid())return QStringLiteral("—");
     const qint64 minutes=qMax<qint64>(0,(QDateTime::currentDateTime().secsTo(at)+59)/60);
-    return QStringLiteral("%1h %2m").arg(minutes/60).arg(minutes%60,2,10,QChar('0'));
+    if(words)return QStringLiteral("%1h %2m").arg(minutes/60).arg(minutes%60,2,10,QChar('0'));
+    return QStringLiteral("%1:%2").arg(minutes/60,2,10,QChar('0')).arg(minutes%60,2,10,QChar('0'));
 }
 QString age(qint64 seconds)
 {
@@ -1549,26 +1670,37 @@ void NewSessionDialog::refreshDense()
     if(!m_denseRail)return;
     using namespace NewSessionDense;
     const auto &t=*m_denseTokens;
-    if(m_denseKey.isEmpty()||(m_account->currentItem()&&denseKey(m_account->currentRow())!=m_denseKey&&m_denseKey!="ollama"))
+    // An agent chosen without an account keeps its tile; another choice of
+    // account (a preset, the list) moves the rail with it.
+    if(m_denseKey.isEmpty()||(m_account->currentItem()&&denseKey(m_account->currentRow())!=m_denseKey&&m_denseKey!="ollama"&&denseRow(m_denseKey)>=0))
         m_denseKey=m_account->currentItem()?denseKey(m_account->currentRow()):QString();
-    bool claude=false;QStringList keys;
-    for(int row=0;row<m_account->count();++row){const auto key=denseKey(row);claude|=key=="claude"||key=="ollama";if(!keys.contains(key))keys<<key;}
-    const bool windows=folderStyle(m_fleet,host())==MachinePlatform::Style::Windows;
+    QStringList keys;
+    for(int row=0;row<m_account->count();++row){const auto key=denseKey(row);if(!keys.contains(key))keys<<key;}
+    const auto style=folderStyle(m_fleet,host());
+    const bool windows=style==MachinePlatform::Style::Windows;
+    const auto *box=host().isEmpty()?&m_fleet.local():m_fleet.peer(host());
+    const bool online=box&&box->ok;
     QList<Agent> agents;
     const QStringList signedOut{"signed_out","expired","credentials_locked","credentials_unavailable","desktop_session_unavailable"};
+    // U25 part 8: Codex, Claude, Kimi, DeepSeek, Ollama and the terminal are
+    // always there ("no acct / + add" without an account); OpenCode with one.
     for(const auto *value:{"codex","claude","kimi","dsh","ollama","opencode","sh"}){
         const QString key=QString::fromLatin1(value);
-        if(!keys.contains(key)&&!(key=="ollama"&&claude))continue;
+        // While the accounts load, only the listed ones (the terminal) are shown.
+        if(keys.isEmpty())break;
+        if(!keys.contains(key)&&(m_accountRequest||key=="opencode"||!AccountCatalog::launchable(key=="ollama"?QStringLiteral("claude"):key,style)))continue;
         Agent agent;agent.key=key;
         agent.name=key=="sh"?(windows?tr("PowerShell"):tr("Shell")):key=="ollama"?tr("Ollama"):IdentityBadges::providerName(key);
         agent.kind=key=="dsh"?QStringLiteral("balance"):key=="ollama"||key=="opencode"?QStringLiteral("local"):key=="sh"?QStringLiteral("terminal"):QStringLiteral("subscription");
         const QString icon=key=="dsh"?QStringLiteral("deepseek"):key;
-        agent.icon=QStringList{"codex","claude","kimi","deepseek","ollama"}.contains(icon)?QIcon(":/hgs/agent-icons/"+icon+".svg")
+        // The agents' logos with their monochrome parts in the theme's text colour.
+        agent.icon=QStringList{"codex","claude","kimi","deepseek","ollama"}.contains(icon)?agentLogoIcon(key,t.text)
             :workspaceIcon(key=="sh"?QString("terminal"):key,key=="sh"?t.muted:IdentityBadges::providerColor(key,m_denseDark));
         const int row=denseRow(key);
         const auto usage=row<0?QJsonObject():m_account->item(row)->data(ProfileRole).toJsonObject()["usage"].toObject();
         const auto status=usage["status"].toString();
         agent.connected=key=="sh"||(row>=0&&!signedOut.contains(status));
+        agent.absent=row<0&&key!="sh"&&key!="ollama";
         agent.busy=m_denseSigningIn&&key==m_denseKey;
         const auto email=usage["identity"].toObject()["email"].toString();
         // Every account of a subscription agent, for the dots, the chip and its list.
@@ -1592,7 +1724,7 @@ void NewSessionDialog::refreshDense()
         for(const auto &windowValue:AccountUsage::launchMeterData(usage)["windows"].toArray()){
             const auto meter=windowValue.toObject();const int minutes=meter["window_minutes"].toInt();
             const double used=meter["used_percent"].toDouble();
-            if(minutes==300){agent.fiveHour=used;agent.reset=resetText(meter);tip<<tr("5h: %1% used · resets in %2").arg(qRound(used)).arg(agent.reset);}
+            if(minutes==300){agent.fiveHour=used;agent.reset=resetText(meter);agent.resetIn=resetText(meter,true);tip<<tr("5h: %1% used · resets in %2").arg(qRound(used)).arg(agent.resetIn);}
             if(minutes==10080){agent.week=used;tip<<tr("Week: %1% used · resets %2").arg(qRound(used)).arg(QLocale().toString(AccountUsage::reset(meter["resets_at"]),QStringLiteral("ddd HH:mm")));}
         }
         if(agent.reset.isEmpty())agent.reset=QStringLiteral("—");
@@ -1602,7 +1734,11 @@ void NewSessionDialog::refreshDense()
             const auto currency=balances.first().toObject()["currency"].toString();
             if(valid){agent.balanceValue=amount;agent.balance=(currency=="CNY"?QStringLiteral("¥"):currency=="USD"?QStringLiteral("$"):currency+' ')+QString::number(amount,'f',2);tip<<tr("Balance: %1").arg(agent.balance);}
         }
-        if(!agent.connected)tip<<(agent.kind=="balance"?tr("No API key"):tr("Not connected"));
+        const auto machine=m_machine->currentText();
+        if(agent.absent)tip={tr("%1 — no account on %2. Add one in Agent accounts.").arg(agent.name,machine)};
+        else if(key=="ollama"&&row<0)tip={tr("Ollama is not set up on %1").arg(machine)};
+        else if(key=="sh")tip={tr("%1 · interactive terminal").arg(agent.name)};
+        else if(!agent.connected)tip<<(agent.kind=="balance"?tr("No API key"):tr("Not signed in on %1").arg(machine));
         agent.tooltip=tip.join('\n');
         if(agent.multi()){
             QStringList lines{tr("%1 · %n accounts","",int(agent.accounts.size())).arg(agent.name)};
@@ -1619,18 +1755,21 @@ void NewSessionDialog::refreshDense()
     const Agent *current=nullptr;for(const auto &agent:agents)if(agent.key==m_denseKey)current=&agent;
     const int row=denseRow(m_denseKey);
     const auto usage=row<0?QJsonObject():m_account->item(row)->data(ProfileRole).toJsonObject()["usage"].toObject();
-    QString title,details,action;bool warn=false;
-    if(!current){title=m_accountStatus->text().isEmpty()?tr("Loading accounts…"):m_accountStatus->text();}
-    else if(m_denseKey=="ollama"&&row<0){title=tr("Ollama · not set up");details=tr("add a local model account to start");warn=true;action=tr("Set up");}
+    QString title,details,action;bool warn=false,danger=false;
+    const auto machine=m_machine->currentText();
+    if(!online&&m_machine->count()>0){title=tr("%1 is offline").arg(machine);details=tr("pick another computer");danger=true;}
+    else if(!current){title=m_accountStatus->text().isEmpty()?tr("Loading accounts…"):m_accountStatus->text();}
+    else if(current->absent){title=tr("%1 · no account on %2").arg(current->name,machine);details=tr("add one in Agent accounts");warn=true;action=tr("Add account");}
+    else if(m_denseKey=="ollama"&&row<0){title=tr("Ollama · not set up on %1").arg(machine);details=tr("add a local model account to start");warn=true;action=tr("Set up");}
     else if(!current->connected){
         warn=true;
         if(current->kind=="balance"){title=tr("%1 · no API key").arg(current->name);details=tr("add an API key to start");action=tr("Add key");}
-        else{title=tr("%1 · not connected").arg(current->name);details=m_denseSigningIn?tr("waiting for sign-in in browser…"):tr("sign in to use this agent and see limits");action=m_denseSigningIn?tr("Signing in…"):tr("Sign in");}
+        else{title=tr("%1 · not connected").arg(current->name);details=m_denseSigningIn?tr("waiting for sign-in in browser…"):tr("sign in to use this account");action=m_denseSigningIn?tr("Signing in…"):tr("Sign in");}
     } else if(current->kind=="subscription"){
         const auto email=usage["identity"].toObject()["email"].toString();
         title=email.isEmpty()?current->name:current->name+" · "+email;
         QStringList parts;
-        if(current->fiveHour>=0)parts<<tr("5h %1% used · resets in %2").arg(qRound(current->fiveHour)).arg(current->reset);
+        if(current->fiveHour>=0)parts<<tr("5h %1% used · resets in %2").arg(qRound(current->fiveHour)).arg(current->resetIn);
         if(current->week>=0)parts<<tr("week %1% used").arg(qRound(current->week));
         details=parts.isEmpty()?AccountUsage::launchSummary(usage):parts.join(QStringLiteral(" · "));
     } else if(current->kind=="balance"){title=current->name;details=current->balance.isEmpty()?tr("API key configured"):tr("balance %1 · pay-as-you-go").arg(current->balance);}
@@ -1639,21 +1778,22 @@ void NewSessionDialog::refreshDense()
         details=m_localModelsListed?tr("local on %1 · %n models","",m_localModel->count()).arg(machine):tr("local on %1").arg(machine);
     } else if(m_denseKey=="opencode"){title=current->name;details=tr("native provider configuration");}
     else {title=current->name;details=tr("interactive terminal session");}
-    m_denseInfo->setText(title,details,warn);
-    const bool multi=current&&current->multi();
+    m_denseInfo->setText(title,details,warn,danger);
+    const bool multi=online&&current&&current->multi();
     m_denseInfo->setVisible(!multi);m_denseChip->setVisible(multi);
     if(multi)m_denseChip->setAccounts(current->accounts,current->chosen);else if(m_denseList->isVisible())m_denseList->hide();
     m_denseSignIn->setText(action);m_denseSignIn->setVisible(!action.isEmpty());m_denseSignIn->setEnabled(!m_denseSigningIn);
-    m_refreshAccounts->setVisible(action.isEmpty());
+    m_refreshAccounts->setVisible(action.isEmpty()&&!danger);
     const qint64 checked=qint64(usage["checked_at"].toDouble());
     const auto updated=checked>0?age(QDateTime::currentSecsSinceEpoch()-checked):QString();
     m_refreshAccounts->setText(updated);m_refreshAccounts->setToolTip(updated.isEmpty()?tr("Refresh accounts"):tr("Updated %1 ago").arg(updated));
     // The Model row: Ollama's models or OpenCode's model and effort.
-    const bool ollama=m_denseKey=="ollama"&&row>=0,openCode=m_denseKey=="opencode";
+    const bool ollama=online&&m_denseKey=="ollama"&&row>=0,openCode=online&&m_denseKey=="opencode";
     for(auto *widget:QList<QWidget *>{m_denseModelCaption,m_denseModelField,m_denseMetaBox})widget->setVisible(ollama||openCode);
     m_denseRescan->setVisible(ollama);
     m_denseModelField->setCurrentIndex(openCode?1:0);m_denseMetaField->setCurrentIndex(openCode?1:0);
     if(ollama&&!m_localModelsListed&&!m_localModelRequest)requestLocalModels();
+    else if(ollama&&m_localModelsListed&&!m_localModelRequest&&m_localModel->count())refreshDenseModel();
     // Permission modes in the ··· menu.
     m_densePermissions->clear();
     for(int index=0;index<m_permissions->count();++index){
@@ -1665,7 +1805,7 @@ void NewSessionDialog::refreshDense()
     for(int index=0;index<m_project->count();++index)if(m_project->itemIcon(index).isNull())m_project->setItemIcon(index,workspaceIcon("folder",t.folder));
     for(int index=0;index<m_machine->count();++index)if(m_machine->itemIcon(index).isNull())m_machine->setItemIcon(index,workspaceIcon("machines",t.muted));
     m_folder->setToolTip(QDir::toNativeSeparators(m_folder->currentData(Qt::UserRole+2).toString()));
-    m_denseBlocked=!current||!current->connected||(m_denseKey=="ollama"&&row<0);
+    m_denseBlocked=!current||!current->connected||current->absent||(m_denseKey=="ollama"&&row<0);
 }
 
 // A frameless dense dialog moves by its header, with the system's snapping.

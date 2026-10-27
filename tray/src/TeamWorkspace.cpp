@@ -1082,6 +1082,23 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     return area;
 }
 
+// U25 part 5 (owner, 2026-10-27): the small activity label a graph node, board
+// card and layers row carry right of the role chip and model tile: what happens
+// now. A problem text wins over it (the callers check that first); Pending,
+// Draft and Accepted say nothing - their icon and border say it.
+static QString activityLabel(const Teams::Task &task)
+{
+    if (task.status == QLatin1String("submitted")) return TeamWorkspace::tr("review");
+    if (task.status == QLatin1String("in_progress")) {
+        const int n = task.last() ? task.last()->n : 0;
+        if (n > 1) return TeamWorkspace::tr("attempt %1").arg(n);
+    }
+    if (task.held) return TeamWorkspace::tr("held");
+    if (task.subteam.known && !task.subteam.team.isEmpty())
+        return TeamWorkspace::tr("sub-team %1/%2").arg(task.subteam.done).arg(task.subteam.total);
+    return QString();
+}
+
 void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int> &order, const QSet<int> &phase)
 {
     const Colors c = colorsFor(m_dark);
@@ -1120,6 +1137,8 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         const bool unassigned = (team.status == "planning" || node.draft) && !assignee;
         if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }
         else if (node.problem) node.problemText = problemText.value(id);
+        // The owner's activity label; a problem text wins over it.
+        if (!unassigned && !node.problem) node.activity = activityLabel(*task);
         // Spec 1.4: the dots under the model tile while its agent really runs
         // this task.
         node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
@@ -1188,6 +1207,13 @@ QWidget *TeamWorkspace::board(const Team &team)
             const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r->addWidget(pill);
             if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r->addWidget(i); }
+            // The same small activity label as the graph (a problem text wins).
+            if (!problemTasks.contains(task.id)) {
+                const QString activity = activityLabel(task);
+                if (!activity.isEmpty()) {
+                    auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r->addWidget(a);
+                }
+            }
             const auto mark = phaseMark(team, task);
             auto *state = new StatusMark(s.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : s.tone),
                                          mark.kind.isEmpty() ? kindOfTask(task, s) : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);
@@ -2249,16 +2275,23 @@ QWidget *TeamWorkspace::members(const Team &team)
             pv->addLayout(answerRow);
             col->addWidget(box);
         }
-        // The answers so far: who answered, and the deny reason.
-        for (const auto &answer : m.permissionAnswers) {
-            const QString by = answer.by == "owner" ? tr("you") : answer.by == "lead" ? tr("the lead")
-                             : answer.by == "rule" ? tr("a rule") : answer.by == "timeout" ? tr("a timeout") : tr("unknown");
-            QString line = answer.denied() ? tr("Denied by %1").arg(by) : tr("Allowed by %1").arg(by);
-            if (answer.denied() && !answer.reason.isEmpty()) line += QStringLiteral(": ") + answer.reason;
-            auto *mark = label(line, answer.denied() ? c.warn : c.accent, 10, false, "teamMemberPermissionAnswered");
-            mark->setWordWrap(true);
-            mark->setProperty("decision", answer.decision);
-            col->addWidget(mark);
+        // U17: the stored answers fold to one summary line and open to the
+        // newest five; the choice is kept for the team and the member.
+        if (!m.permissionAnswers.isEmpty()) {
+            const QString key = QStringLiteral("ui/expanded/teamPermissions/%1/%2").arg(team.id, m.id);
+            const bool open = QSettings().value(key, false).toBool();
+            auto *summary = permissionToggle(m.permissionAnswers, c, open, "teamMemberPermissionsToggle");
+            summary->setProperty("member", m.id);
+            QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {
+                QSettings().setValue(key, expanded);
+                scheduleRender();
+            });
+            col->addWidget(summary, 0, Qt::AlignLeft);
+            if (open) {
+                auto *list = permissionAnswerList(m.permissionAnswers, c, QDateTime::currentSecsSinceEpoch(), 5, "teamMemberPermissions");
+                list->setProperty("member", m.id);
+                col->addWidget(list);
+            }
         }
         bh->addLayout(col, 1);
         auto *right = new QVBoxLayout; right->setSpacing(3);

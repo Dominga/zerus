@@ -47,6 +47,9 @@
 #include <QClipboard>
 #include "TeamController.h"
 #include "TeamDesignerPage.h"
+#include "TeamConversation.h"
+#include "QuestionCard.h"
+#include "ActivityView.h"
 #include "TeamDesignerPanel.h"
 #include "TeamModel.h"
 #include "TeamNewDialog.h"
@@ -176,6 +179,30 @@ QJsonObject graphTeam()
  "layers":{"1":0,"2":1,"3":1,"4":1,"5":2,"6":3,"7":5,"8":2,"9":4},"cycle":[],"ready":[],
  "validation":{"errors":[],"warnings":[]}})").object();
     return t;
+}
+
+// U25 part 5 (owner, 2026-10-27): one task per activity-label rule, plus a
+// problem that must win over the label.
+QJsonObject labelTeam()
+{
+    return QJsonDocument::fromJson(R"({
+ "id":"team-1","name":"Labels","status":"running","project":"Checkout","folder":"/work/labels","lead":"lead",
+ "revision":5,"created":1000,"updated":5000,"settings":{},"layers":{},"cycle":[],"ready":[],"validation":{"errors":[],"warnings":[]},
+ "members":[
+  {"id":"lead","role":"Lead","agent":"claude","state":"active","session":{"host":"","name":"claude/labels/lead"}},
+  {"id":"backend","role":"Backend","agent":"dsh","state":"active","session":{"host":"","name":"dsh/labels/backend"}},
+  {"id":"blocked","role":"Tester","agent":"codex","state":"active","session":{"host":"","name":"codex/labels/blocked"}}],
+ "tasks":[
+  {"id":1,"title":"Review me","assignee":"backend","status":"submitted","attempts":[{"n":1,"id":"a1","member":"backend","state":"reported"}]},
+  {"id":2,"title":"Second try","assignee":"backend","status":"in_progress","attempts":[{"n":2,"id":"a2","member":"backend","state":"delivered","started_at":1200}]},
+  {"id":3,"title":"First try","assignee":"backend","status":"in_progress","attempts":[{"n":1,"id":"a3","member":"backend","state":"delivered","started_at":1300}]},
+  {"id":4,"title":"Held back","assignee":"backend","status":"pending","hold":{"by":"Lead","at":1400,"reason":"ask first"}},
+  {"id":5,"title":"Delegated","assignee":"backend","status":"in_progress","subteam":{"team":"team-2","done":1,"total":2},"attempts":[{"n":1,"id":"a5","member":"backend","state":"delivered","started_at":1500}]},
+  {"id":6,"title":"Queued","assignee":"backend","status":"pending"},
+  {"id":7,"title":"Still a draft","assignee":"backend","status":"draft"},
+  {"id":8,"title":"Done","assignee":"backend","status":"accepted"},
+  {"id":9,"title":"Offline problem","assignee":"blocked","status":"in_progress","attempts":[{"n":2,"id":"a9","member":"blocked","state":"delivered","started_at":1600}]}],
+ "layers":{"1":0,"2":1,"3":1,"4":2,"5":2,"6":3,"7":3,"8":4,"9":1}})").object();
 }
 
 // A running team with two phases appended: phase 1 is finished (it starts
@@ -595,6 +622,7 @@ private slots:
     void attemptStatesShowPhaseIcons();
     void taskCardAnswersQuestionsAndHolds();
     void memberQueueListsCurrentAndReturned();
+    void permissionAnswersFoldToOneLineAndOpenToFive();
     void planningEditsSendTheWholePlan();
     void newTeamStartsTheLeadWithTheTemplate();
     void catalogEditorSavesTheNextVersion();
@@ -648,9 +676,12 @@ private slots:
     void graphEdgesAreEditedByHandleAndSelection();
     void graphRoutingStaysFastForTheLargestPlan();
     void graphNodesInTwoLinesWithDraftEdits();
+    void graphNodesCarryTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
+    void draftIsDecidedWithoutADesignerSession();
+    void designerQuestionIsAnsweredInTheWindow();
     void catalogEditorMarksManualEdits();
     void boardScrollsInsteadOfSqueezingColumns();
     void planningBoardScrollsInsteadOfSqueezingColumns();
@@ -706,6 +737,29 @@ elif a[:2]==['team','status']:
  sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
+elif a[:3]==['team','catalog','decide'] or a[:3]==['team','catalog','apply']:
+ # U15: decisions and Apply change the draft as hgs does; `.refuse` refuses one.
+ import os
+ if a[2]=='decide' and os.path.exists(__file__+'.refuse'):print(open(__file__+'.refuse').read(),file=sys.stderr);sys.exit(1)
+ if a[2]=='apply' and os.path.exists(__file__+'.refuseapply'):print(open(__file__+'.refuseapply').read(),file=sys.stderr);sys.exit(1)
+ c=json.load(open(__file__+'.catalog'));draft=c['draft']
+ if a[2]=='decide':
+  for p in draft['proposals']:
+   if p['id']==body.get('proposal'):p['state']={'keep':'kept','reject':'rejected','undo':'proposed'}[body.get('decision')]
+  out={'status':'decided','proposal':body.get('proposal')}
+ else:
+  kept=[p for p in draft['proposals'] if p['state']=='kept']
+  for p in kept:
+   roles=[r for r in c['catalog']['roles'] if r['id']!=p['target']]
+   c['catalog']['roles']=roles+([p['value']] if p['action']!='remove' else [])
+  c['catalog']['version']+=1;c['draft']={'base':0,'proposals':[]}
+  out={'status':'applied','version':c['catalog']['version'],'changes':len(kept)}
+ open(__file__+'.catalog.new','w').write(json.dumps(c))
+ import time
+ for _ in range(100):
+  try:os.replace(__file__+'.catalog.new',__file__+'.catalog');break
+  except PermissionError:time.sleep(.05)   # Windows: a read holds the file
+ print(json.dumps(out))
 elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
  print('hgs: Phase 9 is not waiting for approval',file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','create']:print(json.dumps({'status':'created','team':'team-new','request_id':body.get('request_id')}))
@@ -734,6 +788,10 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
     QFile::remove(script() + ".statushold");
+    QFile::remove(script() + ".refuse");
+    QFile::remove(script() + ".refuseapply");
+    // Decisions and Apply change the fake catalog: each test starts from the fixture.
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(catalog()).toJson(QJsonDocument::Compact)));
     setTeam(team());
 }
 
@@ -1172,6 +1230,131 @@ void TestTeamsUi::memberQueueListsCurrentAndReturned()
     freshRows.at(2)->click();
     QTRY_COMPARE(panel.openedTask(), 4);
     shot(&panel, "delivery-queue-420");
+}
+
+void TestTeamsUi::permissionAnswersFoldToOneLineAndOpenToFive()
+{
+    // U17: a member with 20 stored answers shows one summary line; opening it
+    // lists the newest five, one row each, with the long deny reason on one
+    // line and its whole text in the tooltip; the choice is kept per team.
+    const QString longReason = QStringLiteral(
+        "This command would rewrite the build directory outside the worktree, and the lead asked to keep the cache for the next phase of the plan. ")
+        + QStringLiteral("The cache is shared with the backend member and removing it would cost another full build. ")
+        + QStringLiteral("Deny it and ask the lead to add a narrower command.");
+    auto t = team();
+    auto members = t["members"].toArray();
+    auto backend = members[1].toObject();
+    QJsonArray answers;
+    for (int i = 0; i < 20; ++i) {
+        const bool denied = i >= 18;   // the newest two are the denials
+        answers.append(QJsonObject{{"question_id", QStringLiteral("q%1").arg(i)},
+                                   {"decision", denied ? "deny" : "allow"},
+                                   {"by", i % 2 ? "lead" : "owner"},
+                                   {"at", 1700.0 + i},
+                                   {"reason", denied ? longReason : QString()},
+                                   {"tool", "Bash"},
+                                   {"command", denied ? QStringLiteral("rm -rf build") : QStringLiteral("cargo test --locked")}});
+    }
+    backend["permission_answers"] = answers;
+    members[1] = backend;
+    t["members"] = members;
+    // The task card's attempt carries its own answers (the newest last).
+    auto tasks = t["tasks"].toArray();
+    auto first = tasks[0].toObject();
+    first["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "backend"}, {"state", "reported"},
+                                               {"sent_at", 1600.0},
+                                               {"permissions", QJsonArray{
+                                                    QJsonObject{{"question_id", "q4"}, {"decision", "allow"}, {"by", "lead"}, {"at", 1702.0},
+                                                                {"tool", "Bash"}, {"command", "cargo test --locked"}},
+                                                    QJsonObject{{"question_id", "q5"}, {"decision", "deny"}, {"by", "owner"}, {"at", 1703.0},
+                                                                {"reason", longReason}, {"tool", "Bash"}, {"command", "rm -rf build"}}}}}};
+    tasks[0] = first;
+    t["tasks"] = tasks;
+    setTeam(t);
+    QSettings().remove("ui/expanded/teamPermissions/team-1/backend");
+    QSettings().remove("ui/expanded/taskPermissions/team-1/1/1");
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.setLive(live);
+    workspace.setLive(live);
+    workspace.resize(1300, 900);
+    workspace.show();
+    controller.refresh();
+    workspace.showTeam("team-1");
+    const auto card = [&workspace]() -> QFrame * {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+            if (frame->property("teamMember") == "backend") return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(card() && card()->findChild<QToolButton *>("teamMemberPermissionsToggle"));
+    // Collapsed: one line, no rows.
+    auto *toggle = card()->findChild<QToolButton *>("teamMemberPermissionsToggle");
+    QVERIFY2(toggle->text().contains(QStringLiteral("18 allowed · 2 denied")), qPrintable(toggle->text()));
+    QVERIFY2(toggle->text().contains(QStringLiteral("last:")), qPrintable(toggle->text()));
+    QVERIFY(!card()->findChild<QWidget *>("teamMemberPermissions"));
+    QCOMPARE(card()->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 0);
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "u17-permissions-collapsed-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "u17-permissions-collapsed-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // Expanded: the newest five, each one row, and "+15 more".
+    card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->click();
+    QTRY_VERIFY(card() && card()->findChild<QWidget *>("teamMemberPermissions"));
+    auto *list = card()->findChild<QWidget *>("teamMemberPermissions");
+    QCOMPARE(list->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 5);
+    auto *more = list->findChild<QLabel *>("teamPermissionMore");
+    QVERIFY(more && more->text() == QStringLiteral("+15 more"));
+    QVERIFY(list->findChildren<QLabel *>("teamPermissionDecision").first()->text().contains(QStringLiteral("Denied")));
+    // The newest is a denial by the lead, so the summary's last answer says so.
+    QVERIFY2(card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->text().contains(QStringLiteral("last: denied by the lead")),
+             qPrintable(card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->text()));
+    // The long deny reason is one line (an ElidingLabel) with its whole text in
+    // the tooltip, and so is the command.
+    auto *reason = list->findChild<QLabel *>("teamPermissionReason");
+    QVERIFY(reason);
+    QCOMPARE(reason->text(), longReason);
+    QCOMPARE(reason->toolTip(), longReason);
+    QVERIFY(reason->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored);
+    auto *command = list->findChild<QLabel *>("teamPermissionCommand");
+    QVERIFY(command && command->toolTip() == QStringLiteral("rm -rf build"));
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "u17-permissions-expanded-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "u17-permissions-expanded-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // The choice is remembered for the team: a re-render keeps it open.
+    workspace.render();
+    QTest::qWait(100);
+    QTRY_VERIFY(card() && card()->findChild<QWidget *>("teamMemberPermissions"));
+    // The task card shows the same for its attempt, opened to all of its answers.
+    TeamTaskCard taskCard;
+    taskCard.setTask(parse(t), 1, live, true);
+    QTRY_VERIFY(taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle"));
+    auto *taskToggle = taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle");
+    QVERIFY2(taskToggle->text().contains(QStringLiteral("1 allowed · 1 denied")), qPrintable(taskToggle->text()));
+    QVERIFY(!taskCard.findChild<QWidget *>("teamTaskPermissions"));
+    taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle")->click();
+    QTRY_VERIFY(taskCard.findChild<QWidget *>("teamTaskPermissions"));
+    auto *taskList = taskCard.findChild<QWidget *>("teamTaskPermissions");
+    QCOMPARE(taskList->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 2);
+    QVERIFY(taskList->findChild<QLabel *>("teamPermissionReason"));
 }
 
 void TestTeamsUi::planningEditsSendTheWholePlan()
@@ -2350,7 +2533,11 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
     QCOMPARE(native["question_id"].toString(), QStringLiteral("approval"));
     QCOMPARE(native["selected_option_ids"].toArray()[0].toString(), QStringLiteral("2"));
     QCOMPARE(native["text"].toString(), QStringLiteral("not this command"));
-    QVERIFY(workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
+    // U17: the stored answer folds to one summary line on the member card.
+    auto *answerSummary = workspace.findChild<QToolButton *>("teamMemberPermissionsToggle");
+    QVERIFY(answerSummary);
+    QVERIFY2(answerSummary->text().contains(QStringLiteral("1 denied")), qPrintable(answerSummary->text()));
+    QVERIFY(!workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
     shot(&workspace, "permission-answer-claude");
     // A DeepSeek card: its own question id and allow/deny native ids.
     members = team["members"].toArray(); backend = members[1].toObject();
@@ -2619,12 +2806,23 @@ void TestTeamsUi::permissionCardsAndGraphOrder()
     auto *deny = card.findChild<QPushButton *>("teamPermissionDeny");
     QVERIFY(!allow && !deny);
     QVERIFY(card.findChild<QLabel *>("teamPermissionWhere"));
-    // Who answered: the deny names the owner and its reason, the allow the lead.
-    const auto answered = card.findChildren<QLabel *>("teamPermissionAnswered");
+    // U17: the answers fold behind one summary line; opening it lists the newest
+    // first, the deny reason on one line with its whole text in the tooltip.
+    auto *permissions = card.findChild<QToolButton *>("teamTaskPermissionsToggle");
+    QVERIFY(permissions);
+    QVERIFY2(permissions->text().contains(QStringLiteral("1 allowed · 1 denied")), qPrintable(permissions->text()));
+    QVERIFY(permissions->text().contains(QStringLiteral("last: allowed by the lead")));
+    QVERIFY(!card.findChild<QWidget *>("teamTaskPermissions"));
+    permissions->click();
+    QTRY_VERIFY(card.findChild<QWidget *>("teamTaskPermissions"));
+    const auto answered = card.findChild<QWidget *>("teamTaskPermissions")->findChildren<QWidget *>("teamPermissionAnswerRow");
     QCOMPARE(answered.size(), 2);
-    QVERIFY(answered[0]->text().contains(QStringLiteral("Denied by you")));
-    QVERIFY(answered[0]->text().contains(QStringLiteral("That kills every ninja on the machine")));
-    QVERIFY(answered[1]->text().contains(QStringLiteral("Allowed by the lead")));
+    QVERIFY(answered[0]->findChild<QLabel *>("teamPermissionDecision")->text().contains(QStringLiteral("Allowed by the lead")));
+    QVERIFY(answered[1]->findChild<QLabel *>("teamPermissionDecision")->text().contains(QStringLiteral("Denied by you")));
+    auto *deniedReason = answered[1]->findChild<QLabel *>("teamPermissionReason");
+    QVERIFY(deniedReason);
+    QCOMPARE(deniedReason->text(), QStringLiteral("That kills every ninja on the machine"));
+    QCOMPARE(deniedReason->toolTip(), QStringLiteral("That kills every ninja on the machine"));
     shot(&card, "permission-card-dark");
     lightPalette();
     card.setTask(parsed, 17, live, false);
@@ -3292,6 +3490,16 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     QVERIFY(tab.findChild<QLineEdit *>("teamNewFolder")->isReadOnly());
     QCOMPARE(tab.draftId(), QStringLiteral("draft-1"));
     QVERIFY(tab.findChild<QPushButton *>("teamNewDiscard")->isVisible());
+    // QA #347: a folder that is not a Git repository has one folder for every
+    // member; the draft shows the policy as Shared, fixed, with the reason.
+    {
+        auto *policy = tab.findChild<QComboBox *>("teamNewFolderPolicy");
+        QVERIFY(policy);
+        QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+        QVERIFY(!policy->isEnabled());
+        QVERIFY2(policy->toolTip().contains(QStringLiteral("every member works in this folder")), qPrintable(policy->toolTip()));
+        QVERIFY(tab.findChild<QLabel *>("teamNewGitNote")->isVisible());
+    }
     // The lead edits the draft: the form follows and marks what it changed.
     setTeam(draftTeam(path));
     QTRY_COMPARE(tab.findChild<QPlainTextEdit *>("teamNewGoal")->toPlainText(), QStringLiteral("Redesign checkout: address form and tests"));
@@ -4013,6 +4221,70 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
     lightShot(&workspace, "ux-5-graph-light");
 }
 
+void TestTeamsUi::graphNodesCarryTheActivityLabel()
+{
+    setTeam(labelTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    // #9's member is offline: its problem text must win over the label.
+    const LiveLookup live = [](const Member &m) { Live l; l.known = true; if (m.id == "blocked") l.offline = true; return l; };
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    TeamUi::TaskView *graph = nullptr;
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph && graph->nodeRect(1).width() > 0; })());
+    const auto node = [&](int id) { for (const auto &n : graph->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    // Each rule of the owner's addition: Submitted, attempt 2, nothing on the
+    // first attempt, Held, a sub-team, and nothing for Pending, Draft, Accepted.
+    QCOMPARE(node(1).activity, QStringLiteral("review"));
+    QCOMPARE(node(2).activity, QStringLiteral("attempt 2"));
+    QVERIFY(node(3).activity.isEmpty());
+    QCOMPARE(node(4).activity, QStringLiteral("held"));
+    QCOMPARE(node(5).activity, QStringLiteral("sub-team 1/2"));
+    QVERIFY(node(6).activity.isEmpty());
+    QVERIFY(node(7).activity.isEmpty());
+    QVERIFY(node(8).activity.isEmpty());
+    // A problem text wins; the label stays empty.
+    QVERIFY(node(9).problem);
+    QVERIFY(!node(9).problemText.isEmpty());
+    QVERIFY(node(9).activity.isEmpty());
+    shot(&workspace, "ux-5-graph-label-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "ux-5-graph-label-light");
+    darkPalette(); workspace.setTheme(true);
+    // The same label on Board cards, right of the role chip and model tile.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "board") { b->click(); break; }
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    const auto card = [&](int id) {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamBoardCard"))
+            if (frame->property("task").toInt() == id) {
+                auto *a = frame->findChild<QLabel *>("teamBoardActivity");
+                return a ? a->text() : QString();
+            }
+        return QStringLiteral("?");
+    };
+    QCOMPARE(card(1), QStringLiteral("review"));
+    QCOMPARE(card(2), QStringLiteral("attempt 2"));
+    QCOMPARE(card(4), QStringLiteral("held"));
+    QVERIFY(card(6).isEmpty());
+    QVERIFY(card(9).isEmpty());
+    // The same label on Layers rows: the list view carries it on its nodes.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "layers") { b->click(); break; }
+    TeamUi::TaskView *layers = nullptr;
+    QTRY_VERIFY(([&] { layers = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceLayers")); return layers != nullptr; })());
+    const auto layerLabel = [&](int id) { for (const auto &n : layers->nodes) if (n.id == id) return n.activity; return QStringLiteral("?"); };
+    QCOMPARE(layerLabel(1), QStringLiteral("review"));
+    QCOMPARE(layerLabel(4), QStringLiteral("held"));
+}
+
 // #380 attempt 2: the member's "…" menu and the swap dialog run their own
 // event loops. A poll that changes the team arrives under each: the menu, the
 // button that opened it and the open dialog stay alive, and the views catch
@@ -4621,6 +4893,163 @@ void TestTeamsUi::catalogHeaderRevertDraftAndBanners()
     draft.findChild<QPushButton *>("teamCatalogRedo")->click(); QCOMPARE(redo, 4);
     draft.findChild<QPushButton *>("teamCatalogBannerDiscard")->click();
     QTRY_COMPARE(calls(script(), "catalog discard").size(), 1);
+}
+
+// U16: the Team designer's own session waits at Claude's folder trust. The
+// window shows its recorded activity and the question as the session view's
+// card, in place of the composer; answering it there sends the native answer
+// with the question's id, hash and run, and the card goes once it is answered.
+void TestTeamsUi::designerQuestionIsAnsweredInTheWindow()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString program = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(program, R"PY(#!/usr/bin/env python3
+import json,os,sys
+a=sys.argv[1:]
+if a and a[0].startswith('@'):a=a[1:]
+here=__file__
+h='a'*64
+if a[:1]==['answer']:
+ body=json.load(sys.stdin)
+ open(here+'.answers','a').write(json.dumps({'name':a[1],'body':body})+'\n')
+ open(here+'.answered','w').write('1')
+ print(json.dumps({'status':'answered','request_id':body['request_id'],'name':a[1],'question_id':body['question_id'],
+  'question_hash':body['expected_question_hash'],'run_id':body['expected_run_id'],'conversation_id':body['expected_conversation_id']}))
+elif a[:1]==['inspect']:
+ q={'question_id':'claude-trust:'+h,'question_hash':h,'source':'claude_folder_trust','answer_transport':'claude_tui',
+    'run_id':'run-1','conversation_id':None,'can_answer':True,'created_at':1791018100,
+    'questions':[{'id':'trust','question':'Do you trust the files in this folder?','body':'/zerus/team-designer','allow_other':False,
+                  'options':[{'id':'trust_0','label':'Yes, proceed'},{'id':'trust_1','label':'No, exit'}]}]}
+ print(json.dumps({'name':a[1],'run_id':'run-1','conversation_id':None,'runtime_state':'live','process_state':'running','cursor':1,
+  'events':[{'seq':1,'at':1791018101,'type':'UserPromptSubmit','detail':'Design a security reviewer for payment code.'}],
+  'pending_questions':[] if os.path.exists(here+'.answered') else [q]}))
+else:print('{}')
+)PY"));
+    TeamConversation::setPollInterval(100);
+    const auto restore = qScopeGuard([] { TeamConversation::setPollInterval(2000); });
+    HgsClient client(FakeCli::program(program));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    // Its own name each run: the card keeps answered drafts by session.
+    const QString designer = "claude/checkout/team-designer-" + QUuid::createUuid().toString(QUuid::Id128).left(8);
+    bool waiting = true;
+    page.designerSession = [&] { return designer; };
+    page.designerLive = [&] { Teams::Live live; live.known = true; live.attention = waiting; return live; };
+    page.setContext("/work/checkout", "checkout");
+    page.resize(1400, 860); page.show();
+    auto *card = page.findChild<QuestionCard *>("teamConversationQuestion");
+    QVERIFY(card); card->setReviewDelayForTests(0);
+    auto *input = page.findChild<QPlainTextEdit *>("teamConversationInput");
+    // The question replaces the composer; the recorded activity stays above it.
+    QTRY_VERIFY(card->isVisible());
+    QVERIFY(!input->isVisible());
+    QCOMPARE(page.findChild<QLabel *>("teamDesignerAgentStatus")->text(), QStringLiteral("Needs your answer"));
+    // The Activity render is slow on a loaded machine.
+    QTRY_VERIFY_WITH_TIMEOUT(page.findChild<QTextBrowser *>("teamConversationText")->toPlainText().contains("Design a security reviewer"), 20000);
+    QCOMPARE(card->findChild<QLabel *>("questionPrompt")->text(), QStringLiteral("Do you trust the files in this folder?"));
+    // Each shot after the Activity has drawn its theme.
+    auto *activity = static_cast<ActivityView *>(page.findChild<QWidget *>("teamConversationActivity"));
+    QTRY_VERIFY_WITH_TIMEOUT(!activity->renderPending(), 20000);
+    shot(&page, "u16-designer-question-dark");
+    lightPalette(); page.setDark(false);
+    QTRY_VERIFY_WITH_TIMEOUT(!activity->renderPending(), 20000);
+    lightShot(&page, "u16-designer-question-light"); darkPalette(); page.setDark(true);
+    // Answered here: the native answer names the very question it answers.
+    QAbstractButton *yes = nullptr;
+    for (auto *option : card->findChildren<QAbstractButton *>("questionOption"))
+        if (option->property("optionId").toString() == "trust_0") yes = option;
+    QVERIFY(yes); yes->click();
+    auto *submit = card->findChild<QPushButton *>("submitQuestionAnswer");
+    QTRY_VERIFY(submit->isVisible() && submit->isEnabled());
+    submit->click();
+    QTRY_VERIFY(QFile::exists(program + ".answers"));
+    QFile log(program + ".answers"); QVERIFY(log.open(QIODevice::ReadOnly));
+    const auto lines = log.readAll().split('\n');
+    QCOMPARE(lines.size() - (lines.last().isEmpty() ? 1 : 0), 1);
+    const auto answer = QJsonDocument::fromJson(lines.first()).object();
+    QCOMPARE(answer["name"].toString(), designer);
+    const auto body = answer["body"].toObject();
+    QCOMPARE(body["question_id"].toString(), QStringLiteral("claude-trust:") + QString(64, 'a'));
+    QCOMPARE(body["expected_question_hash"].toString(), QString(64, 'a'));
+    QCOMPARE(body["expected_run_id"].toString(), QStringLiteral("run-1"));
+    QCOMPARE(body["expected_conversation_id"].toString(), QString());
+    const auto chosen = body["answers"].toArray().first().toObject();
+    QCOMPARE(chosen["question_id"].toString(), QStringLiteral("trust"));
+    QVERIFY2(QJsonDocument(chosen).toJson().contains("trust_0"), QJsonDocument(chosen).toJson().constData());
+    // Once the session no longer asks, the composer is back and nothing is sent again.
+    waiting = false;
+    QTRY_VERIFY(!card->isVisible());
+    QTRY_VERIFY(input->isVisible());
+    QTest::qWait(300);
+    log.seek(0); QCOMPARE(log.readAll().count('\n'), 1);
+}
+
+// U15: with no designer session the draft is still decided, from the
+// proposals list and from the catalog, and applied; a refused decision shows
+// its error next to the proposal in every view of the draft.
+void TestTeamsUi::draftIsDecidedWithoutADesignerSession()
+{
+    auto fixture = catalog();
+    auto draft = fixture["draft"].toObject(); auto proposals = draft["proposals"].toArray();
+    auto second = proposals[1].toObject(); second["state"] = "proposed"; proposals[1] = second;
+    draft["proposals"] = proposals; fixture["draft"] = draft;
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(fixture).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    page.designerSession = [] { return QString(); };   // stopped or never started
+    page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    page.setContext("/work/checkout", "checkout");
+    page.resize(1600, 900); page.show();
+    TeamDesignerPanel panel(&controller);
+    panel.resize(560, 900); panel.show();
+    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
+    QVERIFY(page.findChild<QWidget *>("teamDesignerEmpty")->isVisible());      // not started
+    QVERIFY(page.findChild<QScrollArea *>("teamDesignerProposals")->isVisible());
+    QVERIFY(page.findChild<QFrame *>("teamDesignerDraftBar")->isVisible());
+    const auto card = [&page](int n) { return page.findChildren<QFrame *>("teamDesignerProposal").value(n); };
+    // A refused decision: its error under the proposal, the draft unchanged.
+    QVERIFY(FakeCli::replace(script() + ".refuse", "hgs: The catalog draft is locked by another change"));
+    card(0)->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_VERIFY(card(0) && card(0)->findChild<QLabel *>("teamProposalError"));
+    QVERIFY(card(0)->findChild<QLabel *>("teamProposalError")->text().contains("locked by another change"));
+    QVERIFY(!card(1)->findChild<QLabel *>("teamProposalError"));
+    QCOMPARE(controller.catalog().proposals[0].state, QStringLiteral("proposed"));
+    QTRY_VERIFY(panel.findChild<QLabel *>("teamProposalError"));
+    QVERIFY(panel.findChild<QLabel *>("teamProposalError")->text().contains("locked by another change"));
+    shot(&page, "u15-decide-refused");
+    // Two proposals kept: p1 in the list, p2 in the catalog's draft card.
+    QFile::remove(script() + ".refuse");
+    card(0)->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(controller.catalog().proposals[0].state, QStringLiteral("kept"));
+    QTRY_VERIFY(!page.findChild<QLabel *>("teamProposalError"));
+    QVERIFY(!panel.findChild<QLabel *>("teamProposalError"));
+    page.editor()->showProposal("p2");
+    QTRY_VERIFY(page.editor()->findChild<QPushButton *>("teamProposalKeep"));
+    page.editor()->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(controller.catalog().proposals[1].state, QStringLiteral("kept"));
+    auto *apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
+    QTRY_VERIFY(apply && apply->isEnabled() && apply->text().contains(QStringLiteral("Apply 2 changes")));
+    shot(&page, "u15-two-kept-no-session");
+    // A refused Apply: its error under the DRAFT bar, the draft kept.
+    QVERIFY(FakeCli::replace(script() + ".refuseapply", "hgs: The catalog changed (now v5); refresh and try again"));
+    apply->click();
+    auto *draftError = page.findChild<QLabel *>("teamDesignerDraftError");
+    QTRY_VERIFY(draftError && draftError->isVisible());
+    QVERIFY(draftError->text().contains("The catalog changed (now v5)"));
+    QCOMPARE(controller.catalog().version, 3);
+    shot(&page, "u15-apply-refused");
+    QFile::remove(script() + ".refuseapply");
+    apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
+    apply->click();
+    QTRY_COMPARE(controller.catalog().version, 4);   // v3 + 1
+    QCOMPARE(calls(script(), "catalog apply").size(), 2);
+    QCOMPARE(calls(script(), "catalog decide").size(), 3);
+    QVERIFY(controller.catalog().proposals.isEmpty());
+    QTRY_VERIFY(!page.findChild<QLabel *>("teamDesignerDraftError")->isVisible());
+    QVERIFY(!page.findChild<QScrollArea *>("teamDesignerProposals")->isVisible());
+    QVERIFY(controller.catalog().role("security"));
+    QCOMPARE(controller.catalog().role("tester")->agent, QStringLiteral("claude"));
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()

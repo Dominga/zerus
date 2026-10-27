@@ -1329,7 +1329,11 @@ pub(super) fn hook() -> Result<i32> {
                 let folder = string(&record, "cwd");
                 let model = string(&record, "model");
                 let model = if model.is_empty() { "the session model" } else { model };
-                if subagents_confirm::can_ask() {
+                if subagents_confirm::team_member(string(&record, "name"), string(&record, "run_id")) {
+                    // The team lead routing arrives in phase 39; a native ask
+                    // would wait for someone the team cannot see.
+                    record["subagent_confirm"] = json!("subagent confirmation for team members comes with the lead routing");
+                } else if subagents_confirm::can_ask() {
                     println!("{}", subagents_confirm::decision(&calls, folder, model));
                 } else {
                     // No one can answer a native ask in print mode; never block it.

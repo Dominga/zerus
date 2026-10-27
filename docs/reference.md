@@ -631,10 +631,11 @@ Notifications open Activity for the exact requesting run and conversation,
 including remote or renamed sessions. Polling and restarts do not repeat the same
 request; resolved notifications are removed. Main-agent reply banners wait until
 the session is idle and has no reported active children. While native agent work,
-live background commands or active subagents continue, intermediate replies remain
+jobs the session waits for or active subagents continue, intermediate replies remain
 unread in Activity but show no new-reply badge or reply-only attention count on
 desktop or Android. The pending reply becomes visible when work finishes; this
-never marks it as read. Explicit questions, approvals, errors and review reminders
+never marks it as read. Services, such as a dev server left running, never defer it.
+Explicit questions, approvals, errors and review reminders
 remain actionable. Optional Codex questions, which the agent continues without,
 are not attention: on the desktop, Android and iOS they change neither the
 session's status nor the Needs attention filter, counters or badges. Listings report them separately
@@ -782,17 +783,87 @@ when only the local tracking ref is known; a changed remote asks you to fetch.
 Ordinary non-Git folders show no badge. Offline and changed checkout evidence
 cannot show a green check.
 
-**Ready** means a reply ended, not that a long-running task is complete. An idle
-agent with confirmed live shell commands shows **Background** in muted blue, with
-the command preview and elapsed time. Open **Processes** to follow output or inspect
-the running commands. The session remains in **Active** and still accepts new
-messages. Green **Working** indicates native agent work. Input/approval requests
-take precedence; ordinary agent work takes precedence over background work,
-followed by Scheduled and Ready. Offline and
-historical/unconfirmed process records never establish background work. The CLI's
-additive `process_work` summary uses current owned OS trees (one process-table
-sample per fleet listing) or the native DeepSeek job registry; it does not scan
-native transcripts on each fleet poll.
+### Session states
+
+A session is in one of seven states; **Offline** (the computer does not answer)
+stays as before. A reply ending is not a long task being complete: the states
+say what the session does now and what it waits for.
+
+| State | `session_state` | Meaning |
+|---|---|---|
+| Working | `working` | The turn runs: the model writes code or runs tools. |
+| Building | `build` | A build or test Zerus runs for the session (`hgs run`, `hgs team run`), also while the agent is idle. |
+| Waiting for you | `user` | An approval, an input, an error, a reply to read, or a lead's "Needs you". |
+| Waiting for dependencies | `deps` | Always with its reason (below). |
+| Cooling | `cooling` | Done and waiting for a new task; the prompt cache is still warm. |
+| Cold | `cold` | Done and idle; the prompt cache expired, a new session is cheaper. |
+| Stopped | `stopped` | Stopped by you, or saved and not running. |
+
+The host computes them in this order: Working, unless the turn waits for
+subagents in flight (`Waiting for 2 subagents: explorer, reviewer`) or for a
+tool call running 30 seconds or more (`Waiting for cargo test --workspace ·
+long operation, 6m so far`); Waiting for you for an approval, an input or a
+provider error; Building while a build Zerus runs for the session still runs
+(`Running cargo test · 6m so far`); Waiting for you for an unread reply (a muted session, such as a team member,
+answers its lead, so its reply does not count); Stopped; the account's usage
+limit (`Waiting for the usage limit to reset · 01:30`); the team's reason; an
+`hgs wait` the session declared; a job under a declared team budget; then
+Cooling while the time since the last native event is under the cache TTL,
+otherwise Cold. A team reason that starts with "Waiting for you" makes a lead's
+session Waiting for you and any other session Waiting for dependencies. Team
+reasons come from the team store:
+
+| Situation | `state_reason.text` |
+|---|---|
+| The phase has not started | `Waiting for phase 2 · Checkout to start (#5)` |
+| A dependency is not accepted | `Waiting for #2 Saved cards API (Backend)` |
+| The task is ready or held | `Waiting for Lead to hand out #4` |
+| The task is in a draft phase | `Waiting for Lead: phase 2 is not accepted yet (#5)` |
+| The task was submitted | `Waiting for Lead to review #4` |
+| A lead's members work | `Waiting for reports: Backend #2, Frontend #3` |
+| A draft phase waits | `Waiting for you to approve phase 2 · Next` |
+| Every task is decided | `Waiting for you: all tasks are decided` |
+| The team is paused, the plan is drafted | `Waiting for you to resume the team`, `Waiting for you to approve the plan` |
+
+`state_reason` is null for Working, Cooling, Cold and Stopped, and otherwise
+carries `kind` (`build`, `subagents`, `long_operation`, `usage_limit`,
+`coordination`, `job`, `approval`, `input`, `error`, `reply` or a `team_*` kind)
+with its source: the build's `label`, `command`, `since` and `source`
+(`hgs_run` or `team_run`), subagent `names`, the `command` and its start
+`since`, `resets_at`, or the team and task numbers. `build` is the running
+build itself, or null. `last_active` is the last native event, a cache
+keepalive included. `cache_ttl` is `{seconds, source, kept_warm}`: the TTL the
+account's native usage last reported (`native_usage`), else Claude's settings
+`env` (`ENABLE_PROMPT_CACHING_1H` gives one hour, `FORCE_PROMPT_CACHING_5M` five
+minutes; `settings`), else five minutes (`default`). Keep cache warm extends it:
+each keepalive turn is a native event, and `kept_warm` says the last turn only
+warmed the cache. These fields are additive; older fields keep their meaning.
+
+Start builds and long tests through Zerus so they show as work:
+`hgs team run` for a team member's templates (`hgs guide team-run`), and
+`hgs run --json [--wait]` with `{request_id, label, command, cwd?,
+timeout_minutes?}` for any session (`hgs guide run`). `hgs run` names the
+calling session by its process ancestry, runs the command in `sh -c` (`cmd /C`
+on Windows) in a detached runner with its whole process tree stopped after the
+timeout (30 minutes by default, at most 240), keeps the last 4000 characters of
+output and records the run under the session; the same `request_id` never runs
+twice, and asking again reads its state. `hgs run --list --json` lists the
+session's newest runs.
+
+A job the session started otherwise makes it wait only while it waits for it. A
+long-lived process it does not wait for, such as a dev server, a watcher or a
+tunnel, a job past its declared budget, and any other job that still runs after
+the turn ended with nothing waiting on it, are services: `process_work` lists them under
+`services` with `kind: "job"` (and `unwaited_count`), no longer counts them, and
+the session is Cooling or Cold by its idle time. Services never defer the reply
+badge and never hold a team's capture gate. A session waiting for its own jobs
+remains in **Active** and still accepts new messages; open **Processes** to
+follow output or inspect the running commands. Input/approval requests and
+native work take precedence. Offline and historical/unconfirmed process records
+never establish current work. The CLI's `process_work` summary uses current
+owned OS trees (one process-table sample per fleet listing) or the native
+DeepSeek job registry, with at most eight `jobs`; it does not scan native
+transcripts on each fleet poll.
 
 Working and compacting timers use native start evidence and update locally without extra
 host requests. An idle agent with pending jobs it scheduled for itself (Kimi

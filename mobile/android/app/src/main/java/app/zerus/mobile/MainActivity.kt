@@ -389,17 +389,18 @@ class MainActivity : ComponentActivity() {
             Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 when (badge.kind) {
-                    DesktopBadgeKind.Working, DesktopBadgeKind.Background -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))
+                    DesktopBadgeKind.Working, DesktopBadgeKind.Background, DesktopBadgeKind.Building -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))
                     DesktopBadgeKind.Attention, DesktopBadgeKind.Error -> Text("!", color = Color(colors.foreground),
                         fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                     DesktopBadgeKind.Paused -> Icon(DesktopIcons.Paused, null, Modifier.size(12.dp), tint = Color(colors.foreground))
                     DesktopBadgeKind.Unread -> Icon(Icons.Default.MarkEmailUnread, null, Modifier.size(12.dp), tint = Color(colors.foreground))
-                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
+                    DesktopBadgeKind.Scheduled, DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps -> Icon(Icons.Default.Schedule, null, Modifier.size(12.dp), tint = Color(colors.foreground))
+                    DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold -> Box(Modifier.size(5.dp).background(Color(colors.foreground), CircleShape))
                     DesktopBadgeKind.Neutral -> Unit
                 }
                 Text(badge.caption, color = Color(colors.foreground), style = MaterialTheme.typography.labelSmall,
-                    maxLines=if(badge.kind==DesktopBadgeKind.Waiting) 1 else Int.MAX_VALUE,
-                    overflow=if(badge.kind==DesktopBadgeKind.Waiting) TextOverflow.Ellipsis else TextOverflow.Clip)
+                    maxLines=if(badge.kind in setOf(DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps, DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold)) 1 else Int.MAX_VALUE,
+                    overflow=if(badge.kind in setOf(DesktopBadgeKind.Waiting, DesktopBadgeKind.Deps, DesktopBadgeKind.Cooling, DesktopBadgeKind.Cold)) TextOverflow.Ellipsis else TextOverflow.Clip)
             }
         }
         if (badge.additionalUnread) {
@@ -696,7 +697,11 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                         SessionFilters.archiveDate(session).takeIf { it.isNotBlank() }?.let { archivedDate ->
                             Text("Archived $archivedDate", color = Muted, style = MaterialTheme.typography.labelSmall)
                         }
-                        Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
+                        if (SessionStateContract.hasHostState(session.raw) || !online) {
+                            // U30: line 3 names what waits, how warm the cache is, or who stopped it.
+                            SessionStateLine(session, online, onNew = { sessionActions = session },
+                                onResume = { model.open(session, preserveProject = true) })
+                        } else Text(if(online && SessionFilters.waitingIdle(session)) SessionFilters.waitingLabel(session) else session.preview.ifBlank { "Open to view activity" }, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp)
                         if (model.connections.size > 1) Text(model.connections.find { it.id == session.target.connectionId }?.displayName.orEmpty(), color = Muted, style = MaterialTheme.typography.labelSmall)
                         SessionSubagentRows(model, session, online)
                     }

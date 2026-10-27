@@ -31,6 +31,8 @@ object SelectedSessionPresentation {
         if(selected.target.agentId.isNotBlank()) return SessionDetailsPresentation.agentStatus(displayed.raw.string("display_state","state","status")) +
             if(displayed.raw.optBoolean("read_only")) " / History only" else ""
         if(displayed.raw.string("activity").isBlank() && !displayed.raw.has("tracked")) return "Status not reported"
+        // U30: the host's session_state speaks the seven states; the older derivation stays a fallback.
+        if(SessionStateContract.hasHostState(displayed.raw)) return SessionStateContract.pillText(displayed.raw, true)
         return SessionFilters.status(displayed,true)
     }
 }

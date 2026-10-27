@@ -23,6 +23,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -42,6 +43,36 @@ import androidx.compose.ui.unit.dp
             Text(line, maxLines = 1, overflow = TextOverflow.MiddleEllipsis, color = muted, style = MaterialTheme.typography.bodySmall)
         }
         gitBadge?.let { SessionGitStatusBadge(it) }
+    }
+}
+
+/**
+ * U30, SESSION-STATES.md: the card's line 3. It always names what the session waits for, how warm
+ * its prompt cache is, or who stopped it, from the host's `state_reason` and its cache fields; on a
+ * Cold card it also carries **+ New** and **Resume**, which are the card's own actions (the caller
+ * keeps them off the card's tap target).
+ */
+@Composable internal fun SessionStateLine(session: Session, online: Boolean, onNew: () -> Unit, onResume: () -> Unit) {
+    val status = SessionStateContract.status(session.raw, online)
+    val dark = MaterialTheme.colorScheme.background.luminance() < .5f
+    val tint = when (status.state) {
+        SessionState.Deps -> Color(if (dark) 0xFF6FA8FF else 0xFF2F66C9)
+        SessionState.Cooling -> Color(if (dark) 0xFF56C8E0 else 0xFF137F95)
+        SessionState.Cold -> Color(if (dark) 0xFF8FA6C4 else 0xFF55708F)
+        SessionState.Building -> Color(if (dark) 0xFF7FD3F2 else 0xFF17627F)
+        SessionState.Offline -> MaterialTheme.colorScheme.error
+        SessionState.Working, SessionState.User, SessionState.Stopped -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(status.detail, maxLines = 2, overflow = TextOverflow.Ellipsis, color = tint,
+            style = MaterialTheme.typography.bodyMedium, lineHeight = 20.sp,
+            modifier = Modifier.semantics { contentDescription = status.reason })
+        if (status.coldActions.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onNew, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)) { Text("+ New") }
+                TextButton(onClick = onResume, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)) { Text("Resume") }
+            }
+        }
     }
 }
 

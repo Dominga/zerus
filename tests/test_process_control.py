@@ -83,21 +83,28 @@ class ProcessControl(unittest.TestCase):
         new=self.jobs()[0]['id'];self.assertNotEqual(old,new)
         self.cli('processes',self.name,'--stop',old,'--run',self.run_id,'--conversation','replacement-conversation',ok=False)
         self.assertEqual(len(self.jobs()),2)
-    def test_idle_background_work_is_current_and_clears_after_os_exit(self):
+    def test_idle_jobs_nothing_waits_for_are_services_and_clear_after_os_exit(self):
         self.record.update(phase='idle', active_tools={})
         self.write_record()
         def listed():
             return next(s for s in self.cli('ls','--json','--local')['sessions'] if s['name']==self.name)
+        def jobs(row):
+            return [s for s in row['process_work'].get('services',[]) if s.get('kind')=='job']
         row=listed()
         self.assertEqual(row['activity'],'idle')
-        self.assertEqual(row['process_work']['count'],2)
-        self.assertGreater(row['process_work']['started_at'],0)
-        self.assertIn('sh',row['process_work']['command'])
-        self.assertEqual(row['process_work']['started_at'],listed()['process_work']['started_at'])
-        self.assertEqual(self.cli('inspect',self.name)['process_work']['count'],2)
+        # U30: the turn ended and nothing waits for them, so they are services.
+        self.assertEqual((row['process_work']['count'],row['process_work']['unwaited_count']),(0,2))
+        self.assertEqual(len(jobs(row)),2)
+        self.assertTrue(all(job['since']>0 and 'sh' in job['command'] for job in jobs(row)))
+        self.assertEqual([job['since'] for job in jobs(row)],[job['since'] for job in jobs(listed())])
+        self.assertIn(row['session_state'],('cooling','cold'))
+        self.assertIsNone(row['state_reason'])
+        inspected=self.cli('inspect',self.name)
+        self.assertEqual((inspected['process_work']['count'],len(jobs(inspected))),(0,2))
         self.assertNotIn('process_work',self.cli('inspect',self.name,'--skip-processes'))
         for pid in self.children:os.killpg(pid,signal.SIGKILL)
-        self.wait_for(lambda:listed()['process_work']['count']==0)
+        self.wait_for(lambda:not jobs(listed()))
+        self.assertEqual(listed()['process_work']['count'],0)
         os.kill(self.record['pid'],0)
         # Recorded running jobs are not live evidence after their processes end.
         self.record['shell_jobs']={'old':dict(id='old',status='running',background=True,observed=True,

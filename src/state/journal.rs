@@ -378,7 +378,10 @@ fn latest_reply(record: &Value, recurring_schedules: Option<u64>) -> Result<Valu
     if !keepalive_turn(&db, record, seq)? {
         return Ok(reply(seq, event["at"].clone(), false));
     }
-    Ok(real_reply(&db, record, seq)?.map_or(json!({}), |(seq, at)| reply(seq, at, false)))
+    // U30: the latest turn only warmed the cache; the cache stays warm from it.
+    let mut found = real_reply(&db, record, seq)?.map_or(json!({}), |(seq, at)| reply(seq, at, false));
+    found["kept_warm_at"] = event["at"].clone();
+    Ok(found)
 }
 
 // WhiteWh fork: whether the turn of this main Stop opened with the desktop's
@@ -533,7 +536,9 @@ pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
         "turn_started": record.get("turn_started").unwrap_or(&json!(0)),
         "compaction_started": if record["phase"] == "compacting" { record.get("compaction_started").or_else(||record.get("last_main_progress_at")).unwrap_or(&json!(0)).clone() } else { json!(0) },
         "current_tool": last_tool.map(|tool| string(tool, "name")).unwrap_or(""),
-        "tool_detail": last_tool.map(|tool| string(tool, "detail")).unwrap_or("")}).as_object().unwrap().clone());
+        "tool_detail": last_tool.map(|tool| string(tool, "detail")).unwrap_or(""),
+        // U30: a tool call running past the threshold makes the session wait.
+        "tool_started": last_tool.and_then(|tool| tool["started"].as_f64())}).as_object().unwrap().clone());
     output.as_object_mut().unwrap().extend(
         effort::summary(record, live_pane)
             .as_object()
@@ -794,6 +799,9 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         let mut usage = usage::read(&record);
         // Only for the model this inspection reports: a switch makes it stale.
         claude_statusline::apply(&record, string(&output, "model"), &mut usage);
+        if string(&record, "agent") == "claude" {
+            session_state::observe_ttl(string(&output, "account_id"), &usage);
+        }
         usage
     };
     output["session_clear"] = clear_context::event(&record).unwrap_or(Value::Null);
@@ -904,6 +912,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     workspace::enrich(std::slice::from_mut(&mut output), &workspace::snapshot_cwds(&names));
     waits::decorate(std::slice::from_mut(&mut output));
     notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
+    // U30: after the notification preferences, which say whether it is muted.
+    session_state::decorate(std::slice::from_mut(&mut output));
     Ok(output)
 }
 

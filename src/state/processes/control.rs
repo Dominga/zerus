@@ -115,7 +115,12 @@ impl WorkSample {
         let current = roots(record, &rows);
         let first = current.iter().map(|pid| &rows[pid])
             .min_by(|a,b| a.started.total_cmp(&b.started));
-        json!({"count":current.len(),"started_at":first.map(|p|p.started),
+        // U30: each job, so one nothing waits on can be listed as a service.
+        let mut jobs: Vec<_> = current.iter().map(|pid| &rows[pid]).collect();
+        jobs.sort_by(|a, b| a.started.total_cmp(&b.started));
+        let jobs: Vec<_> = jobs.iter().take(crate::state::session_state::MAX_JOBS)
+            .map(|p| json!({"command":journal::clipped(&json!(p.command),240),"started_at":p.started})).collect();
+        json!({"count":current.len(),"started_at":first.map(|p|p.started),"jobs":jobs,
             "command":first.map(|p|journal::clipped(&json!(p.command),240)).unwrap_or_default(),"sampled_at":now(),
             // G7: services are listed here, never counted as Background work.
             "services":services_of(record, &rows)})

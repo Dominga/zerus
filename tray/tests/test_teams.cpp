@@ -160,6 +160,7 @@ private slots:
     void controllerReadsOnceAndSendsChangesAsYou();
     void controllerSendsPhaseDecisionsAndFinish();
     void controllerSendsHoldReleaseRejectAndReply();
+    void lanesReadGroupAndRoundTrip();
     void panelShowsProblemsWithTheirActions_data();
     void panelShowsProblemsWithTheirActions();
 private:
@@ -1329,6 +1330,41 @@ void TestTeams::controllerSendsPhaseDecisionsAndFinish()
     QCOMPARE(finish["summary"].toString(), QStringLiteral("All phases are in."));
     QVERIFY(!QUuid(finish["request_id"].toString()).isNull());
     QVERIFY(approve["request_id"].toString() != finish["request_id"].toString());
+}
+
+void TestTeams::lanesReadGroupAndRoundTrip()
+{
+    // U27: a task's lane is read from status, groups a phase's tasks in lane
+    // order (the ones without a lane last, by their dependency layers), and
+    // travels back in the plan the desktop sends.
+    auto team = phasedTeam();
+    auto tasks = team["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() == 3) task["lane"] = QJsonObject{{"n", 1}, {"label", "Checkpoint 1"}};
+        if (task["id"].toInt() == 4) task["lane"] = QJsonObject{{"n", 1}, {"label", "Checkpoint 1"}};
+        if (task["id"].toInt() == 5) task["lane"] = QJsonObject{{"n", 2}, {"label", "Checkpoint 2"}};
+        tasks[i] = task;
+    }
+    team["tasks"] = tasks;
+    const auto parsed = parse(team);
+    QCOMPARE(parsed.task(3)->lane.n, 1);
+    QCOMPARE(parsed.task(3)->lane.label, QStringLiteral("Checkpoint 1"));
+    QCOMPARE(parsed.task(5)->lane.n, 2);
+    QVERIFY(!parsed.task(1)->lane.known());
+    const auto groups = laneGroups(parsed, QList<int>{1, 2, 3, 4, 5});
+    QCOMPARE(groups.size(), 3);
+    QCOMPARE((QList<int>{groups[0].first, groups[1].first, groups[2].first}), (QList<int>{1, 2, 0}));
+    QCOMPARE(groups[0].second, (QList<int>{3, 4}));
+    QCOMPARE(groups[1].second, (QList<int>{5}));
+    QCOMPARE(groups[2].second, (QList<int>{1, 2}));
+    QCOMPARE(laneLabel(parsed, QList<int>{3, 4, 5}, 1), QStringLiteral("Checkpoint 1"));
+    QCOMPARE(laneLabel(parsed, QList<int>{3, 4, 5}, 0), QString());
+    // The plan keeps the lane; a task without one sends none.
+    const auto json = parsed.task(3)->json();
+    QCOMPARE(json["lane"].toObject()["n"].toInt(), 1);
+    QCOMPARE(json["lane"].toObject()["label"].toString(), QStringLiteral("Checkpoint 1"));
+    QVERIFY(!parsed.task(1)->json().contains("lane"));
 }
 
 void TestTeams::controllerSendsHoldReleaseRejectAndReply()

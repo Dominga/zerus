@@ -186,6 +186,14 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     Ok(member)
 }
 
+/// U27: a lane is visual only, bounded in number and label; it never touches
+/// dependencies or hand-out.
+fn clean_lane(lane: &mut super::model::Lane, task: u32) -> anyhow::Result<()> {
+    ensure!((1..=99).contains(&lane.n), "Task #{task}: a lane number is 1 to 99");
+    lane.label = clean(lane.label.trim(), 40, "A lane label")?;
+    Ok(())
+}
+
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut task: Task = serde_json::from_value(value.clone()).context("Invalid task")?;
     ensure!(task.id > 0, "Task numbers start at 1");
@@ -218,6 +226,11 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut seen = BTreeSet::new();
     task.deps.retain(|dep| seen.insert(dep.task));
     ensure!(task.deps.iter().all(|dep| dep.task != task.id), "Task #{} depends on itself", task.id);
+    // U27: the lane the task is drawn in; its number and label are bounded and
+    // it changes nothing about hand-out.
+    if let Some(lane) = task.lane.as_mut() {
+        clean_lane(lane, task.id)?;
+    }
     task.status = TaskStatus::Draft;
     // `plan` (and `create`'s planning tasks) always start phase 1; `extend`
     // sets the computed phase afterwards.
@@ -1318,6 +1331,23 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             }
             task.pinned = pinned;
             fields.push("pinned");
+        }
+        // U27: the lead or the owner moves a task to a lane; null takes it out.
+        if let Some(value) = value.get("lane") {
+            let lane = if value.is_null() {
+                None
+            } else {
+                let mut lane: super::model::Lane = serde_json::from_value(value.clone()).context("Invalid lane")?;
+                clean_lane(&mut lane, id)?;
+                Some(lane)
+            };
+            if task.lane != lane {
+                let name = |lane: &Option<super::model::Lane>| lane.as_ref().map(|lane| lane.label.clone()).unwrap_or_default();
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"lane",
+                    "from":name(&task.lane),"to":name(&lane)}));
+            }
+            task.lane = lane;
+            fields.push("lane");
         }
         if !fields.is_empty() {
             diff["updated"].as_array_mut().unwrap().push(json!({"id":id,"fields":fields}));
@@ -3221,6 +3251,94 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lanes_are_visual_only_and_bounded() {
+        // U27: a task's lane is drawn by the desktop and never changes hand-out.
+        let mut team = running_team();
+        team.tasks[0].lane = Some(super::super::model::Lane { n: 1, label: "Checkpoint 1".into() });
+        team.tasks[1].lane = Some(super::super::model::Lane { n: 2, label: "Checkpoint 2".into() });
+        let with_lanes = plan::ready(&team);
+        let mut stripped = team.clone();
+        for task in &mut stripped.tasks {
+            task.lane = None;
+        }
+        assert_eq!(with_lanes, plan::ready(&stripped));
+        // The plan keeps them, with the label trimmed.
+        let (mut planned, _) = create(
+            "t2",
+            &json!({"name":"T","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        let value = apply(
+            &mut planned,
+            "plan",
+            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex","session":{"name":"codex/x/dev","run_id":"r1"}}],
+                "tasks":[
+                    {"id":1,"title":"A","assignee":"dev","lane":{"n":1,"label":" Checkpoint 1 "}},
+                    {"id":2,"title":"B","assignee":"dev","lane":{"n":2}},
+                    {"id":3,"title":"C","assignee":"dev"}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        assert!(value["validation"]["errors"].as_array().unwrap().is_empty(), "{value}");
+        let lane = planned.task(1).unwrap().lane.as_ref().unwrap();
+        assert_eq!((lane.n, lane.label.as_str()), (1, "Checkpoint 1"));
+        assert_eq!(planned.task(2).unwrap().lane.as_ref().unwrap().n, 2);
+        assert!(planned.task(3).unwrap().lane.is_none());
+        // A label is bounded and a lane number is 1 to 99.
+        let mut fresh = create(
+            "t3",
+            &json!({"name":"T","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}}),
+        )
+        .unwrap()
+        .0;
+        let long = "x".repeat(41);
+        let error = apply(
+            &mut fresh,
+            "plan",
+            &json!({"tasks":[{"id":1,"title":"A","lane":{"n":1,"label":long}}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("A lane label is too long"), "{error}");
+        let error = apply(
+            &mut fresh,
+            "plan",
+            &json!({"tasks":[{"id":1,"title":"A","lane":{"n":0}}]}),
+            &Actor::Human,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("a lane number is 1 to 99"), "{error}");
+        // A draft phase edits its tasks' lanes, and null takes one out.
+        let lead_actor = Actor::Member("lead".into());
+        extend(&mut planned, &json!({"tasks":[{"id":4,"title":"Later","assignee":"dev"}]}), &lead_actor, &BTreeSet::new(), &mut events).unwrap();
+        let id = planned.tasks.iter().map(|task| task.id).max().unwrap();
+        let phase = planned.task(id).unwrap().phase;
+        apply(
+            &mut planned,
+            "edit-draft",
+            &json!({"phase":phase,"tasks_update":[{"id":id,"lane":{"n":2,"label":"Review"}}]}),
+            &lead_actor,
+            &BTreeSet::new(),
+            &mut events,
+        )
+        .unwrap();
+        let lane = planned.task(id).unwrap().lane.as_ref().unwrap();
+        assert_eq!((lane.n, lane.label.as_str()), (2, "Review"));
+        apply(&mut planned, "edit-draft", &json!({"phase":phase,"tasks_update":[{"id":id,"lane":null}]}), &lead_actor, &BTreeSet::new(), &mut events)
+            .unwrap();
+        assert!(planned.task(id).unwrap().lane.is_none());
+    }
 
     fn running_team() -> Team {
         let (mut team, _) = create(

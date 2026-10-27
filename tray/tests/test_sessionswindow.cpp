@@ -1986,7 +1986,7 @@ void TestSessionsWindow::readmeScreenshots()
     // 4. A remote DeepSeek session asks which changes to review first.
     window.showSession("build-02", "dsh/orbit/review");
     emit dashboard->filterRequested("@all", "attention");
-    QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QuestionCard *>() && window.findChild<QuestionCard *>()->isVisible(), 10000);
+    QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QuestionCard *>("questionCard") && window.findChild<QuestionCard *>("questionCard")->isVisible(), 10000);
     window.findChild<QPushButton *>("toggleInspector")->click();
     QTRY_VERIFY(!window.findChild<QWidget *>("sessionInspector")->isVisible());
     QVERIFY(save("attention", {1440, 960}));
@@ -3710,7 +3710,7 @@ void TestSessionsWindow::earlyQuotaResetExplainsPendingNativeChoiceAndKeepsDraft
     auto *chip=window.findChild<ToolbarChip *>("usageLimitChip");
     QTRY_VERIFY(chip->isVisible());QCOMPARE(chip->fullLabel(),QString("Usage available"));QCOMPARE(chip->tone(),ChipTone::Neutral);
     QVERIFY(chip->toolTip().contains("Answer any open usage-limit choice"));
-    auto *question=window.findChild<QuestionCard *>();QVERIFY(question->isVisible());
+    auto *question=window.findChild<QuestionCard *>("questionCard");QVERIFY(question->isVisible());
     const auto options=question->findChildren<QAbstractButton *>("questionOption");QCOMPARE(options.size(),2);
     for(const auto *option:options)QVERIFY(!option->isChecked());
     QVERIFY(!composer->findChild<QPushButton *>("sendMessage")->isEnabled());
@@ -4040,7 +4040,7 @@ else: print('{}')
     const auto settle = [&] { QSignalSpy replies(client, &HgsClient::inspectionReady); qsizetype issued = -1;
         QTRY_VERIFY(issued >= 0 || (client->requestInspection({}, name) && (issued = replies.size(), true)));
         QTRY_VERIFY(std::any_of(replies.cbegin() + issued, replies.cend(), [&](const QList<QVariant> &reply) { return reply.at(1).toString() == name; })); };
-    auto *card = window.findChild<QuestionCard *>(); auto *send = composer->findChild<QPushButton *>("sendMessage");
+    auto *card = window.findChild<QuestionCard *>("questionCard"); auto *send = composer->findChild<QPushButton *>("sendMessage");
     QSignalSpy inspected(client, &HgsClient::inspectionReady); QTRY_VERIFY(!inspected.isEmpty());
     QTRY_VERIFY(!composer->isDraftLoading(composer->sessionKey()));
     QTRY_VERIFY(window.findChild<QLabel *>("detailTitle")->text().contains("navigation"));
@@ -6278,7 +6278,7 @@ else: print('{}')
     writeDetails();
     SessionsWindow window(FakeCli::program(program)); window.resize(1080, 760); window.setFleet(fleet());
     keepDetailsPollsOut(window); window.show(); window.showSession({}, "kimi/docs/research");
-    auto *client = window.findChild<HgsClient *>(); auto *card = window.findChild<QuestionCard *>();
+    auto *client = window.findChild<HgsClient *>(); auto *card = window.findChild<QuestionCard *>("questionCard");
     QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
     // A change made while the confirmation is open must stay the latest evidence. An
     // inspection that read details.json before it would restore the reviewed identity,
@@ -6423,7 +6423,7 @@ else: print('{}')
         {"pending_questions", QJsonArray{question}}, {"cache_hint", QJsonObject{{"status", "cold"}, {"tokens", 490252}}}};
     QVERIFY(FakeCli::replace(state, QJsonDocument(details).toJson()));
     SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); keepDetailsPollsOut(window); window.show(); window.showSession({}, "kimi/docs/research");
-    auto *card = window.findChild<QuestionCard *>(); auto *client = window.findChild<HgsClient *>();
+    auto *card = window.findChild<QuestionCard *>("questionCard"); auto *client = window.findChild<HgsClient *>();
     QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
     // A change made while the answer's draft is saved must stay the latest evidence.
     // An inspection that read details.json before it would restore the reviewed
@@ -6501,7 +6501,7 @@ elif args[0]=='answer':
 )PY");
     file.close(); QVERIFY(FakeCli::makeRunnable(file.fileName()));
     SessionsWindow window(FakeCli::program(program)); window.setFleet(fleet()); window.show(); window.showSession({}, "kimi/docs/research");
-    auto *card = window.findChild<QuestionCard *>(); QVERIFY(card);
+    auto *card = window.findChild<QuestionCard *>("questionCard"); QVERIFY(card);
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
     auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
     auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
@@ -6573,7 +6573,7 @@ elif sys.argv[1]=='answer':
         {"pending_questions",QJsonArray{question}},{"events",QJsonArray{}},{"cursor",0}};
     const auto save=[&] { return FakeCli::replace(directory.filePath("details.json"), QJsonDocument(details).toJson()); };QVERIFY(save());
     SessionsWindow window(FakeCli::program(program.fileName()));window.setFleet(fleet());window.show();window.activateWindow();window.showSession({},"codex/hgs/dashboard");
-    auto *client=window.findChild<HgsClient *>();auto *card=window.findChild<QuestionCard *>();
+    auto *client=window.findChild<HgsClient *>();auto *card=window.findChild<QuestionCard *>("questionCard");
     auto *composer=window.findChild<MessageComposer *>("messageComposer");
     auto *activity=window.findChild<ActivityView *>("mainActivity");QVERIFY(activity);
     QSignalSpy promoted(activity,&ActivityView::queueSendNowRequested);
@@ -6610,10 +6610,10 @@ elif sys.argv[1]=='answer':
         SessionsWindow reopened(FakeCli::program(program.fileName()));reopened.setFleet(fleet());reopened.show();reopened.showSession({},"codex/hgs/dashboard");
         auto *reopenedActivity=reopened.findChild<ActivityView *>("mainActivity");
         QTRY_VERIFY(reopenedActivity->findChild<QWidget *>("activityInputQueue")->isVisible());
-        QVERIFY(reopened.findChild<QuestionCard *>()->isHidden());
+        QVERIFY(reopened.findChild<QuestionCard *>("questionCard")->isHidden());
         // Recognition from a persisted receipt survives a later stale snapshot.
         reopened.findChild<HgsClient *>()->inspectionReady({},"codex/hgs/dashboard",stale);
-        QVERIFY(reopened.findChild<QuestionCard *>()->isHidden());
+        QVERIFY(reopened.findChild<QuestionCard *>("questionCard")->isHidden());
     }
     auto nextQuestion=question;nextQuestion["question_id"]="optional-two";nextQuestion["question_hash"]="hash-two";
     nextQuestion["questions"]=QJsonArray{QJsonObject{{"id","q_0"},{"question","Another unanswered question?"},{"allow_other",true}}};
@@ -6684,7 +6684,7 @@ elif args[0]=='answer':
  print(json.dumps(receipt))
 )PY").arg(prefix,source,item,option,installer).toUtf8());file.close();QVERIFY(FakeCli::makeRunnable(file.fileName()));
     SessionsWindow window(FakeCli::program(file.fileName()));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
-    auto *card=window.findChild<QuestionCard *>();auto *client=window.findChild<HgsClient *>();
+    auto *card=window.findChild<QuestionCard *>("questionCard");auto *client=window.findChild<HgsClient *>();
     auto *list=window.findChild<QListWidget *>("sessionList");auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");
     QSignalSpy answered(client,&HgsClient::questionAnswered);const auto key=list->currentItem()->data(Qt::UserRole).toString();
     // Answer only the exact question the card offers. An inspection that read the
@@ -6735,7 +6735,7 @@ void TestSessionsWindow::optionalQuestionKeepsComposerAvailable()
         "if False:pass\nelif c=='inspect':print(open(__file__+'.details').read())\n")));
     QVERIFY(FakeCli::replace(fixture + ".details", QJsonDocument(details).toJson()));
     SessionsWindow window(FakeCli::program(fixture));window.setFleet(fleet());window.show();window.showSession({},"codex/hgs/dashboard");
-    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *card=window.findChild<QuestionCard *>();
+    auto *client=window.findChild<HgsClient *>();auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *card=window.findChild<QuestionCard *>("questionCard");
     const auto applyDetails = [&] {
         if (!FakeCli::replace(fixture + ".details", QJsonDocument(details).toJson())) return false;
         // Wait for an inspection started after the atomic update: an older
@@ -6864,7 +6864,7 @@ elif sys.argv[1]=='answer':
     fixture.write(QJsonDocument(details).toJson()); fixture.close();
     SessionsWindow window(FakeCli::program(program.fileName())); window.setFleet(fleet()); window.show(); window.activateWindow();
     window.showSession({},"kimi/docs/research");
-    auto *card=window.findChild<QuestionCard *>(); auto *composer=window.findChild<MessageComposer *>("messageComposer");
+    auto *card=window.findChild<QuestionCard *>("questionCard"); auto *composer=window.findChild<MessageComposer *>("messageComposer");
     auto *client=window.findChild<HgsClient *>(); auto *context=window.findChild<QPushButton *>("activityContext");
     auto *submit=card->findChild<QPushButton *>("submitQuestionAnswer");
     QSignalSpy answered(client,&HgsClient::questionAnswered);
@@ -6933,7 +6933,7 @@ void TestSessionsWindow::questionFooterHasRoomAndKeepsAnswers()
     QJsonObject details{{"tracked",true},{"conversation_id","conversation-one"},{"run_id","run-one"},{"process_state","running"},{"runtime_state","live"},
         {"activity","waiting"},{"phase","input"},{"pending_questions",QJsonArray{question}},{"session_usage",QJsonObject{{"context",QJsonObject{{"used",236000}}}}}};
     client->inspectionReady({},session.name,details);
-    auto *card=window.findChild<QuestionCard *>();QTRY_VERIFY(!card->isDraftLoading());auto *tabs=card->findChild<QTabBar *>("questionTabs");
+    auto *card=window.findChild<QuestionCard *>("questionCard");QTRY_VERIFY(!card->isDraftLoading());auto *tabs=card->findChild<QTabBar *>("questionTabs");
     for(int i=0;i<3;++i){tabs->setCurrentIndex(i);for(auto *option:card->findChildren<QAbstractButton *>("questionOption"))if(option->property("optionId")==QString("opt_%1_0").arg(i))option->click();}
     auto *submit=card->findChild<QPushButton *>("submitQuestionAnswer");QVERIFY(!submit->isEnabled());
     // A refreshed capability unlocks submission without rebuilding the user's answers.
@@ -7001,7 +7001,7 @@ elif sys.argv[1]=='answer':
 )PY"); program.close();
     QVERIFY(FakeCli::makeRunnable(program.fileName()));
     SessionsWindow window(FakeCli::program(program.fileName())); window.setFleet(fleet()); window.show(); window.showSession({}, "kimi/docs/research");
-    auto *card = window.findChild<QuestionCard *>(); auto *client = window.findChild<HgsClient *>();
+    auto *card = window.findChild<QuestionCard *>("questionCard"); auto *client = window.findChild<HgsClient *>();
     QSignalSpy answered(client, &HgsClient::questionAnswered), failed(client, &HgsClient::questionAnswerFailed);
     QTRY_VERIFY(card->isVisible()); QTRY_VERIFY(!card->isDraftLoading());
     auto *submit = card->findChild<QPushButton *>("submitQuestionAnswer");
@@ -8343,7 +8343,7 @@ void TestSessionsWindow::fileReferencesKeepMachineAndWorkspace()
         QCOMPARE(dialog->findChild<QLineEdit *>("sessionFilePath")->text(), QString("/local/project/docs/README.md"));
         dialog->reject();
     });
-    window.findChild<QuestionCard *>()->fileReferenceActivated("docs/README.md:12");
+    window.findChild<QuestionCard *>("questionCard")->fileReferenceActivated("docs/README.md:12");
     QVERIFY(!window.findChild<QDialog *>("sessionFileDialog"));
     window.showSession("mac", "claude/infra/review"); QTest::qWait(50);
     client->inspectionReady("mac", "claude/infra/review", {{"cwd", "/Users/remote/project"}, {"conversation_id", "conversation-one"}});
@@ -12662,7 +12662,7 @@ void TestSessionsWindow::openCodeOversizedFormShowsItsReason()
     SessionsWindow window(fake);keepDetailsPollsOut(window);window.setFleet(state);window.show();window.showSession({},name);
     auto *composer=window.findChild<MessageComposer *>("messageComposer");auto *client=window.findChild<HgsClient *>();
     settleSelectedInspection(composer,client,{},name,details);
-    auto *question=window.findChild<QuestionCard *>();QVERIFY(question);QTRY_VERIFY(question->isVisible());
+    auto *question=window.findChild<QuestionCard *>("questionCard");QVERIFY(question);QTRY_VERIFY(question->isVisible());
     QTRY_COMPARE(question->findChild<QLabel *>("questionStatus")->text(),QString("Answer this form in OpenCode"));
     QVERIFY(question->findChild<QPushButton *>("submitQuestionAnswer")->isHidden());
 }

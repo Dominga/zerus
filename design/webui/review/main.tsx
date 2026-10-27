@@ -1,0 +1,226 @@
+import { render } from "solid-js/web";
+import { For, Show, createSignal, createEffect } from "solid-js";
+import "../src/styles/base.css";
+import "./review.css";
+import { skins, skin, setSkin, applySkin } from "../src/skin/runtime";
+import { PARITY, type ParityStatus } from "./parity";
+
+const STATUS: Record<ParityStatus, string> = {
+  mock: "в мокапе",
+  partial: "частично в мокапе",
+  native: "нативная работа",
+  cli: "в hgs",
+};
+
+const app = (q = "") => `./app.html${q ? `?${q}` : ""}`;
+
+const SCREENS: { title: string; text: string; q: string }[] = [
+  { title: "Сессии", text: "Список как сейчас, линии дерева у субагентов, беседа, боковая панель", q: "" },
+  { title: "Нужен ответ", text: "Карточка вопроса агента и метки внимания", q: "select=mac:1" },
+  { title: "Подтверждение", text: "Запрос прав на команду (DeepSeek, Native UI)", q: "select=b1:1" },
+  { title: "Задачи", text: "Наши стадии, карточки, детали, история, цели", q: "itab=tasks&tab=taskview" },
+  { title: "Overview", text: "Плитки, машины, аккаунты, внимание и работа", q: "page=dashboard" },
+  { title: "Projects", text: "Проекты, папки, worktree, Swarm", q: "page=projects" },
+  { title: "New session", text: "Новая сессия, worktree только после Start", q: "dialog=new-session" },
+  { title: "Machines", text: "Подключения, статус, SSH", q: "page=machines" },
+  { title: "Accounts", text: "Аккаунты и лимиты", q: "page=accounts" },
+  { title: "Settings", text: "Все разделы, выбор скина", q: "page=settings" },
+  { title: "Terminal", text: "xterm.js, загружается по требованию", q: "tab=terminal" },
+  { title: "Свёрнутый список", text: "Полоса плиток, раскрытие поверх беседы", q: "strip=1" },
+  { title: "Поиск", text: "Результаты по сообщениям с подсветкой", q: "q=pagination" },
+  { title: "Архив", text: "Страницы и выбор периода", q: "filter=archived&select=ws:a1" },
+  { title: "Офлайн и ошибки", text: "Машина недоступна, ошибка провайдера", q: "demo=error&select=b2:1" },
+  { title: "Пусто", text: "Ни одной сессии", q: "demo=empty&select=none" },
+];
+
+function Review() {
+  createEffect(() => applySkin(skin()));
+  const [filter, setFilter] = createSignal<ParityStatus | "all">("all");
+  const total = () => PARITY.reduce((n, g) => n + g.rows.length, 0);
+  const count = (s: ParityStatus) => PARITY.reduce((n, g) => n + g.rows.filter((r) => r.status === s).length, 0);
+  return (
+    <div class="rv">
+      <header class="rv-top">
+        <div class="rv-brand"><img src="./zerus-64.png" alt="" width="28" height="28" /><span>Zerus · новый интерфейс на вебе</span></div>
+        <span class="grow" />
+        <label class="dim" for="sk">Скин страницы</label>
+        <select id="sk" class="field" value={skin().id} onChange={(e) => setSkin(e.currentTarget.value)}>
+          <For each={skins}>{(s) => <option value={s.id}>{s.name}</option>}</For>
+        </select>
+      </header>
+
+      <main class="rv-main">
+        <section class="rv-hero">
+          <div class="eyebrow">Ревью дизайна · 27 октября 2026 · только мокап с выдуманными данными</div>
+          <h1>Веб-интерфейс Zerus на Tauri 2 со скинами</h1>
+          <p class="lead">
+            Это кликабельный мокап на том же стеке, который я предлагаю для настоящего клиента. Он покрывает все основные экраны,
+            переключатель экранов сбоку, тёмную и светлую темы, два альтернативных скина и ключевые состояния. Данные выдуманы:
+            домены example.com, пути вида /home/example. Код клиента я не пишу, пока вы не утвердите дизайн.
+          </p>
+          <div class="rv-cta">
+            <a class="btn primary" href={app()}>Открыть мокап</a>
+            <For each={skins}>{(s) => <a class="btn" href={app(`skin=${s.id}`)}>{s.name}</a>}</For>
+          </div>
+          <p class="hint">
+            Внизу по центру мокапа есть служебная панель MOCKUP: скин, демо-состояния (загрузка, пусто, офлайн), режим «20k»
+            с 20 000 сессий и компактные карточки. Это не часть продукта.
+          </p>
+        </section>
+
+        <section>
+          <h2>Экраны для проверки</h2>
+          <div class="rv-grid">
+            <For each={SCREENS}>{(s) => (
+              <a class="rv-card" href={app(s.q)}>
+                <b>{s.title}</b>
+                <span>{s.text}</span>
+              </a>
+            )}</For>
+          </div>
+        </section>
+
+        <section>
+          <h2>Как выполнены ваши условия</h2>
+          <ol class="rv-rules">
+            <li><b>Берём базу стиля, а не частные решения.</b> Из прототипа взяты только палитра (около 40 переменных тёмной и светлой темы), шрифты, радиусы, плотность и движения. Его рантайм, раскладка шапки, инспектор из карточек и функции не используются.</li>
+            <li><b>Список сессий как сейчас, линии дерева из прототипа.</b> Структура и размеры перенесены из <span class="mono">SessionCardDelegate.h</span>: строки 104/94 px, заголовок проекта 40 px, строка субагента 64 px с отступом 24 px, компактная строка 40 px, полоса плиток 98/108 px. Карточки прозрачные, как сейчас. От прототипа только линии вложенности у строк субагентов (раскройте «2/4» у api-refactor).</li>
+            <li><b>Паритет с Qt.</b> Перед дизайном две инвентаризации прошли все экраны, диалоги, меню, статусы, фильтры, сочетания клавиш, настройки и интеграции текущего клиента. Чек-лист ниже связывает каждый пункт с местом в новом дизайне.</li>
+            <li><b>Оркестратор не тянем, свои задачи редизайним.</b> Задачи — наши стадии, карточки, детали, история, комментарии и цели. Команд, фаз, графа, iron rules и удержания кэша нет.</li>
+            <li><b>Переключатель экранов остаётся сбоку.</b> Рейл 56 px слева, порядок как в Qt. Скин может включить подписи (Fjord), но не переносит рейл наверх.</li>
+            <li><b>Ничего нового из прототипа.</b> Единственное новое — система скинов, которую вы попросили. Всё остальное уже есть в Zerus.</li>
+            <li><b>Сначала дизайн на ревью.</b> Эта страница и мокап — первый шаг. После вашего решения я напишу спеку и план реализации.</li>
+          </ol>
+        </section>
+
+        <section>
+          <h2>Стек: SolidJS + TypeScript + Vite внутри Tauri 2</h2>
+          <div class="rv-two">
+            <div>
+              <h3>Почему Solid</h3>
+              <ul>
+                <li>Реактивность без виртуального DOM. Когда меняется статус одной сессии, обновляются только её текстовые узлы, а не дерево из тысяч строк.</li>
+                <li><span class="mono">createStore</span> + <span class="mono">reconcile</span> принимают целые строки каталога из потока событий (так договорились с сессией data plane) и уведомляют только изменившиеся поля.</li>
+                <li>По js-framework-benchmark (Chrome 156, 25.10.2026) Solid и Svelte 5 в пределах 5–15 % от чистого JS. React 19 примерно в 7 раз медленнее на перестановке строк и примерно в 11 раз больше в сжатом виде.</li>
+                <li>Рантайм около 7 КБ, привычный JSX, официальный шаблон Tauri. Svelte 5 — равноценная альтернатива; Solid выбран за компактность и за то, как ложится на пакеты дельт из Rust.</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Правила скорости</h3>
+              <ul>
+                <li>Разбор NDJSON, Markdown и истории — в Rust, не в webview. В интерфейс приходят готовые модели экранов.</li>
+                <li>Дельты из Rust отправляются пачкой не чаще одного кадра: каждое сообщение канала Tauri — это вызов JavaScript в главном потоке.</li>
+                <li>Виртуальные списки с точной высотой строк по типу строки, как в Qt-делегате; DOM не измеряется. Проверка — кнопка «20k».</li>
+                <li>Анимации только opacity и transform на композиторе, уважают reduce motion. Тяжёлое (xterm.js) загружается при первом открытии.</li>
+                <li>Сборка мокапа: начальный JS около 135 КБ gzip, большая часть — выдуманные данные и диалоги; страницы и терминал загружаются при первом открытии.</li>
+              </ul>
+            </div>
+          </div>
+          <div class="notice warn rv-risk">
+            <div>
+              <b>Честно о GPU и 120 Гц.</b> Веб даёт композитор и дешёвые анимации, но у системных webview есть пределы.
+              На macOS WKWebView ограничивает <span class="mono">requestAnimationFrame</span> 60 кадрами даже на ProMotion (WebKit bug 294338,
+              публичного API нет). На Linux Tauri 2 использует WebKitGTK на GTK 3: версия 2.54 сильно улучшила отрисовку, но остаются
+              риски с NVIDIA и дробным масштабом в KDE. Запасной путь для Linux — Chromium-рантайм (CEF) из Tauri 3, сейчас в альфе,
+              примерно +120 МБ к пакету; Electron остаётся последним вариантом. Поэтому до реализации нужен замер на маке и на Arch с KDE.
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <h2>Скины с первого дня</h2>
+          <div class="rv-two">
+            <div>
+              <p>Один JSON-файл на скин, независимый от стека. Из него получаются CSS-переменные для веба; тот же файл можно превратить в токены Qt, Compose и SwiftUI.</p>
+              <ul>
+                <li><b>L0 токены:</b> цвета поверхностей, текста, акцента, статусов, агентов, палитра машин и проектов, шрифты, радиусы, плотность, длительности анимаций, тени.</li>
+                <li><b>L1 компоненты:</b> только перечисленные варианты — бейдж статуса (плашка или точка), метка агента (плашка или значок), линии дерева (линии или отступ), метка внимания (полоса или подсветка).</li>
+                <li><b>L2 раскладка:</b> рейл (иконки или с подписями), список сессий слева или справа, боковая панель открыта или свёрнута, колонка Activity по центру или во всю ширину.</li>
+                <li><b>L3 функции</b> — не скин. Скин не добавляет данных и поведения.</li>
+                <li>Произвольный CSS запрещён: каждое значение проверяется по типу токена, неизвестные ключи отклоняются, скин может только переопределять токены базового скина. Скин может наследовать другой (<span class="mono">extends</span>).</li>
+              </ul>
+              <p>В мокапе четыре скина: Zerus Dark и Zerus Light (база стиля прототипа), Fjord (другая палитра, точки вместо плашек, значки агентов, подсветка внимания, подписи в рейле, Activity во всю ширину) и Paper (тёплая светлая палитра, другой шрифт и радиусы, список справа, свёрнутая панель).</p>
+            </div>
+            <pre class="act-code mono rv-json">{`{
+  "schema": 1,
+  "id": "fjord",
+  "name": "Fjord",
+  "appearance": "dark",
+  "extends": "zerus-dark",
+  "tokens": {
+    "color": {
+      "accent": "#79b8ff",
+      "status-working": "#6fd3b5",
+      "row": "#132036"
+    },
+    "radius": { "card": 10 }
+  },
+  "components": {
+    "status-badge": "dot",
+    "agent-mark": "glyph",
+    "attention-edge": "tint"
+  },
+  "layout": {
+    "rail": "labeled",
+    "activity-column": "full"
+  }
+}`}</pre>
+          </div>
+        </section>
+
+        <section>
+          <h2>Данные: событийный канал</h2>
+          <p>Контракт согласован с сессией data plane (claude/zerus-work-ba0ed9fd/events), серверная часть уже в PR #368. Клиент запускает <span class="mono">hgs [@host] watch --json</span> по одному процессу на компьютер, строки NDJSON разбирает Rust. Каталог приходит целыми строками с ключом <span class="mono">run:&lt;run_id&gt;</span>, так что переименование не теряет выбор и черновик. События Activity приходят по мере записи в журнал, с курсором; текст между инструментами в первой версии приходит кадрами состояния: в течение 500 мс после изменения журнала, иначе раз в 2 с, пока агент работает. Сейчас ответ виден только при опросе раз в 2,5 с и после SSH-круга. Состояние подключения выводится из hello, heartbeat и gap. Смысл статусов не меняется. Rust сжимает строки каталога (6–12 КБ каждая) до моделей экрана, прежде чем отдать их интерфейсу.</p>
+        </section>
+
+        <section>
+          <h2>Чек-лист паритета с Qt</h2>
+          <div class="rv-summary">
+            <button classList={{ on: filter() === "all" }} onClick={() => setFilter("all")}>Все · {total()}</button>
+            <For each={Object.keys(STATUS) as ParityStatus[]}>{(s) => (
+              <button class={`st-${s}`} classList={{ on: filter() === s }} onClick={() => setFilter(s)}>{STATUS[s]} · {count(s)}</button>
+            )}</For>
+          </div>
+          <For each={PARITY}>{(g) => (
+            <Show when={g.rows.some((r) => filter() === "all" || r.status === filter())}>
+              <h3 class="rv-group">{g.title}</h3>
+              <table class="rv-table">
+                <tbody>
+                  <For each={g.rows.filter((r) => filter() === "all" || r.status === filter())}>{(r) => (
+                    <tr>
+                      <td>{r.what}<Show when={r.note}><div class="hint">{r.note}</div></Show></td>
+                      <td class="rv-where">{r.link ? <a href={r.link}>{r.where}</a> : r.where}</td>
+                      <td><span class={`rv-badge st-${r.status}`}>{STATUS[r.status]}</span></td>
+                    </tr>
+                  )}</For>
+                </tbody>
+              </table>
+            </Show>
+          )}</For>
+        </section>
+
+        <section>
+          <h2>Что нужно решить вам</h2>
+          <ol class="rv-rules">
+            <li><b>Утверждаете ли дизайн?</b> Или что поправить: список, карточки, задачи, отдельные экраны, скины.</li>
+            <li><b>Linux-рантайм.</b> Начать на системном WebKitGTK и замерить на Arch с KDE, держа CEF (Tauri 3) как запасной путь? Я рекомендую да.</li>
+            <li><b>60 Гц анимаций на маке.</b> Это ограничение WKWebView. Прокрутку и плавность я замерю отдельно; если не устроит, обсудим варианты.</li>
+            <li><b>Скины пользователя.</b> Разрешить импорт своих JSON-скинов сразу (только токены и варианты) или сначала оставить встроенные?</li>
+          </ol>
+        </section>
+
+        <section>
+          <h2>Дальше, после утверждения</h2>
+          <ol class="rv-rules">
+            <li>Спека архитектуры Tauri-клиента (процессы, мост к hgs и потоку событий, формат скинов v1, упаковка и подпись, риски WebKitGTK и план замеров).</li>
+            <li>Двухнедельный замер одного тяжёлого экрана (список и длинная Activity) на маке и на Arch с KDE против подтянутого Qt.</li>
+            <li>Клиент растёт рядом с Qt экран за экраном; Qt остаётся рабочим, пока новый не догонит по сценариям.</li>
+          </ol>
+        </section>
+      </main>
+      <footer class="rv-foot hint">Мокап: design/webui в ветке work-e94411a3. Данные выдуманы. Сессия claude/zerus-work-e94411a3/webui.</footer>
+    </div>
+  );
+}
+
+render(() => <Review />, document.getElementById("review")!);

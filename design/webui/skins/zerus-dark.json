@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "id": "zerus-dark",
+  "name": "Zerus Dark",
+  "appearance": "dark",
+  "tokens": {
+    "color": {
+      "page": "#0e1115",
+      "pane": "#14181d",
+      "surface": "#1b1f26",
+      "raised": "#20252d",
+      "card": "#181c22",
+      "card-border": "#232932",
+      "card-hover": "#1e232b",
+      "card-selected": "#1b2621",
+      "card-selected-border": "#2f5a4a",
+      "field": "#11151a",
+      "border": "#2c323b",
+      "divider": "#232932",
+      "hover": "#222830",
+      "segment-on": "#26443a",
+      "tile": "#0f1318",
+      "bubble": "#1f3a31",
+      "bubble-border": "#2f5a4a",
+      "text": "#e6e8eb",
+      "text-2": "#c4cad1",
+      "text-3": "#aab1ba",
+      "muted": "#9aa3ad",
+      "label": "#8f97a2",
+      "dim": "#7b8590",
+      "accent": "#7dd3b0",
+      "accent-text": "#0f1a16",
+      "accent-hover": "#a8e6cc",
+      "accent-muted": "#5c9e86",
+      "accent-bg": "rgba(125,211,176,.10)",
+      "warn": "#e8a75a",
+      "warn-bg": "rgba(232,167,90,.11)",
+      "danger": "#ef7d6d",
+      "danger-bg": "rgba(239,125,109,.11)",
+      "info": "#7fb6e0",
+      "info-bg": "rgba(127,182,224,.11)",
+      "violet": "#b79cff",
+      "violet-bg": "rgba(183,156,255,.11)",
+      "status-working": "{color.accent}",
+      "status-background": "#6fa8ff",
+      "status-scheduled": "{color.violet}",
+      "status-attention": "{color.warn}",
+      "status-error": "{color.danger}",
+      "status-ready": "{color.muted}",
+      "status-offline": "{color.dim}",
+      "unread": "{color.accent}",
+      "draft": "{color.info}",
+      "entity-base": "#171e25",
+      "entity-ink-base": "#ffffff",
+      "tree-line": "#2c323b",
+      "scrollbar": "rgba(156,170,183,.37)",
+      "scrollbar-hover": "rgba(175,189,202,.59)",
+      "terminal-bg": "#0c0f12",
+      "terminal-fg": "#d7dce1",
+      "code-bg": "#11151a",
+      "selection": "rgba(125,211,176,.28)",
+      "backdrop": "rgba(5,8,10,.55)",
+      "focus": "{color.accent}",
+      "row": "transparent",
+      "row-border": "transparent",
+      "row-hover": "#20262e",
+      "row-selected": "#28313b",
+      "row-selected-border": "#5f7083",
+      "attention-ink": "#392900"
+    },
+    "agent": {
+      "claude": "#e8875a",
+      "codex": "#c4cad1",
+      "kimi": "#9aa5ff",
+      "deepseek": "#6fa8ff",
+      "opencode": "#b9d36b"
+    },
+    "entity": {
+      "fill-mix": 22,
+      "ink-mix": 62,
+      "palette": [
+        "#5fbfa5",
+        "#8ea9f4",
+        "#c098e6",
+        "#e7ae66",
+        "#e38f9e",
+        "#75bfcf",
+        "#acc577",
+        "#8d9baa"
+      ]
+    },
+    "font": {
+      "ui": [
+        "Segoe UI",
+        "-apple-system",
+        "SF Pro Text",
+        "Noto Sans",
+        "system-ui",
+        "sans-serif"
+      ],
+      "mono": [
+        "Cascadia Mono",
+        "SF Mono",
+        "JetBrains Mono",
+        "Noto Sans Mono",
+        "ui-monospace",
+        "monospace"
+      ],
+      "base": 13,
+      "line": 1.38
+    },
+    "radius": {
+      "xs": 3,
+      "sm": 4,
+      "md": 6,
+      "lg": 8,
+      "card": 8,
+      "xl": 10,
+      "dialog": 12
+    },
+    "density": {
+      "scale": 1
+    },
+    "motion": {
+      "fast": 120,
+      "base": 160,
+      "slow": 240,
+      "ease": "cubic-bezier(.2,.8,.2,1)",
+      "pulse": 1400
+    },
+    "shadow": {
+      "popover": "0 12px 40px rgba(0,0,0,.45)",
+      "dialog": "0 24px 64px rgba(0,0,0,.55)",
+      "focus-ring": "0 0 0 3px rgba(125,211,176,.10)"
+    }
+  },
+  "components": {
+    "status-badge": "pill",
+    "agent-mark": "chip",
+    "tree-lines": "lines",
+    "attention-edge": "bar"
+  },
+  "layout": {
+    "rail": "icons",
+    "sessions-pane": "left",
+    "inspector": "docked",
+    "activity-column": "centered"
+  }
+}

@@ -1,0 +1,209 @@
+// Skin format v1: a declarative, stack-agnostic JSON document.
+//
+// L0  tokens      colors, fonts, radii, density, motion, shadows
+// L1  components  named variants of existing components (enum values only)
+// L2  layout      named layout variants of existing screens (enum values only)
+//
+// A skin never carries CSS, selectors, URLs or code. The base skin
+// (zerus-dark) defines the complete token set; other skins may only override
+// tokens that exist there. Values are validated per token type and compiled to
+// CSS custom properties; other stacks (Qt, Compose, SwiftUI) can compile the
+// same JSON with their own generators.
+
+export type Appearance = "dark" | "light";
+
+export interface SkinFile {
+  schema: 1;
+  id: string;
+  name: string;
+  appearance: Appearance;
+  extends?: string;
+  tokens?: Record<string, Record<string, unknown>>;
+  components?: Partial<ComponentVariants>;
+  layout?: Partial<LayoutVariants>;
+}
+
+export const COMPONENT_VARIANTS = {
+  "status-badge": ["pill", "dot"],
+  "agent-mark": ["chip", "glyph"],
+  "tree-lines": ["lines", "indent"],
+  "attention-edge": ["bar", "tint"],
+} as const;
+
+export const LAYOUT_VARIANTS = {
+  rail: ["icons", "labeled"],
+  "sessions-pane": ["left", "right"],
+  inspector: ["docked", "collapsed"],
+  "activity-column": ["centered", "full"],
+} as const;
+
+export type ComponentVariants = { -readonly [K in keyof typeof COMPONENT_VARIANTS]: (typeof COMPONENT_VARIANTS)[K][number] };
+export type LayoutVariants = { -readonly [K in keyof typeof LAYOUT_VARIANTS]: (typeof LAYOUT_VARIANTS)[K][number] };
+
+export interface ResolvedSkin {
+  id: string;
+  name: string;
+  appearance: Appearance;
+  tokens: Record<string, Record<string, unknown>>;
+  components: ComponentVariants;
+  layout: LayoutVariants;
+}
+
+type TokenType = "color" | "colors" | "percent" | "px" | "ratio" | "density" | "ms" | "easing" | "fonts" | "shadow";
+
+function tokenType(group: string, key: string): TokenType | undefined {
+  switch (group) {
+    case "color":
+    case "agent":
+      return "color";
+    case "entity":
+      return key === "palette" ? "colors" : "percent";
+    case "font":
+      return key === "base" ? "px" : key === "line" ? "ratio" : "fonts";
+    case "radius":
+      return "px";
+    case "density":
+      return "density";
+    case "motion":
+      return key === "ease" ? "easing" : "ms";
+    case "shadow":
+      return "shadow";
+  }
+  return undefined;
+}
+
+const KEYWORD = /^transparent$/;
+const HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const RGB = /^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*(?:0|1|0?\.\d+)\s*)?\)$/i;
+const REF = /^\{([a-z]+)\.([a-z0-9-]+)\}$/;
+const FAMILY = /^[A-Za-z0-9 -]{1,48}$/;
+const EASING = /^(?:linear|ease|ease-in|ease-out|ease-in-out|cubic-bezier\(\s*-?[\d.]+\s*,\s*-?[\d.]+\s*,\s*-?[\d.]+\s*,\s*-?[\d.]+\s*\))$/;
+const SHADOW_PART = /^(?:inset\s+)?(?:-?\d+(?:\.\d+)?(?:px)?\s+){2,4}rgba?\([\d\s.,]+\)$/;
+
+export class SkinError extends Error {}
+
+function isColor(value: unknown): boolean {
+  return typeof value === "string" && (HEX.test(value) || RGB.test(value) || REF.test(value) || KEYWORD.test(value));
+}
+
+function check(type: TokenType, path: string, value: unknown): void {
+  const fail = (why: string) => {
+    throw new SkinError(`${path}: ${why}`);
+  };
+  const num = (min: number, max: number) => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) fail(`expected a number in ${min}..${max}`);
+  };
+  switch (type) {
+    case "color":
+      if (!isColor(value)) fail("expected #hex, rgb()/rgba() or a {group.token} reference");
+      return;
+    case "colors":
+      if (!Array.isArray(value) || value.length < 1 || value.length > 16 || !value.every((c) => typeof c === "string" && (HEX.test(c) || RGB.test(c))))
+        fail("expected 1..16 literal colors");
+      return;
+    case "percent":
+      return num(0, 100);
+    case "px":
+      return num(0, 32);
+    case "ratio":
+      return num(1, 2);
+    case "density":
+      return num(0.8, 1.3);
+    case "ms":
+      return num(0, 5000);
+    case "easing":
+      if (typeof value !== "string" || !EASING.test(value)) fail("expected a CSS easing keyword or cubic-bezier()");
+      return;
+    case "fonts":
+      if (!Array.isArray(value) || value.length < 1 || value.length > 8 || !value.every((f) => typeof f === "string" && FAMILY.test(f)))
+        fail("expected 1..8 font family names");
+      return;
+    case "shadow":
+      if (typeof value !== "string" || value.length > 160 || !value.split(/,(?![^(]*\))/).every((p) => SHADOW_PART.test(p.trim())))
+        fail("expected box-shadow lengths with an rgb()/rgba() color");
+      return;
+  }
+}
+
+function validateFile(file: SkinFile, base: SkinFile | undefined): void {
+  if (file.schema !== 1) throw new SkinError(`${file.id}: unsupported schema ${String(file.schema)}`);
+  if (!/^[a-z0-9-]{1,40}$/.test(file.id)) throw new SkinError("id: lowercase letters, digits and dashes");
+  if (file.appearance !== "dark" && file.appearance !== "light") throw new SkinError(`${file.id}: appearance must be dark or light`);
+  for (const [group, values] of Object.entries(file.tokens ?? {})) {
+    for (const [key, value] of Object.entries(values)) {
+      const type = tokenType(group, key);
+      if (!type) throw new SkinError(`${file.id}: unknown token group ${group}`);
+      if (base && !(key in ((base.tokens ?? {})[group] ?? {}))) throw new SkinError(`${file.id}: unknown token ${group}.${key}`);
+      check(type, `${file.id}: ${group}.${key}`, value);
+    }
+  }
+  for (const [name, value] of Object.entries(file.components ?? {})) {
+    const allowed = (COMPONENT_VARIANTS as Record<string, readonly string[]>)[name];
+    if (!allowed || !allowed.includes(String(value))) throw new SkinError(`${file.id}: components.${name} must be one of ${allowed?.join(", ") ?? "(unknown)"}`);
+  }
+  for (const [name, value] of Object.entries(file.layout ?? {})) {
+    const allowed = (LAYOUT_VARIANTS as Record<string, readonly string[]>)[name];
+    if (!allowed || !allowed.includes(String(value))) throw new SkinError(`${file.id}: layout.${name} must be one of ${allowed?.join(", ") ?? "(unknown)"}`);
+  }
+}
+
+/** Validate and resolve `extends` chains. The first file is the base skin. */
+export function resolveSkins(files: SkinFile[]): ResolvedSkin[] {
+  const byId = new Map(files.map((f) => [f.id, f]));
+  const base = files[0];
+  validateFile(base, undefined);
+  const resolve = (file: SkinFile, seen: Set<string>): ResolvedSkin => {
+    if (seen.has(file.id)) throw new SkinError(`${file.id}: extends cycle`);
+    seen.add(file.id);
+    if (file !== base) validateFile(file, base);
+    const parent = file.extends ? byId.get(file.extends) : undefined;
+    if (file.extends && !parent) throw new SkinError(`${file.id}: extends unknown skin ${file.extends}`);
+    const inherited = parent ? resolve(parent, seen) : undefined;
+    const tokens: Record<string, Record<string, unknown>> = {};
+    for (const source of [inherited?.tokens ?? {}, file.tokens ?? {}])
+      for (const [group, values] of Object.entries(source)) tokens[group] = { ...(tokens[group] ?? {}), ...values };
+    return {
+      id: file.id,
+      name: file.name,
+      appearance: file.appearance,
+      tokens,
+      components: { ...(inherited?.components ?? {}), ...(file.components ?? {}) } as ComponentVariants,
+      layout: { ...(inherited?.layout ?? {}), ...(file.layout ?? {}) } as LayoutVariants,
+    };
+  };
+  return files.map((f) => resolve(f, new Set()));
+}
+
+const varName = (group: string, key: string) => `--z-${group}-${key}`;
+
+function cssValue(type: TokenType, value: unknown): string {
+  switch (type) {
+    case "color": {
+      const ref = REF.exec(String(value));
+      return ref ? `var(${varName(ref[1], ref[2])})` : String(value);
+    }
+    case "percent":
+      return `${value}%`;
+    case "px":
+      return `${value}px`;
+    case "ms":
+      return `${value}ms`;
+    case "fonts":
+      return (value as string[]).map((f) => (/^[a-z-]+$/.test(f) ? f : `"${f}"`)).join(", ");
+    default:
+      return String(value);
+  }
+}
+
+/** Compile one resolved skin to a single CSS rule of custom properties. */
+export function compileSkin(skin: ResolvedSkin): string {
+  const lines: string[] = [`color-scheme: ${skin.appearance};`];
+  for (const [group, values] of Object.entries(skin.tokens)) {
+    for (const [key, value] of Object.entries(values)) {
+      const type = tokenType(group, key)!;
+      if (type === "colors") (value as string[]).forEach((c, i) => lines.push(`${varName(group, key)}-${i}: ${c};`));
+      else lines.push(`${varName(group, key)}: ${cssValue(type, value)};`);
+    }
+  }
+  return `:root[data-skin="${skin.id}"] {\n  ${lines.join("\n  ")}\n}`;
+}

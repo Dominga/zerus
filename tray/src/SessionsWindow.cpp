@@ -1628,6 +1628,27 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_projectsPage,&ProjectsDialog::relatedSessionRequested,this,&SessionsWindow::openRelatedSession);
     connect(m_projectsPage,&ProjectsDialog::newPathSessionRequested,this,[this](const QString &project,const QString &host,const QString &path){showNewSession({},project,host,{},path);});
     connect(m_projectsPage,&ProjectsDialog::newSessionRequested,this,[this](const QString &project,const QString &host,const QString &folder){showNewSession({},project,host,folder);});
+    // U25 part 7 (spec 7): New team… from a project, and its sessions with
+    // their team role, machine, branch and status.
+    connect(m_projectsPage,&ProjectsDialog::newTeamRequested,this,[this](const QString &){m_pages->setCurrentIndex(0);showNewTeam();});
+    m_projectsPage->setSessionsProvider([this](const QString &project){
+        QList<ProjectsDialog::ProjectSession> rows;
+        for(const auto &entry:m_entries){
+            if(m_organization.groupFor(entry.identity)!=project||entry.session.state=="archived")continue;
+            const auto &s=entry.session;
+            ProjectsDialog::ProjectSession row;
+            row.host=entry.host;row.name=s.name;row.agent=s.cmd;row.machine=entry.machine;row.branch=s.gitBranch;
+            row.title=s.tag.isEmpty()?s.name:s.tag;
+            if(m_teams)if(const auto *team=[&]()->const Teams::Team *{for(const auto &t:m_teams->teams())if(t.memberOfSession(entry.host,s.name))return &t;return nullptr;}()){
+                row.team=team->id;const auto *member=team->memberOfSession(entry.host,s.name);row.role=team->roleOf(member->id);
+            }
+            const bool attention=!s.attentionId.isEmpty();
+            row.status=!entry.online?tr("Offline"):s.state=="paused"?tr("Paused"):attention?tr("Needs input"):s.phase=="working"?tr("Working"):s.unreadReply?tr("New reply"):tr("Ready");
+            row.tone=attention||s.unreadReply?QStringLiteral("warn"):s.phase=="working"?QStringLiteral("active"):QStringLiteral("muted");
+            rows<<row;
+        }
+        return rows;
+    });
     m_machinesPage = new MachinesPage(hgsPath); m_pages->addWidget(m_machinesPage);
     connect(m_machinesPage, &MachinesPage::machinesChanged, this, &SessionsWindow::refreshRequested);
     connect(m_machinesPage, &MachinesPage::sshTerminalRequested, this, &SessionsWindow::machineSshRequested);
@@ -1686,6 +1707,26 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_accountsPage,&AccountsPage::accountsChanged,this,&SessionsWindow::refreshRequested);
     connect(m_accountsPage,&AccountsPage::notice,this,&SessionsWindow::showNotice);
     connect(m_accountsPage,&AccountsPage::catalogChanged,this,[this]{updateDashboardAccounts(m_pages->currentIndex()==3);});
+    // U25 part 7 (spec 9): "Used by teams" - the teams whose members run with
+    // this profile (its agent on its machine; no account means the default).
+    m_accountsPage->setTeamUses([this](const QJsonObject &profile){
+        QList<AccountsPage::TeamUse> uses;
+        if(!m_teams)return uses;
+        const auto provider=profile["provider"].toString(),host=profile["host"].toString();
+        const auto id=profile["id"].toString(),label=profile["label"].toString();
+        for(const auto &team:m_teams->teams()){
+            if(team.status=="done"||team.status=="stopped"||team.status=="archived")continue;
+            QStringList roles;
+            for(const auto &member:team.members){
+                if(member.agent!=provider||member.computer!=host)continue;
+                const bool same=member.account.isEmpty()?profile["is_default"].toBool():(member.account==id||member.account==label);
+                if(same)roles<<team.roleOf(member.id);
+            }
+            if(!roles.isEmpty())uses<<AccountsPage::TeamUse{team.id,team.name,roles.join(QStringLiteral(", "))};
+        }
+        return uses;
+    });
+    connect(m_accountsPage,&AccountsPage::openTeamRequested,this,[this](const QString &team){m_pages->setCurrentIndex(0);showTeam(team);});
     connect(m_usageStore,&AccountUsageStore::changed,this,[this](const QString &){renderAccountUsage();updateDashboardAccounts();});
     connect(m_machinesPage,&MachinesPage::accountsRequested,this,[this](const QString &host) { m_pages->setCurrentIndex(4); m_accountsPage->showMachine(host); });
     connect(m_machinesPage,&MachinesPage::appearanceChanged,this,[this] { m_machineFilter->refreshColors(); m_accountsPage->refreshAppearance(); rebuild(); updateDashboard(); });
@@ -3414,6 +3455,8 @@ void SessionsWindow::rebuild()
     QList<Row> rows;
     QSet<int> subordinateRows;   // WhiteWh fork: visible entries listed under their lead
     QSet<int> teamMemberRows, teamHiddenRows, lastMemberRows;
+    QHash<int, int> teamDepth;
+    QHash<int, QVariantList> teamLines;
     QHash<int, QString> leadTeams;   // WhiteWh fork: lead rows and their teams
     const bool hasGroups = m_organization.groups().size() > 1;
     const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
@@ -3539,6 +3582,28 @@ void SessionsWindow::rebuild()
             if (lead < 0 || leadTeams.contains(lead)) continue;
             // G1: a sub-team's lead sits indented under its parent's lead.
             if (team.parent.known) subordinateRows.insert(lead);
+            const bool collapsed = collapsedDeep(team);
+            // Spec 2.5: the members follow the team's tree - each sub-lead
+            // followed by its reports - over the rows still shown.
+            QHash<QString, int> rowOf;
+            for (int i : follow) rowOf.insert(team.memberOfSession(visible[i].host, visible[i].session.name)->id, i);
+            for (int i : follow) {
+                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
+                if (collapsed && !Teams::memberStatus(team, *member, teamLive(*member)).problem) teamHiddenRows.insert(i);
+            }
+            const auto tree = team.memberTree([&](const QString &id) { return rowOf.contains(id) && !teamHiddenRows.contains(rowOf.value(id)); });
+            QList<int> treeOrder;
+            for (const auto &node : tree) {
+                const int i = rowOf.value(node.member->id, -1);
+                if (i < 0 || node.depth < 1) continue;
+                treeOrder.append(i);
+                teamDepth.insert(i, node.depth);
+                QVariantList lines; for (bool on : node.through) lines.append(on);
+                teamLines.insert(i, lines);
+                if (node.last) lastMemberRows.insert(i);
+            }
+            for (int i : follow) if (!treeOrder.contains(i)) treeOrder.append(i);
+            follow = treeOrder;
             const QSet<int> following(follow.cbegin(), follow.cend());
             QList<int> ordered;
             for (int i : members) {
@@ -3548,13 +3613,7 @@ void SessionsWindow::rebuild()
             }
             members = ordered;
             leadTeams.insert(lead, team.id);
-            const bool collapsed = collapsedDeep(team);
-            for (int i : follow) {
-                teamMemberRows.insert(i);
-                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
-                if (collapsed && !Teams::memberStatus(team, *member, teamLive(*member)).problem) teamHiddenRows.insert(i);
-            }
-            for (auto it = follow.crbegin(); it != follow.crend(); ++it) if (!teamHiddenRows.contains(*it)) { lastMemberRows.insert(*it); break; }
+            for (int i : follow) teamMemberRows.insert(i);
         }
         if (members.isEmpty() && launches.isEmpty() && (filtering || hideEmptyProjects || !group.accessible)) continue;
         if (hasGroups) rows.append({group.id, -1, false});
@@ -3599,6 +3658,8 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
         item->setData(SessionRoles::TeamMember, row.entry >= 0 && row.child.isEmpty() && teamMemberRows.contains(row.entry)
                                                     ? (lastMemberRows.contains(row.entry) ? 2 : 1) : 0);
+        item->setData(SessionRoles::TeamDepth, row.entry >= 0 && row.child.isEmpty() ? teamDepth.value(row.entry, 1) : 0);
+        item->setData(SessionRoles::TeamLines, row.entry >= 0 && row.child.isEmpty() ? teamLines.value(row.entry) : QVariantList());
         if (!row.launch.isEmpty()) {
             const auto launch = m_pendingLaunches.value(row.launch).toObject();
             const QString name = launch.value("tag").toString(), host = launch.value("host").toString();

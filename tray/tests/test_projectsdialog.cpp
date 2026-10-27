@@ -3,6 +3,8 @@
 #include "CloneRepositoryDialog.h"
 #include "PopupMouse.h"
 #include "FakeCli.h"
+#include "CollapsibleBlock.h"
+#include "PageShots.h"
 #include <QInputDialog>
 #include <QColorDialog>
 #include <QCheckBox>
@@ -29,6 +31,7 @@ class TestProjectsDialog : public QObject {
 private slots:
     void projectConnectionsGuideExplainsMissingCatalogsWithoutJoining();
     void cloneAddsFolderWithoutLaunchingSession();
+    void projectPageHasHeaderAndCollapsibleBlocks();
     void worktreeOverviewIsVisibleWithoutSelectingAProjectFolder();
     void projectColorChangesRequireApply_data();
     void projectColorChangesRequireApply();
@@ -74,6 +77,72 @@ void TestProjectsDialog::projectConnectionsGuideExplainsMissingCatalogsWithoutJo
     QCOMPARE(changed.size(),0); // navigation is not enrollment or membership mutation
     dialog.setSwarmSnapshot({{"node_id","desktop-id"},{"peers",QJsonObject{{"laptop",QJsonObject{}},{"office",QJsonObject{}}}}});
     QVERIFY(guide->isHidden());QCOMPARE(changed.size(),0);
+}
+
+// U25 part 7 (spec 7): the project header with its counts and actions, and
+// Folders, Sessions and Iron rules as collapsible blocks - one row per folder
+// with its kind and the team chip, one row per session with its role and
+// status; a team member's worktree is removed with its team only.
+void TestProjectsDialog::projectPageHasHeaderAndCollapsibleBlocks()
+{
+    QTemporaryDir directory;QVERIFY(directory.isValid());
+    QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,directory.path());
+    QCoreApplication::setOrganizationName("hgs-project-blocks-test");QCoreApplication::setApplicationName("projects");QSettings().clear();
+    HgsClient client("/nonexistent/hgs");SessionOrganization projects;const auto project=projects.createGroup("Orbit platform");
+    projects.addFolder(project,"workstation","/work/orbit");
+    projects.addFolder(project,"workstation","/work/orbit-team-528aebfe-backend");
+    projects.addFolder(project,"build-01","/srv/orbit");
+    ProjectsDialog dialog(&client,nullptr,true,&projects);
+    dialog.setSessionsProvider([](const QString &) {
+        QList<ProjectsDialog::ProjectSession> rows;
+        rows << ProjectsDialog::ProjectSession{"", "claude/orbit/checkout", "checkout", "claude", "Lead", "workstation", "feat/checkout-v2", "Working", "active", "team-1"};
+        rows << ProjectsDialog::ProjectSession{"", "dsh/orbit/backend", "Backend", "dsh", "Backend", "workstation", "team/528aebfe/backend", "Needs input", "warn", "team-1"};
+        rows << ProjectsDialog::ProjectSession{"build-01", "codex/orbit/search", "search", "codex", "", "build-01", "feat/search-index", "Ready", "muted", ""};
+        return rows;
+    });
+    QSignalSpy newTeam(&dialog,&ProjectsDialog::newTeamRequested);
+    dialog.resize(1400,1000);dialog.selectProject(project);dialog.show();
+    QCOMPARE(dialog.findChild<QLabel *>("projectHeaderName")->text(),QString("Orbit platform"));
+    QCOMPARE(dialog.findChild<QLabel *>("projectSummary")->text(),QString("3 sessions · 2 in teams · 1 team"));
+    // One row per folder: its kind, and the team chip for the member's worktree.
+    auto *table=dialog.findChild<QTableWidget *>("projectFolders");QCOMPARE(table->columnCount(),4);QCOMPARE(table->rowCount(),3);
+    QMap<QString,QString> kinds;QMap<QString,bool> chips;
+    for(int row=0;row<table->rowCount();++row){
+        kinds.insert(table->item(row,2)->text(),table->item(row,3)->text());
+        chips.insert(table->item(row,2)->text(),table->item(row,0)->data(Qt::UserRole+1).toBool());
+    }
+    QCOMPARE(kinds.value("/work/orbit"),QString("Main checkout"));
+    QCOMPARE(kinds.value("/work/orbit-team-528aebfe-backend"),QString("Worktree · team/528aebfe/backend"));
+    QCOMPARE(kinds.value("/srv/orbit"),QString("Clone"));
+    QVERIFY(chips.value("/work/orbit-team-528aebfe-backend"));QVERIFY(!chips.value("/work/orbit"));
+    // The blocks with their counts.
+    auto *folders=dialog.findChild<QWidget *>("projectFoldersBlock");QVERIFY(folders);
+    QCOMPARE(folders->findChild<QLabel *>("collapsibleNote")->text(),QString("3"));
+    auto *sessionsBlock=dialog.findChild<QWidget *>("projectSessionsBlock");QVERIFY(sessionsBlock);
+    QCOMPARE(sessionsBlock->findChild<QLabel *>("collapsibleNote")->text(),QString("3 sessions · 2 in teams · 1 team"));
+    QVERIFY(dialog.findChild<QWidget *>("projectRulesBlock"));QVERIFY(dialog.findChild<QWidget *>("projectIronRules"));
+    // One row per session: name and role, machine, branch, status.
+    auto *sessions=dialog.findChild<QTableWidget *>("projectSessions");QCOMPARE(sessions->rowCount(),3);
+    QCOMPARE(sessions->item(1,0)->text(),QString("Backend  ·  Backend"));
+    QCOMPARE(sessions->item(1,1)->text(),QString("workstation"));QCOMPARE(sessions->item(1,2)->text(),QString("team/528aebfe/backend"));
+    QCOMPARE(sessions->item(1,3)->text(),QString("Needs input"));QCOMPARE(sessions->item(1,3)->data(Qt::UserRole+1).toString(),QString("warn"));
+    // A team member's worktree goes with its team.
+    for(int row=0;row<table->rowCount();++row)if(table->item(row,3)->text().startsWith("Worktree"))table->setCurrentCell(row,0);
+    dialog.findChild<QPushButton *>("removeProjectFolder")->click();
+    QCOMPARE(projects.group(project)->folders.size(),3);
+    QCOMPARE(dialog.findChild<QLabel *>("projectsStatus")->text(),QString("Team worktrees are removed with the team"));
+    // New team… asks for this project; New session… is the primary action.
+    dialog.findChild<QPushButton *>("projectNewTeam")->click();
+    QCOMPARE(newTeam.size(),1);QCOMPARE(newTeam.first().first().toString(),project);
+    QVERIFY(dialog.findChild<QPushButton *>("newProjectFolderSession")->property("pagePrimary").toBool());
+    table->setCurrentCell(0,0);
+    PageShots::shot(dialog,true,"ux-7-projects-dark");
+    PageShots::shot(dialog,false,"ux-7-projects-light");
+    // A block folds to its header and remembers it.
+    folders->findChild<QPushButton *>("collapsibleHeader")->click();
+    QVERIFY(!folders->findChild<QWidget *>("collapsibleBody")->isVisible());
+    PageShots::shot(dialog,true,"ux-7-projects-collapsed-dark");
+    folders->findChild<QPushButton *>("collapsibleHeader")->click();
 }
 
 void TestProjectsDialog::cloneAddsFolderWithoutLaunchingSession()

@@ -76,6 +76,7 @@ private:
     QWidget *answers(const Teams::Team &team);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
+    void linkDraft(const Teams::Team &team, int dependency, int task, bool add);
     QWidget *board(const Teams::Team &team);
     QWidget *members(const Teams::Team &team);
     QWidget *feed(const Teams::Team &team);
@@ -106,6 +107,8 @@ private:
     // G5: the members block folds, and the owner's choice survives a restart.
     // (G9 moved the draft phases into the graph's band headers.)
     bool m_membersOpen = true;
+    // Spec 5.6: the sub-leads whose reports are folded in Members.
+    QSet<QString> m_subFolded;
     double m_zoom = 1.0;
     int m_drawerTask = 0;
     QHash<QString, QPoint> m_scroll;

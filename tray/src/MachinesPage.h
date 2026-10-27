@@ -43,6 +43,12 @@ private:
     QJsonObject m_data;
     QListWidget *m_list;
     QLabel *m_summary, *m_title, *m_status, *m_origin, *m_effective, *m_colorHint, *m_localHost;
+    // U25 part 7 (spec 8): the title's note, the duplicate-name error and the
+    // unsaved-changes warning; the label swatches and the Soft/Bright segment.
+    QLabel *m_titleNote, *m_aliasError, *m_unsaved;
+    QList<QPushButton *> m_swatches;
+    QPushButton *m_styleSoft, *m_styleBright;
+    bool m_dark = false;
     QLineEdit *m_alias, *m_hostname, *m_user, *m_key;
     QSpinBox *m_port;
     QCheckBox *m_enabled;

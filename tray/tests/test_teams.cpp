@@ -134,6 +134,7 @@ class TestTeams : public QObject {
     Q_OBJECT
 private slots:
     void initTestCase();
+    void subLeadsFormTheMemberTree();
     void modelReadsTheTeamAndDerivesMemberStates();
     void modelReadsPhasesPinnedAndTheWaitingState();
     void leftRunningMembersOfAFinishedTeam();
@@ -1468,6 +1469,73 @@ void TestTeams::modelReadsTheHierarchy()
     QVERIFY(team.tasks[0].subteam.known);
     QCOMPARE(team.tasks[0].subteam.team, QStringLiteral("grand"));
     QCOMPARE(team.tasks[0].subteam.total, 2);
+}
+
+// U25 part 10 (spec 5.6): a sub-lead's reports hang under it; the tree, the
+// reviewer, the feed and the member status follow.
+void TestTeams::subLeadsFormTheMemberTree()
+{
+    auto json = checkout();
+    auto members = json["members"].toArray();
+    // The Integrator becomes a sub-lead, the Backend reports to it.
+    const QString sub = QStringLiteral("integrator"), report = QStringLiteral("backend");
+    for (int i = 0; i < members.size(); ++i) {
+        auto m = members[i].toObject();
+        if (m["id"].toString() == sub) m["sub"] = true;
+        if (m["id"].toString() == report) m["parent"] = sub;
+        members[i] = m;
+    }
+    json["members"] = members;
+    const Team team = parse(json);
+    QVERIFY(team.member(sub)->sub);
+    QCOMPARE(team.member(report)->parent, sub);
+    QCOMPARE(team.reviewerOf(report), sub);
+    QCOMPARE(team.reviewerOf(QStringLiteral("frontend")), team.lead);
+    QVERIFY(team.reviewerOf(team.lead).isEmpty());
+    QCOMPARE(team.reportsOf(sub).size(), 1);
+    QCOMPARE(team.member(report)->json()["parent"].toString(), sub);
+    // Depth first: the lead, its direct reports in order, the sub-lead
+    // followed by its report one level in.
+    const auto tree = team.memberTree();
+    QStringList order; QList<int> depths;
+    for (const auto &node : tree) { order << node.member->id; depths << node.depth; }
+    QCOMPARE(order.first(), team.lead);
+    QCOMPARE(order.last(), report);
+    QCOMPARE(order.at(order.size() - 2), sub);
+    QCOMPARE(depths.last(), 2);
+    QCOMPARE(tree.last().through, QList<bool>{false});   // the sub-lead is the last direct report: no tail
+    QVERIFY(tree.last().last);
+    QVERIFY(!order.mid(1, order.size() - 3).contains(report));
+    // A folded list: with the sub-lead hidden its report hangs from the lead.
+    const auto folded = team.memberTree([&](const QString &id) { return id != sub; });
+    QVERIFY(std::none_of(folded.cbegin(), folded.cend(), [&](const Team::TreeNode &node) { return node.member->id == sub; }));
+    for (const auto &node : folded) if (node.member->id == report) QCOMPARE(node.depth, 1);
+    // A sub-lead's word in the feed.
+    const auto line = [&](const QString &kind, const QJsonObject &detail) {
+        return feedLine(team, QJsonObject{{"at", 1}, {"seq", 1}, {"kind", kind}, {"detail", detail}});
+    };
+    const auto handed = line("handed_out", {{"by", "QA lead"}, {"task", 2}, {"to", "Tester"}, {"attempt", 1}});
+    QCOMPARE(handed.by, QStringLiteral("QA lead"));
+    QVERIFY2(handed.text.startsWith(QStringLiteral("Task to Tester")), qPrintable(handed.text));
+    QCOMPARE(line("handed_out", {{"by", "Lead"}, {"task", 2}, {"to", "Tester"}}).by, QStringLiteral("Lead"));
+    QVERIFY(line("reported", {{"by", "Tester"}, {"to", "QA lead"}, {"task", 2}}).text.startsWith(QStringLiteral("Report to QA lead")));
+    QVERIFY(line("reported", {{"by", "Tester"}, {"task", 2}}).text.startsWith(QStringLiteral("Report to Lead")));
+    QCOMPARE(line("accepted", {{"by", "QA lead"}, {"task", 2}}).by, QStringLiteral("QA lead"));
+    // Its status: reviewing a report's work, else coordinating its reports.
+    Team running = team;
+    running.status = "running";
+    Member *subMember = nullptr;
+    for (auto &m : running.members) if (m.id == sub) subMember = &m;
+    subMember->session = "codex/x/sub"; subMember->error.clear(); subMember->state = "active";
+    for (auto &t : running.tasks) if (t.assignee == sub || t.assignee == report) t.status = "pending";
+    for (auto &t : running.tasks) for (auto &a : t.attempts) if (a.member == sub) a.state = "rejected";
+    QCOMPARE(memberStatus(running, *subMember, Live{}).text, QStringLiteral("Coordinating 1 report"));
+    Task *reviewed = nullptr;
+    for (auto &t : running.tasks) if (!reviewed && t.assignee != sub) { reviewed = &t; }
+    reviewed->assignee = report; reviewed->status = "submitted";
+    const auto status = memberStatus(running, *subMember, Live{});
+    QCOMPARE(status.kind, QStringLiteral("reviewing"));
+    QCOMPARE(status.text, QStringLiteral("Reviewing #%1 %2").arg(reviewed->id).arg(reviewed->title));
 }
 
 QTEST_MAIN(TestTeams)

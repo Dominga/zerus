@@ -32,6 +32,81 @@ impl Actor {
     pub(crate) fn is_lead(&self, team: &Team) -> bool {
         matches!(self, Actor::Member(id) if *id == team.lead)
     }
+    /// You, the lead, or the sub-lead `member` reports to (spec 5.6): who may
+    /// answer, hold, retry and decide that member's work.
+    pub(crate) fn reviews(&self, team: &Team, member: &str) -> bool {
+        match self {
+            Actor::Human => true,
+            Actor::Member(id) => *id == team.lead || (!member.is_empty() && team.reviewer_of(member) == *id),
+            Actor::ParentLead => false,
+        }
+    }
+}
+
+/// Spec 5.6: every parent is the lead or a sub-lead of the team, never the
+/// member itself or one of the members below it; the lead reports to nobody.
+fn check_hierarchy(team: &Team) -> anyhow::Result<()> {
+    for member in &team.members {
+        if member.id == team.lead {
+            ensure!(member.parent.is_empty() && !member.sub, "The lead reports to nobody and is no sub-lead");
+            continue;
+        }
+        if member.parent.is_empty() || member.parent == team.lead {
+            continue;
+        }
+        let parent = team
+            .member(&member.parent)
+            .filter(|parent| parent.state != MemberState::Removed)
+            .with_context(|| format!("{} reports to unknown member {}", member.id, member.parent))?;
+        ensure!(parent.sub, "{} reports to {}, which is not a sub-lead", member.id, parent.id);
+        // Walk up: a cycle would never reach the lead.
+        let mut seen = BTreeSet::new();
+        let mut at = member.parent.clone();
+        while !at.is_empty() && at != team.lead {
+            ensure!(at != member.id && seen.insert(at.clone()), "{} would report to itself", member.id);
+            at = team.member(&at).map(|found| found.parent.clone()).unwrap_or_default();
+        }
+    }
+    Ok(())
+}
+
+/// Spec 5.6: "Reports to..." and "Make sub-lead" / "Stop being a sub-lead".
+fn hierarchy(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you change who reports to whom");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team changes its hierarchy"
+    );
+    let id = text(input, "member").to_owned();
+    ensure!(id != team.lead, "The lead reports to nobody");
+    ensure!(team.member(&id).is_some_and(|member| member.state != MemberState::Removed), "Unknown member {id}");
+    let by = actor.label(team);
+    let role = team.role_of(&id);
+    if op == "reports-to" {
+        let parent = text(input, "parent").to_owned();
+        let parent = if parent == team.lead { String::new() } else { parent };
+        let before = team.member(&id).map(|member| member.parent.clone()).unwrap_or_default();
+        team.members.iter_mut().find(|member| member.id == id).context("Unknown member")?.parent = parent.clone();
+        if let Err(error) = check_hierarchy(team) {
+            team.members.iter_mut().find(|member| member.id == id).context("Unknown member")?.parent = before;
+            return Err(error);
+        }
+        let to = if parent.is_empty() { "Lead".to_owned() } else { team.role_of(&parent) };
+        events.push(Event::new("reports_to", json!({"by":by,"member":role,"to":to})));
+        return Ok(json!({"status":"reports_to","member":id,"parent":if parent.is_empty() { team.lead.clone() } else { parent }}));
+    }
+    let sub = input["sub"].as_bool().context("sub is true or false")?;
+    if !sub {
+        let reports: Vec<String> = team.reports_of(&id).iter().map(|member| member.role.clone()).collect();
+        ensure!(reports.is_empty(), "Move its reports to another lead first: {}", reports.join(", "));
+    }
+    let member = team.members.iter_mut().find(|member| member.id == id).context("Unknown member")?;
+    member.sub = sub;
+    if !sub {
+        member.inbox = Inbox::default();
+    }
+    events.push(Event::new("sub_lead", json!({"by":by,"member":role,"sub":sub})));
+    Ok(json!({"status":if sub { "sub_lead" } else { "member" },"member":id}))
 }
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -89,6 +164,10 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     );
     member.launch_id.clear();
     member.error.clear();
+    member.inbox = Inbox::default();
+    if !member.parent.is_empty() {
+        member.parent = member_id(&member.parent)?;
+    }
     member.prompt = clean(&member.prompt, 8000, "A role prompt")?;
     member.state = match member.session {
         Some(_) => MemberState::Active,
@@ -328,7 +407,11 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     // B5: a plan that widens a role's permissions waits for the owner's
     // explicit confirmation.
     let widening = widening(team, &members);
-    team.members = members;
+    let old_members = std::mem::replace(&mut team.members, members);
+    if let Err(error) = check_hierarchy(team) {
+        team.members = old_members;
+        return Err(error);
+    }
     team.tasks = tasks;
     team.phases = phases;
     team.profile_widening = widening;
@@ -1661,7 +1744,10 @@ fn report(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         task.decided_by = None;
         let title = task.title.clone();
         let role = team.role_of(&member);
-        events.push(Event::new("reported", json!({"by":role,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
+        // Spec 5.6: "Report to QA lead" when a sub-lead reviews it.
+        let reviewer = team.reviewer_of(&member);
+        let to = if reviewer.is_empty() { String::new() } else { team.role_of(&reviewer) };
+        events.push(Event::new("reported", json!({"by":role,"to":to,"task":id,"title":title,"attempt":n,"human":by_member.is_empty()})));
         if accept {
             let decided = decide(team, input, actor, true, events)?;
             let status = decided["status"].clone();
@@ -2055,7 +2141,8 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
 /// The lead (or you) answers one of a member's questions (A3); the member gets
 /// the answer as a message.
 fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you answer a member's question");
+    // Spec 5.6: a sub-lead answers the questions of its own reports.
+    ensure!(matches!(actor, Actor::Human | Actor::Member(_)), "Only the lead or you answer a member's question");
     // C7: a forwarded sub-team question is "sub:<team id>:<question id>",
     // once per level (at most 8 levels).
     let question = clean(text(input, "question").trim(), 400, "A question id")?;
@@ -2078,6 +2165,8 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     let Some((task, attempt, question_at)) = found else {
         bail!("Unknown question {question}")
     };
+    let asked_by = team.tasks[task].attempts[attempt].member.clone();
+    ensure!(actor.reviews(team, &asked_by), "Only the lead or you answer a member's question");
     let asked = &team.tasks[task].attempts[attempt].questions[question_at];
     ensure!(
         !team.tasks[task].status.finished(),
@@ -2105,7 +2194,8 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
 
 /// A5: keeps a pending task back from the dispatcher until `release`.
 fn hold(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you hold a task");
+    let assignee = team.task(task_id(input)?).map(|task| task.assignee.clone()).unwrap_or_default();
+    ensure!(actor.reviews(team, &assignee), "Only the lead or you hold a task");
     // A finished team keeps its tasks as they are (L1).
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
@@ -2125,7 +2215,8 @@ fn hold(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
 
 /// A5: clears a hold; the task is handed out again when it is ready.
 fn release(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you release a task");
+    let assignee = team.task(task_id(input)?).map(|task| task.assignee.clone()).unwrap_or_default();
+    ensure!(actor.reviews(team, &assignee), "Only the lead or you release a task");
     // A finished team keeps its tasks as they are (L1).
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
@@ -2498,7 +2589,9 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
 fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let human = matches!(actor, Actor::Human);
-    ensure!(human || actor.is_lead(team), "Only the lead or you decide on a report");
+    // Spec 5.6: a sub-lead decides the reports of its own reports.
+    let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
+    ensure!(actor.reviews(team, &assignee), "Only the lead or you decide on a report");
     // Deciding is part of the running state machine; a finished or stopped team
     // keeps its reports as they are.
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
@@ -2587,7 +2680,8 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 
 fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
-    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you retry tasks");
+    let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
+    ensure!(actor.reviews(team, &assignee), "Only the lead or you retry tasks");
     let label = actor.label(team);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
@@ -2677,6 +2771,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             extend(team, &plain, actor, offline, events)
         }
         "edit-draft" => edit_draft(team, input, actor, offline, events),
+        "reports-to" | "sub-lead" => hierarchy(team, op, input, actor, events),
         "move-phase" => move_phase(team, input, actor, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
@@ -2802,6 +2897,11 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let profile = member.permissions_profile.clone();
             let adopted = member.session.as_ref().map(|session| session.name.clone());
             team.members.push(member);
+            // Spec 5.6: "Reports to" names the lead or a sub-lead.
+            if let Err(error) = check_hierarchy(team) {
+                team.members.retain(|member| member.id != id);
+                return Err(error);
+            }
             // N39/F1.3: a new member's folder is checked against the team's
             // policy here, as at plan and approve: a mismatch is an error, and
             // the member is not filed to fail at its launch.
@@ -2839,6 +2939,8 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             );
             let id = text(input, "member").to_owned();
             ensure!(id != team.lead, "The lead cannot be removed");
+            let reports: Vec<String> = team.reports_of(&id).iter().map(|member| member.role.clone()).collect();
+            ensure!(reports.is_empty(), "Move its reports to another lead first: {}", reports.join(", "));
             let open: Vec<u32> = team.tasks.iter().filter(|t| t.assignee == id && !t.status.finished()).map(|t| t.id).collect();
             ensure!(open.is_empty(), "Reassign or cancel its open tasks first: {}",
                 open.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", "));
@@ -3584,6 +3686,101 @@ mod tests {
         task.attempts.push(Attempt { n, id: attempt.clone(), member: task.assignee.clone(), state: AttemptState::Delivered, ..Default::default() });
         task.status = TaskStatus::InProgress;
         attempt
+    }
+
+    /// The running team with "qalead" as the Tester's sub-lead (spec 5.6).
+    fn team_with_sub_lead() -> Team {
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        apply(&mut team, "add-member", &json!({"member":{"id":"qalead","role":"QA lead","agent":"codex"}}), &Actor::Human, &none, &mut events)
+            .unwrap();
+        apply(&mut team, "sub-lead", &json!({"member":"qalead","sub":true}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        apply(&mut team, "reports-to", &json!({"member":"qa","parent":"qalead"}), &Actor::Human, &none, &mut events).unwrap();
+        team
+    }
+
+    #[test]
+    fn a_sub_lead_takes_reports_only_while_it_is_one_and_never_in_a_cycle() {
+        let mut team = team_with_sub_lead();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        assert_eq!((team.reviewer_of("qa").as_str(), team.reviewer_of("dev").as_str(), team.reviewer_of("qalead").as_str()), ("qalead", "lead", "lead"));
+        assert_eq!(team.reports_of("qalead").iter().map(|member| member.id.as_str()).collect::<Vec<_>>(), ["qa"]);
+        assert_eq!(team.reports_of("lead").iter().map(|member| member.id.as_str()).collect::<Vec<_>>(), ["dev", "qalead"]);
+        // Only a sub-lead takes reports, never itself or one below it.
+        let error = apply(&mut team, "reports-to", &json!({"member":"dev","parent":"qa"}), &Actor::Human, &none, &mut events).unwrap_err();
+        assert_eq!(error.to_string(), "dev reports to qa, which is not a sub-lead");
+        apply(&mut team, "sub-lead", &json!({"member":"qa","sub":true}), &Actor::Human, &none, &mut events).unwrap();
+        let error = apply(&mut team, "reports-to", &json!({"member":"qalead","parent":"qa"}), &Actor::Human, &none, &mut events).unwrap_err();
+        assert!(error.to_string().ends_with("would report to itself"), "{error}");
+        assert_eq!(team.member("qalead").unwrap().parent, "", "a refused change keeps the old parent");
+        // A member cannot change the hierarchy, and the lead reports to nobody.
+        let error = apply(&mut team, "sub-lead", &json!({"member":"dev","sub":true}), &Actor::Member("qalead".into()), &none, &mut events).unwrap_err();
+        assert_eq!(error.to_string(), "Only the lead or you change who reports to whom");
+        let error = apply(&mut team, "reports-to", &json!({"member":"lead","parent":"qalead"}), &Actor::Human, &none, &mut events).unwrap_err();
+        assert_eq!(error.to_string(), "The lead reports to nobody");
+        // A sub-lead with reports stays one, and is not removed.
+        let error = apply(&mut team, "sub-lead", &json!({"member":"qalead","sub":false}), &Actor::Human, &none, &mut events).unwrap_err();
+        assert_eq!(error.to_string(), "Move its reports to another lead first: Tester");
+        let error = apply(&mut team, "remove-member", &json!({"member":"qalead"}), &Actor::Human, &none, &mut events).unwrap_err();
+        assert_eq!(error.to_string(), "Move its reports to another lead first: Tester");
+        // Add member names "Reports to"; an unknown one is refused.
+        let error = apply(&mut team, "add-member", &json!({"member":{"id":"x","role":"Fuzzer","agent":"codex","parent":"nobody"}}), &Actor::Human, &none, &mut events)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "x reports to unknown member nobody");
+        assert!(team.member("x").is_none());
+        apply(&mut team, "add-member", &json!({"member":{"id":"fuzz","role":"Fuzzer","agent":"codex","parent":"qalead"}}), &Actor::Human, &none, &mut events)
+            .unwrap();
+        assert_eq!(team.reviewer_of("fuzz"), "qalead");
+        // Moved back to the lead, the Tester leaves the sub-lead's reports.
+        apply(&mut team, "reports-to", &json!({"member":"qa","parent":"lead"}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.member("qa").unwrap().parent, "");
+        let feed: Vec<&Event> = events.iter().filter(|event| matches!(event.kind, "reports_to" | "sub_lead")).collect();
+        assert_eq!(feed.last().unwrap().payload, json!({"by":"You","member":"Tester","to":"Lead"}));
+        // Old JSON without the fields loads with everyone under the lead.
+        let old: Member = serde_json::from_value(json!({"id":"m","role":"R","agent":"codex"})).unwrap();
+        assert!(old.parent.is_empty() && !old.sub);
+        assert!(serde_json::to_value(&old).unwrap().get("parent").is_none());
+    }
+
+    #[test]
+    fn a_sub_lead_answers_and_decides_its_reports_work_and_the_lead_hears_only_its_own() {
+        let mut team = team_with_sub_lead();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let sub = Actor::Member("qalead".into());
+        let tested = hand_out(&mut team, 2);
+        let built = hand_out(&mut team, 1);
+        // The Tester's question goes to its sub-lead, who answers it.
+        apply(&mut team, "ask", &json!({"text":"Which browser?"}), &Actor::Member("qa".into()), &none, &mut events).unwrap();
+        assert!(super::super::inbox::items(&team).iter().all(|item| item.kind != "question"));
+        let theirs = super::super::inbox::items_for(&team, "qalead");
+        assert_eq!(theirs.iter().map(|item| item.kind).collect::<Vec<_>>(), ["question"]);
+        apply(&mut team, "reply", &json!({"question":"q1","text":"Chrome"}), &sub, &none, &mut events).unwrap();
+        assert_eq!(events.last().unwrap().payload["by"], "QA lead");
+        // Both report: "Report to QA lead" and the plain one to the lead.
+        apply(&mut team, "report", &json!({"task":2,"attempt":tested,"text":"Tested"}), &Actor::Member("qa".into()), &none, &mut events).unwrap();
+        assert_eq!(events.iter().rev().find(|event| event.kind == "reported").unwrap().payload["to"], "QA lead");
+        apply(&mut team, "report", &json!({"task":1,"attempt":built,"text":"Built"}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+        assert_eq!(events.iter().rev().find(|event| event.kind == "reported").unwrap().payload["to"], "Lead");
+        let lead_items: Vec<Option<u32>> = super::super::inbox::items(&team).iter().filter(|item| item.kind == "report").map(|item| item.task).collect();
+        assert_eq!(lead_items, [Some(1)]);
+        let sub_items: Vec<Option<u32>> = super::super::inbox::items_for(&team, "qalead").iter().filter(|item| item.kind == "report").map(|item| item.task).collect();
+        assert_eq!(sub_items, [Some(2)]);
+        // The sub-lead decides only its reports' work.
+        let error = apply(&mut team, "accept", &json!({"task":1}), &sub, &none, &mut events).unwrap_err();
+        assert_eq!(error.to_string(), "Only the lead or you decide on a report");
+        let error = apply(&mut team, "accept", &json!({"task":2}), &Actor::Member("dev".into()), &none, &mut events).unwrap_err();
+        assert_eq!(error.to_string(), "Only the lead or you decide on a report");
+        apply(&mut team, "accept", &json!({"task":2}), &sub, &none, &mut events).unwrap();
+        let accepted = events.iter().rev().find(|event| event.kind == "accepted").unwrap();
+        assert_eq!((&accepted.payload["by"], &accepted.payload["task"]), (&json!("QA lead"), &json!(2)));
+        assert_eq!(team.task(2).unwrap().status, TaskStatus::Accepted);
+        // The lead still decides anything; holding follows the same rule.
+        apply(&mut team, "accept", &json!({"task":1}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        let error = apply(&mut team, "retry", &json!({"task":1}), &sub, &none, &mut events).unwrap_err();
+        assert_eq!(error.to_string(), "Only the lead or you retry tasks");
     }
 
     #[test]

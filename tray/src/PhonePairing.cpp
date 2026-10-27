@@ -188,7 +188,11 @@ Panel::Panel(const QString &executable, QWidget *parent, std::function<bool(cons
     : QWidget(parent), m_executable(executable), m_client(new HgsClient(executable, this)), m_confirm(std::move(confirm)) {
     setObjectName("phonesPanel");
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 12, 0); layout->setSpacing(10);
-    auto *heading = new QLabel(tr("Phones")); heading->setObjectName("heading"); layout->addWidget(heading);
+    // U25 (spec 8): "Phones · N phones" with Pair a phone… as the primary
+    // action on the right, then the list, then Revoke… and Refresh.
+    auto *head = new QHBoxLayout; head->setSpacing(8);
+    auto *heading = new QLabel(tr("Phones")); heading->setObjectName("phonesHeading"); heading->setStyleSheet(QStringLiteral("font-weight:600;"));
+    heading->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred); head->addWidget(heading, 0, Qt::AlignTop);
     auto *intro = new QLabel(tr("Phones paired with your computers. A phone can control every computer of its workspace; "
                                 "revoke one you no longer use."));
     intro->setObjectName("muted"); intro->setWordWrap(true); layout->addWidget(intro);
@@ -198,12 +202,14 @@ Panel::Panel(const QString &executable, QWidget *parent, std::function<bool(cons
     m_tree->header()->setSectionResizeMode(QHeaderView::ResizeToContents); m_tree->header()->setStretchLastSection(true);
     m_tree->setMinimumHeight(140); layout->addWidget(m_tree);
     auto *buttons = new QHBoxLayout;
-    m_pair = new QPushButton(tr("Pair a phone…")); m_pair->setObjectName("pairPhone");
+    m_pair = new QPushButton(tr("Pair a phone…")); m_pair->setObjectName("pairPhone"); m_pair->setProperty("pagePrimary", true);
     m_revoke = new QPushButton(tr("Revoke…")); m_revoke->setObjectName("revokePhone");
     m_refresh = new QPushButton(tr("Refresh")); m_refresh->setObjectName("refreshPhones");
-    buttons->addWidget(m_pair); buttons->addWidget(m_revoke); buttons->addWidget(m_refresh); buttons->addStretch(); layout->addLayout(buttons);
+    buttons->addWidget(m_revoke); buttons->addWidget(m_refresh); buttons->addStretch(); layout->addLayout(buttons);
     m_status = new QLabel; m_status->setObjectName("phonesStatus"); m_status->setWordWrap(true); m_status->setTextFormat(Qt::PlainText);
-    m_status->setTextInteractionFlags(Qt::TextSelectableByMouse); layout->addWidget(m_status);
+    m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    head->addWidget(m_status, 1); head->addWidget(m_pair, 0, Qt::AlignTop);
+    layout->insertLayout(0, head);
     m_pair->setEnabled(false); m_revoke->setEnabled(false);
     connect(m_pair, &QPushButton::clicked, this, [this] { pair(); });
     connect(m_revoke, &QPushButton::clicked, this, [this] { revoke(); });

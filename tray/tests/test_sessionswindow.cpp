@@ -33,6 +33,7 @@
 #include <QListWidget>
 #include <QRadioButton>
 #include "WorkingLine.h"
+#include "SessionCardDelegate.h"
 #include "GoToDialog.h"
 #include "ShortcutsDialog.h"
 #include <QPushButton>
@@ -253,6 +254,8 @@ private slots:
     void subordinateSessionsFollowTheirLead();
     void agentTeamsGroupTheirSessions();
     void teamTreeShowsSubteamsAndRollsUp();
+    void teamMembersFollowTheirSubLead_data();
+    void teamMembersFollowTheirSubLead();
     void teamRowBarsCountThePhaseInWork();
     void teamLeftoverStopAsksTheRealAction();
     void readmeScreenshots();
@@ -1282,6 +1285,67 @@ else:out({})
 // task's phase and the phase records. A team like 528aebfe - phase 1 and 31
 // finished, 32 in work, 33 and 34 drafts - reads the phase-32 tasks bar and
 // 2/5 phases on the row, and the shot shows it.
+void TestSessionsWindow::teamMembersFollowTheirSubLead_data()
+{
+    QTest::addColumn<QString>("theme");
+    QTest::newRow("dark") << QString("dark");
+    QTest::newRow("light") << QString("light");
+}
+
+// U25 part 10 (spec 2.5): the member tree in the session list - the lead's
+// direct reports one level in, a sub-lead's reports one more, and a line that
+// ends at the last child of its level.
+void TestSessionsWindow::teamMembersFollowTheirSubLead()
+{
+    QFETCH(QString, theme);
+    QSettings().setValue("workspace/theme", theme);
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/collapsedTeams"); QSettings().remove("workspace/inspectorVisible"); });
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QByteArray teams = R"({"items":[{"id":"team-1","name":"Checkout","status":"running","lead":"lead","revision":3,
+        "members":[{"id":"lead","role":"Lead","agent":"codex","state":"active","session":{"host":"","name":"codex/hgs/dashboard"}},
+                   {"id":"qa","role":"Tester","agent":"kimi","state":"active","parent":"qalead","session":{"host":"","name":"kimi/hgs/tester"}},
+                   {"id":"backend","role":"Backend","agent":"kimi","state":"active","session":{"host":"","name":"kimi/hgs/backend"}},
+                   {"id":"qalead","role":"QA lead","agent":"kimi","state":"active","sub":true,"session":{"host":"","name":"kimi/hgs/qalead"}}],
+        "tasks":[{"id":1,"title":"API","status":"in_progress","assignee":"backend","attempt":{"n":1,"state":"delivered"}},
+                 {"id":2,"title":"Tests","status":"pending","assignee":"qa","deps":[{"task":1}]}]}]})";
+    const QByteArray answer = "elif c=='team' and a[1:2]==['list']:print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument::fromJson(teams).toJson(QJsonDocument::Compact))) + ")\n"
+                              "elif c=='team':print('{}')\n";
+    const QString fixture = m_dir->filePath("hgs-subleads");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    auto state = fleet(); auto box = state.local();
+    for (const QString tag : {"tester", "backend", "qalead"}) {
+        SessionInfo member = box.sessions.value(1); member.name = "kimi/hgs/" + tag; member.project = "hgs"; member.tag = tag;
+        box.sessions.append(member);
+    }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1280, 860); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList");
+    const auto rowOf = [&](const QString &key) { for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key) == key) return i; return -1; };
+    QTRY_VERIFY(rowOf("\ncodex/hgs/dashboard") >= 0 && !list->item(rowOf("\ncodex/hgs/dashboard"))->data(SessionRoles::TeamLead).toMap().isEmpty());
+    const int lead = rowOf("\ncodex/hgs/dashboard");
+    // The tree order: Backend, then the QA lead followed by its Tester.
+    QTRY_COMPARE(rowOf("\nkimi/hgs/backend"), lead + 1);
+    QCOMPARE(rowOf("\nkimi/hgs/qalead"), lead + 2);
+    QCOMPARE(rowOf("\nkimi/hgs/tester"), lead + 3);
+    const auto data = [&](int row, int role) { return list->item(row)->data(role); };
+    QCOMPARE(data(lead + 1, SessionRoles::TeamDepth).toInt(), 1);
+    QCOMPARE(data(lead + 1, SessionRoles::TeamMember).toInt(), 1);   // a sibling follows
+    QCOMPARE(data(lead + 2, SessionRoles::TeamDepth).toInt(), 1);
+    QCOMPARE(data(lead + 2, SessionRoles::TeamMember).toInt(), 2);   // the last direct report ends the lead's line
+    QCOMPARE(data(lead + 3, SessionRoles::TeamDepth).toInt(), 2);
+    QCOMPARE(data(lead + 3, SessionRoles::TeamMember).toInt(), 2);
+    // No tail: the lead's line does not run past the QA lead into its Tester.
+    QCOMPARE(data(lead + 3, SessionRoles::TeamLines).toList(), QVariantList{false});
+    // Level 1 is 22 px in, each level below 26 more.
+    QCOMPARE(sessionCardIndent(list->model()->index(lead + 1, 0)), 22);
+    QCOMPARE(sessionCardIndent(list->model()->index(lead + 3, 0)), 48);
+    QCOMPARE(sessionCardIndent(list->model()->index(lead, 0)), 0);
+    if (const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS"); !shots.isEmpty()) {
+        QTest::qWait(300);
+        QVERIFY(list->grab().save(QDir(shots).filePath("ux-10-session-list-" + theme + ".png")));
+    }
+}
+
 void TestSessionsWindow::teamTreeShowsSubteamsAndRollsUp()
 {
     const auto restore = qScopeGuard([] { QSettings().remove("workspace/collapsedTeams"); });
@@ -12773,14 +12837,18 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
     const auto rowFor=[&](const QString &id){for(int row=0;row<table->rowCount();++row)if(table->item(row,0)->data(Qt::UserRole).toString()==id)return row;return -1;};
     QVERIFY(rowFor(localId)>=0);QVERIFY(rowFor(remoteId)>=0);
     QVERIFY(!create->isEnabled());table->setCurrentCell(rowFor(localId),0);QVERIFY(create->isEnabled());
-    auto *metadata=page->findChild<QPushButton *>("projectColor");auto *defaultProject=page->findChild<QCheckBox *>("defaultProject");
+    // U25 part 7 (spec 7): Color… lives in the project header now; the
+    // default checkbox stays right under the project's name field.
+    auto *metadata=page->findChild<QLineEdit *>("projectName");auto *defaultProject=page->findChild<QCheckBox *>("defaultProject");
     for(int height:{760,1100}) {
         window.resize(1150,height);table->clearSelection();QTest::qWait(30);
         QVERIFY(defaultProject->mapTo(page,QPoint()).y()-metadata->mapTo(page,QPoint(0,metadata->height())).y()<45);
         const int full=table->height();table->setCurrentCell(rowFor(localId),0);QTest::qWait(30);QVERIFY(full>=table->height());
         if(height==1100)QVERIFY(table->height()>230);
-        auto *folderActions=page->findChild<QPushButton *>("addProjectFolder");
-        QVERIFY(folderActions->mapTo(page,QPoint()).y()>=table->mapTo(page,QPoint(0,table->height())).y());
+        // The folder actions under the table (Add folder moved to the Folders block's header).
+        auto *folderActions=page->findChild<QPushButton *>("editProjectFolder");
+        // The scrolling project lays out after the worktree panel shows: wait for it.
+        QTRY_VERIFY(folderActions->mapTo(page,QPoint()).y()>=table->mapTo(page,QPoint(0,table->height())).y());
         auto *catalog=page->findChild<QTreeWidget *>("worktreeCatalog");auto *all=page->findChild<QPushButton *>("allWorktreeSessions");
         QVERIFY(all->mapTo(page,QPoint(0,all->height())).y()<=catalog->mapTo(page,QPoint()).y());
         // The compact heading keeps every worktree action visible without overlap.

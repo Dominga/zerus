@@ -3,6 +3,9 @@
 #include <QPointer>
 #include "FleetState.h"
 #include "SessionOrganization.h"
+#include <functional>
+class CollapsibleBlock;
+class IronRulesPanel;
 class ProjectPreview;
 class WorktreePanel;
 class WorktreesDialog;
@@ -31,6 +34,13 @@ public:
     static bool nameProblem(const QString &name, QString *why);
     static QString nameWarning(const QString &) { return {}; }
     static QString suggestName(const QString &dir, MachinePlatform::Style style = MachinePlatform::Style::Posix);
+    // U25 part 7 (spec 7): the project's sessions, one row each - its agent,
+    // name, team role, machine, branch and status - from the window.
+    struct ProjectSession { QString host, name, title, agent, role, machine, branch, status, tone, team; };
+    void setSessionsProvider(std::function<QList<ProjectSession>(const QString &project)> provider) { m_sessionsProvider = std::move(provider); showProject(); }
+    // The kind of a folder: "Main checkout · main", "Worktree · team/x/y",
+    // "Clone · release/2.4"; `team` is set for a team member's worktree.
+    QString folderKind(const SessionOrganization::Folder &folder, bool *team = nullptr) const;
 public slots:
     void setProjects(const QList<ProjectInfo> &projects);
 signals:
@@ -44,6 +54,7 @@ signals:
     void relatedSessionRequested(const QString &host, const QString &name, const QString &archive);
     void newPathSessionRequested(const QString &project, const QString &host, const QString &path);
     void newSessionRequested(const QString &project, const QString &host, const QString &folder);
+    void newTeamRequested(const QString &project);
 private:
     void showProject();
     void updateSwarmConnections();
@@ -98,4 +109,11 @@ private:
     bool m_dark = false;
     ProjectPreview *m_preview;
     QPushButton *m_color, *m_remove, *m_removeFolder, *m_editFolder, *m_openFolder, *m_newSession;
+    // U25 part 7: the header, the three blocks and the sessions table.
+    QLabel *m_headerIcon = nullptr, *m_headerName = nullptr, *m_summary = nullptr;
+    QPushButton *m_newTeam = nullptr;
+    CollapsibleBlock *m_foldersBlock = nullptr, *m_sessionsBlock = nullptr, *m_rulesBlock = nullptr;
+    QTableWidget *m_sessions = nullptr;
+    IronRulesPanel *m_rules = nullptr;
+    std::function<QList<ProjectSession>(const QString &)> m_sessionsProvider;
 };

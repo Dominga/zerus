@@ -1,5 +1,6 @@
 #pragma once
 #include <QHash>
+#include <QMenu>
 #include <QPointer>
 #include <QSet>
 #include <QWidget>
@@ -61,6 +62,23 @@ public:
     // A confirmation runs its own event loop: while it is open the team views
     // do not rebuild, or the widget that asked would be deleted under it.
     bool confirming() const { return m_confirming > 0; }
+    // The same for a menu or dialog with its own event loop opened from a row
+    // (a member's "…" menu, a task menu, the task editor): while one is open
+    // the team views do not rebuild, or the row and the button that opened it
+    // would be deleted under its handler; they catch up once it has closed.
+    class RenderHold {
+    public:
+        explicit RenderHold(TeamPanel *panel) : m_panel(panel) { if (panel) ++panel->m_confirming; }
+        ~RenderHold() { if (m_panel) m_panel->releaseHold(); }
+        RenderHold(const RenderHold &) = delete;
+        RenderHold &operator=(const RenderHold &) = delete;
+    private:
+        QPointer<TeamPanel> m_panel;
+    };
+    friend class RenderHold;
+    // A tool button's menu runs its own event loop as well: the views hold
+    // from aboutToShow until its triggered action has run.
+    void holdWhileOpen(QMenu *menu);
     std::function<void()> confirmClosed;
     // Planning, shared with the team workspace (TeamPanelPlan.cpp): the whole
     // plan once per edit; a task editor (0 = a new task); a dependency.
@@ -99,6 +117,7 @@ private:
     QString m_team, m_filter = QStringLiteral("all"), m_feedMember, m_notice;
     bool m_dark = true, m_showBlockers = false, m_pending = false, m_dirty = false;
     int m_confirming = 0;
+    void releaseHold();
     double m_zoom = 1.0;
     // team id -> phase -> open; at most a handful of teams, oldest dropped.
     QHash<QString, QHash<int, bool>> m_phaseOpen;

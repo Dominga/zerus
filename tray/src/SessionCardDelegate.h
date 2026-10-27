@@ -20,7 +20,13 @@ inline QRect sessionCardRect(const QRect &row) { return row.adjusted(2, 4, -2, -
 // card's text; every place that lays out or hit-tests that text shifts by it.
 inline int &sessionCardTileInset() { static int inset = 0; return inset; }
 // WhiteWh fork: a subordinate session's card stands indented under its lead.
-inline int sessionCardIndent(const QModelIndex &index) { return index.data(SessionRoles::Subordinate).toBool() || index.data(SessionRoles::TeamMember).toBool() ? 22 : 0; }
+// U25 part 10 (spec 2.5): each level below a sub-lead moves a member's card a
+// further 26 px right.
+inline int sessionCardIndent(const QModelIndex &index)
+{
+    if (index.data(SessionRoles::TeamMember).toBool()) return 22 + 26 * (qMax(1, index.data(SessionRoles::TeamDepth).toInt()) - 1);
+    return index.data(SessionRoles::Subordinate).toBool() ? 22 : 0;
+}
 
 // The collapsed session list keeps every row at its height; only the width
 // changes. The list's "expansion" runs from 0 (strip) to 1 (full cards), and
@@ -481,9 +487,18 @@ private:
     void paintTeamConnector(QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &index) const {
         const bool dark = option.widget && option.widget->property("hgsDark").toBool();
         const bool more = index.data(SessionRoles::TeamMember).toInt() == 1;
-        const int line = option.rect.left() + 12, middle = option.rect.top() + 26;
+        // Spec 2.5: the line runs 10 px left of the card; the lines of the
+        // levels above continue only while a later sibling follows there.
+        const int depth = qMax(1, index.data(SessionRoles::TeamDepth).toInt());
+        const auto through = index.data(SessionRoles::TeamLines).toList();
+        const int line = option.rect.left() + 12 + 26 * (depth - 1), middle = option.rect.top() + 26;
         p->save(); p->setRenderHint(QPainter::Antialiasing);
         p->setPen(QPen(QColor(dark ? "#4a525d" : "#b7c3ce"), 1.5)); p->setBrush(Qt::NoBrush);
+        for (int level = 1; level < depth; ++level) {
+            if (level - 1 >= through.size() || !through.at(level - 1).toBool()) continue;
+            const int x = option.rect.left() + 12 + 26 * (level - 1);
+            p->drawLine(x, option.rect.top() - 2, x, option.rect.bottom() + 2);
+        }
         p->drawLine(line, option.rect.top() - 2, line, more ? option.rect.bottom() + 2 : middle - 6);
         p->drawArc(QRect(line, middle - 12, 12, 12), 180 * 16, 90 * 16);
         p->drawLine(line + 6, middle, option.rect.left() + sessionCardIndent(index) + 4, middle);
@@ -590,7 +605,7 @@ private:
             p->setPen(QPen(QColor(dark ? "#38434e" : "#c5cfd9"), 1));
             p->drawLine(option.rect.left() + 17, option.rect.top(), option.rect.left() + 17, option.rect.bottom());
             p->drawLine(option.rect.left() + 17, r.center().y(), r.left() - 3, r.center().y());
-        } else if (indent) {
+        } else if (indent && !index.data(SessionRoles::TeamMember).toBool()) {
             // The line from the lead above into this subordinate's card.
             const int line = option.rect.left() + 12, middle = option.rect.top() + 26;
             p->setPen(QPen(QColor(dark ? "#4a525d" : "#b7c3ce"), 1.5)); p->setBrush(Qt::NoBrush);

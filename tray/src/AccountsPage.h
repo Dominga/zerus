@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <QWidget>
 #include <QHash>
 #include <QJsonObject>
@@ -21,7 +22,12 @@ public:
     QJsonArray profiles(bool includeRemoved = false) const;
     void setTheme(bool dark);
     void refreshAppearance();
+    // U25 part 7 (spec 9): the teams whose members use a profile, for "Used
+    // by teams": one line per team, its name and the roles.
+    struct TeamUse { QString team, name, roles; };
+    void setTeamUses(std::function<QList<TeamUse>(const QJsonObject &profile)> uses) { m_teamUses = std::move(uses); selectionChanged(); }
 signals:
+    void openTeamRequested(const QString &team);
     void loginRequested(const QString &host, const QString &id);
     void installRequested(const QString &host, const QString &provider);
     void accountsChanged();
@@ -31,6 +37,7 @@ protected:
     void showEvent(QShowEvent *) override;
 private:
     void render();
+    void renderTeams(const QJsonObject &account);
     void selectionChanged();
     bool changing() const;
     void add();
@@ -56,6 +63,15 @@ private:
     HgsClient m_client;
     FleetState m_fleet;
     QComboBox *m_machine, *m_profileChoice;
+    // U25 part 7 (spec 9): All / Signed in N / Signed out N, the empty
+    // result with Clear filters, and the Used by teams card.
+    QString m_signFilter = QStringLiteral("all");
+    class QPushButton *m_signAll = nullptr, *m_signIn = nullptr, *m_signOut = nullptr, *m_clearFilters = nullptr;
+    QWidget *m_empty = nullptr;
+    class QFrame *m_teamsCard = nullptr;
+    class QVBoxLayout *m_teamsList = nullptr;
+    int m_totalAccounts = 0;
+    std::function<QList<TeamUse>(const QJsonObject &)> m_teamUses;
     QListWidget *m_list;
     QStackedLayout *m_bodyStack;
     BusyIndicator *m_loadingSpinner, *m_summarySpinner;

@@ -12847,7 +12847,8 @@ void TestSessionsWindow::projectFolderNewSessionPrefillsExactTarget()
         if(height==1100)QVERIFY(table->height()>230);
         // The folder actions under the table (Add folder moved to the Folders block's header).
         auto *folderActions=page->findChild<QPushButton *>("editProjectFolder");
-        QVERIFY(folderActions->mapTo(page,QPoint()).y()>=table->mapTo(page,QPoint(0,table->height())).y());
+        // The scrolling project lays out after the worktree panel shows: wait for it.
+        QTRY_VERIFY(folderActions->mapTo(page,QPoint()).y()>=table->mapTo(page,QPoint(0,table->height())).y());
         auto *catalog=page->findChild<QTreeWidget *>("worktreeCatalog");auto *all=page->findChild<QPushButton *>("allWorktreeSessions");
         QVERIFY(all->mapTo(page,QPoint(0,all->height())).y()<=catalog->mapTo(page,QPoint()).y());
         // The compact heading keeps every worktree action visible without overlap.

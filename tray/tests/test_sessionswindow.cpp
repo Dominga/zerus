@@ -4206,13 +4206,15 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
         return nullptr;
     };
     QVERIFY(row("kimi/docs/research")); QCOMPARE(row("claude/infra/review")->data(SessionRoles::Status).toString(), QString("Needs approval"));
-    // A rebuild renders every role from the fleet again; this one stands in for an unchanged row.
+    // A rebuild prepares every row from the fleet again; this one stands in for an unchanged row.
     row("kimi/docs/research")->setData(SessionRoles::Detail, "kept");
+    const auto rendered = window.rowGenerationForTests();
     auto later = local; later.metrics["cpu_percent"] = 42.0; later.sessions[0].backgroundObservedAt = 7;
     QVERIFY(state.refreshListing({}, later, now + 100)); window.refreshFleet(state);
     QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
     QVERIFY(state.refreshListing("mac", mac, now - FleetState::kPeerStaleMs + 1500)); window.refreshFleet(state);
     QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
+    QCOMPARE(window.rowGenerationForTests(), rendered);
     // A changed listing renders at once.
     auto changed = later; changed.digest = "arch-2"; changed.sessions[1].prompt = "Another prompt";
     QVERIFY(!state.refreshListing({}, changed, now + 300)); state.setLocal(changed, now + 300); window.setFleet(state);
@@ -4222,8 +4224,11 @@ void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
     retrying.sessions[1].recovery = {{"state", "waiting"}, {"due_at", QDateTime::currentMSecsSinceEpoch() / 1000.0 + 30}};
     state.setLocal(retrying, now + 400); window.setFleet(state);
     QVERIFY(row("kimi/docs/research")->data(SessionRoles::Status).toString().startsWith("Retry in "));
-    row("kimi/docs/research")->setData(SessionRoles::Status, "kept");
+    // An applied row whose text is unchanged keeps its item as it is (its digest
+    // matches), so a refresh is seen as a new preparation of the rows.
+    const auto counting = window.rowGenerationForTests();
     QVERIFY(state.refreshListing({}, retrying, now + 500)); window.refreshFleet(state);
+    QVERIFY(window.rowGenerationForTests() > counting);
     QVERIFY(row("kimi/docs/research")->data(SessionRoles::Status).toString().startsWith("Retry in "));
     // A peer whose last poll grew stale is shown offline, even while the rest refreshes.
     retrying.sessions[1].recovery = {}; retrying.digest = "arch-4"; state.setLocal(retrying, now + 600); window.setFleet(state);

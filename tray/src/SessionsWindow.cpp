@@ -1223,8 +1223,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     const auto draftChanged = [this](const QString &key) {
         for (int row = 0; row < m_sessions->count(); ++row) {
             auto *item = m_sessions->item(row);
-            if (item->data(SessionRoles::Key).toString() == key && item->data(SessionRoles::ChildId).toString().isEmpty())
-                item->setData(SessionRoles::Draft, m_composer->hasDraft(key));
+            if (item->data(SessionRoles::Key).toString() == key && item->data(SessionRoles::ChildId).toString().isEmpty()) {
+                // The next applied rows rewrite an item changed here (applyListRows).
+                item->setData(SessionRoles::Draft, m_composer->hasDraft(key)); item->setData(SessionRoles::Digest, QByteArray());
+            }
         }
         // Presence changes once when typing starts or the draft clears, rather
         // than on each keystroke. Defer list rebuilding until the editor returns.
@@ -2002,6 +2004,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
                 const auto data = SessionPresentation::gitStatus(entry.session, m_client.gitStatusSnapshot(host, path), entry.online);
                 item->setData(SessionRoles::GitStatus, data);
                 item->setData(Qt::AccessibleDescriptionRole, GitStatusBadge::tooltip(data));
+                item->setData(SessionRoles::Digest, QByteArray());
                 break;
             }
         }
@@ -2473,6 +2476,7 @@ void SessionsWindow::updateSessionRowPresentation()
         item->setData(SessionRoles::RowCollapsed, value);
         item->setData(Qt::AccessibleDescriptionRole, value ? tr("Collapsed session row. Press Right to expand.")
             : GitStatusBadge::tooltip(item->data(SessionRoles::GitStatus).toJsonObject()));
+        item->setData(SessionRoles::Digest, QByteArray());
     }
     // A density edit changes no selection, native state, inspection or read mark.
     m_sessions->doItemsLayout(); m_sessions->syncRowExpandButtons(); m_sessions->syncActivityAnimation(); m_sessions->viewport()->update();

@@ -220,6 +220,8 @@ pub(crate) enum Step {
     /// The one coalesced message that lists the lead's new inbox items (C2).
     Inbox,
     /// Reminds the free lead once that a report still waits for a decision (C4).
+    /// Reminds a sub-lead once that its report waits for a decision (N9).
+    RemindReviewer { task: u32, member: String },
     RemindReport { task: u32 },
     /// The member is idle without a ready task while tasks are open (C7).
     Starving { member: String },
@@ -283,6 +285,8 @@ pub(crate) enum Step {
     /// Spec 5.6: one coalesced message to a free sub-lead about its reports'
     /// reports, questions and stalls.
     SubInbox { member: String },
+    /// N10: the once-only brief that tells a member it is now a sub-lead.
+    SubBrief { member: String },
     /// Mutes a member's notifications (unless they already are): its
     /// replies are for the lead.
     Quiet { member: String, session: SessionRef, muted: bool, revision: u64 },
@@ -669,17 +673,38 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     if lead_ready && team.settings.remind_lead_minutes > 0 {
         let after = team.settings.remind_lead_minutes as f64 * 60.0;
         for task in &team.tasks {
-            // Spec 5.6: a sub-lead's reports are its own to decide.
+            // Spec 5.6: a sub-lead's reports are its own to decide; it is
+            // reminded first, the lead only after a second interval (N9).
             let sub = task.assignee != team.lead && team.reviewer_of(&task.assignee) != team.lead;
-            if task.status != TaskStatus::Submitted || sub {
+            if task.status != TaskStatus::Submitted {
                 continue;
             }
             let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) else { continue };
-            if attempt.reminded_at.is_some() || attempt.report.as_ref().is_none_or(|report| now - report.at < after) {
+            let age = attempt.report.as_ref().map(|report| now - report.at).unwrap_or(0.0);
+            if sub {
+                let reviewer = team.reviewer_of(&task.assignee);
+                if let Some(found) = team.member(&reviewer).filter(|member| member.sub) {
+                    if session_of(found, seen).is_some_and(can_take_a_message)
+                        && attempt.reminded_at.is_none()
+                        && age >= after
+                    {
+                        steps.push(Step::RemindReviewer { task: task.id, member: reviewer });
+                    }
+                }
+                // The lead hears after the second interval, once.
+                if !(lead_ready && age >= after * 2.0 && !attempt.told_lead.iter().any(|kind| kind == "sub-remind")) {
+                    continue;
+                }
+            } else if attempt.reminded_at.is_some() {
                 continue;
             }
-            steps.push(Step::RemindReport { task: task.id });
-            break;
+            if sub || attempt.report.as_ref().is_some_and(|report| now - report.at >= after) {
+                if !sub && attempt.reminded_at.is_some() {
+                    continue;
+                }
+                steps.push(Step::RemindReport { task: task.id });
+                break;
+            }
         }
     }
     // C2: one message lists the new items, at most once per interval.
@@ -690,9 +715,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Inbox);
         }
     }
+    // N10: a member that just became a sub-lead hears what that means once.
+    for sub in team.members.iter().filter(|member| member.sub && member.sub_brief && member.state != MemberState::Removed) {
+        if session_of(sub, seen).is_some_and(can_take_a_message) {
+            steps.push(Step::SubBrief { member: sub.id.clone() });
+        }
+    }
     // Spec 5.6: each free sub-lead hears about its own reports the same way.
     for sub in team.members.iter().filter(|member| member.sub && member.state != MemberState::Removed) {
-        if !session_of(sub, seen).is_some_and(|found| found.free) {
+        if !session_of(sub, seen).is_some_and(can_take_a_message) {
             continue;
         }
         let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).count();
@@ -1040,27 +1071,33 @@ pub(crate) fn hand_off_text_with(
     if !team.goal.is_empty() {
         text += &format!("Team goal: {}\n", team.goal);
     }
+    let mut task_in_prompt = false;
     if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
         // U25: the role's prompt blocks in its order, when the catalog has one.
-        let ordered = super::catalog::load().ok().and_then(|catalog| {
+        let (ordered, has_task) = super::catalog::load().ok().and_then(|catalog| {
             let role_name = team.role_of(&attempt.member);
             let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-            super::catalog::prompt_order_text(role, prompt, Some(task), "")
-        });
+            let has_task = role.prompt_order.iter().any(|key| key == "task")
+                && !role.prompt_off.iter().any(|key| key == "task");
+            Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
+        }).unwrap_or((None, false));
+        task_in_prompt = has_task;
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
             text += &ordered;
         } else {
             text += &format!("Role: {prompt}\n");
         }
     }
-    text += &format!("\nTask #{}: {}\n", task.id, task.title);
-    if !task.description.is_empty() {
-        text += &format!("{}\n", task.description);
-    }
-    if !task.criteria.is_empty() {
-        text += "\nAcceptance criteria:\n";
-        for criterion in &task.criteria {
-            text += &format!("- {criterion}\n");
+    if !task_in_prompt {
+        text += &format!("\nTask #{}: {}\n", task.id, task.title);
+        if !task.description.is_empty() {
+            text += &format!("{}\n", task.description);
+        }
+        if !task.criteria.is_empty() {
+            text += "\nAcceptance criteria:\n";
+            for criterion in &task.criteria {
+                text += &format!("- {criterion}\n");
+            }
         }
     }
     let deps: Vec<String> = task
@@ -2528,11 +2565,83 @@ fn remind_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result
     }
     let attempt_id = attempt.id.clone();
     change(store, &team.id, |team, events| {
+        let is_sub = team.task(task_id).is_some_and(|task| team.reviewer_of(&task.assignee) != team.lead);
         let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt_id)) else {
             return Ok(());
         };
         found.reminded_at = Some(now());
+        if is_sub && !found.told_lead.iter().any(|kind| kind == "sub-remind") {
+            found.told_lead.push("sub-remind".into());
+        }
         events.push(Event::new("reminded", json!({"task":task_id,"attempt":found.n,"to":"Lead","minutes":minutes})));
+        Ok(())
+    })
+}
+
+/// Reminds a sub-lead once that a report still waits for its decision (N9).
+fn remind_reviewer(store: &mut Store, team: &Team, task_id: u32, member: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported)
+        .context("the task has no report")?
+        .clone();
+    let report = attempt.report.as_ref().context("the attempt has no report")?;
+    let minutes = (((now() - report.at) / 60.0).round() as u64).max(1);
+    let sub = team.member(member).filter(|found| found.sub).context("not a sub-lead")?;
+    let session = sub.session.clone().context("the sub-lead has no session")?;
+    let text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} report waiting {minutes} min]\n\
+         {}'s report on #{} {} has waited {minutes} min for your decision as its sub-lead.\n\
+         Decide with hgs team accept --json or reject --json, or look at your inbox:\n  \
+         {} | hgs team inbox --json",
+        task.id,
+        team.role_of(&attempt.member),
+        task.id,
+        task.title,
+        json!({"team":team.id})
+    );
+    let outcome = send(&session, &uuid::Uuid::new_v4().to_string(), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let attempt_id = attempt.id.clone();
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt_id)) else {
+            return Ok(());
+        };
+        found.reminded_at = Some(now());
+        events.push(Event::new("reminded", json!({"task":task_id,"attempt":found.n,"to":member,"minutes":minutes})));
+        Ok(())
+    })
+}
+
+/// N10: the once-only brief for a member that has just become a sub-lead.
+fn send_sub_brief(store: &mut Store, team: &Team, member: &str) -> anyhow::Result<()> {
+    let sub = team.member(member).filter(|found| found.sub).context("not a sub-lead")?;
+    let session = sub.session.clone().context("the sub-lead has no session")?;
+    let reports: Vec<String> = team.reports_of(member).iter().map(|found| found.role.clone()).collect();
+    let text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} sub-lead]\nYou are now a sub-lead of the team {}: the members {} report to you.\n\
+         Their reports and questions wait in your inbox: {} | hgs team inbox --json.\n\
+         Decide their reports with hgs team accept --json or reject --json; a rejection reopens the task with your reason.\n\
+         You may hand out their tasks, hold one back and release it; your own reports still go to the lead (hgs guide team-lead).",
+        team.name,
+        if reports.is_empty() { "that report to you".to_owned() } else { reports.join(", ") },
+        json!({"team":team.id})
+    );
+    let outcome = send(&session, &uuid::Uuid::new_v4().to_string(), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let member = member.to_owned();
+    change(store, &team.id, |team, events| {
+        if let Some(found) = team.members.iter_mut().find(|found| found.id == member) {
+            found.sub_brief = false;
+        }
+        events.push(Event::new("sub_brief", json!({"member":member})));
         Ok(())
     })
 }
@@ -2966,6 +3075,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::Inbox => tell_lead_inbox(store, team),
         Step::SubInbox { member } => tell_sub_inbox(store, team, member),
+        Step::SubBrief { member } => send_sub_brief(store, team, member),
+        Step::RemindReviewer { task, member } => remind_reviewer(store, team, *task, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
         Step::Starving { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
@@ -4668,6 +4779,28 @@ mod tests {
         let told: Vec<String> = super::inbox::items_for(&t, "qalead").into_iter().map(|item| item.key).collect();
         t.members.iter_mut().find(|member| member.id == "qalead").unwrap().inbox = Inbox { told_at: 10.0, told };
         assert!(!steps(&t, &seen, 20.0).iter().any(|step| matches!(step, Step::SubInbox { .. })));
+        // N8: a sub-lead with its own Background work still takes a message.
+        t.members.iter_mut().find(|member| member.id == "qalead").unwrap().inbox = Inbox::default();
+        let mut background = session("codex/x/qalead", "r9", false);
+        background.live = true;
+        background.activity = "background".into();
+        background.phase = "idle".into();
+        assert!(steps(&t, &[session("claude/x/lead", "r0", true), background], 20.0)
+            .contains(&Step::SubInbox { member: "qalead".into() }));
+        // N9: the sub-lead is reminded first; the lead only after a second
+        // interval.
+        let after = t.settings.remind_lead_minutes as f64 * 60.0;
+        let report_at = t.task(qa).unwrap().attempts.last().unwrap().report.as_ref().unwrap().at;
+        let found = steps(&t, &seen, report_at + after + 1.0);
+        assert!(found.iter().any(|step| matches!(step, Step::RemindReviewer { member, .. } if member == "qalead")), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
+        let found = steps(&t, &seen, report_at + after * 2.0 + 1.0);
+        assert!(found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
+        // N10: a new sub-lead gets its brief once.
+        t.members.iter_mut().find(|member| member.id == "qalead").unwrap().sub_brief = true;
+        assert!(steps(&t, &seen, 20.0).contains(&Step::SubBrief { member: "qalead".into() }));
+        t.members.iter_mut().find(|member| member.id == "qalead").unwrap().sub_brief = false;
+        assert!(!steps(&t, &seen, 21.0).iter().any(|step| matches!(step, Step::SubBrief { .. })));
     }
 
     #[test]

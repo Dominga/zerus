@@ -649,6 +649,7 @@ fn draft_start(input: &Value) -> anyhow::Result<Value> {
         caller_record().is_some(),
         nonempty_env("DSH_SESSION_ID").is_some(),
         nonempty_env("HGS_SESSION").is_some(),
+        nonempty_env("HGS_RUN_ID").is_some(),
     )?;
     let mut store = Store::open(true)?;
     let mut lead = input["lead"].clone();
@@ -676,13 +677,19 @@ fn expected_revision(op: &str, input: &Value) -> Option<u64> {
     }
 }
 
+/// U12/N4: one owner check for every path that can act as the owner. An agent
+/// session carries DSH_SESSION_ID, HGS_SESSION or HGS_RUN_ID and is refused.
+fn owner_caller(input: &Value, record: bool, dsh: bool, env: bool, run: bool) -> anyhow::Result<()> {
+    ensure!(!record && !dsh && !env && !run, "An agent session cannot act as the owner");
+    ensure!(text(input, "by") == "human", "Add \"by\":\"human\" to act as yourself");
+    Ok(())
+}
+
 /// C2: an operation before any team exists is yours: from a process outside
 /// every session, saying so.
-fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool) -> anyhow::Result<()> {
-    ensure!(!record && !dsh, "Only you start a draft team, not an agent session");
-    ensure!(!env, "Zerus could not verify the calling session");
-    ensure!(text(input, "by") == "human", "Add \"by\":\"human\" to start a draft as yourself");
-    Ok(())
+fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool, run: bool) -> anyhow::Result<()> {
+    owner_caller(input, record, dsh, env, run)
+        .context("Only you start a draft team, not an agent session")
 }
 
 fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) -> anyhow::Result<Value> {
@@ -752,14 +759,21 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     }
     let old = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
-    let accepted = old.proposals.iter().any(|proposal| {
-        proposal["kind"] == "next-goal" && proposal["state"] == "accepted"
+    // N12: one next goal per done team, and the lead takes the accepted
+    // proposal's goal rather than a new one.
+    ensure!(old.next.is_empty(), "The next goal was already started for this team");
+    let accepted_goal = old.proposals.iter().find_map(|proposal| {
+        (proposal["kind"] == "next-goal" && proposal["state"] == "accepted")
+            .then(|| proposal["goal"].as_str().unwrap_or_default().trim().to_owned())
     });
     ensure!(
-        matches!(caller, Actor::Human) || (matches!(caller, Actor::Member(member) if *member == old.lead) && accepted),
+        matches!(caller, Actor::Human) || (matches!(caller, Actor::Member(member) if *member == old.lead) && accepted_goal.is_some()),
         "Only you, or the lead with an accepted next-goal proposal, start the next goal"
     );
-    let goal = text(input, "goal").trim().to_owned();
+    let goal = match caller {
+        Actor::Human => text(input, "goal").trim().to_owned(),
+        _ => accepted_goal.unwrap_or_default(),
+    };
     ensure!(!goal.is_empty(), "A next goal needs its goal");
     ensure!(goal.chars().count() <= 4000, "A goal has at most 4000 characters");
     let name = text(input, "name").trim().to_owned();
@@ -894,6 +908,15 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         Ok(Value::Null)
     })?;
     Ok(json!({"status":"accepted","proposal":id,"kind":kind,"result":result}))
+}
+
+/// N8: a sub-team's create input cannot set an owner-only setting.
+fn strip_subteam_owner_settings(settings: &mut Value) {
+    if let Some(object) = settings.as_object_mut() {
+        for key in ops::OWNER_SETTINGS {
+            object.remove(key);
+        }
+    }
 }
 
 /// Who creates a sub-team for a parent task (section 9.1): the assignee's own
@@ -1051,6 +1074,13 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
     if text(filled, "project").is_empty() {
         filled["project"] = json!(parent.project.clone());
     }
+    // N8: a sub-team's create input cannot carry an owner-only setting; the
+    // parent's sub-team approval is inherited and the plan stays review.
+    if filled["settings"].is_object() {
+        let mut settings = filled["settings"].clone();
+        strip_subteam_owner_settings(&mut settings);
+        filled["settings"] = settings;
+    }
     // Section 9.3: a sub-team inherits who approves its plan unless the
     // request says otherwise.
     if filled["settings"].is_null() {
@@ -1086,8 +1116,14 @@ fn create(input: &Value) -> anyhow::Result<Value> {
                 lead["agent"] = json!(record["agent"]);
             }
         } else {
-            ensure!(nonempty_env("HGS_SESSION").is_none(), "Zerus could not verify the calling session");
-            ensure!(text(input, "by") == "human", "Run this from the lead's session, or add \"by\":\"human\" to act as yourself");
+            owner_caller(
+                input,
+                false,
+                nonempty_env("DSH_SESSION_ID").is_some(),
+                nonempty_env("HGS_SESSION").is_some(),
+                nonempty_env("HGS_RUN_ID").is_some(),
+            )
+            .context("Run this from the lead's session, or add \"by\":\"human\" to act as yourself")?;
         }
     }
     let (team, events) = ops::create(&uuid::Uuid::new_v4().to_string(), &filled)?;
@@ -1769,20 +1805,20 @@ fn roster_word_names(team: &Team, op: &str, input: &Value) -> Vec<String> {
         "add-member" => {
             let member = &input["member"];
             let id = text(member, "id");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["add".to_owned(), id.to_owned()] }
         }
         "remove-member" => {
             let id = text(input, "member");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["remove".to_owned(), id.to_owned()] }
         }
         "swap-member" => {
             let id = text(input, "member");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["swap".to_owned(), id.to_owned()] }
         }
         "settings" => {
             let cap = input["settings"]["max_members"].as_u64();
             match cap {
-                Some(cap) if cap as usize != team.settings.max_members => vec![cap.to_string()],
+                Some(cap) if cap as usize != team.settings.max_members => vec!["max".to_owned(), cap.to_string()],
                 _ => Vec::new(),
             }
         }
@@ -1814,7 +1850,12 @@ fn check_roster_word(
     }
     let word = verify(team, input, &needed, super::super::now())
         .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
+    if let Some(used) = team.owner_word_used(word.event) {
+        bail!("That word was already used for {used}; ask the owner again");
+    }
     filled["owner_word_checked"] = serde_json::to_value(&word)?;
+    filled["owner_word_event"] = json!(word.event);
+    filled["owner_word_change"] = json!("the roster change");
     filled["roster_word"] = Value::Bool(true);
     Ok(())
 }
@@ -2237,6 +2278,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // check below fills it, from the lead's own session.
             if let Some(object) = filled.as_object_mut() {
                 object.remove("owner_word_checked");
+                object.remove("owner_word_event");
+                object.remove("owner_word_change");
                 object.remove("roster_word");
             }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
@@ -2293,7 +2336,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                         .filter(|word| word.is_object())
                         .context("The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence")?;
                     let verified = super::owner_word::verify(&team, word, super::super::now())?;
+                    if let Some(used) = team.owner_word_used(verified.event) {
+                        bail!("That word was already used for {used}; ask the owner again");
+                    }
                     filled["owner_word_checked"] = serde_json::to_value(&verified)?;
+                    filled["owner_word_event"] = json!(verified.event);
+                    filled["owner_word_change"] = json!(if op == "approve" { "the plan approval" } else { "the phase approval" });
                 }
             }
             // U26: a lead changes the roster (or max_members) only on the
@@ -2402,8 +2450,20 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("A JSON object is required".into());
     }
     let result = if catalog {
-        // The designer proposes from its session; only you decide and apply.
-        let human = caller_record().is_none() && nonempty_env("HGS_SESSION").is_none() && text(&input, "by") == "human";
+        // N4: the catalog's owner path applies the same agent-session rule.
+        let human = if text(&input, "by") == "human" {
+            owner_caller(
+                &input,
+                caller_record().is_some(),
+                nonempty_env("DSH_SESSION_ID").is_some(),
+                nonempty_env("HGS_SESSION").is_some(),
+                nonempty_env("HGS_RUN_ID").is_some(),
+            )
+            .map_err(|error| error.to_string())?;
+            true
+        } else {
+            false
+        };
         super::catalog::run(&operation, &input, human)
     } else {
         run(&operation, &input, wait)
@@ -2840,6 +2900,52 @@ mod tests {
     }
 
     #[test]
+    fn one_owner_word_is_spent_on_one_roster_change() {
+        use rusqlite::Connection;
+        let now = crate::state::now();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+        for (seq, text) in [(1, "Please remove dev from the roster"), (2, "Please remove dev from the roster again")] {
+            db.execute("INSERT INTO events(seq,name,conversation,payload) VALUES (?1,'claude/x/lead','c1',?2)",
+                rusqlite::params![seq, json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":text}).to_string()]).unwrap();
+        }
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        let caller = Actor::Member("lead".into());
+        let verify = |_: &Team, input: &Value, needed: &[String], now: f64| {
+            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", input["owner_word"]["text"].as_str().unwrap_or_default(), needed, now)
+        };
+        let base = json!({"member":"dev"});
+        let mut first = base.clone();
+        first["owner_word"] = json!({"text":"Please remove dev from the roster"});
+        let input = first.clone();
+        super::check_roster_word(&team, "remove-member", &input, &mut first, &caller, verify).unwrap();
+        // The operation spends the event on the team.
+        let event = first["owner_word_event"].as_i64().unwrap();
+        team.record_owner_word(event, "the roster change");
+        let mut second = base.clone();
+        second["owner_word"] = json!({"text":"Please remove dev from the roster"});
+        let input = second.clone();
+        let error = super::check_roster_word(&team, "remove-member", &input, &mut second, &caller, verify).unwrap_err().to_string();
+        assert!(error.contains("already used"), "{error}");
+        // A new sentence works.
+        let mut third = base.clone();
+        third["owner_word"] = json!({"text":"Please remove dev from the roster again"});
+        let input = third.clone();
+        super::check_roster_word(&team, "remove-member", &input, &mut third, &caller, verify).unwrap();
+    }
+
+    #[test]
+    fn a_subteam_create_input_cannot_set_owner_settings() {
+        let mut settings = json!({"auto_accept":true,"max_members":99,"tree_depth":8,"subteam_approval":"owner","report_timeout_seconds":90});
+        super::strip_subteam_owner_settings(&mut settings);
+        for key in ["auto_accept", "max_members", "tree_depth", "subteam_approval"] {
+            assert!(settings.get(key).is_none(), "{key} survived");
+        }
+        assert_eq!(settings["report_timeout_seconds"], 90);
+    }
+
+    #[test]
     fn a_lead_starts_the_next_goal_only_after_an_accepted_proposal() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
@@ -2864,11 +2970,24 @@ mod tests {
         let value = super::next_goal_as(
             &mut store,
             "99999999-9999-4999-8999-999999999999",
-            &json!({"request_id":"99999999-9999-4999-8999-999999999999","team":"done2","goal":"two"}),
+            &json!({"request_id":"99999999-9999-4999-8999-999999999999","team":"done2","goal":"other"}),
             &Actor::Member("lead".into()),
         )
         .unwrap();
         assert_eq!(value["status"], "planned");
+        // N12: the accepted proposal's goal is used, and the done team cannot
+        // start a second next goal.
+        let next = store.load(value["team"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(next.goal, "two");
+        let error = super::next_goal_as(
+            &mut store,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            &json!({"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","team":"done2","goal":"three"}),
+            &Actor::Member("lead".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("already started"), "{error}");
     }
 
     #[test]
@@ -3954,11 +4073,11 @@ mod tests {
     fn only_the_owner_outside_every_session_starts_a_draft() {
         // C2: no team exists yet to prove a member by.
         let owner = json!({"by":"human"});
-        owner_without_team(&owner, false, false, false).unwrap();
-        for (record, dsh, env) in [(true, false, false), (false, true, false), (false, false, true)] {
-            assert!(owner_without_team(&owner, record, dsh, env).is_err(), "{record} {dsh} {env}");
+        owner_without_team(&owner, false, false, false, false).unwrap();
+        for (record, dsh, env, run) in [(true, false, false, false), (false, true, false, false), (false, false, true, false), (false, false, false, true)] {
+            assert!(owner_without_team(&owner, record, dsh, env, run).is_err(), "{record} {dsh} {env} {run}");
         }
-        assert!(owner_without_team(&json!({}), false, false, false).is_err());
+        assert!(owner_without_team(&json!({}), false, false, false, false).is_err());
     }
 
     #[test]

@@ -27,6 +27,21 @@ fn text<'a>(input: &'a Value, key: &str) -> &'a str {
 /// Planning/Running/Paused query, bounded, never every stored team.
 const ACTIVE_TEAMS: i64 = 1000;
 
+/// C6: whether this CLI runs in the session of the sub-team's parent lead.
+fn parent_lead_calls(store: &Store, team: &Team) -> anyhow::Result<bool> {
+    let Some(link) = &team.parent else { return Ok(false) };
+    let Some(record) = caller_record() else { return Ok(false) };
+    Ok(parent_lead_proven(team, store.load(&link.team)?.as_ref(), &record))
+}
+
+/// The caller is the parent team's lead and no member of the sub-team itself.
+fn parent_lead_proven(team: &Team, parent: Option<&Team>, record: &Value) -> bool {
+    let (Some(link), Some(parent)) = (&team.parent, parent) else { return false };
+    link.team == parent.id
+        && calling_member(team, record).is_none()
+        && calling_member(parent, record).as_deref() == Some(parent.lead.as_str())
+}
+
 /// The member whose session runs this CLI, proven by process ancestry.
 fn calling_member(team: &Team, record: &Value) -> Option<String> {
     let name = record["name"].as_str()?;
@@ -560,11 +575,49 @@ fn draft_get_in(store: &Store, input: &Value) -> anyhow::Result<Value> {
 fn draft_start(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
     ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
+    // C2: there is no team yet to prove a member by, so only you start one.
+    owner_without_team(
+        input,
+        caller_record().is_some(),
+        nonempty_env("DSH_SESSION_ID").is_some(),
+        nonempty_env("HGS_SESSION").is_some(),
+    )?;
     let mut store = Store::open(true)?;
-    draft_start_in(&mut store, &request, input)
+    let mut lead = input["lead"].clone();
+    if store.receipt(&request, input)?.is_none() && lead["session"].is_object() {
+        // C2: the lead's session runs here and leads or serves no other
+        // active team, as an adopted member's must (F8).
+        if lead.get("id").is_none() {
+            lead["id"] = json!("lead");
+        }
+        let member: Member = serde_json::from_value(lead.clone()).context("Invalid lead")?;
+        let adopted = adopted_session(&Team::default(), &member, &store.active_teams(ACTIVE_TEAMS)?, &live_sessions()?)?;
+        lead["session"] = serde_json::to_value(&adopted.session)?;
+    }
+    draft_start_in(&mut store, &request, input, lead)
 }
 
-fn draft_start_in(store: &mut Store, request: &str, input: &Value) -> anyhow::Result<Value> {
+/// C1: the team revision a change must find. The draft, edit-draft,
+/// move-phase, discard-phase and extend operations read "revision" as their
+/// own (the draft's, or the phase numbers they were made against).
+fn expected_revision(op: &str, input: &Value) -> Option<u64> {
+    if matches!(op, "draft" | "edit-draft" | "move-phase" | "discard-phase" | "extend") {
+        None
+    } else {
+        input["revision"].as_u64()
+    }
+}
+
+/// C2: an operation before any team exists is yours: from a process outside
+/// every session, saying so.
+fn owner_without_team(input: &Value, record: bool, dsh: bool, env: bool) -> anyhow::Result<()> {
+    ensure!(!record && !dsh, "Only you start a draft team, not an agent session");
+    ensure!(!env, "Zerus could not verify the calling session");
+    ensure!(text(input, "by") == "human", "Add \"by\":\"human\" to start a draft as yourself");
+    Ok(())
+}
+
+fn draft_start_in(store: &mut Store, request: &str, input: &Value, lead: Value) -> anyhow::Result<Value> {
     if let Some(receipt) = store.receipt(request, input)? {
         return Ok(receipt);
     }
@@ -572,7 +625,7 @@ fn draft_start_in(store: &mut Store, request: &str, input: &Value) -> anyhow::Re
     ensure!(!folder.is_empty(), "A draft names its folder");
     let name = text(input, "name").trim().to_owned();
     ensure!(name.chars().count() <= 80, "A name has at most 80 characters");
-    let mut lead_value = input["lead"].clone();
+    let mut lead_value = lead;
     if lead_value.get("id").is_none() {
         lead_value["id"] = json!("lead");
     }
@@ -658,13 +711,68 @@ fn decide_proposal(input: &Value) -> anyhow::Result<Value> {
     let store_path = text(input, "request_id").to_owned();
     ensure!(super::store::canonical_uuid(&store_path), "A canonical request_id is required");
     let mut store = Store::open(true)?;
-    decide_proposal_in(&mut store, input)
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let caller = actor(&team, "decide-proposal", input)?;
+    let receipt = decide_proposal_in(&mut store, input, &caller)?;
+    if receipt["status"] == "accepted" && receipt["kind"] == "swap-member" {
+        // A swap without a session launches one (H6).
+        if let Err(error) = super::dispatcher::ensure_worker() {
+            eprintln!("hgs: the team dispatcher did not start: {error}");
+        }
+    }
+    Ok(receipt)
 }
 
-fn decide_proposal_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
+/// C8: the input an accepted add-member or swap-member proposal runs with. A
+/// swap's member is its id, or an object with the id and the section 5 fields.
+fn proposal_input(team: &str, kind: &str, member: &Value) -> anyhow::Result<Value> {
+    let mut value = json!({"team":team,"request_id":uuid::Uuid::new_v4().to_string(),"by":"human"});
+    if kind == "add-member" {
+        ensure!(member.is_object(), "The add-member proposal carries its member");
+        value["member"] = member.clone();
+        return Ok(value);
+    }
+    let id = member.as_str().or_else(|| member["id"].as_str()).unwrap_or_default();
+    ensure!(!id.is_empty(), "The swap-member proposal names its member");
+    value["member"] = json!(id);
+    for key in ["agent", "model", "effort", "account", "session"] {
+        if let Some(field) = member.get(key).filter(|field| !field.is_null()) {
+            value[key] = field.clone();
+        }
+    }
+    Ok(value)
+}
+
+/// How many new sessions a change binds, for the tree budget (section 9.2).
+fn added_sessions(team: &Team, op: &str, filled: &Value) -> usize {
+    match op {
+        "add-member" => usize::from(filled["member"]["session"].is_object()),
+        "swap-member" => usize::from(
+            filled["session"].is_object() && team.member(text(filled, "member")).is_none_or(|member| member.session.is_none()),
+        ),
+        _ => 0,
+    }
+}
+
+/// C8: an accepted proposal runs as your own change would: the same session
+/// adoption, tree budget and request receipt.
+fn owner_change(store: &mut Store, op: &str, value: &Value) -> anyhow::Result<Value> {
+    let request = text(value, "request_id").to_owned();
+    let team_id = text(value, "team").to_owned();
+    let mut filled = value.clone();
+    adopt_existing_sessions(store, &request, value, op, &mut filled)?;
+    let team = store.load(&team_id)?.context("Unknown team")?;
+    let tree = tree_around(&team, &mut |id| store.load(id))?;
+    ops::ensure_tree_sessions(&team, &tree, added_sessions(&team, op, &filled))?;
+    store.mutate(Some((&request, value)), &team_id, None, |team, events| {
+        ops::apply(team, op, &filled, &Actor::Human, &BTreeSet::new(), events)
+    })
+}
+
+fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyhow::Result<Value> {
     let team_id = text(input, "team").to_owned();
     let team = store.load(&team_id)?.context("Unknown team")?;
-    ensure!(matches!(actor(&team, "decide-proposal", input)?, Actor::Human), "Only you decide a proposal");
+    ensure!(matches!(caller, Actor::Human), "Only you decide a proposal");
     let id = text(input, "proposal").to_owned();
     let at = team.proposals.iter().position(|proposal| proposal["id"] == id).context("Unknown proposal")?;
     let state = team.proposals[at]["state"].as_str().unwrap_or_default().to_owned();
@@ -678,6 +786,7 @@ fn decide_proposal_in(store: &mut Store, input: &Value) -> anyhow::Result<Value>
         store.mutate(None, &team_id, None, |team, events| {
             if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id) {
                 proposal["state"] = json!("rejected");
+                proposal["decided_at"] = json!(super::super::now());
                 proposal["note"] = json!(reason);
             }
             events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":false})));
@@ -689,13 +798,7 @@ fn decide_proposal_in(store: &mut Store, input: &Value) -> anyhow::Result<Value>
     let member = team.proposals[at]["member"].clone();
     let goal = team.proposals[at]["goal"].as_str().unwrap_or_default().to_owned();
     let result = match kind.as_str() {
-        "add-member" => {
-            let mut value = member;
-            value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
-            store.mutate(None, &team_id, None, |team, events| {
-                super::ops::apply(team, "add-member", &json!({"member":value}), &Actor::Human, &BTreeSet::new(), events)
-            })?
-        }
+        "add-member" | "swap-member" => owner_change(store, &kind, &proposal_input(&team_id, &kind, &member)?)?,
         "remove-member" => {
             let member_id = member["id"].as_str().or(member.as_str()).unwrap_or_default().to_owned();
             store.mutate(None, &team_id, None, |team, events| {
@@ -707,25 +810,18 @@ fn decide_proposal_in(store: &mut Store, input: &Value) -> anyhow::Result<Value>
             let fresh = uuid::Uuid::new_v4().to_string();
             next_goal_in(store, &fresh, &json!({"team":team_id,"goal":goal,"request_id":fresh}))?
         }
-        "swap-member" => {
-            let mut value = member.clone();
-            value["request_id"] = json!(uuid::Uuid::new_v4().to_string());
-            value["team"] = json!(team_id);
-            store.mutate(None, &team_id, None, |team, events| {
-                super::ops::apply(team, "swap-member", &value, &Actor::Human, &BTreeSet::new(), events)
-            })?
-        }
         other => bail!("Unknown proposal kind {other}"),
     };
     store.mutate(None, &team_id, None, |team, events| {
         if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id) {
             proposal["state"] = json!("accepted");
+            proposal["decided_at"] = json!(super::super::now());
             proposal["note"] = json!(reason);
         }
         events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":true,"kind":kind})));
         Ok(Value::Null)
     })?;
-    Ok(json!({"status":"accepted","proposal":id,"result":result}))
+    Ok(json!({"status":"accepted","proposal":id,"kind":kind,"result":result}))
 }
 
 /// Who creates a sub-team for a parent task (section 9.1): the assignee's own
@@ -1797,7 +1893,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             let request = text(input, "request_id");
             ensure!(canonical_uuid(request), "A canonical request_id is required");
             let team_id = text(input, "team");
-            let revision = input["revision"].as_u64();
+            let revision = expected_revision(op, input);
             // A member in a sandbox may not write the team's files: its report
             // waits in its own folder for the dispatcher, which checks it.
             // SQLite may open the store read-only without a word, so the
@@ -1842,30 +1938,24 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 // Bounded: ancestors by id and children by id; a flat team
                 // reads nothing beyond the team itself.
                 let tree = tree_around(&team, &mut |id| store.load(id))?;
-                let added = match op {
-                    "add-member" => usize::from(filled["member"]["session"].is_object()),
-                    "swap-member" => usize::from(
-                        filled["session"].is_object()
-                            && team.member(text(&filled, "member")).is_none_or(|member| member.session.is_none()),
-                    ),
-                    _ => 0,
-                };
-                ops::ensure_tree_sessions(&team, &tree, added)?;
-            }
-            if matches!(op, "cancel" | "reassign") {
-                let team = store.load(team_id)?.context("Unknown team")?;
-                choose_subteam(&mut store, &team, &filled)?;
+                ops::ensure_tree_sessions(&team, &tree, added_sessions(&team, op, &filled))?;
             }
             if op == "archive" {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 ensure_children_closed(&store, &team)?;
             }
+            // C6: a sub-team's plan and phases are decided by the parent lead,
+            // whose session is proven in the parent team, not in this one.
+            let parent_lead = matches!(op, "approve" | "approve-phase" | "discard-phase") && {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                parent_lead_calls(&store, &team)?
+            };
             if matches!(op, "approve" | "approve-phase") {
                 // F13: the lead approves only on the owner's exact sentence,
                 // typed in the lead's own session; the CLI checks it here and
                 // records the verified quote for the state machine and the feed.
                 let team = store.load(team_id)?.context("Unknown team")?;
-                let caller = actor(&team, op, &filled)?;
+                let caller = if parent_lead { Actor::ParentLead } else { actor(&team, op, &filled)? };
                 let auto_plan = op == "approve" && team.settings.approval == Approval::Auto;
                 if matches!(&caller, Actor::Member(member) if *member == team.lead) && !auto_plan {
                     let word = input
@@ -1877,7 +1967,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 }
             }
             let receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
-                let actor = actor(team, op, &filled)?;
+                let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
             }) {
                 Ok(receipt) => receipt,
@@ -1900,6 +1990,12 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             }
             if op == "reject" {
                 reopen_rejected_subteam(&mut store, team_id, &filled)?;
+            }
+            if matches!(op, "cancel" | "reassign") {
+                // C5: the sub-team stops only once the cancel or reassign
+                // itself went through for its caller.
+                let team = store.load(team_id)?.context("Unknown team")?;
+                choose_subteam(&mut store, &team, &filled)?;
             }
             if matches!(op, "pause" | "resume" | "stop") {
                 cascade_status(&mut store, team_id, op, 0)?;
@@ -2036,7 +2132,7 @@ mod tests {
         let mut store = Store::open_at(&dir.path().join("teams.db"), true).unwrap();
         let request = "11111111-1111-4111-8111-111111111111";
         let input = json!({"request_id":request,"folder":dir.path().display().to_string(),"name":"Checkout","lead":{"agent":"claude"}});
-        let value = super::draft_start_in(&mut store, request, &input).unwrap();
+        let value = super::draft_start_in(&mut store, request, &input, input["lead"].clone()).unwrap();
         let id = value["team"].as_str().unwrap().to_owned();
         assert_eq!(value["revision"], 1);
         let team = store.load(&id).unwrap().unwrap();
@@ -2045,7 +2141,7 @@ mod tests {
         assert_eq!(team.member("lead").map(|member| member.role.as_str()), Some("Lead"));
         assert_eq!(team.members.len(), 1);
         // A repeated request returns the first result and creates nothing twice.
-        super::draft_start_in(&mut store, request, &input).unwrap();
+        super::draft_start_in(&mut store, request, &input, input["lead"].clone()).unwrap();
         assert_eq!(store.teams(true, 10).unwrap().len(), 1);
     }
 
@@ -2056,7 +2152,7 @@ mod tests {
         let mut store = Store::open_at(&dir.path().join("teams.db"), true).unwrap();
         let request = "22222222-2222-4222-8222-222222222222";
         let input = json!({"request_id":request,"folder":dir.path().display().to_string(),"lead":{"agent":"claude"}});
-        let value = super::draft_start_in(&mut store, request, &input).unwrap();
+        let value = super::draft_start_in(&mut store, request, &input, input["lead"].clone()).unwrap();
         let id = value["team"].as_str().unwrap().to_owned();
         let get = super::draft_get_in(&store, &json!({"team":id})).unwrap();
         assert_eq!(get["revision"], 1);
@@ -3061,5 +3157,78 @@ mod tests {
         for op in ["report", "cancel", "finish", "discard-phase", "hold"] {
             assert!(!starts_worker(op), "{op}");
         }
+    }
+
+    #[test]
+    fn a_draft_and_phase_edits_keep_their_own_revision() {
+        // C1: "revision" of these operations is not the team's revision, so a
+        // change elsewhere in the team never locks the draft or the phases.
+        for op in ["draft", "edit-draft", "move-phase", "discard-phase", "extend"] {
+            assert_eq!(expected_revision(op, &json!({"revision":3})), None, "{op}");
+        }
+        assert_eq!(expected_revision("plan", &json!({"revision":3})), Some(3));
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let (mut team, _) = ops::create("d", &json!({"name":"D","lead":{"id":"lead","agent":"claude"}})).unwrap();
+        team.status = TeamStatus::Draft;
+        team.draft = Some(Draft { revision: 1, ..Default::default() });
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        // The owner marks a field seen: the team revision moves, the draft's not.
+        let seen = json!({"action":"seen","fields":["goal"]});
+        store
+            .mutate(None, "d", expected_revision("draft", &seen), |team, events| ops::apply(team, "draft", &seen, &Actor::Human, &BTreeSet::new(), events))
+            .unwrap();
+        let update = json!({"action":"update","revision":1,"set":{"goal":"Ship"}});
+        let receipt = store
+            .mutate(Some(("22222222-2222-4222-8222-222222222222", &update)), "d", expected_revision("draft", &update), |team, events| {
+                ops::apply(team, "draft", &update, &Actor::Member("lead".into()), &BTreeSet::new(), events)
+            })
+            .unwrap();
+        // The reply names the draft's revision apart from the team's.
+        assert_eq!(receipt["draft_revision"], 2);
+        assert_ne!(receipt["revision"], receipt["draft_revision"]);
+        let again = json!({"action":"update","revision":2,"set":{"goal":"Ship it"}});
+        store
+            .mutate(None, "d", expected_revision("draft", &again), |team, events| {
+                ops::apply(team, "draft", &again, &Actor::Member("lead".into()), &BTreeSet::new(), events)
+            })
+            .unwrap();
+        assert_eq!(store.load("d").unwrap().unwrap().goal, "Ship it");
+    }
+
+    #[test]
+    fn only_the_owner_outside_every_session_starts_a_draft() {
+        // C2: no team exists yet to prove a member by.
+        let owner = json!({"by":"human"});
+        owner_without_team(&owner, false, false, false).unwrap();
+        for (record, dsh, env) in [(true, false, false), (false, true, false), (false, false, true)] {
+            assert!(owner_without_team(&owner, record, dsh, env).is_err(), "{record} {dsh} {env}");
+        }
+        assert!(owner_without_team(&json!({}), false, false, false).is_err());
+    }
+
+    #[test]
+    fn an_accepted_swap_proposal_runs_with_its_fields() {
+        // C8: the spec's shape (member id plus section 5 fields) is kept by
+        // propose and run by the owner's decision without a panic.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut team = running_team();
+        let proposal = json!({"kind":"swap-member","member":"dev","agent":"claude","model":"opus","reason":"Stuck three times"});
+        ops::apply(&mut team, "propose", &proposal, &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        assert_eq!(team.proposals[0]["member"], json!({"id":"dev","agent":"claude","model":"opus"}));
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let decide = json!({"team":"t","proposal":"p1","accept":true,"by":"human"});
+        let error = decide_proposal_in(&mut store, &decide, &Actor::Member("lead".into())).unwrap_err().to_string();
+        assert!(error.contains("Only you decide"), "{error}");
+        let receipt = decide_proposal_in(&mut store, &decide, &Actor::Human).unwrap();
+        assert_eq!((receipt["status"].as_str(), receipt["kind"].as_str()), (Some("accepted"), Some("swap-member")));
+        let team = store.load("t").unwrap().unwrap();
+        let dev = team.member("dev").unwrap();
+        assert_eq!((dev.agent.as_str(), dev.model.as_str(), dev.session.is_none()), ("claude", "opus", true));
+        assert_eq!(team.proposals[0]["state"], "accepted");
+        assert!(team.proposals[0]["decided_at"].as_f64().is_some());
+        // An old proposal stored with a bare member id runs as well.
+        assert_eq!(proposal_input("t", "swap-member", &json!("dev")).unwrap()["member"], "dev");
     }
 }

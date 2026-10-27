@@ -514,7 +514,7 @@ elif a[:2]==['team','draft']:
   rev=int(open(__file__+'.draftrev').read()) if os.path.exists(__file__+'.draftrev') else body.get('revision')
   if body.get('revision')!=rev:print('hgs: Draft revision is %d now; read it again'%rev,file=sys.stderr);sys.exit(1)
   if os.path.exists(__file__+'.draftrev'):open(__file__+'.draftrev','w').write(str(rev+1))
-  print(json.dumps({'status':'updated','revision':rev+1,'unseen':[]}))
+  print(json.dumps({'status':'updated','draft_revision':rev+1,'revision':rev+40,'unseen':[]}))
  elif act=='seen':print(json.dumps({'status':'seen','unseen':[f for f in ['members','goal'] if f not in body.get('fields',[])]}))
  elif act=='create':print(json.dumps({'status':'planning','team':body.get('team')}))
  elif act=='discard':print(json.dumps({'status':'stopped','stop_lead':body.get('stop_lead',False)}))

@@ -992,7 +992,7 @@ void TeamNewTab::flush()
             return;
         }
         m_retried = false; m_saveError.clear();
-        m_revision = result.value("revision").toInteger(m_revision + 1);
+        m_revision = result.value("draft_revision").toInteger(m_revision + 1);
         // A field changed again while this went out stays to be sent.
         for (auto it = set.constBegin(); it != set.constEnd(); ++it) if (fieldValue(it.key()) == it.value()) m_dirty.remove(it.key());
         if (result.value("unseen").isArray()) { m_unseen.clear(); for (const auto &f : result.value("unseen").toArray()) m_unseen << f.toString(); }

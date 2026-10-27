@@ -242,7 +242,14 @@ struct Phase {
     Waiting waiting;
     // F13: the owner's sentence the lead approved on.
     QString ownerWord;
+    // U25 (server #378): the note under the phase header, and the owner's
+    // send-back of a draft (state "rejected") until the lead reworks it.
+    QString note;
+    struct Rejection { QString comment, by; double at = 0, reworkedAt = 0; };
+    Rejection rejection;
     bool draft() const { return state == "draft"; }
+    bool rejected() const { return state == "rejected"; }
+    bool queued() const { return state == "queued"; }
 };
 
 // Set by `hgs team finish`: who finished the team and the bounded summary.
@@ -296,6 +303,10 @@ struct Team {
     QSet<int> cycle;
     QList<int> ready;
     QStringList errors, warnings;
+    // U25: the same errors and warnings with the task each names (0 for none),
+    // for the plan problems list and a phase's error count.
+    struct PlanIssue { int task = 0; QString text; };
+    QList<PlanIssue> errorItems, warningItems;
     // C7: the plan-health numbers the lead reads before asking for approval and
     // the owner sees in the GUI, with the starving members while the team runs.
     struct Health {
@@ -316,6 +327,7 @@ struct Team {
     struct PhaseSummary {
         int n = 0;
         QString title, status, healthLine;   // status: done|in_work|approved|draft|paused
+        QString state;   // U25: planned|draft|rejected|queued|running|done (empty: older hgs)
         int done = 0, total = 0;
         bool barrier = false;
     };
@@ -348,6 +360,10 @@ struct Team {
     QString previous, next;
     // H1: members limited by usage wait for their reset (settings).
     bool resumeAfterLimits = false;
+    // U25: the owner's auto-accept of error-free phase drafts (settings.auto_accept),
+    // and the open tasks of running phases, the only ones that make a team Stuck.
+    bool autoAccept = false;
+    QList<int> stuckScope;
     // The settings as stored, so a change sends them back whole.
     QJsonObject settingsJson;
     // F8: the lead's membership proposals, decided by the owner. `member` is
@@ -424,6 +440,14 @@ PhaseProgress phaseProgress(const Team &team);
 // lower phase must be approved and its tasks decided. "Phase 2 opens after
 // phase 1 ends."
 QString approveBlocked(const Team &team, int phase);
+// U25 (spec 5.2): the owner's state of a phase: planned (the team is planning),
+// draft, rejected, queued, running or done. phase_summary[].state when the
+// server sends it, else read from the record and the phase's tasks.
+QString ownerPhaseState(const Team &team, const PhaseGroup &group);
+// U25 (server #378): why the owner may not Accept draft N yet, empty when he
+// may. An earlier phase still at work no longer blocks it (the phase waits as
+// queued); an earlier draft does.
+QString acceptBlocked(const Team &team, int phase);
 // The same reason for the compact draft row ("after phase 3"); the full
 // sentence stays its tooltip.
 QString approveBlockedShort(const Team &team, int phase);

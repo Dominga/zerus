@@ -364,8 +364,16 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
         const QString model = m_models->currentData().toString(), effort = m_efforts->currentData().toString();
         m_settingsPopup->hide(); emit settingsRequested(m_key, model, effort);
     });
-    m_rulesChip = new QLabel; m_rulesChip->setObjectName("ironRulesChip"); m_rulesChip->hide();
+    m_rulesChip = new QPushButton; m_rulesChip->setObjectName("ironRulesChip"); m_rulesChip->hide();
     m_rulesChip->setToolTip(tr("This project's iron rules are sent at the start of every message"));
+    m_rulesChip->setAutoDefault(false); m_rulesChip->setCursor(Qt::PointingHandCursor); m_rulesChip->setIconSize(QSize(12, 12));
+    connect(m_rulesChip, &QPushButton::clicked, this, &MessageComposer::ironRulesRequested);
+    // U25: the compact row's centre ends with the session's reference.
+    m_sessionReference = new QPushButton; m_sessionReference->setObjectName("copySessionReference"); m_sessionReference->hide();
+    m_sessionReference->setFixedSize(28, 28); m_sessionReference->setIconSize(QSize(12, 12)); m_sessionReference->setAutoDefault(false);
+    m_sessionReference->setToolTip(tr("Copy session reference")); m_sessionReference->setAccessibleName(tr("Copy session reference"));
+    m_sessionReference->setCursor(Qt::PointingHandCursor);
+    connect(m_sessionReference, &QPushButton::clicked, this, [this] { if (!m_key.isEmpty()) emit sessionReferenceRequested(m_key); });
     actions->addWidget(m_attach); actions->addWidget(m_reference); actions->addWidget(m_rulesChip); actions->addStretch(0); actions->addWidget(m_status, 1); actions->addWidget(m_refreshStatus); actions->addWidget(m_retry); actions->addWidget(m_settings); actions->addWidget(m_stop); actions->addWidget(m_send);
     inputLayout->addLayout(actions);
     connect(edit, &QPlainTextEdit::textChanged, this, [this]() {
@@ -1174,6 +1182,7 @@ void MessageComposer::updateControls()
     // Do not transfer an unfinished settings interaction to the Stop action.
     if (returnFocus) m_editor->setFocus(Qt::OtherFocusReason);
     m_actions->setStretch(2, status.isEmpty() ? 1 : 0);
+    m_sessionReference->setVisible(m_compact && m_sessionReferenceAvailable && !m_key.isEmpty());
     setWorkspaceStyle(m_status, QString("font-size:11px;color:%1;").arg(ownError || (status == m_sessionStatus && m_sessionStatusError)
         ? (m_dark ? "#f4ab9b" : "#a13224") : waiting ? (m_dark ? "#efc978" : "#92641b") : (m_dark ? "#a2adbc" : "#627082")));
     emit controlsChanged();
@@ -1617,6 +1626,7 @@ QJsonObject MessageComposer::withConfirmedFavorites(QJsonObject catalog) const
 void MessageComposer::setTheme(bool dark)
 {
     m_dark = dark;
+    const auto token = [dark](const char *name) { return WorkspaceSkin::color(WorkspaceSkin::active(), dark, QString::fromLatin1(name)).name(); };
     updateSettingsButton();
     m_toolbar->setTheme(dark);
     m_attach->setIcon(workspaceIcon("attachment", dark ? QColor("#c5cfdb") : QColor("#536477")));
@@ -1624,6 +1634,8 @@ void MessageComposer::setTheme(bool dark)
     m_refreshStatus->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_retry->setIcon(composerIcon("refresh", QColor(dark ? "#efc978" : "#92641b"), QColor(dark ? "#85909e" : "#6d7784")));
     m_stop->setIcon(workspaceIcon("stop",dark ? QColor("#ff9ca8") : QColor("#b52d48")));
+    m_rulesChip->setIcon(workspaceIcon("shield", QColor(token("muted"))));
+    m_sessionReference->setIcon(workspaceIcon("link", QColor(token("text2"))));
     // Match the stylesheet's enabled and disabled Send text colors below.
     m_send->setIcon(composerIcon("send", QColor(dark ? "#10231b" : "#ffffff"), QColor(dark ? "#85909e" : "#6d7784")));
     const QColor chevron(dark ? "#a2adbc" : "#627082");
@@ -1664,19 +1676,28 @@ void MessageComposer::setTheme(bool dark)
         QPushButton#attachMessageFile:focus[keyboardFocus="true"] { border-color:%5; }
         QPushButton#refreshSessionStatus { padding:0; border:0; background:transparent; }
         QPushButton#allowMessageRetry { padding:7px 10px; font-size:11px; }
-        QLabel#ironRulesChip { padding:2px 8px; border:1px solid %3; border-radius:6px; font-size:11px; color:%7; }
+        QPushButton#ironRulesChip { padding:2px 8px; border:1px solid %3; border-radius:6px; font-size:11px; color:%7; background:transparent; }
     )").arg(dark ? "#171d24" : "#f8fafb", dark ? "#e8edf4" : "#1a2733", dark ? "#3d4855" : "#dce2e8",
              dark ? "#365b4d" : "#c7eadd", dark ? "#8bdfc0" : "#167357", dark ? "#10231b" : "#ffffff", dark ? "#85909e" : "#6d7784")
         .arg(ContentScale::px(9, m_scale)).arg(ContentScale::px(13, m_scale)) + workspaceScrollbars(dark)
         // WhiteWh fork: the compact composer's card frames the field and its buttons.
+        // U25: the prototype's .ccard, .cbtn and .btn.icon, from the skin's tokens.
         + (m_compact ? QString(R"(
-        QFrame#composerCard { background:%1; border:1px solid %2; border-radius:12px; }
+        QFrame#composerCard { background:%1; border:1px solid %2; border-radius:14px; }
         QFrame#composerCard:focus-within { border-color:%3; }
         QFrame#composerCard QPlainTextEdit#messageInput, QFrame#composerCard QPlainTextEdit#messageInput:focus { background:transparent; border:0; padding:6px 4px; }
         QFrame#composerCard QPushButton#sendMessage { padding:0 12px; border-radius:9px; min-width:34px; min-height:30px; max-height:30px; }
-        QPushButton#attachMessageFile { border:0; border-radius:8px; background:transparent; }
+        QFrame#composerCard QPushButton#interruptAgent { padding:0 11px; border:1px solid %4; border-radius:9px; background:%5; color:%6; min-height:30px; max-height:30px; }
+        QFrame#composerCard QPushButton#interruptAgent:hover { background:%7; color:%8; }
+        QPushButton#attachMessageFile, QPushButton#referenceMessageFile { border:0; border-radius:7px; background:transparent; }
+        QPushButton#attachMessageFile:hover, QPushButton#referenceMessageFile:hover { background:%7; }
+        QPushButton#ironRulesChip { border:1px solid transparent; border-radius:7px; background:transparent; color:%9; font-size:11.5px; padding:0 9px; min-height:26px; max-height:26px; }
+        QPushButton#ironRulesChip:hover { background:%7; color:%8; }
+        QPushButton#copySessionReference { padding:0; border:1px solid %4; border-radius:7px; background:%5; }
+        QPushButton#copySessionReference:hover { background:%7; }
         QPushButton#sessionModelSettings { border:1px solid transparent; }
-    )").arg(dark ? "#1b1f26" : "#ffffff", dark ? "#2c323b" : "#dce2e8", dark ? "#7dd3b0" : "#167357") : QString()));
+    )").arg(token("field"), token("border"), token("cardSelBorder"), token("border"), token("surface"), token("text2"), token("hover"), token("fg"))
+          .arg(token("muted")) : QString()));
     updateControls();
 }
 
@@ -1702,7 +1723,7 @@ void MessageComposer::fitEditor()
 
 void MessageComposer::setIronRulesCount(int count)
 {
-    m_rulesChip->setText(tr("%n iron rule(s)", nullptr, count));
+    m_rulesChip->setText(count == 1 ? tr("1 iron rule") : tr("%1 iron rules").arg(count));
     m_rulesChip->setAccessibleName(m_rulesChip->text());
     m_rulesChip->setVisible(count > 0);
 }
@@ -1713,29 +1734,54 @@ void MessageComposer::setCompact(bool compact)
     m_compact = compact;
     m_resizeHandle->setVisible(!compact && !m_input->isHidden());
     auto *inputLayout = static_cast<QVBoxLayout *>(m_input->layout());
+    // U25 (spec 4): the composer's own controls in the row under the card, by zone.
+    const QList<QPair<ComposerToolbar::Slot, QWidget *>> rowItems{
+        {ComposerToolbar::Slot::Attach, m_attach}, {ComposerToolbar::Slot::FileReference, m_reference},
+        {ComposerToolbar::Slot::IronRules, m_rulesChip}, {ComposerToolbar::Slot::SessionReference, m_sessionReference},
+        {ComposerToolbar::Slot::Status, m_status}, {ComposerToolbar::Slot::StatusRefresh, m_refreshStatus},
+        {ComposerToolbar::Slot::Retry, m_retry}, {ComposerToolbar::Slot::Model, m_settings}};
     if (compact) {
         if (!m_card) {
             m_card = new QFrame; m_card->setObjectName("composerCard");
-            m_cardRow = new QHBoxLayout(m_card); m_cardRow->setContentsMargins(10, 5, 5, 5); m_cardRow->setSpacing(4);
+            m_cardRow = new QHBoxLayout(m_card); m_cardRow->setContentsMargins(10, 5, 5, 5); m_cardRow->setSpacing(6);
             connect(m_editor->document(), &QTextDocument::contentsChanged, this, [this] { if (m_compact) fitEditor(); });
         }
-        inputLayout->removeWidget(m_editor); m_actions->removeWidget(m_send);
-        m_cardRow->addWidget(m_editor, 1); m_cardRow->addWidget(m_send, 0, Qt::AlignBottom);
+        inputLayout->removeWidget(m_editor); m_actions->removeWidget(m_send); m_actions->removeWidget(m_stop);
+        // The prototype's card: the field, then Stop and Send at its bottom right.
+        m_cardRow->addWidget(m_editor, 1); m_cardRow->addWidget(m_stop, 0, Qt::AlignBottom); m_cardRow->addWidget(m_send, 0, Qt::AlignBottom);
         inputLayout->insertWidget(0, m_card);
-        // Attach stays first in the row under the card; the toolbar (voice,
-        // video, attachments) follows it, left of the model.
-        static_cast<QBoxLayout *>(layout())->removeWidget(m_toolbar); m_actions->insertWidget(1, m_toolbar);
+        static_cast<QBoxLayout *>(layout())->removeWidget(m_toolbar);
+        for (const auto &[slot, widget] : rowItems) m_actions->removeWidget(widget);
+        m_toolbar->setThreeZones(true);
+        for (const auto &[slot, widget] : rowItems) m_toolbar->add(slot, widget);
+        inputLayout->insertWidget(1, m_toolbar);
         m_send->setMinimumSize(34, 30); m_send->setMaximumSize(QWIDGETSIZE_MAX, 30); m_send->setLayoutDirection(Qt::LeftToRight);
+        m_stop->setMaximumHeight(30);
         m_card->show();
     } else {
-        m_cardRow->removeWidget(m_editor); m_cardRow->removeWidget(m_send);
+        m_cardRow->removeWidget(m_editor); m_cardRow->removeWidget(m_stop); m_cardRow->removeWidget(m_send);
         inputLayout->removeWidget(m_card); m_card->hide();
-        m_actions->removeWidget(m_toolbar); static_cast<QBoxLayout *>(layout())->insertWidget(0, m_toolbar);
+        for (const auto &[slot, widget] : rowItems) m_toolbar->remove(widget);
+        m_toolbar->setThreeZones(false);
+        inputLayout->removeWidget(m_toolbar); static_cast<QBoxLayout *>(layout())->insertWidget(0, m_toolbar);
         inputLayout->insertWidget(0, m_editor);
-        m_actions->addWidget(m_send);
+        // The classic action row, as the constructor built it.
+        m_actions->insertWidget(0, m_attach); m_actions->insertWidget(1, m_reference); m_actions->insertWidget(2, m_rulesChip);
+        m_actions->addWidget(m_status, 1);
+        for (auto *widget : {static_cast<QWidget *>(m_refreshStatus), static_cast<QWidget *>(m_retry), static_cast<QWidget *>(m_settings),
+                             static_cast<QWidget *>(m_stop), static_cast<QWidget *>(m_send)}) m_actions->addWidget(widget);
+        m_sessionReference->hide();
         m_send->setMinimumSize(0, 0); m_send->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX); m_send->setLayoutDirection(Qt::RightToLeft);
+        m_stop->setMaximumHeight(QWIDGETSIZE_MAX);
     }
     fitEditor(); updateControls(); setTheme(m_dark);
+}
+
+void MessageComposer::setSessionReferenceAvailable(bool available)
+{
+    if (available == m_sessionReferenceAvailable) return;
+    m_sessionReferenceAvailable = available;
+    updateControls();
 }
 
 // The compact menu: the models, then the effort of the chosen one. A choice

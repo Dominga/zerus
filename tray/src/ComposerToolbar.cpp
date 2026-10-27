@@ -227,19 +227,100 @@ void ToolbarChip::updateVisibility()
     if (heldFocus) emit focusReleased();
 }
 
+namespace {
+// The row's zones: the left one from the left edge, the right one to the right
+// edge and the centre one centred between them (grid 1fr auto 1fr). A side
+// wider than its half pushes the centre over rather than overlapping it.
+class ZoneRow : public QLayout {
+public:
+    ZoneRow(QWidget *parent, QHBoxLayout *left, QHBoxLayout *centre, QHBoxLayout *right) : QLayout(parent), m_zones{left, centre, right}
+    {
+        setContentsMargins(0, 0, 0, 0);
+        for (auto *zone : {left, centre, right}) addChildLayout(zone);
+    }
+    ~ZoneRow() override { while (auto *item = takeAt(0)) delete item; }
+    void addItem(QLayoutItem *) override {}
+    int count() const override { return int(m_zones.size()); }
+    QLayoutItem *itemAt(int index) const override { return index >= 0 && index < count() ? m_zones[index] : nullptr; }
+    // Removing a zone ends the row's layout of it (QLayout::removeItem, a zone's deletion).
+    QLayoutItem *takeAt(int index) override { return index >= 0 && index < count() ? m_zones.takeAt(index) : nullptr; }
+    Qt::Orientations expandingDirections() const override { return Qt::Horizontal; }
+    QSize sizeHint() const override
+    {
+        int w = 0, h = 0;
+        for (auto *zone : m_zones) { const auto hint = zone->sizeHint(); w += hint.width(); h = qMax(h, hint.height()); }
+        return {w + 2 * spacing(), h};
+    }
+    QSize minimumSize() const override { return {0, sizeHint().height()}; }
+    void setGeometry(const QRect &rect) override
+    {
+        QLayout::setGeometry(rect);
+        if (m_zones.size() != 3) return;
+        const auto used = [](QLayoutItem *zone) { return zone->isEmpty() ? 0 : zone->sizeHint().width(); };
+        const int gap = spacing(), left = used(m_zones[0]), centre = used(m_zones[1]), right = used(m_zones[2]);
+        if (!centre) {
+            m_zones[0]->setGeometry(QRect(rect.x(), rect.y(), qMin(left, rect.width()), rect.height()));
+            const int width = qMax(qBound(0, rect.width() - left - (left ? gap : 0), rect.width()), qMin(right, rect.width()));
+            m_zones[1]->setGeometry(QRect(rect.x() + left, rect.y(), 0, rect.height()));
+            m_zones[2]->setGeometry(QRect(rect.right() + 1 - width, rect.y(), width, rect.height()));
+            return;
+        }
+        int x = rect.x() + (rect.width() - centre) / 2;
+        x = qMax(x, rect.x() + left + (left ? gap : 0));
+        x = qMin(x, rect.right() + 1 - centre - right - (right ? gap : 0));
+        x = qMax(x, rect.x());
+        m_zones[0]->setGeometry(QRect(rect.x(), rect.y(), qMax(0, x - gap - rect.x()), rect.height()));
+        m_zones[1]->setGeometry(QRect(x, rect.y(), centre, rect.height()));
+        const int start = x + centre + gap;
+        m_zones[2]->setGeometry(QRect(start, rect.y(), qMax(0, rect.right() + 1 - start), rect.height()));
+    }
+private:
+    QList<QLayoutItem *> m_zones;
+};
+}
+
 ComposerToolbar::ComposerToolbar(QWidget *parent) : QWidget(parent)
 {
     setObjectName("composerToolbar"); setFixedHeight(RowHeight);
     // Never let the chips widen the composer: the row fits itself instead.
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    auto *row = new QHBoxLayout(this); row->setContentsMargins(0, 0, 0, 0); row->setSpacing(Spacing);
+    m_leading = new QHBoxLayout; m_leading->setSpacing(Spacing); m_leading->setContentsMargins(0, 0, 0, 0);
+    m_centre = new QHBoxLayout; m_centre->setSpacing(8); m_centre->setContentsMargins(0, 0, 0, 0);
+    m_trailing = new QHBoxLayout; m_trailing->setSpacing(Spacing); m_trailing->setContentsMargins(0, 0, 0, 0);
+    // The left zone keeps its items left, the right one right.
+    m_leading->addStretch(1); m_trailing->addStretch(1);
+    auto *row = new ZoneRow(this, m_leading, m_centre, m_trailing); row->setSpacing(Spacing * 2);
     row->setSizeConstraint(QLayout::SetNoConstraint);
-    m_leading = new QHBoxLayout; m_leading->setSpacing(Spacing);
-    m_trailing = new QHBoxLayout; m_trailing->setSpacing(Spacing);
-    row->addLayout(m_leading); row->addStretch(1); row->addLayout(m_trailing);
 }
 
-bool ComposerToolbar::leading(Slot slot) { return slot <= Slot::CompactionCancel; }
+ComposerToolbar::Zone ComposerToolbar::zone(Slot slot, bool three)
+{
+    switch (slot) {
+    case Slot::Attach: case Slot::FileReference: case Slot::Attachments: case Slot::Voice: case Slot::VoiceCancel: case Slot::VoiceResult:
+    case Slot::IronRules: case Slot::Latest: case Slot::MarkRead: case Slot::Compaction: case Slot::CompactionCancel:
+        return Zone::Left;
+    case Slot::VoiceMode: return three ? Zone::Centre : Zone::Left;
+    case Slot::UsageLimit: case Slot::Recovery: case Slot::Cache: case Slot::Context: case Slot::SessionReference:
+        return three ? Zone::Centre : Zone::Right;
+    case Slot::Status: case Slot::StatusRefresh: case Slot::Retry: case Slot::Model:
+        return Zone::Right;
+    }
+    return Zone::Left;
+}
+
+// The order inside a zone: two zones keep the classic order (the voice mode
+// after Voice), three follow the prototype.
+int ComposerToolbar::rank(Slot slot, bool three)
+{
+    static const QList<Slot> classic{Slot::Attach, Slot::FileReference, Slot::Attachments, Slot::Voice, Slot::VoiceMode, Slot::VoiceCancel,
+        Slot::VoiceResult, Slot::IronRules, Slot::Latest, Slot::MarkRead, Slot::Compaction, Slot::CompactionCancel,
+        Slot::UsageLimit, Slot::Recovery, Slot::Cache, Slot::Context, Slot::SessionReference, Slot::Status, Slot::StatusRefresh, Slot::Retry, Slot::Model};
+    static const QList<Slot> zones{Slot::Attach, Slot::FileReference, Slot::Attachments, Slot::Voice, Slot::VoiceCancel, Slot::VoiceResult,
+        Slot::IronRules, Slot::Latest, Slot::MarkRead, Slot::Compaction, Slot::CompactionCancel,
+        Slot::VoiceMode, Slot::UsageLimit, Slot::Recovery, Slot::Cache, Slot::Context, Slot::SessionReference,
+        Slot::Status, Slot::StatusRefresh, Slot::Retry, Slot::Model};
+    return int((three ? zones : classic).indexOf(slot));
+}
 
 int ComposerToolbar::priority(Slot slot)
 {
@@ -254,13 +335,50 @@ int ComposerToolbar::priority(Slot slot)
     }
 }
 
-void ComposerToolbar::add(Slot slot, QWidget *item)
+QHBoxLayout *ComposerToolbar::zoneLayout(Zone zone) const
 {
+    return zone == Zone::Left ? m_leading : zone == Zone::Centre ? m_centre : m_trailing;
+}
+
+void ComposerToolbar::place(const Item &item)
+{
+    const Zone where = zone(item.slot, m_three);
     int index = 0;
     for (const auto &existing : m_items)
-        if (existing.widget && leading(existing.slot) == leading(slot) && existing.slot < slot) ++index;
-    (leading(slot) ? m_leading : m_trailing)->insertWidget(index, item, 0, Qt::AlignVCenter);
+        if (existing.widget && existing.widget != item.widget && zone(existing.slot, m_three) == where
+            && rank(existing.slot, m_three) < rank(item.slot, m_three) && zoneLayout(where)->indexOf(existing.widget) >= 0) ++index;
+    // The right zone starts with its stretch.
+    if (where == Zone::Right) ++index;
+    zoneLayout(where)->insertWidget(index, item.widget, item.slot == Slot::Status ? 1 : 0, Qt::AlignVCenter);
+}
+
+void ComposerToolbar::remove(QWidget *item)
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        if (m_items[i].widget != item) continue;
+        for (auto *zone : {m_leading, m_centre, m_trailing}) zone->removeWidget(item);
+        if (qobject_cast<ToolbarChip *>(item)) disconnect(item, nullptr, this, nullptr); else item->removeEventFilter(this);
+        m_items.removeAt(i);
+        break;
+    }
+    m_fitted.clear(); scheduleFit();
+}
+
+void ComposerToolbar::setThreeZones(bool three)
+{
+    if (three == m_three) return;
+    m_three = three;
+    for (const auto &item : m_items) if (item.widget) for (auto *zone : {m_leading, m_centre, m_trailing}) zone->removeWidget(item.widget);
+    auto order = m_items;
+    std::stable_sort(order.begin(), order.end(), [three](const Item &a, const Item &b) { return rank(a.slot, three) < rank(b.slot, three); });
+    for (const auto &item : order) if (item.widget) place(item);
+    m_fitted.clear(); fit();
+}
+
+void ComposerToolbar::add(Slot slot, QWidget *item)
+{
     m_items.append({slot, item});
+    place(m_items.last());
     if (auto *chip = qobject_cast<ToolbarChip *>(item)) {
         chip->setTheme(m_dark); connect(chip, &ToolbarChip::fitChanged, this, &ComposerToolbar::scheduleFit);
         connect(chip, &ToolbarChip::focusReleased, this, [this] {
@@ -317,15 +435,24 @@ QList<int> ComposerToolbar::fitInputs() const
     return inputs;
 }
 
-int ComposerToolbar::requiredWidth() const
+int ComposerToolbar::zoneWidth(Zone zone) const
 {
     int width = 0, count = 0;
     for (const auto &item : m_items) {
-        if (!item.widget || !item.widget->isVisibleTo(this)) continue;
+        // The status elides into whatever its zone has left.
+        if (!item.widget || !item.widget->isVisibleTo(this) || ComposerToolbar::zone(item.slot, m_three) != zone || item.slot == Slot::Status) continue;
         width += qMin(item.widget->sizeHint().width(), item.widget->maximumWidth()); ++count;
     }
+    return width + qMax(0, count - 1) * zoneLayout(zone)->spacing();
+}
+
+int ComposerToolbar::requiredWidth() const
+{
+    const int left = zoneWidth(Zone::Left), centre = zoneWidth(Zone::Centre), right = zoneWidth(Zone::Right);
     // The stretch between the zones is empty, so the layout spaces only real items.
-    return width + qMax(0, count - 1) * Spacing;
+    if (!centre) return left + right + (left && right ? Spacing * 2 : 0);
+    // The centre stays centred: both sides get the wider side's width.
+    return centre + 2 * qMax(left, right) + Spacing * 4;
 }
 
 void ComposerToolbar::fit()

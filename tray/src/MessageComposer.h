@@ -62,6 +62,9 @@ public:
     void setCompact(bool compact);
     // WhiteWh fork: how many iron rules go with every message (0 hides the chip).
     void setIronRulesCount(int count);
+    // U25: the compact row's Copy session reference (zerus://session), shown
+    // while the selected session has one to copy.
+    void setSessionReferenceAvailable(bool available);
     // modelDefaultEffort: an empty effort is a choice, the model's own default
     // (OpenCode variants); the popup then offers "Default" first.
     void setModelSettings(const QString &model, const QString &effort, const QJsonArray &options,
@@ -133,6 +136,9 @@ public:
 signals:
     void sessionRefreshRequested(const QString &sessionKey);
     void interruptRequested(const QString &sessionKey);
+    // U25: Copy session reference, and the iron rules chip.
+    void sessionReferenceRequested(const QString &sessionKey);
+    void ironRulesRequested();
     void settingsTerminalRequested(const QString &sessionKey);
     void settingsRequested(const QString &sessionKey, const QString &model, const QString &effort);
     void openCodeCatalogRequested(const QString &sessionKey);
@@ -257,7 +263,8 @@ private:
     QHBoxLayout *m_actions;
     bool m_narrow = false;
     bool m_compact = false;
-    class QLabel *m_rulesChip = nullptr;
+    QPushButton *m_rulesChip = nullptr, *m_sessionReference = nullptr;
+    bool m_sessionReferenceAvailable = false;
     class QFrame *m_card = nullptr;
     QHBoxLayout *m_cardRow = nullptr;
     void fitEditor();

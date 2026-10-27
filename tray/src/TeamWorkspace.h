@@ -17,7 +17,8 @@ class TeamPanel;
 class TeamTaskCard;
 
 // WhiteWh fork: agent teams. The Team tab next to Activity (design D3, HANDOFF
-// §14): the team bar, the Stuck and plan-error strips, Needs your answer (its
+// §14): the Stuck and plan-error strips (the team's status and actions are in
+// the lead session's header, U25), Needs your answer (its
 // slot always there), the canvas — the graph fitted and centered, the board or
 // the layer list — with the feed below, and a side column split between the
 // members and the coordinator's conversation; the divider is the owner's. The
@@ -27,6 +28,7 @@ class TeamWorkspace : public QWidget {
 public:
     struct Computer { QString alias, label; bool online = true; };
     TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *parent = nullptr);
+    ~TeamWorkspace() override;
     void setTheme(bool dark);
     void showTeam(const QString &team);
     void setLive(const Teams::LiveLookup &live) { m_live = live; scheduleRender(); }
@@ -34,6 +36,20 @@ public:
     std::function<void(const QString &host, const QString &session)> openSession;
     std::function<void(const QString &host, const QString &session, const QString &text)> sendMessage;
     std::function<void()> openTeamTab;
+    // U25 (spec 3): the lead session's header carries the team. headerStatus()
+    // goes after the session title: the team status, "Phase N waits for you"
+    // and "Waiting for you to finish", the phase, tasks and phases bars, the
+    // problems and the time since the start. headerActions() goes at the right
+    // of the chips row: the team's actions by state, with their confirmations.
+    // Both show above the canvas until a window takes them into its header.
+    QWidget *headerStatus() const { return m_headerStatus; }
+    QWidget *headerActions() const { return m_headerActions; }
+    void takeHeader();
+    // Off while the shown session is not the team's lead (or the team is archived).
+    void setHeaderShown(bool shown);
+    // "Phase N waits for you": opens the Team tab with that phase unfolded.
+    std::function<void()> openWorkspace;
+    void showPhase(int phase);
     void addMember(const Teams::Team &team);
     void render();
 protected:
@@ -41,7 +57,9 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
 private:
     void scheduleRender();
-    QWidget *teamBar(const Teams::Team &team, const QString &status);
+    void renderHeader();
+    QWidget *headerStatusContent(const Teams::Team &team, const QString &status);
+    QWidget *headerActionsContent(const Teams::Team &team);
     QWidget *finishSummary(const Teams::Team &team);
     // B5: the widening notice, and the approve that asks for the owner's
     // confirmation and sends confirm_widening.
@@ -73,11 +91,29 @@ private:
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).
     const Teams::Team *currentTeam(const QString &id) const;
-    QWidget *answers(const Teams::Team &team);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
     void linkDraft(const Teams::Team &team, int dependency, int task, bool add);
     QWidget *board(const Teams::Team &team);
+    // U25 (spec 5.3, 5.5): every phase a collapsible scroll in Graph, Board and
+    // Layers: header (number, status, accepted/tasks, proposed by or health,
+    // the collapsed summary, the owner's actions), the lead's note, the
+    // send-back form and the phase's body in the chosen view.
+    QWidget *phaseColumn(const Teams::Team &team);
+    QWidget *phaseScroll(const Teams::Team &team, const Teams::PhaseGroup &group);
+    QWidget *phaseGraph(const Teams::Team &team, const Teams::PhaseGroup &group);
+    QWidget *boardColumns(const Teams::Team &team, const QList<int> &ids, int phase);
+    QWidget *layerRows(const Teams::Team &team, const QList<int> &ids);
+    // The tasks with a problem and the tone each shows.
+    QMap<int, Teams::Tone> problemTasks(const Teams::Team &team) const;
+    // The text that names a task's problem on its card ("Needs your answer").
+    QString problemText(const Teams::Team &team, int task) const;
+    QSet<int> blockers(const Teams::Team &team) const;
+    void setAutoAccept(const Teams::Team &team, bool on);
+    void rejectPhase(const QString &team, int phase);
+    // U25 (spec 5.7): the right column's collapsed lists above the members:
+    // Needs your answer, Team stuck (with Show on graph) and Plan problems.
+    QWidget *sideLists(const Teams::Team &team, const QString &status);
     QWidget *members(const Teams::Team &team);
     QWidget *feed(const Teams::Team &team);
     void renderCoordinator(const Teams::Team &team, const QString &status);
@@ -109,11 +145,20 @@ private:
     bool m_membersOpen = true;
     // Spec 5.6: the sub-leads whose reports are folded in Members.
     QSet<QString> m_subFolded;
+    // U25: the draft whose send-back form is open, its text kept across
+    // renders, and Team stuck's Show on graph.
+    int m_rejectPhase = 0;
+    QString m_rejectText;
+    bool m_showBlockers = false, m_rejectFocus = false, m_zoomManual = false;
     double m_zoom = 1.0;
     int m_drawerTask = 0;
     QHash<QString, QPoint> m_scroll;
     // Rebuilt on every render.
-    QPointer<QWidget> m_top, m_left, m_membersContent;
+    QPointer<QWidget> m_top, m_left, m_membersContent, m_headerStatusContent, m_headerActionsContent;
+    // A window's header owns them once taken (takeHeader) and may go first.
+    QPointer<QWidget> m_headerStatus, m_headerActions;
+    QFrame *m_headerStrip;
+    bool m_headerTaken = false, m_headerShown = true;
     QVBoxLayout *m_topHost, *m_leftHost;
     // Kept between renders.
     QWidget *m_body;

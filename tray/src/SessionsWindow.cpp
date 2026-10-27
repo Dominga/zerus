@@ -639,6 +639,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             updateSessionLoading();
         });
     badges->addWidget(m_title, 1);
+    // U25 (spec 3): a lead session's team status follows the title (TeamWorkspace::headerStatus).
+    badges->addStretch(0); m_titleRow = badges;
     connect(&m_client,&HgsClient::sessionReferenceReady,this,[this](const QString &uri){emit copyTextRequested(uri);showNotice(tr("Session reference copied"));});
     connect(&m_client,&HgsClient::sessionReferenceFailed,this,[this](const QString &error){showNotice(error,true);});
     m_badge = label({}, "badge"); m_badge->setFixedHeight(24);
@@ -709,7 +711,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     {auto *h=new QHBoxLayout(m_branchChip);h->setContentsMargins(5,0,6,0);h->setSpacing(3);
      m_branchIcon=new QLabel;m_branchText=new QLabel;m_branchText->setObjectName("sessionBranchText");h->addWidget(m_branchIcon);h->addWidget(m_branchText);}
     auto *metadata = new QHBoxLayout; metadata->setSpacing(6); metadata->addWidget(m_providerBadge); metadata->addWidget(m_machineBadge); metadata->addWidget(m_branchChip); metadata->addWidget(m_meta, 1); metadata->addWidget(m_model);
-    detail->addLayout(metadata);
+    detail->addLayout(metadata); m_chipsRow = metadata;
     m_usageStore=new AccountUsageStore(hgsPath,this);
     m_usageStrip=new QWidget;m_usageStrip->setObjectName("sessionUsageStrip");m_usageStrip->setFixedHeight(22);m_usageStrip->hide();
     auto *usageLayout=new QHBoxLayout(m_usageStrip);usageLayout->setContentsMargins(0,0,0,0);usageLayout->setSpacing(4);
@@ -1266,6 +1268,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(&m_client, &HgsClient::questionAnswerSubmitted, this, [this](quint64 request, const QString &, const QString &, const QJsonObject &) {
         finishQuestion(request, true, {}, false, true);
     });
+    connect(m_composer,&MessageComposer::sessionReferenceRequested,this,[this](const QString &key){
+        if(const auto *entry=selected();entry&&entry->key==key)copySessionReference(*entry);
+    });
+    connect(m_composer,&MessageComposer::ironRulesRequested,this,[this]{
+        if(!m_ironRules||!m_inspector)return;
+        setInspectorVisible(true);
+        for(QWidget *page=m_ironRules;page;page=page->parentWidget())if(const int index=m_inspector->indexOf(page);index>=0){m_inspector->setCurrentIndex(index);break;}
+    });
     connect(m_composer,&MessageComposer::interruptRequested,this,[this](const QString &key) {
         const auto *entry=selected();
         if(!entry||key!=m_selectedKey||m_interruptRequest||m_details.value("interrupt_supported")!=true||awaitingRestoredInspection(*entry))return;
@@ -1524,6 +1534,12 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamWorkspace->sendMessage=m_teamPanel->sendMessage;
     m_teamWorkspace->openTeamTab=[this]{setInspectorVisible(true);m_inspector->setCurrentWidget(m_teamPanel);};
     m_teamWorkspace->setLive([this](const Teams::Member &member){return teamLive(member);});
+    // U25 (spec 3): the team's status and actions live in the lead session's
+    // header; the Team tab has no name bar of its own.
+    m_teamWorkspace->takeHeader();
+    m_titleRow->insertWidget(1,m_teamWorkspace->headerStatus());
+    m_chipsRow->addWidget(m_teamWorkspace->headerActions());
+    m_teamWorkspace->openWorkspace=[this]{if(m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();};
     // The tab exists only while a team is shown.
     m_teamWorkspace->hide();
     m_teamNewTab=new QWidget(this);m_teamNewTab->setObjectName("teamNewTab");
@@ -2529,6 +2545,9 @@ void SessionsWindow::saveOrganization()
 void SessionsWindow::updateHeaderText()
 {
     // Always reserve the indicator's space; appearing must not re-elide the title.
+    // U25: beside a lead's team status the title takes only its own width.
+    const int titleWidth = m_teamHeader ? m_title->fontMetrics().horizontalAdvance(m_fullTitle) + 24 : QWIDGETSIZE_MAX;
+    if (m_title->maximumWidth() != titleWidth) m_title->setMaximumWidth(titleWidth);
     m_title->setText(m_title->fontMetrics().elidedText(m_fullTitle, Qt::ElideMiddle, qMax(20, m_title->width() - 22)));
     m_sessionLoading->move(qMin(m_title->fontMetrics().horizontalAdvance(m_title->text()) + 6, m_title->width() - 16),
         qMax(0, (m_title->height() - 16) / 2));
@@ -4254,6 +4273,8 @@ void SessionsWindow::renderDetails()
     }
     m_composer->setFileReferenceTarget(m_subagentId.isEmpty() ? entry->key : QString(), entry->host, entry->machine,
         fileReferenceContext(entry->session, m_details));
+    // U25: the composer row's Copy session reference, as the session menu offers it.
+    m_composer->setSessionReferenceAvailable(entry->online && !m_details.value("run_id").toString(entry->session.runId).isEmpty());
     auto s = entry->session;
     if (m_details.value("tracked").toBool() && m_details.value("last_event_at").toDouble() >= s.lastEventAt
         && m_details.value("provider_status_at").toDouble() >= s.providerStatusAt) {
@@ -6660,6 +6681,13 @@ void SessionsWindow::updateTeamPanel()
             computers.append({alias,alias,box&&box->ok&&now-m_fleet.peerPolledAt(alias)<FleetState::kPeerStaleMs});
         }
         m_teamWorkspace->setComputers(computers);
+        // U25 (spec 3): only the team's lead session carries it in its header.
+        {const auto *entry=selected();
+         const auto *record=team.isEmpty()?nullptr:m_teams->team(team);
+         const auto *member=record&&entry?record->memberOfSession(entry->host,entry->session.name):nullptr;
+         const bool lead=member&&member->lead&&record->status!="archived"&&entry->session.state!="archived";
+         m_teamWorkspace->setHeaderShown(lead);
+         if(lead!=m_teamHeader){m_teamHeader=lead;updateHeaderText();}}
         m_teamWorkspace->showTeam(team);
         const int index=m_detailTabs->indexOf(m_teamWorkspace);
         if(team.isEmpty()&&index>=0){if(m_detailTabs->currentWidget()==m_teamWorkspace)m_detailTabs->setCurrentIndex(0);m_detailTabs->removeTab(index);m_teamWorkspace->hide();}

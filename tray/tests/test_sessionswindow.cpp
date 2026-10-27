@@ -259,6 +259,7 @@ private slots:
     void teamRowBarsCountThePhaseInWork();
     void teamLeftoverStopAsksTheRealAction();
     void readmeScreenshots();
+    void leadSessionHeaderCarriesTheTeam();
     void groupsPersistFilterAndRevealAttention();
     void rebuildKeepsProjectOrderAtScale_data();
     void rebuildKeepsProjectOrderAtScale();
@@ -1679,6 +1680,101 @@ void TestSessionsWindow::readmeScreenshots()
         for (auto *label : form->findChildren<QLabel *>()) if (label->text().contains(gitFolder)) label->setText(QString(label->text()).replace(gitFolder, shown));
     }));
 }
+
+// U25 (spec 3, 4): the lead session's header carries its team after the title
+// (status, the three bars, the time) and the team's actions at the right of
+// the chips; a member's header does not, and the Team tab has no name bar.
+// The compact composer's row under the field has three zones, the centre one
+// centred under the field. ZERUS_TEAM_SHOTS=<dir> keeps both, dark and light.
+void TestSessionsWindow::leadSessionHeaderCarriesTheTeam()
+{
+    const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    QSettings().setValue("workspace/skin", "whitewh");
+    QSettings().setValue("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    QSettings().setValue("workspace/inspectorVisible", false);
+    const double now = QDateTime::currentSecsSinceEpoch();
+    const auto plain = ReadmeShots::fleet(now);
+    const QJsonObject data{{"inspect", ReadmeShots::conversations(plain, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", ReadmeShots::team(now)},
+                           {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+    const QString fixture = m_dir->filePath("hgs-lead-header");
+    QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    const auto shots = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
+    for (const QString theme : {"dark", "light"}) {
+        QSettings().setValue("workspace/theme", theme);
+        SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(plain); window.show();
+        auto *controller = window.findChild<TeamController *>(); QVERIFY(controller);
+        QTRY_COMPARE_WITH_TIMEOUT(controller->teams().size(), 1, 10000);
+        window.showSession({}, "claude/orbit/checkout");
+        auto *details = window.findChild<QWidget *>("sessionDetailPanel"); QVERIFY(details);
+        QWidget *status = nullptr;
+        QTRY_VERIFY_WITH_TIMEOUT((status = details->findChild<QWidget *>("teamHeaderStatus")) && status->isVisible(), 10000);
+        QCOMPARE(status->property("status").toString(), QStringLiteral("running"));
+        // After the title, before the session's own state pill.
+        auto *title = window.findChild<QLabel *>("detailTitle"); auto *badge = window.findChild<QLabel *>("badge");
+        const auto x = [details](QWidget *w) { return w->mapTo(details, QPoint()).x(); };
+        QVERIFY(x(status) > x(title)); QVERIFY(x(status) + status->width() < x(badge));
+        QVERIFY(qAbs(status->mapTo(details, QPoint()).y() - title->mapTo(details, QPoint()).y()) < title->height());
+        // Phase 1 is the whole plan here: 1 of 7 decided, one phase, an hour in.
+        auto *tasks = details->findChild<QWidget *>("teamHeaderTasks"); QVERIFY(tasks && tasks->isVisible());
+        QCOMPARE(tasks->property("done").toInt(), 1); QCOMPARE(tasks->property("total").toInt(), 7);
+        QVERIFY(details->findChild<QWidget *>("teamHeaderPhase")); QVERIFY(details->findChild<QWidget *>("teamHeaderPhases"));
+        auto *elapsed = details->findChild<QLabel *>("teamHeaderElapsedText"); QVERIFY(elapsed);
+        QVERIFY(elapsed->text().startsWith("1h") || elapsed->text() == "60m");
+        // Running: Pause and Stop… at the right of the chips row; nothing decided yet, so no Finish.
+        auto *pause = details->findChild<QPushButton *>("teamWorkspacePause"); auto *stop = details->findChild<QPushButton *>("teamWorkspaceStop");
+        QVERIFY(pause && pause->isVisible() && stop && stop->isVisible());
+        QVERIFY(!details->findChild<QPushButton *>("teamWorkspaceFinish"));
+        auto *provider = window.findChild<QWidget *>("sessionProviderBadge");
+        QVERIFY(qAbs(pause->mapTo(details, QPoint()).y() + pause->height() / 2 - provider->mapTo(details, QPoint()).y() - provider->height() / 2) <= 4);
+        QVERIFY(x(stop) + stop->width() > details->width() - 40);
+        // The Team tab has no name bar of its own.
+        auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
+        int teamTab = -1; for (int i = 0; i < tabs->count(); ++i) if (tabs->tabText(i) == "Team") teamTab = i;
+        QVERIFY(teamTab >= 0);
+        tabs->setCurrentIndex(teamTab);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QWidget *>("teamWorkspaceGraph"), 10000);
+        QVERIFY(!window.findChild<QWidget *>("teamWorkspaceBar"));
+        QVERIFY(!window.findChild<QWidget *>("teamWorkspaceHeader")->isVisible());
+        // The header keeps the team whichever tab is open (it is rebuilt on a refresh).
+        auto *progress = window.findChild<QWidget *>("teamHeaderProgress"); auto *actions = window.findChild<QWidget *>("teamHeaderActions");
+        QVERIFY(details->isAncestorOf(progress) && details->isAncestorOf(actions));
+        QVERIFY(progress->isVisible() && actions->isVisible());
+        tabs->setCurrentIndex(0);
+        // The composer row: three zones, the centre under the middle of the field.
+        auto *composer = window.findChild<MessageComposer *>("messageComposer"); QVERIFY(composer);
+        auto *toolbar = composer->toolbar(); QVERIFY(toolbar->threeZones());
+        auto *card = composer->findChild<QFrame *>("composerCard"); QVERIFY(card && card->isVisible());
+        auto *reference = composer->findChild<QPushButton *>("copySessionReference");
+        auto *attach = composer->findChild<QPushButton *>("attachMessageFile");
+        auto *model = composer->findChild<QPushButton *>("sessionModelSettings");
+        auto *context = composer->findChild<QWidget *>("activityContext");
+        QTRY_VERIFY(reference->isVisible());
+        QVERIFY(toolbar->isAncestorOf(reference) && toolbar->isAncestorOf(attach) && toolbar->isAncestorOf(model));
+        QVERIFY(toolbar->mapTo(composer, QPoint()).y() >= card->mapTo(composer, QPoint()).y() + card->height());
+        const auto cx = [composer](QWidget *w) { return w->mapTo(composer, QPoint()).x(); };
+        QVERIFY(cx(attach) < cx(context)); QVERIFY(cx(context) < cx(reference)); QVERIFY(cx(reference) + reference->width() < cx(model));
+        QVERIFY(cx(attach) < composer->width() / 3); QVERIFY(cx(model) > composer->width() * 2 / 3);
+        auto *stopInCard = composer->findChild<QPushButton *>("interruptAgent"); QVERIFY(card->isAncestorOf(stopInCard));
+        if (!shots.isEmpty()) {
+            QTest::qWait(300);
+            const int headerBottom = tabs->tabBar()->mapTo(details, QPoint(0, tabs->tabBar()->height())).y();
+            // From the window, so the panels' own backgrounds show.
+            const auto picture = window.grab();
+            const QPoint at = details->mapTo(&window, QPoint());
+            QVERIFY(picture.copy(QRect(at, QSize(details->width(), headerBottom + 4))).save(QDir(shots).filePath(QStringLiteral("ux-3-lead-header-%1.png").arg(theme))));
+            const QPoint composerAt = composer->mapTo(&window, QPoint(-12, -8));
+            QVERIFY(picture.copy(QRect(composerAt, composer->size() + QSize(24, 16))).save(QDir(shots).filePath(QStringLiteral("ux-3-composer-%1.png").arg(theme))));
+        }
+        // A member's header names no team actions (its Team tab stays).
+        window.showSession({}, "dsh/orbit/checkout-api");
+        QTRY_VERIFY_WITH_TIMEOUT(!progress->isVisible() && !actions->isVisible(), 10000);
+        QVERIFY(!window.findChild<QWidget *>("teamHeaderStatus"));
+        QTRY_VERIFY(window.findChild<QLabel *>("detailTitle")->maximumWidth() == QWIDGETSIZE_MAX);
+    }
+}
+
 
 // WhiteWh fork: a list collapsed when Zerus quit restores while the window is
 // still being built, before its pages and status bar exist.

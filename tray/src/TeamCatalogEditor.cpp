@@ -142,7 +142,7 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     // Banner: working designer, out-of-date draft, applied.
     m_banner = new QFrame; m_banner->setObjectName("teamCatalogBanner"); m_banner->hide();
     auto *bh = new QHBoxLayout(m_banner); bh->setContentsMargins(10, 6, 10, 6); bh->setSpacing(8);
-    m_bannerText = new QLabel; m_bannerText->setWordWrap(true); m_bannerText->setObjectName("teamCatalogBannerText");
+    m_bannerText = new QLabel; m_bannerText->setWordWrap(true); m_bannerText->setObjectName("teamCatalogBannerText"); m_bannerText->setTextFormat(Qt::PlainText);
     m_bannerAction = button(QString(), "teamCatalogRedo"); m_bannerAction->hide();
     m_bannerDiscard = button(tr("Discard draft"), "teamCatalogBannerDiscard"); m_bannerDiscard->hide();
     bh->addWidget(m_bannerText, 1); bh->addWidget(m_bannerAction); bh->addWidget(m_bannerDiscard);
@@ -205,18 +205,10 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     });
     connect(m_discard, &QPushButton::clicked, this, [this] {
         if (confirm && !confirm(QString(), tr("Discard draft"), tr("Drop every proposal in the designer's draft? The catalog stays as it is."), tr("Discard draft"))) return;
-        m_teams->call(QStringLiteral("catalog discard"), {}, [this](bool ok, const QJsonObject &, const QString &error) { if (!ok) m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped()); });
+        m_teams->discardDraft();
     });
     connect(m_bannerDiscard, &QPushButton::clicked, m_discard, &QPushButton::click);
-    connect(m_apply, &QPushButton::clicked, this, [this] {
-        int kept = 0; for (const auto &p : m_teams->catalog().proposals) kept += p.state == "kept";
-        if (confirm && !confirm(QString(), tr("Apply changes"), counted(kept, tr("Write %1 kept change as the next catalog version?"), tr("Write %1 kept changes as the next catalog version?")) + QLatin1Char(' ') + tr("Undecided ones stay in the draft; running teams keep their roster."), tr("Apply"))) return;
-        m_teams->call(QStringLiteral("catalog apply"), {}, [this](bool ok, const QJsonObject &result, const QString &error) {
-            if (!ok) { m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped()); return; }
-            m_applied = tr("Applied as v%1").arg(result.value("version").toInteger());
-            updateHeader();
-        });
-    });
+    connect(m_apply, &QPushButton::clicked, this, &TeamCatalogEditor::applyKept);
     connect(m_bannerAction, &QPushButton::clicked, this, [this] { if (askRedo) askRedo(m_teams->catalog().version); });
     connect(m_export, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getSaveFileName(this, tr("Export team catalog"), QStringLiteral("zerus-team-catalog.json"), tr("JSON (*.json)"));
@@ -331,9 +323,11 @@ void TeamCatalogEditor::updateHeader()
     m_legend->setText(QStringLiteral("<span style='color:%1;'>NEW</span> &nbsp;<span style='color:%2;'>CHANGED</span> &nbsp;<span style='color:%3;'>REMOVED</span> &nbsp;"
                                      "<span style='color:%4;text-decoration:line-through;'>old</span> <span style='color:%5;'>new</span>")
                           .arg(c.accent.name(), c.folder.name(), c.danger.name(), c.danger.name(), c.accent.name()));
-    // One banner at a time: out of date, working designer, then a result.
+    // One banner at a time: a refused Apply or Discard, out of date, working
+    // designer, then a result.
     QString text; QColor tone; bool redo = false;
-    if (stale) {
+    if (draft && !m_teams->draftError().isEmpty()) { text = QStringLiteral("⚠ ") + m_teams->draftError(); tone = c.danger; }
+    else if (stale) {
         text = tr("Draft is out of date — Apply is off. The catalog changed to v%1 after this draft was made on v%2; applying would overwrite those edits.")
                    .arg(base.version).arg(base.draftBase);
         tone = c.warn; redo = true;
@@ -765,10 +759,7 @@ QWidget *TeamCatalogEditor::draftEditor(const QString &kind, const QString &id)
     const auto &base = m_teams->catalog();
     auto *w = new QFrame; w->setObjectName("teamCatalogCard");
     auto *v = new QVBoxLayout(w); v->setContentsMargins(14, 12, 14, 14); v->setSpacing(10);
-    const auto decide = [this](const QString &proposal, const QString &decision) {
-        m_teams->call(QStringLiteral("catalog decide"), {{"proposal", proposal}, {"decision", decision}},
-                      [this](bool ok, const QJsonObject &, const QString &error) { if (!ok) m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped()); });
-    };
+    const auto decide = [this](const QString &proposal, const QString &decision) { m_teams->decideProposal(proposal, decision); };
     // One item, or every rule for Routing.
     QStringList ids;
     if (kind == "rule") {
@@ -801,6 +792,7 @@ QWidget *TeamCatalogEditor::draftEditor(const QString &kind, const QString &id)
             }
         }
         v->addLayout(head);
+        if (const auto error = p ? m_teams->proposalError(p->id) : QString(); !error.isEmpty()) v->addWidget(refusal(error, c, "teamProposalError"));
         if (p && !p->reason.isEmpty()) { auto *reason = label(p->reason, c.muted, 12); reason->setWordWrap(true); v->addWidget(reason); }
         auto *grid = new QGridLayout; grid->setHorizontalSpacing(10); grid->setVerticalSpacing(6); grid->setColumnStretch(1, 1);
         int at = 0;
@@ -843,7 +835,17 @@ void TeamCatalogEditor::showProposal(const QString &proposal)
 
 void TeamCatalogEditor::applyKept()
 {
-    if (m_apply->isEnabled()) m_apply->click();
+    // U15: from the draft's own state, not this editor's mode: the designer
+    // page applies while a hand edit hides the draft here.
+    const auto &base = m_teams->catalog();
+    int kept = 0; for (const auto &p : base.proposals) kept += p.state == "kept";
+    if (!kept || base.draftBase != base.version) return;
+    if (confirm && !confirm(QString(), tr("Apply changes"), counted(kept, tr("Write %1 kept change as the next catalog version?"), tr("Write %1 kept changes as the next catalog version?")) + QLatin1Char(' ') + tr("Undecided ones stay in the draft; running teams keep their roster."), tr("Apply"))) return;
+    m_teams->applyDraft([this](bool ok, const QJsonObject &result, const QString &) {
+        if (!ok) return;   // the controller keeps the refusal for the banner
+        m_applied = tr("Applied as v%1").arg(result.value("version").toInteger());
+        updateHeader();
+    });
 }
 
 void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &computers)

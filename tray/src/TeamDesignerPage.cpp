@@ -57,16 +57,18 @@ TeamDesignerPage::TeamDesignerPage(TeamController *teams, QWidget *parent) : QWi
     cv->addWidget(header);
     m_chatStack = new QStackedWidget;
     m_chatStack->addWidget(emptyState());
-    m_chatSplit = new QSplitter(Qt::Vertical); m_chatSplit->setChildrenCollapsible(false);
-    m_proposals = new QScrollArea; m_proposals->setObjectName("teamDesignerProposals"); m_proposals->setWidgetResizable(true);
-    m_proposals->setFrameShape(QFrame::NoFrame); m_proposals->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_chat = new TeamConversation(teams->client());
     m_chat->setPlaceholder(tr("Ask for changes…"));
     m_chat->setQuickAsks({tr("Explain current roles"), tr("Make a cheaper team for docs")});
-    m_chatSplit->addWidget(m_chat); m_chatSplit->addWidget(m_proposals);
+    m_chatStack->addWidget(m_chat);
+    // U15: the proposals stay under Start designer too; deciding them needs
+    // no designer session.
+    m_chatSplit = new QSplitter(Qt::Vertical); m_chatSplit->setChildrenCollapsible(false);
+    m_proposals = new QScrollArea; m_proposals->setObjectName("teamDesignerProposals"); m_proposals->setWidgetResizable(true);
+    m_proposals->setFrameShape(QFrame::NoFrame); m_proposals->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_chatSplit->addWidget(m_chatStack); m_chatSplit->addWidget(m_proposals);
     m_chatSplit->setStretchFactor(0, 3); m_chatSplit->setStretchFactor(1, 2);
-    m_chatStack->addWidget(m_chatSplit);
-    cv->addWidget(m_chatStack, 1);
+    cv->addWidget(m_chatSplit, 1);
     m_split->addWidget(chat);
     // The catalog.
     auto *catalog = new QWidget; catalog->setObjectName("teamDesignerCatalog");
@@ -217,9 +219,7 @@ void TeamDesignerPage::renderProposals()
     const int scroll = m_proposals->verticalScrollBar()->value();
     auto *content = new QWidget; content->setObjectName("teamDesignerProposalList");
     auto *v = new QVBoxLayout(content); v->setContentsMargins(10, 8, 10, 8); v->setSpacing(6);
-    const auto decide = [this](const QString &id, const QString &decision) {
-        m_teams->call(QStringLiteral("catalog decide"), {{"proposal", id}, {"decision", decision}}, [](bool, const QJsonObject &, const QString &) {});
-    };
+    const auto decide = [this](const QString &id, const QString &decision) { m_teams->decideProposal(id, decision); };
     // Apply stands with the proposals it writes.
     int kept = 0, undecided = 0;
     for (const auto &p : catalog.proposals) { kept += p.state == "kept"; undecided += p.state == "proposed"; }
@@ -241,6 +241,7 @@ void TeamDesignerPage::renderProposals()
     QObject::connect(apply, &QPushButton::clicked, this, [this] { m_editor->applyKept(); });
     bar->addWidget(apply);
     v->addLayout(bar);
+    if (!m_teams->draftError().isEmpty()) v->addWidget(refusal(m_teams->draftError(), c, "teamDesignerDraftError"));
     for (const auto &p : catalog.proposals) {
         if (p.state != "proposed" && m_closed.contains(p.id)) continue;
         const bool rejected = p.state == "rejected";
@@ -279,6 +280,8 @@ void TeamDesignerPage::renderProposals()
         QObject::connect(show, &QPushButton::clicked, this, [this, id = p.id] { m_editor->showProposal(id); });
         foot->addWidget(show, 0, Qt::AlignTop);
         cv->addLayout(foot);
+        // A refused decision stays with its proposal until a decision lands.
+        if (const auto error = m_teams->proposalError(p.id); !error.isEmpty()) cv->addWidget(refusal(error, c, "teamProposalError"));
         if (rejected) { auto *effect = card; effect->setStyleSheet(QStringLiteral("QFrame#teamDesignerProposal{background:transparent;}")); }
         v->addWidget(card);
     }

@@ -83,6 +83,18 @@ inline SessionInfo inspected(SessionInfo s, const QJsonObject &details)
     s.attentionId=attention;
     return s;
 }
+// Whether two rows agree in all that inspected() sets except its observation
+// times (backgroundObservedAt, providerStatusAt), which no view shows.
+inline bool sameInspection(const SessionInfo &a, const SessionInfo &b)
+{
+    return a.coordinationWait == b.coordinationWait && a.backgroundProcesses == b.backgroundProcesses
+        && a.backgroundStarted == b.backgroundStarted && a.backgroundCommand == b.backgroundCommand
+        && a.phase == b.phase && a.activity == b.activity && a.processState == b.processState
+        && a.providerError == b.providerError && a.recovery == b.recovery
+        && a.activitySummary == b.activitySummary && a.activityDetail == b.activityDetail
+        && a.currentTool == b.currentTool && a.toolDetail == b.toolDetail
+        && a.attentionId == b.attentionId && a.attentionAcknowledged == b.attentionAcknowledged;
+}
 inline QString providerFailure(const QJsonObject &error)
 {
     const auto kind = error.value("error_kind").toString();
@@ -341,6 +353,29 @@ inline QString currentAction(const SessionInfo &s, bool online = true)
     if (!s.currentTool.isEmpty()) return s.currentTool + (s.toolDetail.isEmpty() ? QString() : QStringLiteral(": ") + s.toolDetail);
     if (!s.prompt.isEmpty()) return status(s) + QStringLiteral(": ") + promptPreview(s.prompt);
     return s.tracked ? status(s) : QObject::tr("Open terminal to view activity");
+}
+
+// When status() or currentAction() of this row may next read differently with
+// no new data, in msecs since the epoch: each second of a retry countdown and of
+// a wait's first hour, then as its elapsed time is shown; when a scheduled run
+// comes due, and at midnight before that. Never: max. A view that skips
+// unchanged listings renders such rows again by then.
+inline qint64 textChangesAt(const SessionInfo &s, qint64 nowMs)
+{
+    if (s.recovery.value("state") == "waiting") return nowMs;
+    qint64 at = std::numeric_limits<qint64>::max();
+    if (waitingIdle(s)) {
+        const auto items = s.coordinationWait.value("items").toArray();
+        at = qMin(at, SessionElapsed::changesAt(items.isEmpty() ? 0 : items.first().toObject().value("created_at").toDouble(), nowMs));
+    }
+    if (scheduledIdle(s) && s.nextScheduledAt > 0 && s.nextScheduledAt < 4e12) {
+        const qint64 due = qint64(s.nextScheduledAt) * 1000;
+        if (due + 1000 > nowMs) {
+            at = qMin(at, due > nowMs ? due : due + 1000);
+            at = qMin(at, QDateTime::fromMSecsSinceEpoch(nowMs).date().addDays(1).startOfDay().toMSecsSinceEpoch());
+        }
+    }
+    return at;
 }
 
 inline QString childCount(const SessionInfo &s, bool expanded = false, bool online = true, bool includeCompleted = true)

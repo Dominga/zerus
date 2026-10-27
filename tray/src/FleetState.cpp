@@ -6,9 +6,13 @@
 #include <QJsonArray>
 #include <QSet>
 #include <algorithm>
+#include <atomic>
 #include <utility>
 
 namespace {
+
+std::atomic<quint64> s_revision{0};
+quint64 nextRevision() { return ++s_revision; }
 
 int visibleSessionCount(const BoxState &box)
 {
@@ -164,10 +168,21 @@ void FleetState::updateUnread(const QString &host, BoxState &box)
         else ++it;
     }
 }
+void FleetState::updateAllUnread()
+{
+    updateUnread({}, m_local);
+    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) updateUnread(it.key(), it->box);
+}
 void FleetState::setAttentionMarks(const QJsonObject &marks)
 {
-    m_attentionMarks = marks; updateUnread({}, m_local);
-    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) updateUnread(it.key(), it->box);
+    m_attentionMarks = marks; updateAllUnread();
+}
+// Every pass recomputes each row's read state from these inputs alone, so only
+// the last of the separate passes counted; settling queued marks follows the
+// pending set and the rows, as it does in that last pass.
+void FleetState::setReadState(const QJsonObject &read, const QJsonObject &marks, const QJsonObject &pending)
+{
+    m_readReplies = read; m_attentionMarks = marks; m_pendingReads = pending; updateAllUnread();
 }
 SessionInfo *FleetState::matchingSession(const QString &host, const SessionInfo &expected)
 {
@@ -194,7 +209,11 @@ bool FleetState::applyNotificationPreferences(const QString &host, const Session
     const auto incoming = SessionNotifications::revision(preferences.value("revision"));
     if (incoming < current || (incoming == current && preferences != s->notificationPreferences)) return false;
     s->notificationPreferences = preferences; s->muted = preferences.value("muted").toBool();
-    s->notificationPreferencesError.clear(); return true;
+    s->notificationPreferencesError.clear();
+    // The row no longer matches its listing: the next one is applied in full.
+    if (host.isEmpty()) { m_localRevision = nextRevision(); m_local.digest.clear(); }
+    else { auto &entry = m_peers[host]; entry.revision = nextRevision(); entry.box.digest.clear(); }
+    return true;
 }
 bool FleetState::markSessionRead(const QString &host, const SessionInfo &expected)
 {
@@ -210,8 +229,7 @@ bool FleetState::markSessionRead(const QString &host, const SessionInfo &expecte
 }
 void FleetState::setReadReplies(const QJsonObject &read)
 {
-    m_readReplies = read; updateUnread({}, m_local);
-    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) updateUnread(it.key(), it->box);
+    m_readReplies = read; updateAllUnread();
 }
 QJsonObject FleetState::unreadReplies() const
 {
@@ -265,7 +283,7 @@ void FleetState::setLocal(const BoxState &box, qint64 /*nowMs*/)
     // на то, что isStale() вообще не смотрит на m_local.
     BoxState next = box; keepOptionalQuestions(next.sessions, m_local.sessions); keepNotificationPreferences(next.sessions, m_local.sessions);
     m_local = std::move(next); updateUnread({}, m_local);
-    m_haveLocal = true;
+    m_haveLocal = true; m_localRevision = nextRevision();
     if (box.peersKnown) {
         for (auto it = m_peers.begin(); it != m_peers.end(); ) {
             if (!box.peers.contains(it.key())) it = m_peers.erase(it); else ++it;
@@ -299,7 +317,9 @@ void FleetState::setPeer(const BoxState &box, qint64 nowMs)
         entry.box.host = box.host;
         entry.box.ok = false;
         entry.box.error = box.error;
+        entry.box.digest = box.digest;
     }
+    entry.revision = nextRevision();
 
     // polledAt обновляется всегда, даже на ok:false: мы СПРОСИЛИ и получили осмысленный
     // ответ (пир жив и сказал "не сейчас"), это не то же самое, что молчание/таймаут
@@ -308,6 +328,65 @@ void FleetState::setPeer(const BoxState &box, qint64 nowMs)
     // час" — см. tooltip().
     entry.polledAt = nowMs;
     entry.everPolled = true;
+}
+
+bool FleetState::refreshListing(const QString &host, const BoxState &box, qint64 nowMs)
+{
+    if (box.digest.isEmpty()) return false;
+    BoxState *current = nullptr;
+    PeerEntry *entry = nullptr;
+    if (host.isEmpty()) {
+        if (!m_haveLocal) return false;
+        current = &m_local;
+    } else {
+        if (m_local.peersKnown && !m_local.peers.contains(host)) return false;
+        const auto found = m_peers.find(host);
+        if (found == m_peers.end() || !found->everPolled) return false;
+        entry = &*found; current = &entry->box;
+    }
+    if (current->digest != box.digest) return false;
+    // setPeer keeps a peer's last rows and metrics through an unsuccessful answer.
+    if (box.ok || host.isEmpty()) {
+        const auto &rows = std::as_const(*current).sessions;
+        if (rows.size() != box.sessions.size()) return false;
+        for (qsizetype i = 0; i < rows.size(); ++i) if (rows[i].name != box.sessions[i].name) return false;
+        current->metrics = box.metrics;
+        for (qsizetype i = 0; i < rows.size(); ++i)
+            if (rows[i].backgroundObservedAt != box.sessions[i].backgroundObservedAt)
+                current->sessions[i].backgroundObservedAt = box.sessions[i].backgroundObservedAt;
+    }
+    if (entry) { entry->polledAt = nowMs; entry->everPolled = true; }
+    return true;
+}
+
+bool FleetState::refreshObservations(const FleetState &source)
+{
+    if (m_haveLocal != source.m_haveLocal || m_localRevision != source.m_localRevision
+        || m_local.sessions.size() != source.m_local.sessions.size() || m_peers.size() != source.m_peers.size()) return false;
+    for (auto it = m_peers.cbegin(), from = source.m_peers.cbegin(); it != m_peers.cend(); ++it, ++from)
+        if (it.key() != from.key() || it->revision != from->revision || it->box.sessions.size() != from->box.sessions.size()) return false;
+    const auto take = [](BoxState &box, const BoxState &from) {
+        box.metrics = from.metrics;
+        const auto &rows = std::as_const(box).sessions;
+        for (qsizetype i = 0; i < rows.size(); ++i)
+            if (rows[i].backgroundObservedAt != from.sessions[i].backgroundObservedAt)
+                box.sessions[i].backgroundObservedAt = from.sessions[i].backgroundObservedAt;
+    };
+    take(m_local, source.m_local);
+    auto from = source.m_peers.cbegin();
+    for (auto it = m_peers.begin(); it != m_peers.end(); ++it, ++from) {
+        take(it->box, from->box);
+        it->polledAt = from->polledAt; it->everPolled = from->everPolled;
+    }
+    return true;
+}
+
+QByteArray FleetState::freshness(qint64 nowMs) const
+{
+    QByteArray result;
+    for (auto it = m_peers.cbegin(); it != m_peers.cend(); ++it)
+        result += it.key().toUtf8() + (nowMs - it->polledAt < kPeerStaleMs ? "+\n" : "-\n");
+    return result;
 }
 
 int FleetState::totalSessions() const
@@ -423,8 +502,7 @@ void FleetState::queueRead(const QString &host, const SessionInfo &s, bool reply
 }
 void FleetState::setPendingReads(const QJsonObject &pending)
 {
-    m_pendingReads = pending; updateUnread({}, m_local);
-    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) updateUnread(it.key(), it->box);
+    m_pendingReads = pending; updateAllUnread();
 }
 QList<ReadMark> FleetState::takeNewReadMarks() { return std::exchange(m_newReads, {}); }
 QList<ReadMark> FleetState::takeSettledReadMarks() { return std::exchange(m_settledReads, {}); }

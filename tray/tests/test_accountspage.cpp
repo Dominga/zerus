@@ -84,6 +84,7 @@ private slots:
     void summaryCountsReadInSingularAndPlural();
     void initialLoadingPublishesOnlyGroupedAccounts();
     void hiddenStartupWarmsAndPublishesVerifiedIdentities();
+    void hiddenPageKeepsItsCatalogAndRendersWhenShown();
     void loadingFinishesWithPartialOrUnavailableResults_data();
     void loadingFinishesWithPartialOrUnavailableResults();
     void permissionsStayBoundToSelectedMachine();
@@ -1030,6 +1031,23 @@ void TestAccountsPage::hiddenStartupWarmsAndPublishesVerifiedIdentities()
     QVERIFY(!page.isVisible());
     const auto calls=[&]{QFile file(m_dir.filePath("calls"));if(!file.open(QIODevice::ReadOnly))return QByteArray();return file.readAll();};
     const auto before=calls();page.setFleet(fleet());QTest::qWait(60);QCOMPARE(calls(),before); // Ordinary fleet polls do not restart the warm-up.
+}
+
+void TestAccountsPage::hiddenPageKeepsItsCatalogAndRendersWhenShown()
+{
+    QFile shared(m_dir.filePath("shared-identity"));QVERIFY(shared.open(QIODevice::WriteOnly));shared.close();
+    AccountsPage page(FakeCli::program(m_script));page.resize(1000,700);
+    auto *list=page.findChild<QListWidget *>("accountProfiles");
+    page.setFleet(fleet());QVERIFY(!page.isVisible());
+    // Sessions read the catalog of the hidden page; its rows wait until it is shown.
+    QTRY_COMPARE(page.catalogProfiles().size(),8);
+    for(int i=0;i<3;++i)page.setFleet(fleet());
+    QCOMPARE(list->count(),0);
+    page.show();QCOMPARE(list->count(),7);QVERIFY(list->currentItem());
+    // A fleet change while hidden is rendered on the next show.
+    page.hide();page.setFleet(fleet(false));
+    QCOMPARE(page.catalogProfiles().size(),4);QCOMPARE(list->count(),7);
+    page.show();QCOMPARE(list->count(),4);
 }
 
 void TestAccountsPage::initialLoadingPublishesOnlyGroupedAccounts()

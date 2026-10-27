@@ -62,4 +62,5 @@ private:
     QJsonObject m_effectiveData;
     bool m_loading = false, m_dirty = false, m_new = false, m_installing = false;
     bool m_discardPrompt = false;
+    bool m_rowsStale = false;
 };

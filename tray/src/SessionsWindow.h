@@ -70,6 +70,10 @@ class SessionsWindow : public QWidget {
 public:
     explicit SessionsWindow(const QString &hgsPath, QWidget *parent = nullptr);
     void setFleet(const FleetState &fleet);
+    // The same listings as the last setFleet, refreshed by FleetState::refreshListing:
+    // pages take the new poll times and metrics, while rows, read state and the
+    // organization stay unless time alone changed what they show.
+    void refreshFleet(const FleetState &fleet);
     void showSessionList();
     void showUpdates();
     void showSession(const QString &host, const QString &name);
@@ -125,6 +129,8 @@ private:
     void applyContentScale();
     void applyActivityWidth();
     void saveOrganization();
+    void applyFleet(const FleetState &fleet, bool refresh);
+    bool refreshEntries();
     void setSessionRowCollapsed(const Entry &entry, bool collapsed);
     void saveSessionRowPreferences();
     void updateSessionRowPresentation();
@@ -149,7 +155,8 @@ private:
     void updateSessionLoading();
     void updateSessionFeedback();
     void rebuild();
-    QMap<int, QVariant> sessionCardRoles(const Entry &entry) const;
+    // includeCompleted: the workspace/showCompletedSubagents setting, read once per rebuild.
+    QMap<int, QVariant> sessionCardRoles(const Entry &entry, bool includeCompleted) const;
     QMap<int,QVariant> childCardRoles(const Entry &entry,const QString &id,const QJsonObject &child) const;
     void selectSession();
     void inspect();
@@ -449,6 +456,10 @@ private:
     bool m_pending = false, m_clipboard = false, m_rebuilding = false;
     // Polls keep hidden pages' data current; these pages render when shown.
     bool m_sessionsStale = false, m_dashboardStale = false;
+    // What the session rows were rendered with: peer reachability by poll age
+    // (FleetState::freshness), and when a row's text next changes with the clock.
+    QByteArray m_renderedFreshness;
+    qint64 m_rowsChangeAt = 0;
     QSet<QString> m_retryReads;
     QHash<QString, quint64> m_waitingPreparations;
     quint64 m_waitingPreparationSerial = 0;
@@ -476,6 +487,9 @@ private:
     SessionRowPreferences m_sessionRowPreferences;
     SwarmController *m_swarm = nullptr;
     QByteArray m_savedOrganization;
+    // SessionOrganization::revision() of the organization last saved and sent
+    // to the swarm; 0 when the next save must serialize it.
+    quint64 m_savedOrganizationRevision = 0;
     QPushButton *m_sessionsNav, *m_machinesNav, *m_accountsNav;
     SwarmButton *m_brand = nullptr;
     QString m_fullTitle, m_fullMeta;

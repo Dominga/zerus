@@ -46,6 +46,7 @@ private slots:
     void dashboardSelectionWaitsForProfiles();
     void controlOnlyComputerIsAConsoleWithoutSessions();
     void countsReadInSingularAndPlural();
+    void hiddenPageRendersFleetChangesWhenShown();
     void windowsConsoleEnablesLocalSessions();
     void enablingIsOfferedOnlyToAWindowsConsole();
     void windowsComputerPageHasNoSshConnection();
@@ -509,6 +510,23 @@ void TestMachinesPage::countsReadInSingularAndPlural()
     // A control console leaves one machine of the fleet.
     local.localSessions = false; fleet.setLocal(local, 0); page.setFleet(fleet);
     QVERIFY2(summary().contains("1 connected, 1 machine"), qPrintable(summary().join(" | ")));
+}
+void TestMachinesPage::hiddenPageRendersFleetChangesWhenShown()
+{
+    MachinesPage page(FakeCli::program(m_script)); start(page);
+    auto *list = widget<QListWidget>(page, "machineProfiles");
+    QCOMPARE(list->item(1)->text(), QString("mac\nNot connected"));
+    page.hide();
+    BoxState local; local.host = "arch"; local.ok = true;
+    BoxState mac; mac.host = "mac"; mac.ok = true; mac.sessions.resize(1);
+    FleetState fleet; fleet.setLocal(local, 0); fleet.setPeer(mac, QDateTime::currentMSecsSinceEpoch());
+    page.setFleet(fleet); page.setFleet(fleet);
+    QCOMPARE(list->item(1)->text(), QString("mac\nNot connected"));
+    page.show();
+    QCOMPARE(list->item(1)->text(), QString("mac\nConnected, 1 session"));
+    // A shown page renders each change at once.
+    mac.sessions.resize(2); fleet.setPeer(mac, QDateTime::currentMSecsSinceEpoch()); page.setFleet(fleet);
+    QCOMPARE(list->item(1)->text(), QString("mac\nConnected, 2 sessions"));
 }
 void TestMachinesPage::windowsConsoleEnablesLocalSessions()
 {

@@ -533,6 +533,9 @@ void AccountsPage::render()
     }
     m_displayProfiles=ready;
     if(!ready.isEmpty() || !pendingAccounts())m_hasSnapshot=true;
+    // Other views read the profiles above (catalogProfiles); the list renders
+    // when the page is shown (showEvent).
+    if(!isVisible())return;
     m_bodyStack->setCurrentIndex(m_hasSnapshot?1:0);
     const auto old = selected(); const QString oldKey = AccountCatalog::profileKey(old);
     const auto desiredKey=m_requestedProfile.isEmpty()?oldKey:m_requestedProfile;

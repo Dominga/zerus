@@ -396,13 +396,56 @@ TrayAgent::~TrayAgent()
     delete m_sessionsWindow;
 }
 
+TrayAgent::ReadState TrayAgent::storedReadState()
+{
+    return {SettingsJson::object("attention/readReplies"), SettingsJson::object("attention/sessionMarks"), ReadMarkStore::load(), true};
+}
+
+bool TrayAgent::readStateApplied(const ReadState &stored) const
+{
+    // Unchanged stored values share their parsed objects (SettingsJson), so these compare at once.
+    return m_appliedReadState.valid && stored.replies == m_appliedReadState.replies
+        && stored.marks == m_appliedReadState.marks && stored.pending == m_appliedReadState.pending;
+}
+
+void TrayAgent::updateLocalPoll(const BoxState &box)
+{
+    if (box.peersKnown && !m_peerTimer.isActive()) m_peerTimer.start();
+    // A control-only computer reports no sessions; its answer only carries the
+    // machine list and metrics. Every poll is a process start on Windows, so it
+    // polls less often, as does an enabled one until its host can push changes.
+    const int localPoll = AppConfig::localPollInterval(m_cfg.localPollMs, box.localSessions,
+                                                       MachinePlatform::of(box.metrics, true));
+    if (m_localTimer.interval() != localPoll) m_localTimer.setInterval(localPoll);
+}
+
+// A listing equal to the last one but for its observation fields: unread and
+// attention results, read marks, peers and the menu stay as they are. What
+// depends on poll times, metrics or the clock is refreshed.
+void TrayAgent::listingRefreshed(const QString &host)
+{
+    m_automaticApprovals->setFleet(m_state);
+    observeAttention(host, host.isEmpty() ? m_state.local() : *m_state.peer(host));
+    if (m_sessionsWindow) {
+        if (host.isEmpty()) m_sessionsWindow->setConnectionError(m_localReadError);
+        m_sessionsWindow->refreshFleet(m_state);
+        m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
+    }
+    refreshIcon();
+}
+
 void TrayAgent::onLocalReady(const BoxState &box)
 {
     m_localReadError = box.ok ? QString() : (box.error.isEmpty() ? tr("Could not read local sessions") : box.error);
-    m_state.setReadReplies(SettingsJson::object("attention/readReplies"));
-    m_state.setAttentionMarks(SettingsJson::object("attention/sessionMarks"));
-    m_state.setPendingReads(ReadMarkStore::load());
     m_lastError.clear();
+    const auto stored = storedReadState();
+    if (readStateApplied(stored) && m_state.refreshListing({}, box, QDateTime::currentMSecsSinceEpoch())) {
+        updateLocalPoll(box);
+        listingRefreshed({});
+        return;
+    }
+    m_appliedReadState.valid = false;
+    m_state.setReadState(stored.replies, stored.marks, stored.pending);
     const auto previousPeers = m_state.peerNames();
     m_state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
     m_automaticApprovals->setFleet(m_state);
@@ -413,13 +456,7 @@ void TrayAgent::onLocalReady(const BoxState &box)
     for (const auto &peer : m_state.peerNames())
         if (!previousPeers.contains(peer)) m_client.requestPeer(peer);
     if (m_streams && previousPeers != m_state.peerNames()) m_streams->setHosts(QStringList{QString()} + m_state.peerNames());
-    if (box.peersKnown && !m_peerTimer.isActive()) m_peerTimer.start();
-    // A control-only computer reports no sessions; its answer only carries the
-    // machine list and metrics. Every poll is a process start on Windows, so it
-    // polls less often, as does an enabled one until its host can push changes.
-    const int localPoll = AppConfig::localPollInterval(m_cfg.localPollMs, box.localSessions,
-                                                       MachinePlatform::of(box.metrics, true));
-    if (m_localTimer.interval() != localPoll) m_localTimer.setInterval(localPoll);
+    updateLocalPoll(box);
     observeAttention({}, m_state.local());
     if (m_sessionsWindow) { m_sessionsWindow->setConnectionError(m_localReadError); m_sessionsWindow->setFleet(m_state); m_sessionsWindow->setPollingHosts(m_client.pollingHosts()); }
     refreshIcon();
@@ -429,15 +466,21 @@ void TrayAgent::onLocalReady(const BoxState &box)
     // rebuildMenu() (см. onMenuAboutToShow), так что к тому моменту данные уже свежие.
     if (!m_menu.isOpen())
         rebuildMenu();
+    m_appliedReadState = storedReadState();
 }
 
 void TrayAgent::onPeerReady(const BoxState &box)
 {
     // box.host is the alias this answer was polled under (see HgsClient::requestPeer).
     if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
-    m_state.setReadReplies(SettingsJson::object("attention/readReplies"));
-    m_state.setAttentionMarks(SettingsJson::object("attention/sessionMarks"));
-    m_state.setPendingReads(ReadMarkStore::load());
+    const auto stored = storedReadState();
+    if (readStateApplied(stored) && m_state.refreshListing(box.host, box, QDateTime::currentMSecsSinceEpoch())) {
+        m_lastError.clear();
+        listingRefreshed(box.host);
+        return;
+    }
+    m_appliedReadState.valid = false;
+    m_state.setReadState(stored.replies, stored.marks, stored.pending);
     if (m_state.local().peersKnown && !m_state.local().peers.contains(box.host)) return;
     m_lastError.clear();
     m_state.setPeer(box, QDateTime::currentMSecsSinceEpoch());
@@ -451,6 +494,7 @@ void TrayAgent::onPeerReady(const BoxState &box)
     // позволить перерисовать меню безусловно: это и есть "строка заменяется, когда
     // пришёл ответ" из задания, а не расплывчатое обновление когда-нибудь потом.
     rebuildMenu();
+    m_appliedReadState = storedReadState();
 }
 
 void TrayAgent::onFailed(const QString &what, const QString &detail)

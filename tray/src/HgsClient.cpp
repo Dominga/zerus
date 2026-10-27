@@ -330,6 +330,45 @@ HgsClient::~HgsClient()
 }
 
 BoxState HgsClient::box(const QJsonObject &object) { return boxFromObject(object); }
+
+QByteArray HgsClient::listingDigest(const QJsonObject &listing)
+{
+    // Rows are hashed one by one, so only the rows themselves are copied to mask them.
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    auto meta = listing;
+    meta.remove(QStringLiteral("sessions")); meta.remove(QStringLiteral("metrics")); meta.remove(QStringLiteral("desktop_presence"));
+    hash.addData(QJsonDocument(meta).toJson(QJsonDocument::Compact));
+    for (const auto &value : listing.value(QStringLiteral("sessions")).toArray()) {
+        auto row = value.toObject();
+        row.remove(QStringLiteral("goal_observed_at"));
+        if (row.contains(QStringLiteral("process_work"))) {
+            auto work = row.value(QStringLiteral("process_work")).toObject();
+            work.remove(QStringLiteral("sampled_at")); row.insert(QStringLiteral("process_work"), work);
+        }
+        hash.addData(QByteArrayLiteral("\n"));
+        hash.addData(value.isObject() ? QJsonDocument(row).toJson(QJsonDocument::Compact) : QByteArrayLiteral("-"));
+    }
+    return hash.result();
+}
+
+BoxState HgsClient::listing(const QJsonObject &object)
+{
+    BoxState box = boxFromObject(object);
+    box.digest = listingDigest(object);
+    return box;
+}
+
+BoxState HgsClient::parseListing(const QByteArray &json, QString *error)
+{
+    if (error) error->clear();
+    QString parseError;
+    const QJsonObject object = JsonParse::object(json, &parseError);
+    if (!parseError.isEmpty()) {
+        if (error) *error = parseError;
+        return BoxState{};
+    }
+    return listing(object);
+}
 ProcessRunner::Request HgsClient::commandRequest(const QString &hgs, const QStringList &arguments) { return processRequest(hgs, arguments); }
 
 QList<SessionInfo> HgsClient::parseSessions(const QJsonArray &rows) {
@@ -750,7 +789,7 @@ void HgsClient::requestLocal()
     struct Listing { BoxState box; QString error; };
     runHgsParsed(m_hgs, {QStringLiteral("ls"), QStringLiteral("--json"), QStringLiteral("--local"), QStringLiteral("--no-archives")},
            15000, this,
-           [](const QByteArray &out) { Listing listing; listing.box = parseBox(out, &listing.error); return listing; },
+           [](const QByteArray &out) { Listing listing; listing.box = parseListing(out, &listing.error); return listing; },
            [this](const Listing &listing) {
                m_localInFlight = false;
                const QString &err = listing.error;
@@ -782,7 +821,7 @@ void HgsClient::requestPeer(const QString &peer)
     runHgsParsed(m_hgs, {QLatin1Char('@') + peer, QStringLiteral("ls"), QStringLiteral("--json"), QStringLiteral("--no-archives")},
            15000, this,
            [peer](const QByteArray &out) {
-               Listing listing; listing.box = parseBox(out, &listing.error);
+               Listing listing; listing.box = parseListing(out, &listing.error);
                // The CLI forwards the peer's own listing, whose host is the name
                // that machine gives itself (HGS_SELF or its host name). A machine
                // saved under another alias must still be found, polled and

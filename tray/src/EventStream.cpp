@@ -228,7 +228,7 @@ private:
             });
             QJsonArray sessions; for (const auto &row : std::as_const(rows)) sessions.append(row);
             auto listing = m_meta; listing["sessions"] = sessions;
-            BoxState box = HgsClient::box(listing);
+            BoxState box = HgsClient::listing(listing);
             // A peer's listing names the computer as it calls itself (requestPeer).
             if (!m_host.isEmpty()) box.reportedHost = std::exchange(box.host, m_host);
             m_listingDirty = false; m_lastListing = QDateTime::currentMSecsSinceEpoch();

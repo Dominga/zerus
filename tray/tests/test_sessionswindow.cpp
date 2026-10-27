@@ -301,6 +301,8 @@ private slots:
     void dashboardActivityRowsStayReadable_data();
     void dashboardActivityRowsStayReadable();
     void filtersSelectionAndOffline();
+    void refreshedListingsKeepRowsUnlessTimeChangesThem();
+    void organizationIsSavedOnlyWhenItChanges();
     void listFiltersKeepTheOpenConversation_data();
     void listFiltersKeepTheOpenConversation();
     void activeFilterCombinesWorkAndAttentionOnce();
@@ -4104,6 +4106,63 @@ void TestSessionsWindow::filtersSelectionAndOffline()
     QSignalSpy opened(&window, &SessionsWindow::sessionActivated);
     QTest::keyClick(list, Qt::Key_Return); QCOMPARE(opened.size(), 0);
     window.close(); // Closing a dashboard never invokes a session command.
+}
+
+void TestSessionsWindow::refreshedListingsKeepRowsUnlessTimeChangesThem()
+{
+    // Listings with digests, as polls and event streams deliver them (FleetState::refreshListing).
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    auto local = fleet().local(); local.digest = "arch-1";
+    auto mac = *fleet().peer("mac"); mac.digest = "mac-1";
+    FleetState state; state.setLocal(local, now); state.setPeer(mac, now - FleetState::kPeerStaleMs + 1500);
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1120, 680); window.setFleet(state); window.show();
+    auto *list = window.findChild<QListWidget *>("sessionList"); QVERIFY(list);
+    const auto row = [list](const QString &name) -> QListWidgetItem * {
+        for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(SessionRoles::Key).toString().endsWith('\n' + name)) return list->item(i);
+        return nullptr;
+    };
+    QVERIFY(row("kimi/docs/research")); QCOMPARE(row("claude/infra/review")->data(SessionRoles::Status).toString(), QString("Needs approval"));
+    // A rebuild renders every role from the fleet again; this one stands in for an unchanged row.
+    row("kimi/docs/research")->setData(SessionRoles::Detail, "kept");
+    auto later = local; later.metrics["cpu_percent"] = 42.0; later.sessions[0].backgroundObservedAt = 7;
+    QVERIFY(state.refreshListing({}, later, now + 100)); window.refreshFleet(state);
+    QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
+    QVERIFY(state.refreshListing("mac", mac, now - FleetState::kPeerStaleMs + 1500)); window.refreshFleet(state);
+    QCOMPARE(row("kimi/docs/research")->data(SessionRoles::Detail).toString(), QString("kept"));
+    // A changed listing renders at once.
+    auto changed = later; changed.digest = "arch-2"; changed.sessions[1].prompt = "Another prompt";
+    QVERIFY(!state.refreshListing({}, changed, now + 300)); state.setLocal(changed, now + 300); window.setFleet(state);
+    QVERIFY(row("kimi/docs/research")->data(SessionRoles::Detail).toString() != "kept");
+    // Rows whose text follows the clock render again: here a retry countdown.
+    auto retrying = changed; retrying.digest = "arch-3";
+    retrying.sessions[1].recovery = {{"state", "waiting"}, {"due_at", QDateTime::currentMSecsSinceEpoch() / 1000.0 + 30}};
+    state.setLocal(retrying, now + 400); window.setFleet(state);
+    QVERIFY(row("kimi/docs/research")->data(SessionRoles::Status).toString().startsWith("Retry in "));
+    row("kimi/docs/research")->setData(SessionRoles::Status, "kept");
+    QVERIFY(state.refreshListing({}, retrying, now + 500)); window.refreshFleet(state);
+    QVERIFY(row("kimi/docs/research")->data(SessionRoles::Status).toString().startsWith("Retry in "));
+    // A peer whose last poll grew stale is shown offline, even while the rest refreshes.
+    retrying.sessions[1].recovery = {}; retrying.digest = "arch-4"; state.setLocal(retrying, now + 600); window.setFleet(state);
+    QCOMPARE(row("claude/infra/review")->data(SessionRoles::Status).toString(), QString("Needs approval"));
+    QTRY_VERIFY_WITH_TIMEOUT(state.isStale(QDateTime::currentMSecsSinceEpoch()), 5000);
+    QVERIFY(state.refreshListing({}, retrying, QDateTime::currentMSecsSinceEpoch())); window.refreshFleet(state);
+    QCOMPARE(row("claude/infra/review")->data(SessionRoles::Status).toString(), QString("Offline"));
+}
+
+void TestSessionsWindow::organizationIsSavedOnlyWhenItChanges()
+{
+    QSettings().remove("workspace/organization");
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.setFleet(fleet()); window.show();
+    QTRY_VERIFY(QSettings().contains("workspace/organization"));
+    // Polls with the same rows leave the saved layout alone, whatever else wrote it.
+    QSettings().setValue("workspace/organization", QByteArray("{}"));
+    for (int i = 0; i < 3; ++i) window.setFleet(fleet());
+    QCOMPARE(QSettings().value("workspace/organization").toByteArray(), QByteArray("{}"));
+    // A newly observed session changes the layout, which is saved at once.
+    auto state = fleet(); auto local = state.local(); auto added = local.sessions[1]; added.name = "kimi/docs/second"; added.tag = "second";
+    local.sessions << added; state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state);
+    const auto saved = QSettings().value("workspace/organization").toByteArray();
+    QVERIFY(saved.contains("kimi/docs/second"));
 }
 
 void TestSessionsWindow::listFiltersKeepTheOpenConversation_data()

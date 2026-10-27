@@ -5,9 +5,11 @@
 #include <QColor>
 #include <QDir>
 #include <algorithm>
+#include <atomic>
 #include <utility>
 
 namespace {
+std::atomic<quint64> s_revision{0};
 // Stored folders keep the form of their machine: local Windows folders are drive or
 // UNC paths (MachinePlatform::clean), compared with either separator and any case.
 bool sameFolder(const QString &a, const QString &b)
@@ -71,8 +73,10 @@ SessionOrganization::SessionOrganization(const QJsonObject &data)
         const auto previous = beforePin.value(session).toString();
         moveSession(session, group(previous) ? previous : m_default);
     }
-
+    changed();
 }
+
+void SessionOrganization::changed() { m_revision = ++s_revision; }
 
 const SessionOrganization::Group *SessionOrganization::group(const QString &id) const
 {
@@ -136,7 +140,7 @@ QString SessionOrganization::createGroup(const QString &name,const QString &rese
     int position = 0;
     while (position < m_groups.size() && m_groups[position].id != "ungrouped") ++position;
     m_groups.insert(position, {id, title, false, {}, "#64b5f6", {}});
-    indexGroups();
+    indexGroups(); changed();
     return id;
 }
 
@@ -144,6 +148,7 @@ void SessionOrganization::renameGroup(const QString &id, const QString &name)
 {
     if (name.trimmed().isEmpty()) return;
     for (auto &g : m_groups) if (g.id == id) g.name = name.trimmed().left(80);
+    changed();
 }
 
 bool SessionOrganization::removeGroup(const QString &id, const QString &destination)
@@ -156,12 +161,14 @@ bool SessionOrganization::removeGroup(const QString &id, const QString &destinat
     for (const auto &session : displaced) m_sessionGroups.remove(session);
     if (m_default==id) m_default=target;
     for (const auto &session:displaced) moveSession(session,target);
+    changed();
     return true;
 }
 
 void SessionOrganization::setCollapsed(const QString &id, bool collapsed)
 {
     for (auto &g : m_groups) if (g.id == id) g.collapsed = collapsed;
+    changed();
 }
 
 void SessionOrganization::moveGroup(const QString &id, const QString &before)
@@ -174,7 +181,7 @@ void SessionOrganization::moveGroup(const QString &id, const QString &before)
     int to = 0;
     while (to < m_groups.size() && m_groups[to].id != before) ++to;
     m_groups.insert(to, g);
-    indexGroups();
+    indexGroups(); changed();
 }
 
 void SessionOrganization::moveSession(const QString &session, const QString &id, const QString &before)
@@ -190,6 +197,7 @@ void SessionOrganization::moveSession(const QString &session, const QString &id,
     const int position = before.isEmpty() ? -1 : ordered.indexOf(before);
     ordered.insert(position < 0 ? ordered.size() : position, session);
     m_sessionGroups.insert(session, id);
+    changed();
 }
 
 void SessionOrganization::renameSession(const QString &oldId, const QString &newId)
@@ -209,7 +217,7 @@ void SessionOrganization::renameSession(const QString &oldId, const QString &new
     }
     for (auto it = m_runs.begin(); it != m_runs.end(); ++it) if (it.value().toString() == oldId) it.value() = newId;
     if(m_currentRun.contains(oldId))m_currentRun[newId]=m_currentRun.take(oldId);
-    indexSessions();
+    indexSessions(); changed();
 }
 
 QString SessionOrganization::observe(const QString &machine, const QString &name, const QString &run, const QString &archive)
@@ -219,26 +227,33 @@ QString SessionOrganization::observe(const QString &machine, const QString &name
         const QString token = machine + '\n' + run;
         const auto old = m_runs.value(token).toString();
         if (!old.isEmpty()) renameSession(old, id);
-        m_runs.insert(token, id);
+        if (old != id) { m_runs.insert(token, id); changed(); }
         m_currentRun[id]=token;
     }
     if (!m_sessionGroups.contains(id)) {
         const auto prior=archive.isEmpty()?QString():m_runGroups.value(machine+'\n'+run).toString();
         if(!prior.isEmpty()&&group(prior))appendSession(id,prior);
         else {appendSession(id,m_default);m_unassigned.insert(id);}
+        changed();
     }
-    if(archive.isEmpty()&&!run.isEmpty()){const auto token=machine+'\n'+run;if(m_unassigned.contains(id))m_runGroups.remove(token);else m_runGroups[token]=groupFor(id);}
+    if(archive.isEmpty()&&!run.isEmpty()){
+        const auto token=machine+'\n'+run;
+        if(m_unassigned.contains(id)){if(m_runGroups.contains(token)){m_runGroups.remove(token);changed();}}
+        else if(const QJsonValue assigned(groupFor(id));m_runGroups.value(token)!=assigned){m_runGroups[token]=assigned;changed();}
+    }
     return id;
 }
 
 void SessionOrganization::setVivid(const QString &id, bool vivid)
 {
     for (auto &g : m_groups) if (g.id == id) g.vivid = vivid;
+    changed();
 }
 void SessionOrganization::setColor(const QString &id, const QString &color)
 {
     const QColor chosen(color); if (!chosen.isValid()) return;
     for (auto &g : m_groups) if (g.id == id) g.color = chosen.name();
+    changed();
 }
 QString SessionOrganization::addFolder(const QString &project, const QString &machine, const QString &path, const QString &name,
                                       MachinePlatform::Style style)
@@ -248,7 +263,7 @@ QString SessionOrganization::addFolder(const QString &project, const QString &ma
     for (auto &g : m_groups) if (g.id == project) {
         for (const auto &folder : g.folders) if (folder.machine == machine && MachinePlatform::same(folder.path, clean, style)) return folder.id;
         const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        g.folders.append({id, machine, clean, name.trimmed().left(80)}); return id;
+        g.folders.append({id, machine, clean, name.trimmed().left(80)}); changed(); return id;
     }
     return {};
 }
@@ -259,14 +274,14 @@ bool SessionOrganization::editFolder(const QString &project, const QString &id, 
     const auto clean = MachinePlatform::clean(path, style);
     for (auto &g : m_groups) if (g.id == project) {
         for (const auto &f : g.folders) if (f.id != id && f.machine == machine && MachinePlatform::same(f.path, clean, style)) return false;
-        for (auto &f : g.folders) if (f.id == id) { if(f.machine!=machine){f.machineId.clear();f.machineName.clear();} f.machine=machine; f.path=clean; f.name=name.trimmed().left(80); return true; }
+        for (auto &f : g.folders) if (f.id == id) { if(f.machine!=machine){f.machineId.clear();f.machineName.clear();} f.machine=machine; f.path=clean; f.name=name.trimmed().left(80); changed(); return true; }
     }
     return false;
 }
 void SessionOrganization::removeFolder(const QString &project, const QString &folder)
 {
     for (auto &g : m_groups) if (g.id == project) for (int i = 0; i < g.folders.size(); ++i)
-        if (g.folders[i].id == folder) { g.folders.removeAt(i); return; }
+        if (g.folders[i].id == folder) { g.folders.removeAt(i); changed(); return; }
 }
 QString SessionOrganization::moveFolder(const QString &project, const QString &folder, const QString &destination)
 {
@@ -305,6 +320,7 @@ QString SessionOrganization::transferFolder(const QString &project, const QStrin
         m_groups[to].folders.append(folder);
     }
     if (!copy) m_groups[from].folders.removeAt(index);
+    changed();
     return targetId;
 }
 QJsonObject SessionOrganization::toJson() const

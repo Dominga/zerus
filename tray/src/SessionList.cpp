@@ -248,6 +248,20 @@ bool SessionList::viewportEvent(QEvent *event)
                 else QToolTip::hideText();
                 return true;
             }
+            // U25 (spec 2.1): the project's '+'.
+            if (index.data(SessionRoles::Header).toBool() && SessionList::projectAddRect(visualItemRect(row)).contains(help->pos())) {
+                const QString project = index.data(SessionRoles::Title).toString(), folder = index.data(SessionRoles::ProjectFolder).toString();
+                QToolTip::showText(help->globalPos(), folder.isEmpty() ? tr("New session in %1").arg(project) : tr("New session in %1 (%2)").arg(project, folder),
+                                   viewport(), SessionList::projectAddRect(visualItemRect(row)));
+                return true;
+            }
+            // U25 (spec 2.3): why this session is muted.
+            if (const auto mute = SessionDelegate::muteRect(animationOption(index), index); mute.adjusted(-2, -2, 2, 2).contains(help->pos())) {
+                QToolTip::showText(help->globalPos(), index.data(SessionRoles::TeamMuted).toBool()
+                    ? tr("Notifications muted — team members are muted by default; the lead reports for them. Right-click to unmute.")
+                    : tr("Notifications muted. Right-click to unmute."), viewport(), mute);
+                return true;
+            }
             const auto question = SessionDelegate::optionalQuestionRect(visualItemRect(row), indexFromItem(row), font(),
                 property("compact").toBool(), row->isSelected());
             if (question.contains(help->pos())) {
@@ -259,31 +273,20 @@ bool SessionList::viewportEvent(QEvent *event)
             // phases they count.
             const auto team = row->data(SessionRoles::TeamLead).toMap();
             const auto teamStrip = SessionList::teamStripRect(visualItemRect(row));
+            // U25 (spec 2.4): the strip carries only the team icon; the
+            // tooltip names the team.
             if (!team.isEmpty() && teamStrip.contains(help->pos())) {
-                const auto text = team.value("progressTooltip").toString();
-                if (!text.isEmpty()) QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), teamStrip);
+                QString text = tr("Open team %1").arg(team.value("name").toString());
+                if (const auto progress = team.value("progressTooltip").toString(); !progress.isEmpty()) text += QLatin1Char('\n') + progress;
+                QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), teamStrip);
                 return true;
             }
-            const auto rect = SessionDelegate::gitStatusRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool());
-            if (rect.contains(help->pos())) {
-                const auto text = GitStatusBadge::tooltip(row->data(SessionRoles::GitStatus).toJsonObject());
-                QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), rect);
-                return true;
-            }
-            // G7: the services chip names them and reminds that they are not work.
-            const auto servicesRect = SessionDelegate::servicesRect(visualItemRect(row), indexFromItem(row), font(), property("compact").toBool());
-            if (servicesRect.contains(help->pos())) {
-                QStringList lines;
-                for (const auto &value : row->data(SessionRoles::Services).toList()) {
-                    const auto service = value.toMap();
-                    const double since = service.value("since").toDouble();
-                    lines << tr("%1 · since %2").arg(service.value("name").toString(),
-                        since > 0 ? QDateTime::fromSecsSinceEpoch(qint64(since)).toString(QStringLiteral("d MMM HH:mm")) : tr("unknown"));
+            // U25 (spec 2.2): each chip names what it counts.
+            for (const auto &chip : SessionDelegate::rowChips(visualItemRect(row), index, font(), property("compact").toBool()))
+                if (chip.rect.contains(help->pos())) {
+                    QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(SessionRowChips::tooltip(chip, index)), viewport(), chip.rect);
+                    return true;
                 }
-                lines << tr("These live with the session and are not Background work.");
-                QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(lines.join(QLatin1Char('\n'))), viewport(), servicesRect);
-                return true;
-            }
         }
     }
     if (event->type() == QEvent::ToolTip && narrow(this)) {
@@ -310,7 +313,8 @@ bool SessionList::viewportEvent(QEvent *event)
         }
     }
     if (event->type() == QEvent::Leave) {
-        setProperty("hoveredChildren", QString()); viewport()->unsetCursor(); viewport()->update();
+        setProperty("hoveredChildren", QString()); setProperty("hoveredAdd", QString()); setProperty("hoveredChip", QString());
+        viewport()->unsetCursor(); viewport()->update();
     }
     return WorkspaceList::viewportEvent(event);
 }
@@ -318,7 +322,7 @@ bool SessionList::viewportEvent(QEvent *event)
 void SessionList::mousePressEvent(QMouseEvent *e)
 {
     setKeyboardFocusVisible(false);
-    m_press = e->position().toPoint(); m_pressedGroup.clear(); m_pressedParent.clear(); m_togglePress = false;
+    m_press = e->position().toPoint(); m_pressedGroup.clear(); m_pressedParent.clear(); m_pressedAdd.clear(); m_pressedChip.clear(); m_togglePress = false;
     if (e->button() == Qt::RightButton) { e->accept(); return; }
     auto *item = itemAt(m_press);
     const bool additive = e->modifiers().testFlag(Qt::ControlModifier) || e->modifiers().testFlag(Qt::MetaModifier);
@@ -341,6 +345,12 @@ void SessionList::mousePressEvent(QMouseEvent *e)
         && teamStripRect(visualItemRect(item)).contains(m_press)) {
         m_pressedTeam = item->data(SessionRoles::TeamLead).toMap().value("id").toString();
         setFocus(); e->accept(); return;
+    }
+    // U25: the project's '+' and a card's chips act on release over them.
+    if (e->button() == Qt::LeftButton && item) {
+        const auto target = hoverTarget(m_press);
+        if (target.startsWith(QLatin1String("add:"))) { m_pressedAdd = target.mid(4); setFocus(); e->accept(); return; }
+        if (target.startsWith(QLatin1String("chip:"))) { m_pressedChip = target.mid(5); setFocus(); e->accept(); return; }
     }
     if (e->button() == Qt::LeftButton && item && item->data(SessionRoles::Header).toBool()) {
         m_pressedGroup = item->data(SessionRoles::Group).toString(); setFocus(); e->accept(); return;
@@ -420,15 +430,32 @@ void SessionList::mouseDoubleClickEvent(QMouseEvent *e)
     else emit rowCompacted(key);
 }
 
+// U25: what under the pointer acts on its own: "add:<project>" for a
+// project's '+', "chip:<key>\n<kind>" for a card's chip, or nothing.
+QString SessionList::hoverTarget(const QPoint &point) const
+{
+    const auto *item = itemAt(point);
+    if (!item || narrow(this)) return {};
+    const auto index = indexFromItem(item);
+    const QRect rect = visualItemRect(item);
+    if (index.data(SessionRoles::Header).toBool())
+        return projectAddRect(rect).contains(point) ? QStringLiteral("add:") + index.data(SessionRoles::Group).toString() : QString();
+    for (const auto &chip : SessionDelegate::rowChips(rect, index, font(), property("compact").toBool()))
+        if (chip.rect.contains(point)) return QStringLiteral("chip:") + index.data(SessionRoles::Key).toString() + QLatin1Char('\n') + QString::number(chip.kind);
+    return {};
+}
+
 void SessionList::mouseMoveEvent(QMouseEvent *e)
 {
     if (m_togglePress) { e->accept(); return; }
     const auto point = e->position().toPoint();
     const auto *item = itemAt(point);
     const QString hovered = childrenControlRect(item).contains(point) ? item->data(SessionRoles::Key).toString() : QString();
-    if (property("hoveredChildren").toString() != hovered) {
-        setProperty("hoveredChildren", hovered); viewport()->update();
-        if (hovered.isEmpty()) viewport()->unsetCursor(); else viewport()->setCursor(Qt::PointingHandCursor);
+    const QString target = hoverTarget(point);
+    const QString add = target.startsWith(QLatin1String("add:")) ? target.mid(4) : QString(), chip = target.startsWith(QLatin1String("chip:")) ? target.mid(5) : QString();
+    if (property("hoveredChildren").toString() != hovered || property("hoveredAdd").toString() != add || property("hoveredChip").toString() != chip) {
+        setProperty("hoveredChildren", hovered); setProperty("hoveredAdd", add); setProperty("hoveredChip", chip); viewport()->update();
+        if (hovered.isEmpty() && target.isEmpty()) viewport()->unsetCursor(); else viewport()->setCursor(Qt::PointingHandCursor);
     }
     if (!m_pressedParent.isEmpty()) { e->accept(); return; }
     if (!m_pressedGroup.isEmpty() && e->buttons().testFlag(Qt::LeftButton)) {
@@ -456,6 +483,14 @@ void SessionList::mouseReleaseEvent(QMouseEvent *e)
         if (e->button() == Qt::LeftButton && item
             && item->data(SessionRoles::TeamLead).toMap().value("id").toString() == id
             && (e->position().toPoint() - m_press).manhattanLength() < QApplication::startDragDistance()) emit teamActivated(id);
+        e->accept(); return;
+    }
+    if (!m_pressedAdd.isEmpty() || !m_pressedChip.isEmpty()) {
+        const QString add = std::exchange(m_pressedAdd, {}), chip = std::exchange(m_pressedChip, {});
+        const QString target = e->button() == Qt::LeftButton ? hoverTarget(e->position().toPoint()) : QString();
+        if (!add.isEmpty() && target == QLatin1String("add:") + add) emit projectNewSession(add);
+        if (!chip.isEmpty() && target == QLatin1String("chip:") + chip)
+            emit chipActivated(chip.section(QLatin1Char('\n'), 0, -2), chip.section(QLatin1Char('\n'), -1).toInt());
         e->accept(); return;
     }
     if (!m_pressedGroup.isEmpty()) {

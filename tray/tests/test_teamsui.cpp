@@ -679,6 +679,7 @@ private slots:
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
+    void draftIsDecidedWithoutADesignerSession();
     void designerQuestionIsAnsweredInTheWindow();
     void catalogEditorMarksManualEdits();
     void boardScrollsInsteadOfSqueezingColumns();
@@ -735,6 +736,29 @@ elif a[:2]==['team','status']:
  sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
+elif a[:3]==['team','catalog','decide'] or a[:3]==['team','catalog','apply']:
+ # U15: decisions and Apply change the draft as hgs does; `.refuse` refuses one.
+ import os
+ if a[2]=='decide' and os.path.exists(__file__+'.refuse'):print(open(__file__+'.refuse').read(),file=sys.stderr);sys.exit(1)
+ if a[2]=='apply' and os.path.exists(__file__+'.refuseapply'):print(open(__file__+'.refuseapply').read(),file=sys.stderr);sys.exit(1)
+ c=json.load(open(__file__+'.catalog'));draft=c['draft']
+ if a[2]=='decide':
+  for p in draft['proposals']:
+   if p['id']==body.get('proposal'):p['state']={'keep':'kept','reject':'rejected','undo':'proposed'}[body.get('decision')]
+  out={'status':'decided','proposal':body.get('proposal')}
+ else:
+  kept=[p for p in draft['proposals'] if p['state']=='kept']
+  for p in kept:
+   roles=[r for r in c['catalog']['roles'] if r['id']!=p['target']]
+   c['catalog']['roles']=roles+([p['value']] if p['action']!='remove' else [])
+  c['catalog']['version']+=1;c['draft']={'base':0,'proposals':[]}
+  out={'status':'applied','version':c['catalog']['version'],'changes':len(kept)}
+ open(__file__+'.catalog.new','w').write(json.dumps(c))
+ import time
+ for _ in range(100):
+  try:os.replace(__file__+'.catalog.new',__file__+'.catalog');break
+  except PermissionError:time.sleep(.05)   # Windows: a read holds the file
+ print(json.dumps(out))
 elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
  print('hgs: Phase 9 is not waiting for approval',file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','create']:print(json.dumps({'status':'created','team':'team-new','request_id':body.get('request_id')}))
@@ -763,6 +787,10 @@ void TestTeamsUi::init()
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
     QFile::remove(script() + ".statushold");
+    QFile::remove(script() + ".refuse");
+    QFile::remove(script() + ".refuseapply");
+    // Decisions and Apply change the fake catalog: each test starts from the fixture.
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(catalog()).toJson(QJsonDocument::Compact)));
     setTeam(team());
 }
 
@@ -4953,6 +4981,74 @@ else:print('{}')
     QTRY_VERIFY(input->isVisible());
     QTest::qWait(300);
     log.seek(0); QCOMPARE(log.readAll().count('\n'), 1);
+}
+
+// U15: with no designer session the draft is still decided, from the
+// proposals list and from the catalog, and applied; a refused decision shows
+// its error next to the proposal in every view of the draft.
+void TestTeamsUi::draftIsDecidedWithoutADesignerSession()
+{
+    auto fixture = catalog();
+    auto draft = fixture["draft"].toObject(); auto proposals = draft["proposals"].toArray();
+    auto second = proposals[1].toObject(); second["state"] = "proposed"; proposals[1] = second;
+    draft["proposals"] = proposals; fixture["draft"] = draft;
+    QVERIFY(FakeCli::replace(script() + ".catalog", QJsonDocument(fixture).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamDesignerPage page(&controller);
+    page.designerSession = [] { return QString(); };   // stopped or never started
+    page.confirm = [](const QString &, const QString &, const QString &, const QString &) { return true; };
+    page.setContext("/work/checkout", "checkout");
+    page.resize(1600, 900); page.show();
+    TeamDesignerPanel panel(&controller);
+    panel.resize(560, 900); panel.show();
+    QTRY_COMPARE(page.findChildren<QFrame *>("teamDesignerProposal").size(), 2);
+    QVERIFY(page.findChild<QWidget *>("teamDesignerEmpty")->isVisible());      // not started
+    QVERIFY(page.findChild<QScrollArea *>("teamDesignerProposals")->isVisible());
+    QVERIFY(page.findChild<QFrame *>("teamDesignerDraftBar")->isVisible());
+    const auto card = [&page](int n) { return page.findChildren<QFrame *>("teamDesignerProposal").value(n); };
+    // A refused decision: its error under the proposal, the draft unchanged.
+    QVERIFY(FakeCli::replace(script() + ".refuse", "hgs: The catalog draft is locked by another change"));
+    card(0)->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_VERIFY(card(0) && card(0)->findChild<QLabel *>("teamProposalError"));
+    QVERIFY(card(0)->findChild<QLabel *>("teamProposalError")->text().contains("locked by another change"));
+    QVERIFY(!card(1)->findChild<QLabel *>("teamProposalError"));
+    QCOMPARE(controller.catalog().proposals[0].state, QStringLiteral("proposed"));
+    QTRY_VERIFY(panel.findChild<QLabel *>("teamProposalError"));
+    QVERIFY(panel.findChild<QLabel *>("teamProposalError")->text().contains("locked by another change"));
+    shot(&page, "u15-decide-refused");
+    // Two proposals kept: p1 in the list, p2 in the catalog's draft card.
+    QFile::remove(script() + ".refuse");
+    card(0)->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(controller.catalog().proposals[0].state, QStringLiteral("kept"));
+    QTRY_VERIFY(!page.findChild<QLabel *>("teamProposalError"));
+    QVERIFY(!panel.findChild<QLabel *>("teamProposalError"));
+    page.editor()->showProposal("p2");
+    QTRY_VERIFY(page.editor()->findChild<QPushButton *>("teamProposalKeep"));
+    page.editor()->findChild<QPushButton *>("teamProposalKeep")->click();
+    QTRY_COMPARE(controller.catalog().proposals[1].state, QStringLiteral("kept"));
+    auto *apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
+    QTRY_VERIFY(apply && apply->isEnabled() && apply->text().contains(QStringLiteral("Apply 2 changes")));
+    shot(&page, "u15-two-kept-no-session");
+    // A refused Apply: its error under the DRAFT bar, the draft kept.
+    QVERIFY(FakeCli::replace(script() + ".refuseapply", "hgs: The catalog changed (now v5); refresh and try again"));
+    apply->click();
+    auto *draftError = page.findChild<QLabel *>("teamDesignerDraftError");
+    QTRY_VERIFY(draftError && draftError->isVisible());
+    QVERIFY(draftError->text().contains("The catalog changed (now v5)"));
+    QCOMPARE(controller.catalog().version, 3);
+    shot(&page, "u15-apply-refused");
+    QFile::remove(script() + ".refuseapply");
+    apply = page.findChild<QPushButton *>("teamDesignerApplyKept");
+    apply->click();
+    QTRY_COMPARE(controller.catalog().version, 4);   // v3 + 1
+    QCOMPARE(calls(script(), "catalog apply").size(), 2);
+    QCOMPARE(calls(script(), "catalog decide").size(), 3);
+    QVERIFY(controller.catalog().proposals.isEmpty());
+    QTRY_VERIFY(!page.findChild<QLabel *>("teamDesignerDraftError")->isVisible());
+    QVERIFY(!page.findChild<QScrollArea *>("teamDesignerProposals")->isVisible());
+    QVERIFY(controller.catalog().role("security"));
+    QCOMPARE(controller.catalog().role("tester")->agent, QStringLiteral("claude"));
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()

@@ -395,7 +395,7 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     m_bannerIcon = new QLabel; m_bannerIcon->setFixedSize(18, 18);
     auto *bt = new QVBoxLayout; bt->setSpacing(2);
     m_bannerTitle = new QLabel; m_bannerTitle->setObjectName("teamCatalogBannerTitle");
-    m_bannerText = new QLabel; m_bannerText->setWordWrap(true); m_bannerText->setObjectName("teamCatalogBannerText");
+    m_bannerText = new QLabel; m_bannerText->setWordWrap(true); m_bannerText->setObjectName("teamCatalogBannerText"); m_bannerText->setTextFormat(Qt::PlainText);
     bt->addWidget(m_bannerTitle); bt->addWidget(m_bannerText);
     m_bannerAction = button(QString(), "teamCatalogRedo"); m_bannerAction->hide();
     m_bannerDiscard = button(tr("Discard draft"), "teamCatalogBannerDiscard"); m_bannerDiscard->hide(); m_bannerDiscard->setProperty("danger", true);
@@ -466,18 +466,7 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     });
     connect(m_discard, &QPushButton::clicked, this, [this] { discardDraft(); });
     connect(m_bannerDiscard, &QPushButton::clicked, this, [this] { discardDraft(); });
-    connect(m_apply, &QPushButton::clicked, this, [this] {
-        int kept = 0; for (const auto &p : m_teams->catalog().proposals) kept += p.state == "kept";
-        if (confirm && !confirm(QStringLiteral("teamCatalogApplyConfirm"), tr("Apply changes"),
-                                counted(kept, tr("Write %1 kept change as the next catalog version?"), tr("Write %1 kept changes as the next catalog version?"))
-                                    + QLatin1Char(' ') + tr("Undecided ones stay in the draft; running teams keep their roster."), tr("Apply"))) return;
-        m_teams->call(QStringLiteral("catalog apply"), {}, [this](bool ok, const QJsonObject &result, const QString &error) {
-            if (!ok) { m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped()); return; }
-            m_applied = tr("Applied as v%1").arg(result.value("version").toInteger());
-            updateHeader();
-            m_teams->refreshCatalog();
-        });
-    });
+    connect(m_apply, &QPushButton::clicked, this, &TeamCatalogEditor::applyKept);
     connect(m_bannerAction, &QPushButton::clicked, this, [this] { if (askRedo) askRedo(m_teams->catalog().version); });
     connect(m_export, &QPushButton::clicked, this, [this] {
         const auto path = QFileDialog::getSaveFileName(this, tr("Export team catalog"), QStringLiteral("zerus-team-catalog.json"), tr("JSON (*.json)"));
@@ -589,23 +578,18 @@ void TeamCatalogEditor::changed()
     updateHeader();
 }
 
+// U15: decisions go through the controller, whatever the designer session's
+// state; a refusal stays on its proposal's plate.
 void TeamCatalogEditor::decide(const QString &proposal, const QString &decision)
 {
-    m_teams->call(QStringLiteral("catalog decide"), {{"proposal", proposal}, {"decision", decision}},
-                  [this](bool ok, const QJsonObject &, const QString &error) {
-                      if (!ok) m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped());
-                      m_teams->refreshCatalog();
-                  });
+    m_teams->decideProposal(proposal, decision);
 }
 
 void TeamCatalogEditor::discardDraft()
 {
     if (confirm && !confirm(QStringLiteral("teamCatalogDiscardConfirm"), tr("Discard draft"),
                             tr("Drop every proposal in the designer's draft? The catalog stays as it is."), tr("Discard draft"))) return;
-    m_teams->call(QStringLiteral("catalog discard"), {}, [this](bool ok, const QJsonObject &, const QString &error) {
-        if (!ok) m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped());
-        m_teams->refreshCatalog();
-    });
+    m_teams->discardDraft();   // a refusal shows in the banner
 }
 
 int TeamCatalogEditor::unsavedChanges() const
@@ -670,9 +654,12 @@ void TeamCatalogEditor::updateHeader()
     };
     m_legend->setText(legendMark(QStringLiteral("NEW"), c.accent) + QStringLiteral(" &nbsp;") + legendMark(QStringLiteral("CHANGED"), c.folder)
                       + QStringLiteral(" &nbsp;") + legendMark(QStringLiteral("REMOVED"), c.danger));
-    // One banner at a time: out of date, working designer, then a result.
+    // One banner at a time: a refused Apply or Discard, out of date, working
+    // designer, then a result.
     QString title, text; QColor tone; bool redo = false; QString icon = QStringLiteral("team");
-    if (stale) {
+    if (draft && !m_teams->draftError().isEmpty()) {
+        title = tr("The draft was not changed"); text = m_teams->draftError(); tone = c.danger; icon = QStringLiteral("warning");
+    } else if (stale) {
         title = tr("Draft is out of date — Apply is off");
         text = tr("The catalog was saved as v%1 after this draft started on v%2.").arg(base.version).arg(base.draftBase);
         tone = c.warn; redo = true; icon = QStringLiteral("warning");
@@ -830,6 +817,7 @@ QWidget *TeamCatalogEditor::proposalPlate(const Proposal &p)
         head->addWidget(undo);
     }
     v->addLayout(head);
+    if (const auto error = m_teams->proposalError(p.id); !error.isEmpty()) v->addWidget(refusal(error, c, "teamProposalError"));
     if (!p.reason.isEmpty()) v->addWidget(hint(p.reason, c.text2));
     return plate;
 }
@@ -1600,7 +1588,17 @@ void TeamCatalogEditor::showProposal(const QString &proposal)
 
 void TeamCatalogEditor::applyKept()
 {
-    if (m_apply->isEnabled()) m_apply->click();
+    // U15: from the draft's own state, not this editor's mode: the designer
+    // page applies while a hand edit hides the draft here.
+    const auto &base = m_teams->catalog();
+    int kept = 0; for (const auto &p : base.proposals) kept += p.state == "kept";
+    if (!kept || base.draftBase != base.version) return;
+    if (confirm && !confirm(QStringLiteral("teamCatalogApplyConfirm"), tr("Apply changes"), counted(kept, tr("Write %1 kept change as the next catalog version?"), tr("Write %1 kept changes as the next catalog version?")) + QLatin1Char(' ') + tr("Undecided ones stay in the draft; running teams keep their roster."), tr("Apply"))) return;
+    m_teams->applyDraft([this](bool ok, const QJsonObject &result, const QString &) {
+        if (!ok) return;   // the controller keeps the refusal for the banner
+        m_applied = tr("Applied as v%1").arg(result.value("version").toInteger());
+        updateHeader();
+    });
 }
 
 void TeamCatalogEditor::setSources(HgsClient *client, const QList<Computer> &computers)

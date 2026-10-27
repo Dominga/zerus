@@ -1718,6 +1718,14 @@ inline QLabel *label(const QString &text, const QColor &color, int pixels = 12, 
     return l;
 }
 
+// U15: what hgs refused, shown next to what was tried.
+inline QLabel *refusal(const QString &error, const Colors &c, const char *name)
+{
+    auto *l = label(QStringLiteral("⚠ ") + error, c.danger, 11, false, name);
+    l->setWordWrap(true);
+    return l;
+}
+
 // QA: a label that keeps its whole text (for tests and tooltips) and paints it
 // elided with an ellipsis when the row is narrower than the text.
 class ElidingLabel : public QLabel {

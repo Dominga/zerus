@@ -194,7 +194,29 @@ bool FleetState::applyNotificationPreferences(const QString &host, const Session
     const auto incoming = SessionNotifications::revision(preferences.value("revision"));
     if (incoming < current || (incoming == current && preferences != s->notificationPreferences)) return false;
     s->notificationPreferences = preferences; s->muted = preferences.value("muted").toBool();
-    s->notificationPreferencesError.clear(); return true;
+    s->notificationPreferencesError.clear(); applyMute(host, *s); return true;
+}
+bool FleetState::setTeamMembers(const QSet<QString> &members)
+{
+    if (members == m_teamMembers) return false;
+    m_teamMembers = members;
+    applyMutes({}, m_local);
+    for (auto it = m_peers.begin(); it != m_peers.end(); ++it) applyMutes(it.key(), it.value().box);
+    return true;
+}
+void FleetState::applyMutes(const QString &host, BoxState &box) const
+{
+    for (auto &s : box.sessions) applyMute(host, s);
+}
+void FleetState::applyMute(const QString &host, SessionInfo &s) const
+{
+    // Revision 0 is the host's default: the session never chose.
+    const bool chosen = SessionNotifications::valid(s.notificationPreferences, s.conversationId)
+        && SessionNotifications::revision(s.notificationPreferences.value("revision")) > 0;
+    // Without a choice, a mute the session already carries stays; the team adds its own.
+    const bool own = s.muted && !s.teamMuted;
+    s.teamMuted = !chosen && !own && m_teamMembers.contains(host + QLatin1Char('\n') + s.name);
+    s.muted = chosen ? s.notificationPreferences.value("muted").toBool() : own || s.teamMuted;
 }
 bool FleetState::markSessionRead(const QString &host, const SessionInfo &expected)
 {
@@ -264,6 +286,7 @@ void FleetState::setLocal(const BoxState &box, qint64 /*nowMs*/)
     // локальный и синхронный по сути (миллисекунды). localIsAlwaysFresh() полагается
     // на то, что isStale() вообще не смотрит на m_local.
     BoxState next = box; keepOptionalQuestions(next.sessions, m_local.sessions); keepNotificationPreferences(next.sessions, m_local.sessions);
+    applyMutes({}, next);
     m_local = std::move(next); updateUnread({}, m_local);
     m_haveLocal = true;
     if (box.peersKnown) {
@@ -289,7 +312,8 @@ void FleetState::setPeer(const BoxState &box, qint64 nowMs)
 
     if (box.ok) {
         const auto before = std::exchange(entry.box.sessions, {});
-        entry.box = box; keepOptionalQuestions(entry.box.sessions, before); keepNotificationPreferences(entry.box.sessions, before); updateUnread(box.host, entry.box);
+        entry.box = box; keepOptionalQuestions(entry.box.sessions, before); keepNotificationPreferences(entry.box.sessions, before);
+        applyMutes(box.host, entry.box); updateUnread(box.host, entry.box);
     } else {
         // Пир ответил "я офлайн/сплю" — это не то же самое, что "мы не знаем, что там".
         // hgs в таком случае не может опросить tmux и присылает sessions:[], но реальные

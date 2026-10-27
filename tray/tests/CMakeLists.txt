@@ -566,7 +566,7 @@ target_link_libraries(test_accountusage PRIVATE Qt6::Test Qt6::Widgets hgs-tray-
 zerus_add_test(accountusage test_accountusage)
 set_tests_properties(accountusage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-add_executable(test_newsessiondialog test_newsessiondialog.cpp)
+add_executable(test_newsessiondialog test_newsessiondialog.cpp ../resources.qrc)
 target_link_libraries(test_newsessiondialog PRIVATE Qt6::Test hgs-tray-views)
 target_compile_definitions(test_newsessiondialog PRIVATE ZERUS_OPENCODE_EFFORT_IDS="${PROJECT_SOURCE_DIR}/../tests/fixtures/opencode-effort-ids.json")
 zerus_add_test(newsessiondialog test_newsessiondialog)

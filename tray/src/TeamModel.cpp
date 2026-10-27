@@ -350,6 +350,7 @@ Team parse(const QJsonObject &v)
             PermissionAnswer answer;
             answer.questionId = str(a, "question_id"); answer.decision = str(a, "decision");
             answer.by = str(a, "by"); answer.reason = str(a, "reason"); answer.at = a.value("at").toDouble();
+            answer.tool = str(a, "tool"); answer.command = str(a, "command");
             if (!answer.decision.isEmpty()) member.permissionAnswers.append(answer);
         }
         if (m.value("budget").isObject()) {
@@ -521,6 +522,9 @@ Team parse(const QJsonObject &v)
                 answer.decision = str(item, "decision");
                 answer.by = str(item, "by");
                 answer.reason = str(item, "reason");
+                // U17: the tool and command the agent asked about.
+                answer.tool = str(item, "tool");
+                answer.command = str(item, "command");
                 answer.at = item.value("at").toDouble();
                 attempt.permissions.append(answer);
             }

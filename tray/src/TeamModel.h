@@ -42,9 +42,10 @@ struct Question {
 };
 
 // C4: one answered permission request (members[].permission_answers keeps the
-// last 20): what was decided, who decided it and the deny text.
+// last 20): what was decided, who decided it, the tool and command it asked
+// about and the deny text.
 struct PermissionAnswer {
-    QString questionId, decision, by, reason;
+    QString questionId, decision, by, reason, tool, command;
     double at = 0;
     bool denied() const { return decision == "deny"; }
 };

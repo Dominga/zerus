@@ -387,6 +387,29 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             }
         }
     }
+    // U17/B1: the answers stored on the member while an attempt ran belong to
+    // it; the task card lists them with that attempt (newest shown first).
+    if let Some(tasks) = value["tasks"].as_array_mut() {
+        for (task, value) in team.tasks.iter().zip(tasks) {
+            let Some(member) = team.member(&task.assignee) else { continue };
+            if member.permission_answers.is_empty() {
+                continue;
+            }
+            let Some(attempts) = value["attempts"].as_array_mut() else { continue };
+            for (index, attempt) in attempts.iter_mut().enumerate() {
+                let Some(sent) = task.attempts.get(index).map(|attempt| attempt.sent_at) else { continue };
+                let end = task.attempts.get(index + 1).map(|next| next.sent_at).unwrap_or(f64::INFINITY);
+                let answers: Vec<&Value> = member
+                    .permission_answers
+                    .iter()
+                    .filter(|answer| answer["at"].as_f64().is_some_and(|at| at >= sent && at < end))
+                    .collect();
+                if !answers.is_empty() {
+                    attempt["permissions"] = json!(answers);
+                }
+            }
+        }
+    }
     // C4: the reports the owner's attention list shows.
     value["attention"] = json!(super::inbox::attention(team, super::super::now()));
     // Section 9.4: a delegated task shows its sub-team, and the team lists its
@@ -1352,10 +1375,23 @@ fn answer(input: &Value) -> anyhow::Result<Value> {
     let mut store = Store::open(true)?;
     store.mutate(None, &team.id, None, |team, events| {
         let member = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        // U17: the stored answer keeps the tool and the command the agent asked
+        // about, so the desktop can list them beside the decision.
+        let (asked_tool, asked_command) = member
+            .permission
+            .as_ref()
+            .map(|pending| {
+                (
+                    pending["tool"].as_str().unwrap_or_default().to_owned(),
+                    pending["command"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .unwrap_or_default();
         if member.permission.as_ref().is_some_and(|pending| pending["question_id"] == question.as_str()) {
             member.permission = None;
         }
-        member.permission_answers.push(json!({"question_id":question,"decision":decision,"by":who,"at":now(),"reason":reason}));
+        member.permission_answers.push(json!({"question_id":question,"decision":decision,"by":who,"at":now(),"reason":reason,
+            "tool":asked_tool,"command":asked_command}));
         let excess = member.permission_answers.len().saturating_sub(20);
         member.permission_answers.drain(..excess);
         events.push(Event::new(
@@ -3935,7 +3971,13 @@ mod tests {
         let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
         member.permission = Some(json!({"question_id":"toolu_1","tool":"Bash","command":"rm -rf build",
             "command_source":"tool_input","reason":"clean the build","asked_at":30.0}));
-        member.permission_answers = vec![json!({"question_id":"q0","decision":"deny","by":"lead","at":25.0,"reason":"not now"})];
+        // U17: an answer keeps the tool and command it was asked about; the one
+        // from this attempt's window belongs to the attempt.
+        member.permission_answers = vec![
+            json!({"question_id":"q0","decision":"deny","by":"lead","at":25.0,"reason":"not now",
+                "tool":"Bash","command":"rm -rf build"}),
+            json!({"question_id":"q1","decision":"allow","by":"owner","at":5.0,"reason":"","tool":"Bash","command":"ls"}),
+        ];
         let value = view_with(&team, &[], None);
         let question = &value["members"][1]["question"];
         assert_eq!(
@@ -3944,6 +3986,12 @@ mod tests {
         );
         assert_eq!(value["members"][1]["permission_answers"][0]["by"], "lead");
         assert_eq!(value["members"][1]["permission_answers"][0]["decision"], "deny");
+        assert_eq!(value["members"][1]["permission_answers"][0]["command"], "rm -rf build");
+        // The attempt (sent at 10.0) carries the answer at 25.0, not the one at 5.0.
+        let attempt = &value["tasks"][0]["attempts"][0];
+        assert_eq!(attempt["permissions"].as_array().unwrap().len(), 1, "{attempt}");
+        assert_eq!(attempt["permissions"][0]["command"], "rm -rf build");
+        assert_eq!(attempt["permissions"][0]["at"], 25.0);
         assert!(denies("No") && denies("Deny") && !denies("Allow"));
     }
 

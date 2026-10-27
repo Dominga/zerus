@@ -2172,16 +2172,23 @@ QWidget *TeamWorkspace::members(const Team &team)
             pv->addLayout(answerRow);
             col->addWidget(box);
         }
-        // The answers so far: who answered, and the deny reason.
-        for (const auto &answer : m.permissionAnswers) {
-            const QString by = answer.by == "owner" ? tr("you") : answer.by == "lead" ? tr("the lead")
-                             : answer.by == "rule" ? tr("a rule") : answer.by == "timeout" ? tr("a timeout") : tr("unknown");
-            QString line = answer.denied() ? tr("Denied by %1").arg(by) : tr("Allowed by %1").arg(by);
-            if (answer.denied() && !answer.reason.isEmpty()) line += QStringLiteral(": ") + answer.reason;
-            auto *mark = label(line, answer.denied() ? c.warn : c.accent, 10, false, "teamMemberPermissionAnswered");
-            mark->setWordWrap(true);
-            mark->setProperty("decision", answer.decision);
-            col->addWidget(mark);
+        // U17: the stored answers fold to one summary line and open to the
+        // newest five; the choice is kept for the team and the member.
+        if (!m.permissionAnswers.isEmpty()) {
+            const QString key = QStringLiteral("ui/expanded/teamPermissions/%1/%2").arg(team.id, m.id);
+            const bool open = QSettings().value(key, false).toBool();
+            auto *summary = permissionToggle(m.permissionAnswers, c, open, "teamMemberPermissionsToggle");
+            summary->setProperty("member", m.id);
+            QObject::connect(summary, &QToolButton::clicked, this, [this, key](bool expanded) {
+                QSettings().setValue(key, expanded);
+                scheduleRender();
+            });
+            col->addWidget(summary, 0, Qt::AlignLeft);
+            if (open) {
+                auto *list = permissionAnswerList(m.permissionAnswers, c, QDateTime::currentSecsSinceEpoch(), 5, "teamMemberPermissions");
+                list->setProperty("member", m.id);
+                col->addWidget(list);
+            }
         }
         bh->addLayout(col, 1);
         auto *right = new QVBoxLayout; right->setSpacing(3);

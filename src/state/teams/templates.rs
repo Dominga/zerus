@@ -63,26 +63,31 @@ const fn optional(name: &'static str, kind: Kind) -> Param {
 pub(crate) const BUILTIN: &[Template] = &[
     Template {
         id: "cargo-build",
-        summary: "cargo build --locked in your folder (a filter is a package name)",
+        summary: "cargo build --locked in your folder (optional package and toolchain)",
         program: "cargo",
-        args: &["build", "--locked", "--package={filter}"],
-        params: &[optional("filter", Kind::Identifier)],
+        args: &["+{toolchain}", "build", "--locked", "--package={package}"],
+        params: &[optional("toolchain", Kind::Identifier), optional("package", Kind::Identifier)],
         timeout_secs: 1800,
     },
     Template {
         id: "cargo-test",
-        summary: "cargo test --locked in your folder (a filter is a package name)",
+        summary: "cargo test --locked in your folder (a test-name filter, a binary, an optional package)",
         program: "cargo",
-        args: &["test", "--locked", "--package={filter}"],
-        params: &[optional("filter", Kind::Identifier)],
+        args: &["+{toolchain}", "test", "--locked", "--package={package}", "--bin={bin}", "{filter}"],
+        params: &[
+            optional("toolchain", Kind::Identifier),
+            optional("package", Kind::Identifier),
+            optional("bin", Kind::Identifier),
+            optional("filter", Kind::Identifier),
+        ],
         timeout_secs: 1800,
     },
     Template {
         id: "cargo-clippy",
-        summary: "cargo clippy --locked --all-targets -- -D warnings",
+        summary: "cargo clippy --locked --all-targets -- -D warnings (an optional package and toolchain)",
         program: "cargo",
-        args: &["clippy", "--locked", "--all-targets", "--package={filter}", "--", "-D", "warnings"],
-        params: &[optional("filter", Kind::Identifier)],
+        args: &["+{toolchain}", "clippy", "--locked", "--all-targets", "--package={package}", "--", "-D", "warnings"],
+        params: &[optional("toolchain", Kind::Identifier), optional("package", Kind::Identifier)],
         timeout_secs: 1800,
     },
     Template {
@@ -103,7 +108,7 @@ pub(crate) const BUILTIN: &[Template] = &[
     },
     Template {
         id: "qt-test",
-        summary: "a Qt test binary from .ci-build/gui, offscreen; shots into the folder",
+        summary: "a Qt test binary from .ci-build/gui, offscreen; functions are arguments, shots into the folder",
         program: ".ci-build/gui/{suite}",
         args: &[],
         params: &[param("suite", Kind::Identifier), optional("functions", Kind::Identifiers), optional("shots", Kind::Identifier)],
@@ -111,9 +116,9 @@ pub(crate) const BUILTIN: &[Template] = &[
     },
     Template {
         id: "git-merge-lead",
-        summary: "git merge --no-edit teams-v2/lead in your folder",
+        summary: "git merge --no-edit the lead's branch into your own folder",
         program: "git",
-        args: &["merge", "--no-edit", "teams-v2/lead"],
+        args: &["merge", "--no-edit"],
         params: &[],
         timeout_secs: 300,
     },
@@ -304,9 +309,28 @@ fn has_shell_syntax(value: &str) -> bool {
     value.chars().any(|c| matches!(c, '|' | '&' | ';' | '<' | '>' | '(' | ')' | '$' | '`' | '"' | '\'' | '^' | '!' | '*' | '?' | '\n' | '\r' | '\0'))
 }
 
-fn check_text(value: &str, what: &str) -> anyhow::Result<()> {
-    ensure!(!value.trim().is_empty() && value.chars().count() <= 4000, "A template {what} is 1-4000 characters");
-    ensure!(!has_shell_syntax(value), "A template {what} has no shell metacharacters");
+/// N3: a commit message is any text up to 4000 characters. It goes to Zerus'
+/// own commit code as JSON and to git as one argv element, never to a shell, so
+/// "( ) ' \" ! ? *" and newlines are allowed; only NUL is not.
+fn check_message(value: &str) -> anyhow::Result<()> {
+    ensure!(!value.trim().is_empty() && value.chars().count() <= 4000, "A commit message is 1-4000 characters");
+    ensure!(!value.contains('\0'), "A commit message has no NUL character");
+    Ok(())
+}
+
+/// N1: a branch name Zerus merges as one argv element: the lead's own branch may
+/// carry a `/` (teams-v2/lead), but nothing a ref cannot have.
+pub(crate) fn check_branch(value: &str) -> anyhow::Result<()> {
+    ensure!(!value.is_empty() && value.chars().count() <= 200, "A branch name is 1-200 characters");
+    ensure!(value != "HEAD", "The folder is on no branch");
+    ensure!(
+        value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '+' | '@')),
+        "A branch name is letters, digits, _ - . / + @ (got \"{value}\")"
+    );
+    ensure!(
+        !value.starts_with('-') && !value.starts_with('/') && !value.ends_with('/') && !value.contains("..") && !value.contains("//"),
+        "A branch name is a plain name (got \"{value}\")"
+    );
     Ok(())
 }
 
@@ -331,7 +355,7 @@ fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow
             if param.kind == Kind::Identifier {
                 check_identifier(text, name)?;
             } else {
-                check_text(text, name.trim())?;
+                check_message(text)?;
             }
             Ok(Some(Words::One(text.to_owned())))
         }
@@ -385,7 +409,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
     }
     if template.id == "git-commit" {
         let message = args["message"].as_str().unwrap_or_default().to_owned();
-        check_text(&message, "message")?;
+        check_message(&message)?;
         let paths: Vec<String> = match &args["paths"] {
             Value::Null => Vec::new(),
             Value::String(one) => vec![one.clone()],
@@ -441,6 +465,10 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         }
     }
     if template.id == "qt-test" {
+        // N2: Qt test functions are positional arguments of the test binary.
+        if let Some(Words::Many(functions)) = value_of(template.params, args, "functions", folder)? {
+            argv.extend(functions);
+        }
         // U21: the test binary is one of the folder's build outputs, run by
         // Zerus; a suite that is not a file in the folder is refused.
         let path = folder.join(&program);
@@ -484,9 +512,8 @@ pub(crate) struct Outcome {
 
 /// Runs a validated plan in the member's folder, outside the member's sandbox
 /// (the worker is not confined): TEMP inside the folder, Qt offscreen, bounded
-/// time and output (U21).
+/// time and output (U21). The whole process tree ends with the run (C2).
 pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&str, String)]) -> Outcome {
-    let started = Instant::now();
     let temp = folder.join(".zerus-team").join("tmp");
     let _ = std::fs::create_dir_all(&temp);
     let mut command = Command::new(&plan.program);
@@ -497,20 +524,42 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         .env("TMP", &temp)
         .env("QT_QPA_PLATFORM", "offscreen")
         // The worker's own build dir is Zerus', never the member's.
-        .env_remove("CARGO_TARGET_DIR")
-        .stdin(if plan.commit.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env_remove("CARGO_TARGET_DIR");
     for (key, value) in env {
         command.env(key, value);
     }
-    let mut child = match command.spawn() {
+    let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
+    run_tree(&mut command, timeout, stdin)
+}
+
+/// How long a pipe reader may take after the tree ended: a process that escaped
+/// the job cannot hold the worker (C2).
+const JOIN_BOUND: Duration = Duration::from_secs(5);
+
+/// C2: one command outside the member's sandbox. The child and everything it
+/// starts live in one job (Windows) or process group (Unix), so a timeout stops
+/// the whole tree, and whatever a finished command left behind is ended before
+/// the output pipes are joined - a lingering grandchild can neither keep the
+/// worker waiting nor outlive the run. The joins are bounded too, for a process
+/// that escaped the tree.
+pub(crate) fn run_tree(command: &mut Command, timeout: Duration, stdin: Option<Vec<u8>>) -> Outcome {
+    let started = Instant::now();
+    let program = command.get_program().to_string_lossy().into_owned();
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    #[cfg(windows)]
+    let spawned = crate::platform::spawn(command);
+    #[cfg(unix)]
+    let spawned = crate::platform::spawn_group(command);
+    let mut child = match spawned {
         Ok(child) => child,
-        Err(error) => return Outcome { error: format!("could not start {}: {error}", plan.program), ..Default::default() },
+        Err(error) => return Outcome { error: format!("could not start {program}: {error}"), ..Default::default() },
     };
-    if let (Some(payload), Some(mut stdin)) = (plan.commit.as_ref(), child.stdin.take()) {
+    if let (Some(payload), Some(mut pipe)) = (stdin, child.stdin.take()) {
         use std::io::Write;
-        let _ = stdin.write_all(serde_json::to_vec(payload).unwrap_or_default().as_slice());
+        let _ = pipe.write_all(&payload);
     }
     // Drain both streams without holding the child: a full pipe would stop it.
     let mut out = child.stdout.take().map(bounded);
@@ -520,8 +569,6 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
                 timed_out = true;
                 break None;
             }
@@ -529,8 +576,16 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
             Err(_) => break None,
         }
     };
-    let stdout = out.take().and_then(|thread| thread.join().ok()).unwrap_or_default();
-    let stderr = err.take().and_then(|thread| thread.join().ok()).unwrap_or_default();
+    // C2: the tree ends here, whether the command timed out or finished: a
+    // descendant it left holding the pipes is stopped, so the readers return.
+    #[cfg(windows)]
+    child.terminate();
+    #[cfg(unix)]
+    crate::platform::kill_process_group(&mut child);
+    let _ = child.kill();
+    let _ = child.wait();
+    let stdout = join_bounded(out.take());
+    let stderr = join_bounded(err.take());
     let mut tail = stdout;
     if !stderr.trim().is_empty() {
         if !tail.is_empty() && !tail.ends_with('\n') {
@@ -545,6 +600,20 @@ pub(crate) fn execute(plan: &Plan, folder: &Path, timeout: Duration, env: &[(&st
         timed_out,
         error: if timed_out { format!("the command did not finish in {} s and was stopped", timeout.as_secs()) } else { String::new() },
     }
+}
+
+/// C2: waits at most `JOIN_BOUND` for a drained stream. A reader still blocked
+/// after the tree ended stays detached; its text is not worth the worker.
+fn join_bounded(handle: Option<std::thread::JoinHandle<String>>) -> String {
+    let Some(handle) = handle else { return String::new() };
+    let until = Instant::now() + JOIN_BOUND;
+    while !handle.is_finished() {
+        if Instant::now() >= until {
+            return String::new();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().ok().unwrap_or_default()
 }
 
 fn bounded(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
@@ -627,21 +696,97 @@ mod tests {
     fn a_value_outside_its_type_is_refused() {
         let dir = temp();
         for (id, args) in [
-            ("cargo-build", json!({"filter":"pkg; rm -rf /"})),
-            ("cargo-build", json!({"filter":"--all"})),
-            ("cargo-build", json!({"filter":"../elsewhere"})),
+            ("cargo-build", json!({"package":"pkg; rm -rf /"})),
+            ("cargo-build", json!({"package":"--all"})),
+            ("cargo-build", json!({"package":"../elsewhere"})),
             ("cargo-test", json!({"filter":42})),
+            ("cargo-test", json!({"bin":"a b"})),
+            ("cargo-clippy", json!({"toolchain":"1.99.1 --offline"})),
             ("qt-build", json!({"targets":["hgs-tray","a b"]})),
-            ("git-commit", json!({"message":"nice $(whoami) commit"})),
             ("git-commit", json!({"message":"ok","paths":["../outside.txt"]})),
         ] {
             assert!(plan(id, &args, dir.path()).is_err(), "{id} {args} must be refused");
         }
         // And the types that are valid pass.
-        assert_eq!(plan("cargo-build", &json!({"filter":"hgs"}), dir.path()).unwrap().argv, ["build", "--locked", "--package=hgs"]);
+        assert_eq!(plan("cargo-build", &json!({"package":"hgs"}), dir.path()).unwrap().argv, ["build", "--locked", "--package=hgs"]);
         assert_eq!(plan("qt-build", &json!({"targets":["hgs-tray"]}), dir.path()).unwrap().argv, ["--build", ".ci-build/gui", "--target", "hgs-tray"]);
         // An absent filter adds no argument at all.
         assert_eq!(plan("cargo-build", &json!({}), dir.path()).unwrap().argv, ["build", "--locked"]);
+    }
+
+    #[test]
+    fn a_cargo_check_is_expressed_exactly() {
+        // N2: the checks every hand-out names are expressible: a test-name
+        // filter with a binary, and the pinned clippy toolchain.
+        let dir = temp();
+        assert_eq!(
+            plan("cargo-test", &json!({"bin":"hgs","filter":"teams"}), dir.path()).unwrap().argv,
+            ["test", "--locked", "--bin=hgs", "teams"]
+        );
+        assert_eq!(
+            plan("cargo-clippy", &json!({"toolchain":"1.99.1"}), dir.path()).unwrap().argv,
+            ["+1.99.1", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
+        );
+        assert_eq!(
+            plan("cargo-test", &json!({"toolchain":"1.99.1","bin":"hgs","filter":"teams"}), dir.path()).unwrap().argv,
+            ["+1.99.1", "test", "--locked", "--bin=hgs", "teams"]
+        );
+        // A package still narrows the run when the workspace has several.
+        assert_eq!(
+            plan("cargo-test", &json!({"package":"hgs","filter":"guide"}), dir.path()).unwrap().argv,
+            ["test", "--locked", "--package=hgs", "guide"]
+        );
+    }
+
+    #[test]
+    fn qt_test_functions_are_arguments() {
+        // N2: qt-test's functions were validated and then dropped; they are the
+        // binary's positional arguments.
+        let dir = temp();
+        let suite = dir.path().join(".ci-build").join("gui");
+        std::fs::create_dir_all(&suite).unwrap();
+        std::fs::write(suite.join("test_teamsui.exe"), b"x").unwrap();
+        let built = plan("qt-test", &json!({"suite":"test_teamsui","functions":["a","b"]}), dir.path()).unwrap();
+        assert_eq!(built.argv, ["a", "b"]);
+        assert!(built.program.ends_with("test_teamsui.exe"), "{}", built.program);
+        assert!(plan("qt-test", &json!({"suite":"test_teamsui"}), dir.path()).unwrap().argv.is_empty());
+    }
+
+    #[test]
+    fn a_commit_message_is_any_text() {
+        // N3: the message goes as JSON to Zerus' commit code and as one argv
+        // element to git, never to a shell: ( ) ' " ! ? * and newlines are fine.
+        let dir = temp();
+        let message = "Fork: the run is off the tick (C1)\n\nIt said \"done\"! (really?) *yes* -- it's fine";
+        let built = plan("git-commit", &json!({"message":message}), dir.path()).unwrap();
+        assert_eq!(built.commit.as_ref().unwrap()["message"], message);
+        // 4000 characters are allowed, 4001 are not; NUL never, and not blank.
+        assert!(plan("git-commit", &json!({"message":"x".repeat(4000)}), dir.path()).is_ok());
+        assert!(plan("git-commit", &json!({"message":"x".repeat(4001)}), dir.path()).is_err());
+        assert!(plan("git-commit", &json!({"message":"a\u{0}b"}), dir.path()).is_err());
+        assert!(plan("git-commit", &json!({"message":"   "}), dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_output_does_not_hold_the_run() {
+        // C2: the direct child exits at once, but the grandchild it started
+        // keeps the output pipe open for a minute. The tree ends with the run
+        // and the joins are bounded, so the call returns at once.
+        let dir = temp();
+        #[cfg(windows)]
+        let plan = Plan {
+            template: "test".into(),
+            program: "cmd".into(),
+            argv: vec!["/c".into(), "start /b ping -n 60 127.0.0.1".into()],
+            commit: None,
+        };
+        #[cfg(unix)]
+        let plan = Plan { template: "test".into(), program: "sh".into(), argv: vec!["-c".into(), "sleep 60 &".into()], commit: None };
+        let started = Instant::now();
+        let outcome = execute(&plan, dir.path(), Duration::from_secs(120), &[]);
+        assert!(!outcome.timed_out, "{outcome:?}");
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(started.elapsed() < Duration::from_secs(30), "the run waited for the grandchild: {:?}", started.elapsed());
     }
 
     #[test]
@@ -698,7 +843,7 @@ mod tests {
         assert!(items["items"].as_array().unwrap().iter().any(|item| item["id"] == "make" && item["source"] == "owner"), "{items}");
         // An addition cannot shadow a built-in one.
         assert!(set_additions(&[json!({"id":"cargo-build","program":"make","args":[]})]).is_err());
-        assert!(plan("cargo-build", &json!({"filter":"hgs"}), dir.path()).is_ok());
+        assert!(plan("cargo-build", &json!({"package":"hgs"}), dir.path()).is_ok());
         assert!(addition("cargo-build").is_none());
         settings_override(None);
     }

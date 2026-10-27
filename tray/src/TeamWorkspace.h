@@ -15,6 +15,7 @@ class TeamController;
 class TeamConversation;
 class TeamPanel;
 class TeamTaskCard;
+namespace TeamUi { class TaskView; }
 
 // WhiteWh fork: agent teams. The Team tab next to Activity (design D3, HANDOFF
 // §14): the Stuck and plan-error strips (the team's status and actions are in
@@ -87,6 +88,14 @@ private:
     // F7/F8: opens another team in this workspace (previous, next, a new one).
     void openOtherTeam(const QString &team);
     QWidget *attentionStrip(const Teams::Team &team);
+    // N7: Answer on a permission item: the member's Allow / Deny box, or its
+    // command on the clipboard when this hgs sends no box.
+    void answerAttention(const QString &teamId, const QString &member, const QString &command);
+    // A planning, running or paused team takes a settings change (ops.rs settings).
+    static bool settingsOpen(const Teams::Team &team)
+    {
+        return team.status == QLatin1String("planning") || team.status == QLatin1String("running") || team.status == QLatin1String("paused");
+    }
     QWidget *errorStrip();
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).
@@ -102,12 +111,21 @@ private:
     QWidget *phaseColumn(const Teams::Team &team);
     QWidget *phaseScroll(const Teams::Team &team, const Teams::PhaseGroup &group);
     QWidget *phaseGraph(const Teams::Team &team, const Teams::PhaseGroup &group);
+    // U25 part 5 (spec 5.4): the nodes of `order` in two lines - the
+    // dependencies from other phases and the problem - with the working dots
+    // and the full tooltip. `phase` holds the tasks drawn in this view (empty:
+    // a team without phases).
+    void graphNodes(TeamUi::TaskView *view, const Teams::Team &team, const QList<int> &order, const QSet<int> &phase);
+    // #465 N18: a graph view takes back the owner's half-made link and
+    // selected edge, and reports their changes, per team.
+    void keepGraphEdit(TeamUi::TaskView *view, const QString &team);
     QWidget *boardColumns(const Teams::Team &team, const QList<int> &ids, int phase);
     QWidget *layerRows(const Teams::Team &team, const QList<int> &ids);
     // The tasks with a problem and the tone each shows.
     QMap<int, Teams::Tone> problemTasks(const Teams::Team &team) const;
     // The text that names a task's problem on its card ("Needs your answer").
     QString problemText(const Teams::Team &team, int task) const;
+    QMap<int, QString> problemTexts(const Teams::Team &team) const;
     QSet<int> blockers(const Teams::Team &team) const;
     void setAutoAccept(const Teams::Team &team, bool on);
     void rejectPhase(const QString &team, int phase);
@@ -147,8 +165,14 @@ private:
     QSet<QString> m_subFolded;
     // U25: the draft whose send-back form is open, its text kept across
     // renders, and Team stuck's Show on graph.
-    int m_rejectPhase = 0;
+    // N14 (#383): the open send-back form: its team, phase (number and when
+    // it was added) and the phase numbers' revision (rejectKey); the comment.
+    QString m_rejectPhase;
     QString m_rejectText;
+    // #465 N18: per team, the task a click-to-connect started from and the
+    // selected edge (dependency, task), across re-renders.
+    QHash<QString, std::pair<int, QPair<int, int>>> m_graphEdit;
+    static QString rejectKey(const Teams::Team &team, int phase);
     bool m_showBlockers = false, m_rejectFocus = false, m_zoomManual = false;
     double m_zoom = 1.0;
     int m_drawerTask = 0;

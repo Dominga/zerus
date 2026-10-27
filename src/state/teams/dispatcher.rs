@@ -220,6 +220,8 @@ pub(crate) enum Step {
     /// The one coalesced message that lists the lead's new inbox items (C2).
     Inbox,
     /// Reminds the free lead once that a report still waits for a decision (C4).
+    /// Reminds a sub-lead once that its report waits for a decision (N9).
+    RemindReviewer { task: u32, member: String },
     RemindReport { task: u32 },
     /// The member is idle without a ready task while tasks are open (C7).
     Starving { member: String },
@@ -283,6 +285,8 @@ pub(crate) enum Step {
     /// Spec 5.6: one coalesced message to a free sub-lead about its reports'
     /// reports, questions and stalls.
     SubInbox { member: String },
+    /// N10: the once-only brief that tells a member it is now a sub-lead.
+    SubBrief { member: String },
     /// Mutes a member's notifications (unless they already are): its
     /// replies are for the lead.
     Quiet { member: String, session: SessionRef, muted: bool, revision: u64 },
@@ -308,6 +312,30 @@ fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
     seen.iter().find(|s| s.host == session.host && s.name == session.name)
 }
 
+/// N7: whether this tick may decide anything from the member's session being
+/// absent - only when its computer answered the listing. A member with no
+/// session yet, or a tick with no listing information, is not held back.
+fn host_listed(team: &Team, attempt: &Attempt, listed: Option<&BTreeSet<String>>) -> bool {
+    let Some(listed) = listed else { return true };
+    team.member(&attempt.member)
+        .and_then(|member| member.session.as_ref())
+        .is_none_or(|session| listed.contains(&session.host))
+}
+
+/// N7: the computers whose listing this tick answered. A peer that failed
+/// appears with `ok: false` and no sessions; only the first machine is local
+/// (`seen` names it with an empty host).
+fn listed_hosts(listing: &Value) -> BTreeSet<String> {
+    let mut hosts = BTreeSet::new();
+    for (index, machine) in listing.as_array().into_iter().flatten().enumerate() {
+        if machine["ok"] == false {
+            continue;
+        }
+        hosts.insert(if index == 0 { String::new() } else { machine["host"].as_str().unwrap_or_default().to_owned() });
+    }
+    hosts
+}
+
 /// A session quiet enough for its ended turn to become the attempt's report
 /// (A2): idle, no question, input or approval, and no Background work.
 fn capture_open(found: &Seen) -> bool {
@@ -324,8 +352,16 @@ fn same_turn(attempt: &Attempt, ended: f64, found: &Seen) -> bool {
 }
 
 /// What to do for one team now. Pure, so the rules are tested without
-/// processes.
+/// processes; the tick passes the computers whose listing answered (N7).
+#[cfg(test)]
 pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
+    steps_with(team, seen, now, None)
+}
+
+/// The dispatcher's decision for one team. `listed` names the computers whose
+/// session listing answered this tick; a member whose computer did not answer is
+/// not decided on absence (N7). None means every member is taken from `seen`.
+pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&BTreeSet<String>>) -> Vec<Step> {
     let mut steps = Vec::new();
     let planning = team.status == TeamStatus::Planning && matches!(team.brief, Notice::Pending | Notice::Sending);
     let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
@@ -447,6 +483,12 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             continue;
         }
         if attempt.state == AttemptState::Delivered {
+            // N7: a member whose computer did not answer this tick is not
+            // evidence that it stopped; decide nothing about its attempt until
+            // its listing answers again.
+            if !host_listed(team, attempt, listed) {
+                continue;
+            }
             let found = team.member(&attempt.member).and_then(|m| session_of(m, seen));
             let delivered = attempt.delivered_at.unwrap_or(attempt.sent_at);
             // A1: an attempt that shows the member working really started.
@@ -477,7 +519,10 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                     if capture_open(found) && attempt.open_question().is_none() {
                         if let Some(at) = replied {
                             steps.push(Step::TurnEnded { task: task.id, at, reply: found.reply_id.clone() });
-                        } else if attempt.started_at.is_some() && now - delivered >= team.settings.report_timeout_seconds as f64 {
+                        } else if !attempt.no_report
+                            && attempt.started_at.is_some()
+                            && now - delivered >= team.settings.report_timeout_seconds as f64
+                        {
                             // A2: the session is quiet but the listing carries no
                             // reply mark for the turn (its replies were never read),
                             // so no turn end could be recorded. After the timeout the
@@ -528,8 +573,12 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                     // stopped or was renamed) and no turn end was recorded. After
                     // the timeout the attempt is decided as for a session that went
                     // away: its last reply is captured from the session's record,
-                    // or it shows No report (U20).
-                    if attempt.started_at.is_some() && now - delivered >= team.settings.report_timeout_seconds as f64 {
+                    // or it shows No report (U20). N7: only while its computer is
+                    // listed - an absent listing is not a stopped session.
+                    if !attempt.no_report
+                        && attempt.started_at.is_some()
+                        && now - delivered >= team.settings.report_timeout_seconds as f64
+                    {
                         steps.push(Step::NoReport { task: task.id });
                     }
                 }
@@ -624,17 +673,38 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
     if lead_ready && team.settings.remind_lead_minutes > 0 {
         let after = team.settings.remind_lead_minutes as f64 * 60.0;
         for task in &team.tasks {
-            // Spec 5.6: a sub-lead's reports are its own to decide.
+            // Spec 5.6: a sub-lead's reports are its own to decide; it is
+            // reminded first, the lead only after a second interval (N9).
             let sub = task.assignee != team.lead && team.reviewer_of(&task.assignee) != team.lead;
-            if task.status != TaskStatus::Submitted || sub {
+            if task.status != TaskStatus::Submitted {
                 continue;
             }
             let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) else { continue };
-            if attempt.reminded_at.is_some() || attempt.report.as_ref().is_none_or(|report| now - report.at < after) {
+            let age = attempt.report.as_ref().map(|report| now - report.at).unwrap_or(0.0);
+            if sub {
+                let reviewer = team.reviewer_of(&task.assignee);
+                if let Some(found) = team.member(&reviewer).filter(|member| member.sub) {
+                    if session_of(found, seen).is_some_and(can_take_a_message)
+                        && attempt.reminded_at.is_none()
+                        && age >= after
+                    {
+                        steps.push(Step::RemindReviewer { task: task.id, member: reviewer });
+                    }
+                }
+                // The lead hears after the second interval, once.
+                if !(lead_ready && age >= after * 2.0 && !attempt.told_lead.iter().any(|kind| kind == "sub-remind")) {
+                    continue;
+                }
+            } else if attempt.reminded_at.is_some() {
                 continue;
             }
-            steps.push(Step::RemindReport { task: task.id });
-            break;
+            if sub || attempt.report.as_ref().is_some_and(|report| now - report.at >= after) {
+                if !sub && attempt.reminded_at.is_some() {
+                    continue;
+                }
+                steps.push(Step::RemindReport { task: task.id });
+                break;
+            }
         }
     }
     // C2: one message lists the new items, at most once per interval.
@@ -645,9 +715,15 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             steps.push(Step::Inbox);
         }
     }
+    // N10: a member that just became a sub-lead hears what that means once.
+    for sub in team.members.iter().filter(|member| member.sub && member.sub_brief && member.state != MemberState::Removed) {
+        if session_of(sub, seen).is_some_and(can_take_a_message) {
+            steps.push(Step::SubBrief { member: sub.id.clone() });
+        }
+    }
     // Spec 5.6: each free sub-lead hears about its own reports the same way.
     for sub in team.members.iter().filter(|member| member.sub && member.state != MemberState::Removed) {
-        if !session_of(sub, seen).is_some_and(|found| found.free) {
+        if !session_of(sub, seen).is_some_and(can_take_a_message) {
             continue;
         }
         let new = inbox::items_for(team, &sub.id).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).count();
@@ -995,27 +1071,33 @@ pub(crate) fn hand_off_text_with(
     if !team.goal.is_empty() {
         text += &format!("Team goal: {}\n", team.goal);
     }
+    let mut task_in_prompt = false;
     if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
         // U25: the role's prompt blocks in its order, when the catalog has one.
-        let ordered = super::catalog::load().ok().and_then(|catalog| {
+        let (ordered, has_task) = super::catalog::load().ok().and_then(|catalog| {
             let role_name = team.role_of(&attempt.member);
             let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-            super::catalog::prompt_order_text(role, prompt, Some(task), "")
-        });
+            let has_task = role.prompt_order.iter().any(|key| key == "task")
+                && !role.prompt_off.iter().any(|key| key == "task");
+            Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
+        }).unwrap_or((None, false));
+        task_in_prompt = has_task;
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
             text += &ordered;
         } else {
             text += &format!("Role: {prompt}\n");
         }
     }
-    text += &format!("\nTask #{}: {}\n", task.id, task.title);
-    if !task.description.is_empty() {
-        text += &format!("{}\n", task.description);
-    }
-    if !task.criteria.is_empty() {
-        text += "\nAcceptance criteria:\n";
-        for criterion in &task.criteria {
-            text += &format!("- {criterion}\n");
+    if !task_in_prompt {
+        text += &format!("\nTask #{}: {}\n", task.id, task.title);
+        if !task.description.is_empty() {
+            text += &format!("{}\n", task.description);
+        }
+        if !task.criteria.is_empty() {
+            text += "\nAcceptance criteria:\n";
+            for criterion in &task.criteria {
+                text += &format!("- {criterion}\n");
+            }
         }
     }
     let deps: Vec<String> = task
@@ -1071,7 +1153,8 @@ pub(crate) fn hand_off_text_with(
         let ids: Vec<&str> = super::templates::BUILTIN.iter().map(|template| template.id).collect();
         text += &format!(
             "\nZerus runs these commands for you, outside your sandbox, without an approval: {}.\n\
-             Ask for one with {run} | hgs team run --json: the exit code and the output tail come back.\n\
+             Ask for one with {run} | hgs team run --json: a new request_id for every run; --wait returns the exit code as soon as it is ready.\n\
+             Ask again with the same request_id to read the result - it never runs the command twice.\n\
              Anything else still asks the lead.",
             ids.join(", "),
             run = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"attempt":attempt.id,"template":"cargo-test","args":{}})
@@ -1455,13 +1538,34 @@ pub(crate) fn last_reply(session: &SessionRef) -> anyhow::Result<String> {
     Ok(last_reply_of(session, "")?.unwrap_or_default())
 }
 
+/// One `hgs inspect` record of a member's session, at most 45 s. Tests replace
+/// it with a record of their own, so the capture rules run without a CLI.
+fn inspect_reply(session: &SessionRef) -> anyhow::Result<Value> {
+    #[cfg(test)]
+    if let Some(record) = INSPECTED.with(|record| record.borrow().clone()) {
+        return Ok(record);
+    }
+    let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
+    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    serde_json::from_slice(&output.stdout).context("invalid inspect output")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's `hgs inspect` record for this thread, instead of a real call.
+    static INSPECTED: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn inspect_override(record: Option<Value>) {
+    INSPECTED.with(|slot| *slot.borrow_mut() = record);
+}
+
 /// The last reply, but only when it is still the reply whose id is `expected`:
 /// a newer turn started, so this is not that turn's report (A2). `None` means
 /// the session moved on; an error means it has no reply or cannot be read.
 pub(crate) fn last_reply_of(session: &SessionRef, expected: &str) -> anyhow::Result<Option<String>> {
-    let output = hgs(&session.host, &["inspect", &session.name, "--skip-processes"], None, Duration::from_secs(45))?;
-    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
-    let record: Value = serde_json::from_slice(&output.stdout).context("invalid inspect output")?;
+    let record = inspect_reply(session)?;
     if !expected.is_empty() {
         let found = record["reply_id"].as_str().unwrap_or_default();
         if !found.is_empty() && found != expected {
@@ -1471,6 +1575,22 @@ pub(crate) fn last_reply_of(session: &SessionRef, expected: &str) -> anyhow::Res
     let text = reply_text(&record);
     anyhow::ensure!(!text.is_empty(), "The member's session has no reply yet");
     Ok(Some(text))
+}
+
+/// N6: the session's last reply, but only when it was written after `since` -
+/// the moment this attempt was delivered. Without a recorded turn identity the
+/// time is the only proof the reply belongs to this attempt: an earlier
+/// attempt's, or an earlier task's, last message is not this attempt's report.
+/// None means there is no newer reply (or no time to prove one).
+pub(crate) fn last_reply_after(session: &SessionRef, since: f64) -> anyhow::Result<Option<String>> {
+    let record = inspect_reply(session)?;
+    let at = record["reply_at"].as_f64().unwrap_or(0.0);
+    let written_after_delivery = at.is_finite() && at > since;
+    if !written_after_delivery {
+        return Ok(None);
+    }
+    let text = reply_text(&record);
+    Ok((!text.is_empty()).then_some(text))
 }
 
 /// The last reply's text in an `hgs inspect` record.
@@ -2445,11 +2565,83 @@ fn remind_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result
     }
     let attempt_id = attempt.id.clone();
     change(store, &team.id, |team, events| {
+        let is_sub = team.task(task_id).is_some_and(|task| team.reviewer_of(&task.assignee) != team.lead);
         let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt_id)) else {
             return Ok(());
         };
         found.reminded_at = Some(now());
+        if is_sub && !found.told_lead.iter().any(|kind| kind == "sub-remind") {
+            found.told_lead.push("sub-remind".into());
+        }
         events.push(Event::new("reminded", json!({"task":task_id,"attempt":found.n,"to":"Lead","minutes":minutes})));
+        Ok(())
+    })
+}
+
+/// Reminds a sub-lead once that a report still waits for its decision (N9).
+fn remind_reviewer(store: &mut Store, team: &Team, task_id: u32, member: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported)
+        .context("the task has no report")?
+        .clone();
+    let report = attempt.report.as_ref().context("the attempt has no report")?;
+    let minutes = (((now() - report.at) / 60.0).round() as u64).max(1);
+    let sub = team.member(member).filter(|found| found.sub).context("not a sub-lead")?;
+    let session = sub.session.clone().context("the sub-lead has no session")?;
+    let text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} report waiting {minutes} min]\n\
+         {}'s report on #{} {} has waited {minutes} min for your decision as its sub-lead.\n\
+         Decide with hgs team accept --json or reject --json, or look at your inbox:\n  \
+         {} | hgs team inbox --json",
+        task.id,
+        team.role_of(&attempt.member),
+        task.id,
+        task.title,
+        json!({"team":team.id})
+    );
+    let outcome = send(&session, &uuid::Uuid::new_v4().to_string(), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let attempt_id = attempt.id.clone();
+    change(store, &team.id, |team, events| {
+        let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt_id)) else {
+            return Ok(());
+        };
+        found.reminded_at = Some(now());
+        events.push(Event::new("reminded", json!({"task":task_id,"attempt":found.n,"to":member,"minutes":minutes})));
+        Ok(())
+    })
+}
+
+/// N10: the once-only brief for a member that has just become a sub-lead.
+fn send_sub_brief(store: &mut Store, team: &Team, member: &str) -> anyhow::Result<()> {
+    let sub = team.member(member).filter(|found| found.sub).context("not a sub-lead")?;
+    let session = sub.session.clone().context("the sub-lead has no session")?;
+    let reports: Vec<String> = team.reports_of(member).iter().map(|found| found.role.clone()).collect();
+    let text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} sub-lead]\nYou are now a sub-lead of the team {}: the members {} report to you.\n\
+         Their reports and questions wait in your inbox: {} | hgs team inbox --json.\n\
+         Decide their reports with hgs team accept --json or reject --json; a rejection reopens the task with your reason.\n\
+         You may hand out their tasks, hold one back and release it; your own reports still go to the lead (hgs guide team-lead).",
+        team.name,
+        if reports.is_empty() { "that report to you".to_owned() } else { reports.join(", ") },
+        json!({"team":team.id})
+    );
+    let outcome = send(&session, &uuid::Uuid::new_v4().to_string(), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let member = member.to_owned();
+    change(store, &team.id, |team, events| {
+        if let Some(found) = team.members.iter_mut().find(|found| found.id == member) {
+            found.sub_brief = false;
+        }
+        events.push(Event::new("sub_brief", json!({"member":member})));
         Ok(())
     })
 }
@@ -2714,73 +2906,44 @@ pub(crate) fn commit_in(folder: &str, branch: &str, message: &str, paths: &[Stri
 /// U21: the git route of the built-in template, run the way commit_in runs git
 /// (C2): the repository's own config may name neither a hook path, fsmonitor,
 /// an include, a filter nor a signing program, and hooks are disabled outright;
-/// a clone member owns its .git, so its config must never run code here.
-pub(crate) fn merge_lead(folder: &str, timeout: Duration) -> super::templates::Outcome {
+/// a clone member owns its .git, so its config must never run code here. N1: the
+/// branch is the lead's own, passed in, never a name built into Zerus.
+pub(crate) fn merge_lead(folder: &str, branch: &str, timeout: Duration) -> super::templates::Outcome {
     let started = Instant::now();
-    let run = |args: &[&str]| -> anyhow::Result<Output> {
-        let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
-        let mut child = std::process::Command::new("git")
-            .arg("-C")
-            .arg(folder)
-            .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "gpg.program="])
-            .arg("--no-optional-locks")
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|error| anyhow::anyhow!("git did not run: {error}"))?;
-        let out_pipe = child.stdout.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        });
-        let err_pipe = child.stderr.take().map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
-                buf
-            })
-        });
-        loop {
-            if child.try_wait()?.is_some() {
-                break;
+    let deadline = started + timeout;
+    let elapsed = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A read, not a run: `worktrees::git` bounds it in time and output.
+    let listing = match super::super::worktrees::git(Path::new(folder), &["config", "--list", "--show-scope", "--name-only"], deadline) {
+        Ok(out) => String::from_utf8_lossy(&out).into_owned(),
+        Err(error) => {
+            return super::templates::Outcome {
+                exit: Some(1),
+                tail: format!("This repository's config was not read: {}", error.detail),
+                ms: elapsed(),
+                ..Default::default()
             }
-            if started.elapsed() >= timeout {
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!("git {args:?} did not finish in {} s and was stopped", timeout.as_secs());
-            }
-            std::thread::sleep(Duration::from_millis(20));
         }
-        let status = child.wait()?;
-        let stdout = out_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
-        let stderr = err_pipe.and_then(|handle| handle.join().ok()).unwrap_or_default();
-        Ok(Output { status, stdout, stderr })
     };
-    let outcome = (|| -> anyhow::Result<(Option<i32>, String)> {
-        let listed = run(&["config", "--list", "--show-scope", "--name-only"])?;
-        anyhow::ensure!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr).trim());
-        if let Some(reason) = refused_repository_config(&String::from_utf8_lossy(&listed.stdout)) {
-            anyhow::bail!("This repository {reason}; Zerus merges without it");
-        }
-        let merged = run(&["merge", "--no-edit", "teams-v2/lead"])?;
-        let mut tail = String::from_utf8_lossy(&merged.stdout).into_owned();
-        let error = String::from_utf8_lossy(&merged.stderr).into_owned();
-        if !error.trim().is_empty() {
-            if !tail.is_empty() && !tail.ends_with('\n') {
-                tail.push('\n');
-            }
-            tail.push_str(&error);
-        }
-        Ok((merged.status.code(), tail))
-    })();
-    let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match outcome {
-        Ok((exit, tail)) => super::templates::Outcome { exit, tail: super::templates::last_chars(&tail, 4000), ms, ..Default::default() },
-        Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ms, ..Default::default() },
+    if let Some(reason) = refused_repository_config(&listing) {
+        return super::templates::Outcome {
+            exit: Some(1),
+            tail: format!("This repository {reason}; Zerus merges without it"),
+            ms: elapsed(),
+            ..Default::default()
+        };
     }
+    let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(folder)
+        .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "gpg.program="])
+        .arg("--no-optional-locks")
+        .args(["merge", "--no-edit", branch]);
+    let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
+    let mut outcome = super::templates::run_tree(&mut command, remaining, None);
+    outcome.ms = elapsed();
+    outcome
 }
 
 fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
@@ -2912,6 +3075,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::Inbox => tell_lead_inbox(store, team),
         Step::SubInbox { member } => tell_sub_inbox(store, team, member),
+        Step::SubBrief { member } => send_sub_brief(store, team, member),
+        Step::RemindReviewer { task, member } => remind_reviewer(store, team, *task, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
         Step::Starving { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
@@ -3198,38 +3363,40 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 if attempt.turn_ended_at.is_none() {
                     // A2/U20: no turn end reached the listing (a quiet session whose
                     // replies were never marked), so there is no recorded reply to
-                    // compare with; the session's last reply is the outcome of the
-                    // attempt all the same, and no earlier gate saw it.
-                    if let Ok(Some(reply)) = last_reply_of(&session, "") {
+                    // compare with. N6: only a reply written after this attempt was
+                    // delivered is its outcome; the session's older last message (an
+                    // earlier attempt's report, another task's) is not.
+                    if let Ok(Some(reply)) = last_reply_after(&session, attempt.delivered_at.unwrap_or(attempt.sent_at)) {
                         if capture_quiet(store, &team.id, *task, &reply).is_ok() {
                             return Ok(());
                         }
                     }
-                }
-                match last_reply_of(&session, &attempt.turn_reply) {
-                    Ok(Some(reply)) => {
-                        if capture_report(store, &team.id, *task, &reply, &attempt.turn_reply).is_ok() {
+                } else {
+                    match last_reply_of(&session, &attempt.turn_reply) {
+                        Ok(Some(reply)) => {
+                            if capture_report(store, &team.id, *task, &reply, &attempt.turn_reply).is_ok() {
+                                return Ok(());
+                            }
+                        }
+                        Ok(None) => {
+                            // A newer reply: the turn ended again, so record that one
+                            // (A2). The next tick captures it once its timeout passed.
+                            change(store, &team.id, |team, _| {
+                                if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                                    if attempt.state == AttemptState::Delivered {
+                                        attempt.turn_ended_at = None;
+                                        attempt.turn_reply.clear();
+                                        attempt.no_report = false;
+                                        attempt.report_ready_at = None;
+                                        attempt.blocked_since = None;
+                                    }
+                                }
+                                Ok(())
+                            })?;
                             return Ok(());
                         }
+                        Err(_) => {}
                     }
-                    Ok(None) => {
-                        // A newer reply: the turn ended again, so record that one
-                        // (A2). The next tick captures it once its timeout passed.
-                        change(store, &team.id, |team, _| {
-                            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
-                                if attempt.state == AttemptState::Delivered {
-                                    attempt.turn_ended_at = None;
-                                    attempt.turn_reply.clear();
-                                    attempt.no_report = false;
-                                    attempt.report_ready_at = None;
-                                    attempt.blocked_since = None;
-                                }
-                            }
-                            Ok(())
-                        })?;
-                        return Ok(());
-                    }
-                    Err(_) => {}
                 }
             }
             change(store, &team.id, |team, events| {
@@ -3302,7 +3469,9 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         None => return Ok(true),
     };
     anyhow::ensure!(output.status.success(), "hgs ls failed: {}", String::from_utf8_lossy(&output.stderr).trim());
-    let sessions = seen(&serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?);
+    let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
+    let sessions = seen(&listing);
+    let listed = listed_hosts(&listing);
     for team in &teams {
         if let Err(error) = take_outbox(store, team, &sessions) {
             eprintln!("hgs team worker: {}: outbox: {error}", team.name);
@@ -3310,7 +3479,7 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     }
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
     for team in &teams {
-        for step in steps(team, &sessions, now()) {
+        for step in steps_with(team, &sessions, now(), Some(&listed)) {
             if let Err(error) = run_step(store, team, &step, host) {
                 eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
             }
@@ -3322,16 +3491,45 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
 /// Applies the requests members left in their folders: a sandbox may not write
 /// the team store, but it can write its own folder (U20). The folder proves the
 /// member; the request must name that member and one of its running attempts.
+/// C1: a run is only claimed and started here; a detached runner executes it and
+/// settles the request, so no template can hold the tick.
 fn take_outbox(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<()> {
+    take_outbox_with(store, team, seen, &spawn_runner)
+}
+
+fn take_outbox_with(
+    store: &mut Store,
+    team: &Team,
+    seen: &[Seen],
+    spawn: &dyn Fn(&Path, &Value) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     if team.status != TeamStatus::Running && team.status != TeamStatus::Paused {
         return Ok(());
     }
     for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
         let Some(found) = session_of(member, seen).filter(|found| !found.cwd.is_empty() && found.host.is_empty()) else { continue };
         let folder = Path::new(&found.cwd);
+        // C1: a runner that died leaves its claim behind; the member then hears
+        // that the run stopped instead of waiting for a result that never comes.
+        settle_stale_runs(folder, team);
         let Ok(requests) = super::outbox::pending(folder, super::outbox::PER_TICK) else { continue };
         for (path, request) in requests {
-            let outcome = match apply_outbox(store, team, member, folder, &request) {
+            if request["op"] == "run" {
+                match start_run(store, team, member, folder, &request, spawn) {
+                    // A refusal is answered now; a claim needs no answer - the
+                    // runner writes it, and a claim that could not start stays
+                    // queued for the next tick.
+                    Ok(Some(outcome)) => {
+                        if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
+                            eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("hgs team worker: {}: run {}: {error:#}", team.name, request["request_id"]),
+                }
+                continue;
+            }
+            let outcome = match apply_outbox(store, team, member, &request) {
                 Ok(value) => value,
                 // A refusal is final: the request leaves the outbox as well, or
                 // the worker would try it again every tick.
@@ -3345,12 +3543,58 @@ fn take_outbox(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<
     Ok(())
 }
 
-/// U21: one queued template run, executed here (the worker is not confined, so
-/// the command runs outside the member's sandbox) and recorded on its attempt.
-fn apply_run(store: &mut Store, team: &Team, member: &Member, task_id: u32, folder: &Path, request: &Value) -> anyhow::Result<Value> {
+/// N1: the branch the lead's own folder is on: what a member merges. It is read
+/// from the team's folder, never built into Zerus, so another project gets its
+/// own branch.
+fn lead_branch(team: &Team) -> anyhow::Result<String> {
+    anyhow::ensure!(!team.folder.is_empty(), "The team has no folder to merge from");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let out = super::super::worktrees::git(Path::new(&team.folder), &["rev-parse", "--abbrev-ref", "HEAD"], deadline)
+        .map_err(|error| anyhow::anyhow!("the lead's branch was not read: {}", error.detail))?;
+    let branch = String::from_utf8_lossy(&out).trim().to_owned();
+    super::templates::check_branch(&branch)?;
+    Ok(branch)
+}
+
+/// Whether `folder` is inside `root` (a shared member in a subfolder of the
+/// team's checkout, not an own worktree or clone beside it).
+fn inside(folder: &str, root: &str) -> bool {
+    let (Ok(folder), Ok(root)) = (crate::platform::canonical(Path::new(folder)), crate::platform::canonical(Path::new(root))) else {
+        return false;
+    };
+    folder != root && folder.starts_with(&root)
+}
+
+/// U21/C1: one queued run, executed outside the member's sandbox. N1: the merge
+/// runs in the member's own folder and only when that is not the team's.
+fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<super::templates::Outcome> {
     let template = request["template"].as_str().unwrap_or_default();
     let args = request["args"].clone();
     let plan = super::templates::plan(template, &args, folder)?;
+    let timeout = Duration::from_secs(super::templates::timeout_for(template));
+    if template == "git-merge-lead" {
+        let mine = member_folder_path(team, member)?;
+        anyhow::ensure!(
+            !mine.is_empty() && !same_path(&mine, &team.folder) && !inside(&mine, &team.folder),
+            "This team works in one shared folder; Zerus does not merge the lead's branch into it"
+        );
+        let branch = lead_branch(team)?;
+        return Ok(merge_lead(&mine, &branch, timeout));
+    }
+    if let Some(payload) = &plan.commit {
+        // B4/U21: the commit template is Zerus' own code, not a subprocess: the
+        // identity is the one the outbox proved.
+        let input = json!({"request_id":request["request_id"],"team":team.id,"attempt":request["attempt"],
+            "message":payload["message"],"paths":payload["paths"]});
+        return Ok(match super::commands::commit_in_team(team, &member.id, &input) {
+            Ok(result) => super::templates::Outcome {
+                exit: Some(0),
+                tail: format!("{} {}", result["status"].as_str().unwrap_or_default(), result["sha"].as_str().unwrap_or_default()).trim().to_owned(),
+                ..Default::default()
+            },
+            Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ..Default::default() },
+        });
+    }
     let mut env: Vec<(&str, String)> = Vec::new();
     if template == "qt-test" && args["shots"].as_str() == Some("true") {
         // U21: the shots go into the member's own folder, never the team's.
@@ -3358,37 +3602,29 @@ fn apply_run(store: &mut Store, team: &Team, member: &Member, task_id: u32, fold
         let _ = fs::create_dir_all(&shots);
         env.push(("ZERUS_TEAM_SHOTS", shots.display().to_string()));
     }
-    let timeout = Duration::from_secs(super::templates::timeout_for(template));
-    let outcome = if template == "git-merge-lead" {
-        // U21, attempt 2: a clone member owns its .git, so this git route is
-        // run the way commit_in runs git, with the repository's own config
-        // refused and its hooks disabled.
-        merge_lead(&folder.display().to_string(), timeout)
-    } else if let Some(payload) = &plan.commit {
-        // B4/U21: the commit template is Zerus' own code, not a subprocess: the
-        // identity is the one the outbox proved.
-        let input = json!({"request_id":request["request_id"],"team":team.id,"attempt":request["attempt"],
-            "message":payload["message"],"paths":payload["paths"]});
-        match super::commands::commit_in_team(team, &member.id, &input) {
-            Ok(result) => super::templates::Outcome {
-                exit: Some(0),
-                tail: format!("{} {}", result["status"].as_str().unwrap_or_default(), result["sha"].as_str().unwrap_or_default()).trim().to_owned(),
-                ..Default::default()
-            },
-            Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ..Default::default() },
-        }
-    } else {
-        super::templates::execute(&plan, folder, timeout, &env)
-    };
+    Ok(super::templates::execute(&plan, folder, timeout, &env))
+}
+
+/// U21/C1: records one run on its attempt - even when the attempt ended while
+/// the command ran, so its exit code and tail are never lost - and answers the
+/// member with them.
+fn record_run(store: &mut Store, team: &Team, member: &Member, request: &Value, outcome: &super::templates::Outcome) -> Value {
+    let template = request["template"].as_str().unwrap_or_default();
+    let args = request["args"].clone();
     let attempt_id = request["attempt"].as_str().unwrap_or_default().to_owned();
     let role = team.role_of(&member.id);
-    change(store, &team.id, |team, events| {
-        let task = team.task_mut(task_id).context("unknown task")?;
-        let attempt = task.open_attempt_mut().filter(|attempt| attempt.id == attempt_id).context("the attempt ended")?;
+    let recorded = change(store, &team.id, |team, events| {
+        let task = team
+            .tasks
+            .iter_mut()
+            .find(|task| task.attempts.iter().any(|attempt| attempt.id == attempt_id))
+            .context("unknown attempt")?;
+        let task_id = task.id;
+        let attempt = task.attempts.iter_mut().find(|attempt| attempt.id == attempt_id).context("unknown attempt")?;
         let n = attempt.n;
         attempt.runs.push(RunRecord {
             template: template.to_owned(),
-            args: args.clone(),
+            args,
             exit: outcome.exit,
             at: now(),
             ms: outcome.ms,
@@ -3401,17 +3637,173 @@ fn apply_run(store: &mut Store, team: &Team, member: &Member, task_id: u32, fold
             json!({"member":role,"task":task_id,"attempt":n,"template":template,"exit":outcome.exit,"timed_out":outcome.timed_out}),
         ));
         Ok(())
-    })?;
-    Ok(json!({"status":"ran","template":template,"exit":outcome.exit,"tail":outcome.tail,"ms":outcome.ms,
-        "timed_out":outcome.timed_out,"error":outcome.error}))
+    });
+    if let Err(error) = recorded {
+        eprintln!("hgs team worker: {}: ran: {error:#}", team.name);
+    }
+    json!({"status":"ran","template":template,"exit":outcome.exit,"tail":outcome.tail,"ms":outcome.ms,
+        "timed_out":outcome.timed_out,"error":outcome.error})
+}
+
+/// C1: claims a queued run and starts the detached runner. None means claimed
+/// (the runner settles it); Some is a refusal to answer now.
+fn start_run(
+    store: &mut Store,
+    team: &Team,
+    member: &Member,
+    folder: &Path,
+    request: &Value,
+    spawn: &dyn Fn(&Path, &Value) -> anyhow::Result<()>,
+) -> anyhow::Result<Option<Value>> {
+    let _ = store;
+    let id = request["request_id"].as_str().unwrap_or_default().to_owned();
+    let refuse = |error: String| Ok(Some(json!({"status":"refused","request_id":id,"error":error})));
+    if !super::store::canonical_uuid(&id) {
+        return refuse("An outbox request needs a canonical request_id".into());
+    }
+    // N4: an answer that is already there is the answer; it never runs twice.
+    if super::outbox::result(folder, &id).is_some() {
+        let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
+        return Ok(None);
+    }
+    if super::outbox::running(folder, &id).is_some() {
+        // A push of the same id while the runner works: keep the claim, drop the copy.
+        let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
+        return Ok(None);
+    }
+    if request["team"].as_str() != Some(team.id.as_str()) {
+        return refuse("a request for another team".into());
+    }
+    if request["member"].as_str() != Some(member.id.as_str()) {
+        return refuse(format!("the folder belongs to {}", team.role_of(&member.id)));
+    }
+    let attempt = request["attempt"].as_str().unwrap_or_default();
+    if !team.tasks.iter().any(|task| task.open_attempt().is_some_and(|found| found.id == attempt && found.member == member.id)) {
+        return refuse(format!("attempt {attempt} does not run for this member"));
+    }
+    let template = request["template"].as_str().unwrap_or_default();
+    if let Err(error) = super::templates::plan(template, &request["args"], folder) {
+        return refuse(format!("{error:#}"));
+    }
+    let marker = json!({"request_id":id,"started":now(),"timeout_secs":super::templates::timeout_for(template)});
+    super::outbox::write_running(folder, &id, &marker)?;
+    let _ = std::fs::remove_file(super::outbox::request_path(folder, &id));
+    if let Err(error) = spawn(folder, request) {
+        // Nobody took the claim: put the request back for the next tick.
+        let _ = std::fs::remove_file(super::outbox::running_path(folder, &id));
+        super::outbox::push(folder, request)?;
+        return Err(error.context("the runner did not start"));
+    }
+    Ok(None)
+}
+
+/// C1: starts one detached runner for a claimed request; the worker never waits
+/// for a template. The request goes to the runner on its standard input, never
+/// through the member's folder, so the folder cannot change what runs.
+fn spawn_runner(folder: &Path, request: &Value) -> anyhow::Result<()> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(["team", "worker", "--run"])
+        .current_dir(folder)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for name in ["TMUX", "HGS_HOST_PANE", "HGS_SESSION", "HGS_RUN_ID"] {
+        command.env_remove(name);
+    }
+    let mut child = crate::platform::spawn_detached(&mut command)?;
+    if let Some(mut pipe) = child.stdin.take() {
+        use std::io::Write;
+        let _ = pipe.write_all(&serde_json::to_vec(request)?);
+    }
+    Ok(())
+}
+
+/// C1: a claim whose runner never settled (it crashed, the computer restarted)
+/// is answered once its own bound has long passed, so a member never waits on a
+/// result that cannot come.
+fn settle_stale_runs(folder: &Path, team: &Team) {
+    const GRACE_SECONDS: f64 = 120.0;
+    for (_, marker) in super::outbox::running_all(folder) {
+        let id = marker["request_id"].as_str().unwrap_or_default();
+        let started = marker["started"].as_f64().unwrap_or(0.0);
+        let bound = marker["timeout_secs"].as_u64().unwrap_or(1800) as f64;
+        if !id.is_empty() && now() > started + bound + GRACE_SECONDS {
+            let outcome = json!({"status":"refused","request_id":id,
+                "error":"the run stopped without a result (the runner ended, this computer restarted, or the command outlived its bound); ask again with a new request_id"});
+            let _ = super::outbox::settle_running(folder, id, &outcome);
+            eprintln!("hgs team worker: {}: run {id} stopped without a result", team.name);
+        }
+    }
+}
+
+/// C1: the detached runner for one claimed request, read from its standard
+/// input: execute it, record it and leave the outcome where the member polls.
+pub(crate) fn worker_run() -> Result<i32> {
+    use std::io::Read;
+    let folder = std::env::current_dir().map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    std::io::stdin().take(super::outbox::REQUEST_BYTES + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    let request: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => return Err(format!("The run request is not JSON: {error}")),
+    };
+    let mut store = match Store::open(true) {
+        Ok(store) => store,
+        Err(error) => {
+            if let Some(id) = request["request_id"].as_str() {
+                let outcome = json!({"status":"refused","request_id":id,"error":format!("the team store was not opened: {error:#}")});
+                let _ = super::outbox::settle_running(&folder, id, &outcome);
+            }
+            return Ok(1);
+        }
+    };
+    run_request(&mut store, &folder, &request);
+    Ok(0)
+}
+
+/// C1: one claimed request from the runner's folder. Its outcome, good or bad,
+/// is left in the outbox; the runner never holds the worker or another team.
+fn run_request(store: &mut Store, folder: &Path, request: &Value) {
+    let id = request["request_id"].as_str().unwrap_or_default().to_owned();
+    let outcome = (|| -> anyhow::Result<Value> {
+        anyhow::ensure!(super::store::canonical_uuid(&id), "An outbox request needs a canonical request_id");
+        let team = store.load(request["team"].as_str().unwrap_or_default())?.context("Unknown team")?;
+        anyhow::ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
+        let member = team.member(request["member"].as_str().unwrap_or_default()).context("Unknown member")?.clone();
+        // The folder still proves the member: it is the one Zerus gives it.
+        let mine = member_folder_path(&team, &member)?;
+        let here = folder.display().to_string();
+        anyhow::ensure!(
+            !mine.is_empty() && (same_path(&here, &mine) || inside(&here, &mine)),
+            "This folder is not {}'s own folder",
+            team.role_of(&member.id)
+        );
+        let attempt = request["attempt"].as_str().unwrap_or_default();
+        // C1: the attempt may have ended while the command ran; the result is
+        // still its own, so the claim is not refused for that.
+        anyhow::ensure!(
+            team.tasks.iter().any(|task| task.attempts.iter().any(|found| found.id == attempt && found.member == member.id)),
+            "attempt {attempt} is not this member's"
+        );
+        let outcome = run_outcome(&team, &member, folder, request)?;
+        Ok(record_run(store, &team, &member, request, &outcome))
+    })();
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => json!({"status":"refused","request_id":id,"error":format!("{error:#}")}),
+    };
+    if let Err(error) = super::outbox::settle_running(folder, &id, &outcome) {
+        eprintln!("hgs team worker: run {id}: {error}");
+    }
 }
 
 /// One queued request, applied as the member's own write (U20). The member's
 /// input keys the store receipt, so a request applied twice (a worker that died
 /// before it removed the file) is a replay, not a second report.
-fn apply_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<Value> {
+fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "run"), "Unknown outbox request {op}");
+    anyhow::ensure!(matches!(op, "report" | "ask" | "commit"), "Unknown outbox request {op}");
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.role_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
@@ -3434,9 +3826,6 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Path, 
     }
     if op == "commit" {
         return super::commands::commit_in_team(team, &member.id, &input);
-    }
-    if op == "run" {
-        return apply_run(store, team, member, task.id, folder, request);
     }
     let member_id = member.id.clone();
     store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {
@@ -4390,6 +4779,28 @@ mod tests {
         let told: Vec<String> = super::inbox::items_for(&t, "qalead").into_iter().map(|item| item.key).collect();
         t.members.iter_mut().find(|member| member.id == "qalead").unwrap().inbox = Inbox { told_at: 10.0, told };
         assert!(!steps(&t, &seen, 20.0).iter().any(|step| matches!(step, Step::SubInbox { .. })));
+        // N8: a sub-lead with its own Background work still takes a message.
+        t.members.iter_mut().find(|member| member.id == "qalead").unwrap().inbox = Inbox::default();
+        let mut background = session("codex/x/qalead", "r9", false);
+        background.live = true;
+        background.activity = "background".into();
+        background.phase = "idle".into();
+        assert!(steps(&t, &[session("claude/x/lead", "r0", true), background], 20.0)
+            .contains(&Step::SubInbox { member: "qalead".into() }));
+        // N9: the sub-lead is reminded first; the lead only after a second
+        // interval.
+        let after = t.settings.remind_lead_minutes as f64 * 60.0;
+        let report_at = t.task(qa).unwrap().attempts.last().unwrap().report.as_ref().unwrap().at;
+        let found = steps(&t, &seen, report_at + after + 1.0);
+        assert!(found.iter().any(|step| matches!(step, Step::RemindReviewer { member, .. } if member == "qalead")), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
+        let found = steps(&t, &seen, report_at + after * 2.0 + 1.0);
+        assert!(found.iter().any(|step| matches!(step, Step::RemindReport { .. })), "{found:?}");
+        // N10: a new sub-lead gets its brief once.
+        t.members.iter_mut().find(|member| member.id == "qalead").unwrap().sub_brief = true;
+        assert!(steps(&t, &seen, 20.0).contains(&Step::SubBrief { member: "qalead".into() }));
+        t.members.iter_mut().find(|member| member.id == "qalead").unwrap().sub_brief = false;
+        assert!(!steps(&t, &seen, 21.0).iter().any(|step| matches!(step, Step::SubBrief { .. })));
     }
 
     #[test]
@@ -4466,41 +4877,149 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_template_run_from_the_members_folder_runs_and_is_recorded() {
-        // U21: the member cannot run the command in its own sandbox; it queues
-        // the run and the worker executes it, recording exit and output tail.
+    fn a_queued_template_run_is_claimed_off_the_tick_and_runs_in_the_runner() {
+        // C1: the tick only claims the run and starts a runner; the runner (here
+        // called directly) executes it and records exit and output tail.
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         let mut t = team();
         t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
         let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
         task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
         task.status = TaskStatus::InProgress;
         let id = task.id;
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
-        let folder = dir.path().join("work");
-        std::fs::create_dir_all(folder.join(".zerus-team")).unwrap();
         // U21, attempt 2: additions come from Zerus state (the owner's), never
         // from the member's folder; the test points the state at its own file.
         let settings = dir.path().join("templates.json");
         crate::state::teams::templates::settings_override(Some(settings));
         crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo run-ok"]})]).unwrap();
-        let request = json!({"op":"run","request_id":"77777777-7777-4777-8777-777777777777",
+        let run_id = "77777777-7777-4777-8777-777777777777";
+        let request = json!({"op":"run","request_id":run_id,
             "team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
-            "input":{"request_id":"77777777-7777-4777-8777-777777777777","team":t.id,"attempt":"A1","template":"say","args":{}}});
-        super::super::outbox::push(&folder, &request).unwrap();
+            "input":{"request_id":run_id,"team":t.id,"attempt":"A1","template":"say","args":{}}});
+        let path = super::super::outbox::push(&folder, &request).unwrap();
         let mut member = session("codex/x/dev", "r1", true);
         member.cwd = folder.to_string_lossy().into_owned();
+        let started = std::cell::RefCell::new(Vec::<(std::path::PathBuf, Value)>::new());
+        let spawn = |folder: &Path, request: &Value| {
+            started.borrow_mut().push((folder.to_path_buf(), request.clone()));
+            Ok(())
+        };
         let current = store.load(&t.id).unwrap().unwrap();
-        take_outbox(&mut store, &current, &[member]).unwrap();
+        take_outbox_with(&mut store, &current, &[member.clone()], &spawn).unwrap();
+        // The tick claimed the request and returned; nothing ran yet.
+        let claims = started.borrow().clone();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].1["request_id"], run_id);
+        assert_eq!(claims[0].0, folder);
+        assert!(super::super::outbox::running_path(&folder, run_id).exists(), "the claim is not recorded");
+        assert!(!path.exists(), "the request left the queue");
+        assert!(super::super::outbox::result(&folder, run_id).is_none(), "the tick ran the command");
+        assert!(store.load(&t.id).unwrap().unwrap().task(id).unwrap().attempts.last().unwrap().runs.is_empty());
+        // A second tick starts nothing again: the claim is not a request.
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[member], &spawn).unwrap();
+        assert_eq!(started.borrow().len(), 1);
+        // The runner executes the claim and settles it.
+        run_request(&mut store, &folder, &claims[0].1);
+        assert!(super::super::outbox::running(&folder, run_id).is_none(), "the claim stays after the result");
         let saved = store.load(&t.id).unwrap().unwrap();
         let attempt = saved.task(id).unwrap().attempts.last().unwrap();
         assert_eq!(attempt.runs.len(), 1);
         assert_eq!((attempt.runs[0].template.as_str(), attempt.runs[0].exit), ("say", Some(0)));
-        let result = super::super::outbox::result(&folder, "77777777-7777-4777-8777-777777777777").unwrap();
+        let result = super::super::outbox::result(&folder, run_id).unwrap();
         assert_eq!(result["status"], "ran");
         assert_eq!(result["tail"].as_str().unwrap_or_default().trim(), "run-ok", "{result}");
         crate::state::teams::templates::settings_override(None);
+    }
+
+    #[test]
+    fn a_run_whose_attempt_ended_keeps_its_exit_code_and_tail() {
+        // C1: the attempt changing while the command runs must not lose the
+        // result; the run is recorded on the attempt it belonged to.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let settings = dir.path().join("templates.json");
+        crate::state::teams::templates::settings_override(Some(settings));
+        crate::state::teams::templates::set_additions(&[json!({"id":"say","program":"cmd","args":["/c","echo late-ok"]})]).unwrap();
+        let run_id = "77777777-7777-4777-8777-777777777778";
+        let request = json!({"op":"run","request_id":run_id,
+            "team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
+            "input":{"request_id":run_id,"team":t.id,"attempt":"A1","template":"say","args":{}}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let started = std::cell::RefCell::new(Vec::<Value>::new());
+        let spawn = |_: &Path, request: &Value| {
+            started.borrow_mut().push(request.clone());
+            Ok(())
+        };
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[member], &spawn).unwrap();
+        // The attempt is decided while the runner works.
+        let before = started.borrow().clone();
+        let mut ended = store.load(&t.id).unwrap().unwrap();
+        {
+            let task = ended.task_mut(id).unwrap();
+            task.attempts.last_mut().unwrap().state = AttemptState::Rejected;
+            task.status = TaskStatus::Pending;
+        }
+        store.mutate(None, &t.id, None, |team, _| {
+            *team = ended;
+            Ok(Value::Null)
+        })
+        .unwrap();
+        run_request(&mut store, &folder, &before[0]);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        assert_eq!((attempt.state, attempt.runs.len()), (AttemptState::Rejected, 1), "{attempt:?}");
+        assert_eq!(attempt.runs[0].exit, Some(0));
+        let result = super::super::outbox::result(&folder, run_id).unwrap();
+        assert_eq!(result["status"], "ran", "{result}");
+        assert_eq!(result["tail"].as_str().unwrap_or_default().trim(), "late-ok");
+        crate::state::teams::templates::settings_override(None);
+    }
+
+    #[test]
+    fn a_claim_whose_runner_died_is_answered_on_a_later_tick() {
+        // C1: the worker settles a claim no live runner holds, once its bound
+        // has long passed; the member stops waiting for a result.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        t.folder = folder.display().to_string();
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let run_id = "77777777-7777-4777-8777-777777777779";
+        let marker = json!({"request_id":run_id,"started":now()-7200.0,"timeout_secs":300});
+        super::super::outbox::write_running(&folder, run_id, &marker).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox_with(&mut store, &current, &[member], &|_, _| panic!("a stale claim must not start a runner")).unwrap();
+        let result = super::super::outbox::result(&folder, run_id).unwrap();
+        assert_eq!(result["status"], "refused");
+        assert!(result["error"].as_str().unwrap_or_default().contains("stopped without a result"), "{result}");
+        assert!(super::super::outbox::running(&folder, run_id).is_none());
     }
 
     #[test]
@@ -4609,7 +5128,7 @@ mod tests {
             return;
         }
         assert!(hardened.join(".git").join("hooks").join("post-merge").exists());
-        let outcome = merge_lead(&hardened.display().to_string(), Duration::from_secs(60));
+        let outcome = merge_lead(&hardened.display().to_string(), "teams-v2/lead", Duration::from_secs(60));
         assert_eq!(outcome.exit, Some(0), "{outcome:?}");
         assert!(!marker.exists(), "the repository's post-merge hook ran");
     }
@@ -4637,10 +5156,65 @@ mod tests {
         }
         let program = format!("cmd /c echo x > \"{}\"", marker.display());
         assert!(git(&["config", "core.fsmonitor", &program]));
-        let outcome = merge_lead(&repo.display().to_string(), Duration::from_secs(60));
+        let outcome = merge_lead(&repo.display().to_string(), "main", Duration::from_secs(60));
         assert_eq!(outcome.exit, Some(1), "{outcome:?}");
         assert!(outcome.tail.contains("configures core.fsmonitor"), "{}", outcome.tail);
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn a_merge_uses_the_leads_own_branch_and_never_a_shared_folder() {
+        // N1: the branch comes from the lead's folder (never a name built into
+        // Zerus), and the merge runs in the member's own worktree - a member in
+        // the team's shared folder never merges into the owner's checkout.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.email=t@e", "-c", "user.name=T"])
+                .args(args)
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        if !(git(&["init", "-q"]) && git(&["add", "."]) && git(&["commit", "-qm", "A"]) && git(&["switch", "-qc", "feature/lead"])) {
+            eprintln!("git could not build the test repository; the sandbox blocks it");
+            return;
+        }
+        let member = Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), folder: MemberFolder::Worktree, ..Default::default() };
+        let t = folder_team(&repo, member.clone());
+        let mine = member_folder_path(&t, &member).unwrap();
+        if !git(&["worktree", "add", "--quiet", "-b", "team/abcdef12/dev", &mine, "HEAD"]) {
+            eprintln!("git could not create the member worktree; the sandbox blocks it");
+            return;
+        }
+        // The lead's branch moves after the member's folder was cut from it.
+        std::fs::write(repo.join("lead.txt"), "l").unwrap();
+        assert!(git(&["add", "."]) && git(&["commit", "-qm", "lead"]));
+        let request = json!({"template":"git-merge-lead","args":{}});
+        let outcome = run_outcome(&t, &member, Path::new(&mine), &request).unwrap();
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(Path::new(&mine).join("lead.txt").exists(), "the lead's branch was not merged: {}", outcome.tail);
+        // A shared member works in the team's own checkout: Zerus merges nothing there.
+        let shared = Member { folder: MemberFolder::Shared, ..member.clone() };
+        let shared_team = folder_team(&repo, shared.clone());
+        let error = run_outcome(&shared_team, &shared, &repo, &request).unwrap_err().to_string();
+        assert!(error.contains("shared folder"), "{error}");
+    }
+
+    #[test]
+    fn the_hand_out_says_how_to_read_a_run_result() {
+        // N4: a new UUID per run, and asking again with the same one only reads.
+        let t = team();
+        let task = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().clone();
+        let attempt = Attempt { n: 1, id: "A1".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.contains("a new request_id for every run"), "{text}");
+        assert!(text.contains("Ask again with the same request_id to read the result"), "{text}");
+        assert!(text.contains("it never runs the command twice"), "{text}");
     }
 
     #[test]
@@ -4731,6 +5305,120 @@ mod tests {
         let seen = vec![session("claude/x/lead", "r0", true)];
         let late = steps(&t, &seen, 10.0 + timeout + 1.0);
         assert!(late.contains(&Step::NoReport { task: 1 }), "{late:?}");
+    }
+
+    /// N6: one NoReport step with a given `hgs inspect` record.
+    fn capture_with(reply: Value) -> (tempfile::TempDir, Store, String, u32) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            started_at: Some(11.0),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        inspect_override(Some(reply));
+        run_step(&mut store, &t, &Step::NoReport { task: id }, "").unwrap();
+        inspect_override(None);
+        (dir, store, t.id, id)
+    }
+
+    #[test]
+    fn a_quiet_capture_takes_only_a_reply_newer_than_the_delivery() {
+        // N6: after a rejection the session's last message is still attempt 1's
+        // report (or another task's); without a turn identity only a reply
+        // written after this attempt was delivered is its own.
+        let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"old","reply_at":5.0,"last_message":"attempt 1's report"}));
+        let saved = store.load(&team_id).unwrap().unwrap();
+        let attempt = saved.task(task).unwrap().attempts.last().unwrap();
+        assert!(attempt.report.is_none(), "an older reply was captured: {:?}", attempt.report);
+        assert!(attempt.no_report);
+        assert_eq!(attempt.state, AttemptState::Delivered);
+        // A reply written after the delivery is this attempt's report.
+        let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"new","reply_at":20.0,"last_message":"Done: checked"}));
+        let saved = store.load(&team_id).unwrap().unwrap();
+        let attempt = saved.task(task).unwrap().attempts.last().unwrap();
+        let report = attempt.report.as_ref().unwrap();
+        assert!(report.captured && report.text.contains("Done: checked"), "{report:?}");
+        assert_eq!(attempt.state, AttemptState::Reported);
+        // No time at all: not proven to be this attempt's.
+        let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"none","last_message":"who knows"}));
+        let saved = store.load(&team_id).unwrap().unwrap();
+        assert!(saved.task(task).unwrap().attempts.last().unwrap().report.is_none());
+    }
+
+    #[test]
+    fn a_no_report_attempt_is_not_decided_again() {
+        // N7: after a failed capture the guard stops a repeated `hgs inspect` on
+        // every tick, in both NoReport branches.
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            started_at: Some(11.0),
+            no_report: true,
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        let timeout = t.settings.report_timeout_seconds as f64;
+        let at = 10.0 + timeout + 1.0;
+        // No reply mark in the listing: the (None, Some) branch.
+        assert!(!steps(&t, &[session("codex/x/dev", "r1", true)], at).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        // No session in the listing: the (None, None) branch.
+        assert!(!steps(&t, &[], at).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        // Without the flag the same states decide it once.
+        t.task_mut(id).unwrap().attempts.last_mut().unwrap().no_report = false;
+        assert!(steps(&t, &[session("codex/x/dev", "r1", true)], at).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        assert!(steps(&t, &[], at).iter().any(|step| matches!(step, Step::NoReport { .. })));
+    }
+
+    #[test]
+    fn a_computer_that_did_not_list_is_not_a_stopped_member() {
+        // N7: a remote host whose listing failed decides nothing; its session is
+        // not "gone" and the lead is not told it stopped.
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            started_at: Some(11.0),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().session.as_mut().unwrap().host = "msi".into();
+        let timeout = t.settings.report_timeout_seconds as f64;
+        let at = 10.0 + timeout + 1.0;
+        let local_only: BTreeSet<String> = [String::new()].into_iter().collect();
+        let found = steps_with(&t, &[], at, Some(&local_only));
+        assert!(!found.iter().any(|step| matches!(step, Step::NoReport { .. } | Step::StartLate { .. })), "{found:?}");
+        // Its host answers and the session is really not there: decided.
+        let both: BTreeSet<String> = [String::new(), "msi".to_owned()].into_iter().collect();
+        assert!(steps_with(&t, &[], at, Some(&both)).iter().any(|step| matches!(step, Step::NoReport { .. })));
+        // A local member whose session is gone is decided as before.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().session.as_mut().unwrap().host.clear();
+        assert!(steps_with(&t, &[], at, Some(&local_only)).iter().any(|step| matches!(step, Step::NoReport { .. })));
     }
 
     #[test]

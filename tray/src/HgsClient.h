@@ -226,6 +226,8 @@ public:
     void setPresence(double idleSeconds, bool locked);
     void setupMachine(const QString &alias, const QString &source = {});
     QJsonObject worktreeSnapshot(const QString &host, const QString &path) const;
+    // Every snapshot by host + '\n' + path: an implicitly shared copy.
+    QHash<QString, QJsonObject> gitStatusSnapshots() const { return m_gitStatusCache; }
     QJsonObject gitStatusSnapshot(const QString &host, const QString &path) const;
     // `git-status` for a folder, at most every 15 s; none while a live event
     // stream follows it (EventStreams::coversGit).

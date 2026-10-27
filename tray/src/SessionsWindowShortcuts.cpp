@@ -383,10 +383,7 @@ void SessionsWindow::stepSession(int direction, bool attention)
         const QString key = item->data(SessionRoles::Key).toString();
         if (!needsAttention(key)) continue;
         revealSession(key); // May rebuild the list.
-        for (int row = 0; row < m_sessions->count(); ++row)
-            if (sessionRow(m_sessions->item(row)) && m_sessions->item(row)->data(SessionRoles::Key).toString() == key) {
-                m_sessions->setCurrentRow(row); m_sessions->scrollToItem(m_sessions->item(row)); break;
-            }
+        revealRow(key, true);
         return;
     }
     showNotice(tr("No sessions need attention"));

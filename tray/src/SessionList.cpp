@@ -56,6 +56,7 @@ SessionList::SessionList(QWidget *parent) : WorkspaceList(parent), m_token(QUuid
     connect(model(), &QAbstractItemModel::dataChanged, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::rowsInserted, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::rowsRemoved, this, &SessionList::scheduleRowExpandButtons);
+    connect(model(), &QAbstractItemModel::rowsMoved, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::modelReset, this, &SessionList::scheduleRowExpandButtons);
     connect(model(), &QAbstractItemModel::layoutChanged, this, &SessionList::scheduleRowExpandButtons);
     m_elapsedTimer.setInterval(1000);

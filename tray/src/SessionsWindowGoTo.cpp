@@ -163,7 +163,7 @@ void SessionsWindow::activateGoTo(const GoToItem &item)
             for (int row = 0; row < m_sessions->count(); ++row)
                 if (m_sessions->item(row)->data(SessionRoles::Key).toString() == item.id
                     && m_sessions->item(row)->data(SessionRoles::ChildId).toString().isEmpty()) {
-                    showSessionList(); m_sessions->setCurrentRow(row); m_sessions->scrollToItem(m_sessions->item(row));
+                    showSessionList(); revealRow(item.id, true);
                     return;
                 }
         }

@@ -61,6 +61,7 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
+#include "JsonParse.h"
 #include "OffGuiThread.h"
 #include "QuestionReply.h"
 #include "EventStream.h"
@@ -560,6 +561,12 @@ private slots:
     void pushFindsAMessageThatStartsWithAnAttachment();
     void preview();
     void controlConsolePreview();
+    void rowPreparationMatchesAppliedRows();
+    void rowPreparationFollowsFiltersDraftsAndPeers();
+    void rowPreparationNeverRunsOnTheGuiThread();
+    void rowPreparationDropsStaleResults();
+    void rowPreparationKeepsItemsSelectionAndScroll();
+    void rowPreparationRevealsSessionsAfterFilterChanges();
 private:
     FleetState fleet() const;
     // Two running OpenCode 2 sessions, each with its own run and conversation,
@@ -615,6 +622,10 @@ void TestSessionsWindow::nativeSettingsNavigationOnExplicitSpeechHost()
 
 void TestSessionsWindow::initTestCase()
 {
+    // Most checks read Sessions rows right after setFleet or an action: rows are
+    // prepared on the preparation thread while the GUI thread waits. The
+    // rowPreparation* tests cover the asynchronous application default.
+    SessionsWindow::setRowPreparationForTests(SessionsWindow::RowPreparation::Blocking);
     MessageBoxIcons::install();
     m_dir = std::make_unique<QTemporaryDir>(); QVERIFY(m_dir->isValid());
     QCoreApplication::setOrganizationName("hgs-tests");
@@ -13934,4 +13945,349 @@ void TestSessionsWindow::pushFindsAMessageThatStartsWithAnAttachment()
     fixture.queue("q-match", "❯ Rename the release branch\n❯ " + reference + " (" + instruction + "\n  " + path + ") Check this");
     inspectPush(window, fixture);
     QTRY_COMPARE_WITH_TIMEOUT(fixture.sentNow(), QStringList{"q-match"}, PushTimeout);
+}
+
+// Sessions rows prepared off the GUI thread (SessionsWindow::prepareRows).
+namespace {
+using RowPreparation = SessionsWindow::RowPreparation;
+// The application default, for one test.
+struct AsyncRows {
+    AsyncRows() { SessionsWindow::setRowPreparationForTests(RowPreparation::Async); }
+    ~AsyncRows() { SessionsWindow::setRowPreparationForTests(RowPreparation::Blocking); }
+};
+void settleRows(SessionsWindow &window)
+{
+    QTRY_VERIFY_WITH_TIMEOUT(!window.rowsPendingForTests(), 20000);
+}
+SessionsWindow::PreparedRows prepared(const SessionsWindow::RowInputs &inputs)
+{
+    return offGuiThread([&inputs] { return SessionsWindow::prepareRows(inputs); });
+}
+QStringList preparedKeys(const SessionsWindow::PreparedRows &rows)
+{
+    QStringList keys;
+    for (const auto &row : rows.rows) keys << row.key;
+    return keys;
+}
+const SessionsWindow::PreparedRow *preparedRow(const SessionsWindow::PreparedRows &rows, const QString &key)
+{
+    for (const auto &row : rows.rows) if (row.key == key) return &row;
+    return nullptr;
+}
+// Every row role an item holds: what a prepared row lists.
+QMap<int, QVariant> itemRoles(const QListWidgetItem *item)
+{
+    QMap<int, QVariant> roles;
+    QList<int> candidates{Qt::ToolTipRole, Qt::AccessibleTextRole, Qt::AccessibleDescriptionRole};
+    for (int role = Qt::UserRole; role < SessionRoles::Digest; ++role) candidates << role;
+    for (int role : candidates) if (item->data(role).isValid()) roles.insert(role, item->data(role));
+    return roles;
+}
+SessionInfo rowSession(const QString &name, const QString &cmd)
+{
+    SessionInfo s; s.name = name; s.cmd = cmd; s.project = name.section('/', 1, 1); s.tag = name.section('/', 2);
+    s.tracked = true; s.resumable = true; s.state = "running"; s.activity = "idle"; s.phase = "idle"; s.processState = "running";
+    return s;
+}
+// This computer with working, unread, stopped, paused, scheduled and subagent
+// sessions; a reachable peer asking for approval; and a peer last polled long ago.
+FleetState rowFleet(qint64 now)
+{
+    auto working = rowSession("codex/hgs/dashboard", "codex"); working.activity = "busy"; working.phase = "tool";
+    working.currentTool = "Bash"; working.toolDetail = "ctest"; working.turnStarted = 1700000000;
+    auto unread = rowSession("kimi/docs/research", "kimi"); unread.unreadReply = true; unread.replyId = "reply-1"; unread.conversationId = "conv-kimi";
+    auto stopped = rowSession("codex/hgs/stopped", "codex"); stopped.state = "stopped";
+    auto paused = rowSession("codex/website/navigation", "codex"); paused.state = "paused";
+    auto subs = rowSession("claude/hgs/subs", "claude"); subs.activity = "busy"; subs.phase = "thinking"; subs.conversationId = "conv-subs";
+    subs.subagents = QJsonObject{{"a", QJsonObject{{"name", "Tests"}, {"state", "working"}}},
+                                 {"b", QJsonObject{{"name", "Docs"}, {"state", "finished"}}},
+                                 {"c", QJsonObject{{"name", "Deploy"}, {"state", "working"}, {"display_state", "approval"}}}};
+    subs.subagentActiveCount = 2;
+    auto scheduledRow = rowSession("codex/hgs/scheduled", "codex"); scheduledRow.scheduledJobs = 2;
+    BoxState arch; arch.host = "arch"; arch.ok = true; arch.metrics = QJsonObject{{"platform", "linux"}};
+    arch.sessions = {working, unread, stopped, paused, subs, scheduledRow};
+    auto approval = rowSession("claude/infra/review", "claude"); approval.activity = "busy"; approval.phase = "approval";
+    BoxState mac; mac.host = "mac"; mac.ok = true; mac.sessions = {approval};
+    auto stale = rowSession("codex/old/stale", "codex"); stale.activity = "busy"; stale.phase = "tool";
+    BoxState old; old.host = "old"; old.ok = true; old.sessions = {stale};
+    FleetState state; state.setLocal(arch, now); state.setPeer(mac, now); state.setPeer(old, now - FleetState::kPeerStaleMs - 60000);
+    return state;
+}
+// Two projects: the paused session and the peer's approval are in "Second".
+QString storeRowProjects()
+{
+    SessionOrganization projects;
+    const auto second = projects.createGroup("Second", "6f1d2c3b-0000-4000-8000-000000000002");
+    projects.moveSession(projects.observe("arch", "codex/website/navigation", {}), second);
+    projects.moveSession(projects.observe("mac", "claude/infra/review", {}), second);
+    for (const auto *machine : {"arch", "mac", "old"}) projects.markImported(machine);
+    setJsonSetting("workspace/organization", QJsonDocument(projects.toJson()).toJson(QJsonDocument::Compact));
+    return second;
+}
+}
+
+void TestSessionsWindow::rowPreparationMatchesAppliedRows()
+{
+    AsyncRows async;
+    storeRowProjects();
+    QSettings().setValue("workspace/expandedSessions", QStringList{"\nclaude/hgs/subs"});
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1100, 760);
+    QSignalSpy applied(&window, &SessionsWindow::rowsApplied);
+    window.setFleet(rowFleet(QDateTime::currentMSecsSinceEpoch())); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    settleRows(window); QVERIFY(!applied.isEmpty());
+    // The rows applied are those a preparation of the window's current inputs gives.
+    const auto mismatch = [&]() -> QString {
+        if (window.rowsPendingForTests()) return "pending";
+        const auto rows = prepared(window.rowInputsForTests());
+        if (list->count() != rows.rows.size()) return QString("%1 rows, %2 prepared").arg(list->count()).arg(rows.rows.size());
+        for (int i = 0; i < rows.rows.size(); ++i) {
+            const auto &row = rows.rows[i]; const auto *item = list->item(i);
+            if (item->data(SessionRoles::Key).toString() != row.key) return "key of row " + QString::number(i) + ": " + row.key;
+            if (item->flags() != row.flags || item->isHidden() != row.hidden) return "flags or hidden of " + row.key;
+            if (item->data(SessionRoles::Digest).toByteArray() != row.digest) return "digest of " + row.key;
+            const auto roles = itemRoles(item);
+            for (auto it = row.roles.cbegin(); it != row.roles.cend(); ++it)
+                if (roles.value(it.key()) != it.value()) return QString("role %1 of %2").arg(it.key()).arg(row.key);
+            if (roles.size() != row.roles.size()) return "other roles of " + row.key;
+        }
+        return {};
+    };
+    const auto compare = [&] { QTRY_COMPARE_WITH_TIMEOUT(mismatch(), QString(), 20000); };
+    compare();
+    // Filters, a collapsed project and a changed listing apply the same rows.
+    for (const auto *id : {"attention", "active", "paused", "all"}) {
+        for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) if (button->property("filter") == id) button->click();
+        settleRows(window); compare();
+    }
+    auto changed = rowFleet(QDateTime::currentMSecsSinceEpoch());
+    auto local = changed.local(); local.sessions[0].activityDetail = "step 2"; local.sessions.removeAt(1);
+    changed.setLocal(local, QDateTime::currentMSecsSinceEpoch());
+    window.setFleet(changed); settleRows(window); compare();
+    QVERIFY(!preparedKeys(prepared(window.rowInputsForTests())).contains("\nkimi/docs/research"));
+}
+
+void TestSessionsWindow::rowPreparationFollowsFiltersDraftsAndPeers()
+{
+    const auto second = storeRowProjects();
+    QSettings().setValue("workspace/expandedSessions", QStringList{"\nclaude/hgs/subs"});
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1100, 760);
+    window.setFleet(rowFleet(QDateTime::currentMSecsSinceEpoch())); window.show();
+    const auto inputs = window.rowInputsForTests();
+    auto rows = prepared(inputs);
+    // Projects: a header per project, with members in their own project.
+    const auto keys = preparedKeys(rows);
+    QVERIFY(keys.contains("#group\nungrouped")); QVERIFY(keys.contains("#group\n" + second));
+    QVERIFY(keys.indexOf("#group\n" + second) < keys.indexOf("mac\nclaude/infra/review"));
+    QCOMPARE(preparedRow(rows, "#group\n" + second)->roles.value(SessionRoles::Total).toInt(), 2);
+    // Subagents: active children of an expanded session, the finished one hidden.
+    QVERIFY(keys.contains("\nclaude/hgs/subs\n#child\na")); QVERIFY(keys.contains("\nclaude/hgs/subs\n#child\nc"));
+    QVERIFY(!keys.contains("\nclaude/hgs/subs\n#child\nb"));
+    QVERIFY(preparedRow(rows, "\nclaude/hgs/subs")->roles.value(SessionRoles::HasChildren).toBool());
+    QVERIFY(preparedRow(rows, "\nclaude/hgs/subs\n#child\nc")->roles.value(SessionRoles::Attention).toBool());
+    auto completed = inputs; completed.includeCompleted = true;
+    QVERIFY(preparedKeys(prepared(completed)).contains("\nclaude/hgs/subs\n#child\nb"));
+    // A peer past its poll age is offline: never working, marked offline.
+    const auto *stale = preparedRow(rows, "old\ncodex/old/stale"); QVERIFY(stale);
+    QCOMPARE(stale->roles.value(SessionRoles::Host).toString(), QString("old (offline)"));
+    QVERIFY(!stale->roles.value(SessionRoles::Working).toBool());
+    QVERIFY(preparedRow(rows, "\ncodex/hgs/dashboard")->roles.value(SessionRoles::Working).toBool());
+    QVERIFY(!preparedRow(rows, "\ncodex/hgs/dashboard")->roles.value(Qt::AccessibleTextRole).toString().isEmpty());
+    // Active: current work, Scheduled and Needs attention; a draft adds a stopped session.
+    auto active = inputs; active.filter = "active";
+    rows = prepared(active);
+    const auto sessions = [](const SessionsWindow::PreparedRows &value) {
+        QStringList result;
+        for (const auto &row : value.rows) if (row.kind == SessionsWindow::PreparedRow::Session) result << row.key;
+        std::sort(result.begin(), result.end()); return result;
+    };
+    for (const auto *key : {"\nclaude/hgs/subs", "\ncodex/hgs/dashboard", "\ncodex/hgs/scheduled", "mac\nclaude/infra/review"})
+        QVERIFY2(sessions(rows).contains(key), key);
+    for (const auto *key : {"\ncodex/hgs/stopped", "\ncodex/website/navigation", "old\ncodex/old/stale"})
+        QVERIFY2(!sessions(rows).contains(key), key);
+    const int activeCount = rows.counts.value("active");
+    QCOMPARE(activeCount, sessions(rows).size());
+    active.drafts.insert("\ncodex/hgs/stopped");
+    rows = prepared(active);
+    QVERIFY(sessions(rows).contains("\ncodex/hgs/stopped")); QCOMPARE(rows.counts.value("active"), activeCount + 1);
+    QVERIFY(preparedRow(rows, "\ncodex/hgs/stopped")->roles.value(SessionRoles::Draft).toBool());
+    QVERIFY(rows.drafts.contains("\ncodex/hgs/stopped"));
+    // A subagent's unsent draft counts for its session too.
+    auto childDraft = inputs; childDraft.filter = "active";
+    childDraft.childDrafts.insert("arch\ncodex/hgs/stopped\n\nchild");
+    auto stoppedEntry = std::find_if(childDraft.entries.begin(), childDraft.entries.end(), [](const auto &e) { return e.key == "\ncodex/hgs/stopped"; });
+    QVERIFY(stoppedEntry != childDraft.entries.end());
+    stoppedEntry->session.subagents = QJsonObject{{"child", QJsonObject{{"name", "Child"}, {"state", "finished"}}}};
+    QVERIFY(prepared(childDraft).drafts.contains("\ncodex/hgs/stopped"));
+    // Needs attention: the approval on the peer and the child asking for approval.
+    auto attention = inputs; attention.filter = "attention";
+    rows = prepared(attention);
+    QVERIFY(sessions(rows).contains("\nclaude/hgs/subs")); QVERIFY(sessions(rows).contains("mac\nclaude/infra/review"));
+    for (const auto *key : {"\ncodex/hgs/dashboard", "\ncodex/hgs/scheduled", "\ncodex/hgs/stopped", "old\ncodex/old/stale"})
+        QVERIFY2(!sessions(rows).contains(key), key);
+    QCOMPARE(rows.counts.value("attention"), sessions(rows).size());
+    // A machine filter keeps that machine's rows and counts sessions per machine.
+    auto mac = inputs; mac.hostFilters = {"mac"};
+    rows = prepared(mac);
+    QCOMPARE(sessions(rows), QStringList{"mac\nclaude/infra/review"});
+    QCOMPARE(rows.machineCounts.value("@local"), 6); QCOMPARE(rows.machineCounts.value("mac"), 1);
+    // A collapsed project hides its members but keeps its header.
+    auto collapsed = inputs; collapsed.organization.setCollapsed(second, true);
+    rows = prepared(collapsed);
+    QVERIFY(!preparedRow(rows, "#group\n" + second)->hidden);
+    QVERIFY(preparedRow(rows, "mac\nclaude/infra/review")->hidden);
+    QVERIFY(preparedRow(rows, "#group\n" + second)->roles.value(SessionRoles::Collapsed).toBool());
+    // Equal inputs prepare equal rows; a change changes only that row's digest.
+    QCOMPARE(prepared(inputs).rows.first().digest, prepared(inputs).rows.first().digest);
+    auto detail = inputs;
+    for (auto &entry : detail.entries) if (entry.key == "\ncodex/hgs/dashboard") entry.session.model = "another-model";
+    const auto before = prepared(inputs), after = prepared(detail);
+    QCOMPARE(before.rows.size(), after.rows.size());
+    for (int i = 0; i < before.rows.size(); ++i)
+        QCOMPARE(before.rows[i].digest == after.rows[i].digest, before.rows[i].key != "\ncodex/hgs/dashboard");
+}
+
+void TestSessionsWindow::rowPreparationNeverRunsOnTheGuiThread()
+{
+    for (const auto mode : {RowPreparation::Async, RowPreparation::Blocking}) {
+        SessionsWindow::setRowPreparationForTests(mode);
+        const auto restore = qScopeGuard([] { SessionsWindow::setRowPreparationForTests(RowPreparation::Blocking); });
+        const int violations = JsonParse::violations();
+        SessionsWindow window(program()); keepDetailsPollsOut(window);
+        window.setFleet(rowFleet(QDateTime::currentMSecsSinceEpoch())); window.show();
+        settleRows(window);
+        auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list->count() > 0);
+        QCOMPARE(JsonParse::violations(), violations);
+    }
+    // A preparation on the GUI thread is a violation, fatal in every Qt suite.
+    SessionsWindow window(program()); keepDetailsPollsOut(window);
+    window.setFleet(rowFleet(QDateTime::currentMSecsSinceEpoch())); window.show(); settleRows(window);
+    QStringList reported;
+    JsonParse::setViolationHandler([&reported](const char *file, int) { reported << QString::fromUtf8(file); });
+    const auto restore = qScopeGuard([] { JsonParse::setViolationHandler({}); });
+    const auto rows = SessionsWindow::prepareRows(window.rowInputsForTests());
+    QVERIFY(!rows.rows.isEmpty());
+    QCOMPARE(reported.size(), 1); QVERIFY2(reported[0].endsWith("SessionsWindowRows.cpp"), qPrintable(reported[0]));
+}
+
+void TestSessionsWindow::rowPreparationDropsStaleResults()
+{
+    AsyncRows async;
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1100, 760);
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy inspected(client, &HgsClient::inspectionReady);
+    window.setFleet(rowFleet(now)); window.show(); settleRows(window);
+    // The first row is selected and inspected; its reply may rebuild the rows.
+    QTRY_VERIFY(!inspected.isEmpty()); QTest::qWait(100); settleRows(window);
+    auto *list = window.findChild<SessionList *>("sessionList");
+    const auto keys = [list] { QStringList result; for (int i = 0; i < list->count(); ++i) result << list->item(i)->data(SessionRoles::Key).toString(); return result; };
+    // Hold the preparation thread so that two preparations wait behind it.
+    QSemaphore gate; QObject holder; bool held = false;
+    ProcessRunner::post(&holder, [&gate] { gate.acquire(); return true; }, [&held](bool) { held = true; });
+    const auto listing = [&](const QString &name) {
+        auto state = rowFleet(now); auto local = state.local(); local.sessions.append(rowSession(name, "codex"));
+        state.setLocal(local, QDateTime::currentMSecsSinceEpoch()); return state;
+    };
+    QSignalSpy applied(&window, &SessionsWindow::rowsApplied);
+    const auto dropped = window.droppedRowPreparationsForTests();
+    const auto start = window.rowGenerationForTests();
+    window.setFleet(listing("codex/hgs/first"));
+    QTRY_VERIFY(window.rowGenerationForTests() > start);
+    const auto first = window.rowGenerationForTests();
+    window.setFleet(listing("codex/hgs/second"));
+    QTRY_VERIFY(window.rowGenerationForTests() > first);
+    // Nothing is applied while both wait: the list still shows the earlier rows.
+    QVERIFY(applied.isEmpty()); QVERIFY(!keys().contains("\ncodex/hgs/first"));
+    gate.release();
+    QTRY_VERIFY(held);
+    settleRows(window);
+    QVERIFY(!applied.isEmpty());
+    for (const auto &signal : applied) QVERIFY(signal[0].toULongLong() > first);
+    QCOMPARE(applied.last()[0].toULongLong(), window.rowGenerationForTests());
+    QVERIFY(window.droppedRowPreparationsForTests() > dropped);
+    QVERIFY(keys().contains("\ncodex/hgs/second")); QVERIFY(!keys().contains("\ncodex/hgs/first"));
+}
+
+void TestSessionsWindow::rowPreparationKeepsItemsSelectionAndScroll()
+{
+    AsyncRows async;
+    BoxState box; box.host = "arch"; box.ok = true;
+    for (int i = 0; i < 60; ++i) box.sessions.append(rowSession(QString("codex/scaling/session-%1").arg(i, 2, 10, QChar('0')), "codex"));
+    FleetState state; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1100, 600);
+    window.setFleet(state); window.show(); QVERIFY(QTest::qWaitForWindowExposed(&window)); settleRows(window);
+    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    const QString selectedKey = "\ncodex/scaling/session-40";
+    auto *client = window.findChild<HgsClient *>(); QSignalSpy inspected(client, &HgsClient::inspectionReady);
+    window.showSession({}, "codex/scaling/session-40"); settleRows(window);
+    QTRY_COMPARE(list->currentItem() ? list->currentItem()->data(SessionRoles::Key).toString() : QString(), selectedKey);
+    // Its inspection merges into its row; wait for it before comparing items.
+    QTRY_VERIFY(std::any_of(inspected.cbegin(), inspected.cend(), [](const auto &row) { return row[1].toString() == "codex/scaling/session-40"; }));
+    QTest::qWait(100); settleRows(window);
+    auto *bar = list->verticalScrollBar(); QVERIFY(bar->maximum() > 0);
+    bar->setValue(bar->maximum() / 2); const int scroll = bar->value();
+    const auto items = [list] {
+        QHash<QString, QListWidgetItem *> result;
+        for (int i = 0; i < list->count(); ++i) result.insert(list->item(i)->data(SessionRoles::Key).toString(), list->item(i));
+        return result;
+    };
+    const auto digests = [list] {
+        QHash<QString, QByteArray> result;
+        for (int i = 0; i < list->count(); ++i) result.insert(list->item(i)->data(SessionRoles::Key).toString(), list->item(i)->data(SessionRoles::Digest).toByteArray());
+        return result;
+    };
+    const auto before = items(); const auto beforeDigests = digests();
+    auto *selectedItem = list->currentItem();
+    // One changed row: the same items stay, only its roles are written.
+    QSignalSpy changedRoles(list->model(), &QAbstractItemModel::dataChanged);
+    box.sessions[10].activity = "busy"; box.sessions[10].phase = "tool"; box.sessions[10].activityDetail = "Running tests";
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state); settleRows(window);
+    QCOMPARE(items(), before);
+    QCOMPARE(list->currentItem(), selectedItem); QVERIFY(selectedItem->isSelected());
+    QCOMPARE(bar->value(), scroll);
+    const QString changedKey = "\ncodex/scaling/session-10";
+    QVERIFY(before.value(changedKey)->data(SessionRoles::Working).toBool());
+    for (auto it = beforeDigests.cbegin(); it != beforeDigests.cend(); ++it)
+        QCOMPARE(it.value() == digests().value(it.key()), it.key() != changedKey);
+    QVERIFY(!changedRoles.isEmpty());
+    for (const auto &signal : changedRoles) QCOMPARE(signal[0].toModelIndex().data(SessionRoles::Key).toString(), changedKey);
+    // A new row and a removed one: the other items, selection and scroll stay.
+    box.sessions.removeAt(5); box.sessions.append(rowSession("codex/scaling/session-60", "codex"));
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch()); window.setFleet(state); settleRows(window);
+    const auto after = items();
+    QCOMPARE(after.size(), before.size());
+    QVERIFY(!after.contains("\ncodex/scaling/session-05")); QVERIFY(after.contains("\ncodex/scaling/session-60"));
+    for (auto it = before.cbegin(); it != before.cend(); ++it)
+        if (it.key() != "\ncodex/scaling/session-05") QCOMPARE(after.value(it.key()), it.value());
+    QCOMPARE(list->currentItem(), selectedItem); QCOMPARE(list->selectedItems(), QList<QListWidgetItem *>{selectedItem});
+    QCOMPARE(bar->value(), scroll);
+    // Rows in the order prepared, as a new list would show them.
+    const auto rows = prepared(window.rowInputsForTests());
+    QCOMPARE(list->count(), rows.rows.size());
+    for (int i = 0; i < rows.rows.size(); ++i) QCOMPARE(list->item(i)->data(SessionRoles::Key).toString(), rows.rows[i].key);
+}
+
+void TestSessionsWindow::rowPreparationRevealsSessionsAfterFilterChanges()
+{
+    AsyncRows async;
+    BoxState box; box.host = "arch"; box.ok = true;
+    for (int i = 0; i < 40; ++i) box.sessions.append(rowSession(QString("codex/reveal/session-%1").arg(i, 2, 10, QChar('0')), "codex"));
+    box.sessions[0].activity = "busy"; box.sessions[0].phase = "approval";
+    FleetState state; state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(program()); keepDetailsPollsOut(window); window.resize(1100, 600);
+    window.setFleet(state); window.show(); QVERIFY(QTest::qWaitForWindowExposed(&window)); settleRows(window);
+    auto *list = window.findChild<SessionList *>("sessionList");
+    for (auto *button : window.findChildren<QPushButton *>("sessionFilter")) if (button->property("filter") == "attention") button->click();
+    settleRows(window); QCOMPARE(list->count(), 1);
+    // Opening a session the filter hides lists every session again, then selects
+    // and shows it once those rows are applied.
+    window.showSession({}, "codex/reveal/session-35");
+    QVERIFY(window.rowsPendingForTests());
+    settleRows(window);
+    QCOMPARE(list->count(), 40);
+    auto *item = list->currentItem(); QVERIFY(item);
+    QCOMPARE(item->data(SessionRoles::Key).toString(), QString("\ncodex/reveal/session-35"));
+    QVERIFY(list->viewport()->rect().intersects(list->visualItemRect(item)));
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    QTRY_COMPARE(composer->sessionKey(), QString("\ncodex/reveal/session-35"));
 }

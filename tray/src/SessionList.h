@@ -12,7 +12,9 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             ChildId, ParentKey, HasChildren, Expanded, ProjectColor, ProjectVivid, LaunchId, WorkingSince, ReviewLater, Draft, Failure,
             GitStatus, GitHost, GitPath, MetaIcon, Scheduled, OptionalQuestions, ModifiedAt, CoordinationWait, Waiting,
             // {host, name} of a live session a dragged task can be pinned to; empty for other rows.
-            TaskTarget, Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
+            TaskTarget, Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51,
+            // Of the prepared row last written to the item (SessionsWindow::applyListRows).
+            Digest = Qt::UserRole + 52 };
 }
 class QToolButton;
 

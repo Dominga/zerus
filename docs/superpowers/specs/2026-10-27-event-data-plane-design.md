@@ -163,6 +163,42 @@ time per unchanged listing fell from 5.5 ms to 0.36 ms with the window shown
 and per changed listing from 5.6 ms to 4.1 ms; M2b moves the remaining rebuild
 off the GUI thread.
 
+M2b-2 prepares the Sessions rows off the GUI thread. `SessionsWindow::rebuild()`
+keeps on the GUI thread only the reconciliation of state the window owns: the
+listed sessions with their organization identities, placement of launched
+sessions, row-preference migration, and restore, fork and rename continuations.
+It then copies what the rows read into `RowInputs`: the entries, fleet,
+organization, row preferences, filters, the selection and its inspection, the
+composers' unsent-draft keys from memory, the git status cache, machine colors
+and the tooltip font. `prepareRows()` runs on the shared preparation thread
+(`ProcessRunner::post`) and reads only that copy. It filters, counts and groups
+the sessions, orders the rows with their subagents and launch placeholders, and
+builds every role, the account catalog, the counts, the wrapped accessible text
+and project tooltips (`QTextLayout` with the copied font lays text out without
+painting), and a digest per row. Several rebuilds in one pass of the event loop
+prepare once. Each preparation has a generation, and a result superseded by a
+newer request is dropped. The GUI thread applies the newest result: filter
+counts and list chrome, then the rows by key. Items are kept, moved with their
+selection and persistent indexes, inserted or removed; roles are written only to
+rows whose digest changed, and a reused item reads exactly as a new one would.
+Selection, scroll and the details pane are applied as before. A choice made
+during reconciliation (a placed creation, a fork, a restore or a rename) and a
+row to reveal (Go to, notifications, attention navigation, a new launch) wait
+for the applied rows. Status semantics are unchanged: the predicates the window
+uses (`SessionRows.h`) are the ones the preparation uses. Preparing rows on the
+GUI thread is a violation, counted and fatal in the Qt suites like a GUI-thread
+JSON parse. Suites that read rows right after an action select Blocking
+preparation, which still runs on the preparation thread while the GUI thread
+waits; the application always prepares asynchronously.
+
+On arch, GUI-thread CPU per changed 35-row listing with the window shown fell
+from 4.1 ms to 1.7 ms in the listing handler, and from 5.3 ms to 3.6 ms
+including the applied rows and the paint that follows (medians of three runs).
+The row preparation itself, about 2.9 ms, runs on the preparation thread; the
+list update of a changed listing costs 0.03 ms. What stays on the GUI thread is
+the reconciliation (about 0.4 ms), the details pane render (about 0.5 ms),
+selection actions and the paint.
+
 ## Event stream: `hgs [@host] watch --json`
 
 ### Transport

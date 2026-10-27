@@ -46,7 +46,8 @@ QJsonObject ArchiveBrowser::query(const QString &cursor)const {
     const auto [from,until]=m_period->range();
     return {{"from",double(from)},{"until",double(until)},{"limit",50},{"cursor",cursor},{"query",m_query}};
 }
-bool ArchiveBrowser::includes(double at)const{const auto q=query({});return at>=q["from"].toDouble()&&at<q["until"].toDouble();}
+bool ArchiveBrowser::includes(double at)const{const auto range=includedRange();return at>=range.first&&at<range.second;}
+std::pair<double,double> ArchiveBrowser::includedRange()const{const auto q=query({});return {q["from"].toDouble(),q["until"].toDouble()};}
 void ArchiveBrowser::configure(const QMap<QString,QString>&hosts,bool active){
     setVisible(active);const bool different=hosts!=m_hosts;
     if(!active&&m_active){m_client.cancelArchivePages();for(auto &page:m_pages)page.request=0;}

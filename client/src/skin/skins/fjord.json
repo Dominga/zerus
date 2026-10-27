@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "id": "fjord",
+  "name": "Fjord",
+  "appearance": "dark",
+  "extends": "zerus-dark",
+  "tokens": {
+    "color": {
+      "page": "#0b1220",
+      "pane": "#101a2b",
+      "surface": "#142033",
+      "raised": "#18263c",
+      "card": "#132036",
+      "card-border": "#1e2e47",
+      "card-hover": "#182841",
+      "card-selected": "#16304d",
+      "card-selected-border": "#2f5f93",
+      "field": "#0d1626",
+      "border": "#24364f",
+      "divider": "#1e2e47",
+      "hover": "#1a2a42",
+      "segment-on": "#1d3c5f",
+      "tile": "#0d1626",
+      "bubble": "#17324f",
+      "bubble-border": "#2f5f93",
+      "text": "#e3ebf5",
+      "text-2": "#c3d0df",
+      "text-3": "#a5b5c8",
+      "muted": "#8fa1b6",
+      "label": "#8597ac",
+      "dim": "#6f8399",
+      "accent": "#79b8ff",
+      "accent-text": "#08121f",
+      "accent-hover": "#a6d0ff",
+      "accent-muted": "#4f87c2",
+      "accent-bg": "rgba(121,184,255,.11)",
+      "status-working": "#6fd3b5",
+      "status-background": "#79b8ff",
+      "entity-base": "#132036",
+      "tree-line": "#2a3f5c",
+      "terminal-bg": "#0a111d",
+      "code-bg": "#0d1626",
+      "selection": "rgba(121,184,255,.26)",
+      "row": "#132036",
+      "row-border": "#1e2e47",
+      "row-hover": "#182841",
+      "row-selected": "#16304d",
+      "row-selected-border": "#2f5f93",
+      "attention-ink": "#2a1c00"
+    },
+    "font": {
+      "ui": [
+        "Inter",
+        "Segoe UI",
+        "-apple-system",
+        "SF Pro Text",
+        "Noto Sans",
+        "system-ui",
+        "sans-serif"
+      ]
+    },
+    "radius": {
+      "card": 10,
+      "lg": 9,
+      "xl": 12
+    },
+    "shadow": {
+      "focus-ring": "0 0 0 3px rgba(121,184,255,.12)"
+    }
+  },
+  "components": {
+    "status-badge": "dot",
+    "agent-mark": "glyph",
+    "tree-lines": "lines",
+    "attention-edge": "tint"
+  },
+  "layout": {
+    "rail": "labeled",
+    "sessions-pane": "left",
+    "inspector": "docked",
+    "activity-column": "full"
+  }
+}

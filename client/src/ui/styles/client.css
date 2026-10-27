@@ -1,0 +1,14 @@
+/* Client additions on top of the approved mockup styles: states the mockup
+   showed with fixed data (reading, older pages, other screens) and the cost of
+   long transcripts. */
+@layer components {
+  /* Off-screen Activity items skip layout and paint until they scroll into view. */
+  .act-col > .act-msg, .act-col > .act-tools, .act-col > .act-thinking, .act-col > .act-notice { content-visibility: auto; contain-intrinsic-size: auto 72px; }
+  .act-older { padding: 4px 2px; text-align: center; }
+  /* Groups that hold an approval or a failure read in the warning colour, as in Qt. */
+  .act-tools.warn .act-tools-head b { color: var(--z-color-warn); }
+  .act-live b { min-width: 0; }
+  .later-screen { flex: 1; align-self: center; }
+  /* The measurement panel floats over the right edge, clear of the list and the Activity column. */
+  .perf-host { position: fixed; z-index: 90; right: 12px; bottom: 40px; width: min(620px, 60vw); max-height: 78vh; overflow: auto; padding: 10px 12px; border-radius: var(--z-radius-lg); border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); font-size: var(--fs-xs); }
+}

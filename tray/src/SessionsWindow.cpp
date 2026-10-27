@@ -589,7 +589,7 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     connect(&m_client, &HgsClient::notificationsFinished, this, [this](quint64 request, bool ok, const QJsonObject &result, const QString &error) {
         const auto found = m_pendingNotifications.find(request); if (found == m_pendingNotifications.end()) return;
-        const auto original = found->entry; m_pendingNotifications.erase(found);
+        const auto original = found->entry; const bool thenUnmute = found->thenUnmute; m_pendingNotifications.erase(found);
         const auto *box = original.host.isEmpty() ? &m_fleet.local() : m_fleet.peer(original.host);
         const bool current = box && std::any_of(box->sessions.cbegin(), box->sessions.cend(), [&](const SessionInfo &s) {
             return s.name == original.session.name && s.runId == original.session.runId
@@ -604,6 +604,15 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         rebuild(); updateDashboard();
         emit notificationPreferencesChanged(original.host, original.session.name, original.session.runId,
                                             original.session.conversationId, preferences);
+        if (!thenUnmute) return;
+        for (const auto &s : box->sessions) if (s.name == original.session.name && s.runId == original.session.runId
+                                                && s.conversationId == original.session.conversationId && s.state != "archived") {
+            Entry next = original; next.session = s;
+            const QJsonObject payload{{"run_id", s.runId}, {"conversation_id", s.conversationId}, {"muted", false},
+                                      {"expected_revision", s.notificationPreferences.value("revision")}};
+            m_pendingNotifications.insert(m_client.requestNotifications(next.host, s.name, payload), {next});
+            return;
+        }
     });
     connect(m_sessions, &SessionList::sessionMoved, this, [this](const QString &id, const QString &group, const QString &before) {
         m_organization.moveSession(id, group, before); saveOrganization(); rebuild();
@@ -1528,6 +1537,19 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     };
     m_collapsedTeams=[]{const auto list=QSettings().value("workspace/collapsedTeams").toStringList();return QSet<QString>(list.cbegin(),list.cend());}();
     connect(m_sessions,&SessionList::teamActivated,this,&SessionsWindow::showTeam);
+    // U25 (spec 2.1): a project's '+' opens New session for that project.
+    connect(m_sessions,&SessionList::projectNewSession,this,[this](const QString &group){showNewSession({},group,selectedHostTarget());});
+    // U25 (spec 2.2): a chip opens where its count lives: services and
+    // background commands in Processes (or Terminal), git in the inspector.
+    connect(m_sessions,&SessionList::chipActivated,this,[this](const QString &key,int kind){
+        for(int row=0;row<m_sessions->count();++row)if(m_sessions->item(row)->data(KeyRole).toString()==key){m_sessions->setCurrentRow(row);break;}
+        const auto *entry=selected();if(!entry||entry->key!=key)return;
+        if(SessionRowChips::isGit(SessionRowChips::Kind(kind))){setInspectorVisible(true);m_inspector->setCurrentWidget(m_worktrees);return;}
+        if(ProcessSettings::enabled()&&entry->online){m_detailTabs->setCurrentWidget(m_processes);return;}
+        if(entry->session.cmd=="dsh"){showNativeUi(*entry);return;}
+        if(!NativeSessionCapabilities::terminal(entry->session,m_details)){showNotice(NativeSessionCapabilities::terminalReason(entry->session,m_details),true);return;}
+        m_detailTabs->setCurrentWidget(m_terminal);m_terminal->connectSession();
+    });
     m_inspector->addTab(m_teamPanel, tr("Team"));
     // The team workspace: the Team tab next to Activity, shown while a team is.
     m_teamWorkspace=new TeamWorkspace(m_teams,m_teamPanel,this);
@@ -1554,6 +1576,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // once each; the known ones are kept across restarts.
     m_teamNotices=std::make_shared<TeamAttentionNotices>(QSettings().value("teams/attentionNotified").toStringList());
     connect(m_teams,&TeamController::teamsChanged,this,[this]{
+        // U25 (spec 2.3): members other than the lead are muted by default.
+        QSet<QString> members;
+        for(const auto &team:m_teams->teams())if(team.status!="archived")
+            for(const auto &member:team.members)if(!member.lead&&member.id!=team.lead&&!member.session.isEmpty())members.insert(member.host+'\n'+member.session);
+        if(members!=m_teamMembers){m_teamMembers=members;m_fleet.setTeamMembers(members);emit teamMembersChanged(members);}
         rebuild();updateTeamPanel();
         const auto changes=m_teamNotices->observe(m_teams->teams());
         if(changes.raised.isEmpty()&&changes.cleared.isEmpty())return;
@@ -2755,7 +2782,7 @@ void SessionsWindow::setFleet(const FleetState &fleet) {
     if (auto *launch=qobject_cast<NewSessionDialog *>(QApplication::activeModalWidget()); launch && launch->parentWidget()==this) launch->setFleet(fleet);
     m_settingsPage->setLocalSessions(fleet.local().localSessions, LocalSessionHost::canEnable(fleet.local())); m_settingsPage->setPeers(fleet.peerNames());
     m_settingsPage->setMobileGateway(fleet.local().localSessions||MachinePlatform::of(fleet.local().metrics,true)==MachinePlatform::Style::Windows);
-    m_fleet = fleet; m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
+    m_fleet = fleet; m_fleet.setTeamMembers(m_teamMembers); m_fleet.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object()); m_fleet.setPendingReads(ReadMarkStore::load()); reconcileTerminations();m_usageStore->setFleet(fleet); m_accountsPage->setFleet(fleet); updateDashboard(); m_projectsPage->setFleet(fleet); m_machinesPage->setFleet(fleet); if (isVisible()) rebuild(); applyQueuedModelSettings();
     updateConnectionStatus();
     if (!m_nativeLaunchToOpen.isEmpty()) {
         for (const auto &entry : m_entries) if (entry.session.launchId==m_nativeLaunchToOpen) {
@@ -3265,6 +3292,11 @@ QMap<int, QVariant> SessionsWindow::sessionCardRoles(const Entry &e) const
     for (const auto &service : s.services)
         services.append(QVariantMap{{"name", service.name}, {"command", service.command}, {"since", service.since}});
     roles.insert(SessionRoles::Services, services);
+    // U25 (spec 2.2): only confirmed current commands of a live session.
+    const bool jobs = !terminating && SessionPresentation::currentActivity(s, e.online) && s.backgroundProcesses > 0;
+    roles.insert(SessionRoles::BackgroundJobs, jobs ? s.backgroundProcesses : 0);
+    roles.insert(SessionRoles::BackgroundCommand, jobs ? s.backgroundCommand : QString());
+    roles.insert(SessionRoles::TeamMuted, s.muted && s.teamMuted);
     roles.insert(SessionRoles::MachineName, e.machine);
     roles.insert(SessionRoles::MachineColor, MachineAppearance::color(e.machine));
     roles.insert(HostRole, e.machine + (e.online ? QString() : tr(" (offline)"))); roles.insert(ChildrenRole, childCount(s, false, e.online, includeCompleted));
@@ -3733,6 +3765,7 @@ void SessionsWindow::rebuild()
             item->setData(SessionRoles::ProjectVivid, group->vivid);
             item->setData(SessionRoles::Collapsed, group->collapsed && query.isEmpty());
             item->setData(SessionRoles::Total, total); item->setData(SessionRoles::Attention, alerts); item->setData(SessionRoles::Working, busy); item->setData(SessionRoles::Unread, unread);
+            item->setData(SessionRoles::ProjectFolder, group->folders.isEmpty() ? QString() : QDir::toNativeSeparators(group->folders.first().path));
             const QString description = tr("%1: %2 shown, %3 need a response, %4 working, %5 unread replies. Click to collapse or expand; drag to reorder.")
                 .arg(group->name).arg(total).arg(alerts).arg(busy).arg(unread);
             item->setToolTip(sessionTooltip({description}, 330).html); item->setData(Qt::AccessibleTextRole, description);
@@ -5996,8 +6029,8 @@ void SessionsWindow::showSessionMenu(const QString &key, const QPoint &position)
         else if (!SessionNotifications::identity(target.runId,128) || !SessionNotifications::identity(target.conversationId,256)) muteReason = tr("Refresh this session's identity before changing shared notifications.");
         else if (!target.notificationPreferencesError.isEmpty()) muteReason = tr("Conflicting shared notification preferences. Refresh the session.");
         else if (pending || m_pendingNotifications.size() >= 16) muteReason = tr("A shared notification change is pending. Wait for its result.");
-        auto *mute = add(target.muted ? tr("Unmute") : tr("Mute"), "contextToggleMute", SessionMenuAction::ToggleMute, notifications, muteReason);
-        mute->setIcon(workspaceIcon(target.muted ? "attention" : "mute", SessionStatusBadge::mutedTone(m_dark)));
+        auto *mute = add(target.muted ? tr("Unmute notifications") : tr("Mute notifications"), "contextToggleMute", SessionMenuAction::ToggleMute, notifications, muteReason);
+        mute->setIcon(workspaceIcon(target.muted ? "bell" : "bell-off", SessionStatusBadge::mutedTone(m_dark)));
         // WhiteWh fork: the hours stay as set in Details; on from here is one hour.
         auto *warm = add(tr("Keep cache warm"), "contextKeepCacheWarm", SessionMenuAction::ToggleKeepWarm, !original.session.conversationId.isEmpty(),
             tr("Send the idle agent a one-word service message before its prompt cache expires"));
@@ -6088,10 +6121,12 @@ void SessionsWindow::runSessionMenuAction(const Entry &original, SessionMenuActi
             || std::any_of(m_pendingNotifications.cbegin(), m_pendingNotifications.cend(), [&](const PendingNotifications &p) {
                 return p.entry.host == current.host && p.entry.session.conversationId == current.session.conversationId;
             })) return;
+        // A member muted by its team first records the mute it has, then unmutes.
+        const bool team = current.session.teamMuted;
         const QJsonObject payload{{"run_id", current.session.runId}, {"conversation_id", current.session.conversationId},
-            {"muted", !current.session.muted}, {"expected_revision", current.session.notificationPreferences.value("revision")}};
+            {"muted", team || !current.session.muted}, {"expected_revision", current.session.notificationPreferences.value("revision")}};
         const auto request = m_client.requestNotifications(current.host, current.session.name, payload);
-        m_pendingNotifications.insert(request, {current}); return;
+        m_pendingNotifications.insert(request, {current, team}); return;
     }
     case SessionMenuAction::ToggleKeepWarm:
         CacheKeepalive::setHours(current.host, current.session, CacheKeepalive::hours(current.host, current.session) > 0 ? 0 : CacheKeepalive::DefaultHours);

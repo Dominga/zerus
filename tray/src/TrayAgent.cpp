@@ -152,6 +152,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_peerTimer(this)
 {
     m_icons.setForegroundOverride(m_cfg.iconColor);
+    { const auto members = QSettings().value("teams/mutedMembers").toStringList(); m_state.setTeamMembers(QSet<QString>(members.cbegin(), members.cend())); }
     auto *updates=UpdateController::instance();
     connect(updates,&UpdateController::changed,this,[this]{if(!m_menu.isOpen())m_menu.rebuild(m_state);});
     connect(updates,&UpdateController::newerReleaseVerified,this,[this](const QString &token,const QString &version){m_notifier->post(token,tr("Zerus update available"),tr("Zerus %1 is available. Open Updates for installation instructions.").arg(version));});
@@ -690,6 +691,15 @@ void TrayAgent::showSessions()
             m_notifier->post(token, title, body);
         });
         connect(m_sessionsWindow, &SessionsWindow::teamAttentionCleared, this, [this](const QString &token) { m_notifier->withdraw(token); });
+        // U25 (spec 2.3): team members are muted by default; known across restarts.
+        connect(m_sessionsWindow, &SessionsWindow::teamMembersChanged, this, [this](const QSet<QString> &members) {
+            QStringList kept(members.cbegin(), members.cend()); kept.sort(); if (kept.size() > 4096) kept = kept.mid(0, 4096);
+            QSettings().setValue("teams/mutedMembers", kept);
+            if (!m_state.setTeamMembers(members)) return;
+            observeAttention({}, m_state.local());
+            for (const auto &host : m_state.peerNames()) if (const auto *box = m_state.peer(host)) observeAttention(host, *box);
+            m_sessionsWindow->setFleet(m_state); refreshIcon();
+        });
         connect(m_sessionsWindow, &SessionsWindow::newSessionRequested, this, &TrayAgent::launchSession);
         connect(m_sessionsWindow, &SessionsWindow::accountLoginRequested, this, [this](const QString &host, const QString &id) {
             auto backend = makeLaunchTerminal(m_cfg); QString error; QStringList args;

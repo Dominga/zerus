@@ -50,6 +50,9 @@ struct SessionInfo {
     bool reviewLater = false, attentionAcknowledged = false;
     // Confirmed notification preference from the session's host, shared by devices.
     bool muted = false;
+    // U25 (spec 2.3): muted only because it is a team member other than the
+    // lead and its session carries no choice of its own (FleetState).
+    bool teamMuted = false;
     bool sharedNotifications = false;
     QJsonObject notificationPreferences;
     QString notificationPreferencesError;

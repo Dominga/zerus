@@ -113,6 +113,9 @@ signals:
     // N7 (U18): a team's attention item, raised once and withdrawn when gone.
     void teamAttentionRaised(const QString &token, const QString &title, const QString &body);
     void teamAttentionCleared(const QString &token);
+    // U25 (spec 2.3): the sessions of team members other than the lead
+    // (host + '\n' + name), muted until they carry their own choice.
+    void teamMembersChanged(const QSet<QString> &members);
 
 public:
     // WhiteWh fork: apply the selected skin again, as after a change in Settings.
@@ -624,7 +627,10 @@ private:
     void finishSendEvidence(const QString &key);
     struct PendingAnswer { QString key, questionId, questionHash; };
     QHash<quint64, PendingAnswer> m_pendingAnswers;
-    struct PendingNotifications { Entry entry; };
+    // U25: unmuting a member muted by its team writes mute, then unmute: the
+    // host records only a change, and revision 0 means the session never chose.
+    struct PendingNotifications { Entry entry; bool thenUnmute = false; };
+    QSet<QString> m_teamMembers;
     QHash<quint64, PendingNotifications> m_pendingNotifications;
     bool m_confirmingQuestionCache = false;
     QStackedWidget *m_detailStack = nullptr;

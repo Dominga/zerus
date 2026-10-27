@@ -1062,6 +1062,24 @@ keeps or rejects.
 Claude's start-up trust stays manual for every other folder. No other agent
 (Codex, DeepSeek, Kimi, OpenCode) gets folder trust or rules from Zerus.
 
+### The team roster on the owner's word
+
+The lead changes a team's roster only on the owner's explicit word: a sentence
+the owner typed in the lead's own session, at most 30 minutes old. For
+`add-member` the sentence must name what is added — the member's role or its
+agent/model, in English or Russian ("backend"/"бэкенд", "frontend"/"фронт",
+"qa", "reviewer"/"ревьюер", "expert"/"эксперт"; "DeepSeek"/"дипсик"/"dsh",
+"Claude"/"клод", "Opus"/"опус", "Codex"/"кодекс", "Kimi"/"кими") — not the
+generated id. The sentence says how many members it adds; one is the default.
+
+When the add would exceed `max_members`, the same word raises the cap by
+exactly the count the sentence names, within the tree's session budget, in the
+same change, and the feed names the old and the new cap. One verified prompt
+covers one add per count it names: the same sentence cannot add a second
+member. `remove-member` and `swap-member` still need the member's id in the
+sentence, and a separate lead `settings` cap change still names the new cap.
+The team's roster and feed say "Added by Lead on your word" with the quote.
+
 <a id="activity"></a>
 
 ## Activity, messages and native controls
@@ -3236,6 +3254,16 @@ app's workspace, unless with `--background`. After a main-thread watchdog abort,
 Windows Error Reporting restarts the app with the same settings in the background
 (`--background`, never `--sessions`): a window that opens by itself after a crash
 would be a surprise.
+
+**DeepSeek members' folders.** A DeepSeek session's sandbox needs full control
+(WRITE_DAC and WRITE_OWNER) of the folder it confines. When Zerus creates a
+member's worktree or clone it adds this user's explicit, inheritable FullControl
+entry to that new folder, so the sandbox starts there. A folder Zerus did not
+create (a direct, existing or custom folder) is checked first: when a right is
+missing the session does not start, and the member's error — shown in the Lead's
+inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
+one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
+ACLs itself: it reports the exact error to the Lead.
 
 **Updates.** The portable zip has no installer or self-update. Stable releases
 after 0.42.2 and nightly releases carry the same tested zip. A portable

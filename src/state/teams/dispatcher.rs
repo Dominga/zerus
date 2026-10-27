@@ -1150,6 +1150,7 @@ pub(crate) fn hand_off_text_with(
          Your task and attempt again: {current} | hgs {at}team current --json\n\
          Report once at the end: hgs {at}team report --json, with JSON on stdin:\n  {report}\n\
          A progress line is not a report; a question is not a report.\n\
+         Never repair file permissions or ACLs yourself; report the exact error to {boss} with the folder and the command.\n\
          Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
          the report as your last message: Zerus gives it to {boss}. A blocker goes to {boss} too: ask it, not the owner.",
         ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."}),

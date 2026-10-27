@@ -778,25 +778,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn route_matches_like_the_prototype() {
-        let mut catalog = builtin();
-        catalog.routing = vec![
-            Rule { id: "review".into(), when: "review · release".into(), template: "bugfix".into(), approval: String::new(), use_: String::new() },
-            Rule { id: "all".into(), when: "everything else".into(), template: "feature".into(), approval: String::new(), use_: String::new() },
-        ];
-        validate(&catalog).unwrap();
-        // Either word of "review · release" matches; the dot is not a token.
-        assert_eq!(route(&catalog, "please review this")["template"]["id"], "bugfix");
-        assert_eq!(route(&catalog, "make a release")["template"]["id"], "bugfix");
-        // "everything else" always matches, so it is the catch-all, not the
-        // first template fallback.
-        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
-        // An empty when never matches.
-        catalog.routing[0].when.clear();
-        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
-    }
-
-    #[test]
     fn a_claude_designer_is_trusted_for_its_folder_and_gets_the_narrow_rules() {
         let folder = "C:\\Users\\owner\\.local\\state\\hgs\\sessions\\team-designer";
         let dir = tempfile::tempdir().unwrap();
@@ -837,6 +818,25 @@ mod tests {
             assert!(!trust_designer(agent, "C:\\designer", &config).unwrap(), "{agent}");
         }
         assert!(!config.exists(), "nothing writes a Claude account config for another agent");
+    }
+
+    #[test]
+    fn route_matches_like_the_prototype() {
+        let mut catalog = builtin();
+        catalog.routing = vec![
+            Rule { id: "review".into(), when: "review · release".into(), template: "bugfix".into(), approval: String::new(), use_: String::new() },
+            Rule { id: "all".into(), when: "everything else".into(), template: "feature".into(), approval: String::new(), use_: String::new() },
+        ];
+        validate(&catalog).unwrap();
+        // Either word of "review · release" matches; the dot is not a token.
+        assert_eq!(route(&catalog, "please review this")["template"]["id"], "bugfix");
+        assert_eq!(route(&catalog, "make a release")["template"]["id"], "bugfix");
+        // "everything else" always matches, so it is the catch-all, not the
+        // first template fallback.
+        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
+        // An empty when never matches.
+        catalog.routing[0].when.clear();
+        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
     }
 
     #[test]

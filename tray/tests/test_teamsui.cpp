@@ -181,6 +181,30 @@ QJsonObject graphTeam()
     return t;
 }
 
+// U25 part 5 (owner, 2026-10-27): one task per activity-label rule, plus a
+// problem that must win over the label.
+QJsonObject labelTeam()
+{
+    return QJsonDocument::fromJson(R"({
+ "id":"team-1","name":"Labels","status":"running","project":"Checkout","folder":"/work/labels","lead":"lead",
+ "revision":5,"created":1000,"updated":5000,"settings":{},"layers":{},"cycle":[],"ready":[],"validation":{"errors":[],"warnings":[]},
+ "members":[
+  {"id":"lead","role":"Lead","agent":"claude","state":"active","session":{"host":"","name":"claude/labels/lead"}},
+  {"id":"backend","role":"Backend","agent":"dsh","state":"active","session":{"host":"","name":"dsh/labels/backend"}},
+  {"id":"blocked","role":"Tester","agent":"codex","state":"active","session":{"host":"","name":"codex/labels/blocked"}}],
+ "tasks":[
+  {"id":1,"title":"Review me","assignee":"backend","status":"submitted","attempts":[{"n":1,"id":"a1","member":"backend","state":"reported"}]},
+  {"id":2,"title":"Second try","assignee":"backend","status":"in_progress","attempts":[{"n":2,"id":"a2","member":"backend","state":"delivered","started_at":1200}]},
+  {"id":3,"title":"First try","assignee":"backend","status":"in_progress","attempts":[{"n":1,"id":"a3","member":"backend","state":"delivered","started_at":1300}]},
+  {"id":4,"title":"Held back","assignee":"backend","status":"pending","hold":{"by":"Lead","at":1400,"reason":"ask first"}},
+  {"id":5,"title":"Delegated","assignee":"backend","status":"in_progress","subteam":{"team":"team-2","done":1,"total":2},"attempts":[{"n":1,"id":"a5","member":"backend","state":"delivered","started_at":1500}]},
+  {"id":6,"title":"Queued","assignee":"backend","status":"pending"},
+  {"id":7,"title":"Still a draft","assignee":"backend","status":"draft"},
+  {"id":8,"title":"Done","assignee":"backend","status":"accepted"},
+  {"id":9,"title":"Offline problem","assignee":"blocked","status":"in_progress","attempts":[{"n":2,"id":"a9","member":"blocked","state":"delivered","started_at":1600}]}],
+ "layers":{"1":0,"2":1,"3":1,"4":2,"5":2,"6":3,"7":3,"8":4,"9":1}})").object();
+}
+
 // A running team with two phases appended: phase 1 is finished (it starts
 // collapsed), phase 2 has a barrier, phase 3 waits as a draft.
 QJsonObject phasedTeam()
@@ -651,6 +675,7 @@ private slots:
     void graphEdgesAreEditedByHandleAndSelection();
     void graphRoutingStaysFastForTheLargestPlan();
     void graphNodesInTwoLinesWithDraftEdits();
+    void graphNodesCarryTheActivityLabel();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
@@ -4165,6 +4190,70 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
     shot(&workspace, "ux-5-graph-dark");
     workspace.setTheme(false);
     lightShot(&workspace, "ux-5-graph-light");
+}
+
+void TestTeamsUi::graphNodesCarryTheActivityLabel()
+{
+    setTeam(labelTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    // #9's member is offline: its problem text must win over the label.
+    const LiveLookup live = [](const Member &m) { Live l; l.known = true; if (m.id == "blocked") l.offline = true; return l; };
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    TeamUi::TaskView *graph = nullptr;
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph && graph->nodeRect(1).width() > 0; })());
+    const auto node = [&](int id) { for (const auto &n : graph->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    // Each rule of the owner's addition: Submitted, attempt 2, nothing on the
+    // first attempt, Held, a sub-team, and nothing for Pending, Draft, Accepted.
+    QCOMPARE(node(1).activity, QStringLiteral("review"));
+    QCOMPARE(node(2).activity, QStringLiteral("attempt 2"));
+    QVERIFY(node(3).activity.isEmpty());
+    QCOMPARE(node(4).activity, QStringLiteral("held"));
+    QCOMPARE(node(5).activity, QStringLiteral("sub-team 1/2"));
+    QVERIFY(node(6).activity.isEmpty());
+    QVERIFY(node(7).activity.isEmpty());
+    QVERIFY(node(8).activity.isEmpty());
+    // A problem text wins; the label stays empty.
+    QVERIFY(node(9).problem);
+    QVERIFY(!node(9).problemText.isEmpty());
+    QVERIFY(node(9).activity.isEmpty());
+    shot(&workspace, "ux-5-graph-label-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "ux-5-graph-label-light");
+    darkPalette(); workspace.setTheme(true);
+    // The same label on Board cards, right of the role chip and model tile.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "board") { b->click(); break; }
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    const auto card = [&](int id) {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamBoardCard"))
+            if (frame->property("task").toInt() == id) {
+                auto *a = frame->findChild<QLabel *>("teamBoardActivity");
+                return a ? a->text() : QString();
+            }
+        return QStringLiteral("?");
+    };
+    QCOMPARE(card(1), QStringLiteral("review"));
+    QCOMPARE(card(2), QStringLiteral("attempt 2"));
+    QCOMPARE(card(4), QStringLiteral("held"));
+    QVERIFY(card(6).isEmpty());
+    QVERIFY(card(9).isEmpty());
+    // The same label on Layers rows: the list view carries it on its nodes.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "layers") { b->click(); break; }
+    TeamUi::TaskView *layers = nullptr;
+    QTRY_VERIFY(([&] { layers = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceLayers")); return layers != nullptr; })());
+    const auto layerLabel = [&](int id) { for (const auto &n : layers->nodes) if (n.id == id) return n.activity; return QStringLiteral("?"); };
+    QCOMPARE(layerLabel(1), QStringLiteral("review"));
+    QCOMPARE(layerLabel(4), QStringLiteral("held"));
 }
 
 // #380 attempt 2: the member's "…" menu and the swap dialog run their own

@@ -132,7 +132,7 @@ pub(crate) fn with_test_state_root<T>(root: &Path, run: impl FnOnce() -> T) -> T
     storage::set_test_root(Some(root.to_path_buf()));
     // The test process may itself run inside a session; the command must see
     // no ambient identity so it acts as the owner.
-    teams::commands::set_test_caller_identities(Some((None, None)));
+    teams::commands::set_test_caller_identities(Some((None, None, None)));
     let _restore = Restore;
     run()
 }

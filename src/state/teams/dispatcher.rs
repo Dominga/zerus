@@ -970,7 +970,17 @@ pub(crate) fn hand_off_text_with(
         text += &format!("Team goal: {}\n", team.goal);
     }
     if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
-        text += &format!("Role: {prompt}\n");
+        // U25: the role's prompt blocks in its order, when the catalog has one.
+        let ordered = super::catalog::load().ok().and_then(|catalog| {
+            let role_name = team.role_of(&attempt.member);
+            let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
+            super::catalog::prompt_order_text(role, prompt, Some(task), "")
+        });
+        if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
+            text += &ordered;
+        } else {
+            text += &format!("Role: {prompt}\n");
+        }
     }
     text += &format!("\nTask #{}: {}\n", task.id, task.title);
     if !task.description.is_empty() {
@@ -1164,7 +1174,16 @@ pub(crate) fn brief_text(team: &Team) -> String {
         text += &format!("Folder: {}\n", team.folder);
     }
     if let Some(prompt) = team.member(&team.lead).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
-        text += &format!("Your role: {prompt}\n");
+        let ordered = super::catalog::load().ok().and_then(|catalog| {
+            let role_name = team.role_of(&team.lead);
+            let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
+            super::catalog::prompt_order_text(role, prompt, None, "")
+        });
+        if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
+            text += &ordered;
+        } else {
+            text += &format!("Your role: {prompt}\n");
+        }
     }
     if !team.lead_protocol.trim().is_empty() {
         text += &format!("\nTeam protocol:\n{}\n", team.lead_protocol.trim());
@@ -4718,6 +4737,17 @@ mod tests {
             {"type":"Tool","detail":"run"}]});
         assert_eq!(reply_text(&record), "The answer.");
         assert_eq!(reply_text(&json!({})), "");
+    }
+
+    #[test]
+    fn an_old_catalog_keeps_the_hand_off_text_unchanged() {
+        let mut team = team();
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt = "You write the backend".into();
+        let task = team.task(1).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text_with(&team, &task, &attempt, "", "", "");
+        assert!(text.contains("Role: You write the backend"), "{text}");
+        assert!(!text.contains("Project rules:") && !text.contains("Team protocol extra:"), "{text}");
     }
 
     #[test]

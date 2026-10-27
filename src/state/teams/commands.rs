@@ -84,38 +84,41 @@ fn dsh_member(team: &Team, conversation: &str) -> Option<String> {
 /// elsewhere (a member on another computer) is authorized by its attempt id;
 /// anything else must say it is you.
 fn actor(team: &Team, op: &str, input: &Value) -> anyhow::Result<Actor> {
-    let (dsh, env) = caller_identities();
-    resolve_actor(team, op, input, caller_record().as_ref(), dsh.as_deref(), env.as_deref())
+    let (dsh, env, run) = caller_identities();
+    resolve_actor(team, op, input, caller_record().as_ref(), dsh.as_deref(), env.as_deref(), run.as_deref())
 }
 
-/// The ambient session identities of this process (H7): its dsh conversation
-/// and its hgs session. A test driving the real entry point replaces them,
-/// because the test process itself may run inside a session.
-fn caller_identities() -> (Option<String>, Option<String>) {
+/// The ambient session identities of this process (H7, U12): its dsh
+/// conversation, its hgs session and its hgs run. A test driving the real
+/// entry point replaces them, because the test process itself may run inside
+/// a session.
+type Identities = (Option<String>, Option<String>, Option<String>);
+
+fn caller_identities() -> Identities {
     #[cfg(test)]
     if let Some(found) = TEST_CALLER_IDENTITIES.with(|value| value.borrow().clone()) {
         return found;
     }
-    (nonempty_env("DSH_SESSION_ID"), nonempty_env("HGS_SESSION"))
+    (nonempty_env("DSH_SESSION_ID"), nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID"))
 }
 
 #[cfg(test)]
 thread_local! {
-    static TEST_CALLER_IDENTITIES: std::cell::RefCell<Option<(Option<String>, Option<String>)>> = const { std::cell::RefCell::new(None) };
+    static TEST_CALLER_IDENTITIES: std::cell::RefCell<Option<Identities>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Sets (or clears) this thread's ambient session identities; used with the
 /// private state directory so a command test acts as the owner, not as the
 /// session that happens to run the tests.
 #[cfg(test)]
-pub(crate) fn set_test_caller_identities(identities: Option<(Option<String>, Option<String>)>) {
+pub(crate) fn set_test_caller_identities(identities: Option<Identities>) {
     TEST_CALLER_IDENTITIES.with(|value| *value.borrow_mut() = identities);
 }
 
 /// The proven identities decide who asks. A stale `HGS_SESSION` (a resumed host
 /// leaks another session's into its members) never names the caller: a member
 /// is proven by its ancestry, its dsh conversation or its attempt id, in that
-/// order (H7).
+/// order (H7). An agent session marker (U12) never falls through to the owner.
 fn resolve_actor(
     team: &Team,
     op: &str,
@@ -123,6 +126,7 @@ fn resolve_actor(
     record: Option<&Value>,
     dsh: Option<&str>,
     env: Option<&str>,
+    run: Option<&str>,
 ) -> anyhow::Result<Actor> {
     if let Some(record) = record {
         let member = calling_member(team, record).with_context(|| format!("This session is not a member of team {}", team.name))?;
@@ -143,6 +147,12 @@ fn resolve_actor(
         }
         bail!("The attempt is not in this team");
     }
+    // U12: a dsh session or any other agent session carries a marker; it can
+    // never claim to be the owner, even with "by":"human".
+    ensure!(
+        dsh.is_none() && run.is_none(),
+        "An agent session cannot act as the owner"
+    );
     // A process outside every session acts as the owner; a session env that
     // does not own the calling process could name another one (H7).
     ensure!(env.is_none(), "Zerus could not verify the calling session");
@@ -904,6 +914,7 @@ fn parent_caller(
     record: Option<&Value>,
     dsh: Option<&str>,
     env: Option<&str>,
+    run: Option<&str>,
     by: &str,
 ) -> anyhow::Result<ParentCaller> {
     let resolved = if let Some(record) = record {
@@ -919,6 +930,8 @@ fn parent_caller(
         Some(id) if id == team.lead => Ok(ParentCaller::ParentLead),
         Some(_) => bail!("A sub-team is created from the parent task's assignee, the parent lead or you"),
         None => {
+            // U12: an agent session never falls through to the owner.
+            ensure!(dsh.is_none() && run.is_none(), "An agent session cannot act as the owner");
             ensure!(env.is_none(), "Zerus could not verify the calling session");
             ensure!(
                 by == "human",
@@ -1020,6 +1033,7 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
         caller_record().as_ref(),
         nonempty_env("DSH_SESSION_ID").as_deref(),
         nonempty_env("HGS_SESSION").as_deref(),
+        nonempty_env("HGS_RUN_ID").as_deref(),
         text(input, "by"),
     )?;
     // The assignee's session becomes the sub-team's lead.
@@ -3131,17 +3145,25 @@ mod tests {
         let foreign = Some("codex/AIBalanceTools/AI BalancerUpdate");
         // Its own session ancestry still proves the member, whatever the env says.
         let own = json!({"name":"codex/x/dev","run_id":"r1"});
-        assert_eq!(resolve_actor(&team, "ask", &json!({}), Some(&own), None, foreign).unwrap(), Actor::Member("dev".into()));
+        assert_eq!(resolve_actor(&team, "ask", &json!({}), Some(&own), None, foreign, None).unwrap(), Actor::Member("dev".into()));
         // A dsh member with a leaked env is proven by its conversation.
         team.members.iter_mut().find(|member| member.id == "dev").unwrap().session.as_mut().unwrap().conversation_id = "c1".into();
-        assert_eq!(resolve_actor(&team, "ask", &json!({}), None, Some("c1"), foreign).unwrap(), Actor::Member("dev".into()));
+        assert_eq!(resolve_actor(&team, "ask", &json!({}), None, Some("c1"), foreign, None).unwrap(), Actor::Member("dev".into()));
         // A report by attempt id is proven too.
-        assert_eq!(resolve_actor(&team, "report", &json!({"attempt":attempt}), None, None, foreign).unwrap(), Actor::Member("dev".into()));
+        assert_eq!(resolve_actor(&team, "report", &json!({"attempt":attempt}), None, None, foreign, None).unwrap(), Actor::Member("dev".into()));
         // The leaked env alone proves nothing: it cannot act as the owner.
-        let error = resolve_actor(&team, "stop", &human, None, None, foreign).unwrap_err().to_string();
+        let error = resolve_actor(&team, "stop", &human, None, None, foreign, None).unwrap_err().to_string();
         assert_eq!(error, "Zerus could not verify the calling session");
         // Outside every session, the owner may act.
-        assert_eq!(resolve_actor(&team, "stop", &human, None, None, None).unwrap(), Actor::Human);
+        assert_eq!(resolve_actor(&team, "stop", &human, None, None, None, None).unwrap(), Actor::Human);
+        // U12: a dsh session outside this team, and any session carrying the
+        // hgs run marker, never acts as the owner - whatever "by" says.
+        for op in ["stop", "approve-phase", "swap-member"] {
+            let error = resolve_actor(&team, op, &human, None, Some("session-other"), None, None).unwrap_err().to_string();
+            assert_eq!(error, "An agent session cannot act as the owner", "{op}");
+            let error = resolve_actor(&team, op, &human, None, None, None, Some("run-other")).unwrap_err().to_string();
+            assert_eq!(error, "An agent session cannot act as the owner", "{op}");
+        }
     }
 
     #[test]
@@ -3583,26 +3605,32 @@ mod tests {
         ];
         // A DeepSeek assignee is proven by its conversation id, not by an hgs
         // session record.
-        assert_eq!(parent_caller(&parent, "dshdev", None, Some("conv-dev"), None, "").unwrap(), ParentCaller::Assignee);
+        assert_eq!(parent_caller(&parent, "dshdev", None, Some("conv-dev"), None, None, "").unwrap(), ParentCaller::Assignee);
         // A dsh non-assignee cannot pass by:human as the owner.
-        let error = parent_caller(&parent, "dshdev", None, Some("conv-qa"), None, "human")
+        let error = parent_caller(&parent, "dshdev", None, Some("conv-qa"), None, None, "human")
             .unwrap_err()
             .to_string();
         assert!(error.contains("assignee"), "{error}");
         // The owner path still needs no session env and says it is you.
-        assert_eq!(parent_caller(&parent, "dev", None, None, None, "human").unwrap(), ParentCaller::Owner);
-        let error = parent_caller(&parent, "dev", None, None, Some("HGS"), "human")
+        assert_eq!(parent_caller(&parent, "dev", None, None, None, None, "human").unwrap(), ParentCaller::Owner);
+        // U12: a dsh session outside the parent, or a run marker, may not claim
+        // the owner path either.
+        let error = parent_caller(&parent, "dev", None, Some("session-other"), None, None, "human").unwrap_err().to_string();
+        assert_eq!(error, "An agent session cannot act as the owner");
+        let error = parent_caller(&parent, "dev", None, None, None, Some("run-other"), "human").unwrap_err().to_string();
+        assert_eq!(error, "An agent session cannot act as the owner");
+        let error = parent_caller(&parent, "dev", None, None, Some("HGS"), None, "human")
             .unwrap_err()
             .to_string();
         assert!(error.contains("could not verify"), "{error}");
         // A session record is checked against the parent team: the assignee
         // and the parent lead are accepted, a stranger is refused.
         let dev = json!({"name":"codex/x/dev","run_id":"r1"});
-        assert_eq!(parent_caller(&parent, "dev", Some(&dev), None, Some(""), "").unwrap(), ParentCaller::Assignee);
+        assert_eq!(parent_caller(&parent, "dev", Some(&dev), None, Some(""), None, "").unwrap(), ParentCaller::Assignee);
         let lead = json!({"name":"claude/x/lead","run_id":"r0"});
-        assert_eq!(parent_caller(&parent, "dev", Some(&lead), None, None, "").unwrap(), ParentCaller::ParentLead);
+        assert_eq!(parent_caller(&parent, "dev", Some(&lead), None, None, None, "").unwrap(), ParentCaller::ParentLead);
         let stranger = json!({"name":"codex/x/other","run_id":"r9"});
-        assert!(parent_caller(&parent, "dev", Some(&stranger), None, None, "").is_err());
+        assert!(parent_caller(&parent, "dev", Some(&stranger), None, None, None, "").is_err());
     }
 
     #[test]

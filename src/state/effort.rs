@@ -1839,7 +1839,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("effort payload exceeds 4 KiB".into());
     }
     let request: Request =
-        serde_json::from_slice(&bytes).map_err(|e| format!("invalid effort payload: {e}"))?;
+        serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| format!("invalid effort payload: {e}"))?;
     let id = uuid::Uuid::parse_str(&request.request_id)
         .map_err(|_| "request_id must be a UUID")?
         .to_string();
@@ -2071,7 +2071,7 @@ pub(super) fn dispatch_settings(args: &[String]) -> Result<i32> {
         return Err("settings payload exceeds 4 KiB".into());
     }
     let request: SettingsRequest =
-        serde_json::from_slice(&bytes).map_err(|e| format!("invalid settings payload: {e}"))?;
+        serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| format!("invalid settings payload: {e}"))?;
     let id = uuid::Uuid::parse_str(&request.request_id)
         .map_err(|_| "request_id must be a UUID")?
         .to_string();

@@ -54,7 +54,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if dsh::exists(&args[0]) { return dsh::dispatch("compact-context", args); }
     let mut bytes = Vec::new(); io::stdin().take(8193).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
     if bytes.len() > 8192 { return Err("Compact request is too large".into()); }
-    let request: Request = serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+    let request: Request = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e|e.to_string())?;
     let uuid = uuid::Uuid::parse_str(&request.request_id).map_err(|_|"Invalid request identity")?;
     let name = &args[0];
     let guard = lock(None)?;

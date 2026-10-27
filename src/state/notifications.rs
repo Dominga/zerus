@@ -486,7 +486,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if bytes.len() > 8192 {
         return Err("notification request exceeds limits".into());
     }
-    let request = parse(&bytes)?;
+    let request = parse(crate::state::without_bom(&bytes))?;
     let _preference_guard = lock(Some(&root().join("notifications.lock")))?;
     // Same lock files as their writers, without the default lock's rename
     // recovery. An interrupted rename is refused, never completed here.

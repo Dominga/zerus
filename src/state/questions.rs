@@ -660,7 +660,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if input.len() as u64 > MAX_PAYLOAD_BYTES {
         return Err("answer payload exceeds128 KiB".into());
     }
-    let request: AnswerRequest = serde_json::from_slice(&input)
+    let request: AnswerRequest = serde_json::from_slice(crate::state::without_bom(&input))
         .map_err(|error| format!("invalid answer payload: {error}"))?;
     let request_id = uuid::Uuid::parse_str(&request.request_id)
         .map_err(|_| "request_id must be a UUID")?

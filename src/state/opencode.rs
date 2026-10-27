@@ -1062,7 +1062,7 @@ fn checked_request(record: &Value) -> Result<Value> {
     if bytes.len() > 30 * 1024 * 1024 {
         return Err("Native request exceeds bounds".into());
     }
-    let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let request: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     let id =
         uuid::Uuid::parse_str(string(&request, "request_id")).map_err(|_| "Invalid request ID")?;
     if id.is_nil()

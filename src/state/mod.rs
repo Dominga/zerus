@@ -69,6 +69,7 @@ mod search;
 pub(crate) mod session_graph;
 mod storage;
 mod subagents;
+mod subagents_confirm;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -217,6 +218,10 @@ fn account_binding(record: &Value) -> Value {
     };
     json!({"provider":provider,"id":id,"home":agent_home,"run_id":record["run_id"]})
 }
+
+/// Tests that change HGS_STATE_DIR share this lock (they run in one process).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(super) fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("")
@@ -737,6 +742,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "hook" {
         return hooks::hook();
+    }
+    if command == "subagents-confirm" {
+        return subagents_confirm::dispatch(args);
     }
     if command == "answer-channel" {
         return answer_channel::run();

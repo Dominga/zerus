@@ -1314,6 +1314,19 @@ pub(super) fn hook() -> Result<i32> {
     {
         return Ok(0);
     }
+    // U19: the owner confirms subagents before Claude starts them.
+    if agent == "claude" && subagents_confirm::confirm() {
+        if kind == "UserPromptSubmit" {
+            subagents_confirm::group_reset(sid);
+        }
+        if subagents_confirm::subagent_call(&event) {
+            let calls = subagents_confirm::group_add(sid, &event["tool_input"]);
+            let folder = string(&record, "cwd");
+            let model = string(&record, "model");
+            let model = if model.is_empty() { "the session model" } else { model };
+            println!("{}", subagents_confirm::decision(&calls, folder, model));
+        }
+    }
     if pause_active(&record) && ["UserPromptSubmit", "PreToolUse", "TurnStarted"].contains(&kind) {
         eprintln!("hgs is pausing this session; retry after resuming");
         return Ok(2);

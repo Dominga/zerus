@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QJsonValue>
 #include <QRegularExpression>
+#include <QSet>
 #include <algorithm>
 #include <functional>
 
@@ -56,6 +57,57 @@ const Member *Team::memberOfSession(const QString &host, const QString &session)
 {
     for (const auto &m : members) if (!m.session.isEmpty() && m.session == session && m.host == host) return &m;
     return nullptr;
+}
+
+QString Team::reviewerOf(const QString &id) const
+{
+    if (id == lead) return {};
+    const Member *self = member(id);
+    const Member *parent = self && !self->parent.isEmpty() ? member(self->parent) : nullptr;
+    return parent && parent->sub && parent->id != id && parent->id != lead ? parent->id : lead;
+}
+
+QList<const Member *> Team::reportsOf(const QString &id) const
+{
+    QList<const Member *> out;
+    for (const auto &m : members) if (m.id != lead && reviewerOf(m.id) == id) out.append(&m);
+    return out;
+}
+
+QList<Team::TreeNode> Team::memberTree(const std::function<bool(const QString &)> &shown) const
+{
+    const auto visible = [&](const QString &id) { return !shown || shown(id); };
+    // The shown parent of each shown member: its reviewer, or the nearest
+    // shown one above it (bounded: a broken chain ends at the lead).
+    const auto parentOf = [&](const QString &id) {
+        QString at = reviewerOf(id);
+        for (int guard = 0; at != lead && !at.isEmpty() && !visible(at) && guard < members.size(); ++guard) at = reviewerOf(at);
+        return at.isEmpty() || !visible(at) ? lead : at;
+    };
+    const auto childrenOf = [&](const QString &id) {
+        QList<const Member *> out;
+        for (const auto &m : members) if (m.id != lead && visible(m.id) && parentOf(m.id) == id) out.append(&m);
+        return out;
+    };
+    QList<TreeNode> out;
+    QSet<QString> placed{lead};
+    // Depth-first from the lead; a member whose chain never reaches the lead
+    // (a broken record with a cycle) is listed under the lead at the end.
+    std::function<void(const QString &, int, QList<bool>)> walk = [&](const QString &id, int depth, QList<bool> through) {
+        const auto children = childrenOf(id);
+        for (int i = 0; i < children.size(); ++i) {
+            if (placed.contains(children[i]->id)) continue;
+            placed.insert(children[i]->id);
+            const bool last = i == children.size() - 1;
+            out.append({children[i], depth + 1, last, through});
+            walk(children[i]->id, depth + 1, through + QList<bool>{!last});
+        }
+    };
+    if (const Member *l = member(lead)) out.append({l, 0, true, {}});
+    walk(lead, 0, {});
+    for (const auto &m : members)
+        if (!placed.contains(m.id) && visible(m.id)) out.append({&m, 1, true, {}});
+    return out;
 }
 
 const Task *Team::task(int id) const
@@ -311,6 +363,8 @@ Team parse(const QJsonObject &v)
             member.budget.elapsedMinutes = budget.value("elapsed_minutes").toInt();
             member.budget.since = budget.value("since").toDouble();
         }
+        member.parent = str(m, "parent");
+        member.sub = m.value("sub").toBool();
         member.lead = member.id == team.lead;
         if (member.lead && member.role.isEmpty()) member.role = tr("Lead");
         team.members.append(member);
@@ -688,6 +742,8 @@ QJsonObject Member::json() const
     QJsonObject o{{"id", id}, {"role", role}, {"agent", agent}, {"account", account}, {"model", model}, {"effort", effort},
                   {"permissions", permissions}, {"computer", computer}, {"directory", directory}, {"prompt", prompt}};
     if (!folder.isEmpty()) o.insert("folder", folder);
+    if (!parent.isEmpty()) o.insert("parent", parent);
+    if (sub) o.insert("sub", true);
     if (!session.isEmpty()) {
         // F8: an adopted session keeps its identity, so hgs finds the same one.
         QJsonObject ref{{"host", host}, {"name", session}};
@@ -787,9 +843,20 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
         return make("sent", tr("Sending #%1 %2").arg(current->id).arg(current->title), QStringLiteral("Sending"), Tone::Assigned, current->id);
     if (attempt)
         return make("working", tr("Working on #%1 %2").arg(current->id).arg(current->title), QStringLiteral("#%1").arg(current->id), Tone::Active, current->id);
+    // Spec 5.6: a sub-lead reviews its reports' work, or coordinates them.
+    if (member.sub && (team.status == "running" || team.status == "paused")) {
+        for (const auto &task : team.tasks)
+            if (task.status == "submitted" && team.reviewerOf(task.assignee) == member.id)
+                return make("reviewing", tr("Reviewing #%1 %2").arg(task.id).arg(task.title), QStringLiteral("#%1").arg(task.id), Tone::Active, task.id);
+    }
     for (const auto &task : team.tasks)
         if (task.status == "submitted" && task.last() && task.last()->member == member.id)
             return make("submitted", tr("Submitted"), tr("Submitted"), Tone::Done, task.id);
+    if (member.sub && (team.status == "running" || team.status == "paused")) {
+        const qsizetype n = team.reportsOf(member.id).size();
+        const QString text = n == 1 ? tr("Coordinating 1 report") : tr("Coordinating %1 reports").arg(n);
+        return make("coordinating", text, tr("Coordinating"), Tone::Muted);
+    }
     if (team.status == "done") return make("done", tr("Done"), tr("Done"), Tone::Done);
     if (live.working) return make("working", tr("Working"), tr("Working"), Tone::Active);
     return make("idle", tr("Idle"), tr("Idle"), Tone::Muted);
@@ -1234,13 +1301,21 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "all_decided") { t = tr("All tasks decided · waiting for the lead"); line.tone = Tone::Active; }
     else if (k == "finished") { t = tr("Finished · %1 of %2 tasks accepted").arg(d.value("accepted").toInt()).arg(d.value("tasks").toInt()); line.tone = Tone::Done; }
     else if (k == "lead_told" && d.value("kind").toString() == "all_decided") t = tr("Told the Lead that all tasks are decided");
-    else if (k == "handed_out") { line.by = tr("Lead"); t = tr("Task to %1 · %2%3").arg(d.value("to").toString(), ref, attempt); }
+    // Spec 5.6: a sub-lead hands out its reports' tasks ("QA lead: Task to Tester").
+    else if (k == "handed_out") {
+        const QString by = d.value("by").toString();
+        line.by = by.isEmpty() || by == "Lead" || by == "Zerus" ? tr("Lead") : by;
+        t = tr("Task to %1 · %2%3").arg(d.value("to").toString(), ref, attempt);
+    }
     else if (k == "delivered") t = tr("Delivered %1%2").arg(ref, attempt);
     else if (k == "started") t = tr("Started %1%2").arg(ref, attempt);
     else if (k == "start_late") { t = tr("Delivered and not started yet · %1%2").arg(ref, attempt); line.tone = Tone::Warn; }
     else if (k == "refused") { t = tr("Not delivered %1%2 (%3); handed out again later").arg(ref, attempt, d.value("error").toString()); line.tone = Tone::Warn; }
     else if (k == "unconfirmed") { t = tr("Delivery unconfirmed · %1%2 (%3)").arg(ref, attempt, d.value("error").toString()); line.tone = Tone::Danger; }
-    else if (k == "reported") t = tr("Report to Lead · %1%2").arg(ref, attempt);
+    else if (k == "reported") {
+        const QString to = d.value("to").toString();
+        t = tr("Report to %1 · %2%3").arg(to.isEmpty() ? tr("Lead") : to, ref, attempt);
+    }
     else if (k == "report_replaced") t = tr("Replaced the captured reply · %1%2").arg(ref, attempt);
     else if (k == "question_asked") {
         const QString text = d.value("text").toString();

@@ -406,3 +406,30 @@ Events: `member_error`, `member_swapped`, `member_rebound`, `member_limited`,
 `hosts`, `swapped`, `proposals`, `findings_summary`, `findings`,
 `phases_health`, `phase_summary`, `totals`, `children`, `parent`, `previous`,
 `next`, `attempts[].report.structured|unstructured`.
+
+## A sub-lead inside a team (U25 part 10)
+
+The owner's design (`SPEC.md` 5.6 and 2.5 of the UI handoff) adds a hierarchy inside one team. Sub-teams (separate
+teams with their own lead, above) stay as they are.
+
+- `members[].parent`: the member it reports to; empty means the lead (old teams load unchanged, and the field is
+  skipped when empty). `members[].sub`: the member is a sub-lead. A sub-lead keeps its own coalesced inbox in
+  `members[].inbox` (`told_at`, `told`), as the team's `inbox` is the lead's.
+- A parent is the lead or a non-removed sub-lead of the same team, never the member itself or one below it; the lead
+  has no parent and is no sub-lead. `plan`, `add-member` ("Reports to") and the commands below are refused otherwise:
+  "X reports to unknown member Y", "X reports to Y, which is not a sub-lead", "X would report to itself".
+- `hgs team reports-to --json` `{"request_id","team","member","parent"}` (lead or owner; `parent` may name the lead)
+  records `reports_to {by, member, to}`. `hgs team sub-lead --json` `{"request_id","team","member","sub"}` (lead or
+  owner) records `sub_lead {by, member, sub}`. Stopping being a sub-lead, and `remove-member` of one, are refused while
+  it has reports: "Move its reports to another lead first: <roles>".
+- The reviewer of a member is its sub-lead parent, else the lead (`Team::reviewer_of`). The reviewer may `reply` to
+  the member's questions and `hold`, `release`, `retry`, `accept` and `reject` its tasks; the lead and the owner still
+  may do all of these for anyone. A sub-lead's own tasks are reviewed by its own parent.
+- Hand-outs to a sub-lead's report say `from: <sub-lead role>` and name it as the route for questions, the report
+  and blockers ("Questions for QA lead", "Zerus gives it to QA lead"); the lead's own reports keep the old words. The
+  `handed_out` event's `by` is the sub-lead's role ("QA lead: Task to Tester"), `reported` gains `to` ("Report to QA
+  lead"), and a sub-lead's decision has its role as `by` ("QA lead: Accepted #5").
+- Report, question and stall items of a task go to the inbox of the reviewer of its assignee: a free sub-lead gets
+  one coalesced message per interval like the lead (step `SubInbox`, event `inbox_told {items, member}`), and `hgs team
+  inbox --json` called from a sub-lead's session (or with `"member"`) lists its items. The lead's inbox and its report
+  reminder keep the team's own items and its direct reports'.

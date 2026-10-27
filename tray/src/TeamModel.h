@@ -87,6 +87,10 @@ struct Member {
     // `team status` sends them in members[].question and permission_answers.
     Question permission;
     QList<PermissionAnswer> permissionAnswers;
+    // Spec 5.6 (U25): the member it reports to (empty: the lead) and whether
+    // it is a sub-lead, which hands out, reviews and accepts its reports' tasks.
+    QString parent;
+    bool sub = false;
     QJsonObject json() const;
 };
 
@@ -365,6 +369,17 @@ struct Team {
     const Host *hostOf(const QString &member) const;
     const Member *member(const QString &id) const;
     const Member *memberOfSession(const QString &host, const QString &session) const;
+    // Spec 5.6: who reviews a member (its sub-lead parent, else the lead; the
+    // lead has none), its direct reports, and the members as a tree: the lead,
+    // then each member followed by its reports, depth 0 for the lead.
+    QString reviewerOf(const QString &member) const;
+    QList<const Member *> reportsOf(const QString &member) const;
+    struct TreeNode { const Member *member = nullptr; int depth = 0; bool last = false; QList<bool> through; };
+    // `last`: no later sibling under the same parent. `through[k]`: the line of
+    // depth k+1 continues past this row (its ancestor there has a later sibling).
+    // `shown`, when set, keeps only those members: one whose parent is not
+    // shown hangs from its nearest shown ancestor (a folded team's list).
+    QList<TreeNode> memberTree(const std::function<bool(const QString &)> &shown = {}) const;
     const Task *task(int id) const;
     const Phase *phase(int n) const;
     const LeftRunning *leftOf(const QString &member) const;

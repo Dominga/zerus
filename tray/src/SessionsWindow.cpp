@@ -3414,6 +3414,8 @@ void SessionsWindow::rebuild()
     QList<Row> rows;
     QSet<int> subordinateRows;   // WhiteWh fork: visible entries listed under their lead
     QSet<int> teamMemberRows, teamHiddenRows, lastMemberRows;
+    QHash<int, int> teamDepth;
+    QHash<int, QVariantList> teamLines;
     QHash<int, QString> leadTeams;   // WhiteWh fork: lead rows and their teams
     const bool hasGroups = m_organization.groups().size() > 1;
     const bool filtering = !m_projectFilters.isEmpty() || !m_folderFilterPath.isEmpty() || !query.isEmpty() || !m_hostFilters.isEmpty() || m_filter != "all";
@@ -3539,6 +3541,28 @@ void SessionsWindow::rebuild()
             if (lead < 0 || leadTeams.contains(lead)) continue;
             // G1: a sub-team's lead sits indented under its parent's lead.
             if (team.parent.known) subordinateRows.insert(lead);
+            const bool collapsed = collapsedDeep(team);
+            // Spec 2.5: the members follow the team's tree - each sub-lead
+            // followed by its reports - over the rows still shown.
+            QHash<QString, int> rowOf;
+            for (int i : follow) rowOf.insert(team.memberOfSession(visible[i].host, visible[i].session.name)->id, i);
+            for (int i : follow) {
+                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
+                if (collapsed && !Teams::memberStatus(team, *member, teamLive(*member)).problem) teamHiddenRows.insert(i);
+            }
+            const auto tree = team.memberTree([&](const QString &id) { return rowOf.contains(id) && !teamHiddenRows.contains(rowOf.value(id)); });
+            QList<int> treeOrder;
+            for (const auto &node : tree) {
+                const int i = rowOf.value(node.member->id, -1);
+                if (i < 0 || node.depth < 1) continue;
+                treeOrder.append(i);
+                teamDepth.insert(i, node.depth);
+                QVariantList lines; for (bool on : node.through) lines.append(on);
+                teamLines.insert(i, lines);
+                if (node.last) lastMemberRows.insert(i);
+            }
+            for (int i : follow) if (!treeOrder.contains(i)) treeOrder.append(i);
+            follow = treeOrder;
             const QSet<int> following(follow.cbegin(), follow.cend());
             QList<int> ordered;
             for (int i : members) {
@@ -3548,13 +3572,7 @@ void SessionsWindow::rebuild()
             }
             members = ordered;
             leadTeams.insert(lead, team.id);
-            const bool collapsed = collapsedDeep(team);
-            for (int i : follow) {
-                teamMemberRows.insert(i);
-                const auto *member = team.memberOfSession(visible[i].host, visible[i].session.name);
-                if (collapsed && !Teams::memberStatus(team, *member, teamLive(*member)).problem) teamHiddenRows.insert(i);
-            }
-            for (auto it = follow.crbegin(); it != follow.crend(); ++it) if (!teamHiddenRows.contains(*it)) { lastMemberRows.insert(*it); break; }
+            for (int i : follow) teamMemberRows.insert(i);
         }
         if (members.isEmpty() && launches.isEmpty() && (filtering || hideEmptyProjects || !group.accessible)) continue;
         if (hasGroups) rows.append({group.id, -1, false});
@@ -3599,6 +3617,8 @@ void SessionsWindow::rebuild()
         item->setData(SessionRoles::Header, row.entry < 0 && row.launch.isEmpty()); item->setHidden(row.hidden);
         item->setData(SessionRoles::TeamMember, row.entry >= 0 && row.child.isEmpty() && teamMemberRows.contains(row.entry)
                                                     ? (lastMemberRows.contains(row.entry) ? 2 : 1) : 0);
+        item->setData(SessionRoles::TeamDepth, row.entry >= 0 && row.child.isEmpty() ? teamDepth.value(row.entry, 1) : 0);
+        item->setData(SessionRoles::TeamLines, row.entry >= 0 && row.child.isEmpty() ? teamLines.value(row.entry) : QVariantList());
         if (!row.launch.isEmpty()) {
             const auto launch = m_pendingLaunches.value(row.launch).toObject();
             const QString name = launch.value("tag").toString(), host = launch.value("host").toString();

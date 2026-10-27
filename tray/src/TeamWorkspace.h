@@ -106,6 +106,8 @@ private:
     // G5: the members block folds, and the owner's choice survives a restart.
     // (G9 moved the draft phases into the graph's band headers.)
     bool m_membersOpen = true;
+    // Spec 5.6: the sub-leads whose reports are folded in Members.
+    QSet<QString> m_subFolded;
     double m_zoom = 1.0;
     int m_drawerTask = 0;
     QHash<QString, QPoint> m_scroll;

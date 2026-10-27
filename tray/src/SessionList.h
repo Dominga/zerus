@@ -20,6 +20,12 @@ enum Role { Key = Qt::UserRole, Title, Meta, Status, Detail, Agent, Host, Childr
             // G7: the services the session runs (name, command, since); shown as
             // an icon on the row, never as Background work.
             Services,
+            // U25 part 10 (spec 2.5): a member's level under its lead (1 for the
+            // lead's direct reports, 2 below a sub-lead) and, per level above
+            // its own, whether that level's line runs past the row (a list of
+            // bools, TeamTree::through).
+            TeamDepth,
+            TeamLines,
             Muted = Qt::UserRole + 50, RowCollapsed = Qt::UserRole + 51 };
 }
 class QToolButton;

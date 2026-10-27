@@ -6,6 +6,7 @@
 #include "TeamConversation.h"
 #include "TeamPanel.h"
 #include "TeamTaskCard.h"
+#include "TeamTreeIndent.h"
 #include "TeamWidgets.h"
 #include <QComboBox>
 #include <QDialog>
@@ -1044,15 +1045,30 @@ QWidget *TeamWorkspace::members(const Team &team)
     }
     v->addLayout(title);
     if (m_membersOpen) {
-    for (const auto &m : team.members) {
+    // Spec 5.6: the members as a tree - each sub-lead followed by its reports,
+    // indented with their lines; a folded sub-lead hides them.
+    auto *tree = new QWidget; tree->setObjectName("teamWorkspaceMemberTree");
+    auto *treeBox = new QVBoxLayout(tree); treeBox->setContentsMargins(0, 0, 0, 0); treeBox->setSpacing(0);
+    v->addWidget(tree);
+    int foldedBelow = -1;
+    bool firstCard = true;
+    for (const auto &node : team.memberTree()) {
+        const auto &m = *node.member;
+        if (foldedBelow >= 0 && node.depth > foldedBelow) continue;
+        foldedBelow = m.sub && m_subFolded.contains(m.id) ? node.depth : -1;
         // F7: a session left running after the team ended is shown apart below.
         if (finished && leftMember(team, m.id)) continue;
         const auto state = live(m);
         const auto status = memberStatus(team, m, state);
         auto *b = new MemberCard; b->setObjectName("teamWorkspaceMember"); b->setCursor(Qt::PointingHandCursor); b->setProperty("teamMember", m.id);
-        const QColor edge = m.id == m_focus ? c.accent : status.problem ? toneColor(c, status.tone) : c.border;
+        // Spec 5.6: a sub-lead's edge leans to its role's color.
+        const QColor subEdge = colorMix(roleColor(QStringLiteral("leadgpt"), m_dark), c.cardBorder, 0.4);
+        const QColor edge = m.id == m_focus ? c.accent : status.problem ? toneColor(c, status.tone) : m.sub ? subEdge : c.border;
         b->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceMember{background:%1;border:1px solid %2;border-radius:9px;}").arg(c.card.name(), edge.name()));
-        b->setToolTip(m.id == m_focus ? tr("Show every member") : tr("Show only %1's tasks").arg(team.roleOf(m.id)));
+        QString tip = m.id == m_focus ? tr("Show every member") : tr("Show only %1's tasks").arg(team.roleOf(m.id));
+        if (const QString boss = team.reviewerOf(m.id); !boss.isEmpty() && boss != team.lead)
+            tip += QStringLiteral("\n") + tr("Reports to %1").arg(team.roleOf(boss));
+        b->setToolTip(tip);
         b->clicked = [this, id = m.id] { m_focus = m_focus == id ? QString() : id; scheduleRender(); };
         auto *bh = new QHBoxLayout(b); bh->setContentsMargins(8, 6, 6, 6); bh->setSpacing(8);
         auto *tile = new QLabel; tile->setPixmap(agentLogo(m.agent, c.fg).pixmap(16, 16)); bh->addWidget(tile, 0, Qt::AlignTop);
@@ -1060,6 +1076,27 @@ QWidget *TeamWorkspace::members(const Team &team)
         auto *top = row(4);
         const QString role = team.roleOf(m.id);
         top->addWidget(new Pill(role, roleColor(role, m_dark)));
+        if (m.sub) {
+            // Spec 5.6: "▾ sub-lead · N reports" folds its reports.
+            const qsizetype reports = team.reportsOf(m.id).size();
+            const bool folded = m_subFolded.contains(m.id);
+            const QColor sub = roleColor(QStringLiteral("leadgpt"), m_dark);
+            auto *pill = new QToolButton; pill->setObjectName("teamWorkspaceSubLead"); pill->setProperty("teamMember", m.id);
+            pill->setToolButtonStyle(Qt::ToolButtonTextBesideIcon); pill->setCursor(Qt::PointingHandCursor);
+            pill->setIcon(workspaceIcon(folded ? "chevron-right" : "chevron-down", sub)); pill->setIconSize(QSize(10, 10));
+            pill->setText(reports == 1 ? tr("sub-lead · 1 report") : tr("sub-lead · %1 reports").arg(reports));
+            pill->setToolTip(tr("Show or hide its reports"));
+            pill->setProperty("folded", folded);
+            QColor fill = sub; fill.setAlphaF(0.14);
+            pill->setStyleSheet(QStringLiteral("QToolButton#teamWorkspaceSubLead{background:%1;color:%2;border:0;border-radius:6px;"
+                                               "padding:0 7px 0 5px;font-size:11px;min-height:19px;max-height:19px;}")
+                                    .arg(fill.name(QColor::HexArgb), sub.name()));
+            QObject::connect(pill, &QToolButton::clicked, this, [this, id = m.id] {
+                if (!m_subFolded.remove(id)) m_subFolded.insert(id);
+                scheduleRender();
+            });
+            top->addWidget(pill);
+        }
         if (state.attention) { auto *q = label(QStringLiteral("?1"), c.warn, 10, true); q->setToolTip(tr("A question waits in its session")); top->addWidget(q); }
         top->addWidget(elided(m.model.isEmpty() ? agentNames.value(m.agent, m.agent) : m.model, c.text3, 11), 1);
         col->addLayout(top);
@@ -1238,7 +1275,10 @@ QWidget *TeamWorkspace::members(const Team &team)
             if (const auto *member = t ? t->member(id) : nullptr) memberMenu(*t, *member, more->mapToGlobal(QPoint(0, more->height())));
         });
         bh->addWidget(more, 0, Qt::AlignTop);
-        v->addWidget(b);
+        // The lead and its direct reports stay flush; a sub-lead's reports go
+        // one level in, with the line from their sub-lead.
+        treeBox->addWidget(new TeamTreeIndent(b, qMax(0, node.depth - 1), node.last, node.through.mid(1), c.border, firstCard));
+        firstCard = false;
     }
     // F7: the sessions a Done/Stopped team left running, apart from the members.
     if (finished && !team.leftRunning.isEmpty()) v->addWidget(m_panel->leftoverMembers(team, false));
@@ -1275,8 +1315,40 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
             if (m_panel->confirm("teamRemoveMemberConfirm", tr("Remove member?"), tr("Remove %1 from %2? Its session keeps running; it gets no more tasks.").arg(role, name), tr("Remove")))
                 m_panel->act("remove-member", {{"member", id}});
         });
-        remove->setEnabled(open.isEmpty());
+        remove->setEnabled(open.isEmpty() && team.reportsOf(member.id).isEmpty());
         if (!open.isEmpty()) remove->setToolTip(tr("Has open tasks %1 — reassign or cancel them first").arg(open.join(QStringLiteral(", "))));
+        else if (!team.reportsOf(member.id).isEmpty()) remove->setToolTip(tr("Move its reports to another lead first"));
+    }
+    // Spec 5.6: "Reports to…" the lead or a sub-lead (never itself or one
+    // below it), and "Make sub-lead" / "Stop being a sub-lead".
+    if (team.status == "planning" || team.status == "running" || team.status == "paused") {
+        auto *reportsTo = menu.addMenu(tr("Reports to…"));
+        reportsTo->setObjectName("teamWorkspaceReportsTo");
+        reportsTo->setEnabled(!member.lead);
+        if (member.lead) reportsTo->setToolTip(tr("The coordinator reports to you"));
+        QSet<QString> below{member.id};
+        for (const auto &node : team.memberTree())
+            if (below.contains(team.reviewerOf(node.member->id))) below.insert(node.member->id);
+        const QString current = team.reviewerOf(member.id);
+        for (const auto &node : team.memberTree()) {
+            const Member &boss = *node.member;
+            if (!(boss.lead || boss.sub) || below.contains(boss.id)) continue;
+            const QString name = boss.lead ? tr("%1 (coordinator)").arg(team.roleOf(boss.id)) : tr("%1 (sub-lead)").arg(team.roleOf(boss.id));
+            auto *choice = reportsTo->addAction(name, this, [this, id = member.id, parent = boss.id] {
+                m_panel->act("reports-to", {{"member", id}, {"parent", parent}});
+            });
+            choice->setCheckable(true);
+            choice->setChecked(boss.id == current);
+            choice->setProperty("parent", boss.id);
+        }
+        const bool hasReports = !team.reportsOf(member.id).isEmpty();
+        auto *sub = menu.addAction(member.sub ? tr("Stop being a sub-lead") : tr("Make sub-lead"), this, [this, id = member.id, on = !member.sub] {
+            m_panel->act("sub-lead", {{"member", id}, {"sub", on}});
+        });
+        sub->setObjectName("teamWorkspaceSubLeadToggle");
+        sub->setEnabled(!member.lead && !(member.sub && hasReports));
+        if (member.lead) sub->setToolTip(tr("Already the coordinator"));
+        else if (member.sub && hasReports) sub->setToolTip(tr("Move its reports to another lead first"));
     }
     // H6: swap the session, agent, model or account of any member, the lead too.
     if (team.status == "planning" || team.status == "running" || team.status == "paused") {
@@ -1677,6 +1749,13 @@ void TeamWorkspace::addMember(const Team &team)
     auto *computer = new QComboBox; computer->setObjectName("teamAddMemberComputer");
     computer->addItem(tr("this computer"), QString());
     for (const auto &k : m_computers) if (!k.alias.isEmpty()) computer->addItem(k.label, k.alias);
+    // Spec 5.6: "Reports to" the coordinator or one of its sub-leads.
+    auto *reportsTo = new QComboBox; reportsTo->setObjectName("teamAddMemberReportsTo");
+    for (const auto &node : team.memberTree()) {
+        const Member &boss = *node.member;
+        if (boss.lead) reportsTo->addItem(tr("%1 (coordinator)").arg(team.roleOf(boss.id)), QString());
+        else if (boss.sub) reportsTo->addItem(tr("%1 (sub-lead)").arg(team.roleOf(boss.id)), boss.id);
+    }
     auto *permissions = label(QString(), c.text2, 12); permissions->setObjectName("teamAddMemberPermissions");
     auto *prompt = new QPlainTextEdit; prompt->setObjectName("teamAddMemberPrompt"); prompt->setFixedHeight(70);
     prompt->setPlaceholderText(tr("What this member is for"));
@@ -1715,9 +1794,10 @@ void TeamWorkspace::addMember(const Team &team)
     auto *modelRow = new QWidget; auto *mh = new QHBoxLayout(modelRow); mh->setContentsMargins(0, 0, 0, 0); mh->setSpacing(6); mh->addWidget(model, 1); mh->addWidget(effort);
     field(1, tr("Model"), modelRow);
     field(2, tr("Account"), account);
-    field(3, tr("Computer"), computer);
-    field(4, tr("Permissions"), permissions);
-    field(5, tr("Prompt"), prompt);
+    field(3, tr("Reports to"), reportsTo);
+    field(4, tr("Computer"), computer);
+    field(5, tr("Permissions"), permissions);
+    field(6, tr("Prompt"), prompt);
     v->addLayout(form);
     v->addWidget(offline);
     auto *note = label(tr("Defaults come from the role. The session starts when the member gets its first task."), c.dim, 11); note->setWordWrap(true);
@@ -1752,16 +1832,17 @@ void TeamWorkspace::addMember(const Team &team)
     fillAccounts();
     QObject::connect(close, &QToolButton::clicked, pop, [this] { if (m_popover) { retire(m_popover); m_popover = nullptr; } });
     QObject::connect(cancel, &QPushButton::clicked, pop, [this] { if (m_popover) { retire(m_popover); m_popover = nullptr; } });
-    QObject::connect(ok, &QPushButton::clicked, pop, [this, team, picked, agent, model, effort, account, computer, prompt] {
+    QObject::connect(ok, &QPushButton::clicked, pop, [this, team, picked, agent, model, effort, account, computer, prompt, reportsTo] {
         const auto *role = m_teams->catalog().role(*picked);
         if (!role) return;
         // New members share the team's folder policy: a worktree when others have one.
         QString folder = QStringLiteral("shared");
         for (const auto &m : team.members) if (!m.lead && m.folder == "worktree" && role->folder != "read_only" && role->folder != "shared") folder = m.folder;
-        const QJsonObject member{{"id", nextMemberId(team, role->name)}, {"role", role->name}, {"agent", agent->currentData().toString()},
-                                 {"model", model->text().trimmed()}, {"effort", effort->currentData().toString()}, {"account", account->currentData().toString()},
-                                 {"computer", computer->currentData().toString()}, {"permissions", role->permissions}, {"folder", folder},
-                                 {"prompt", prompt->toPlainText().trimmed()}};
+        QJsonObject member{{"id", nextMemberId(team, role->name)}, {"role", role->name}, {"agent", agent->currentData().toString()},
+                           {"model", model->text().trimmed()}, {"effort", effort->currentData().toString()}, {"account", account->currentData().toString()},
+                           {"computer", computer->currentData().toString()}, {"permissions", role->permissions}, {"folder", folder},
+                           {"prompt", prompt->toPlainText().trimmed()}};
+        if (const QString parent = reportsTo->currentData().toString(); !parent.isEmpty()) member.insert("parent", parent);
         m_panel->act(QStringLiteral("add-member"), {{"member", member}});
         if (m_popover) { retire(m_popover); m_popover = nullptr; }
     });

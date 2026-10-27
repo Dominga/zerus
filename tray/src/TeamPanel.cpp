@@ -1,4 +1,5 @@
 #include "TeamPanel.h"
+#include "TeamTreeIndent.h"
 #include "TeamDesignerPanel.h"
 #include "TeamTaskCard.h"
 #include "TeamWidgets.h"
@@ -395,7 +396,7 @@ QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
     const Colors c = colorsFor(m_dark);
     const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
     auto *box = new QWidget; box->setObjectName("teamSummaryMembers");
-    auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(2);
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 0, 0, 0); v->setSpacing(0);
     auto *title = row(6);
     title->addWidget(label(tr("Members"), c.fg, 12, true));
     // F7: the sessions a finished team left running are counted apart.
@@ -405,7 +406,13 @@ QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
     title->addWidget(label(QString::number(active), c.muted, 12));
     title->addStretch();
     v->addLayout(title);
-    for (const auto &m : team.members) {
+    // Spec 5.6 / 6: the members as a tree, a sub-lead's reports one level in
+    // with their line; rows sit 2 px apart and the elbow meets the row's middle.
+    v->addSpacing(2);
+    TeamTreeIndent::Metrics metrics; metrics.elbowY = 14; metrics.gap = 2;
+    bool firstRow = true;
+    for (const auto &node : team.memberTree()) {
+        const auto &m = *node.member;
         // F7: a session that still runs after a Done/Stopped team is shown
         // apart, never as an active member.
         if ((team.status == "done" || team.status == "stopped") && leftMember(team, m.id)) continue;
@@ -433,7 +440,10 @@ QWidget *TeamPanel::summaryMembers(const Team &team, bool narrow)
             auto *indent = row(0); indent->addSpacing(34); indent->addWidget(queue, 1);
             bv->addLayout(indent);
         }
-        v->addWidget(block);
+        auto *tree = new TeamTreeIndent(block, qMax(0, node.depth - 1), node.last, node.through.mid(1), c.border, firstRow, metrics);
+        tree->setObjectName("teamSummaryMemberTree");
+        v->addWidget(tree);
+        firstRow = false;
     }
     if ((team.status == "done" || team.status == "stopped") && !team.leftRunning.isEmpty()) v->addWidget(leftoverMembers(team, narrow));
     return box;

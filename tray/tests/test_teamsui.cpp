@@ -93,6 +93,48 @@ QJsonObject team(const QString &status = "running")
     return t;
 }
 
+// U25 part 10 (spec 5.6): the running team with a QA lead as a sub-lead; the
+// Tester reports to it and its unit tests wait for its review.
+QJsonObject subLeadTeam()
+{
+    auto t = team();
+    auto members = t["members"].toArray();
+    auto tester = members[2].toObject(); tester["parent"] = "qa-lead"; members[2] = tester;
+    members.append(QJsonObject{{"id", "qa-lead"}, {"role", "QA lead"}, {"agent", "codex"}, {"model", "gpt-6.1-sol"}, {"state", "active"},
+                               {"sub", true}, {"session", QJsonObject{{"host", ""}, {"name", "codex/checkout/qa-lead"}}}});
+    t["members"] = members;
+    auto tasks = t["tasks"].toArray();
+    auto unit = tasks[3].toObject();
+    unit["status"] = "submitted";
+    unit["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a4"}, {"member", "tester"}, {"state", "reported"}, {"sent_at", 1500},
+                                              {"report", QJsonObject{{"text", "All green"}, {"at", 1600}}}}};
+    tasks[3] = unit;
+    t["tasks"] = tasks;
+    return t;
+}
+
+// Opens the member menu of `member` and hands the active menu to `inspect`.
+void inspectMemberMenu(QWidget *root, const QString &member, const std::function<void(QMenu *)> &inspect)
+{
+    QToolButton *more = nullptr;
+    for (auto *card : root->findChildren<QFrame *>("teamWorkspaceMember"))
+        if (card->property("teamMember") == member && card->isVisibleTo(root)) more = card->findChild<QToolButton *>("teamWorkspaceMemberMenu");
+    QVERIFY(more);
+    bool seen = false;
+    std::function<void(int)> look = [&](int tries) {
+        QTimer::singleShot(10, qApp, [&, tries] {
+            auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!menu) { if (tries > 0) look(tries - 1); return; }
+            seen = true;
+            inspect(menu);
+            menu->hide();
+        });
+    };
+    look(300);
+    more->click();
+    QTRY_VERIFY(seen);
+}
+
 // A running team with two phases appended: phase 1 is finished (it starts
 // collapsed), phase 2 has a barrier, phase 3 waits as a draft.
 QJsonObject phasedTeam()
@@ -495,6 +537,7 @@ private slots:
     void reportPreviewsAndFindings();
     void hierarchyInTeamViewsAndMemberCards();
     void workspaceAddsAMember();
+    void subLeadsAreATreeInMembersAndTheInspector();
     void designerPageStartsOrOpensTheDesigner();
     void catalogEditorMarksManualEdits();
     void boardColumnsKeepTheirScroll();
@@ -3137,6 +3180,127 @@ void TestTeamsUi::workspaceAddsAMember()
     QCOMPARE(member["role"].toString(), QStringLiteral("Tester"));
     QCOMPARE(member["model"].toString(), QStringLiteral("kimi-k2"));
     QCOMPARE(member["folder"].toString(), QStringLiteral("shared"));
+}
+
+void TestTeamsUi::subLeadsAreATreeInMembersAndTheInspector()
+{
+    setTeam(subLeadTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.resize(420, 900); panel.show();
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    darkPalette(); workspace.setTheme(true); panel.setTheme(true);
+    const auto cards = [&] {
+        QList<QFrame *> found;
+        for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember")) if (card->isVisibleTo(&workspace)) found << card;
+        std::sort(found.begin(), found.end(), [](QFrame *a, QFrame *b) { return a->mapToGlobal(QPoint()).y() < b->mapToGlobal(QPoint()).y(); });
+        QStringList ids; for (auto *card : found) ids << card->property("teamMember").toString();
+        return ids;
+    };
+    // The lead, its direct reports, then the sub-lead followed by its Tester.
+    QTRY_COMPARE(cards(), (QStringList{"lead", "backend", "qa-lead", "tester"}));
+    QMap<QString, int> levels;
+    for (auto *indent : workspace.findChildren<QWidget *>("teamTreeIndent"))
+        if (indent->isVisibleTo(&workspace))
+        if (auto *card = indent->findChild<QFrame *>("teamWorkspaceMember")) levels.insert(card->property("teamMember").toString(), indent->property("level").toInt());
+    QCOMPARE(levels.value("tester"), 1);
+    QCOMPARE(levels.value("qa-lead"), 0);
+    QCOMPARE(levels.value("backend"), 0);
+    // The Tester's card sits 20 px right of the sub-lead's.
+    QFrame *subCard = nullptr, *testerCard = nullptr;
+    for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember")) {
+        if (!card->isVisibleTo(&workspace)) continue;
+        if (card->property("teamMember") == "qa-lead") subCard = card;
+        if (card->property("teamMember") == "tester") testerCard = card;
+    }
+    QCOMPARE(testerCard->mapToGlobal(QPoint()).x() - subCard->mapToGlobal(QPoint()).x(), 20);
+    QVERIFY(testerCard->toolTip().contains(QStringLiteral("Reports to QA lead")));
+    // The sub-lead reviews its report's work, and its pill folds its reports.
+    auto *pill = subCard->findChild<QToolButton *>("teamWorkspaceSubLead");
+    QVERIFY(pill);
+    QCOMPARE(pill->text(), QStringLiteral("sub-lead · 1 report"));
+    shot(&workspace, "ux-10-members-tree-dark");
+    // A shot may render again: click the pill on screen now.
+    for (auto *shown : workspace.findChildren<QToolButton *>("teamWorkspaceSubLead"))
+        if (shown->isVisibleTo(&workspace)) pill = shown;
+    pill->click();
+    QTRY_COMPARE(cards(), (QStringList{"lead", "backend", "qa-lead"}));
+    for (auto *again : workspace.findChildren<QToolButton *>("teamWorkspaceSubLead"))
+        if (again->isVisibleTo(&workspace)) { again->click(); break; }
+    QTRY_COMPARE(cards().size(), 4);
+    // "Reports to…" offers the coordinator and the sub-lead, with a check on
+    // the current one, and never the member itself or one below it.
+    inspectMemberMenu(&workspace, "tester", [](QMenu *menu) {
+        QMenu *reports = nullptr;
+        for (auto *action : menu->actions()) if (action->menu() && action->menu()->objectName() == "teamWorkspaceReportsTo") reports = action->menu();
+        QVERIFY(reports);
+        QStringList names; QString checked;
+        for (auto *action : reports->actions()) { names << action->text(); if (action->isChecked()) checked = action->property("parent").toString(); }
+        QCOMPARE(names, (QStringList{"Lead (coordinator)", "QA lead (sub-lead)"}));
+        QCOMPARE(checked, QStringLiteral("qa-lead"));
+        reports->actions().first()->trigger();
+    });
+    QTRY_COMPARE(calls(script(), "reports-to").size(), 1);
+    QCOMPARE(calls(script(), "reports-to").first()["member"].toString(), QStringLiteral("tester"));
+    QCOMPARE(calls(script(), "reports-to").first()["parent"].toString(), QStringLiteral("lead"));
+    inspectMemberMenu(&workspace, "qa-lead", [](QMenu *menu) {
+        QAction *toggle = nullptr;
+        for (auto *action : menu->actions()) if (action->objectName() == "teamWorkspaceSubLeadToggle") toggle = action;
+        QVERIFY(toggle);
+        QCOMPARE(toggle->text(), QStringLiteral("Stop being a sub-lead"));
+        QVERIFY(!toggle->isEnabled());
+        QCOMPARE(toggle->toolTip(), QStringLiteral("Move its reports to another lead first"));
+        QMenu *reports = nullptr;
+        for (auto *action : menu->actions()) if (action->menu() && action->menu()->objectName() == "teamWorkspaceReportsTo") reports = action->menu();
+        QStringList names; for (auto *action : reports->actions()) names << action->text();
+        QCOMPARE(names, QStringList{"Lead (coordinator)"});
+    });
+    inspectMemberMenu(&workspace, "backend", [](QMenu *menu) {
+        for (auto *action : menu->actions())
+            if (action->objectName() == "teamWorkspaceSubLeadToggle") { QCOMPARE(action->text(), QStringLiteral("Make sub-lead")); action->trigger(); }
+    });
+    QTRY_COMPARE(calls(script(), "sub-lead").size(), 1);
+    QCOMPARE(calls(script(), "sub-lead").first()["sub"].toBool(), true);
+    // Add member: "Reports to" the coordinator or the sub-lead.
+    QPushButton *add = nullptr;
+    for (auto *button : workspace.findChildren<QPushButton *>("teamWorkspaceAddMember")) if (button->isVisibleTo(&workspace)) add = button;
+    QVERIFY(add);
+    add->click();
+    QFrame *popover = nullptr;
+    QTRY_VERIFY((popover = workspace.findChild<QFrame *>("teamAddMember")) && popover->isVisible());
+    auto *reportsTo = popover->findChild<QComboBox *>("teamAddMemberReportsTo");
+    QVERIFY(reportsTo);
+    QCOMPARE(reportsTo->count(), 2);
+    QCOMPARE(reportsTo->itemText(0), QStringLiteral("Lead (coordinator)"));
+    QCOMPARE(reportsTo->itemText(1), QStringLiteral("QA lead (sub-lead)"));
+    reportsTo->setCurrentIndex(1);
+    for (auto *chip : popover->findChildren<QPushButton *>("teamAddMemberRole")) if (chip->text() == "Tester") chip->click();
+    shot(&workspace, "ux-10-add-member-reports-to-dark");
+    popover->findChild<QPushButton *>("teamAddMemberOk")->click();
+    QTRY_COMPARE(calls(script(), "add-member").size(), 1);
+    QCOMPARE(calls(script(), "add-member").first()["member"].toObject()["parent"].toString(), QStringLiteral("qa-lead"));
+    // The inspector lists the members as the same tree.
+    const auto rows = [&] {
+        QList<QWidget *> shown;
+        for (auto *row : panel.findChildren<QWidget *>("teamSummaryMemberTree")) if (row->isVisibleTo(&panel)) shown << row;
+        return shown;
+    };
+    QTRY_COMPARE(rows().size(), 4);
+    QWidget *testerRow = nullptr;
+    for (auto *row : rows()) if (row->property("level").toInt() == 1) testerRow = row;
+    QVERIFY(testerRow);
+    shot(&panel, "ux-10-inspector-tree-dark");
+    workspace.setTheme(false); panel.setTheme(false);
+    lightShot(&workspace, "ux-10-members-tree-light");
+    lightShot(&panel, "ux-10-inspector-tree-light");
 }
 
 void TestTeamsUi::designerPageStartsOrOpensTheDesigner()

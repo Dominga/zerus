@@ -105,7 +105,7 @@ inline void glyph(QPainter &p, const QRectF &r, const QColor &color, const QStri
         pen.setStyle(Qt::DotLine); p.setPen(pen); p.drawEllipse(c);
     } else if (kind == "cancelled") {
         p.drawEllipse(c); p.drawLine(m + QPointF(-s * .6, s * .6), m + QPointF(s * .6, -s * .6));
-    } else if (kind == "working" || kind == "in_progress" || kind == "running") {
+    } else if (kind == "working" || kind == "in_progress" || kind == "running" || kind == "reviewing") {
         p.drawEllipse(c); p.setBrush(color); p.setPen(Qt::NoPen);
         QPolygonF play{m + QPointF(-s * .3, -s * .45), m + QPointF(s * .5, 0), m + QPointF(-s * .3, s * .45)}; p.drawPolygon(play);
     } else if (kind == "assigned") {
@@ -116,6 +116,11 @@ inline void glyph(QPainter &p, const QRectF &r, const QColor &color, const QStri
         p.drawLine(m + QPointF(-s * .35, -s * .1), m + QPointF(0, -s * .45)); p.drawLine(m + QPointF(s * .35, -s * .1), m + QPointF(0, -s * .45));
     } else if (kind == "paused") {
         p.drawEllipse(c); p.drawLine(m + QPointF(-s * .25, -s * .35), m + QPointF(-s * .25, s * .35)); p.drawLine(m + QPointF(s * .25, -s * .35), m + QPointF(s * .25, s * .35));
+    } else if (kind == "coordinating") {
+        // Spec 5.6: a sub-lead between reviews - a hub with its reports.
+        p.drawEllipse(QRectF(m.x() - s * .22, c.top(), s * .44, s * .44));
+        p.drawLine(m + QPointF(0, -s * .05), m + QPointF(-s * .4, s * .45));
+        p.drawLine(m + QPointF(0, -s * .05), m + QPointF(s * .4, s * .45));
     } else if (kind == "idle" || kind == "pending" || kind == "planning") {
         p.drawEllipse(c);
         if (kind == "idle") p.drawLine(m + QPointF(-s * .45, 0), m + QPointF(s * .45, 0));

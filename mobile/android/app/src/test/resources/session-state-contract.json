@@ -1,0 +1,1121 @@
+{
+ "schema": 1,
+ "description": "U30 six session states: the order of SESSION-STATES.md section 4 over one hgs ls --json row after the host added cache_ttl and last_active. `team` is the team store's reason for the session and whether it is the lead; `budget` is a declared budget still within its minutes. A job nothing waits for moves to process_work.services and no longer counts. Offline is the client's state for a machine that does not answer; a host never lists it.",
+ "now": 1000000.0,
+ "long_operation_seconds": 30,
+ "states": [
+  "working",
+  "user",
+  "deps",
+  "cooling",
+  "cold",
+  "stopped",
+  "offline"
+ ],
+ "cases": [
+  {
+   "name": "working",
+   "raw": {
+    "activity": "busy",
+    "phase": "tool",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "current_tool": "Edit",
+    "tool_detail": "web/app.ts",
+    "tool_started": 999995.0
+   },
+   "expect": {
+    "session_state": "working"
+   }
+  },
+  {
+   "name": "starting",
+   "raw": {
+    "activity": "busy",
+    "phase": "working",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "current_tool": ""
+   },
+   "expect": {
+    "session_state": "working"
+   }
+  },
+  {
+   "name": "long-operation",
+   "raw": {
+    "activity": "busy",
+    "phase": "tool",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "current_tool": "Bash",
+    "tool_detail": "cargo test --workspace",
+    "tool_started": 999640.0
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "long_operation",
+    "text": "Waiting for cargo test --workspace · long operation, 6m so far"
+   }
+  },
+  {
+   "name": "short-tool-call-is-working",
+   "raw": {
+    "activity": "busy",
+    "phase": "tool",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "current_tool": "Bash",
+    "tool_detail": "cargo test",
+    "tool_started": 999971.0
+   },
+   "expect": {
+    "session_state": "working"
+   }
+  },
+  {
+   "name": "subagents",
+   "raw": {
+    "activity": "busy",
+    "phase": "tool",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "current_tool": "Agent",
+    "tool_started": 999600.0,
+    "subagent_active_count": 2,
+    "subagent_previews": [
+     {
+      "label": "explorer",
+      "state": "working"
+     },
+     {
+      "label": "reviewer",
+      "state": "working"
+     },
+     {
+      "label": "old",
+      "state": "unknown"
+     }
+    ]
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "subagents",
+    "text": "Waiting for 2 subagents: explorer, reviewer"
+   }
+  },
+  {
+   "name": "main-agent-works-beside-subagents",
+   "raw": {
+    "activity": "busy",
+    "phase": "tool",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "current_tool": "Edit",
+    "tool_started": 999998.0,
+    "subagent_active_count": 1
+   },
+   "expect": {
+    "session_state": "working"
+   }
+  },
+  {
+   "name": "approval",
+   "raw": {
+    "activity": "busy",
+    "phase": "approval",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "subagent_active_count": 1
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "approval",
+    "text": "Needs approval"
+   }
+  },
+  {
+   "name": "input",
+   "raw": {
+    "activity": "busy",
+    "phase": "input",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    }
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "input",
+    "text": "Needs input"
+   }
+  },
+  {
+   "name": "provider-error",
+   "raw": {
+    "activity": "attention",
+    "phase": "error",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "provider_error": {
+     "error_kind": "capacity"
+    },
+    "activity_summary": "Model at capacity"
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "error",
+    "text": "Model at capacity"
+   }
+  },
+  {
+   "name": "unread-reply",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "reply_id": "7:999990",
+    "read": {
+     "reply_id": "6:999000"
+    },
+    "notification_preferences": {
+     "muted": false
+    }
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "reply",
+    "text": "Response ready to read"
+   }
+  },
+  {
+   "name": "muted-reply-is-not-yours",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "reply_id": "7:999990",
+    "read": {
+     "reply_id": "6:999000"
+    },
+    "notification_preferences": {
+     "muted": true
+    }
+   },
+   "expect": {
+    "session_state": "cooling"
+   }
+  },
+  {
+   "name": "read-reply",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "reply_id": "7:1",
+    "read": {
+     "reply_id": "7:1"
+    }
+   },
+   "expect": {
+    "session_state": "cooling"
+   }
+  },
+  {
+   "name": "never-read-reply",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "reply_id": "7:1",
+    "read": null
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "reply"
+   }
+  },
+  {
+   "name": "reply-without-read-marks-is-unknown",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "reply_id": "7:1"
+   },
+   "expect": {
+    "session_state": "cooling"
+   }
+  },
+  {
+   "name": "reply-deferred-by-a-budgeted-job",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 1,
+     "started_at": 999580.0,
+     "command": "cargo build --release",
+     "jobs": [
+      {
+       "command": "cargo build --release",
+       "started_at": 999580.0
+      }
+     ]
+    },
+    "reply_id": "7:999990",
+    "read": {
+     "reply_id": "6:999000"
+    },
+    "notification_preferences": {
+     "muted": false
+    }
+   },
+   "budget": {
+    "label": "release build",
+    "minutes": 15,
+    "declared_at": 999570.0,
+    "job": {
+     "command": "cargo build --release",
+     "since": 999580.0
+    }
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "job",
+    "process_work_count": 1,
+    "text": "Waiting for cargo build --release · long operation, 7m so far"
+   }
+  },
+  {
+   "name": "reply-not-deferred-by-a-service",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 1,
+     "started_at": 999100.0,
+     "command": "npm run dev",
+     "jobs": [
+      {
+       "command": "npm run dev",
+       "started_at": 999100.0
+      }
+     ],
+     "services": [
+      {
+       "name": "socraticode",
+       "command": "node socraticode.js",
+       "since": 997000.0
+      }
+     ]
+    },
+    "reply_id": "7:999990",
+    "read": {
+     "reply_id": "6:999000"
+    },
+    "notification_preferences": {
+     "muted": false
+    }
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "reply",
+    "process_work_count": 0,
+    "services": [
+     "socraticode",
+     "npm"
+    ]
+   }
+  },
+  {
+   "name": "paused",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "state": "paused"
+   },
+   "team": {
+    "lead": false,
+    "reason": {
+     "kind": "team_dependency",
+     "text": "Waiting for #2 Saved cards API (Backend)",
+     "team": "t",
+     "task": 3,
+     "dependency": 2
+    }
+   },
+   "expect": {
+    "session_state": "stopped"
+   }
+  },
+  {
+   "name": "stopped",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "exited",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "state": "stopped"
+   },
+   "expect": {
+    "session_state": "stopped"
+   }
+  },
+  {
+   "name": "stopped-with-a-reply-to-read",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "state": "stopped",
+    "reply_id": "7:999990",
+    "read": {
+     "reply_id": "6:999000"
+    },
+    "notification_preferences": {
+     "muted": false
+    }
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "reply"
+   }
+  },
+  {
+   "name": "archived-never-asks",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "state": "archived",
+    "reply_id": "7:999990",
+    "read": {
+     "reply_id": "6:999000"
+    },
+    "notification_preferences": {
+     "muted": false
+    }
+   },
+   "expect": {
+    "session_state": "stopped"
+   }
+  },
+  {
+   "name": "usage-limit",
+   "raw": {
+    "activity": "attention",
+    "phase": "error",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "provider_error": {
+     "error_kind": "session_limit",
+     "reset_at": 1005400.0
+    },
+    "activity_summary": "Session limit reached"
+   },
+   "team": {
+    "lead": false,
+    "reason": {
+     "kind": "team_dependency",
+     "text": "Waiting for #2 Saved cards API (Backend)",
+     "team": "t",
+     "task": 3,
+     "dependency": 2
+    }
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "usage_limit",
+    "text_prefix": "Waiting for the usage limit to reset · "
+   }
+  },
+  {
+   "name": "usage-limit-without-reset",
+   "raw": {
+    "activity": "attention",
+    "phase": "error",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "provider_error": {
+     "error_kind": "quota"
+    }
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "usage_limit",
+    "text": "Waiting for the usage limit to reset"
+   }
+  },
+  {
+   "name": "team-member-dependency",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 992800.0,
+    "process_work": {
+     "count": 0
+    }
+   },
+   "team": {
+    "lead": false,
+    "reason": {
+     "kind": "team_dependency",
+     "text": "Waiting for #2 Saved cards API (Backend)",
+     "team": "t",
+     "task": 3,
+     "dependency": 2
+    }
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "team_dependency",
+    "text": "Waiting for #2 Saved cards API (Backend)"
+   }
+  },
+  {
+   "name": "lead-all-decided-needs-you",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    }
+   },
+   "team": {
+    "lead": true,
+    "reason": {
+     "kind": "team_decided",
+     "text": "Waiting for you: all tasks are decided",
+     "team": "t"
+    }
+   },
+   "expect": {
+    "session_state": "user",
+    "kind": "team_decided",
+    "text": "Waiting for you: all tasks are decided"
+   }
+  },
+  {
+   "name": "member-waiting-for-you-is-deps",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    }
+   },
+   "team": {
+    "lead": false,
+    "reason": {
+     "kind": "team_paused",
+     "text": "Waiting for you to resume the team",
+     "team": "t"
+    }
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "team_paused"
+   }
+  },
+  {
+   "name": "working-member-ignores-the-team",
+   "raw": {
+    "activity": "busy",
+    "phase": "tool",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999999.0,
+    "process_work": {
+     "count": null
+    },
+    "current_tool": "Edit",
+    "tool_started": 999997.0
+   },
+   "team": {
+    "lead": false,
+    "reason": {
+     "kind": "team_dependency",
+     "text": "Waiting for #2 Saved cards API (Backend)",
+     "team": "t",
+     "task": 3,
+     "dependency": 2
+    }
+   },
+   "expect": {
+    "session_state": "working"
+   }
+  },
+  {
+   "name": "team-before-coordination",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "coordination_wait": {
+     "schema": 1,
+     "status": "ok",
+     "count": 1,
+     "items": [
+      {
+       "state": "awaiting_result",
+       "label": "Review patch",
+       "producer": {
+        "name": "claude/example/worker",
+        "host": "peer"
+       },
+       "created_at": 999900.0
+      }
+     ]
+    }
+   },
+   "team": {
+    "lead": false,
+    "reason": {
+     "kind": "team_dependency",
+     "text": "Waiting for #2 Saved cards API (Backend)",
+     "team": "t",
+     "task": 3,
+     "dependency": 2
+    }
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "team_dependency"
+   }
+  },
+  {
+   "name": "coordination-wait",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 0
+    },
+    "coordination_wait": {
+     "schema": 1,
+     "status": "ok",
+     "count": 1,
+     "items": [
+      {
+       "state": "awaiting_result",
+       "label": "Review patch",
+       "producer": {
+        "name": "claude/example/worker",
+        "host": "peer"
+       },
+       "created_at": 999900.0
+      }
+     ]
+    }
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "coordination",
+    "text": "Waiting for result from worker: Review patch"
+   }
+  },
+  {
+   "name": "budgeted-job-after-the-turn",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999940.0,
+    "process_work": {
+     "count": 1,
+     "started_at": 999580.0,
+     "command": "cargo build --release",
+     "jobs": [
+      {
+       "command": "cargo build --release",
+       "started_at": 999580.0
+      }
+     ]
+    }
+   },
+   "budget": {
+    "label": "release build",
+    "minutes": 15,
+    "declared_at": 999570.0,
+    "job": {
+     "command": "cargo build --release",
+     "since": 999580.0
+    }
+   },
+   "expect": {
+    "session_state": "deps",
+    "kind": "job",
+    "process_work_count": 1
+   }
+  },
+  {
+   "name": "dev-server-after-the-turn-is-cooling",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999880.0,
+    "process_work": {
+     "count": 1,
+     "started_at": 999100.0,
+     "command": "npm run dev",
+     "jobs": [
+      {
+       "command": "npm run dev",
+       "started_at": 999100.0
+      }
+     ],
+     "services": [
+      {
+       "name": "socraticode",
+       "command": "node socraticode.js",
+       "since": 997000.0
+      }
+     ]
+    }
+   },
+   "expect": {
+    "session_state": "cooling",
+    "process_work_count": 0,
+    "services": [
+     "socraticode",
+     "npm"
+    ]
+   }
+  },
+  {
+   "name": "dev-server-after-the-ttl-is-cold",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999699.0,
+    "process_work": {
+     "count": 1,
+     "started_at": 999100.0,
+     "command": "npm run dev",
+     "jobs": [
+      {
+       "command": "npm run dev",
+       "started_at": 999100.0
+      }
+     ],
+     "services": [
+      {
+       "name": "socraticode",
+       "command": "node socraticode.js",
+       "since": 997000.0
+      }
+     ]
+    }
+   },
+   "expect": {
+    "session_state": "cold",
+    "process_work_count": 0,
+    "services": [
+     "socraticode",
+     "npm"
+    ]
+   }
+  },
+  {
+   "name": "job-without-a-budget-is-a-service",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999970.0,
+    "process_work": {
+     "count": 1,
+     "started_at": 999580.0,
+     "command": "cargo build --release",
+     "jobs": [
+      {
+       "command": "cargo build --release",
+       "started_at": 999580.0
+      }
+     ]
+    }
+   },
+   "expect": {
+    "session_state": "cooling",
+    "process_work_count": 0,
+    "services": [
+     "cargo"
+    ]
+   }
+  },
+  {
+   "name": "one-hour-cache-still-cooling",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 3600,
+     "source": "settings",
+     "kept_warm": false
+    },
+    "last_active": 997540.0,
+    "process_work": {
+     "count": 0
+    }
+   },
+   "expect": {
+    "session_state": "cooling"
+   }
+  },
+  {
+   "name": "one-hour-cache-cold",
+   "raw": {
+    "activity": "idle",
+    "phase": "idle",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 3600,
+     "source": "settings",
+     "kept_warm": false
+    },
+    "last_active": 996400.0,
+    "process_work": {
+     "count": 0
+    }
+   },
+   "expect": {
+    "session_state": "cold"
+   }
+  },
+  {
+   "name": "unknown-activity-counts-idle-time",
+   "raw": {
+    "activity": "unknown",
+    "phase": "unknown",
+    "process_state": "running",
+    "conversation_id": "c",
+    "run_id": "r",
+    "cache_ttl": {
+     "seconds": 300,
+     "source": "default",
+     "kept_warm": false
+    },
+    "last_active": 999990.0,
+    "process_work": {
+     "count": 0
+    }
+   },
+   "expect": {
+    "session_state": "cooling"
+   }
+  }
+ ]
+}

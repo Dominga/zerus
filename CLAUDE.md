@@ -78,18 +78,28 @@ Opening New Team creates nothing: Start planning creates only the team draft and
 its lead session (in the team folder, never a worktree); member worktrees and
 sessions are created only by Create team.
 
-An idle agent with confirmed owned live shell or native jobs shows `Background`,
-remains in Active and accepts new messages. Its MCP servers and other services
-(from the agent's own config, with their children) live with the session: they
-show as a services icon with names, start times and whether they outlive it,
-never as `Background`, and never count as Background work for the teams'
-capture gate, blocked reminder or time budget. Native work and explicit
-attention take precedence. A native Stop ends a turn; it does not prove those
-jobs finished. Retain unread reply identity and defer reply-only
-badges/notifications until the work completes. Historical, unknown and offline
-jobs never establish current work. Keep this contract aligned across desktop,
-Android, shared fixtures and docs; changes to these status semantics need
-explicit owner direction.
+A session is Working, Waiting for you, Waiting for dependencies (always with
+its reason), Cooling, Cold or Stopped; Offline stays (owner direction U30).
+`hgs ls`, `inspect` and the mobile API carry `session_state`, `state_reason`,
+`last_active` and `cache_ttl`; the order and texts are in `docs/reference.md`
+and the shared `session-state-contract.json`. A job the agent started makes the
+session wait only while it waits for it: a tool call past 30 seconds, subagents
+in flight, or a job under a declared team budget. A long-lived process it does
+not wait for (a dev server, watcher or tunnel, and its MCP servers and other
+services from the agent's own config, with their children), a job past its
+budget and a job still running after the turn ended with nothing waiting on it
+are services: they show as a services icon with names, start times and whether
+they outlive the session, never make it wait, never count as Background work
+for the teams' capture gate, blocked reminder or time budget, and never defer
+the reply badge; the session is Cooling or Cold by its idle time against the
+prompt cache TTL. A session waiting for its own jobs remains in Active and
+accepts new messages. Native work and explicit attention take precedence. A
+native Stop ends a turn; it does not prove those jobs finished. Retain unread
+reply identity and defer reply-only badges/notifications while the session
+waits for its jobs. Historical, unknown and offline jobs never establish
+current work. Keep this contract aligned across desktop, Android, shared
+fixtures and docs; changes to these status semantics need explicit owner
+direction.
 
 Owner-approved independent-agent waits use `hgs wait`, separately from native
 work. Before handing off work whose acceptance or result you will wait for,

@@ -71,6 +71,7 @@ mod storage;
 mod subagents;
 mod subagents_confirm;
 mod session_upload;
+mod session_state;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -535,6 +536,8 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     // rename keeps, to the names that `snapshot` listed (zerus-18u1).
     workspace::enrich(sessions, &workspace::snapshot_cwds(&names));
     waits::decorate(sessions);
+    // U30: after the waits, which name a coordination reason.
+    session_state::decorate(sessions);
     Ok(box_value)
 }
 

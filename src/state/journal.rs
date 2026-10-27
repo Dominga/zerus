@@ -413,7 +413,13 @@ fn kimi_reply(db: &Connection, record: &Value, skip_scheduled: bool) -> Result<O
     Ok(stop.map(|(seq, at)| (seq, at, false)))
 }
 
+/// A session's status. Its readers of the live pane (the effort footer and
+/// every terminal chooser) share one capture of it.
 pub(super) fn summary(record: &Value, live_pane: bool) -> Value {
+    kimi_tui_choice::observing(|| observed_summary(record, live_pane))
+}
+
+fn observed_summary(record: &Value, live_pane: bool) -> Value {
     let mut output = normalized_activity(record, live_pane);
     output["conversation_id"] = record["conversation_id"].clone();
     output

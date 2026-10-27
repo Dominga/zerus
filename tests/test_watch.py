@@ -185,6 +185,37 @@ class WatchStream(unittest.TestCase):
         stream.quiet(lambda f: f['t'] == 'delta', 6)
         self.assertEqual(stream.close(), 0)
 
+    def listed_row(self):
+        return next(row for row in self.listing()['sessions'] if row['name'] == self.name)
+
+    def upserted(self, predicate, timeout):
+        """The row of the first delta that upserts this session as `predicate` wants."""
+        delta = self.stream.next(lambda f: f['t'] == 'delta' and any(
+            item['key'] == self.key() and predicate(item['row']) for item in f['upsert']), timeout=timeout)
+        return next(item['row'] for item in delta['upsert'] if item['key'] == self.key())
+
+    def test_a_changed_binding_or_journal_row_derives_the_row_the_listing_shows(self):
+        # Between whole listings (every 5 s) only the changed session's row is
+        # derived again, through the listing's own steps.
+        self.stream, *_ = self.start()
+        self.record.update(prompt='Derived request', last_event_at=time.time())
+        self.write_record()
+        row = self.upserted(lambda row: row.get('prompt') == 'Derived request', timeout=4)
+        self.assertEqual(steady(row), steady(self.listed_row()))
+        # A journal row alone, such as a reply, changes the reply identity.
+        reply = self.journal('Stop', detail='Derived reply')
+        row = self.upserted(lambda row: str(row.get('reply_id', '')).startswith(f'{reply}:'), timeout=4)
+        self.assertEqual(steady(row), steady(self.listed_row()))
+        self.assertEqual(self.stream.close(), 0)
+
+    def test_a_session_killed_in_tmux_is_noticed_without_any_file_change(self):
+        self.stream, *_ = self.start()
+        self.tmux('kill-session', '-t', '=' + self.name)
+        # The probe sees the terminal change within 5 s and lists it whole.
+        row = self.upserted(lambda row: row.get('state') == 'stopped', timeout=8)
+        self.assertEqual(steady(row), steady(self.listed_row()))
+        self.assertEqual(self.stream.close(), 0)
+
     def test_a_forgotten_session_is_removed_with_its_reason_and_ends_its_subscription(self):
         stream, *_ = self.start()
         stream.send(op='subscribe', topic='activity', session=self.session())

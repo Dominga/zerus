@@ -409,7 +409,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             .extend(telemetry::unavailable().as_object().unwrap().clone());
     }
     // Bounds question indexing for the whole listing.
-    let budget = read_marks::question_budget();
+    let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), budget: read_marks::question_budget() };
     let mut process_work = processes::WorkSample::default();
     for record in bindings {
         if archive::equivalent(&record, &archived) {
@@ -418,22 +418,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         let name = string(&record, "name");
         if let Some(index) = by_name.get(name) {
             if matches(&record, snapshot.get(name)) {
-                // An approval answered in Terminal sends no hook.
-                let record = claude_approval::reconcile(record);
-                let session = &mut sessions[*index];
-                session["resumable"] = json!(
-                    !string(&record, "conversation_id").is_empty()
-                        && string(&record, "error").is_empty()
-                );
-                let summary = journal::summary(&record, true);
-                session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
-                session
-                    .as_object_mut()
-                    .ok_or("invalid session")?
-                    .extend(summary.as_object().ok_or("invalid summary")?.clone());
-                let questions = read_marks::pending_questions(&record, session, true, budget);
-                read_marks::enrich_listing(session, &marks, journal::journal_name(&record), questions);
-                notifications::enrich(session, notification_preferences.as_ref(), journal::journal_name(&record));
+                live_row(&mut sessions[*index], record, &shared, &mut process_work)?;
             }
             continue;
         }
@@ -479,12 +464,49 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     }
     sessions.extend(dsh::snapshots()?);
     sessions.extend(opencode::snapshots()?);
+    finish_rows(sessions, &marks, &names);
+    Ok(box_value)
+}
+
+/// What every row of one listing shares besides its process sample.
+struct Shared<'a> {
+    marks: &'a Value,
+    preferences: Option<&'a notifications::Store>,
+    /// Bounds question indexing for the whole listing.
+    budget: std::time::Instant,
+}
+
+/// The row of a live session whose pane runs its saved binding `record`.
+/// `hgs watch` re-derives single rows through this same step
+/// (`watch_source::rows`).
+fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &mut processes::WorkSample) -> Result<()> {
+    // An approval answered in Terminal sends no hook.
+    let record = claude_approval::reconcile(record);
+    session["resumable"] = json!(
+        !string(&record, "conversation_id").is_empty()
+            && string(&record, "error").is_empty()
+    );
+    let summary = journal::summary(&record, true);
+    session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
+    session
+        .as_object_mut()
+        .ok_or("invalid session")?
+        .extend(summary.as_object().ok_or("invalid summary")?.clone());
+    let questions = read_marks::pending_questions(&record, session, true, shared.budget);
+    read_marks::enrich_listing(session, shared.marks, journal::journal_name(&record), questions);
+    notifications::enrich(session, shared.preferences, journal::journal_name(&record));
+    Ok(())
+}
+
+/// The last steps of every listed row. `names` holds the session names of the
+/// pane snapshot by session ID.
+fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, String>) {
     // DeepSeek and untracked live sessions are owned by their names.
     for session in sessions.iter_mut() {
         if session.get("attention_signature").is_none() {
             let owner = string(session, "name").to_owned();
             let questions=if session["agent"]=="opencode" {session["pending_questions"].as_array().cloned().unwrap_or_default()}else{Vec::new()};
-            read_marks::enrich_listing(session, &marks, &owner, Ok(Some(questions)));
+            read_marks::enrich_listing(session, marks, &owner, Ok(Some(questions)));
         }
     }
 
@@ -497,9 +519,25 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     // The pane folders are read after the lock is released, when a session may
     // have been renamed since `snapshot`. They go by the session IDs, which a
     // rename keeps, to the names that `snapshot` listed (zerus-18u1).
-    workspace::enrich(sessions, &workspace::snapshot_cwds(&names));
+    workspace::enrich(sessions, &workspace::snapshot_cwds(names));
     waits::decorate(sessions);
-    Ok(box_value)
+}
+
+/// The rows a terminal listing starts from, before `merge_listing` adds what
+/// the saved bindings say.
+pub(crate) fn listed_rows(listing: &backend::Listing) -> Vec<Value> {
+    listing.sessions.iter().map(|row| {
+        let name = row.name.as_str();
+        let mut parts = name.splitn(3, '/'); let cmd = parts.next().unwrap_or("");
+        let project = parts.next().filter(|s| !s.is_empty()); let tag = parts.next().filter(|s| !s.is_empty());
+        let ttys: Vec<&str> = listing.clients.iter().filter_map(|client| if client.session == name { Some(client.terminal.as_str()) } else { None }).collect();
+        json!({"name":name,"cmd":cmd,"project":project,"tag":tag,"attached":row.attached,"clients":ttys,"created":row.created,"launch_id":row.launch_id})
+    }).collect()
+}
+
+/// Each listed session's immutable ID (`$N`) by its listed name.
+pub(crate) fn listed_ids(listing: &backend::Listing) -> BTreeMap<String, String> {
+    listing.sessions.iter().map(|row| (row.name.clone(), row.id.clone())).collect()
 }
 
 /// Select a tracked conversation or explicit pending request by exact ID/home.

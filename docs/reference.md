@@ -4016,12 +4016,18 @@ more fail with `too_many_subscriptions`. Other topics fail with
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive
 folder and the DeepSeek and OpenCode bindings, and holds a read-only connection
-to the Activity journal. A change lists again after 150 ms, at most every 500 ms
-and at most once per four durations of the previous listing. A listing also
-runs every 5 s, for changes no file shows, such as an exited process or a tmux
-rename. Followed summaries are re-read when their journal rows or catalog row
-change, at most every 500 ms, and otherwise every 2 s while the agent is busy and
-every 15 s while it is idle; DeepSeek and OpenCode every 2 s.
+to the Activity journal. A changed binding, or new journal rows of its session,
+derives only that session's row again, through the steps and under the lock of
+the listing. Any other change lists all rows again. Both wait 150 ms after a
+change and start at most every 500 ms and at most once per four durations of
+the previous one. Every 5 s the stream probes what no file shows: tmux sessions
+that start, end, are renamed, attached or detached, exited agent processes,
+ended background work, sessions that have not reported a hook event yet and the
+DeepSeek and OpenCode hosts. All rows are listed again every 5 s, for terminal
+choosers and status lines of sessions that already reported hooks. Followed
+summaries are re-read when their journal rows or catalog row change, at most
+every 500 ms, and otherwise every 2 s while the agent is busy and every 15 s
+while it is idle; DeepSeek and OpenCode every 2 s.
 
 A frame is at most 1 MiB including its newline. An event too large for a frame
 is cut with `"truncated": true`, and an oversized summary loses the oldest items

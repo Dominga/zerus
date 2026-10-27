@@ -1130,13 +1130,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     let launches = state::launches::Evidence::read();
     // A listing that fails is an error: no sessions would show live ones as stopped.
     let listing = terminal().listing().map_err(|e| Error::new(1, e))?;
-    let sessions: Vec<Value> = listing.sessions.iter().map(|row| {
-        let name = row.name.as_str();
-        let mut parts = name.splitn(3, '/'); let cmd = parts.next().unwrap_or("");
-        let project = parts.next().filter(|s| !s.is_empty()); let tag = parts.next().filter(|s| !s.is_empty());
-        let ttys: Vec<&str> = listing.clients.iter().filter_map(|client| if client.session == name { Some(client.terminal.as_str()) } else { None }).collect();
-        json!({"name":name,"cmd":cmd,"project":project,"tag":tag,"attached":row.attached,"clients":ttys,"created":row.created,"launch_id":row.launch_id})
-    }).collect();
+    let sessions = state::listed_rows(&listing);
     let mut raw = json!({"host":config.host(),"ok":true,"hgs_version":env!("CARGO_PKG_VERSION"),"projects":projects,"sessions":sessions,"peers":config.peers,"metrics":crate::metrics::snapshot(&config.state)});
     // Phone alerts wait while the owner is active here; see src/presence.rs.
     if let Some(presence) = crate::presence::listing(&config.state, crate::presence::now()) {
@@ -1150,11 +1144,7 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
         raw["local_host"] = crate::host::admin::local_host(&config.state);
     }
     // A session renamed before merge_listing reads the panes keeps its ID.
-    let ids = listing
-        .sessions
-        .iter()
-        .map(|row| (row.name.clone(), row.id.clone()))
-        .collect();
+    let ids = state::listed_ids(&listing);
     let mut merged = state::merge_listing_archives(raw, &ids, archives).map_err(|e| Error::new(1, e))?;
     merged["archive_paging"] = json!(true);
     merged["archive_revision"] = json!(state::archive_catalog::revision().map_err(|e|Error::new(1,e))?);

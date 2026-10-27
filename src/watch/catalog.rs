@@ -38,6 +38,11 @@ pub(super) fn row_digest(row: &Value) -> Digest32 {
     digest(&masked(row, &VOLATILE_ROW))
 }
 
+/// A row's key: its run, or its name for a row without one.
+pub(super) fn key(row: &Value) -> String {
+    protocol::catalog_key(row).unwrap_or_else(|| format!("name:{}", row.get("name").and_then(Value::as_str).unwrap_or("")))
+}
+
 /// The listing's rows with their keys, and its other fields. Two rows with the
 /// same key (never expected) keep apart: the later one falls back to its name,
 /// then to its position.
@@ -54,7 +59,7 @@ pub(super) fn split(mut listing: Value) -> (Vec<(String, Value)>, Value) {
     let mut rows = Vec::with_capacity(sessions.len());
     for (index, row) in sessions.into_iter().enumerate() {
         let name = row.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
-        let mut key = protocol::catalog_key(&row).unwrap_or_else(|| format!("name:{name}"));
+        let mut key = key(&row);
         if seen.contains(&key) {
             key = protocol::key_for(None, &name);
         }

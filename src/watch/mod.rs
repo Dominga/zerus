@@ -3,7 +3,9 @@
 //! carries the rows of `hgs ls --json --local --no-archives`; Activity carries
 //! what `hgs inspect` returns for subscribed sessions. Change detection is a
 //! 250 ms pulse over cheap stamps and the journal's data version, on
-//! `std::thread` only. See "Event stream" in docs/reference.md.
+//! `std::thread` only. A changed binding or journal row derives only its
+//! session's row again; a 5 s probe watches what no file shows and the whole
+//! listing runs every 5 s. See "Event stream" in docs/reference.md.
 mod activity;
 mod catalog;
 mod stamps;
@@ -26,14 +28,23 @@ use zerus_watch_protocol::{self as protocol, reason, topic, Body, Control};
 
 /// How often sources are checked.
 const PULSE: Duration = Duration::from_millis(250);
-/// A listing waits this long after a change, so a burst lists once.
+/// A listing or a row refresh waits this long after a change, so a burst
+/// derives once.
 const DEBOUNCE: Duration = Duration::from_millis(150);
-/// Listings start at least this far apart, and at least four times the
-/// previous listing's duration apart.
+/// Listings, and row refreshes, start at least this far apart, and at least
+/// four times the previous one's duration apart.
 const LISTING_GAP: Duration = Duration::from_millis(500);
-/// Listing without any observed change: process exit, tmux kill or rename,
-/// ended background jobs and terminal choosers report no file change.
-const SAFETY: Duration = Duration::from_secs(5);
+/// What no file shows is probed this often: a session that starts, ends, is
+/// killed, renamed, attached or detached, an exited agent process, ended
+/// background work, a session that has not reported a hook event yet
+/// (startup choosers) and DeepSeek and OpenCode hosts.
+const PROBE: Duration = Duration::from_secs(5);
+/// The whole listing runs at least this often, for what neither a file nor
+/// the probe shows: terminal choosers and status lines of sessions that have
+/// reported hooks, and native transcripts between hook events. 15 s would
+/// halve the watcher's CPU on a busy computer but show such a chooser up to
+/// 15 s late; that tradeoff waits for the owner (zerus-604d.6).
+const FULL: Duration = Duration::from_secs(5);
 /// `catalog.meta` with only fresh metrics or presence goes out this rarely.
 const META_INTERVAL: Duration = Duration::from_secs(10);
 /// A changed session's summary is re-inspected at most this often.
@@ -92,7 +103,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     let mut next_pulse = Instant::now() + PULSE;
     loop {
         let now = Instant::now();
-        let deadline = watch.listing_due.map_or(next_pulse, |due| due.min(next_pulse));
+        let deadline = [watch.listing_due, watch.refresh_due].into_iter().flatten().fold(next_pulse, Instant::min);
         let input = received.recv_timeout(deadline.saturating_duration_since(now));
         if matches!(input, Ok(Input::Line(_) | Input::TooLong)) {
             pending.fetch_sub(1, Ordering::SeqCst);
@@ -127,6 +138,9 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         }
         if watch.listing_due.is_some_and(|due| now >= due) {
             watch.list(now);
+        }
+        if watch.refresh_due.is_some_and(|due| now >= due) {
+            watch.refresh_rows(now);
         }
         watch.emit_catalog();
         watch.resync_activity();
@@ -188,6 +202,15 @@ fn read_controls<R: BufRead>(mut input: R, inputs: mpsc::Sender<Input>, pending:
     }
     ended();
     let _ = inputs.send(Input::End);
+}
+
+/// What changed in the Activity journal since the previous pulse.
+enum Journal {
+    Unchanged,
+    /// Rows of these journal names were added.
+    Names(BTreeSet<String>),
+    /// Rows were added or the journal was replaced, for names not known.
+    Unknown,
 }
 
 /// Frames out, with repeated source failures limited.
@@ -257,10 +280,21 @@ struct Watch<'a> {
     catalog_resync: bool,
     meta_sent: Option<(Digest32, Digest32, Instant)>,
     // Listing schedule.
-    stamp: stamps::Stamp,
+    scan: stamps::Scan,
+    /// Each binding file's session and journal names (None: no binding).
+    identities: BTreeMap<PathBuf, Option<(String, String)>>,
+    /// The terminal's structure when the rows were derived.
+    structure: Option<u64>,
     listing_due: Option<Instant>,
     listed_at: Option<Instant>,
     listing_cost: Duration,
+    // Row refreshes between listings.
+    stale: BTreeSet<String>,
+    stale_native: bool,
+    refresh_due: Option<Instant>,
+    refreshed_at: Option<Instant>,
+    refresh_cost: Duration,
+    probed_at: Option<Instant>,
     // Activity.
     journal: Option<rusqlite::Connection>,
     data_version: Option<i64>,
@@ -270,10 +304,14 @@ struct Watch<'a> {
 
 impl<'a> Watch<'a> {
     fn new(config: &'a Config, writer: Writer) -> Self {
+        let root = source::state_root();
+        // Stamps are taken before the first listing: a change during it lists again.
+        let scan = stamps::scan(&root);
+        let identities = scan.bindings.keys().map(|path| (path.clone(), source::binding_identity(path))).collect();
         Self {
             config,
             out: Out { writer, reported: BTreeMap::new() },
-            root: source::state_root(),
+            root,
             rows: Vec::new(),
             digests: Vec::new(),
             meta: json!({}),
@@ -284,10 +322,18 @@ impl<'a> Watch<'a> {
             snapshot_sent: false,
             catalog_resync: false,
             meta_sent: None,
-            stamp: stamps::Stamp::default(),
+            scan,
+            identities,
+            structure: None,
             listing_due: None,
             listed_at: None,
             listing_cost: Duration::ZERO,
+            stale: BTreeSet::new(),
+            stale_native: false,
+            refresh_due: None,
+            refreshed_at: None,
+            refresh_cost: Duration::ZERO,
+            probed_at: None,
             journal: None,
             data_version: None,
             journal_max: 0,
@@ -318,12 +364,23 @@ impl<'a> Watch<'a> {
         self.listing_due = Some(self.listing_due.map_or(due, |current| current.min(due)));
     }
 
+    fn schedule_refresh(&mut self, at: Instant) {
+        let gap = LISTING_GAP.max(self.refresh_cost * 4);
+        let due = self.refreshed_at.map_or(at, |started| at.max(started + gap));
+        self.refresh_due = Some(self.refresh_due.map_or(due, |current| current.min(due)));
+    }
+
     /// Re-runs the `ls --json --local --no-archives` builder.
     fn list(&mut self, now: Instant) {
-        // The stamp is taken first: a change during the listing lists again.
-        self.stamp = stamps::scan(&self.root);
         self.listing_due = None;
         self.listed_at = Some(now);
+        // The listing covers every row refresh and probe asked for so far.
+        self.probed_at = Some(now);
+        self.stale.clear();
+        self.stale_native = false;
+        self.refresh_due = None;
+        // The structure is taken first: a change during the listing lists again.
+        self.structure = source::structure_now().ok();
         match crate::cli::local_listing(self.config) {
             Ok(listing) => {
                 let (rows, meta) = catalog::split(listing);
@@ -336,6 +393,109 @@ impl<'a> Watch<'a> {
             Err(error) => self.out.failure("listing_failed", &error.message, Some(topic::CATALOG), None),
         }
         self.listing_cost = now.elapsed();
+    }
+
+    /// Derives again the rows whose inputs changed since they were listed; a
+    /// whole listing follows when only it can tell.
+    fn refresh_rows(&mut self, now: Instant) {
+        self.refresh_due = None;
+        self.refreshed_at = Some(now);
+        let wanted = std::mem::take(&mut self.stale);
+        let native = std::mem::take(&mut self.stale_native);
+        match self.derive(&wanted, native) {
+            Ok(true) => {}
+            Ok(false) => self.schedule(now),
+            Err(error) => {
+                self.out.failure("listing_failed", &error, Some(topic::CATALOG), None);
+                self.schedule(now);
+            }
+        }
+        self.refresh_cost = now.elapsed();
+    }
+
+    /// Replaces the rows of the live tracked sessions in `wanted` and, with
+    /// `native`, the DeepSeek and OpenCode rows. False when a whole listing
+    /// must decide: the terminal changed, a session is no longer live under
+    /// its binding, or a row would change its key or its place.
+    fn derive(&mut self, wanted: &BTreeSet<String>, native: bool) -> std::result::Result<bool, String> {
+        if !self.listed {
+            return Ok(false);
+        }
+        let mut rows = Vec::new();
+        if !wanted.is_empty() {
+            let Some((derived, structure)) = source::rows(wanted)? else { return Ok(false) };
+            if Some(structure) != self.structure {
+                return Ok(false);
+            }
+            rows = derived;
+        }
+        if native {
+            let derived = source::native_rows()?;
+            let listed: BTreeSet<&str> = self
+                .rows
+                .iter()
+                .filter(|(_, row)| row["name"].as_str().is_some_and(source::native))
+                .map(|(key, _)| key.as_str())
+                .collect();
+            let keys: Vec<String> = derived.iter().map(catalog::key).collect();
+            if keys.len() != listed.len() || keys.iter().any(|key| !listed.contains(key.as_str())) {
+                return Ok(false);
+            }
+            rows.extend(derived);
+        }
+        let mut updates = Vec::with_capacity(rows.len());
+        for row in rows {
+            let key = catalog::key(&row);
+            let Some(index) = self.rows.iter().position(|(listed, _)| *listed == key) else { return Ok(false) };
+            if self.rows[index].1["name"] != row["name"] {
+                return Ok(false);
+            }
+            updates.push((index, row));
+        }
+        for (index, row) in updates {
+            self.digests[index] = catalog::row_digest(&row);
+            self.rows[index].1 = row;
+        }
+        self.pending = true;
+        Ok(true)
+    }
+
+    /// What no file shows: the terminal's structure, agent processes and
+    /// their work, sessions without a hook event yet and DeepSeek and
+    /// OpenCode hosts. The listing's metrics and presence are refreshed too.
+    fn probe(&mut self, now: Instant) {
+        self.probed_at = Some(now);
+        if !self.listed {
+            // The last listing failed: try again.
+            self.schedule(now);
+            return;
+        }
+        let rows: Vec<&Value> = self.rows.iter().map(|(_, row)| row).collect();
+        let probe = match source::probe(&rows) {
+            Ok(probe) if Some(probe.structure) == self.structure => probe,
+            // A changed terminal, or one this probe cannot read: list it whole.
+            _ => {
+                self.schedule(now);
+                return;
+            }
+        };
+        let native = self.rows.iter().any(|(_, row)| row["name"].as_str().is_some_and(source::native));
+        if !probe.stale.is_empty() || native {
+            self.stale.extend(probe.stale);
+            self.stale_native |= native;
+            self.schedule_refresh(now);
+        }
+        // `metrics` and `desktop_presence` as the listing reports them now.
+        self.meta["metrics"] = crate::metrics::snapshot(&self.config.state);
+        match crate::presence::listing(&self.config.state, crate::presence::now()) {
+            Some(presence) => self.meta["desktop_presence"] = presence,
+            None => {
+                if let Some(meta) = self.meta.as_object_mut() {
+                    meta.remove("desktop_presence");
+                }
+            }
+        }
+        self.pending = true;
     }
 
     /// Sends what changed since the client's copy, unless the client is
@@ -560,12 +720,46 @@ impl<'a> Watch<'a> {
     // ---- Pulse -------------------------------------------------------------
 
     fn pulse(&mut self, now: Instant) {
-        let journal_changed = self.poll_journal();
-        let stamp = stamps::scan(&self.root);
-        if stamp != self.stamp || journal_changed {
-            self.schedule(now + DEBOUNCE);
+        let journal = self.poll_journal();
+        let scan = stamps::scan(&self.root);
+        let (changed, removed) = scan.changed_bindings(&self.scan);
+        // Inputs other than bindings, and added or removed bindings, change
+        // the whole listing; a changed binding changes its own row.
+        let mut whole = scan.global != self.scan.global || removed || matches!(journal, Journal::Unknown);
+        let mut names = BTreeSet::new();
+        for path in changed {
+            let identity = source::binding_identity(&path);
+            match &identity {
+                Some((name, _)) if self.scan.bindings.contains_key(&path) => {
+                    names.insert(name.clone());
+                }
+                _ => whole = true,
+            }
+            self.identities.insert(path, identity);
         }
-        if self.listed_at.is_none_or(|at| now >= at + SAFETY) {
+        if removed {
+            self.identities.retain(|path, _| scan.bindings.contains_key(path));
+        }
+        // Journal rows change the rows of the sessions they belong to. Rows
+        // of other names belong to no listed binding.
+        if let Journal::Names(journals) = &journal {
+            for (name, journal) in self.identities.values().flatten() {
+                if journals.contains(journal) {
+                    names.insert(name.clone());
+                }
+            }
+        }
+        self.scan = scan;
+        if whole {
+            self.schedule(now + DEBOUNCE);
+        } else if !names.is_empty() {
+            self.stale.extend(names);
+            self.schedule_refresh(now + DEBOUNCE);
+        }
+        if self.probed_at.is_none_or(|at| now >= at + PROBE) {
+            self.probe(now);
+        }
+        if self.listed_at.is_none_or(|at| now >= at + FULL) {
             self.schedule(now);
         }
         self.activity(now);
@@ -586,32 +780,32 @@ impl<'a> Watch<'a> {
         }
     }
 
-    /// Whether the journal changed. Subscriptions with new rows read them.
-    fn poll_journal(&mut self) -> bool {
+    /// The journal names with new rows. Subscriptions with new rows read them.
+    fn poll_journal(&mut self) -> Journal {
         self.open_journal();
-        let Some(db) = &self.journal else { return false };
+        let Some(db) = &self.journal else { return Journal::Unchanged };
         let version = match source::data_version(db) {
             Ok(version) => version,
             Err(_) => {
                 self.journal = None;
-                return false;
+                return Journal::Unchanged;
             }
         };
         if Some(version) == self.data_version {
-            return false;
+            return Journal::Unchanged;
         }
         self.data_version = Some(version);
-        let Ok((_, max)) = source::bounds(db) else { return true };
+        let Ok((_, max)) = source::bounds(db) else { return Journal::Unknown };
         if max < self.journal_max {
             // A replaced journal: every cursor is meaningless now.
             for sub in self.subs.iter_mut().filter(|sub| !sub.native) {
                 sub.resync = Some(reason::RESET);
             }
             self.journal_max = max;
-            return true;
+            return Journal::Unknown;
         }
         if max == self.journal_max {
-            return false;
+            return Journal::Unchanged;
         }
         const SCAN: usize = 10_000;
         let names: Option<BTreeSet<String>> = if max - self.journal_max > SCAN as i64 {
@@ -629,7 +823,7 @@ impl<'a> Watch<'a> {
             }
         }
         self.journal_max = max;
-        true
+        names.map_or(Journal::Unknown, Journal::Names)
     }
 
     fn activity(&mut self, now: Instant) {

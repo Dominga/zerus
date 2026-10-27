@@ -4,6 +4,7 @@
 //! and `hgs ls` already do.
 use super::*;
 use rusqlite::{Connection, OpenFlags};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 /// The session state folder.
@@ -140,4 +141,174 @@ pub(crate) fn archived(run_id: &str) -> bool {
 /// Whether `name` still has a saved binding of any agent.
 pub(crate) fn saved(name: &str) -> bool {
     local_sessions().is_ok() && (record_path(name).exists() || native(name))
+}
+
+// ---- Rows between listings (zerus-604d.6) ------------------------------------
+//
+// A whole `ls --json --local --no-archives` summarizes every session. Between
+// such listings `hgs watch` derives again only the live tracked rows whose
+// inputs changed, through the same steps (`live_row`, `finish_rows`) and under
+// the same lock, and probes what no file reports.
+
+/// What the terminal showed a derivation: its listed sessions with their IDs,
+/// attached clients, creation and launch, and every pane with its run marker.
+/// A session that starts, ends, is renamed, attached or detached changes it.
+fn structure(sessions: &[Value], ids: &BTreeMap<String, String>, snapshot: &Snapshot, names: &BTreeMap<String, String>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    json!([sessions, ids, snapshot, names]).to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The terminal's rows and session IDs, as a listing starts from them.
+fn terminal() -> Result<(Vec<Value>, BTreeMap<String, String>)> {
+    let listing = backend::current().listing()?;
+    Ok((listed_rows(&listing), listed_ids(&listing)))
+}
+
+/// The terminal's structure now. A listing that starts later sees this one or
+/// a newer one, so taking it first never hides a change.
+pub(crate) fn structure_now() -> Result<u64> {
+    local_sessions()?;
+    let (sessions, ids) = terminal()?;
+    let (snapshot, names) = live_sessions()?;
+    Ok(structure(&sessions, &ids, &snapshot, &names))
+}
+
+/// The rows `ls --json --local --no-archives` lists now for the live tracked
+/// sessions in `wanted`, with the terminal structure they saw. None when only
+/// a whole listing can tell: the panes no longer show exactly the listed
+/// sessions under their listed names (one started, ended or was renamed), or
+/// a wanted session does not run its saved binding in its pane.
+pub(crate) fn rows(wanted: &BTreeSet<String>) -> Result<Option<(Vec<Value>, u64)>> {
+    local_sessions()?;
+    if !root().exists() {
+        return Ok(None);
+    }
+    let (sessions, ids) = terminal()?;
+    // As in a listing: the panes and the bindings are read under the lock, so
+    // a rename is seen before it began or after it finished (zerus-gd02).
+    let (snapshot, names, records) = {
+        let _guard = lock(None)?;
+        let (snapshot, names) = live_sessions()?;
+        let mut records = Vec::with_capacity(wanted.len());
+        for name in wanted {
+            match read(name) {
+                Ok(record) if record["rename_shadow"] != true => records.push(record),
+                _ => return Ok(None),
+            }
+        }
+        (snapshot, names, records)
+    };
+    let shape = structure(&sessions, &ids, &snapshot, &names);
+    let consistent = sessions.len() == snapshot.len()
+        && sessions.iter().all(|session| {
+            let listed = string(session, "name");
+            match ids.get(listed).and_then(|id| names.get(id)) {
+                Some(name) => name == listed,
+                None => snapshot.contains_key(listed),
+            }
+        });
+    if !consistent {
+        return Ok(None);
+    }
+    let marks = read_marks::load();
+    let preferences = notifications::load();
+    let shared = Shared { marks: &marks, preferences: preferences.as_ref(), budget: read_marks::question_budget() };
+    let mut process_work = processes::WorkSample::default();
+    let mut rows = Vec::with_capacity(records.len());
+    for record in records {
+        let name = string(&record, "name");
+        let Some(session) = sessions.iter().find(|session| string(session, "name") == name) else {
+            return Ok(None);
+        };
+        if !matches(&record, snapshot.get(name)) {
+            return Ok(None);
+        }
+        let mut session = session.clone();
+        session
+            .as_object_mut()
+            .ok_or("invalid session")?
+            .extend(telemetry::unavailable().as_object().unwrap().clone());
+        live_row(&mut session, record, &shared, &mut process_work)?;
+        rows.push(session);
+    }
+    finish_rows(&mut rows, &marks, &names);
+    Ok(Some((rows, shape)))
+}
+
+/// The DeepSeek and OpenCode rows of `ls --json --local --no-archives`. Their
+/// hosts answer them, so no file shows their changes.
+pub(crate) fn native_rows() -> Result<Vec<Value>> {
+    local_sessions()?;
+    let mut rows = dsh::snapshots()?;
+    rows.extend(opencode::snapshots()?);
+    if !rows.is_empty() {
+        let (_, names) = live_sessions()?;
+        finish_rows(&mut rows, &read_marks::load(), &names);
+    }
+    Ok(rows)
+}
+
+/// What a probe between listings found.
+pub(crate) struct Probe {
+    /// The terminal's structure (`structure_now`).
+    pub(crate) structure: u64,
+    /// Live tracked rows to derive again.
+    pub(crate) stale: Vec<String>,
+}
+
+/// `process_work` without its sampling time.
+fn work(mut value: Value) -> Value {
+    if let Some(fields) = value.as_object_mut() {
+        fields.remove("sampled_at");
+    }
+    value
+}
+
+/// Compares the listed `rows` with what no file reports: the terminal's
+/// structure and, for each live tracked session, its agent process and the
+/// work that process owns, from one process sample. A session that has not
+/// reported a hook event yet is always derived again: startup choosers have
+/// no hook. It takes no lock; what it finds only asks for rows that do.
+pub(crate) fn probe(rows: &[&Value]) -> Result<Probe> {
+    local_sessions()?;
+    let (sessions, ids) = terminal()?;
+    let (snapshot, names) = live_sessions()?;
+    let mut sample = processes::WorkSample::default();
+    let mut stale = Vec::new();
+    for row in rows {
+        let name = string(row, "name");
+        if row["tracked"] != true || !snapshot.contains_key(name) || native(name) {
+            continue;
+        }
+        let Ok(record) = read(name) else {
+            stale.push(name.to_owned());
+            continue;
+        };
+        let quiet = string(&record, "conversation_id").is_empty()
+            || record["last_event_at"].as_f64().unwrap_or(0.) == 0.;
+        let idle = row["activity"] == "idle" && row["phase"] == "idle";
+        // As the summary decides `terminal_supported` of a live pane.
+        let terminal = string(&record, "archive_id").is_empty() && process_alive(&record);
+        if quiet
+            || !matches(&record, snapshot.get(name))
+            || row["terminal_supported"] != json!(terminal)
+            || work(row["process_work"].clone()) != work(sample.summary(&record, idle))
+        {
+            stale.push(name.to_owned());
+        }
+    }
+    Ok(Probe { structure: structure(&sessions, &ids, &snapshot, &names), stale })
+}
+
+/// The session a binding file holds and the journal name its Activity rows
+/// carry; None for a rename's shadow or a file that is no binding.
+pub(crate) fn binding_identity(path: &Path) -> Option<(String, String)> {
+    let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let name = string(&value, "name");
+    if value["rename_shadow"] == true || name.is_empty() {
+        return None;
+    }
+    Some((name.to_owned(), journal::journal_name(&value).to_owned()))
 }

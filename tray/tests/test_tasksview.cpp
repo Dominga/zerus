@@ -66,6 +66,7 @@ private slots:
     void initTestCase();
     void namedCardsOpenCentralViewAndRecoverTheOriginalIdentity();
     void taskDocumentAndDiscussionUseActivityComposition();
+    void rowsAreNotSetUpAgainWhenOnlyAnotherSessionChanges();
     void taskTitleRenamesInPlaceAndKeepsRefusedEdits();
     void newCommentRecoversPreviousWithoutResending();
     void slowDetailsPublishDuringBoardRefreshesAndRejectOldSelections();
@@ -264,6 +265,8 @@ void TestTasksView::firstActiveFilterCombinesReviewAndWorkWithoutChangingSelecti
 
 void TestTasksView::taskDocumentAndDiscussionUseActivityComposition() {
     QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo", {{"title", "A clear task title"}, {"text", "A **canonical** document."}})}));
+    // The board's listing arrives after the task's own read, as on a loaded runner.
+    { QFile delay(dir.filePath("delay-list")); QVERIFY(delay.open(QIODevice::WriteOnly)); delay.write("0.5"); }
     HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); TaskInspector inspector(&client, &board);
     QWidget center; auto *layout = new QVBoxLayout(&center); layout->setContentsMargins(0, 0, 0, 0);
     auto *pane = inspector.takeDetailsPane(); layout->addWidget(pane); center.resize(1100, 780); center.show();
@@ -275,6 +278,8 @@ void TestTasksView::taskDocumentAndDiscussionUseActivityComposition() {
     QVERIFY(!composer->isAncestorOf(pane->findChild<QWidget *>("taskInspectorActions")));
     MessageComposer activity; activity.resize(800, 400); activity.show(); activity.setTheme(true);
     QCOMPARE(composer->editor()->height(), activity.editor()->height());
+    // A comment is saved only for the board's loaded project (zerus-fexl).
+    QTRY_COMPARE(board.board().projectId, QStringLiteral("project-1"));
     composer->editor()->setPlainText("A clarification before Start"); composer->findChild<QPushButton *>("sendMessage")->click();
     QTRY_VERIFY(detail->toPlainText().contains("A clarification before Start")); QTRY_VERIFY(detail->toPlainText().contains("Waiting for Start"));
     QCOMPARE(pane->findChild<QTabBar *>("taskDetailTabs")->currentIndex(), 0);
@@ -584,6 +589,37 @@ void TestTasksView::inspectorDiscardsHistoryAfterLeavingTheProject() {
     QCOMPARE(inspector.displayedCount(), 0);
     QVERIFY(inspector.findChild<QTextBrowser *>("taskInspectorDetail")->toPlainText().isEmpty());
     QVERIFY(!inspector.findChild<QPushButton *>("taskOpenActivity")->isEnabled());
+}
+
+void TestTasksView::rowsAreNotSetUpAgainWhenOnlyAnotherSessionChanges() {
+    // The window passes the task context on every session update (zerus-604d.13).
+    // In review rows have no animation, so a paint means the row was set up again.
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {
+        FakeTasksCli::task(1, "review", {{"session", FakeTasksCli::pinned("codex/api")}}),
+        FakeTasksCli::task(2, "review", {{"session", FakeTasksCli::pinned("codex/web")}})}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client);
+    TaskInspector inspector(&client, &board); inspector.resize(400, 700); inspector.show();
+    const auto setContext = [&](const QString &session, const QList<TaskSession> &list) {
+        board.setContext("project-1", "orchard", "", session, "key", list); inspector.setContext("project-1", "", session, list);
+    };
+    setContext("codex/api", sessions());
+    QTRY_COMPARE(inspector.displayedCount(), 2);
+    auto *api = inspector.findChild<TaskRow *>("taskInspectorRow:T-000001");
+    auto *web = inspector.findChild<TaskRow *>("taskInspectorRow:T-000002"); QVERIFY(api && web);
+    struct Paints : QObject {
+        int count = 0;
+        bool eventFilter(QObject *, QEvent *event) override { if (event->type() == QEvent::Paint) ++count; return false; }
+    } apiPaints, webPaints;
+    api->installEventFilter(&apiPaints); web->installEventFilter(&webPaints);
+    QTest::qWait(150); apiPaints.count = webPaints.count = 0;
+    // Other sessions change their status: no row is set up or drawn again.
+    auto changed = sessions(); changed[1].status = QStringLiteral("Compacting"); changed[3].status = QStringLiteral("Paused");
+    setContext("codex/api", changed);
+    QTest::qWait(150);
+    QCOMPARE(apiPaints.count, 0); QCOMPARE(webPaints.count, 0);
+    // Opening the other session changes which task is its own: both rows change.
+    setContext("codex/web", changed);
+    QTRY_VERIFY(apiPaints.count > 0 && webPaints.count > 0);
 }
 
 void TestTasksView::inspectorKeepsSelectionInAFixedLowerPane() {

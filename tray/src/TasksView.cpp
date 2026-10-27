@@ -306,9 +306,11 @@ void TasksView::render() {
         }
         row->setObjectName(QStringLiteral("taskRow:") + task.id);
         const auto state = rowState(task);
-        row->setProperty("separated", index > 0);
+        if (row->property("separated").toBool() != (index > 0)) { row->setProperty("separated", index > 0); row->update(); }
         row->setTask(task, state, colors, v.now);
-        m_list->removeWidget(row); m_list->insertWidget(index++, row); row->show(); shown.insert(task.uuid);
+        // A row already in its place is not moved, which would lay the list out again.
+        if (m_list->indexOf(row) != index) { m_list->removeWidget(row); m_list->insertWidget(index, row); }
+        ++index; row->show(); shown.insert(task.uuid);
     }
     for (auto it = m_rows.begin(); it != m_rows.end();) {
         if (shown.contains(it.key())) { ++it; continue; }

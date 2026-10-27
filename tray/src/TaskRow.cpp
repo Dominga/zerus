@@ -172,6 +172,14 @@ void TaskRow::setCompact(bool compact) {
 }
 
 void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const TaskColors &colors, qint64 now) {
+    // The window passes every session update on; a row that would show the
+    // same task, state, colours and age is not set up again.
+    const QString shownAge = task.stage == QLatin1String("active") ? age(now - task.stageAt) : QString();
+    const bool olderDone = task.stage == QLatin1String("done") && now - task.stageAt > TaskBoard::RecentDoneMs;
+    const bool shownCompact = property("compact").toBool();
+    if (!m_buttons.isEmpty() && task == m_task && state == m_state && colors.dark == m_colors.dark && shownAge == m_shownAge
+        && olderDone == m_olderDone && shownCompact == m_shownCompact) return;
+    m_shownAge = shownAge; m_olderDone = olderDone; m_shownCompact = shownCompact;
     const bool rebuild = task.stage != m_task.stage || m_buttons.isEmpty();
     const bool menuChanged = rebuild || state.blocked != m_state.blocked || colors.dark != m_colors.dark;
     m_task = task; m_state = state; m_colors = colors;

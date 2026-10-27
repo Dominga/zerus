@@ -57,6 +57,8 @@ const BUSY_REFRESH: Duration = Duration::from_secs(2);
 const IDLE_REFRESH: Duration = Duration::from_secs(15);
 /// DeepSeek and OpenCode answer from their own hosts.
 const NATIVE_REFRESH: Duration = Duration::from_secs(2);
+/// How often a subscription without a followed transcript looks for one.
+const TRANSCRIPT_RETRY: Duration = Duration::from_secs(2);
 /// With more than this queued, catalog changes wait and coalesce.
 const DEFER_BYTES: usize = protocol::QUEUE_BYTES / 4;
 /// A repeated source failure is reported at most this often.
@@ -870,6 +872,10 @@ impl<'a> Watch<'a> {
             if self.subs[index].more {
                 self.read_events(index);
             }
+            self.read_transcript(index, now);
+            if self.subs[index].resync.is_some() {
+                continue;
+            }
             let sub = &self.subs[index];
             let interval = if sub.native {
                 NATIVE_REFRESH
@@ -904,6 +910,7 @@ impl<'a> Watch<'a> {
             return;
         }
         sub.journal = Some(timeline.journal().to_owned());
+        follow_conversation(sub, &timeline);
         let events = match timeline.events(db, sub.cursor, protocol::ACTIVITY_READ, false) {
             Ok(events) => events,
             Err(error) => {
@@ -933,6 +940,47 @@ impl<'a> Watch<'a> {
         }
     }
 
+    /// Messages between tools from the followed Codex or Claude transcript,
+    /// each as an `event` frame; a later revision of a queued one replaces it.
+    fn read_transcript(&mut self, index: usize, now: Instant) {
+        let sub = &mut self.subs[index];
+        if sub.native {
+            return;
+        }
+        let Some(tail) = sub.transcript.as_mut() else {
+            if now < sub.transcript_at {
+                return;
+            }
+            sub.transcript_at = now + TRANSCRIPT_RETRY;
+            let Ok(Some(timeline)) = source::timeline(&sub.name) else { return };
+            if sub.run_id.as_deref().is_none_or(|run| run == timeline.run_id()) {
+                sub.transcript = timeline.transcript();
+                // Followed from its end: the next summary carries what came before.
+                sub.dirty |= sub.transcript.is_some();
+            }
+            return;
+        };
+        let messages = match tail.read() {
+            source::TailRead::Messages(messages) => messages,
+            source::TailRead::Ended => {
+                sub.transcript = None;
+                sub.transcript_at = now;
+                return;
+            }
+        };
+        for mut message in messages {
+            let id = activity::message_id(&message);
+            let Some(rev) = sub.message_rev(&id, &message) else { continue };
+            activity::shrink_event(&mut message, activity::PAYLOAD_LIMIT);
+            let coalesce = format!("event|{}|{}|{id}", topic::ACTIVITY, sub.key);
+            let body = Body::Event(protocol::EventUpdate { topic: topic::ACTIVITY.into(), key: sub.key.clone(), id, rev, event: message });
+            if !self.out.offer(&body, Some(coalesce)) {
+                sub.resync = Some(reason::OVERFLOW);
+                return;
+            }
+        }
+    }
+
     /// Re-inspects one session; sends `state` when its summary changed, and
     /// for DeepSeek and OpenCode a replacement of their event window.
     fn refresh(&mut self, index: usize) {
@@ -953,6 +1001,7 @@ impl<'a> Watch<'a> {
         if !sub.native {
             if let Ok(Some(timeline)) = source::timeline(&sub.name) {
                 sub.journal = Some(timeline.journal().to_owned());
+                follow_conversation(sub, &timeline);
             }
         } else {
             let events = inspection["events"].as_array().cloned().unwrap_or_default();
@@ -1178,6 +1227,16 @@ impl<'a> Watch<'a> {
         } else {
             None
         };
+        // The transcript is followed from before the first summary is read, so
+        // no message falls between them; one in both is the same `event` ID.
+        if !sub.native && sub.transcript.is_none() {
+            if let Ok(Some(timeline)) = source::timeline(&sub.name) {
+                if sub.run_id.as_deref().is_none_or(|run| run == timeline.run_id()) {
+                    sub.transcript = timeline.transcript();
+                }
+            }
+            sub.transcript_at = Instant::now() + TRANSCRIPT_RETRY;
+        }
         let inspection = match source::inspect(&sub.name, if gap.is_some() { 0 } else { after }) {
             Ok(inspection) => inspection,
             Err(error) => {
@@ -1232,6 +1291,15 @@ impl<'a> Watch<'a> {
         }
         send_state(&self.out, sub, &inspection);
         true
+    }
+}
+
+/// A conversation that changed (cleared context, a resumed run) is followed in
+/// its own transcript from the next pulse.
+fn follow_conversation(sub: &mut Subscription, timeline: &source::Timeline) {
+    if sub.transcript.as_ref().is_some_and(|tail| tail.conversation() != timeline.conversation()) {
+        sub.transcript = None;
+        sub.transcript_at = Instant::now();
     }
 }
 

@@ -22,6 +22,7 @@ private slots:
     void streamEndingBeforePublicationNeverGoesLive();
     void unchangedListingIsAppliedAgain();
     void gitFoldersFollowTheStreamAndResubscribeAfterRestart();
+    void providerMessagesMergeByIdRepeatAndTime();
 
 private:
     QString install(const QString &script);
@@ -57,9 +58,16 @@ for text in sys.stdin:
     if op.get('op') == 'subscribe':
         key = 'run:' + op['session']['run_id']
         send('events', topic='activity', key=key, events=[{'seq': 41, 'type': 'UserPromptSubmit', 'detail': 'go'}], cursor=41)
-        send('state', topic='activity', key=key, value={'run_id': op['session']['run_id'], 'conversation_id': 'c-r1', 'activity': 'busy'}, rev=1)
+        before = {'type': 'AgentMessage', 'source': 'codex_transcript', 'at': 1.0, 'message_id': '', 'agent_id': '', 'detail': 'Before.'}
+        send('state', topic='activity', key=key, value={'run_id': op['session']['run_id'], 'conversation_id': 'c-r1', 'activity': 'busy',
+             'provider_messages': [before]}, rev=1)
         send('delta', topic='catalog', upsert=[{'key': 'run:r1', 'row': row('codex/Alpha', 'r1', 'busy')}], remove=[{'key': 'run:r2', 'reason': 'archived'}], cursor=2)
         send('events', topic='activity', key=key, events=[{'seq': 42, 'type': 'Stop', 'detail': 'done'}], cursor=42)
+        # Messages between tools: a new one, a repeat of the summary's, then a revision.
+        checking = dict(before, at=2.0, message_id='m-1', detail='Checking.')
+        send('event', topic='activity', key=key, id='m-1', rev=1, event=checking)
+        send('event', topic='activity', key=key, id='AgentMessage@1.5#0', rev=1, event=dict(before, at=1.5))
+        send('event', topic='activity', key=key, id='m-1', rev=2, event=dict(checking, detail='Checked.'))
 )PY";
 
 // Answers git subscriptions with state frames and logs every git operation
@@ -154,6 +162,14 @@ void TestEventStream::listingAndActivityArriveFromTheStream()
     QCOMPARE(events.at(0).toObject().value("seq").toInt(), 41);
     QCOMPARE(events.at(1).toObject().value("seq").toInt(), 42);
     QCOMPARE(cursor, 42);
+    // Messages between tools join the summary's provider_messages.
+    const auto details = [&activity] {
+        QStringList texts;
+        for (const auto &message : activity.last().at(1).toJsonObject().value("provider_messages").toArray())
+            texts << message.toObject().value("detail").toString();
+        return texts;
+    };
+    QTRY_COMPARE(details(), (QStringList{"Before.", "Checked."}));
     QCOMPARE(guiThreadParses, 0);
     JsonParse::setViolationHandler({});
     stream.stop();
@@ -301,4 +317,39 @@ void TestEventStream::gitFoldersFollowTheStreamAndResubscribeAfterRestart()
 }
 
 QTEST_MAIN(TestEventStream)
+void TestEventStream::providerMessagesMergeByIdRepeatAndTime()
+{
+    const auto message = [](const QString &type, double at, const QString &id, const QString &detail) {
+        return QJsonObject{{"type", type}, {"source", "claude_transcript"}, {"at", at}, {"message_id", id}, {"detail", detail}};
+    };
+    const auto texts = [](const QJsonObject &summary) {
+        QStringList out;
+        for (const auto &value : summary.value("provider_messages").toArray()) out << value.toObject().value("detail").toString();
+        return out;
+    };
+    QJsonObject summary{{"name", "claude/p/t"}};
+    EventStream::mergeProviderMessage(summary, message("AgentMessage", 10, "a", "Ten."));
+    EventStream::mergeProviderMessage(summary, message("AgentMessage", 30, "c", "Thirty."));
+    // Inserted in time order.
+    EventStream::mergeProviderMessage(summary, message("AgentMessage", 20, "b", "Twenty."));
+    QCOMPARE(texts(summary), (QStringList{"Ten.", "Twenty.", "Thirty."}));
+    // The same message ID and type replaces; thinking with that ID is another message.
+    EventStream::mergeProviderMessage(summary, message("AgentMessage", 20, "b", "Twenty, revised."));
+    EventStream::mergeProviderMessage(summary, message("AgentThinking", 20, "b", "Twenty."));
+    QCOMPARE(texts(summary), (QStringList{"Ten.", "Twenty, revised.", "Twenty.", "Thirty."}));
+    // Without an ID, the same type and text within 3 s is a repeat; later it is new.
+    EventStream::mergeProviderMessage(summary, message("AgentMessage", 12, "", "Ten."));
+    QCOMPARE(texts(summary).size(), 4);
+    EventStream::mergeProviderMessage(summary, message("AgentMessage", 40, "", "Ten."));
+    QCOMPARE(texts(summary).last(), QStringLiteral("Ten."));
+    QCOMPARE(texts(summary).size(), 5);
+    // The newest 100 stay.
+    for (int i = 0; i < 120; ++i) EventStream::mergeProviderMessage(summary, message("AgentMessage", 100 + i, QString::number(i), QString::number(i)));
+    const auto kept = texts(summary);
+    QCOMPARE(kept.size(), 100);
+    QCOMPARE(kept.first(), QStringLiteral("20"));
+    QCOMPARE(kept.last(), QStringLiteral("119"));
+    QCOMPARE(summary.value("name").toString(), QStringLiteral("claude/p/t"));
+}
+
 #include "test_eventstream.moc"

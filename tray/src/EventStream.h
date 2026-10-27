@@ -60,6 +60,11 @@ public:
     // Tests: the least time between applied listings (2 s) and the time after
     // which an unchanged listing is applied again (10 s).
     static void setListingTimingForTests(int gapMs, int refreshMs);
+    // A provider message between tools, from an Activity `event` frame, joins
+    // the summary's provider_messages: it replaces the one with its non-empty
+    // message_id and type, is dropped as a repeat of one with its type and
+    // text within 3 s, or is inserted in time order; the newest 100 stay.
+    static void mergeProviderMessage(QJsonObject &summary, const QJsonObject &message);
 
 signals:
     void stateChanged(EventStream::State state);

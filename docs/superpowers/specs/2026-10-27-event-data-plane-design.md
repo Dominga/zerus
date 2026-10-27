@@ -272,10 +272,15 @@ on a 250 ms pulse:
   conversations (at most 200 rows per read). `seq` is global and monotonic and
   already serves as the `inspect --after` cursor. Hooks write it on every
   native hook event, and retention keeps 50,000 rows. Text between tools exists
-  only in native transcripts. For subscribed sessions the watcher stats the
-  transcript and, when it grows, re-derives provider messages from an offset
-  cursor keyed on device, inode, prefix hash and offset (the existing
-  tail-reader pattern). DeepSeek and OpenCode keep their inspect RPCs, polled
+  only in native transcripts. For subscribed Codex and Claude sessions the
+  watcher stats the transcript on each pulse and, when it grows, reads at most
+  2 MiB from an offset cursor keyed on device, inode, a hash of the first line
+  and offset, projects new lines with the function `inspect` uses for
+  `provider_messages` and sends each new or changed message as an `event`
+  frame (zerus-604d.8). The tail opens before the first summary is read, so no
+  message falls between them; a replaced, rewritten or shortened file, a new
+  conversation, or more than 16 MiB of backlog ends it, and it reopens at the
+  end while the next summary carries what came before. DeepSeek and OpenCode keep their inspect RPCs, polled
   only while subscribed.
 - **Catalog**: per-binding stamps plus stamps of `renames/`, `name_routes/`,
   `read-marks.json`, `notifications.json`, `waits.sqlite3`, `launches/`, the

@@ -258,6 +258,42 @@ class WatchStream(unittest.TestCase):
         stream.quiet(lambda f: f['t'] in ('events', 'state'), 2)
         self.assertEqual(stream.close(), 0)
 
+    def transcript_line(self, text, phase='commentary', at='2026-10-27T12:00:00Z'):
+        return json.dumps(dict(type='response_item', timestamp=at, payload=dict(
+            type='message', role='assistant', phase=phase, content=[dict(type='output_text', text=text)]))) + '\n'
+
+    def test_messages_between_tools_stream_as_event_frames_from_the_transcript(self):
+        transcript = (self.root / f'rollout-{self.conversation_id}.jsonl').resolve()
+        transcript.write_text(json.dumps(dict(type='session_meta', payload=dict(id=self.conversation_id))) + '\n'
+                              + self.transcript_line('Before the stream.'))
+        self.record.update(transcript=str(transcript))
+        self.write_record()
+        stream, *_ = self.start()
+        stream.send(op='subscribe', topic='activity', session=self.session())
+        state = stream.next(lambda f: f['t'] == 'state')
+        self.assertEqual([m['detail'] for m in state['value']['provider_messages']], ['Before the stream.'])
+        with transcript.open('a') as file:
+            file.write(self.transcript_line('Checking the deployment.', at='2026-10-27T12:00:05Z'))
+        started = time.monotonic()
+        event = stream.next(lambda f: f['t'] == 'event', timeout=5)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual((event['topic'], event['key'], event['rev']), ('activity', self.key(), 1))
+        inspected = subprocess.run([str(HGS), 'inspect', self.name, '--skip-processes'], env=self.env,
+                                   text=True, capture_output=True, timeout=10)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        listed = json.loads(inspected.stdout)['provider_messages']
+        self.assertEqual(event['event'], listed[-1])
+        self.assertEqual(event['event']['detail'], 'Checking the deployment.')
+        self.assertEqual(event['id'], f"AgentMessage@{event['event']['at']}#"
+                         + hashlib.sha256(b'Checking the deployment.').hexdigest()[:16])
+        # Private reasoning and a repeat of the same message send nothing.
+        with transcript.open('a') as file:
+            file.write(self.transcript_line('PRIVATE_REASONING', phase='analysis'))
+            file.write(self.transcript_line('Checking the deployment.', at='2026-10-27T12:00:06Z'))
+        stream.quiet(lambda f: f['t'] == 'event', 1.5)
+        self.assertNotIn('PRIVATE_REASONING', ''.join(stream.raw))
+        self.assertEqual(stream.close(), 0)
+
     def test_resume_after_a_cursor_and_gap_below_retention(self):
         rows = [self.journal('Stop', detail=f'reply {n}') for n in range(5)]
         stream, *_ = self.start()

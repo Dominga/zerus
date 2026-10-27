@@ -790,15 +790,26 @@ void TeamNewTab::validate()
     else if (git && !m_worktrees->isChecked() && m_folderPolicy->currentData().toString() != QStringLiteral("shared"))
         m_worktrees->setChecked(true);
     // B6/N10: typing a path keeps auto; a finished non-Git path forces shared.
-    // The draft's folder is fixed, so from Start planning on the policy is
-    // what the owner and the lead chose, never an edit made here.
-    if (!git && m_folderCommitted && m_folderPolicy->currentData().toString() != "shared" && m_draft.isEmpty()) {
-        // No signals: currentIndexChanged would call validate() again inside this one.
-        const QSignalBlocker block(m_folderPolicy);
-        m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
-        m_worktrees->setChecked(false);
-        m_forcedShared = true;
-        touch("settings");
+    // QA #347: the draft's folder is fixed, so from Start planning on the policy
+    // is what the owner and the lead chose - and a non-Git folder has one folder
+    // for every member: it shows Shared, disabled, with the reason beside the
+    // warning, instead of an Auto this folder can never honour.
+    const bool inDraft = !m_draft.isEmpty();
+    const bool sharedOnly = !folder.isEmpty() && !git;
+    if (sharedOnly && (inDraft || m_folderCommitted)) {
+        if (m_folderPolicy->currentData().toString() != "shared") {
+            // No signals: currentIndexChanged would call validate() again inside this one.
+            const QSignalBlocker block(m_folderPolicy);
+            m_folderPolicy->setCurrentIndex(m_folderPolicy->findData(QStringLiteral("shared")));
+            m_worktrees->setChecked(false);
+            m_forcedShared = true;
+            if (!inDraft) touch("settings");
+        }
+        m_folderPolicy->setEnabled(false);
+        m_folderPolicy->setToolTip(tr("Folder is not a Git repository: every member works in this folder, so the policy is shared."));
+    } else {
+        m_folderPolicy->setEnabled(true);
+        m_folderPolicy->setToolTip(tr("Auto lets the lead choose the folder each member works in"));
     }
     m_gitNote->setVisible(!folder.isEmpty() && !git);
     const QString name = m_name->text().trimmed();

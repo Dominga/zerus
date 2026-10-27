@@ -598,6 +598,7 @@ private slots:
     void attemptStatesShowPhaseIcons();
     void taskCardAnswersQuestionsAndHolds();
     void memberQueueListsCurrentAndReturned();
+    void permissionAnswersFoldToOneLineAndOpenToFive();
     void planningEditsSendTheWholePlan();
     void newTeamStartsTheLeadWithTheTemplate();
     void catalogEditorSavesTheNextVersion();
@@ -1175,6 +1176,131 @@ void TestTeamsUi::memberQueueListsCurrentAndReturned()
     freshRows.at(2)->click();
     QTRY_COMPARE(panel.openedTask(), 4);
     shot(&panel, "delivery-queue-420");
+}
+
+void TestTeamsUi::permissionAnswersFoldToOneLineAndOpenToFive()
+{
+    // U17: a member with 20 stored answers shows one summary line; opening it
+    // lists the newest five, one row each, with the long deny reason on one
+    // line and its whole text in the tooltip; the choice is kept per team.
+    const QString longReason = QStringLiteral(
+        "This command would rewrite the build directory outside the worktree, and the lead asked to keep the cache for the next phase of the plan. ")
+        + QStringLiteral("The cache is shared with the backend member and removing it would cost another full build. ")
+        + QStringLiteral("Deny it and ask the lead to add a narrower command.");
+    auto t = team();
+    auto members = t["members"].toArray();
+    auto backend = members[1].toObject();
+    QJsonArray answers;
+    for (int i = 0; i < 20; ++i) {
+        const bool denied = i >= 18;   // the newest two are the denials
+        answers.append(QJsonObject{{"question_id", QStringLiteral("q%1").arg(i)},
+                                   {"decision", denied ? "deny" : "allow"},
+                                   {"by", i % 2 ? "lead" : "owner"},
+                                   {"at", 1700.0 + i},
+                                   {"reason", denied ? longReason : QString()},
+                                   {"tool", "Bash"},
+                                   {"command", denied ? QStringLiteral("rm -rf build") : QStringLiteral("cargo test --locked")}});
+    }
+    backend["permission_answers"] = answers;
+    members[1] = backend;
+    t["members"] = members;
+    // The task card's attempt carries its own answers (the newest last).
+    auto tasks = t["tasks"].toArray();
+    auto first = tasks[0].toObject();
+    first["attempts"] = QJsonArray{QJsonObject{{"n", 1}, {"id", "a1"}, {"member", "backend"}, {"state", "reported"},
+                                               {"sent_at", 1600.0},
+                                               {"permissions", QJsonArray{
+                                                    QJsonObject{{"question_id", "q4"}, {"decision", "allow"}, {"by", "lead"}, {"at", 1702.0},
+                                                                {"tool", "Bash"}, {"command", "cargo test --locked"}},
+                                                    QJsonObject{{"question_id", "q5"}, {"decision", "deny"}, {"by", "owner"}, {"at", 1703.0},
+                                                                {"reason", longReason}, {"tool", "Bash"}, {"command", "rm -rf build"}}}}}};
+    tasks[0] = first;
+    t["tasks"] = tasks;
+    setTeam(t);
+    QSettings().remove("ui/expanded/teamPermissions/team-1/backend");
+    QSettings().remove("ui/expanded/taskPermissions/team-1/1/1");
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.setLive(live);
+    workspace.setLive(live);
+    workspace.resize(1300, 900);
+    workspace.show();
+    controller.refresh();
+    workspace.showTeam("team-1");
+    const auto card = [&workspace]() -> QFrame * {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+            if (frame->property("teamMember") == "backend") return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(card() && card()->findChild<QToolButton *>("teamMemberPermissionsToggle"));
+    // Collapsed: one line, no rows.
+    auto *toggle = card()->findChild<QToolButton *>("teamMemberPermissionsToggle");
+    QVERIFY2(toggle->text().contains(QStringLiteral("18 allowed · 2 denied")), qPrintable(toggle->text()));
+    QVERIFY2(toggle->text().contains(QStringLiteral("last:")), qPrintable(toggle->text()));
+    QVERIFY(!card()->findChild<QWidget *>("teamMemberPermissions"));
+    QCOMPARE(card()->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 0);
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "u17-permissions-collapsed-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "u17-permissions-collapsed-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // Expanded: the newest five, each one row, and "+15 more".
+    card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->click();
+    QTRY_VERIFY(card() && card()->findChild<QWidget *>("teamMemberPermissions"));
+    auto *list = card()->findChild<QWidget *>("teamMemberPermissions");
+    QCOMPARE(list->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 5);
+    auto *more = list->findChild<QLabel *>("teamPermissionMore");
+    QVERIFY(more && more->text() == QStringLiteral("+15 more"));
+    QVERIFY(list->findChildren<QLabel *>("teamPermissionDecision").first()->text().contains(QStringLiteral("Denied")));
+    // The newest is a denial by the lead, so the summary's last answer says so.
+    QVERIFY2(card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->text().contains(QStringLiteral("last: denied by the lead")),
+             qPrintable(card()->findChild<QToolButton *>("teamMemberPermissionsToggle")->text()));
+    // The long deny reason is one line (an ElidingLabel) with its whole text in
+    // the tooltip, and so is the command.
+    auto *reason = list->findChild<QLabel *>("teamPermissionReason");
+    QVERIFY(reason);
+    QCOMPARE(reason->text(), longReason);
+    QCOMPARE(reason->toolTip(), longReason);
+    QVERIFY(reason->sizePolicy().horizontalPolicy() == QSizePolicy::Ignored);
+    auto *command = list->findChild<QLabel *>("teamPermissionCommand");
+    QVERIFY(command && command->toolTip() == QStringLiteral("rm -rf build"));
+    workspace.render();
+    QTest::qWait(150);
+    shot(&workspace, "u17-permissions-expanded-dark");
+    lightPalette();
+    workspace.setTheme(false);
+    workspace.render();
+    QTest::qWait(250);
+    shot(&workspace, "u17-permissions-expanded-light");
+    darkPalette();
+    workspace.setTheme(true);
+    workspace.render();
+    QTest::qWait(150);
+    // The choice is remembered for the team: a re-render keeps it open.
+    workspace.render();
+    QTest::qWait(100);
+    QTRY_VERIFY(card() && card()->findChild<QWidget *>("teamMemberPermissions"));
+    // The task card shows the same for its attempt, opened to all of its answers.
+    TeamTaskCard taskCard;
+    taskCard.setTask(parse(t), 1, live, true);
+    QTRY_VERIFY(taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle"));
+    auto *taskToggle = taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle");
+    QVERIFY2(taskToggle->text().contains(QStringLiteral("1 allowed · 1 denied")), qPrintable(taskToggle->text()));
+    QVERIFY(!taskCard.findChild<QWidget *>("teamTaskPermissions"));
+    taskCard.findChild<QToolButton *>("teamTaskPermissionsToggle")->click();
+    QTRY_VERIFY(taskCard.findChild<QWidget *>("teamTaskPermissions"));
+    auto *taskList = taskCard.findChild<QWidget *>("teamTaskPermissions");
+    QCOMPARE(taskList->findChildren<QWidget *>("teamPermissionAnswerRow").size(), 2);
+    QVERIFY(taskList->findChild<QLabel *>("teamPermissionReason"));
 }
 
 void TestTeamsUi::planningEditsSendTheWholePlan()
@@ -2353,7 +2479,11 @@ void TestTeamsUi::followUpsShowThePermissionAnswerAndPlanFixes()
     QCOMPARE(native["question_id"].toString(), QStringLiteral("approval"));
     QCOMPARE(native["selected_option_ids"].toArray()[0].toString(), QStringLiteral("2"));
     QCOMPARE(native["text"].toString(), QStringLiteral("not this command"));
-    QVERIFY(workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
+    // U17: the stored answer folds to one summary line on the member card.
+    auto *answerSummary = workspace.findChild<QToolButton *>("teamMemberPermissionsToggle");
+    QVERIFY(answerSummary);
+    QVERIFY2(answerSummary->text().contains(QStringLiteral("1 denied")), qPrintable(answerSummary->text()));
+    QVERIFY(!workspace.findChild<QLabel *>("teamMemberPermissionAnswered"));
     shot(&workspace, "permission-answer-claude");
     // A DeepSeek card: its own question id and allow/deny native ids.
     members = team["members"].toArray(); backend = members[1].toObject();
@@ -2622,12 +2752,23 @@ void TestTeamsUi::permissionCardsAndGraphOrder()
     auto *deny = card.findChild<QPushButton *>("teamPermissionDeny");
     QVERIFY(!allow && !deny);
     QVERIFY(card.findChild<QLabel *>("teamPermissionWhere"));
-    // Who answered: the deny names the owner and its reason, the allow the lead.
-    const auto answered = card.findChildren<QLabel *>("teamPermissionAnswered");
+    // U17: the answers fold behind one summary line; opening it lists the newest
+    // first, the deny reason on one line with its whole text in the tooltip.
+    auto *permissions = card.findChild<QToolButton *>("teamTaskPermissionsToggle");
+    QVERIFY(permissions);
+    QVERIFY2(permissions->text().contains(QStringLiteral("1 allowed · 1 denied")), qPrintable(permissions->text()));
+    QVERIFY(permissions->text().contains(QStringLiteral("last: allowed by the lead")));
+    QVERIFY(!card.findChild<QWidget *>("teamTaskPermissions"));
+    permissions->click();
+    QTRY_VERIFY(card.findChild<QWidget *>("teamTaskPermissions"));
+    const auto answered = card.findChild<QWidget *>("teamTaskPermissions")->findChildren<QWidget *>("teamPermissionAnswerRow");
     QCOMPARE(answered.size(), 2);
-    QVERIFY(answered[0]->text().contains(QStringLiteral("Denied by you")));
-    QVERIFY(answered[0]->text().contains(QStringLiteral("That kills every ninja on the machine")));
-    QVERIFY(answered[1]->text().contains(QStringLiteral("Allowed by the lead")));
+    QVERIFY(answered[0]->findChild<QLabel *>("teamPermissionDecision")->text().contains(QStringLiteral("Allowed by the lead")));
+    QVERIFY(answered[1]->findChild<QLabel *>("teamPermissionDecision")->text().contains(QStringLiteral("Denied by you")));
+    auto *deniedReason = answered[1]->findChild<QLabel *>("teamPermissionReason");
+    QVERIFY(deniedReason);
+    QCOMPARE(deniedReason->text(), QStringLiteral("That kills every ninja on the machine"));
+    QCOMPARE(deniedReason->toolTip(), QStringLiteral("That kills every ninja on the machine"));
     shot(&card, "permission-card-dark");
     lightPalette();
     card.setTask(parsed, 17, live, false);
@@ -3295,6 +3436,16 @@ void TestTeamsUi::embeddedNewTeamIsLedByTheSession()
     QVERIFY(tab.findChild<QLineEdit *>("teamNewFolder")->isReadOnly());
     QCOMPARE(tab.draftId(), QStringLiteral("draft-1"));
     QVERIFY(tab.findChild<QPushButton *>("teamNewDiscard")->isVisible());
+    // QA #347: a folder that is not a Git repository has one folder for every
+    // member; the draft shows the policy as Shared, fixed, with the reason.
+    {
+        auto *policy = tab.findChild<QComboBox *>("teamNewFolderPolicy");
+        QVERIFY(policy);
+        QCOMPARE(policy->currentData().toString(), QStringLiteral("shared"));
+        QVERIFY(!policy->isEnabled());
+        QVERIFY2(policy->toolTip().contains(QStringLiteral("every member works in this folder")), qPrintable(policy->toolTip()));
+        QVERIFY(tab.findChild<QLabel *>("teamNewGitNote")->isVisible());
+    }
     // The lead edits the draft: the form follows and marks what it changed.
     setTeam(draftTeam(path));
     QTRY_COMPARE(tab.findChild<QPlainTextEdit *>("teamNewGoal")->toPlainText(), QStringLiteral("Redesign checkout: address form and tests"));

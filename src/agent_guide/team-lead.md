@@ -22,7 +22,7 @@ Members:
     {"request_id":"UUID","team":"ID","question":"q3","text":"..."} |
     hgs team reply --json
 - reject with "hold":true; release gives a held task out. A captured report may
-  be replaced. Missing skill: add-member {...}, reassign.
+  be replaced. Roster: owner_word or propose.
 - A member states a budget with hgs team expect
   {"label":"install","minutes":15}; Zerus says once when the job is red.
 - Rate a permission by its command: allow what the task needs in the member's

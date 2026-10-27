@@ -752,14 +752,21 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     }
     let old = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(old.status == TeamStatus::Done, "Only a done team starts the next goal");
-    let accepted = old.proposals.iter().any(|proposal| {
-        proposal["kind"] == "next-goal" && proposal["state"] == "accepted"
+    // N12: one next goal per done team, and the lead takes the accepted
+    // proposal's goal rather than a new one.
+    ensure!(old.next.is_empty(), "The next goal was already started for this team");
+    let accepted_goal = old.proposals.iter().find_map(|proposal| {
+        (proposal["kind"] == "next-goal" && proposal["state"] == "accepted")
+            .then(|| proposal["goal"].as_str().unwrap_or_default().trim().to_owned())
     });
     ensure!(
-        matches!(caller, Actor::Human) || (matches!(caller, Actor::Member(member) if *member == old.lead) && accepted),
+        matches!(caller, Actor::Human) || (matches!(caller, Actor::Member(member) if *member == old.lead) && accepted_goal.is_some()),
         "Only you, or the lead with an accepted next-goal proposal, start the next goal"
     );
-    let goal = text(input, "goal").trim().to_owned();
+    let goal = match caller {
+        Actor::Human => text(input, "goal").trim().to_owned(),
+        _ => accepted_goal.unwrap_or_default(),
+    };
     ensure!(!goal.is_empty(), "A next goal needs its goal");
     ensure!(goal.chars().count() <= 4000, "A goal has at most 4000 characters");
     let name = text(input, "name").trim().to_owned();
@@ -894,6 +901,15 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         Ok(Value::Null)
     })?;
     Ok(json!({"status":"accepted","proposal":id,"kind":kind,"result":result}))
+}
+
+/// N8: a sub-team's create input cannot set an owner-only setting.
+fn strip_subteam_owner_settings(settings: &mut Value) {
+    if let Some(object) = settings.as_object_mut() {
+        for key in ops::OWNER_SETTINGS {
+            object.remove(key);
+        }
+    }
 }
 
 /// Who creates a sub-team for a parent task (section 9.1): the assignee's own
@@ -1050,6 +1066,13 @@ fn parent_create(input: &Value, filled: &mut Value) -> anyhow::Result<Option<(St
     }
     if text(filled, "project").is_empty() {
         filled["project"] = json!(parent.project.clone());
+    }
+    // N8: a sub-team's create input cannot carry an owner-only setting; the
+    // parent's sub-team approval is inherited and the plan stays review.
+    if filled["settings"].is_object() {
+        let mut settings = filled["settings"].clone();
+        strip_subteam_owner_settings(&mut settings);
+        filled["settings"] = settings;
     }
     // Section 9.3: a sub-team inherits who approves its plan unless the
     // request says otherwise.
@@ -1754,20 +1777,20 @@ fn roster_word_names(team: &Team, op: &str, input: &Value) -> Vec<String> {
         "add-member" => {
             let member = &input["member"];
             let id = text(member, "id");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["add".to_owned(), id.to_owned()] }
         }
         "remove-member" => {
             let id = text(input, "member");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["remove".to_owned(), id.to_owned()] }
         }
         "swap-member" => {
             let id = text(input, "member");
-            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+            if id.is_empty() { Vec::new() } else { vec!["swap".to_owned(), id.to_owned()] }
         }
         "settings" => {
             let cap = input["settings"]["max_members"].as_u64();
             match cap {
-                Some(cap) if cap as usize != team.settings.max_members => vec![cap.to_string()],
+                Some(cap) if cap as usize != team.settings.max_members => vec!["max".to_owned(), cap.to_string()],
                 _ => Vec::new(),
             }
         }
@@ -2679,6 +2702,16 @@ mod tests {
     }
 
     #[test]
+    fn a_subteam_create_input_cannot_set_owner_settings() {
+        let mut settings = json!({"auto_accept":true,"max_members":99,"tree_depth":8,"subteam_approval":"owner","report_timeout_seconds":90});
+        super::strip_subteam_owner_settings(&mut settings);
+        for key in ["auto_accept", "max_members", "tree_depth", "subteam_approval"] {
+            assert!(settings.get(key).is_none(), "{key} survived");
+        }
+        assert_eq!(settings["report_timeout_seconds"], 90);
+    }
+
+    #[test]
     fn a_lead_starts_the_next_goal_only_after_an_accepted_proposal() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
@@ -2703,11 +2736,24 @@ mod tests {
         let value = super::next_goal_as(
             &mut store,
             "99999999-9999-4999-8999-999999999999",
-            &json!({"request_id":"99999999-9999-4999-8999-999999999999","team":"done2","goal":"two"}),
+            &json!({"request_id":"99999999-9999-4999-8999-999999999999","team":"done2","goal":"other"}),
             &Actor::Member("lead".into()),
         )
         .unwrap();
         assert_eq!(value["status"], "planned");
+        // N12: the accepted proposal's goal is used, and the done team cannot
+        // start a second next goal.
+        let next = store.load(value["team"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(next.goal, "two");
+        let error = super::next_goal_as(
+            &mut store,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            &json!({"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","team":"done2","goal":"three"}),
+            &Actor::Member("lead".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("already started"), "{error}");
     }
 
     #[test]

@@ -618,11 +618,14 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
         validate_settings(&updated)?;
         ensure_lead_settings(&team.settings, &updated, actor, input["roster_word"].as_bool() == Some(true))?;
-        // N27: a sub-team's own lead cannot turn its approvals to auto; its
-        // plan and phases stay with the parent lead or you.
-        if team.parent.is_some() {
+        // N13: only a sub-lead (and its parent lead) is refused auto; the owner
+        // may choose it, and a sub-team already carrying auto can still change
+        // other settings.
+        if team.parent.is_some() && !matches!(actor, Actor::Human) {
             ensure!(
-                updated.approval != Approval::Auto && updated.phase_approval != Some(Approval::Auto),
+                (updated.approval != Approval::Auto || team.settings.approval == Approval::Auto)
+                    && (updated.phase_approval != Some(Approval::Auto)
+                        || team.settings.phase_approval == Some(Approval::Auto)),
                 "A sub-team's plan and phases are approved by its parent lead or you, never auto"
             );
         }
@@ -647,7 +650,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-const OWNER_SETTINGS: [&str; 8] = [
+pub(crate) const OWNER_SETTINGS: [&str; 8] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -1894,7 +1897,12 @@ fn expect(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
 /// attempt is revoked (`swapped`) and handed again to the new session with the
 /// previous attempt's report and open questions as a continuation.
 fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(matches!(actor, Actor::Human), "Only you swap a member");
+    // N9: the lead swaps on the owner's verified word; the owner directly.
+    ensure!(
+        matches!(actor, Actor::Human)
+            || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
+        "Only you swap a member; the lead needs your word"
+    );
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
         "Only a planning, running or paused team swaps a member"
@@ -1976,9 +1984,10 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
     } else {
         "You".to_owned()
     };
+    let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
     events.push(Event::new(
         "member_swapped",
-        json!({"member":role,"from":from,"to":to,"by":by,"agent":agent,"changed":changed,"lead":lead}),
+        json!({"member":role,"from":from,"to":to,"by":by,"agent":agent,"changed":changed,"lead":lead,"owner_word":quote}),
     ));
     Ok(json!({"status":"swapped","member":id,"from":from,"to":to,"agent":agent,"tasks":handed,"lead":lead,"by":by}))
 }
@@ -2919,11 +2928,12 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 team.profile_widening.push(json!({"member":id,"from":"write","to":profile}));
             }
             let by = if input["roster_word"].as_bool() == Some(true) {
-                format!("{} on your word", actor.label(team))
-            } else {
-                actor.label(team)
-            };
-            events.push(Event::new("member_added", json!({"by":by,"member":role})));
+        format!("{} on your word", actor.label(team))
+    } else {
+        actor.label(team)
+    };
+    let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
+            events.push(Event::new("member_added", json!({"by":by,"member":role,"owner_word":quote})));
             // F8: the existing session is adopted, not launched (L2).
             if let Some(session) = adopted {
                 events.push(Event::new("member_adopted", json!({"member":role,"session":session})));
@@ -2948,7 +2958,8 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
             member.state = MemberState::Removed;
             let by = if input["roster_word"].as_bool() == Some(true) { "Lead on your word" } else { "You" };
-            events.push(Event::new("member_removed", json!({"by":by,"member":role})));
+            let quote = input["owner_word_checked"]["text"].as_str().unwrap_or_default();
+            events.push(Event::new("member_removed", json!({"by":by,"member":role,"owner_word":quote})));
             Ok(json!({"status":"removed","member":id,"by":by}))
         }
         _ => bail!("Unknown team operation {op}"),
@@ -4838,15 +4849,35 @@ mod tests {
         team.members.push(Member { id: "dev".into(), role: "Lead".into(), agent: "codex".into(), ..Default::default() });
         let none = BTreeSet::new();
         let mut events = Vec::new();
-        let error = apply(&mut team, "settings", &json!({"settings":{"approval":"auto"}}), &Actor::Human, &none, &mut events)
+        let error = apply(&mut team, "settings", &json!({"settings":{"approval":"auto"}}), &Actor::Member("dev".into()), &none, &mut events)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("never auto"), "{error}");
+        assert!(error.contains("Only you change") || error.contains("never auto"), "{error}");
         // The same team's phase approval cannot be auto either.
-        let error = apply(&mut team, "settings", &json!({"settings":{"phase_approval":"auto"}}), &Actor::Human, &none, &mut events)
+        let error = apply(&mut team, "settings", &json!({"settings":{"phase_approval":"auto"}}), &Actor::Member("dev".into()), &none, &mut events)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("never auto"), "{error}");
+        assert!(error.contains("Only you change") || error.contains("never auto"), "{error}");
+        // N13: the owner may choose auto for a sub-team.
+        apply(&mut team, "settings", &json!({"settings":{"approval":"auto"}}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(team.settings.approval, Approval::Auto);
+        // A sub-team already carrying auto can still change another setting.
+        apply(&mut team, "settings", &json!({"settings":{"report_timeout_seconds":90}}), &Actor::Member("dev".into()), &none, &mut events).unwrap();
+        assert_eq!(team.settings.report_timeout_seconds, 90);
+    }
+
+    #[test]
+    fn a_lead_swaps_a_member_only_on_the_word() {
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        let error = apply(&mut team, "swap-member", &json!({"member":"qa"}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("your word"), "{error}");
+        let swapped = apply(&mut team, "swap-member", &json!({"member":"qa","roster_word":true,"owner_word_checked":{"text":"swap qa for kimi"}}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(swapped["by"], "Lead on your word");
+        assert!(events.iter().any(|event| event.kind == "member_swapped" && event.payload["owner_word"] == "swap qa for kimi"));
     }
 
     #[test]
@@ -5466,7 +5497,7 @@ mod tests {
         let error = apply(&mut team, "swap-member", &json!({"member":"dev"}), &Actor::Member("lead".into()), &none, &mut events)
             .unwrap_err()
             .to_string();
-        assert_eq!(error, "Only you swap a member");
+        assert_eq!(error, "Only you swap a member; the lead needs your word");
     }
 
     #[test]

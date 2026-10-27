@@ -21,9 +21,28 @@ const KEY_PHRASES: &[&str] = &[
 
 /// U26: a roster change needs the owner's explicit word naming that change.
 const ROSTER_PHRASES: &[&str] = &[
-    "roster", "team change", "add", "remove", "swap", "max members",
-    "участник", "состав", "добав", "удал", "замен",
+    "roster", "team change", "member", "members", "участник", "состав",
 ];
+
+/// U26/N10: a whole token, not a substring ("add" does not match "address").
+fn has_token(haystack: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return true;
+    }
+    let mut from = 0;
+    while let Some(at) = haystack[from..].find(token) {
+        let start = from + at;
+        let end = start + token.len();
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[end..].chars().next();
+        let boundary = |ch: Option<char>| ch.is_none_or(|ch| !ch.is_alphanumeric() && ch != '-' && ch != '_');
+        if boundary(before) && boundary(after) {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
 
 /// Verifies the owner's word for a roster change, requiring the sentence to
 /// name every `needed` value (the member, or the new cap).
@@ -118,7 +137,7 @@ fn verify_scan(
         if !detail.contains(text) {
             continue;
         }
-        if !needed.iter().all(|value| lowered.contains(&value.to_lowercase())) {
+        if !needed.iter().all(|value| has_token(&lowered, &value.to_lowercase())) {
             continue;
         }
         return Ok(OwnerWord { text: detail.to_owned(), at, event: seq });
@@ -198,6 +217,26 @@ mod tests {
         // A lead on another computer cannot be checked here.
         let team = Team { lead: "lead".into(), ..Default::default() };
         assert!(verify(&team, &serde_json::json!({"text":"plan approved"}), 2000.0).is_err());
+    }
+
+    #[test]
+    fn a_roster_word_matches_whole_tokens_and_the_operation_verb() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Add a QA check so dev can retest"));
+        // "add" inside "address" and the wrong operation verb are refused.
+        let error = verify_roster_in(&db, "claude/x/lead", "c1", "Add a QA check so dev can retest", &["remove".into(), "dev".into()], 2000.0).unwrap_err().to_string();
+        assert!(error.contains("owner's word"), "{error}");
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Address the padding"));
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "Address the padding", &["add".into(), "dev".into()], 2000.0).is_err());
+        // "phase 15" does not authorize max_members 5.
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "phase 15 is done"));
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "phase 15 is done", &["max".into(), "5".into()], 2000.0).is_err());
+        // The right verb and whole member id work.
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please remove dev from the roster"));
+        verify_roster_in(&db, "claude/x/lead", "c1", "Please remove dev from the roster", &["remove".into(), "dev".into()], 2000.0).unwrap();
     }
 
     #[test]

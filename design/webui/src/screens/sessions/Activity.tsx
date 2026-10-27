@@ -1,14 +1,114 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createRoot, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../../lib/icons";
-import { activity } from "../../mock/data";
-import { selected, toast, setDetailTab, contentScale, subagentOpen, setSubagentOpen } from "../../state";
+import { Dialog } from "../../components/Overlays";
+import { selected, toast, setDetailTab, contentScale, subagentOpen, setSubagentOpen, setMenu, dialog, setDialog, type MenuEntry } from "../../state";
 import { skin } from "../../skin/runtime";
-import type { ActivityItem, Session } from "../../mock/types";
+import { demoTranscript, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue, type MediaMessage, type TranscriptItem } from "../../mock/activity-extra";
+import type { Session } from "../../mock/types";
+
+// ---------------------------------------------------------------------------
+// Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
+// scaled with the content scale, or the full pane. The transcript, queue,
+// questions, banners and the composer all share it; Terminal, Processes and
+// Native UI ignore it. The skin's L2 activity-column variant is the start.
+
+export const COLUMN = { min: 480, max: 2400, initial: 900, edge: 10 } as const;
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+const savedColumn = (() => { try { return Number(localStorage.getItem("zerus-mock-activity-width")) || 0; } catch { return 0; } })();
+const [columnWidth, setColumnWidthRaw] = createSignal(savedColumn ? clamp(savedColumn, COLUMN.min, COLUMN.max) : COLUMN.initial);
+const [fullWidth, setFullWidth] = createSignal(skin().layout["activity-column"] === "full");
+createRoot(() => createEffect(on(() => skin().layout["activity-column"], (v) => setFullWidth(v === "full"), { defer: true })));
+export { columnWidth, fullWidth };
+
+function setColumnWidth(width: number) {
+  setColumnWidthRaw(clamp(Math.round(width), COLUMN.min, COLUMN.max));
+  try { localStorage.setItem("zerus-mock-activity-width", String(columnWidth())); } catch { /* storage may be unavailable */ }
+}
+/** Double-click on an edge or Reset Activity width: the default, centered. */
+export function resetColumn() { setColumnWidth(COLUMN.initial); setFullWidth(false); }
+
+/** CSS variables for everything that shares the column (set on the Activity tab body). */
+export const columnStyle = () => ({
+  "--content-scale": String(contentScale()),
+  "--col": fullWidth() ? "100%" : `${Math.round(columnWidth() * contentScale())}px`,
+});
+
+/** Full-width Activity (checkable) and Reset Activity width (disabled at the default). */
+export function columnMenuItems(): MenuEntry[] {
+  const atDefault = !fullWidth() && columnWidth() === COLUMN.initial;
+  return [
+    { label: "Full-width Activity", checked: fullWidth(), action: () => setFullWidth(!fullWidth()) },
+    { label: "Reset Activity width", icon: "rotate-ccw", disabled: atDefault, action: atDefault ? undefined : resetColumn },
+  ];
+}
+
+/** A 10 px column edge in the transcript margin; both edges move together. */
+function ColumnEdge(props: { right?: boolean }) {
+  const [dragging, setDragging] = createSignal(false);
+  let origin = 0, start = 0, widest = 0, narrowest = 0;
+  const measure = (el: HTMLElement) => {
+    const scroller = el.closest(".act-scroll") as HTMLElement;
+    start = el.parentElement!.getBoundingClientRect().width;
+    // Its edges stay within the pane; the width keeps a readable minimum.
+    widest = scroller.clientWidth - 2 * COLUMN.edge;
+    narrowest = Math.min(widest, COLUMN.min * contentScale());
+  };
+  const apply = (distance: number) => {
+    setColumnWidth(clamp(start + 2 * distance, narrowest, widest) / contentScale());
+    setFullWidth(false);
+  };
+  return (
+    <div class="col-edge" classList={{ right: props.right, dragging: dragging() }} role="separator" aria-orientation="vertical" tabindex="0"
+      aria-label="Activity width" aria-valuemin={COLUMN.min} aria-valuemax={COLUMN.max} aria-valuenow={columnWidth()}
+      title="Drag to resize Activity. Double-click to restore the default width."
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const el = e.currentTarget;
+        el.setPointerCapture(e.pointerId);
+        origin = e.clientX;
+        measure(el);
+        setDragging(true);
+      }}
+      onPointerMove={(e) => { if (dragging()) apply(props.right ? e.clientX - origin : origin - e.clientX); }}
+      onPointerUp={(e) => { setDragging(false); e.currentTarget.releasePointerCapture(e.pointerId); }}
+      onPointerCancel={() => setDragging(false)}
+      onDblClick={resetColumn}
+      onKeyDown={(e) => {
+        const step = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+        if (!step) return;
+        e.preventDefault();
+        measure(e.currentTarget);
+        apply((props.right ? step : -step) * 20);
+      }}
+      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: e.clientX, y: e.clientY, items: columnMenuItems() }); }}
+    />
+  );
+}
+
+/** The text browser's menu, then the two width items. */
+function activityMenu(e: MouseEvent) {
+  if ((e.target as HTMLElement).closest("button, a, input, textarea, .col-edge")) return;
+  e.preventDefault();
+  const scroller = e.currentTarget as HTMLElement;
+  const text = getSelection()?.toString() ?? "";
+  setMenu({
+    x: e.clientX, y: e.clientY, items: [
+      { label: "Copy", icon: "copy", kbd: "Ctrl+C", disabled: !text, action: text ? () => { void navigator.clipboard?.writeText(text).catch(() => {}); toast("Copied", "The selected text is on the clipboard"); } : undefined },
+      { label: "Select All", kbd: "Ctrl+A", action: () => { const col = scroller.querySelector(".act-col"); if (col) getSelection()?.selectAllChildren(col); } },
+      { separator: true },
+      ...columnMenuItems(),
+    ],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Transcript
 
 // The richest synthetic transcript belongs to api-refactor; other sessions get
 // a short conversation derived from their own row so every state reads true.
-function activityFor(s: Session | undefined): ActivityItem[] {
-  if (!s || s.key === "ws:1") return activity;
+function activityFor(s: Session | undefined): TranscriptItem[] {
+  if (!s || s.key === "ws:1") return demoTranscript;
   return [
     { id: `${s.key}-u`, kind: "user", at: "Oct 27 09:12", body: `Work on ${s.name}: keep the change small and tell me before anything destructive.`, sender: "You" },
     { id: `${s.key}-t`, kind: "tools", at: "Oct 27 09:14", title: "3 tool calls", body: "Read, Grep, Bash", lines: ["Read  README.md", "Grep  \"TODO\" src", "Bash  make check"] },
@@ -41,30 +141,172 @@ function Body(props: { text: string }) {
   );
 }
 
-function Item(props: { item: ActivityItem }) {
+// ---------------------------------------------------------------------------
+// Voice and round-video messages (ActivityView.cpp:978-1025, VoicePlayerImage.h)
+
+const mediaTime = (ms: number) => {
+  const s = Math.floor(Math.max(0, ms) / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
+
+// One recording plays at a time, as with the view's single media player.
+const [playing, setPlaying] = createSignal<string>();
+const [videoOpen, setVideoOpen] = createSignal<MediaMessage>();
+
+/** Delivery state glyph (18 px); media state never claims reading or completion. */
+function DeliveryGlyph(props: { item: MediaMessage }) {
+  const s = props.item.state;
+  return (
+    <span class="vm-state" classList={{ issue: voiceStateIssue(s) }} title={voiceStateDetail(s)} role="img" aria-label={VOICE_STATE_LABEL[s]}>
+      <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <Show when={s === "submitted"} fallback={
+          <Show when={s === "cancelled"} fallback={
+            <>
+              <circle cx="9" cy="9" r="6.5" />
+              <Show when={voiceStateIssue(s)} fallback={<path d="M9 5V9L12 10" />}><path d="M9 5V10M9 13H9.01" /></Show>
+            </>
+          }><path d="M5 5L13 13M13 5L5 13" /></Show>
+        }><path d="M3 9L7 13L15 5" /></Show>
+      </svg>
+    </span>
+  );
+}
+
+/** 32×32 transcript toggle: a down arrow beside an "A", or a chevron when open. */
+function TranscriptButton(props: { open: boolean; onToggle: () => void }) {
+  return (
+    <button class="vm-tbtn" data-tip={props.open ? "Hide transcript" : "Show transcript"} aria-label={props.open ? "Hide transcript" : "Show transcript"}
+      aria-expanded={props.open} onClick={props.onToggle}>
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <Show when={props.open} fallback={<path d="M10 8V19M6 15L10 19L14 15M16 24L20.5 12L25 24M17.5 20H23.5" />}><path d="M10 19L16 13L22 19" /></Show>
+      </svg>
+    </button>
+  );
+}
+
+function Waveform(props: { values: number[] }) {
+  const bars = () => (props.values.length === 64 ? props.values : []);
+  const layer = (cls: string) => (
+    <span class={`vp-bars ${cls}`}>
+      <Show when={bars().length} fallback={<i class="flat" />}>
+        <For each={bars()}>{(v) => <i style={{ height: `${Math.max(2, (27 * v) / 255)}px` }} />}</For>
+      </Show>
+    </span>
+  );
+  return <>{layer("rest")}{layer("played")}</>;
+}
+
+function MediaCard(props: { item: MediaMessage }) {
+  const it = props.item;
+  const [transcript, setTranscript] = createSignal(false);
+  const [position, setPosition] = createSignal(0);
+  let timer: number | undefined;
+  const stop = () => { clearInterval(timer); timer = undefined; if (playing() === it.id) setPlaying(undefined); };
+  const play = () => {
+    if (position() >= it.durationMs) setPosition(0);
+    setPlaying(it.id);
+    clearInterval(timer);
+    timer = window.setInterval(() => {
+      const next = position() + 100;
+      if (next >= it.durationMs) { setPosition(it.durationMs); stop(); } else setPosition(next);
+    }, 100);
+  };
+  createEffect(() => { if (playing() !== it.id && timer) { clearInterval(timer); timer = undefined; } });
+  onCleanup(stop);
+  const isPlaying = () => playing() === it.id;
+  const seek = (e: MouseEvent) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setPosition(Math.round(clamp((e.clientX - r.left) / r.width, 0, 1) * it.durationMs));
+  };
+  const video = it.media === "video";
+  return (
+    <article class="act-msg k-user media" id={`item-${it.id}`}>
+      <header>
+        <b>{video ? "You (video)" : "You (voice)"}</b>
+        <span class="grow" />
+        <span class="act-time">{it.at}</span>
+        <DeliveryGlyph item={it} />
+      </header>
+      <Show when={video} fallback={
+        <div class="vm-row">
+          <div class="vp" style={{ "--p": String(position() / it.durationMs) }}>
+            <button class="vp-btn" aria-label={`Play or pause voice message (${mediaTime(it.durationMs)})`} aria-pressed={isPlaying()}
+              onClick={() => (isPlaying() ? stop() : play())}>
+              <svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true">
+                <Show when={isPlaying()} fallback={<path d="M17 12L31 22L17 32Z" />}>
+                  <rect x="15" y="13" width="5" height="18" rx="1" /><rect x="24" y="13" width="5" height="18" rx="1" />
+                </Show>
+              </svg>
+            </button>
+            <div class="vp-side">
+              <div class="vp-wave" role="slider" tabindex="-1" aria-label="Seek" aria-valuemin={0} aria-valuemax={it.durationMs} aria-valuenow={position()} onClick={seek}>
+                <Waveform values={it.waveform} />
+              </div>
+              <span class="vp-caption tabular">{mediaTime(position())} / {mediaTime(it.durationMs)}</span>
+            </div>
+          </div>
+          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
+        </div>
+      }>
+        <button class="vm-poster" aria-label="Play video message" data-tip="Play video message" onClick={() => { setVideoOpen(it); setDialog("video-message"); }}>
+          <span class="vm-play" aria-hidden="true"><svg width="48" height="48" viewBox="0 0 48 48"><path d="M18 12L36 24L18 36Z" /></svg></span>
+        </button>
+        <div class="vm-meta">
+          <Show when={it.transcript}><TranscriptButton open={transcript()} onToggle={() => setTranscript(!transcript())} /></Show>
+          <span class="tabular">{mediaTime(it.durationMs)}</span>
+        </div>
+      </Show>
+      <Show when={transcript() && it.transcript}><p class="vm-text">{it.transcript}</p></Show>
+      <Show when={it.error}><p class="vm-error">{it.error}</p></Show>
+    </article>
+  );
+}
+
+/** "Video message": the round view and a Play / pause button. */
+function VideoDialog() {
+  const [position, setPosition] = createSignal(0);
+  const [running, setRunning] = createSignal(false);
+  let timer: number | undefined;
+  const halt = () => { clearInterval(timer); timer = undefined; setRunning(false); };
+  const toggle = () => {
+    const v = videoOpen();
+    if (!v) return;
+    if (running()) return halt();
+    if (position() >= v.durationMs) setPosition(0);
+    setRunning(true);
+    timer = window.setInterval(() => { const next = position() + 100; if (next >= v.durationMs) { setPosition(v.durationMs); halt(); } else setPosition(next); }, 100);
+  };
+  // Closing the dialog stops playback, like the view's single player.
+  createEffect(on(dialog, (d) => { if (d !== "video-message") { halt(); setPosition(0); } }));
+  onCleanup(halt);
+  return (
+    <Dialog id="video-message" title="Video message" width="400px" icon="video">
+      <div class="vd">
+        <div class="vd-round" classList={{ playing: running() }} role="img" aria-label="Round video">
+          <span class="vd-time tabular">{mediaTime(position())} / {mediaTime(videoOpen()?.durationMs ?? 0)}</span>
+        </div>
+        <button class="btn" onClick={toggle}><Icon name={running() ? "pause" : "play"} size={13} />Play / pause</button>
+      </div>
+    </Dialog>
+  );
+}
+
+function Item(props: { item: TranscriptItem }) {
   const [open, setOpen] = createSignal(false);
   const it = props.item;
-  if (it.kind === "thinking") return <div class="act-thinking"><span class="eyebrow">Thinking</span><p>{it.body}</p></div>;
+  if (it.kind === "media") return <MediaCard item={it} />;
+  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`}><span class="eyebrow">Thinking</span><p>{it.body}</p></div>;
   if (it.kind === "report")
     return (
-      <div class="act-notice" classList={{ open: open() }}>
+      <div class="act-notice" id={`item-${it.id}`} classList={{ open: open() }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><span class="muted">from {it.sender}</span><span class="grow" /><span class="act-time">{it.at}</span></div>
         <button class="link" onClick={() => setOpen(!open())}>{open() ? "▾ Hide report" : "▸ Show report"}</button>
         <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
       </div>
     );
-  if (it.kind === "voice")
-    return (
-      <article class="act-msg k-user voice">
-        <header><b>{it.sender}</b><span class="act-time">{it.at}</span><span class="act-receipt"><Icon name="check" size={11} />Accepted by native app</span></header>
-        <div class="voice-player"><button class="icon-btn small" title="Play / pause"><Icon name="play" size={13} /></button><div class="wave" aria-hidden="true">{Array.from({ length: 48 }, (_, i) => <i style={{ height: `${4 + ((i * 37) % 17)}px` }} />)}</div><span class="dim tabular">0:09</span></div>
-        <button class="link" onClick={() => setOpen(!open())}>{open() ? "Hide transcript" : "Show transcript"}</button>
-        <Show when={open()}><p class="act-body" style={{ "margin-top": "4px" }}>{it.body}</p></Show>
-      </article>
-    );
   return (
     <Show when={it.kind !== "tools" && it.kind !== "tool"} fallback={
-      <div class="act-tools" classList={{ open: open() }}>
+      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open() }}>
         <button class="act-tools-head" onClick={() => setOpen(!open())} aria-expanded={open()}>
           <Icon name="chevron-right" size={12} class="chev" />
           <b>{it.title}</b>
@@ -77,7 +319,7 @@ function Item(props: { item: ActivityItem }) {
         </Show>
       </div>
     }>
-      <article class={`act-msg k-${it.kind}`}>
+      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`}>
         <header>
           <b>{it.kind === "user" ? "You" : it.kind === "agent" ? "Agent" : it.sender ?? "Zerus"}</b>
           <span class="act-time">{it.at}</span>
@@ -158,12 +400,18 @@ export function QuestionCard() {
 }
 
 export function ActivityView() {
-  const full = () => skin().layout["activity-column"] === "full";
   const s = () => selected();
+  let scroller!: HTMLDivElement;
+  // Review links may name an item: app.html?…#item-a3c opens Activity scrolled to it.
+  onMount(() => {
+    const id = location.hash.slice(1);
+    if (id.startsWith("item-")) requestAnimationFrame(() => scroller.querySelector(`#${CSS.escape(id)}`)?.scrollIntoView({ block: "start", behavior: "instant" }));
+  });
   return (
-    <div class="activity" style={{ "--content-scale": contentScale() }}>
-      <div class="act-scroll">
-        <div class="act-col" classList={{ full: full() }}>
+    <div class="activity">
+      <div class="act-scroll" ref={scroller} onContextMenu={activityMenu}>
+        <div class="act-col">
+          <Show when={!fullWidth()}><ColumnEdge /><ColumnEdge right /></Show>
           <Show when={subagentOpen()}>
             <div class="subagent-bar">
               <button class="btn small" onClick={() => setSubagentOpen(undefined)}><Icon name="arrow-right" size={12} style={{ rotate: "180deg" }} />Main activity</button>
@@ -193,6 +441,7 @@ export function ActivityView() {
           </Show>
         </div>
       </div>
+      <VideoDialog />
     </div>
   );
 }

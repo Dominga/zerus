@@ -1,16 +1,17 @@
-import { Show } from "solid-js";
-import { AgentGlyph, AGENT_LABEL, Icon } from "../../lib/icons";
+import { For, Show } from "solid-js";
+import { AGENT_LABEL, Icon } from "../../lib/icons";
 import { machineOf } from "./model";
 import { projects } from "../../mock/data";
-import type { AgentKind, Session, Status, Subagent } from "../../mock/types";
+import type { AgentKind, Session, Subagent } from "../../mock/types";
 
-// Card anatomy follows tray/src/SessionCardDelegate.h paintCard():
-//   line 1  title (14px/600) + status badge (20px) [+ unread] [+ questions] ... agent badge (18px)
-//   line 2  folder/branch meta (11px, elided in the middle) ... git badge, machine badge (18px)
-//   line 3  activity excerpt (12px)
-//   footer  model (10px) + effort badge (16px) ... last change | agents counter
-// Cards are transparent rows; hover and selection paint a neutral surface,
-// and attention/unread/draft/error rows carry a 3px edge mark.
+// Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
+// compact density (94 px rows, the only density in the web client):
+//   line 1  title (14px/600) + status badge (20px) [+ unread] [+ questions] ... provider badge (18px)
+//   line 2  branch/folder icon + "folder / branch" (11px) ... git marks, machine badge (18px)
+//   line 3  current action (12px)
+//   footer  model (10px) + effort chip (16px) ... agents counter (20px)
+// Rows are transparent; hover and selection paint a neutral surface, and
+// attention, unread, draft and error rows carry a 3px edge mark.
 
 export function statusCaption(s: Session): string {
   switch (s.status) {
@@ -28,16 +29,25 @@ export function statusCaption(s: Session): string {
   }
 }
 
+/** Short state for strip tiles: elapsed time while working, otherwise the caption. */
+export function stripCaption(s: Session): string {
+  if (s.status === "working" || s.status === "background") return `${s.turnStartedMin ?? 0}m`;
+  return statusCaption(s);
+}
+
 // Badge precedence (SessionCardDelegate::statusOf): attention/error, working or
 // background, draft, new reply, scheduled, waiting, paused, neutral.
-export function badgeKind(s: Session): string {
-  const muted = s.muted ? "muted-" : "";
-  if (s.status === "attention") return `${muted}attention`;
+export type BadgeKind =
+  | "attention" | "error" | "working" | "background" | "draft" | "unread" | "scheduled" | "waiting" | "paused"
+  | "neutral" | "muted-attention" | "muted-unread";
+
+export function badgeKind(s: Session): BadgeKind {
+  if (s.status === "attention") return s.muted ? "muted-attention" : "attention";
   if (s.status === "error" || s.status === "working" || s.status === "background") return s.status;
   if (s.draft && s.status !== "offline") return "draft";
-  if (s.unread) return `${muted}unread`;
-  if (s.status === "ready" || s.status === "offline" || s.status === "ended") return "neutral";
-  return s.status;
+  if (s.unread) return s.muted ? "muted-unread" : "unread";
+  if (s.status === "scheduled" || s.status === "waiting" || s.status === "paused") return s.status;
+  return "neutral";
 }
 
 // Edge mark: attention/error > draft > unread; muted rows turn it grey.
@@ -50,20 +60,44 @@ export function emphasis(s: Session): string | undefined {
   return undefined;
 }
 
-export function StatusBadge(props: { kind: string; caption: string }) {
+// Status glyphs from SessionStatusBadge::paint, on a 12px box centred where
+// Qt centres them (x+11 inside the badge).
+const BADGE_GLYPH: Partial<Record<BadgeKind, string>> = {
+  paused: `<path d="M4 3V9M8 3V9" stroke-width="1.5"/>`,
+  draft: `<path d="M3 9L8.5 3.5M7.5 2.5L9.5 4.5M3 9L2.5 9.5" stroke-width="1.4"/>`,
+  scheduled: `<circle cx="6" cy="6" r="4.5"/><path d="M6 6V3.2M6 6H8.2"/>`,
+  waiting: `<circle cx="6" cy="6" r="4.5"/><path d="M6 6V3.2M6 6H8.2"/>`,
+  unread: `<rect x="2" y="3" width="8" height="6" rx="1" stroke-width="1"/><path d="M2 3L6 6L10 3" stroke-width="1"/>`,
+  "muted-unread": `<rect x="2" y="3" width="8" height="6" rx="1" stroke-width="1"/><path d="M2 3L6 6L10 3" stroke-width="1"/>`,
+};
+
+export function StatusBadge(props: { kind: BadgeKind; caption: string; iconOnly?: boolean }) {
   return (
-    <span class={`sbadge k-${props.kind}`}>
-      <i class="sb-ico" aria-hidden="true" />
-      <span class="sb-label">{props.caption}</span>
+    <span class={`sbadge k-${props.kind}`} classList={{ "icon-only": props.iconOnly }}>
+      <Show when={props.kind !== "neutral"}>
+        <Show when={BADGE_GLYPH[props.kind]} fallback={<i class="sb-mark" aria-hidden="true" />}>
+          {(g) => <svg class="sb-glyph" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={g()} />}
+        </Show>
+      </Show>
+      <Show when={!props.iconOnly}><span class="sb-label">{props.caption}</span></Show>
     </span>
   );
 }
 
-export function AgentBadge(props: { agent: AgentKind; narrow?: boolean }) {
+// Provider glyphs from IdentityBadges::paint (pen 1.4), centred at x+10.
+const PROVIDER_GLYPH: Record<AgentKind, string> = {
+  claude: Array.from({ length: 8 }, (_, i) => `<path transform="rotate(${i * 45} 6 6)" d="M6 8V11"/>`).join(""),
+  kimi: `<path d="M3 2V10M3 6L9 2M3 6L9 10"/>`,
+  opencode: `<path d="M4 3L1 6L4 9M8 3L11 6L8 9"/>`,
+  codex: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
+  deepseek: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
+};
+
+export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: number }) {
   return (
-    <span class="agent-badge" classList={{ narrow: props.narrow }} style={{ "--agent": `var(--z-agent-${props.agent})` }} title={AGENT_LABEL[props.agent]}>
-      <AgentGlyph agent={props.agent} size={12} />
-      <span class="ab-label">{AGENT_LABEL[props.agent]}</span>
+    <span class="agent-badge" classList={{ narrow: props.narrow }} style={{ "--agent": `var(--z-agent-${props.agent})`, "max-width": `${props.max ?? 95}px` }} title={AGENT_LABEL[props.agent]}>
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
+      <Show when={!props.narrow}><span class="ab-label">{AGENT_LABEL[props.agent]}</span></Show>
     </span>
   );
 }
@@ -78,16 +112,78 @@ export function MachineBadge(props: { alias: string; vivid?: boolean; offline?: 
   );
 }
 
-function GitBadge(props: { git: NonNullable<Session["git"]> }) {
+type Git = NonNullable<Session["git"]>;
+interface GitMark { icon: string; count?: string; tone: "muted" | "attention" | "incoming" | "synced" | "conflict" }
+
+// GitStatusBadge::marks: changed files, outgoing, incoming, then unverified or synced.
+export function gitMarks(g: Git): GitMark[] {
+  const verified = g.state !== "unknown";
+  const count = (n: number) => (n > 99 ? "99+" : String(n));
+  const marks: GitMark[] = [];
+  if (g.changed) marks.push({ icon: "git-diff", count: count(g.changed), tone: !verified ? "muted" : g.conflicts ? "conflict" : "attention" });
+  if (g.ahead) marks.push({ icon: "git-push", count: count(g.ahead), tone: verified ? "attention" : "muted" });
+  if (g.behind) marks.push({ icon: "git-pull", count: count(g.behind), tone: verified ? "incoming" : "muted" });
+  if (!verified) marks.push({ icon: "git-unknown", tone: "muted" });
+  else if (!g.changed && !g.ahead && !g.behind) marks.push({ icon: "git-synced", tone: "synced" });
+  return marks;
+}
+
+export function gitTooltip(s: Session): string {
+  const g = s.git!;
+  const verified = g.state !== "unknown";
+  const ref = verified ? "verified upstream" : "last known upstream; remote unverified";
+  return [
+    "Git status (current checkout)",
+    s.cwd,
+    s.branch ? `Branch: ${s.branch}` : "",
+    s.branch ? `Upstream: origin/${s.branch}` : "",
+    `${g.changed} changed or new files (including staged and untracked files)`,
+    g.conflicts ? `${g.conflicts} files with merge conflicts` : "",
+    `${g.ahead} outgoing commits (${ref})`,
+    `${g.behind} incoming commits (${ref})`,
+    !verified ? "Remote publication has not been verified recently." : !g.changed && !g.ahead && !g.behind ? "Clean checkout. Branch matches the verified remote." : "",
+    verified ? "Remote checked: 27 Oct 11:42:10" : "",
+  ].filter(Boolean).join("\n");
+}
+
+export function GitMarks(props: { session: Session }) {
   return (
-    <span class="gbadge" classList={{ [props.git.state]: true }} title="Git status: changed files, commits to push, commits to pull">
-      <Show when={props.git.changed}><span><Icon name="git-compare-arrows" size={11} />{props.git.changed}</span></Show>
-      <Show when={props.git.ahead}><span><Icon name="arrow-up" size={11} />{props.git.ahead}</span></Show>
-      <Show when={props.git.behind}><span><Icon name="arrow-down" size={11} />{props.git.behind}</span></Show>
-      <Show when={props.git.state === "synced"}><span><Icon name="check" size={11} /></span></Show>
+    <span class="gmarks" title={gitTooltip(props.session)}>
+      <For each={gitMarks(props.session.git!)}>{(m) => (
+        <span class={`gmark t-${m.tone}`} classList={{ counted: !!m.count }}>
+          <Icon name={m.icon} size={16} />
+          <Show when={m.count}><span>{m.count}</span></Show>
+        </span>
+      )}</For>
     </span>
   );
 }
+
+/** Children counter: two-person glyph, compact count, chevron (SessionCardDelegate.h:520-543). */
+export function AgentsCounter(props: { label: string; expandable: boolean; expanded: boolean; onToggle?: () => void }) {
+  const glyph = (
+    <svg class="kids-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+      <circle cx="4" cy="3" r="2" /><circle cx="10" cy="4" r="2" />
+      <path d="M0 9A4 3 0 0 1 8 9M6 9.5A3.5 2.5 0 0 1 13 9.5" />
+    </svg>
+  );
+  return (
+    <Show when={props.expandable} fallback={<span class="sc-kids static">{glyph}<span>{props.label}</span></span>}>
+      <button class="sc-kids" classList={{ open: props.expanded }} aria-expanded={props.expanded}
+        title={props.expanded ? "Hide subagents" : "Show subagents"}
+        onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
+        {glyph}
+        <span>{props.label}</span>
+        <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
+      </button>
+    </Show>
+  );
+}
+
+// Qt keeps min(72, natural width) of the title before badges shrink (60 on
+// compact rows). CSS cannot read the natural width, so estimate it from the
+// 14px DemiBold average advance.
+const titleReserve = (name: string, max: number) => ({ "min-width": `${Math.min(max, Math.ceil(name.length * 7.6))}px` });
 
 function detailText(s: Session): string {
   if (s.summary) return s.summary;
@@ -95,6 +191,16 @@ function detailText(s: Session): string {
   if (s.status === "ready") return "Waiting for your next message";
   if (s.status === "paused") return "Resume to continue";
   return "";
+}
+
+export const agentsLabel = (s: Session) => {
+  const kids = s.subagents ?? [];
+  return `${kids.filter((k) => k.state === "working").length}/${kids.length}`;
+};
+
+function folderOf(s: Session) {
+  const project = projects.find((p) => p.id === s.project);
+  return (project?.folders.find((f) => f.machine === s.machine)?.name ?? s.cwd.split(/[\\/]/).pop() ?? "").toLowerCase().split(" ")[0];
 }
 
 export function SessionCard(props: {
@@ -105,66 +211,65 @@ export function SessionCard(props: {
   onToggleChildren: () => void;
 }) {
   const s = () => props.session;
-  const project = () => projects.find((p) => p.id === s().project);
-  const folder = () => (project()?.folders.find((f) => f.machine === s().machine)?.name ?? s().cwd.split(/[\\/]/).pop() ?? "").toLowerCase().split(" ")[0];
-  const kids = () => s().subagents ?? [];
-  const activeKids = () => kids().filter((k) => k.state === "working").length;
+  const kind = () => badgeKind(s());
   return (
-    <div class="scard" classList={{ selected: props.selected, offline: s().status === "offline" }} data-emphasis={emphasis(s())}>
+    <div class="scard" classList={{ selected: props.selected, offline: s().status === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
       <div class="sc-l1">
-        <Show when={s().muted}><Icon name="bell-off" size={14} class="sc-muted" /></Show>
-        <span class="sc-title ell">{s().name}</span>
-        <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
-        <Show when={s().unread && (s().status === "working" || s().status === "attention" || s().draft)}><span class="sbadge k-unread icon-only" title="New reply"><i class="sb-ico" /></span></Show>
-        <Show when={s().optionalQuestions}><span class="qchip" title="Optional question waiting. The agent can continue without an answer. Click to open."><Icon name="circle-question-mark" size={13} />{s().optionalQuestions}</span></Show>
+        <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
+        <span class="sc-title ell" style={titleReserve(s().name, 72)}>{s().name}</span>
+        <StatusBadge kind={kind()} caption={statusCaption(s())} />
+        <Show when={s().unread && (s().status === "working" || s().status === "attention" || s().draft)}>
+          <span class="sc-extra"><StatusBadge kind={s().muted ? "muted-unread" : "unread"} caption="" iconOnly /></span>
+        </Show>
+        <Show when={s().optionalQuestions}>
+          <span class="qchip" classList={{ muted: !!s().muted }} title={`${s().optionalQuestions} optional question${s().optionalQuestions === 1 ? "" : "s"} waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.`}>
+            <Icon name="question" size={16} />{s().optionalQuestions! > 99 ? "99+" : s().optionalQuestions}
+          </span>
+        </Show>
         <span class="grow" />
         <AgentBadge agent={s().agent} />
       </div>
       <div class="sc-l2">
-        <Icon name={s().branch ? "git-branch" : "folder"} size={13} class="sc-meta-ico" />
-        <span class="sc-meta ell">{folder()}{s().branch ? ` / ${s().branch}` : ""}</span>
+        <Icon name={s().branch ? "git-branch" : "folder"} size={14} class="sc-meta-ico" />
+        <span class="sc-meta ell">{folderOf(s())}{s().branch ? ` / ${s().branch}` : ""}</span>
         <span class="grow" />
-        <Show when={s().git}>{(g) => <GitBadge git={g()} />}</Show>
+        <Show when={s().git && s().status !== "ended"}><GitMarks session={s()} /></Show>
         <MachineBadge alias={s().machine} offline={s().status === "offline"} />
       </div>
       <div class="sc-l3">
-        <Show when={s().reviewLater}><Icon name="bell" size={13} class="sc-review later" /></Show>
+        <Show when={s().reviewLater}><Icon name="attention" size={14} class="sc-review" /></Show>
         <span class="ell">{detailText(s())}</span>
       </div>
       <div class="sc-foot">
         <span class="sc-model ell">{s().model}</span>
         <Show when={s().effort}><span class="sc-effort">{s().effort}</span></Show>
         <span class="grow" />
-        <Show when={s().status !== "working" && !kids().length}><span class="sc-modified">{s().lastEvent}</span></Show>
-        <Show when={kids().length}>
-          <button class="sc-kids" classList={{ open: props.expanded }} onClick={(e) => { e.stopPropagation(); props.onToggleChildren(); }}
-            aria-expanded={props.expanded} title={props.expanded ? "Hide agents" : "Show agents"}>
-            <Icon name="users" size={12} />
-            <span>{activeKids()}/{kids().length}</span>
-            <Icon name="chevron-down" size={12} class="chev" />
-          </button>
+        <Show when={(s().subagents ?? []).length}>
+          <AgentsCounter label={agentsLabel(s())} expandable={props.expandable} expanded={props.expanded} onToggle={props.onToggleChildren} />
         </Show>
       </div>
     </div>
   );
 }
 
-const CHILD_STATUS: Record<Subagent["state"], { kind: Status | "unread"; caption: string }> = {
+const CHILD_STATUS: Record<Subagent["state"], { kind: BadgeKind; caption: string }> = {
   working: { kind: "working", caption: "Working" },
-  ready: { kind: "ready", caption: "Ready" },
+  ready: { kind: "neutral", caption: "Ready" },
   attention: { kind: "attention", caption: "Needs input" },
 };
+export const childStatus = (c: Subagent) => CHILD_STATUS[c.state];
 
-export function ChildCard(props: { parent: Session; child: Subagent; last: boolean; selected: boolean }) {
+/** Native subagent row (64 px): card indented 24 px, one muted detail line. */
+export function ChildCard(props: { parent: Session; child: Subagent; last: boolean; first: boolean; selected: boolean }) {
   return (
-    <div class="child-row" classList={{ last: props.last }}>
+    <div class="child-row" classList={{ last: props.last, first: props.first }}>
       <i class="tree" aria-hidden="true" />
       <div class="scard child" classList={{ selected: props.selected }}>
         <div class="sc-l1">
-          <span class="sc-title ell">{props.child.name}</span>
-          <StatusBadge kind={CHILD_STATUS[props.child.state].kind} caption={CHILD_STATUS[props.child.state].caption} />
+          <span class="sc-title ell" style={titleReserve(props.child.name, 72)}>{props.child.name}</span>
+          <StatusBadge kind={childStatus(props.child).kind} caption={childStatus(props.child).caption} />
           <span class="grow" />
-          <AgentBadge agent={props.parent.agent} />
+          <AgentBadge agent={props.parent.agent} max={85} />
         </div>
         <div class="sc-child-detail ell">{props.child.summary}</div>
       </div>
@@ -172,16 +277,21 @@ export function ChildCard(props: { parent: Session; child: Subagent; last: boole
   );
 }
 
+/**
+ * Compact (collapsed) row, 40 px: title, then status, provider and mute at the
+ * right, then the expand button (SessionCardDelegate::compactLayout).
+ */
 export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void }) {
   const s = () => props.session;
   return (
-    <div class="scard compact" classList={{ selected: props.selected }} data-emphasis={emphasis(s())}>
-      <span class="sc-title ell">{s().name}</span>
+    <div class="scard compact" classList={{ selected: props.selected }} data-emphasis={emphasis(s())}
+      aria-description="Collapsed session row. Press Right to expand.">
+      <span class="sc-title ell" style={titleReserve(s().name, 60)}>{s().name}</span>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
-      <span class="grow" />
-      <AgentBadge agent={s().agent} narrow />
-      <button class="icon-btn small" title="Show full card" onClick={(e) => { e.stopPropagation(); props.onExpand(); }}>
-        <Icon name="maximize-2" size={12} />
+      <AgentBadge agent={s().agent} />
+      <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
+      <button class="cc-expand" title={`Expand session row`} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
+        <Icon name="expand-row" size={16} />
       </button>
     </div>
   );

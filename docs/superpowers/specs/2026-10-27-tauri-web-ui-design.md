@@ -29,6 +29,10 @@ design work reaches the product.
 | Scope | No new features from the prototype. The skin system is the one requested addition |
 | Process | A mocked-data design is reviewed and approved before implementation |
 | Base build | QtWebEngine stays out (`2026-10-13-native-ui-plugin-design.md`); Tauri uses system webviews |
+| Refresh rate (round 2) | On macOS, scrolling, animations and `requestAnimationFrame` run at the display's refresh rate (120 Hz on ProMotion), not 60. This is a pass/fail criterion of the measurement |
+| Row density (round 2) | The compact 94 px card is the only density; the non-compact 104 px card and its setting are dropped |
+| Icons (round 2) | Zerus's own glyphs from `tray/src/WorkspaceIcons.h`, the provider glyphs from `IdentityBadge.h` and the status glyphs from `SessionStatusBadge.h`; a substitute icon set is used only where Qt has no glyph |
+| Side panel (round 2) | The prototype's Environment/Context card styling (raised cards, radii, collapsible blocks, show/hide motion) with today's content only |
 
 Non-goals: replacing the Qt client in one step; changing `hgs` CLI, API v1,
 state paths or status semantics; plugins (a separate design, see the 2026-10-27
@@ -156,9 +160,28 @@ adds no new action semantics.
   alternative; Solid is chosen for size and the reconcile fit. Solid 2.0 is not
   adopted before it is final.
 - **Lists are virtualized with exact row heights** (`@tanstack/solid-virtual`).
-  The session list keeps the Qt delegate's sizes: card 104 px (94 compact),
-  project header 40, subagent row 64 with a 24 px indent, compact row 40; the
-  strip is 98/108 px with square tiles. No DOM measurement on the hot path.
+  The session list keeps the Qt delegate's compact sizes: card 94 px, project
+  header 40, subagent row 64 with a 24 px indent, collapsed row 40; the strip
+  is 98 px with 84 px square tiles. No DOM measurement on the hot path.
+- **Rows are bound to their identity.** The virtualizer's items are one store
+  array reconciled by index, so the list iterates stable row ids and looks up
+  each row's offset: a catalog delta updates bound text in place and never
+  rebuilds a row. Rebuilding rows on every delta made the round 1 mockup flicker
+  on hover and restarted badge animations. Scroll containers reserve their
+  scroll-bar gutter; hover changes only colours, never layout.
+- **Panel modes follow `SessionPanelDock`.** Docked (resizable splitter, minimum
+  270, default 310), Collapsed (the strip) and Peek (the panel over the
+  conversation). Hover opens Peek after 150 ms of rest and closes it after
+  350 ms outside; menus and an active search keep it open. The panel moves by
+  transform only (220 ms, OutCubic) and the conversation resizes once.
+- **Activity column**: 900 px at 100 % content scale (480-2400), both edges drag
+  together, double-click resets, Full-width Activity and Reset Activity width in
+  the context menu; the composer, questions and banners share the column.
+- **Zerus mark**: tinted with the attention colour and turning while any session
+  needs attention, as `SwarmButton` does; each blade is its own layer animated
+  by transform and opacity, paused while the window is hidden and static under
+  Reduce motion. When attention clears, the current turn finishes and the mark
+  settles. The owner chooses among the mockup's three motions.
 - **Motion** uses only opacity and transforms, honors `prefers-reduced-motion`
   and the existing Reduce motion and Animate working sessions settings.
 - **Heavy parts load on demand**: xterm.js when Terminal first opens.
@@ -191,7 +214,9 @@ One JSON document per skin, independent of the UI stack.
 }
 ```
 
-- **L0 tokens.** Groups `color`, `agent`, `entity` (machine and project palette
+- **L0 tokens.** Groups `color`, `agent`, `list` (the session list's badge,
+  edge, tile frame, Git tone and counter colours, taken from the Qt delegate so
+  cards keep today's look in every skin), `entity` (machine and project palette
   plus the fill and ink mix amounts that reproduce `MachineAppearance`), `font`
   (UI and mono stacks, base size, line height), `radius`, `density`, `motion`
   (durations, easing, pulse) and `shadow`. The base skin (`zerus-dark`) defines

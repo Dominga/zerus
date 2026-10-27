@@ -19,8 +19,8 @@ import { Icon } from "./lib/icons";
 import { skinList, skin, setSkin, applySkin } from "./skin/runtime";
 import { setSection } from "./screens/settings/store";
 import {
-  page, setPage, selected, setDialog, stress, setStressMode, demoState, setDemoState, setInspectorOpen, inspectorOpen,
-  compactList, setCompactList, setContentScale, contentScale, toast, setDetailTab, detailTab,
+  page, setPage, selected, setDialog, stress, setStressMode, demoState, setDemoState, setInspectorOpen, inspectorOpen, logoMotion, setLogoMotion, type LogoMotion,
+  setContentScale, contentScale, toast, setDetailTab, detailTab,
 } from "./state";
 import { accounts } from "./mock/data";
 
@@ -42,7 +42,7 @@ function StatusBar() {
       </Show>
       <span class="grow" />
       <Show when={acc() && acc()!.fiveHour > 0}>
-        <button class="usage" title="5-hour and weekly limits; at the current pace the limit runs out in about 3 h" onClick={() => setPage("accounts")}>
+        <button class="sb-usage" title="5-hour and weekly limits; at the current pace the limit runs out in about 3 h" onClick={() => setPage("accounts")}>
           <span>{acc()!.label}</span>
           <span class="meter" classList={{ warn: acc()!.fiveHour > 50 }}><i style={{ width: `${acc()!.fiveHour}%` }} /></span><span class="tabular">5h {acc()!.fiveHour}%</span>
           <span class="meter"><i style={{ width: `${acc()!.week}%` }} /></span><span class="tabular">7d {acc()!.week}%</span>
@@ -53,29 +53,42 @@ function StatusBar() {
   );
 }
 
-/** Mockup-only toolbar: skin switcher and demo states. Not part of the product UI. */
-function ReviewBar() {
-  const [min, setMin] = createSignal(false);
+/** Mockup-only review tools: skin, demo state, logo motion, 20k rows. Not part of the product UI. */
+function ReviewTools() {
+  const [open, setOpen] = createSignal(false);
   return (
-    <div class="review-bar" classList={{ min: min() }}>
-      <span class="tag">MOCKUP</span>
-      <Show when={!min()}>
-        <label class="sr-only" for="skin">Skin</label>
-        <select id="skin" value={skin().id} onChange={(e) => setSkin(e.currentTarget.value)} title="Skin (L0 tokens + L1/L2 variants)">
-          <For each={skinList()}>{(s) => <option value={s.id}>{s.name}</option>}</For>
-        </select>
-        <select value={demoState()} onChange={(e) => setDemoState(e.currentTarget.value as never)} title="Demo state">
-          <option value="normal">Live data</option>
-          <option value="loading">Loading</option>
-          <option value="empty">Empty fleet</option>
-          <option value="error">Offline / errors</option>
-        </select>
-        <button classList={{ on: stress() }} onClick={() => { setStressMode(!stress()); toast(stress() ? "20 000 sessions" : "Demo fleet", stress() ? "Virtualized list: only visible rows are in the DOM" : "Back to 17 sessions"); }} title="Load 20 000 synthetic sessions">20k</button>
-        <button classList={{ on: compactList() }} onClick={() => setCompactList(!compactList())} title="Compact cards (94 px)">Compact</button>
-        <a href="./index.html" style={{ color: "inherit", "font-size": "inherit" }}>Review ↗</a>
+    <>
+      <button class="review-launch" classList={{ on: open() }} title="Mockup review tools (not part of the product)" onClick={() => setOpen(!open())}>MOCK<br />UP</button>
+      <Show when={open()}>
+        <div class="review-pop" role="dialog" aria-label="Mockup review tools">
+          <span class="tag">MOCKUP</span>
+          <label>Skin
+            <select value={skin().id} onChange={(e) => setSkin(e.currentTarget.value)}>
+              <For each={skinList()}>{(s) => <option value={s.id}>{s.name}</option>}</For>
+            </select>
+          </label>
+          <label>Data
+            <select value={demoState()} onChange={(e) => setDemoState(e.currentTarget.value as never)}>
+              <option value="normal">Live data</option>
+              <option value="loading">Loading</option>
+              <option value="empty">Empty fleet</option>
+              <option value="error">Offline / errors</option>
+            </select>
+          </label>
+          <label>Zerus mark motion (while sessions need attention)
+            <select value={logoMotion()} onChange={(e) => setLogoMotion(e.currentTarget.value as LogoMotion)}>
+              <option value="qt">As in Qt: one turn, pause</option>
+              <option value="blades">Blades: staggered spring + glow</option>
+              <option value="ripple">Ripple: calm turn + rings</option>
+            </select>
+          </label>
+          <div class="rp-row">
+            <button class="rp-btn" classList={{ on: stress() }} onClick={() => { setStressMode(!stress()); toast(stress() ? "20 000 sessions" : "Demo fleet", stress() ? "Virtualized list: only visible rows are in the DOM" : "Back to the demo fleet"); }}>20 000 sessions</button>
+            <a href="./index.html">Review page ↗</a>
+          </div>
+        </div>
       </Show>
-      <button onClick={() => setMin(!min())} title={min() ? "Show" : "Hide"}>{min() ? "›" : "‹"}</button>
-    </div>
+    </>
   );
 }
 
@@ -101,7 +114,7 @@ export function App() {
   onMount(() => addEventListener("keydown", keys));
   onCleanup(() => removeEventListener("keydown", keys));
   return (
-    <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled", "compact-list": compactList() }}>
+    <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" }}>
       <Rail />
       <main class="page">
         <Suspense>
@@ -127,7 +140,7 @@ export function App() {
       <SetupDialogs />
       <TaskDialogs />
       <SettingsDialogs />
-      <ReviewBar />
+      <ReviewTools />
     </div>
   );
 }

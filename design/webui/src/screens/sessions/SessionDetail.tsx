@@ -1,10 +1,11 @@
-import { For, Show, Switch, Match, onMount, onCleanup, createEffect } from "solid-js";
+import { For, Show, Switch, Match, onMount, onCleanup, createEffect, createSignal, on } from "solid-js";
 import { Icon } from "../../lib/icons";
-import { ActivityView } from "./Activity";
+import { ActivityView, columnStyle } from "./Activity";
 import { Composer } from "./Composer";
 import { Inspector } from "./Inspector";
 import { AgentBadge, MachineBadge } from "./SessionCard";
 import { TaskView } from "../tasks/TaskView";
+import { reduced } from "../tasks/motion";
 import { selected, detailTab, setDetailTab, inspectorOpen, setInspectorOpen, setMenu, setDialog, toast, subagentOpen, STATUS_LABEL, type DetailTab } from "../../state";
 import { projects, terminalLines, processes } from "../../mock/data";
 import { skin } from "../../skin/runtime";
@@ -145,7 +146,13 @@ function Header() {
       <div class="dh-row2">
         <AgentBadge agent={s().agent} />
         <MachineBadge alias={s().machine} />
-        <span class="dh-meta ell" title={s().cwd}>{s().cwd.split(/[\\/]/).pop()}{s().branch ? ` / ${s().branch}` : ""}{s().worktree ? ` · worktree ${s().worktree}` : ""}</span>
+        <span class="dh-chip ell" title={s().cwd}><Icon name="folder" size={13} />{s().cwd.split(/[\\/]/).pop()}</span>
+        <Show when={s().branch}>
+          <span class="dh-chip ell" title={`Git branch ${s().branch}`}><Icon name="git-branch" size={13} />{s().branch}</span>
+        </Show>
+        <Show when={s().worktree}>
+          <span class="dh-chip ell" title={`Linked worktree ${s().worktree}`}><Icon name="folder-git-2" size={13} />worktree {s().worktree}</span>
+        </Show>
         <span class="grow" />
         <span class="dh-model ell">{s().model} {s().effort}</span>
       </div>
@@ -167,7 +174,33 @@ const TAB_LIST = (): { id: DetailTab; label: string; show: boolean }[] => {
   ];
 };
 
+// The side panel slides in from the right and fades; it stays mounted while it
+// animates out. Leaving takes it out of the flow, so Activity reflows once at
+// the start and the motion itself is transform/opacity only.
+function useInspectorPresence() {
+  const [shown, setShown] = createSignal(inspectorOpen());
+  const [leaving, setLeaving] = createSignal(false);
+  let fallback: number | undefined;
+  const left = () => { clearTimeout(fallback); setShown(false); setLeaving(false); };
+  let first = true;
+  createEffect(on(inspectorOpen, (open) => {
+    clearTimeout(fallback);
+    // A skin that starts collapsed (Paper) may close it before the first paint.
+    const initial = first;
+    first = false;
+    if (open) { setLeaving(false); setShown(true); return; }
+    if (!shown()) return;
+    if (initial || reduced()) return left();
+    setLeaving(true);
+    // animationend is the normal end; the timer covers a skipped animation.
+    fallback = window.setTimeout(left, 600);
+  }));
+  onCleanup(() => clearTimeout(fallback));
+  return { shown, leaving, left };
+}
+
 export function SessionDetail() {
+  const { shown: inspectorShown, leaving: inspectorLeaving, left: inspectorLeft } = useInspectorPresence();
   return (
     <section class="detail" aria-label="Session">
       <Show when={selected()} fallback={<EmptyDetail />}>
@@ -186,9 +219,9 @@ export function SessionDetail() {
             <div class="tab-body">
               <Switch>
                 <Match when={detailTab() === "activity"}>
-                  <div class="activity-wrap">
+                  <div class="activity-wrap" style={columnStyle()}>
                     <ActivityView />
-                    <div class="cmp-col" classList={{ full: skin().layout["activity-column"] === "full" }}><Composer /></div>
+                    <div class="cmp-col"><Composer /></div>
                   </div>
                 </Match>
                 <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
@@ -198,7 +231,7 @@ export function SessionDetail() {
               </Switch>
             </div>
           </div>
-          <Show when={inspectorOpen()}><Inspector /></Show>
+          <Show when={inspectorShown()}><Inspector leaving={inspectorLeaving()} onLeft={inspectorLeft} /></Show>
         </div>
       </Show>
     </section>

@@ -5,6 +5,7 @@
 // 100-card / 80-history bounds. In the Tauri client the listing comes from
 // `hgs task list` through the Rust backend; here mutations edit a local store.
 import { batch, createEffect, createMemo, createRoot, createSignal, on } from "solid-js";
+import type { BadgeKind } from "../sessions/SessionCard";
 import { createStore, produce } from "solid-js/store";
 import { catalog, contentScale, demoState, selected, selectedTask, setDetailTab, setDialog, setSelectedKey, setSelectedTask, stress, toast } from "../../state";
 import { projects } from "../../mock/data";
@@ -57,19 +58,19 @@ export const displayTitle = (t: TaskVM) => t.title || t.text.split("\n")[0];
 // ---------------------------------------------------------------- context
 
 /** A session of the open project as Tasks sees it (SessionsWindow::updateTasks). */
-export interface TaskSession { key: string; host: string; name: string; status: string; kind: string; blocker: string; running: boolean; working: boolean }
+export interface TaskSession { key: string; host: string; name: string; status: string; kind: BadgeKind; blocker: string; running: boolean; working: boolean }
 
 function asTaskSession(s: Session): TaskSession {
   const running = s.status !== "offline" && s.status !== "paused" && s.status !== "ended";
   const working = s.status === "working" || s.status === "background";
-  let status = "Ready", kind = "neutral";
+  let status = "Ready", kind: BadgeKind = "neutral";
   switch (s.status) {
     case "working": status = "Working"; kind = "working"; break;
     case "background": status = "Background"; kind = "background"; break;
     case "attention": status = s.attention === "approval" ? "Needs approval" : "Needs input"; kind = "attention"; break;
     case "error": status = "Error"; kind = "error"; break;
     case "scheduled": status = "Scheduled"; kind = "scheduled"; break;
-    case "offline": status = "Offline"; kind = "offline"; break;
+    case "offline": status = "Offline"; kind = "neutral"; break;
     case "paused": status = "Paused"; kind = "paused"; break;
     default: break;
   }

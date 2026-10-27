@@ -15,13 +15,15 @@
     --fs-md: var(--fs-base); --fs-lg: calc(var(--fs-base) * 1.12); --fs-xl: calc(var(--fs-base) * 1.3);
   }
 
-  /* ------------------------------------------------------------ side panel */
+  /* ------------------------------------------------------------ side panel
+     Fits the inspector's grouped cards: the same raised card surface, 1 px
+     card border and card radius; tiles and square buttons use the xl radius. */
   .tk-panel { position: relative; container: tasks / inline-size; height: 100%; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 10px 8px; font-size: var(--fs-sm); }
   .tk-head { display: flex; align-items: center; gap: 6px; min-height: 32px; }
   .tk-scope { flex: 1; min-width: 0; color: var(--z-color-muted); font-size: var(--fs-sm); }
   .tk-newtitle { flex: 1; height: 32px; animation: fadeIn var(--z-motion-fast) both; }
   .tk-sq {
-    flex: none; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 9px;
+    flex: none; width: 32px; height: 32px; display: grid; place-items: center; border-radius: var(--z-radius-xl);
     border: 1px solid var(--z-color-border); color: var(--z-color-muted);
     transition: border-color var(--z-motion-fast), color var(--z-motion-fast), background var(--z-motion-fast);
   }
@@ -35,7 +37,7 @@
   .tk-tiles { display: flex; gap: 4px; }
   .tk-tile {
     position: relative; flex: 1 1 0; min-width: 44px; height: 34px; display: flex; align-items: center; gap: 6px; padding: 0 9px 0 4px;
-    border-radius: 9px; background: var(--z-color-card); border: 1px solid transparent; color: var(--z-color-muted); font-size: calc(var(--fs-base) * .9);
+    border-radius: var(--z-radius-xl); background: var(--z-color-card); border: 1px solid var(--z-color-card-border); color: var(--z-color-muted); font-size: calc(var(--fs-base) * .9);
     transition: background var(--z-motion-fast), border-color var(--z-motion-fast), color var(--z-motion-fast);
   }
   .tk-tile:hover { border-color: var(--z-color-border); }
@@ -56,14 +58,14 @@
   .tk-create-error { color: var(--z-color-danger); font-size: var(--fs-xs); white-space: pre-line; }
 
   .tk-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; margin: 0 -6px; padding: 1px 6px 6px; }
-  .tk-cards { position: relative; display: flex; flex-direction: column; gap: 5px; }
+  .tk-cards { position: relative; display: flex; flex-direction: column; gap: 8px; }
   .tk-dropline { position: absolute; left: 8px; right: 8px; top: 0; height: 2px; border-radius: 1px; background: var(--z-color-accent); opacity: 0; pointer-events: none; transition: opacity var(--z-motion-fast), translate var(--z-motion-fast) var(--ease); }
   .tk-dropline.on { opacity: 1; }
 
   /* Task card (TaskRow, compact) */
   .tk-card {
     position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px; align-items: start;
-    padding: 9px 5px 9px 10px; border-radius: var(--z-radius-card); cursor: pointer;
+    padding: 10px 6px 10px 12px; border-radius: var(--z-radius-dialog); cursor: pointer;
     background: var(--z-color-card); border: 1px solid var(--z-color-card-border); color: var(--z-color-text);
     transition: background var(--z-motion-fast), border-color var(--z-motion-fast), opacity var(--z-motion-fast);
     animation: tk-in var(--z-motion-base) var(--ease) backwards;
@@ -71,7 +73,7 @@
   .tk-card[draggable="true"] { cursor: grab; }
   .tk-card:hover { background: var(--z-color-card-hover); border-color: var(--z-color-border); }
   .tk-card.sel { background: var(--z-color-card-selected); border-color: var(--z-color-card-selected-border); }
-  .tk-card.mine::before { content: ""; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 3px; border-radius: 0 2px 2px 0; background: var(--z-color-accent); }
+  .tk-card.mine::before { content: ""; position: absolute; left: -1px; top: 12px; bottom: 12px; width: 3px; border-radius: 0 2px 2px 0; background: var(--z-color-accent); }
   .tk-card.dragging { opacity: .4; }
   .tk-card:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: 1px; }
   .tk-card-main { min-width: 0; }
@@ -104,12 +106,12 @@
   .tk-glyph.st-active { border-color: color-mix(in srgb, var(--stage) 38%, transparent); }
   .tk-glyph.st-active::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--stage); border-right-color: var(--stage); animation: spin 1.1s linear infinite; }
 
-  .tk-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 26px 14px; text-align: center; color: var(--z-color-muted); border: 1px dashed var(--z-color-border); border-radius: var(--z-radius-lg); animation: fadeIn var(--z-motion-base) both; }
+  .tk-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 26px 14px; text-align: center; color: var(--z-color-muted); border: 1px dashed var(--z-color-border); border-radius: var(--z-radius-dialog); animation: fadeIn var(--z-motion-base) both; }
   .tk-empty svg { color: var(--z-color-dim); }
   .tk-noproject { margin: auto 0; border: 0; }
   .tk-older { align-self: flex-start; margin-top: 6px; padding: 4px 2px; color: var(--z-color-accent); font-size: var(--fs-xs); }
   .tk-older:hover { text-decoration: underline; }
-  .tk-skel { display: flex; gap: 10px; align-items: center; padding: 10px; border-radius: var(--z-radius-card); border: 1px solid var(--z-color-card-border); }
+  .tk-skel { display: flex; gap: 10px; align-items: center; padding: 10px; border-radius: var(--z-radius-dialog); border: 1px solid var(--z-color-card-border); }
   .tk-skel-glyph { width: 22px; height: 22px; border-radius: 50%; flex: none; }
 
   /* A card flying to its new stage tile; styled without ancestors so it can live in <body>. */

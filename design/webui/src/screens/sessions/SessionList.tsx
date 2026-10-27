@@ -1,14 +1,17 @@
-import { For, Show, createMemo, createEffect, on } from "solid-js";
+import { For, Show, createMemo, createEffect, createSignal, on, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import { Icon, AgentGlyph } from "../../lib/icons";
+import { Icon } from "../../lib/icons";
 import { listRows, rowHeight, shownSummary, type Row } from "./model";
-import { SessionCard, ChildCard, CompactCard, AgentBadge, MachineBadge, StatusBadge, badgeKind, statusCaption } from "./SessionCard";
+import {
+  SessionCard, ChildCard, CompactCard, AgentBadge, MachineBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
+  emphasis, childStatus, gitTooltip,
+} from "./SessionCard";
 import { projects, machines, accounts, archived } from "../../mock/data";
 import {
   selectedKey, setSelectedKey, setDetailTab, collapsed, setCollapsed, setExpandedChildren, expandedChildren,
-  setCompactRows, compactRows, compactList, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
+  setCompactRows, compactRows, stateFilter, setStateFilter, counts, search, setSearch, stripMode, setStripMode,
   setMenu, setDialog, toast, demoState, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilter, setAccountFilter,
-  setPage, multi, setMulti, peek, setPeek, catalog, setSubagentOpen,
+  setPage, multi, setMulti, peek, setPeek, catalog, setSubagentOpen, sessionsWidth, setSessionsWidth, menu, subagentOpen,
   type StateFilter, type MenuEntry,
 } from "../../state";
 import type { Session } from "../../mock/types";
@@ -33,11 +36,11 @@ function taskDrop(e: DragEvent, target: string) {
 
 // Five state filters, in SessionsWindow order, then the scope filters.
 const FILTERS: { id: StateFilter; icon: string; tip: string; count: () => string }[] = [
-  { id: "all", icon: "rows-3", tip: "All sessions", count: () => String(counts().all) },
-  { id: "attention", icon: "bell", tip: "Needs attention", count: () => String(counts().attention) },
-  { id: "active", icon: "zap", tip: "Active: working, scheduled, waiting, needs attention or a draft", count: () => String(counts().active) },
-  { id: "paused", icon: "pause", tip: "Saved sessions (paused or stopped)", count: () => String(counts().paused) },
-  { id: "archived", icon: "archive", tip: "Archive", count: () => `${counts().archived}+` },
+  { id: "all", icon: "all", tip: "All sessions", count: () => String(counts().all) },
+  { id: "attention", icon: "attention", tip: "Needs attention", count: () => String(counts().attention) },
+  { id: "active", icon: "active", tip: "Active: working, scheduled, waiting, needs attention or a draft", count: () => String(counts().active) },
+  { id: "paused", icon: "paused", tip: "Saved sessions (paused or stopped)", count: () => String(counts().paused) },
+  { id: "archived", icon: "archived", tip: "Archive", count: () => `${counts().archived}+` },
 ];
 
 const openMenu = (e: MouseEvent, items: MenuEntry[]) => {
@@ -49,8 +52,8 @@ const openMenu = (e: MouseEvent, items: MenuEntry[]) => {
 function sessionMenu(s: Session): MenuEntry[] {
   const live = s.status !== "paused" && s.status !== "ended";
   return [
-    { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "maximize-2" : "rows-2", action: () => setCompactRows(s.key, !compactRows[s.key]) },
-    { label: "Expand all collapsed", icon: "rows-3", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
+    { label: compactRows[s.key] ? "Expand session row" : "Compact session row", icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setCompactRows(s.key, !compactRows[s.key]) },
+    { label: "Expand all collapsed", icon: "expand-row", disabled: !Object.values(compactRows).some(Boolean), action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
     { separator: true },
     s.agent === "deepseek" ? { label: "Open native DeepSeek UI", icon: "external-link" } : { label: "Open terminal", icon: "square-terminal", action: () => setDetailTab("terminal") },
     ...(s.status === "background" ? [{ label: "Show running commands", icon: "activity", action: () => setDetailTab("processes") } as MenuEntry] : []),
@@ -102,22 +105,26 @@ function batchMenu(): MenuEntry[] {
       { label: "Resume all in background (1)", icon: "play" } as MenuEntry,
     ]).slice(0, 6),
     { separator: true },
-    { label: "Expand all collapsed", icon: "rows-3", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
-    { label: `Mark all as read (${catalog.rows.filter((s) => s.unread).length})`, icon: "check-check" },
+    { label: "Expand all collapsed", icon: "expand-row", action: () => Object.keys(compactRows).forEach((k) => setCompactRows(k, false)) },
+    { label: `Mark all as read (${catalog.rows.filter((s) => s.unread).length})`, icon: "read-all" },
     { label: "Clear archive…", icon: "trash", danger: true },
   ];
 }
 
+/** Project header: 40 px row, 32 px band (radius 6), Qt chevron, icon and counters. */
 function Header(props: { row: Extract<Row, { type: "header" }> }) {
   const p = () => projects.find((x) => x.id === props.row.project)!;
+  const open = () => !collapsed[props.row.project];
   return (
     <button class="group-band entity" style={{ "--entity": `var(--z-entity-palette-${p().colorIndex})` }}
       onDragOver={taskDragOver} onDragLeave={taskDragLeave} onDrop={(e) => taskDrop(e, "Any session")}
-      aria-expanded={!collapsed[props.row.project]} onClick={() => setCollapsed(props.row.project, !collapsed[props.row.project])}
+      aria-expanded={open()} onClick={() => setCollapsed(props.row.project, open())}
       onContextMenu={(e) => openMenu(e, headerMenu(props.row.project))}
       title={`${p().name}: ${props.row.total} shown, ${props.row.attention} need a response, ${props.row.working} working, ${props.row.unread} unread replies. Click to collapse or expand; drag to reorder.`}>
-      <Icon name="chevron-down" size={13} class="gb-chev" />
-      <Icon name="folder" size={15} stroke={1.7} />
+      <svg class="gb-chev" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d={open() ? "M1 3L5 7L9 3" : "M3 1L7 5L3 9"} />
+      </svg>
+      <Icon name="projects" size={16} class="gb-icon" />
       <span class="gb-name ell">{p().name}</span>
       <Show when={props.row.working}><span class="gb-count working">● {props.row.working}</span></Show>
       <Show when={props.row.unread}><span class="gb-count hot">● {props.row.unread}</span></Show>
@@ -223,9 +230,9 @@ function SelectionBar() {
       <div class="selection-bar" role="toolbar" aria-label="Selected sessions">
         <div class="row"><b>{multiCount()} selected</b><span class="grow" /><button class="icon-btn small" title="Deselect all (Esc)" onClick={() => Object.keys(multi).forEach((k) => setMulti(k, false))}><Icon name="x" size={14} /></button></div>
         <div class="row sel-actions">
-          <button class="icon-btn" title={`Mark as read (${multiCount()})`}><Icon name="check-check" size={18} /></button>
+          <button class="icon-btn" title={`Mark as read (${multiCount()})`}><Icon name="read-all" size={18} /></button>
           <button class="icon-btn" title="Pause (1)"><Icon name="pause" size={18} /></button>
-          <button class="icon-btn" title="Compact session rows"><Icon name="rows-2" size={18} /></button>
+          <button class="icon-btn" title="Compact session rows"><Icon name="compact-row" size={18} /></button>
           <button class="icon-btn" title="Move to project" onClick={() => setDialog("move-project")}><Icon name="folder" size={18} /></button>
           <button class="icon-btn" title="Move to archive"><Icon name="archive" size={18} /></button>
           <button class="icon-btn danger" title={`Terminate (${multiCount()})`} onClick={() => setDialog("terminate")}><Icon name="circle-stop" size={18} /></button>
@@ -236,33 +243,120 @@ function SelectionBar() {
   );
 }
 
-export function SessionList() {
-  let scroller!: HTMLDivElement;
+// Strip geometry (SessionCardDelegate.h SessionStrip): tile side 84, strip 98.
+const STRIP_WIDTH = 98;
+const OPEN_MS = 220; // SessionPanelDock: 220 ms, OutCubic
+const OUT_CUBIC = "cubic-bezier(.33, 1, .68, 1)";
+const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.dataset.reduceMotion === "1";
+
+/**
+ * Keeps one DOM node per row id. The virtualizer's items are new objects on
+ * every measure, so the list iterates stable string keys instead: a catalog
+ * delta updates bound text in place and never rebuilds a row (no flicker, no
+ * restarted animations, hover kept).
+ */
+function useRows(strip: boolean) {
+  // A plain element, not a signal: a reactive getter makes the virtualizer
+  // observe the box during render, before it is attached and sized.
+  let scrollEl: HTMLElement | undefined;
   const rows = listRows;
+  const heights = createMemo(() => rows().map((r) => rowHeight(r, strip)));
   const virtualizer = createVirtualizer({
     get count() { return rows().length; },
-    getScrollElement: () => scroller,
-    estimateSize: (i) => rowHeight(rows()[i], compactList()),
-    getItemKey: (i) => rows()[i].id,
+    getScrollElement: () => scrollEl ?? null,
+    estimateSize: (i) => heights()[i] ?? 94,
+    getItemKey: (i) => rows()[i]?.id ?? i,
     overscan: 6,
   });
-  createEffect(on([rows, compactList], () => virtualizer.measure(), { defer: true }));
+  // Re-measure only when ids or heights change, not on every row update.
+  const shape = createMemo(() => rows().map((r, i) => `${r.id}:${heights()[i]}`).join("|"));
+  createEffect(on(shape, () => virtualizer.measure(), { defer: true }));
+  const byId = createMemo(() => new Map(rows().map((r) => [r.id, r])));
   const items = createMemo(() => virtualizer.getVirtualItems());
+  // getVirtualItems() is one store array reconciled by index; reading its keys
+  // here tracks it, and an unchanged key list keeps every row's DOM node.
+  const keys = createMemo<string[]>(() => items().map((i) => String(i.key)), [], { equals: (a, b) => a.length === b.length && a.every((k, i) => k === b[i]) });
+  const startOf = createMemo(() => new Map(items().map((i) => [String(i.key), i.start])));
+  // The scroller can be replaced (demo states); observe the new box once it is in the page.
+  const ref = (el: HTMLElement) => { scrollEl = el; requestAnimationFrame(() => virtualizer._willUpdate()); };
+  return { ref, rows, virtualizer, byId, keys, startOf, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
+}
+
+/** Slides the full panel out from under the strip (transform only). */
+function slide(el: HTMLElement | undefined, width: number, opening: boolean, done?: () => void) {
+  if (!el || reducedMotion()) { done?.(); return; }
+  const hidden = `translateX(${-(width - STRIP_WIDTH)}px)`;
+  const a = el.animate(
+    opening ? [{ transform: hidden, opacity: 0.6 }, { transform: "translateX(0)", opacity: 1 }] : [{ transform: "translateX(0)", opacity: 1 }, { transform: hidden, opacity: 0 }],
+    { duration: OPEN_MS, easing: OUT_CUBIC },
+  );
+  a.onfinish = () => done?.();
+}
+
+export function SessionList() {
+  const list = useRows(false);
   const searching = () => search().trim().length > 0 && stateFilter() !== "archived";
-  const expanded = () => !stripMode() || peek();
+  let panel: HTMLDivElement | undefined;
+  let section: HTMLElement | undefined;
+  const [panelVisible, setPanelVisible] = createSignal(!stripMode());
+  const [searchFocused, setSearchFocused] = createSignal(false);
+
+  // Docked <-> strip: the conversation resizes once; the panel animates above it.
+  const toggleDock = () => {
+    Object.keys(multi).forEach((k) => setMulti(k, false));
+    if (!stripMode()) {
+      setStripMode(true);
+      setPanelVisible(true);
+      slide(panel, sessionsWidth(), false, () => { if (stripMode() && !peek()) setPanelVisible(false); });
+    } else {
+      setPeek(false);
+      setStripMode(false);
+      setPanelVisible(true);
+      requestAnimationFrame(() => slide(panel, sessionsWidth(), true));
+    }
+  };
+  // Peek: the full panel lies over the conversation; the strip stays put.
+  createEffect(on(peek, (open, was) => {
+    if (!stripMode() || open === was) return;
+    if (open) { setPanelVisible(true); requestAnimationFrame(() => slide(panel, sessionsWidth(), true)); }
+    else slide(panel, sessionsWidth(), false, () => { if (!peek() && stripMode()) setPanelVisible(false); });
+  }, { defer: true }));
+
+  // Hover expand: opens after 150 ms of rest on the strip; closes once the
+  // pointer has been outside for 350 ms. Menus and an active search keep it open.
+  let enterTimer: number | undefined, leaveTimer: number | undefined;
+  let hoverOpened = false;
+  const keepOpen = () => !!menu() || searchFocused() || search().length > 0;
+  const onStripEnter = () => {
+    clearTimeout(leaveTimer);
+    if (!stripMode() || peek()) return;
+    enterTimer = setTimeout(() => { if (stripMode() && !peek()) { hoverOpened = true; setPeek(true); } }, 150);
+  };
+  const onSectionEnter = () => clearTimeout(leaveTimer);
+  const onSectionLeave = () => {
+    clearTimeout(enterTimer);
+    if (!peek() || !hoverOpened) return;
+    const check = () => { if (keepOpen()) leaveTimer = setTimeout(check, 100); else { hoverOpened = false; setPeek(false); } };
+    leaveTimer = setTimeout(check, 350);
+  };
+  const onKeyEsc = (e: KeyboardEvent) => { if (e.key === "Escape" && peek()) { hoverOpened = false; setPeek(false); } };
+  addEventListener("keydown", onKeyEsc);
+  const outside = (e: PointerEvent) => { if (peek() && section && !section.contains(e.target as Node) && !(e.target as Element).closest?.(".menu")) { hoverOpened = false; setPeek(false); } };
+  addEventListener("pointerdown", outside);
+  onCleanup(() => { removeEventListener("keydown", onKeyEsc); removeEventListener("pointerdown", outside); clearTimeout(enterTimer); clearTimeout(leaveTimer); });
 
   const onKey = (e: KeyboardEvent) => {
-    const list = rows().filter((r) => r.type !== "header");
-    const i = list.findIndex((r) => r.id === selectedKey());
+    const nav = list.rows().filter((r) => r.type !== "header");
+    const i = nav.findIndex((r) => r.id === selectedKey());
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      const next = list[Math.max(0, Math.min(list.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+      const next = nav[Math.max(0, Math.min(nav.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
       if (next) {
-        setSelectedKey(next.id);
-        virtualizer.scrollToIndex(rows().indexOf(next), { align: "auto" });
+        setSelectedKey(next.type === "child" ? next.parent.key : next.id);
+        list.virtualizer.scrollToIndex(list.rows().indexOf(next), { align: "auto" });
       }
     } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && i >= 0) {
-      const r = list[i];
+      const r = nav[i];
       if (r.type === "card" && r.compactRow && e.key === "ArrowRight") setCompactRows(r.session.key, false);
       else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, e.key === "ArrowRight");
       else if (r.type === "child" && e.key === "ArrowLeft") setSelectedKey(r.parent.key);
@@ -271,41 +365,42 @@ export function SessionList() {
     }
   };
 
+  const toggleGlyph = () => (!stripMode() ? "collapse-sessions" : peek() ? "pin" : "expand-sessions");
+  const toggleCaption = () => (!stripMode() ? "Collapse session list" : peek() ? "Keep session list open" : "Expand session list");
+
   return (
-    <section class="sessions-pane" classList={{ strip: stripMode(), peek: stripMode() && peek() }} aria-label="Sessions"
-      onMouseLeave={() => stripMode() && peek() && setTimeout(() => setPeek(false), 350)}>
-      <Show when={stripMode()}><Strip /></Show>
-      <div class="sp-panel" classList={{ overlay: stripMode() }} hidden={!expanded()}>
+    <section class="sessions-pane" ref={section} classList={{ strip: stripMode(), peek: stripMode() && peek() }} aria-label="Sessions"
+      style={{ "--pane-w": stripMode() ? `${STRIP_WIDTH}px` : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
+      onPointerEnter={onSectionEnter} onPointerLeave={onSectionLeave}>
+      <Show when={stripMode()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
+      <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}>
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? "Archive" : "Sessions"}</h1>
           <span class="grow" />
-          <button class="icon-btn" data-tip="New session (Ctrl+N)" onClick={() => setDialog("new-session")}><Icon name="plus" size={16} /></button>
-          <button class="icon-btn" data-tip={stripMode() ? "Keep session list open" : "Collapse session list"} onClick={() => { setPeek(false); setStripMode(!stripMode()); }}>
-            <Icon name={stripMode() ? "pin" : "panel-right-close"} size={15} style={stripMode() ? undefined : { transform: "scaleX(-1)" }} />
-          </button>
-          <button class="icon-btn" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="ellipsis" size={16} /></button>
+          <button class="icon-btn hd" data-tip="New session (Ctrl+N)" onClick={() => setDialog("new-session")}><Icon name="add" size={18} /></button>
+          <button class="icon-btn hd" data-tip={toggleCaption()} onClick={toggleDock}><Icon name={toggleGlyph()} size={18} /></button>
+          <button class="icon-btn hd" data-tip="Session and machine actions" onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
         <div class="sp-search">
-          <Icon name="search" size={14} class="sp-search-ico" />
-          <input class="field" type="search" placeholder={stateFilter() === "archived" ? "Search archive names and IDs…" : "Search sessions, IDs and messages…"} value={search()} onInput={(e) => setSearch(e.currentTarget.value)}
-            onKeyDown={(e) => e.key === "Escape" && setSearch("")} />
+          <input class="field" type="search" placeholder={stateFilter() === "archived" ? "Search archive names and IDs…" : "Search sessions, IDs and messages…"} value={search()}
+            onInput={(e) => setSearch(e.currentTarget.value)} onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)}
+            onKeyDown={(e) => e.key === "Escape" && setSearch("")} aria-label="Search sessions" />
         </div>
         <div class="sp-filters" role="toolbar" aria-label="State filter">
           <For each={FILTERS}>
             {(f) => (
-              <button class="fchip" classList={{ on: stateFilter() === f.id, hot: f.id === "attention" && counts().attention > 0 }} data-tip={`${f.tip} / ${f.count()}`}
+              <button class="fchip" classList={{ on: stateFilter() === f.id }} data-tip={`${f.tip} / ${f.count()}`}
                 aria-pressed={stateFilter() === f.id} onClick={() => setStateFilter(f.id)}>
-                <Icon name={f.icon} size={13} />
+                <Icon name={f.icon} size={16} />
                 <span class="tabular">{f.count()}</span>
               </button>
             )}
           </For>
-          <span class="grow" />
-          <ScopeButton icon="monitor" label="machines" selected={machineFilter()} set={setMachineFilter}
+          <ScopeButton icon="machines" label="machines" selected={machineFilter()} set={setMachineFilter}
             choices={machines.map((m) => ({ id: m.alias, label: `${m.alias}${m.thisComputer ? " (this machine)" : m.connection === "offline" ? " (offline)" : ""}`, count: catalog.rows.filter((s) => s.machine === m.alias).length }))} />
-          <ScopeButton icon="folder" label="projects" selected={projectFilter()} set={setProjectFilter}
+          <ScopeButton icon="projects" label="projects" selected={projectFilter()} set={setProjectFilter}
             choices={projects.map((p) => ({ id: p.id, label: p.name, count: catalog.rows.filter((s) => s.project === p.id).length }))} />
-          <ScopeButton icon="user-round-cog" label="accounts" selected={accountFilter()} set={setAccountFilter}
+          <ScopeButton icon="accounts" label="accounts" selected={accountFilter()} set={setAccountFilter}
             choices={accounts.map((a) => ({ id: a.id, label: `${a.label} · ${a.agent}`, count: a.sessions }))} />
         </div>
         <FilterChips />
@@ -313,43 +408,11 @@ export function SessionList() {
         <Show when={stateFilter() !== "archived"} fallback={<ArchiveList />}>
           <Show when={!searching()} fallback={<SearchResults />}>
             <Show when={demoState() === "normal" || demoState() === "error"} fallback={<ListPlaceholder />}>
-              <div class="sp-scroll" ref={scroller} tabindex="0" onKeyDown={onKey} role="tree"
+              <div class="sp-scroll" ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
                 aria-label="Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group">
-                <Show when={rows().length} fallback={<NoMatches />}>
-                  <div style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}>
-                    <For each={items()}>
-                      {(item) => {
-                        const row = () => rows()[item.index];
-                        return (
-                          <div class="vrow" data-type={row()?.type} style={{ transform: `translateY(${item.start}px)`, height: `${item.size}px` }}
-                            role="treeitem" aria-selected={row()?.id === selectedKey()}>
-                            <Show when={row()}>
-                              {(r) => {
-                                const v = r();
-                                if (v.type === "header") return <Header row={v} />;
-                                if (v.type === "child")
-                                  return (
-                                    <div class="rowhit" onClick={() => { setSelectedKey(v.parent.key); setSubagentOpen(v.child.id); setDetailTab("activity"); }}>
-                                      <ChildCard parent={v.parent} child={v.child} last={v.last} selected={false} />
-                                    </div>
-                                  );
-                                return (
-                                  <div class="rowhit" classList={{ "has-kids-open": v.expanded, multi: !!multi[v.session.key] }} onClick={(e) => selectSession(v.session.key, e)}
-                                    onDragOver={taskDragOver} onDragLeave={taskDragLeave} onDrop={(e) => taskDrop(e, v.session.name)}
-                                    onContextMenu={(e) => { if (!multi[v.session.key]) selectSession(v.session.key); openMenu(e, sessionMenu(v.session)); }}
-                                    onDblClick={() => setCompactRows(v.session.key, !compactRows[v.session.key])}>
-                                    <Show when={!v.compactRow} fallback={<CompactCard session={v.session} selected={selectedKey() === v.session.key || !!multi[v.session.key]} onExpand={() => setCompactRows(v.session.key, false)} />}>
-                                      <SessionCard session={v.session} selected={selectedKey() === v.session.key || !!multi[v.session.key]} expandable={v.expandable}
-                                        expanded={!!expandedChildren[v.session.key]} onToggleChildren={() => setExpandedChildren(v.session.key, !expandedChildren[v.session.key])} />
-                                    </Show>
-                                  </div>
-                                );
-                              }}
-                            </Show>
-                          </div>
-                        );
-                      }}
-                    </For>
+                <Show when={list.rows().length} fallback={<NoMatches />}>
+                  <div style={{ height: `${list.virtualizer.getTotalSize()}px`, position: "relative" }}>
+                    <For each={list.keys()}>{(id) => <ListRow id={id} list={list} />}</For>
                   </div>
                 </Show>
               </div>
@@ -360,12 +423,67 @@ export function SessionList() {
         <footer class="sp-foot">
           <span class="tabular ell">{searching() ? "" : shownSummary().shown ? `${shownSummary().shown} shown, ${shownSummary().working} working, ${shownSummary().attention} attention, 1 starting` : "No matching sessions"}</span>
           <span class="grow" />
-          <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, [{ heading: "Session creations" }, { label: "orders-v3 · Preparing worktree · 0:41", icon: "loader-circle" }, { label: "docs-index · Waiting for session", icon: "clock" }])}><Icon name="clock" size={13} /></button>
-          <button class="icon-btn small" data-tip="Mark all as read: current replies on every machine" onClick={() => toast("Marked as read", `${catalog.rows.filter((s) => s.unread).length} replies marked as read.`)}><Icon name="check-check" size={14} /></button>
-          <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" onClick={() => setDialog("drafts")}><Icon name="pencil" size={13} /></button>
+          <button class="icon-btn small" data-tip="Session creation status" onClick={(e) => openMenu(e, [{ heading: "Session creations" }, { label: "orders-v3 · Preparing worktree · 0:41", icon: "loader-circle" }, { label: "docs-index · Waiting for session", icon: "clock" }])}><Icon name="clock" size={16} /></button>
+          <button class="icon-btn small" data-tip="Mark all as read: current replies on every machine" onClick={() => toast("Marked as read", `${catalog.rows.filter((s) => s.unread).length} replies marked as read.`)}><Icon name="read-all" size={16} /></button>
+          <button class="icon-btn small" data-tip="Saved drafts: recover local drafts, including those from ended sessions" onClick={() => setDialog("drafts")}><Icon name="drafts" size={16} /></button>
         </footer>
       </div>
+      <Show when={!stripMode()}><ResizeHandle /></Show>
     </section>
+  );
+}
+
+/** QSplitter handle: 8 px, transparent; drag sets the docked width (min 270). */
+function ResizeHandle() {
+  const [dragging, setDragging] = createSignal(false);
+  const down = (e: PointerEvent) => {
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const startX = e.clientX, startW = sessionsWidth();
+    const right = !!el.closest(".layout-right");
+    setDragging(true);
+    const move = (m: PointerEvent) => {
+      const dx = (m.clientX - startX) * (right ? -1 : 1);
+      setSessionsWidth(Math.round(Math.max(270, Math.min(innerWidth - 56 - 520, startW + dx))));
+    };
+    const up = () => { setDragging(false); el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+  return <div class="sp-resize" classList={{ dragging: dragging() }} role="separator" aria-orientation="vertical" aria-label="Session list width" onPointerDown={down} />;
+}
+
+type RowSource = ReturnType<typeof useRows>;
+
+/** One virtual row, bound to its id: content updates in place while the row exists. */
+function ListRow(props: { id: string; list: RowSource }) {
+  const row = () => props.list.byId().get(props.id);
+  const top = () => props.list.startOf().get(props.id) ?? 0;
+  return (
+    <div class="vrow" data-type={row()?.type} style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}
+      role="treeitem" aria-selected={props.id === selectedKey()}>
+      <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} />}</Show>
+      <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
+        {(c) => (
+          <div class="rowhit" onClick={() => { setSelectedKey(c().parent.key); setSubagentOpen(c().child.id); setDetailTab("activity"); }}>
+            <ChildCard parent={c().parent} child={c().child} first={c().first} last={c().last} selected={selectedKey() === c().parent.key && subagentOpen() === c().child.id} />
+          </div>
+        )}
+      </Show>
+      <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
+        {(v) => (
+          <div class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key] }} onClick={(e) => selectSession(v().session.key, e)}
+            onDragOver={taskDragOver} onDragLeave={taskDragLeave} onDrop={(e) => taskDrop(e, v().session.name)}
+            onContextMenu={(e) => { if (!multi[v().session.key]) selectSession(v().session.key); openMenu(e, sessionMenu(v().session)); }}
+            onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setCompactRows(v().session.key, !compactRows[v().session.key]); }}>
+            <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setCompactRows(v().session.key, false)} />}>
+              <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
+                expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])} />
+            </Show>
+          </div>
+        )}
+      </Show>
+    </div>
   );
 }
 
@@ -436,40 +554,99 @@ function ArchiveList() {
   );
 }
 
-/** Collapsed list: square tiles (84 or 94 px) in a 98/108 px strip. */
-function Strip() {
+/**
+ * Collapsed list (SessionPanelDock Collapsed): one toggle, a search button as
+ * wide as a tile, the active and most urgent filters meeting in the middle,
+ * then the same rows at their heights: bands, 84 px square tiles, child rows.
+ */
+function Strip(props: { onEnter: () => void; onToggle: () => void }) {
+  const list = useRows(true);
+  // The active filter plus the first of attention, active, all that is not checked and has sessions.
+  const shown = createMemo(() => {
+    const urgent = (["attention", "active", "all"] as StateFilter[]).find((id) => id !== stateFilter() && (id === "all" || Number(FILTERS.find((f) => f.id === id)!.count()) > 0));
+    return FILTERS.filter((f) => f.id === stateFilter() || f.id === urgent);
+  });
   return (
-    <div class="strip-col" onMouseEnter={() => setTimeout(() => stripMode() && setPeek(true), 150)}>
-      <button class="strip-search" data-tip="Search sessions" data-tip-pos="right" onClick={() => setPeek(true)}><Icon name="search" size={15} /></button>
-      <div class="strip-filters">
-        <button class="fchip on"><Icon name="rows-3" size={12} /><span>{counts().all}</span></button>
-        <Show when={counts().attention}><button class="fchip hot" onClick={() => setStateFilter("attention")}><Icon name="bell" size={12} /><span>{counts().attention}</span></button></Show>
+    <div class="strip-col" onPointerEnter={props.onEnter}>
+      <button class="icon-btn hd strip-toggle" data-tip="Expand session list" data-tip-pos="right" onClick={props.onToggle}><Icon name="expand-sessions" size={18} /></button>
+      <button class="strip-search" data-tip="Search sessions" data-tip-pos="right" onClick={() => { setPeek(true); requestAnimationFrame(() => document.querySelector<HTMLInputElement>(".sp-panel.overlay .sp-search input")?.focus()); }}>
+        <Icon name="search" size={16} />
+      </button>
+      <div class="strip-filters" classList={{ single: shown().length < 2 }}>
+        <For each={shown()}>{(f) => (
+          <button class="fchip" classList={{ on: stateFilter() === f.id }} aria-pressed={stateFilter() === f.id} data-tip={`${f.tip} / ${f.count()}`} data-tip-pos="right" onClick={() => setStateFilter(f.id)}>
+            <Icon name={f.icon} size={16} /><span class="tabular">{f.count()}</span>
+          </button>
+        )}</For>
       </div>
-      <div class="strip-scroll">
-        <For each={listRows()}>
-          {(r) => r.type === "header" ? (
-            <div class="strip-band entity" style={{ "--entity": `var(--z-entity-palette-${projects.find((p) => p.id === r.project)?.colorIndex ?? 0})` }}
-              title={projects.find((p) => p.id === r.project)?.name}>
-              <span class="ell">{projects.find((p) => p.id === r.project)?.name}</span>
-              <span class="gb-count" classList={{ hot: !!(r.attention || r.unread), working: !r.attention && !r.unread && !!r.working, total: !r.attention && !r.unread && !r.working }}>
-                {r.attention ? `! ${r.attention}` : r.unread ? `● ${r.unread}` : r.working ? `● ${r.working}` : r.total}
-              </span>
-            </div>
-          ) : r.type === "card" ? (
-            <button class="strip-tile" classList={{ selected: selectedKey() === r.session.key }} data-state={badgeKind(r.session)}
-              title={`${r.session.name} · ${statusCaption(r.session)}\n${r.session.summary}\n${r.session.machine}`} onClick={() => selectSession(r.session.key)}>
-              <span class="st-top">
-                <StatusBadge kind={badgeKind(r.session)} caption="" />
-                <span class="st-agent"><AgentGlyph agent={r.session.agent} size={12} /></span>
-              </span>
-              <span class="st-name">{r.session.name}</span>
-              <span class="st-state">{r.session.status === "working" ? `${r.session.turnStartedMin}m` : statusCaption(r.session)}</span>
-              <Show when={r.session.unread}><i class="st-unread" /></Show>
-            </button>
-          ) : null}
-        </For>
+      <div class="strip-scroll" ref={list.ref}>
+        <div style={{ height: `${list.virtualizer.getTotalSize()}px`, position: "relative" }}>
+          <For each={list.keys()}>{(id) => <StripRow id={id} list={list} />}</For>
+        </div>
       </div>
       <div class="strip-count tabular">{shownSummary().shown}</div>
     </div>
+  );
+}
+
+function StripRow(props: { id: string; list: RowSource }) {
+  const row = () => props.list.byId().get(props.id);
+  const top = () => props.list.startOf().get(props.id) ?? 0;
+  return (
+    <div class="vrow" style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}>
+      <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <StripBand row={h()} />}</Show>
+      <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
+        {(c) => (
+          <button class="strip-child" title={`${c().child.name} · ${childStatus(c().child).caption}`}
+            onClick={() => { setSelectedKey(c().parent.key); setSubagentOpen(c().child.id); setDetailTab("activity"); }}>
+            <StatusBadge kind={childStatus(c().child).kind} caption="" iconOnly />
+            <span class="ell">{c().child.name}</span>
+          </button>
+        )}
+      </Show>
+      <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>{(v) => <StripTile row={v()} />}</Show>
+    </div>
+  );
+}
+
+/** Header band in the strip: one counter (attention > unread > working > total), name in the rest. */
+function StripBand(props: { row: Extract<Row, { type: "header" }> }) {
+  const p = () => projects.find((x) => x.id === props.row.project)!;
+  const counter = () => props.row.attention ? { text: `! ${props.row.attention}`, cls: "hot" } : props.row.unread ? { text: `● ${props.row.unread}`, cls: "hot" }
+    : props.row.working ? { text: `● ${props.row.working}`, cls: "working" } : { text: String(props.row.total), cls: "total" };
+  return (
+    <button class="group-band strip-band entity" style={{ "--entity": `var(--z-entity-palette-${p().colorIndex})` }} title={p().name}
+      onClick={() => setCollapsed(props.row.project, !collapsed[props.row.project])}>
+      <span class="ell">{p().name}</span>
+      <span class={`gb-count ${counter().cls}`}>{counter().text}</span>
+    </button>
+  );
+}
+
+/** A square tile: status and provider marks, name on up to two lines, state; the frame carries the state colour. */
+function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
+  const s = () => props.row.session;
+  const kind = () => badgeKind(s());
+  const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
+  const tip = () => [`${s().name} · ${statusCaption(s())}`, s().summary, `${s().cwd.split(/[\\/]/).pop()}${s().branch ? ` / ${s().branch}` : ""} · ${s().machine}`, s().git ? gitTooltip(s()) : "", s().optionalQuestions ? `${s().optionalQuestions} optional question(s) waiting` : ""].filter(Boolean).join("\n");
+  return (
+    <button class="strip-tile" classList={{ selected: selectedKey() === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
+      onContextMenu={(e) => { selectSession(s().key); openMenu(e, sessionMenu(s())); }}>
+      <span class="st-block">
+        <span class="st-top">
+          <span class="st-status">
+            <StatusBadge kind={kind()} caption="" iconOnly />
+            <Show when={s().unread && (s().status === "working" || s().status === "attention" || s().draft)}><i class="st-unread" classList={{ muted: !!s().muted }} /></Show>
+          </span>
+          <Show when={s().muted}><Icon name="mute" size={14} class="st-mute" /></Show>
+          <span class="st-provider">
+            <AgentBadge agent={s().agent} narrow />
+            <Show when={s().optionalQuestions}><i class="st-question" classList={{ muted: !!s().muted }}>?</i></Show>
+          </span>
+        </span>
+        <span class="st-name">{s().name}</span>
+        <span class="st-state" data-tone={kind()}>{stripCaption(s())}</span>
+      </span>
+    </button>
   );
 }

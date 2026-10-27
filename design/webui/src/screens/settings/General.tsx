@@ -1,6 +1,6 @@
 import { Show, createSignal, onMount, onCleanup } from "solid-js";
 import { Icon } from "../../lib/icons";
-import { compactList, setCompactList, setDialog, toast, demoState } from "../../state";
+import { setDialog, toast, demoState } from "../../state";
 import { DOWNLOAD_FOLDER, DOWNLOAD_USAGE, HGS_VERSION, INSTALLED_VERSION } from "../../mock/settings-extra";
 import { prefs, setPrefs, platform, dialogCtx, setDialogCtx } from "./store";
 import { SectionHead, Group, Row, ToggleRow, NumberField, Select, Actions, Status, Spinner } from "./ui";
@@ -11,7 +11,6 @@ export function SessionsSection() {
     <>
       <SectionHead title="Sessions" />
       <Group>
-        <ToggleRow label="Compact session rows" checked={compactList()} onChange={setCompactList} />
         <ToggleRow label="Expand the collapsed session list on hover" checked={prefs.expandOnHover} onChange={(v) => setPrefs("expandOnHover", v)} />
         <ToggleRow label="Hide projects without active sessions" checked={prefs.hideEmptyProjects} onChange={(v) => setPrefs("hideEmptyProjects", v)} />
         <ToggleRow label="Animate working sessions" checked={prefs.animateActivity} onChange={(v) => setPrefs("animateActivity", v)} />

@@ -39,7 +39,6 @@ export const [search, setSearch] = createSignal(params.get("q") ?? "");
 export const [collapsed, setCollapsed] = createStore<Record<string, boolean>>({});
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({ "ws:1": true });
 export const [compactRows, setCompactRows] = createStore<Record<string, boolean>>({ "ws:8": true });
-export const [compactList, setCompactList] = createSignal(false);
 export const [stripMode, setStripMode] = createSignal(params.get("strip") === "1");
 export const [menu, setMenu] = createSignal<{ x: number; y: number; items: MenuEntry[] } | undefined>();
 export const [dialog, setDialog] = createSignal<string | undefined>(params.get("dialog") ?? undefined);
@@ -48,6 +47,19 @@ export const [demoState, setDemoState] = createSignal<"normal" | "empty" | "erro
 export const [contentScale, setContentScale] = createSignal(1);
 export const [toasts, setToasts] = createStore<{ items: { id: number; title: string; text: string }[] }>({ items: [] });
 export const [selectedTask, setSelectedTask] = createSignal<string | undefined>(param("task", "T-4k2a9q"));
+
+// Docked session list width (QSplitter default 310, minimum 270). Remembered per
+// viewer like workspace/sessionsWidth; storage may be unavailable.
+const savedWidth = (() => { try { return Number(localStorage.getItem("zerus-mock-sessions-width")) || 0; } catch { return 0; } })();
+export const [sessionsWidth, setSessionsWidthRaw] = createSignal(savedWidth >= 270 ? savedWidth : 310);
+export function setSessionsWidth(width: number) {
+  setSessionsWidthRaw(width);
+  try { localStorage.setItem("zerus-mock-sessions-width", String(width)); } catch { /* ignore */ }
+}
+
+/** Mockup-only choice between Zerus mark animations (review toolbar). */
+export type LogoMotion = "qt" | "blades" | "ripple";
+export const [logoMotion, setLogoMotion] = createSignal<LogoMotion>(param<LogoMotion>("logo", "blades"));
 
 let toastId = 0;
 export function toast(title: string, text: string) {

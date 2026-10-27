@@ -1,12 +1,10 @@
 import type { JSX } from "solid-js";
 import { ICONS } from "./icons.generated";
+import { QT_ICONS, ZERUS_PETAL } from "./qt-icons";
 import type { AgentKind } from "../mock/types";
 
 // Static SVG markup: an icon costs one element and no reactive bookkeeping,
 // which matters in virtualized lists that mount rows while scrolling.
-
-const ZERUS_PETAL =
-  "M39 9 C54 3 70 13 77 29 C72 25 69 24 72 32 C81 44 77 58 65 65 C70 51 65 36 52 28 C40 21 30 25 22 34 C25 21 38 15 51 19 C57 21 56 16 51 13 C47 11 43 10 39 9 Z";
 
 const rotations = (count: number, body: (deg: number) => string) =>
   Array.from({ length: count }, (_, i) => body((360 / count) * i)).join("");
@@ -28,29 +26,92 @@ export const AGENT_LABEL: Record<AgentKind, string> = {
   opencode: "OpenCode",
 };
 
+// Lucide names used across the mockup that mean the same thing as a Qt glyph.
+// A name that is itself a Qt glyph (folder, settings, search, pause, play, copy,
+// send, pin, trash, calendar, terminal, video, git-branch, chevron-*) needs no
+// entry: Qt glyphs win by name. Names without a Qt counterpart stay Lucide.
+export const QT_ALIAS: Record<string, string> = {
+  bell: "attention",
+  "bell-off": "mute",
+  zap: "active",
+  archive: "archived",
+  monitor: "machines",
+  "folder-open": "folder",
+  "user-round-cog": "accounts",
+  users: "agents",
+  plus: "add",
+  ellipsis: "more",
+  "square-terminal": "terminal",
+  paperclip: "attachment",
+  mic: "microphone",
+  square: "stop",
+  "circle-stop": "stop",
+  "check-check": "read-all",
+  check: "task-check",
+  "external-link": "external",
+  "panel-right": "inspector",
+  "panel-right-close": "collapse-panel",
+  inbox: "task-inbox",
+  "list-todo": "task-list",
+  clock: "task-clock",
+  funnel: "task-funnel",
+  pencil: "task-edit",
+  "arrow-up-to-line": "task-top",
+  "pin-off": "unpinned",
+  "refresh-cw": "refresh",
+  "rotate-ccw": "reset",
+  x: "close",
+  "calendar-days": "calendar",
+  "circle-question-mark": "question",
+  "circle-alert": "context-warning",
+  "triangle-alert": "context-warning",
+  "git-compare-arrows": "git-diff",
+  link: "connect",
+};
+
+interface Glyph { html: string; viewBox: string; stroke: number; fill: boolean }
+
+// One entry per distinct name, so the table stays as small as the icon set.
+const resolved = new Map<string, Glyph>();
+
+/** A Qt glyph by name, then through QT_ALIAS, then the Lucide glyph. */
+export function resolveIcon(name: string): Glyph {
+  let glyph = resolved.get(name);
+  if (glyph) return glyph;
+  const alias = QT_ALIAS[name];
+  const qt = QT_ICONS[name] ?? (alias ? QT_ICONS[alias] : undefined);
+  glyph = qt
+    ? { html: qt.body, viewBox: `0 0 ${qt.view ?? 24} ${qt.view ?? 24}`, stroke: qt.stroke ?? 1.6, fill: !!qt.fill }
+    : { html: ICONS[name] ?? "", viewBox: "0 0 24 24", stroke: 2, fill: false };
+  resolved.set(name, glyph);
+  return glyph;
+}
+
 interface IconProps {
   name: string;
   size?: number;
   class?: string;
   style?: JSX.CSSProperties;
+  /** Pen width in grid units; defaults to the glyph's own Qt pen (1.6) or Lucide's 2. */
   stroke?: number;
 }
 
 export function Icon(props: IconProps) {
+  const glyph = () => resolveIcon(props.name);
   return (
     <svg
       class={props.class}
       style={props.style}
       width={props.size ?? 14}
       height={props.size ?? 14}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width={props.stroke ?? 2}
+      viewBox={glyph().viewBox}
+      fill={glyph().fill ? "currentColor" : "none"}
+      stroke={glyph().fill ? "none" : "currentColor"}
+      stroke-width={props.stroke ?? glyph().stroke}
       stroke-linecap="round"
       stroke-linejoin="round"
       aria-hidden="true"
-      innerHTML={ICONS[props.name] ?? ""}
+      innerHTML={glyph().html}
     />
   );
 }

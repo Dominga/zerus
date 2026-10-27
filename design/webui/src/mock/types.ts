@@ -71,7 +71,7 @@ export interface Session {
   cwd: string;
   branch?: string;
   worktree?: string;
-  git?: { ahead: number; behind: number; changed: number; state: "synced" | "diff" | "push" | "pull" | "unknown" };
+  git?: { ahead: number; behind: number; changed: number; conflicts?: number; state: "synced" | "diff" | "push" | "pull" | "unknown" };
   status: Status;
   phase?: "tool" | "approval" | "thinking" | "compacting";
   summary: string;

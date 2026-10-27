@@ -55,6 +55,7 @@ function tokenType(group: string, key: string): TokenType | undefined {
   switch (group) {
     case "color":
     case "agent":
+    case "list":
       return "color";
     case "entity":
       return key === "palette" ? "colors" : "percent";

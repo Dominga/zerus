@@ -32,6 +32,11 @@ pub(crate) fn subagent_call(event: &Value) -> bool {
         && matches!(string(event, "tool_name"), "Agent" | "Task")
 }
 
+/// The same tool, on any event (PostToolUse removes the answered call).
+pub(crate) fn subagent_tool(event: &Value) -> bool {
+    string(event, "agent_id").is_empty() && matches!(string(event, "tool_name"), "Agent" | "Task")
+}
+
 /// A definition model from `.claude/agents/<type>.md` below `folder`.
 fn definition_model(folder: &str, kind: &str) -> Option<String> {
     let path = Path::new(folder).join(".claude").join("agents").join(format!("{kind}.md"));
@@ -47,21 +52,44 @@ fn group_path(session: &str) -> PathBuf {
     root().join(format!("subagents-turn-{session}.json"))
 }
 
-/// Appends one call to the current turn's group and returns the group.
-pub(crate) fn group_add(session: &str, input: &Value) -> Vec<Value> {
-    let path = group_path(session);
-    let mut calls: Vec<Value> = fs::read_to_string(&path)
+fn read_group(session: &str) -> Vec<Value> {
+    fs::read_to_string(group_path(session))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    calls.push(input.clone());
-    let _ = fs::write(&path, serde_json::to_string(&calls).unwrap_or_default());
-    calls
+        .unwrap_or_default()
 }
 
-/// A new owner prompt starts a new turn.
+/// Adds one unanswered call of this turn and returns the still-unanswered
+/// calls, so the reason names only what this answer decides.
+pub(crate) fn group_add(session: &str, tool_use_id: &str, input: &Value) -> Vec<Value> {
+    let mut group = read_group(session);
+    group.push(json!({"id":tool_use_id,"input":input}));
+    let _ = atomic(&group_path(session), &serde_json::to_string(&group).unwrap_or_default());
+    group.iter().map(|entry| entry["input"].clone()).collect()
+}
+
+/// A call answered or denied no longer belongs to the open group.
+pub(crate) fn group_remove(session: &str, tool_use_id: &str) {
+    let mut group = read_group(session);
+    let before = group.len();
+    group.retain(|entry| entry["id"].as_str() != Some(tool_use_id));
+    if group.len() != before {
+        let _ = atomic(&group_path(session), &serde_json::to_string(&group).unwrap_or_default());
+    }
+}
+
+/// A new owner prompt, Stop or SessionEnd ends the turn.
 pub(crate) fn group_reset(session: &str) {
     let _ = fs::remove_file(group_path(session));
+}
+
+/// Claude's print mode has nobody to answer a native ask.
+pub(crate) fn can_ask() -> bool {
+    can_ask_with(std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref())
+}
+
+fn can_ask_with(entry: Option<&str>) -> bool {
+    entry.is_none_or(|entry| entry == "cli")
 }
 
 pub(crate) fn describe(input: &Value, folder: &str, session_model: &str) -> String {
@@ -168,6 +196,34 @@ mod tests {
             Some(value) => std::env::set_var("HGS_STATE_DIR", value),
             None => std::env::remove_var("HGS_STATE_DIR"),
         }
+    }
+
+    #[test]
+    fn the_turn_group_drops_answered_calls_and_resets() {
+        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = std::env::var("HGS_STATE_DIR").ok();
+        std::env::set_var("HGS_STATE_DIR", dir.path());
+        let first = call("Explore", "", "", "One");
+        let second = call("general", "", "", "Two");
+        assert_eq!(group_add("s", "t1", &first).len(), 1);
+        assert_eq!(group_add("s", "t2", &second).len(), 2);
+        group_remove("s", "t1");
+        assert_eq!(read_group("s").len(), 1);
+        assert_eq!(read_group("s")[0]["id"], "t2");
+        group_reset("s");
+        assert!(read_group("s").is_empty());
+        match old {
+            Some(value) => std::env::set_var("HGS_STATE_DIR", value),
+            None => std::env::remove_var("HGS_STATE_DIR"),
+        }
+    }
+
+    #[test]
+    fn print_mode_cannot_be_asked() {
+        assert!(can_ask_with(None));
+        assert!(!can_ask_with(Some("sdk-cli")), "a print-mode run has nobody to answer");
+        assert!(can_ask_with(Some("cli")));
     }
 
     #[test]

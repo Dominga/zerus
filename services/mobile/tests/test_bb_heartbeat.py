@@ -25,6 +25,11 @@ FORWARDED = {key for key, use in LISTING_KEYS.items() if use == "forwarded"} | C
 PEER_ALIAS = "bb-private-peer-alias"
 SCREEN_TEXT = "BB-SCREEN-SENTINEL last terminal line"
 PRESENCE = {"idle_seconds": 4.0, "locked": False, "locked_seconds": None}
+# U30: the session's state reaches phones as hgs lists it.
+STATE = {"session_state": "deps", "last_active": 150.0,
+         "state_reason": {"kind": "long_operation", "text": "Waiting for build --wait - long operation, 1m so far",
+                          "command": "build --wait", "tool": "Bash", "since": 100.0},
+         "cache_ttl": {"seconds": 3600, "source": "settings", "kept_warm": False}}
 
 
 def hgs_listing_keys(source: str) -> set[str]:
@@ -39,7 +44,7 @@ def hgs_listing_keys(source: str) -> set[str]:
 
 class HeartbeatPrivacyTests(BlackBoxCase):
     def full_listing(self) -> dict:
-        busy = session_row(process_work={"count": 1, "started_at": 100.0, "command": "build --wait", "sampled_at": 200.0})
+        busy = session_row(process_work={"count": 1, "started_at": 100.0, "command": "build --wait", "sampled_at": 200.0}, **STATE)
         return listing(archive_revision="0"*64,archive_paging=True,sessions=[busy], peers=[PEER_ALIAS + ".example.invalid"], local_sessions=True,
                        local_host={"state": "running"}, desktop_presence=PRESENCE,
                        ended_launches=[{"launch_id": str(uuid.uuid4()), "name": "claude/example/failed",
@@ -66,6 +71,8 @@ class HeartbeatPrivacyTests(BlackBoxCase):
             # Observation clocks would defeat the relay's unchanged-snapshot shortcut.
             self.assertEqual(snapshot["sessions"][0]["process_work"],
                              {"count": 1, "started_at": 100.0, "command": "build --wait"})
+            for key, value in STATE.items():
+                self.assertEqual(snapshot["sessions"][0][key], value, key)
 
     def test_reviewed_listing_keys_match_the_hgs_source(self):
         cli = ROOT / "src/cli.rs"

@@ -413,7 +413,11 @@ pub(super) fn dsh_work(record: &Value, inspected: &Value, live: bool) -> Value {
         && matches!(string(j, "source"), "dsh_jobs" | "dsh_calls")
         && matches!(string(j, "status"), "starting" | "running" | "stopping")).collect();
     let first = current.iter().min_by(|a,b| a["started_at"].as_f64().unwrap_or(0.).total_cmp(&b["started_at"].as_f64().unwrap_or(0.)));
-    json!({"count":current.len(),"started_at":first.map(|j|j["started_at"].clone()),
+    let mut jobs = current.clone();
+    jobs.sort_by(|a,b| a["started_at"].as_f64().unwrap_or(0.).total_cmp(&b["started_at"].as_f64().unwrap_or(0.)));
+    let jobs: Vec<_> = jobs.iter().take(super::session_state::MAX_JOBS)
+        .map(|j| json!({"command":journal::clipped(&j["command"],240),"started_at":j["started_at"]})).collect();
+    json!({"count":current.len(),"started_at":first.map(|j|j["started_at"].clone()),"jobs":jobs,
         "command":first.map(|j|journal::clipped(&j["command"],240)).unwrap_or_default(),"sampled_at":now()})
 }
 fn read_tail(path: &Path) -> Result<(String, bool)> {

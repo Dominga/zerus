@@ -44,12 +44,27 @@ pub(super) fn absolute_root() -> Result<PathBuf> {
 }
 
 pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
+    write_atomic(path, contents, false)
+}
+
+/// `atomic` for a file whose privacy is checked when it is read (#526): on
+/// Windows the new file gets a protected DACL for this user only before
+/// anything is written, as a Unix temp file is created 0600; an inherited ACL
+/// is not private on every computer.
+pub(super) fn atomic_private(path: &Path, contents: &str) -> Result<()> {
+    write_atomic(path, contents, true)
+}
+
+fn write_atomic(path: &Path, contents: &str, private: bool) -> Result<()> {
     let parent = path.parent().ok_or("cannot write file without parent")?;
     private_dir(parent)?;
     let mut temp = tempfile::Builder::new()
         .prefix(".hgs-")
         .tempfile_in(parent)
         .map_err(|e| e.to_string())?;
+    if private {
+        crate::platform::owner_only_file(temp.path()).map_err(|e| e.to_string())?;
+    }
     temp.write_all(contents.as_bytes())
         .map_err(|e| e.to_string())?;
     temp.as_file().sync_all().map_err(|e| e.to_string())?;

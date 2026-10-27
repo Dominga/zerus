@@ -7,12 +7,19 @@ use worktrees::git;
 
 /// The bound of one local git read: its process start (about 0.1 s on Windows)
 /// and its work. Each read has its own, so a slow read never leaves the reads
-/// after it already expired.
-const LOCAL_READ: Duration = Duration::from_millis(700);
+/// after it already expired. 2 s by the owner's decision (#526): while other
+/// agents build, one git status takes up to 1.2 s here, and 0.7 s made the
+/// desktop's evidence "timeout" on many refreshes.
+const LOCAL_READ: Duration = Duration::from_secs(2);
 /// One read of the changes: a diff or the untracked files.
-const CHANGES_READ: Duration = Duration::from_millis(800);
+const CHANGES_READ: Duration = Duration::from_secs(2);
 /// The remote check: its endpoint and one ls-remote.
 const REMOTE_READ: Duration = Duration::from_secs(3);
+/// The longest one `inspect` can take: five local reads, two changes reads,
+/// the remote check and the recheck after it. Its callers wait longer: the
+/// desktop 25 s (30 s over SSH) and the phone connector 25 s.
+#[cfg(test)]
+const INSPECT_LONGEST: Duration = Duration::from_secs(5 * 2 + 2 * 2 + 3 + 2);
 
 /// The bound of a read: the product's own, or the one a test sets for itself.
 fn bound(product: Duration) -> Duration {
@@ -350,8 +357,9 @@ mod tests {
         let (_dir, repo) = changed_checkout();
         // Reading the changes takes longer than a read's bound: when the reads
         // shared one deadline, every read after the changes started expired
-        // and the checkout read as unavailable.
-        let bound = Duration::from_secs(5);
+        // and the checkout read as unavailable. Each read keeps half of the
+        // patient bound, which a busy computer's git stays well within.
+        let bound = PATIENT / 2;
         let status = with_bound(bound, || {
             SLOW_CHANGES.with(|slow| slow.set(bound + Duration::from_millis(500)));
             inspect(&repo)
@@ -359,6 +367,14 @@ mod tests {
         assert_eq!(status["state"], "ok", "{status}");
         assert!(status["root"].is_string() && status["common_dir"].is_string(), "{status}");
         assert_eq!(status["remote_state"], "no_upstream", "{status}");
+    }
+
+    #[test]
+    fn every_read_has_its_own_bound_and_the_callers_wait_for_all_of_them() {
+        assert_eq!((LOCAL_READ, CHANGES_READ, REMOTE_READ), (Duration::from_secs(2), Duration::from_secs(2), Duration::from_secs(3)));
+        assert_eq!(INSPECT_LONGEST, LOCAL_READ * 5 + CHANGES_READ * 2 + REMOTE_READ + LOCAL_READ);
+        // The desktop's and the phone connector's timeouts for git-status.
+        assert!(INSPECT_LONGEST < Duration::from_secs(25));
     }
 
     #[test]

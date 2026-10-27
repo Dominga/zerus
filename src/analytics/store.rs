@@ -52,7 +52,8 @@ impl Store {
             return Ok(None);
         }
         if create {
-            crate::platform::private_dir(root)?;
+            // #526: made owner-only here, never trusted to inherit it.
+            crate::platform::owner_only_dir(root)?;
         }
         ensure!(
             crate::platform::verify_private(root, crate::platform::Private::Directory)?,

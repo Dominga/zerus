@@ -774,8 +774,12 @@ time. These describe the current checkout shared by sessions in the same folder,
 not ownership of an individual feature or an archived conversation.
 
 Git reads run separately from agent/fleet polling, with at most two concurrent
-requests. Local evidence refreshes about every 15 seconds and expires after 30;
-read-only remote verification is cached for at most 60 seconds. A changed tracking
+requests. Each Git read of the evidence has its own bound: 2 seconds for a local
+read, 3 seconds for the remote check, so a busy computer's slow read never
+expires the reads after it; one status takes at most 19 seconds and the desktop
+waits 25 (30 over SSH). A read past its bound reports `timeout` and the next
+refresh tries again. Local evidence refreshes about every 15 seconds and expires
+after 30; read-only remote verification is cached for at most 60 seconds. A changed tracking
 OID or remote endpoint invalidates that verification. Nothing fetches, commits or
 pushes automatically. A muted cloud question mark means verification is unavailable,
 expired, detached or lacks a remote upstream. Outgoing/incoming counts become muted

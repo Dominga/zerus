@@ -106,7 +106,8 @@ fn answers(question: &Value) -> Option<Value> {
 }
 
 fn open(root: &Path) -> Result<Connection> {
-    platform::private_dir(root)?;
+    // #526: made owner-only here, never trusted to inherit it.
+    platform::owner_only_dir(root)?;
     if !platform::verify_private(root, platform::Private::Directory)? {
         return Err(bad("The approval journal folder must be private"));
     }

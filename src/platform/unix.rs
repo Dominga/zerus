@@ -161,6 +161,15 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
         .mode(0o700)
         .create(path)
 }
+/// Create a directory and its missing parents, each new one owner-only, for a
+/// store whose privacy is checked (#526: on Windows each gets a protected DACL).
+pub fn owner_only_dir(path: &Path) -> io::Result<()> {
+    private_dir(path)
+}
+/// Owner-only access for a file this process has just created.
+pub fn owner_only_file(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
 /// Whether `path` itself (a final symbolic link is not followed) is the
 /// expected kind of entry, owned by this user, closed to everyone else and,
 /// for a file, linked once.

@@ -1333,7 +1333,9 @@ void HgsClient::pumpGitStatus()
         };
         QStringList args{"git-status", "--path", path, "--json"};
         if (!host.isEmpty()) args.prepend('@' + host);
-        runHgs(m_hgs, args, host.isEmpty() ? 5000 : 10000, this,
+        // git-status bounds each of its git reads (2 s by the owner's
+        // decision, #526); all of them together take at most 19 s.
+        runHgs(m_hgs, args, host.isEmpty() ? 25000 : 30000, this,
             [finish](const QByteArray &out) { finish(out.size() <= 32768 ? QJsonDocument::fromJson(out).object() : QJsonObject()); },
             [finish](const QString &, const QString &) { finish({}); });
     }

@@ -26,6 +26,10 @@ struct TaskRowState {
     QHash<int, QString> blocked;     // TaskAction → why it is unavailable now
     QString anyNow;                  // To do and Backlog: the session an Any task goes to now
     bool showStage = false;          // mixed-stage filter: retain each card's workflow label
+    bool operator==(const TaskRowState &o) const {
+        return mine == o.mine && sessionStatus == o.sessionStatus && statusKind == o.statusKind && blocked == o.blocked
+            && anyNow == o.anyNow && showStage == o.showStage;
+    }
 };
 
 // One task in the list: a fixed-height header with the meta on the left and the
@@ -73,6 +77,10 @@ private:
     TaskItem m_task;
     TaskRowState m_state;
     TaskColors m_colors;
+    // What setTask last showed beyond its arguments: the In progress age, an
+    // older accepted task's date and the compact layout.
+    QString m_shownAge;
+    bool m_olderDone = false, m_shownCompact = false;
     TaskGlyph *m_glyph;
     TaskStatusPill *m_status;
     QLabel *m_meta, *m_tail, *m_text, *m_summary;

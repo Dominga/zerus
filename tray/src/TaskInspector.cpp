@@ -476,8 +476,9 @@ void TaskInspector::refresh() {
         }
         auto state = m_board->rowState(task); state.showStage = m_stage == QLatin1String("current");
         row->setTask(task, state, colors, view.now);
-        row->setProperty("expanded", task.uuid == m_selected);
-        m_cards->removeWidget(row); m_cards->insertWidget(index++, row); row->show(); keep.insert(task.uuid);
+        if (row->property("expanded").toBool() != (task.uuid == m_selected)) { row->setProperty("expanded", task.uuid == m_selected); row->update(); }
+        if (m_cards->indexOf(row) != index) { m_cards->removeWidget(row); m_cards->insertWidget(index, row); }
+        ++index; row->show(); keep.insert(task.uuid);
         if (task.uuid == m_selected) selectedShown = true;
     }
     for (auto it = m_rows.begin(); it != m_rows.end();) {

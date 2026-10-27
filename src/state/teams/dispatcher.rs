@@ -205,6 +205,8 @@ pub(crate) enum Step {
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
     HandOut { task: u32, member: String },
+    /// U31: an idle member takes an independent task of the next draft phase.
+    WorkAhead { task: u32, member: String },
     /// The member's first turn after the hand-off began (A1).
     Started { task: u32 },
     /// The hand-out did not start in `start_timeout_seconds` (A1).
@@ -918,6 +920,42 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         busy.insert(member.id.as_str());
         steps.push(if member.needs_settings() { Step::Settings { member: member.id.clone() } } else { Step::HandOut { task: id, member: member.id.clone() } });
     }
+    // U31: work ahead. An idle member may take an independent task of the next
+    // draft phase: no dependency on an open running-phase task and no file it
+    // names that an open running task also names.
+    if team.settings.work_ahead {
+        let running: Vec<&Task> = team.tasks.iter().filter(|task| {
+            !task.status.finished() && team.phases.iter().find(|phase| phase.n == task.phase).is_none_or(|phase| phase.state == PhaseState::Approved)
+        }).collect();
+        let running_ids: BTreeSet<u32> = running.iter().map(|task| task.id).collect();
+        let files = |text: &str| -> BTreeSet<String> {
+            text.split_whitespace()
+                .map(|word| word.trim_matches(|c: char| "`'\",;()[]{}".contains(c)))
+                .filter(|word| word.contains('/') || word.contains('\\') || word.rsplit_once('.').is_some_and(|(_, ext)| !ext.is_empty() && ext.len() <= 4))
+                .map(str::to_lowercase)
+                .collect()
+        };
+        let running_files: BTreeSet<String> = running.iter().flat_map(|task| files(&format!("{} {}", task.title, task.description))).collect();
+        for member in &team.members {
+            if !available(member, &busy) || busy.contains(member.id.as_str()) {
+                continue;
+            }
+            let draft = team.phases.iter().filter(|phase| phase.state == PhaseState::Draft).map(|phase| phase.n).min();
+            let Some(draft) = draft else { break };
+            let task = team.tasks.iter().find(|task| {
+                task.phase == draft
+                    && matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
+                    && task.assignee == member.id
+                    && task.kind == TaskKind::Task
+                    && !task.deps.iter().any(|dep| running_ids.contains(&dep.task))
+                    && files(&format!("{} {}", task.title, task.description)).is_disjoint(&running_files)
+            });
+            if let Some(task) = task {
+                busy.insert(member.id.as_str());
+                steps.push(Step::WorkAhead { task: task.id, member: member.id.clone() });
+            }
+        }
+    }
     coalesce_lead(steps)
 }
 
@@ -1083,13 +1121,21 @@ pub(crate) fn hand_off_text_with(
     let mut task_in_prompt = false;
     if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
         // U25: the role's prompt blocks in its order, when the catalog has one.
-        let (ordered, has_task) = super::catalog::load().ok().and_then(|catalog| {
-            let role_name = team.role_of(&attempt.member);
-            let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-            let has_task = role.prompt_order.iter().any(|key| key == "task")
-                && !role.prompt_off.iter().any(|key| key == "task");
-            Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
-        }).unwrap_or((None, false));
+        // N3: a member's own snapshot wins; an old member keeps today's live text.
+        let snapshot = team.member(&attempt.member).and_then(|member| member.prompt_snapshot.clone());
+        let (ordered, has_task) = if let Some(snapshot) = snapshot {
+            let has_task = snapshot.prompt_order.iter().any(|key| key == "task")
+                && !snapshot.prompt_off.iter().any(|key| key == "task");
+            (super::catalog::prompt_order_text_snapshot(&snapshot, prompt, Some(task)), has_task)
+        } else {
+            super::catalog::load().ok().and_then(|catalog| {
+                let role_name = team.role_of(&attempt.member);
+                let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
+                let has_task = role.prompt_order.iter().any(|key| key == "task")
+                    && !role.prompt_off.iter().any(|key| key == "task");
+                Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
+            }).unwrap_or((None, false))
+        };
         task_in_prompt = has_task;
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
             text += &ordered;
@@ -1193,6 +1239,7 @@ fn continuation_extra(task: &Task) -> String {
             text += &format!("- {question}\n");
         }
     }
+    text += "\nBefore a test run expected to take more than about ten minutes (the full test_sessionswindow, the full Rust suite, repeated GUI runs), ask the lead with `hgs team ask --json`, naming the suite and why.\n";
     text += "The previous session worked in this folder; check the working tree before you continue.\n";
     text
 }
@@ -1307,11 +1354,15 @@ pub(crate) fn brief_text(team: &Team) -> String {
         text += &format!("Folder: {}\n", team.folder);
     }
     if let Some(prompt) = team.member(&team.lead).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
-        let ordered = super::catalog::load().ok().and_then(|catalog| {
-            let role_name = team.role_of(&team.lead);
-            let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-            super::catalog::prompt_order_text(role, prompt, None, "")
-        });
+        let ordered = if let Some(snapshot) = team.member(&team.lead).and_then(|member| member.prompt_snapshot.clone()) {
+            super::catalog::prompt_order_text_snapshot(&snapshot, prompt, None)
+        } else {
+            super::catalog::load().ok().and_then(|catalog| {
+                let role_name = team.role_of(&team.lead);
+                let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
+                super::catalog::prompt_order_text(role, prompt, None, "")
+            })
+        };
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
             text += &ordered;
         } else {
@@ -1320,6 +1371,11 @@ pub(crate) fn brief_text(team: &Team) -> String {
     }
     if !team.lead_protocol.trim().is_empty() {
         text += &format!("\nTeam protocol:\n{}\n", team.lead_protocol.trim());
+    }
+    if let Ok(catalog) = super::catalog::load() {
+        if !catalog.planning_rules.trim().is_empty() {
+            text += &format!("\nPlanning rules (v{}):\n{}\n", catalog.version, catalog.planning_rules.trim());
+        }
     }
     text += &format!(
         "\nPlan the work as tasks with acceptance criteria and dependencies (hard: waits for Accepted; soft: may start \
@@ -3323,6 +3379,15 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 hand_out(store, &team.id, *task, member, None, host)
             }
         }
+        Step::WorkAhead { task, member } => {
+            hand_out(store, &team.id, *task, member, None, host)?;
+            change(store, &team.id, |team, _| {
+                if let Some(attempt) = team.task_mut(*task).and_then(|task| task.attempts.last_mut()) {
+                    attempt.worked_ahead = true;
+                }
+                Ok(())
+            })
+        }
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
@@ -4240,6 +4305,66 @@ mod tests {
     }
     fn session(name: &str, run: &str, free: bool) -> Seen {
         Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
+    }
+
+    #[test]
+    fn a_member_prompt_snapshot_wins_over_the_live_catalog() {
+        let mut t = team();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt = "Backend prompt".into();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = Some(crate::state::teams::model::PromptSnapshot {
+            prompt_order: vec!["protocol".into()],
+            protocol_extra: "SNAPSHOT EXTRA".into(),
+            ..Default::default()
+        });
+        let task = t.task(1).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.contains("SNAPSHOT EXTRA"), "{text}");
+        // An old member without a snapshot keeps today's live catalog text.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = None;
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(!text.contains("SNAPSHOT EXTRA"), "{text}");
+    }
+
+    #[test]
+    fn work_ahead_hands_only_an_independent_draft_task() {
+        let mut t = team();
+        // The running phase has no ready work: every task waits for a decision.
+        for task in &mut t.tasks {
+            if task.phase == 1 {
+                task.status = TaskStatus::Submitted;
+                task.attempts.push(Attempt { n: 1, state: AttemptState::Reported, member: "dev".into(), ..Default::default() });
+            }
+        }
+        let mut events = Vec::new();
+        ops::apply(&mut t, "extend", &json!({"phase_title":"Next","tasks":[
+            {"id":4,"title":"Independent docs","assignee":"dev"},
+            {"id":5,"title":"Depends on API","assignee":"dev","deps":[{"task":1,"kind":"hard"}]}]}),
+            &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        let seen = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
+        // Off: nothing from the draft phase is handed out.
+        assert!(!steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::WorkAhead { .. })));
+        t.settings.work_ahead = true;
+        let found = steps(&t, &seen, 100.0);
+        assert!(found.contains(&Step::WorkAhead { task: 4, member: "dev".into() }), "{found:?}");
+        assert!(!found.iter().any(|step| matches!(step, Step::WorkAhead { task: 5, .. })), "{found:?}");
+        // U31: its report waits Submitted and cannot be accepted before the
+        // phase is approved; approval opens it.
+        t.task_mut(4).unwrap().status = TaskStatus::Submitted;
+        t.task_mut(4).unwrap().attempts.push(Attempt { n: 1, state: AttemptState::Reported, member: "dev".into(), worked_ahead: true, ..Default::default() });
+        let mut events = Vec::new();
+        let error = ops::apply(&mut t, "accept", &json!({"task":4}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+        assert!(error.contains("worked ahead of phase 2"), "{error}");
+        // A discarded phase revokes the worked-ahead attempt with its task.
+        let mut discarded = t.clone();
+        discarded.task_mut(4).unwrap().status = TaskStatus::Draft;
+        discarded.task_mut(4).unwrap().attempts.clear();
+        ops::apply(&mut discarded, "discard-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        assert!(discarded.task(4).is_none(), "the discarded draft's worked-ahead task goes");
+        t.task_mut(4).unwrap().status = TaskStatus::Draft;
+        ops::apply(&mut t, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+        t.task_mut(4).unwrap().status = TaskStatus::Submitted;
+        ops::apply(&mut t, "accept", &json!({"task":4}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     }
 
     #[test]

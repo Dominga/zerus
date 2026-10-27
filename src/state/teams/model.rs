@@ -125,6 +125,10 @@ pub(crate) struct Settings {
     /// waiting when the owner turns it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_accept: bool,
+    /// U31: let an idle member take an independent task of the next draft
+    /// phase; the result waits for that phase's approval.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub work_ahead: bool,
 }
 
 fn default_max_members() -> usize {
@@ -200,6 +204,7 @@ impl Default for Settings {
             tree_sessions: default_tree_sessions(),
             subteam_approval: SubteamApproval::default(),
             auto_accept: false,
+            work_ahead: false,
         }
     }
 }
@@ -240,11 +245,29 @@ pub(crate) enum MemberFolder {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PromptSnapshot {
+    #[serde(default)]
+    pub prompt_order: Vec<String>,
+    #[serde(default)]
+    pub prompt_off: Vec<String>,
+    #[serde(default)]
+    pub protocol_extra: String,
+    #[serde(default)]
+    pub task_template: String,
+    #[serde(default)]
+    pub notes: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Member {
     /// Stable within the team, such as `backend`.
     pub id: String,
     #[serde(default)]
     pub role: String,
+    /// N3: the role's prompt blocks copied when the member joined, so a later
+    /// catalog edit never changes a running team mid-phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_snapshot: Option<PromptSnapshot>,
     pub agent: String,
     #[serde(default)]
     pub account: String,
@@ -829,6 +852,9 @@ pub(crate) struct Attempt {
     pub member: String,
     #[serde(default)]
     pub state: AttemptState,
+    /// U31: this attempt worked a task of a draft phase before its approval.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worked_ahead: bool,
     #[serde(default)]
     pub sent_at: f64,
     #[serde(default)]

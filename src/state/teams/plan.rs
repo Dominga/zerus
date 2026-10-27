@@ -323,22 +323,19 @@ pub(crate) struct Totals {
     pub decided: usize,
 }
 
-/// A review, QA or acceptance task, by the role of its assignee and then its
-/// title (C7): the tasks a fan-in barrier usually waits for.
-fn review_kind(role: &str, title: &str) -> Option<&'static str> {
-    let classify = |haystack: &str| {
-        let haystack = haystack.to_lowercase();
-        if haystack.contains("accept") {
-            Some("accept")
-        } else if haystack.contains("qa") || haystack.contains("test") || haystack.contains("verif") {
-            Some("qa")
-        } else if haystack.contains("review") {
-            Some("review")
-        } else {
-            None
-        }
-    };
-    classify(role).or_else(|| classify(title))
+/// A review, QA or acceptance task, by the role of its assignee (C7, C10:
+/// never by words in its title).
+fn review_kind(role: &str, _title: &str) -> Option<&'static str> {
+    let haystack = role.to_lowercase();
+    if haystack.contains("accept") {
+        Some("accept")
+    } else if haystack.contains("qa") || haystack.contains("test") || haystack.contains("verif") {
+        Some("qa")
+    } else if haystack.contains("review") {
+        Some("review")
+    } else {
+        None
+    }
 }
 
 /// The plan-health block (C7): the plan covers every task not yet decided,
@@ -491,6 +488,62 @@ fn health_of(team: &Team, scope: &[Task]) -> Health {
                 load.on_critical_path,
                 health.chain
             ));
+        }
+    }
+    // U28 (22): a phase above 25 tasks.
+    if open.len() > 25 {
+        health.warnings.push(format!("(22) {} tasks in one phase; offer a phase split above 25", open.len()));
+    }
+    // U28 (9): lane weight, volume times the kind's cost (a desktop task ~3).
+    let mut weights: BTreeMap<String, usize> = BTreeMap::new();
+    for task in &open {
+        let desktop = {
+            let text = format!("{} {}", task.title, task.description).to_lowercase();
+            ["qt", "desktop", "tray", "gui", "test_sessionswindow", "test_teamsui"].iter().any(|word| text.contains(word))
+        };
+        *weights.entry(task.assignee.clone()).or_default() += if desktop { 3 } else { 1 };
+    }
+    if let (Some(min), Some(max)) = (weights.values().min(), weights.values().max()) {
+        if *min > 0 && *max * 3 > *min * 4 {
+            health.warnings.push(format!("(9) lane weights differ by more than a third: {min} to {max}"));
+        }
+    }
+    // U28 (13): Expert/ProExpert tasks only after three returns.
+    for task in &open {
+        let role = team.member(&task.assignee).map(|member| member.role.to_lowercase()).unwrap_or_default();
+        if (role.contains("expert")) && task.history.len() < 3 {
+            health.warnings.push(format!("(13) task #{} goes to the {role} without three returns", task.id));
+        }
+    }
+    // U28 (12): QA/reviewer tasks that implement.
+    for task in &open {
+        let role = team.member(&task.assignee).map(|member| member.role.as_str()).unwrap_or_default();
+        let title = task.title.to_lowercase();
+        if review_kind(role, &task.title).is_some() && ["implement", "fix", "build", "write code"].iter().any(|word| title.contains(word)) {
+            health.warnings.push(format!("(12) task #{} makes the reviewer implement", task.id));
+        }
+    }
+    // U28 (7): a hard dependency on an earlier phase.
+    for task in &open {
+        for dep in hard_deps(task, all_hard) {
+            if let Some(found) = by_id.get(&dep) {
+                if found.phase < task.phase {
+                    health.warnings.push(format!("(7) task #{} has a hard dependency on earlier-phase task #{}", task.id, dep));
+                }
+            }
+        }
+    }
+    // U28 (18): more than two full GUI suite runs in one lane.
+    let mut suites: BTreeMap<String, usize> = BTreeMap::new();
+    for task in &open {
+        let text = format!("{} {}", task.title, task.description).to_lowercase();
+        if text.contains("test_sessionswindow") || text.contains("test_teamsui") {
+            *suites.entry(task.assignee.clone()).or_default() += 1;
+        }
+    }
+    for (member, count) in suites {
+        if count > 2 {
+            health.warnings.push(format!("(18) {} runs the full GUI suites in {count} tasks; batch them", team.role_of(&member)));
         }
     }
     health
@@ -837,6 +890,42 @@ mod tests {
     }
     use DependencyKind::{Hard, Soft};
     use TaskStatus::*;
+
+    #[test]
+    fn u28_warnings_name_their_rule() {
+        // (22): a phase above 25 tasks.
+        let mut many = team((1..=26).map(|id| task(id, &[], InProgress)).collect());
+        assert!(health(&many).warnings.iter().any(|w| w.starts_with("(22)")), "{:?}", health(&many).warnings);
+        // (7): a hard dependency on an earlier phase.
+        many.tasks[1].phase = 2;
+        many.tasks[1].deps = vec![Dependency { task: 1, kind: Hard }];
+        assert!(health(&many).warnings.iter().any(|w| w.starts_with("(7)")), "{:?}", health(&many).warnings);
+        // (12): a QA task that implements; a title with "Review" is not a review task.
+        let mut qa = team(vec![task(1, &[], InProgress)]);
+        qa.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), state: MemberState::Active, ..Default::default() });
+        qa.tasks[0].assignee = "qa".into();
+        qa.tasks[0].title = "Implement the parser".into();
+        assert!(health(&qa).warnings.iter().any(|w| w.starts_with("(12)")), "{:?}", health(&qa).warnings);
+        qa.tasks[0].assignee = "dev".into();
+        qa.tasks[0].title = "Review fixes: accept drafts".into();
+        assert!(!health(&qa).warnings.iter().any(|w| w.starts_with("(12)") || w.contains("review task")), "{:?}", health(&qa).warnings);
+        // (13): an Expert task without three returns.
+        let mut expert = team(vec![task(1, &[], InProgress)]);
+        expert.members.push(Member { id: "expert".into(), role: "Expert".into(), agent: "claude".into(), state: MemberState::Active, ..Default::default() });
+        expert.tasks[0].assignee = "expert".into();
+        assert!(health(&expert).warnings.iter().any(|w| w.starts_with("(13)")), "{:?}", health(&expert).warnings);
+        // (9): a desktop lane against a server lane.
+        let mut lanes = team(vec![task(1, &[], InProgress), task(2, &[], InProgress), task(3, &[], InProgress)]);
+        for task in &mut lanes.tasks { task.title = "Qt tray page".into(); }
+        lanes.tasks[2].assignee = "lead".into();
+        lanes.tasks[2].title = "Merge branches".into();
+        assert!(health(&lanes).warnings.iter().any(|w| w.starts_with("(9)")), "{:?}", health(&lanes).warnings);
+        // (18): three full GUI-suite runs in one lane.
+        let mut suites = team((1..=3).map(|id| task(id, &[], InProgress)).collect());
+        for task in &mut suites.tasks { task.title = "Run test_teamsui".into(); }
+        assert!(health(&suites).warnings.iter().any(|w| w.starts_with("(18)")), "{:?}", health(&suites).warnings);
+    }
+
 
     #[test]
     fn cycles_are_found_and_layers_ignore_their_back_edges() {

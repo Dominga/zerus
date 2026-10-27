@@ -4305,6 +4305,46 @@ mod tests {
     }
 
     #[test]
+    fn a_member_prompt_snapshot_survives_a_catalog_edit_through_run() {
+        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        let old = ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"].map(|key| (key, std::env::var(key).ok()));
+        for key in ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"] { std::env::remove_var(key); }
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            super::set_test_caller_identities(Some((None, None, None)));
+            let mut catalog = crate::state::teams::catalog::builtin();
+            let role = catalog.roles.iter_mut().find(|role| role.id == "backend").unwrap();
+            role.prompt_order = vec!["protocol".into()];
+            role.protocol_extra = "OLD BLOCK".into();
+            crate::state::teams::catalog::run("set", &json!({"version":1,"catalog":catalog}), true).unwrap();
+            let _ = Store::open(true).unwrap();
+            let created = super::run("create", &json!({"request_id":"10000000-0000-4000-8000-000000000001","name":"T","by":"human",
+                "lead":{"id":"lead","role":"Lead","agent":"codex"},
+                "members":[{"id":"dev","role":"Backend","agent":"codex","prompt":"Backend prompt"}],
+                "tasks":[{"id":1,"title":"Work","assignee":"dev"}]}), false).unwrap();
+            let store = Store::open(false).unwrap();
+            let team_id = created["team"].as_str().unwrap_or("t").to_owned();
+            let mut next = crate::state::teams::catalog::load().unwrap();
+            next.roles.iter_mut().find(|role| role.id == "backend").unwrap().protocol_extra = "NEW BLOCK".into();
+            crate::state::teams::catalog::run("set", &json!({"version":next.version,"catalog":next}), true).unwrap();
+            assert_eq!(crate::state::teams::catalog::load().unwrap().roles.iter().find(|role| role.id == "backend").unwrap().protocol_extra, "NEW BLOCK");
+            let team = store.load(&team_id).unwrap().unwrap();
+            let task = team.task(1).unwrap().clone();
+            let attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), ..Default::default() };
+            let text = crate::state::teams::dispatcher::hand_off_text(&team, &task, &attempt, "", "");
+            assert!(text.contains("OLD BLOCK") && !text.contains("NEW BLOCK"), "{text}");
+            let mut old_team = team.clone();
+            old_team.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = None;
+            let text = crate::state::teams::dispatcher::hand_off_text(&old_team, &task, &attempt, "", "");
+            assert!(text.contains("NEW BLOCK"), "{text}");
+            super::set_test_caller_identities(None);
+        });
+        for (key, value) in old {
+            match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
+        }
+    }
+
+    #[test]
     fn phase35_findings_work_through_run() {
         let _env = crate::state::ENV_LOCK.lock().unwrap();
         let old = ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"].map(|key| (key, std::env::var(key).ok()));

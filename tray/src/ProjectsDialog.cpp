@@ -43,6 +43,7 @@
 #include <QPainter>
 #include <QTimer>
 #include <QUrl>
+#include <numeric>
 
 namespace {
 class FolderSplitterHandle : public QSplitterHandle {
@@ -246,9 +247,12 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     m_foldersBlock->body()->addWidget(m_folderSplitter,1);
     // Each block sits in the prototype's card.
     const auto inCard=[form](QWidget *block,const QString &name,int stretch){
-        QBoxLayout *box=nullptr;auto *card=PageCards::card(name,&box);box->addWidget(block,1);form->addWidget(card,stretch);
+        // No stretch inside: a card grows only while its open body has
+        // something that grows (the folder table), never when folded.
+        QBoxLayout *box=nullptr;auto *card=PageCards::card(name,&box);box->addWidget(block);form->addWidget(card,stretch);
+        return card;
     };
-    inCard(m_foldersBlock,QStringLiteral("projectFoldersCard"),1);
+    auto *foldersCard=inCard(m_foldersBlock,QStringLiteral("projectFoldersCard"),m_foldersBlock->isExpanded()?1:0);
     auto *folderPane=new QWidget;auto *folderLayout=new QVBoxLayout(folderPane);folderLayout->setContentsMargins(0,0,0,0);folderLayout->setSpacing(8);
     m_folderSplitter->addWidget(folderPane);
     m_folders = new QTableWidget; m_folders->setObjectName("projectFolders"); m_folders->setColumnCount(4);
@@ -302,7 +306,12 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(m_sessions,&QTableWidget::cellDoubleClicked,this,[this](int row,int){
         const auto *item=m_sessions->item(row,0);if(item)emit relatedSessionRequested(item->data(Qt::UserRole+1).toString(),item->data(Qt::UserRole).toString(),{});
     });
-    m_sessionsBlock->body()->addWidget(m_sessions);inCard(m_sessionsBlock,QStringLiteral("projectSessionsCard"),0);
+    m_sessionsBlock->body()->addWidget(m_sessions);
+    // N23: the newest rows only; the rest are one click away in Sessions.
+    m_allSessions=new QPushButton;m_allSessions->setObjectName("projectAllSessions");m_allSessions->setFlat(true);m_allSessions->setAutoDefault(false);m_allSessions->hide();
+    connect(m_allSessions,&QPushButton::clicked,this,[this]{emit projectSessionsRequested(currentId());});
+    m_sessionsBlock->body()->addWidget(m_allSessions,0,Qt::AlignLeft);
+    inCard(m_sessionsBlock,QStringLiteral("projectSessionsCard"),0);
     // Iron rules: the project's, as the session inspector edits them.
     // Folded until opened (remembered): the folders keep the room.
     m_rulesBlock=new CollapsibleBlock(QStringLiteral("projects/ironRules"),tr("Iron rules"),false);m_rulesBlock->setObjectName("projectRulesBlock");
@@ -310,6 +319,10 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     // The block's header names them and counts them.
     for(const char *name:{"inspectorPanelTitle","ironRulesCount"})if(auto *own=m_rules->findChild<QLabel *>(name))own->hide();
     m_rules->changed=[this](int count){m_rulesBlock->setNote(QString::number(count));};
+    // Folded, the Folders card keeps only its header and the blocks below
+    // move up; the room left over goes under them.
+    form->addStretch(0);
+    m_foldersBlock->expandedChanged=[form,foldersCard](bool expanded){form->setStretchFactor(foldersCard,expanded?1:0);form->invalidate();};
     auto *foot = new QHBoxLayout; m_remove = new QPushButton(tr("Delete project…")); m_remove->setObjectName("deleteProject"); PageCards::danger(m_remove); foot->addWidget(m_remove); foot->addStretch(); form->addLayout(foot);
     // U25: the blocks keep their own height; a short window scrolls the
     // project instead of squeezing the folder table over its actions.
@@ -325,9 +338,9 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     connect(m_openFolder,&QPushButton::clicked,this,[this]{openFolder(selectedFolder());});
     connect(m_newSession,&QPushButton::clicked,this,[this]{newFolderSession(currentId(),selectedFolder());});
     connect(m_removeFolder,&QPushButton::clicked,this,[this]{
-        // U25 (spec 7): a team member's worktree goes with its team.
+        // U25 (spec 7): a team member's own worktree or clone goes with its team.
         bool team=false;folderKind(selectedFolder(),&team);
-        if(team){m_status->setText(tr("Team worktrees are removed with the team"));m_status->setProperty("pageError",true);return;}
+        if(team){m_status->setText(tr("Team folders are removed with the team"));m_status->setProperty("pageError",true);return;}
         removeFolder(currentId(),selectedFolder().id);
     });
     connect(m_editFolder,&QPushButton::clicked,this,[this]{const int row=m_folders->currentRow();if(row>=0)editFolder(m_folders->item(row,0)->data(Qt::UserRole).toString());});
@@ -343,6 +356,8 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
         emit catalogDraftEditing(false);
     });
     connect(m_color,&QPushButton::clicked,this,&ProjectsDialog::chooseColor);
+    m_live=new QTimer(this);m_live->setSingleShot(true);m_live->setInterval(1000);
+    connect(m_live,&QTimer::timeout,this,&ProjectsDialog::refreshLive);
     connect(m_client,&HgsClient::projectsForHostReady,this,&ProjectsDialog::importLegacy);
     connect(m_client,&HgsClient::projectsFailed,this,[this](const QString &host,const QString &){m_importing.remove(host);});
     refresh();
@@ -402,31 +417,13 @@ void ProjectsDialog::showProject()
     m_headerName->setText(project->name);
     m_headerIcon->setPixmap(workspaceIcon("projects",QColor(project->color).isValid()?QColor(project->color):PageCards::token(m_dark,"folder")).pixmap(20,20));
     m_rules->setProject(project->id,project->name);
-    // Sessions, how many of them are in teams, and in how many teams.
-    const auto sessions=m_sessionsProvider?m_sessionsProvider(project->id):QList<ProjectSession>{};
-    int inTeams=0;QSet<QString> teams;
-    for(const auto &session:sessions)if(!session.team.isEmpty()){++inTeams;teams.insert(session.team);}
-    const QString sessionCount=sessions.size()==1?tr("1 session"):tr("%1 sessions").arg(sessions.size());
-    const QString summary=tr("%1 · %2 in teams · %3").arg(sessionCount).arg(inTeams).arg(teams.size()==1?tr("1 team"):tr("%1 teams").arg(teams.size()));
-    m_summary->setText(summary);m_sessionsBlock->setNote(summary);
-    m_sessions->setRowCount(0);
-    for(const auto &session:sessions){
-        const int row=m_sessions->rowCount();m_sessions->insertRow(row);
-        auto *name=new QTableWidgetItem(session.title+(session.role.isEmpty()?QString():QStringLiteral("  ·  ")+session.role));
-        QFont bold=m_sessions->font();bold.setWeight(QFont::DemiBold);name->setFont(bold);
-        name->setData(Qt::UserRole,session.name);name->setData(Qt::UserRole+1,session.host);name->setToolTip(session.name);
-        m_sessions->setItem(row,0,name);
-        m_sessions->setItem(row,1,new QTableWidgetItem(session.machine));
-        auto *branch=new QTableWidgetItem(session.branch);branch->setForeground(PageCards::token(m_dark,"dim"));
-        QFont mono=m_sessions->font();mono.setFamilies({QStringLiteral("Cascadia Mono"),QStringLiteral("Consolas"),mono.family()});mono.setPixelSize(12);branch->setFont(mono);
-        m_sessions->setItem(row,2,branch);
-        auto *status=new QTableWidgetItem(session.status);status->setData(Qt::UserRole+1,session.tone);m_sessions->setItem(row,3,status);
-    }
-    m_sessions->setFixedHeight(qMax(36,m_sessions->rowCount()*m_sessions->verticalHeader()->defaultSectionSize()+4));
+    m_projectSessions=m_sessionsProvider?m_sessionsProvider(project->id):QList<ProjectSession>{};
+    showSessions();
     m_preview->setProject(project->name,QColor(project->color),project->vivid,project->id==m_projects->defaultProject());
     m_default->setChecked(project->id==m_projects->defaultProject());
     const auto selected=selectedFolder().id;const QSignalBlocker blockFolders(m_folders);
     m_remove->setEnabled(m_projects->groups().size()>1);m_folders->setSortingEnabled(false); m_folders->setRowCount(0);
+    const auto kinds=folderKinds();
     for (const auto &folder : project->folders) {
         const int row = m_folders->rowCount(); m_folders->insertRow(row);
         const auto style = folderStyle(folder.machine); const auto path = MachinePlatform::native(folder.path, style);
@@ -434,9 +431,9 @@ void ProjectsDialog::showProject()
         m_folders->setItem(row,0,new FolderSortItem(name)); m_folders->item(row,0)->setData(Qt::UserRole,folder.id);
         m_folders->item(row,0)->setToolTip(name);
         m_folders->setItem(row,1,new FolderSortItem(folder.machineName.isEmpty()?folder.machine:folder.machineName)); m_folders->setItem(row,2,new FolderSortItem(path));
-        bool team=false;const QString kind=folderKind(folder,&team);
-        m_folders->item(row,0)->setData(Qt::UserRole+1,team);
-        auto *kindItem=new FolderSortItem(kind);kindItem->setForeground(PageCards::token(m_dark,"muted"));m_folders->setItem(row,3,kindItem);
+        const auto kind=kinds.value(folder.id);
+        m_folders->item(row,0)->setData(Qt::UserRole+1,kind.team);
+        auto *kindItem=new FolderSortItem(kind.text);kindItem->setForeground(PageCards::token(m_dark,"muted"));m_folders->setItem(row,3,kindItem);
         for(int column=1;column<4;++column)m_folders->item(row,column)->setData(Qt::UserRole,folder.id);
         m_folders->item(row,2)->setToolTip(path);
     }
@@ -445,41 +442,125 @@ void ProjectsDialog::showProject()
     for(int row=0;row<m_folders->rowCount();++row)if(m_folders->item(row,0)->data(Qt::UserRole).toString()==selected){m_folders->setCurrentCell(row,0);break;}
     updateFolderActions();
 }
+void ProjectsDialog::showSessions()
+{
+    // Sessions, how many of them are in teams, and in how many teams.
+    const auto &sessions=m_projectSessions;
+    int inTeams=0;QSet<QString> teams;
+    for(const auto &session:sessions)if(!session.team.isEmpty()){++inTeams;teams.insert(session.team);}
+    const QString sessionCount=sessions.size()==1?tr("1 session"):tr("%1 sessions").arg(sessions.size());
+    const QString summary=tr("%1 · %2 in teams · %3").arg(sessionCount).arg(inTeams).arg(teams.size()==1?tr("1 team"):tr("%1 teams").arg(teams.size()));
+    m_summary->setText(summary);m_sessionsBlock->setNote(summary);
+    // The newest rows (N23: a project can hold thousands of sessions).
+    QList<int> order(sessions.size());std::iota(order.begin(),order.end(),0);
+    std::stable_sort(order.begin(),order.end(),[&sessions](int a,int b){return sessions[a].created>sessions[b].created;});
+    if(order.size()>kSessionRows)order.resize(kSessionRows);
+    // A refresh keeps the selected session selected.
+    QString selected;
+    if(const auto *current=m_sessions->currentRow()>=0?m_sessions->item(m_sessions->currentRow(),0):nullptr)
+        selected=current->data(Qt::UserRole+1).toString()+'\n'+current->data(Qt::UserRole).toString();
+    const QSignalBlocker block(m_sessions);
+    m_sessions->setRowCount(order.size());
+    QFont bold=m_sessions->font();bold.setWeight(QFont::DemiBold);
+    QFont mono=m_sessions->font();mono.setFamilies({QStringLiteral("Cascadia Mono"),QStringLiteral("Consolas"),mono.family()});mono.setPixelSize(12);
+    int current=-1;
+    for(int row=0;row<order.size();++row){
+        const auto &session=sessions[order[row]];
+        auto *name=new QTableWidgetItem(session.title+(session.role.isEmpty()?QString():QStringLiteral("  ·  ")+session.role));
+        name->setFont(bold);name->setData(Qt::UserRole,session.name);name->setData(Qt::UserRole+1,session.host);name->setToolTip(session.name);
+        m_sessions->setItem(row,0,name);
+        m_sessions->setItem(row,1,new QTableWidgetItem(session.machine));
+        auto *branch=new QTableWidgetItem(session.branch);branch->setForeground(PageCards::token(m_dark,"dim"));branch->setFont(mono);
+        m_sessions->setItem(row,2,branch);
+        auto *status=new QTableWidgetItem(session.status);status->setData(Qt::UserRole+1,session.tone);m_sessions->setItem(row,3,status);
+        if(session.host+'\n'+session.name==selected)current=row;
+    }
+    if(current>=0)m_sessions->setCurrentCell(current,0);
+    m_sessions->setFixedHeight(qMax(36,m_sessions->rowCount()*m_sessions->verticalHeader()->defaultSectionSize()+4));
+    m_allSessions->setText(tr("Show all %1 in Sessions").arg(sessions.size()));
+    m_allSessions->setVisible(sessions.size()>order.size());
+}
+void ProjectsDialog::refreshLive()
+{
+    if(!isVisible()||!m_projects->group(currentId()))return;
+    m_projectSessions=m_sessionsProvider?m_sessionsProvider(currentId()):QList<ProjectSession>{};
+    showSessions();
+    // The kinds change in place: the folder rows, their order and the
+    // selection stay.
+    const auto kinds=folderKinds();const QSignalBlocker block(m_folders);
+    for(int row=0;row<m_folders->rowCount();++row){
+        auto *name=m_folders->item(row,0);auto *kind=m_folders->item(row,3);if(!name||!kind)continue;
+        const auto now=kinds.value(name->data(Qt::UserRole).toString());
+        if(name->data(Qt::UserRole+1).toBool()!=now.team)name->setData(Qt::UserRole+1,now.team);
+        if(kind->text()!=now.text)kind->setText(now.text);
+    }
+    m_folders->viewport()->update();
+}
+void ProjectsDialog::showEvent(QShowEvent *event)
+{
+    QDialog::showEvent(event);
+    // Polls skip a hidden page.
+    refreshLive();
+}
 QString ProjectsDialog::folderKind(const SessionOrganization::Folder &folder, bool *team) const
 {
-    // A session running in the folder knows its worktree and branch; without
-    // one, a team member's generated worktree is known by its name.
-    const auto git=[this](const SessionOrganization::Folder &target, QString *branch) {
-        bool worktree=false, seen=false;
-        const auto look=[&](const BoxState &box){
-            for(const auto &session:box.sessions){
-                if(seen)return;
-                const auto cwd=QDir::cleanPath(session.canonicalCwd.isEmpty()?session.cwd:session.canonicalCwd);
-                if(cwd.compare(QDir::cleanPath(target.path),Qt::CaseInsensitive)!=0&&QDir::cleanPath(session.gitRoot).compare(QDir::cleanPath(target.path),Qt::CaseInsensitive)!=0)continue;
-                seen=true;*branch=session.gitBranch;worktree=session.gitWorktree;
-            }
-        };
-        if(target.machine==m_fleet.local().host)look(m_fleet.local());
-        else if(const auto *peer=m_fleet.peer(target.machine))look(*peer);
-        static const QRegularExpression generated(QStringLiteral("-team-([0-9a-f]{8})-([A-Za-z0-9_.-]+)$"));
-        const auto match=generated.match(QDir::cleanPath(target.path));
-        if(!seen&&match.hasMatch()){worktree=true;*branch=QStringLiteral("team/%1/%2").arg(match.captured(1),match.captured(2));}
-        return worktree;
-    };
-    QString branch;const bool worktree=git(folder,&branch);
-    if(team)*team=worktree&&branch.startsWith(QStringLiteral("team/"));
-    QString kind;
-    if(worktree)kind=tr("Worktree");
-    else{
-        // The first plain folder of the project is its main checkout; the others are clones.
-        bool first=true;QString ignored;
-        if(const auto *project=m_projects->group(currentId()))for(const auto &other:project->folders){
-            if(other.id==folder.id)break;
-            if(!git(other,&ignored))first=false;
+    const auto kind=folderKinds().value(folder.id);
+    if(team)*team=kind.team;
+    return kind.text;
+}
+QHash<QString,ProjectsDialog::FolderKind> ProjectsDialog::folderKinds() const
+{
+    QHash<QString,FolderKind> kinds;
+    const auto *project=m_projects->group(currentId());if(!project)return kinds;
+    const auto key=[](const QString &path){return QDir::cleanPath(path).toCaseFolded();};
+    // A session running in a folder (its working folder or its checkout root)
+    // knows its branch and whether it is a worktree; the first one counts.
+    // One pass over each machine's sessions (N23).
+    struct Seen { QString branch, root; bool worktree = false; };
+    QHash<QString,QHash<QString,Seen>> machines;
+    for(const auto &folder:project->folders){
+        if(machines.contains(folder.machine))continue;
+        auto &paths=machines[folder.machine];
+        const auto *box=folder.machine==m_fleet.local().host?&m_fleet.local():m_fleet.peer(folder.machine);
+        if(!box)continue;
+        for(const auto &session:box->sessions){
+            const Seen seen{session.gitBranch,session.gitRoot,session.gitWorktree};
+            const auto cwd=session.canonicalCwd.isEmpty()?session.cwd:session.canonicalCwd;
+            if(!cwd.isEmpty()&&!paths.contains(key(cwd)))paths.insert(key(cwd),seen);
+            if(!session.gitRoot.isEmpty()&&!paths.contains(key(session.gitRoot)))paths.insert(key(session.gitRoot),seen);
         }
-        kind=first?tr("Main checkout"):tr("Clone");
     }
-    return branch.isEmpty()?kind:tr("%1 · %2").arg(kind,branch);
+    // A team member's own worktree or clone: the generated
+    // "<folder>-team-<id8>-<member>" path (dispatcher.rs member_folder_path),
+    // or where a member session with its own folder runs.
+    QSet<QString> teamFolders;
+    for(const auto &session:m_projectSessions)
+        if(session.teamFolder&&!session.cwd.isEmpty())teamFolders.insert(session.machine+'\n'+key(session.cwd));
+    static const QRegularExpression generated(QStringLiteral("-team-([0-9a-f]{8})-([a-z0-9-]+)$"));
+    bool mainCheckout=false;
+    for(const auto &folder:project->folders){
+        const auto match=generated.match(QDir::cleanPath(folder.path));
+        FolderKind kind;kind.team=match.hasMatch()||teamFolders.contains(folder.machine+'\n'+key(folder.path));
+        QString label,branch;
+        const auto &paths=machines[folder.machine];const auto seen=paths.constFind(key(folder.path));
+        if(seen!=paths.cend()){
+            branch=seen->branch;
+            // No checkout root: an ordinary folder without Git.
+            label=seen->worktree?tr("Worktree"):seen->root.isEmpty()?tr("Folder"):QString();
+        }else if(match.hasMatch()){
+            // Worktree or clone, as the member's agent chose; no session tells which.
+            label=tr("Team folder");branch=QStringLiteral("team/%1/%2").arg(match.captured(1),match.captured(2));
+        }
+        if(label.isEmpty()){
+            // The first checkout of the project is its main checkout; the
+            // others, and a team member's own clone, are clones.
+            label=!kind.team&&!mainCheckout?tr("Main checkout"):tr("Clone");
+            if(!kind.team)mainCheckout=true;
+        }
+        kind.text=branch.isEmpty()?label:tr("%1 · %2").arg(label,branch);
+        kinds.insert(folder.id,kind);
+    }
+    return kinds;
 }
 void ProjectsDialog::changed()
 {
@@ -496,6 +577,9 @@ void ProjectsDialog::setFleet(const FleetState &fleet)
     m_fleet=fleet; updateSwarmConnections();
     if (m_worktreeOverview) m_worktreeOverview->setContext(*m_projects, m_fleet, m_allProjects->isChecked());
     updateFolderActions();
+    // N22: the Sessions rows and the folder kinds follow the fleet while the
+    // page shows, at most once a second (after the window took the poll in).
+    if (isVisible() && !m_live->isActive()) m_live->start();
     const auto request=[this](const QString &host,const QString &machine,bool online){
         if (!online || machine.isEmpty() || m_projects->hasImported(machine) || m_importing.contains(host)
             || m_importDeferred.contains(machine)) return;
@@ -615,7 +699,23 @@ void ProjectsDialog::editFolder(const QString &id, const QString &projectId)
 }
 void ProjectsDialog::removeFolder(const QString &projectId, const QString &id)
 {
-    if(id.isEmpty()||!m_projects->group(projectId))return;
+    const auto present=[this,&projectId,&id]()->const SessionOrganization::Folder *{
+        if(const auto *project=m_projects->group(projectId))for(const auto &folder:project->folders)if(folder.id==id)return &folder;
+        return nullptr;
+    };
+    const auto *folder=id.isEmpty()?nullptr:present();if(!folder)return;
+    // A destructive action asks first (N25); the files stay where they are.
+    const auto style=folderStyle(folder->machine);
+    const auto name=folder->name.isEmpty()?suggestName(folder->path,style):folder->name;
+    QMessageBox confirm(QMessageBox::Question,tr("Remove folder?"),
+        tr("Remove “%1” (%2 on %3) from %4? Files stay on disk.").arg(name,MachinePlatform::native(folder->path,style),folder->machine,m_projects->group(projectId)->name),
+        QMessageBox::Cancel,this);
+    confirm.setObjectName("removeProjectFolderConfirm");confirm.setTextFormat(Qt::PlainText);
+    auto *remove=confirm.addButton(tr("Remove folder"),QMessageBox::DestructiveRole);remove->setObjectName("removeProjectFolderConfirmButton");
+    confirm.setDefaultButton(QMessageBox::Cancel);confirm.setEscapeButton(QMessageBox::Cancel);
+    confirm.exec();
+    // The catalog can change while the question is open: read it again.
+    if(confirm.clickedButton()!=remove||!present())return;
     m_projects->removeFolder(projectId,id);changed();
 }
 void ProjectsDialog::transferFolder(const QString &projectId, const SessionOrganization::Folder &folder,

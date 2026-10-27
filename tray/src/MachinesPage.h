@@ -22,6 +22,8 @@ protected:
     void showEvent(QShowEvent *) override;
 private:
     void renderRows();
+    // The amber dot beside the machine with unsaved edits (every row rebuild too).
+    void markUnsaved();
     void loadSelection();
     void updateControls();
     void changed();

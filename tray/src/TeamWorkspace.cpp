@@ -1063,6 +1063,23 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     return area;
 }
 
+// U25 part 5 (owner, 2026-10-27): the small activity label a graph node, board
+// card and layers row carry right of the role chip and model tile: what happens
+// now. A problem text wins over it (the callers check that first); Pending,
+// Draft and Accepted say nothing - their icon and border say it.
+static QString activityLabel(const Teams::Task &task)
+{
+    if (task.status == QLatin1String("submitted")) return TeamWorkspace::tr("review");
+    if (task.status == QLatin1String("in_progress")) {
+        const int n = task.last() ? task.last()->n : 0;
+        if (n > 1) return TeamWorkspace::tr("attempt %1").arg(n);
+    }
+    if (task.held) return TeamWorkspace::tr("held");
+    if (task.subteam.known && !task.subteam.team.isEmpty())
+        return TeamWorkspace::tr("sub-team %1/%2").arg(task.subteam.done).arg(task.subteam.total);
+    return QString();
+}
+
 void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int> &order, const QSet<int> &phase)
 {
     const Colors c = colorsFor(m_dark);
@@ -1101,6 +1118,8 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         const bool unassigned = (team.status == "planning" || node.draft) && !assignee;
         if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }
         else if (node.problem) node.problemText = problemText.value(id);
+        // The owner's activity label; a problem text wins over it.
+        if (!unassigned && !node.problem) node.activity = activityLabel(*task);
         // Spec 1.4: the dots under the model tile while its agent really runs
         // this task.
         node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
@@ -1169,6 +1188,13 @@ QWidget *TeamWorkspace::board(const Team &team)
             const QString role = task.assignee.isEmpty() ? tr("You") : team.roleOf(task.assignee);
             auto *pill = new Pill(role, roleColor(role, m_dark)); pill->setObjectName("teamBoardRole"); r->addWidget(pill);
             if (const auto *m = team.member(task.assignee)) { auto *i = new QLabel; i->setPixmap(agentLogo(m->agent, c.text3).pixmap(14, 14)); r->addWidget(i); }
+            // The same small activity label as the graph (a problem text wins).
+            if (!problemTasks.contains(task.id)) {
+                const QString activity = activityLabel(task);
+                if (!activity.isEmpty()) {
+                    auto *a = label(activity, c.text3, 11); a->setObjectName("teamBoardActivity"); r->addWidget(a);
+                }
+            }
             const auto mark = phaseMark(team, task);
             auto *state = new StatusMark(s.text, toneColor(c, mark.tone != Tone::Neutral ? mark.tone : s.tone),
                                          mark.kind.isEmpty() ? kindOfTask(task, s) : mark.kind, 0, Qt::AlignLeft, nullptr, mark.tooltip);

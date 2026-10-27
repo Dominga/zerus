@@ -21,7 +21,7 @@ public:
     // Indices into the caller's list, in project order. Unknown identities stay
     // first in the default project; ties keep the caller's original order.
     QHash<QString, QList<int>> orderedMembers(const QStringList &sessions) const;
-    QString createGroup(const QString &name);
+    QString createGroup(const QString &name, const QString &reservedId = {});
     void renameGroup(const QString &id, const QString &name);
     bool removeGroup(const QString &id, const QString &destination = {});
     QString defaultProject() const { return m_default; }

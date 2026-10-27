@@ -183,7 +183,7 @@ public:
     // Асинхронно: `hgs ls --json --local`. Один exec, единицы миллисекунд.
     void requestLocal();
     // OpenCode effort is a variant of the chosen model: it is passed only with a model.
-    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {}, const QString &effort = {});
+    void launchDetachedSession(const QString &host, const QString &agent, const QString &target, const QString &name, const QString &account, const QString &launchId, const QString &model = {}, const QString &effort = {}, const QString &expectedMachine = {});
     void launchNativeSession(const QString &host, const QString &target, const QString &name, const QString &account, const QString &launchId);
     // Асинхронно: `hgs @<peer> ls --json`. Пир, который спит, — это ok:false, а не ошибка.
     // peerReady() carries a box whose host is this alias (see BoxState::host).
@@ -220,9 +220,11 @@ public:
     QJsonObject worktreeSnapshot(const QString &host, const QString &path) const;
     QJsonObject gitStatusSnapshot(const QString &host, const QString &path) const;
     void requestGitStatus(const QString &host, const QString &path);
-    quint64 requestWorktrees(const QString &host, const QString &path, bool refresh = false);
+    quint64 requestWorktrees(const QString &host, const QString &path, bool refresh = false, const QString &expectedMachine = {});
     quint64 createWorktree(const QString &host, const QString &path, const QString &commonDir,
-                           const QString &branch, const QString &base, const QString &destination);
+                           const QString &branch, const QString &base, const QString &destination,
+                           const QString &requestId = {}, bool receipt = false, const QString &expectedMachine = {});
+    quint64 worktreeReceipt(const QString &host, const QString &action, const QString &requestId, const QString &expectedMachine = {});
     // Cleanup verdicts are computed on the owning machine. Whole-repository reviews
     // stay cached for five minutes for the Clean up reminder; removal repeats every
     // check there. Discard needs its own content proof; failures are never replayed.
@@ -235,10 +237,11 @@ public:
     quint64 removeWorktree(const QString &host, const QString &path, const QString &commonDir,
                            const QString &fingerprint, bool deleteBranch, const QString &ignoredFingerprint = {}, const QString &discardFingerprint = {}, const QString &processFingerprint = {}, bool preserveArchiveRestore = false);
     quint64 requestDirectories(const QString &host, const QString &path, bool hidden = false);
+    quint64 requestCreationDirectory(const QString &host, const QString &path, const QString &expectedMachine = {});
     quint64 createDirectory(const QString &host, const QString &path);
     // Selected-computer capability probe precedes every acquisition operation.
     quint64 repositoryOperation(const QString &host, const QString &action, const QString &url,
-                                const QString &parent, const QString &name, const QString &token = {});
+                                const QString &parent, const QString &name, const QString &token = {}, const QString &expectedMachine = {});
     // Whether an inspection of this session is running; one at a time per session.
     bool inspectionInFlight(const QString &host, const QString &name, const QString &archiveId = QString()) const
     { return m_inspectionsInFlight.contains(host + QLatin1Char('\n') + name + QLatin1Char('\n') + archiveId); }
@@ -387,6 +390,7 @@ signals:
     void worktreesFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
     void gitStatusChanged(const QString &host, const QString &path);
     void worktreeCreated(quint64 request, bool ok, const QJsonObject &result, const QString &error);
+    void worktreeReceiptReady(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void worktreeReviewReady(quint64 request, const QString &host, const QString &path, const QJsonObject &data);
     void worktreeReviewFailed(quint64 request, const QString &host, const QString &path, const QString &detail);
     void worktreeInspectionFinished(quint64 request, const QString &host, const QString &path, const QString &file, const QJsonObject &data, const QString &error);

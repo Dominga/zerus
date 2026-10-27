@@ -251,6 +251,43 @@ impl App {
         units: usize,
         class: ServiceClass,
     ) -> Result<ResourcePermit> {
+        if lane.name != "database" {
+            return self.admit_once(lane, units, class).await;
+        }
+        // A single phone's fresh membership, receipt and event checks can
+        // overlap the gateway heartbeat on different workers. Queue briefly
+        // before DB work instead of converting a short burst into a busy UI.
+        // Every attempt still acquires BOTH existing local and shared budgets.
+        // No permit or SQL transaction is retained across the backoff.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        let mut pause = Duration::from_millis(10);
+        loop {
+            match self.admit_once(lane, units, class).await {
+                Ok(permit) => return Ok(permit),
+                Err(error) if error.0 == Error::BUSY.0 && error.1 == Error::BUSY.1 => {
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        return Err(error);
+                    }
+                    tokio::select! {
+                        _ = self.stop.cancelled() => return Err(Error::UNAVAILABLE),
+                        _ = tokio::time::sleep_until(deadline.min(now + pause)) => {}
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    pause = (pause * 2).min(Duration::from_millis(100));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    async fn admit_once(
+        &self,
+        lane: &Lane,
+        units: usize,
+        class: ServiceClass,
+    ) -> Result<ResourcePermit> {
         let local = lane.take(units, class)?;
         if !self.cfg.public_enrollment {
             return Ok(ResourcePermit {
@@ -1259,11 +1296,7 @@ mod admission_cleanup_tests {
 #[cfg(test)]
 mod database_response_lifetime_tests {
     use super::*;
-    use crate::{
-        args,
-        db::{i, Db},
-        store::token,
-    };
+    use crate::{args, db::i, store::token, test_backend::Backend};
     use http_body_util::BodyExt;
     use std::task::Poll;
     use zerus_mobile_crypto::{
@@ -1274,7 +1307,14 @@ mod database_response_lifetime_tests {
         first: App,
         second: App,
         secret: String,
-        _directory: tempfile::TempDir,
+        _backend: Backend,
+    }
+
+    impl Fixture {
+        async fn close(&self) {
+            self.first.store.db.close().await;
+            self.second.store.db.close().await;
+        }
     }
 
     fn workspace_body() -> (String, Value) {
@@ -1300,7 +1340,6 @@ mod database_response_lifetime_tests {
     }
 
     async fn fixture() -> Fixture {
-        let directory = tempfile::tempdir().unwrap();
         let config = Config {
             public_enrollment: true,
             large_payload_slots: 2,
@@ -1308,22 +1347,23 @@ mod database_response_lifetime_tests {
             background: false,
             ..Config::default()
         };
-        let db = Db::open(
-            &directory.path().join("state/relay.sqlite3"),
-            Arc::new(config),
-        )
-        .await
-        .unwrap();
-        let store = Store::new(db);
+        let backend = Backend::new(config).await;
+        let store = backend.store().await;
         let (secret, body) = workspace_body();
         store.create_workspace(&body).await.unwrap();
+        // SQLite owns one file lock/pool; PostgreSQL exercises independent workers.
+        let peer = if backend.is_postgres() {
+            backend.store().await
+        } else {
+            store.clone()
+        };
         let first = App::new(store.clone()).await.unwrap();
-        let second = App::new(store).await.unwrap();
+        let second = App::new(peer).await.unwrap();
         Fixture {
             first,
             second,
             secret,
-            _directory: directory,
+            _backend: backend,
         }
     }
 
@@ -1332,6 +1372,139 @@ mod database_response_lifetime_tests {
             "SELECT used_total,used_standard,(SELECT count(*) FROM service_leases WHERE lane=?) AS leases FROM service_resources WHERE lane=?",
             args![lane, lane],
         ).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn short_cross_worker_database_burst_waits_without_borrowing_team_capacity() {
+        let fixture = fixture().await;
+        let standard = fixture
+            .first
+            .cfg
+            .standard_capacity(fixture.first.cfg.payload_pool_max() as usize);
+        let mut held = Vec::new();
+        for _ in 0..standard {
+            held.push(
+                fixture
+                    .first
+                    .admit(&fixture.first.database, 1, ServiceClass::Standard)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(fixture.first.database.standard.available_permits(), 0);
+        assert_eq!(
+            fixture.second.database.standard.available_permits(),
+            standard
+        );
+        let team = fixture
+            .second
+            .admit(&fixture.second.database, 1, ServiceClass::Team)
+            .await
+            .unwrap();
+        let release = async {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let row = usage(&fixture.first, "database").await;
+            assert_eq!(i(&row, "used_standard"), standard as i64);
+            assert_eq!(i(&row, "used_total"), standard as i64 + 1);
+            drop(held);
+        };
+        let (result, ()) = futures_util::future::join(
+            fixture
+                .second
+                .admit(&fixture.second.database, 1, ServiceClass::Standard),
+            release,
+        )
+        .await;
+        let accepted = result.is_ok();
+        drop(result);
+        drop(team);
+        all_released(&fixture.first).await;
+        fixture.close().await;
+        assert!(
+            accepted,
+            "short database burst must queue within the existing capacity"
+        );
+    }
+
+    #[tokio::test]
+    async fn sustained_database_pressure_stays_bounded_and_does_not_borrow_reserved_slots() {
+        let fixture = fixture().await;
+        let standard = fixture
+            .first
+            .cfg
+            .standard_capacity(fixture.first.cfg.payload_pool_max() as usize);
+        let mut held = Vec::new();
+        for _ in 0..standard {
+            held.push(
+                fixture
+                    .first
+                    .admit(&fixture.first.database, 1, ServiceClass::Standard)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let start = Instant::now();
+        let result = fixture
+            .second
+            .admit(&fixture.second.database, 1, ServiceClass::Standard)
+            .await;
+        let elapsed = start.elapsed();
+        let busy = matches!(result,Err(error) if error.0==Error::BUSY.0 && error.1==Error::BUSY.1);
+        let row = usage(&fixture.first, "database").await;
+        assert_eq!(i(&row, "used_standard"), standard as i64);
+        assert_eq!(i(&row, "used_total"), standard as i64);
+        assert_eq!(i(&row, "leases"), standard as i64);
+        drop(held);
+        all_released(&fixture.first).await;
+        fixture.close().await;
+        assert!(busy, "sustained pressure must remain a capacity refusal");
+        assert!(
+            elapsed >= Duration::from_millis(200) && elapsed < Duration::from_secs(2),
+            "database capacity waiting must have a finite deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_database_admission_wait_leaves_no_shared_or_local_reservation() {
+        let fixture = fixture().await;
+        let standard = fixture
+            .first
+            .cfg
+            .standard_capacity(fixture.first.cfg.payload_pool_max() as usize);
+        let mut held = Vec::new();
+        for _ in 0..standard {
+            held.push(
+                fixture
+                    .first
+                    .admit(&fixture.first.database, 1, ServiceClass::Standard)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let second = fixture.second.clone();
+        let pending = tokio::spawn(async move {
+            second
+                .admit(&second.database, 1, ServiceClass::Standard)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        pending.abort();
+        let cancelled = matches!(pending.await,Err(error) if error.is_cancelled());
+        drop(held);
+        all_released(&fixture.first).await;
+        assert_eq!(
+            fixture.first.database.standard.available_permits(),
+            standard
+        );
+        assert_eq!(
+            fixture.second.database.standard.available_permits(),
+            standard
+        );
+        fixture.close().await;
+        assert!(
+            cancelled,
+            "waiting must remain owned by the requesting future"
+        );
     }
 
     async fn database_free(app: &App) {
@@ -1355,7 +1528,7 @@ mod database_response_lifetime_tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let row = app.store.db.one(
-                    "SELECT (SELECT coalesce(sum(used_total),0) FROM service_resources) AS used,(SELECT count(*) FROM service_leases) AS leases",
+                    "SELECT (SELECT CAST(coalesce(sum(used_total),0) AS BIGINT) FROM service_resources) AS used,(SELECT count(*) FROM service_leases) AS leases",
                     &[],
                 ).await.unwrap().unwrap();
                 if i(&row, "used") == 0 && i(&row, "leases") == 0 { break; }
@@ -1426,7 +1599,7 @@ mod database_response_lifetime_tests {
         assert_eq!(bytes.as_ref(), br#"{"routes":[]}"#);
         drop(unread_responses);
         all_released(&fixture.first).await;
-        fixture.first.store.db.close().await;
+        fixture.close().await;
     }
 
     #[tokio::test]
@@ -1447,7 +1620,7 @@ mod database_response_lifetime_tests {
         );
         drop(body);
         all_released(&fixture.first).await;
-        fixture.first.store.db.close().await;
+        fixture.close().await;
     }
 
     #[tokio::test]
@@ -1516,7 +1689,7 @@ mod database_response_lifetime_tests {
             fixture.second.database.standard.available_permits(),
             standard
         );
-        fixture.first.store.db.close().await;
+        fixture.close().await;
     }
 
     #[tokio::test]
@@ -1547,6 +1720,6 @@ mod database_response_lifetime_tests {
         assert!(i(&usage(&fixture.first, "body").await, "used_standard") > 0);
         drop(response);
         all_released(&fixture.first).await;
-        fixture.first.store.db.close().await;
+        fixture.close().await;
     }
 }

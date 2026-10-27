@@ -989,6 +989,16 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         journal = self.journal(row["run_id"])
         self.assertEqual(journal.count("UserPromptSubmit"), len(MESSAGES), journal)
 
+    def test_literal_at_mention_is_not_replaced_by_a_file(self):
+        (self.project / 'literalreviewer.log').write_text('Synthetic completion target.\n')
+        name = self.launch('at-mention', self.NO_HOOK_REVIEW)
+        text = 'Send a fixture test to @literalreviewer'
+        payload, receipt = self.deliver(name, text)
+        self.assertEqual(self.accepted(name, text), 1, self.describe())
+        self.assertEqual(self.send(name, payload), receipt)
+        self.deliver(name, 'After the literal mention.')
+        self.assertEqual(self.accepted(name, text), 1, self.describe())
+
     def test_hgs_answers_request_user_input_async(self):
         name = self.launch("question", self.NO_HOOK_REVIEW)
         # The question does not block the turn: Codex accepts it and the turn ends.

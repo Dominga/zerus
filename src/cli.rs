@@ -117,6 +117,9 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] worktrees --path PATH [--refresh] [--json]   existing checkouts as JSON
        hgs [@host] git-status --path PATH --json   read-only checkout/publication status
        hgs [@host] worktrees create --path REPO --branch NAME --destination PATH [--base HEAD] [--json]
+       hgs [@host] worktrees create ... --request-id UUID --receipt --json   durable creation, no replay
+       hgs [@host] worktrees status|cancel --request-id UUID --json   original creation receipt
+       Worktree creation ABI: worktree-requests-v1
        hgs [@host] worktrees review --path PATH [--worktree WORKTREE] [--json]   cleanup verdicts and fingerprints
        hgs [@host] worktrees policy get|set --json   worktree-maintenance-v1 (host-local cleanup rules)
        hgs [@host] worktrees sweep --json   one bounded automatic cleanup step
@@ -425,13 +428,17 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             return Err(Error::new(1,"Mobile target identity changed; refresh computers"));
         }
         args.drain(..2);
-        if args.first().is_none_or(|a| a.starts_with('@')
-            || (a.starts_with('-') && !(args.len()==1 && matches!(a.as_str(),"--help"|"-h"|"--version")))) {
+        let command_at=if args.first().is_some_and(|a|a=="--client") {
+            if args.get(1).is_none_or(|client|client.is_empty()) { return Err(Error::new(2,"--client needs a peer name")); }
+            2
+        }else{0};
+        if args.get(command_at).is_none_or(|a| a.starts_with('@')
+            || (a.starts_with('-') && !(args.len()==command_at+1 && matches!(a.as_str(),"--help"|"-h"|"--version")))) {
             return Err(Error::new(2,"A guarded mobile call requires a local command"));
         }
-        if args.first().is_some_and(|a| a == "__state") {
+        if args.get(command_at).is_some_and(|a| a == "__state") {
             session_process()?;
-            return state::dispatch(&args[1..]).map_err(|e| Error::new(1,e));
+            return state::dispatch(&args[command_at+1..]).map_err(|e| Error::new(1,e));
         }
     }
     // The existing swarm namespace fails closed on unknown operations in older
@@ -489,6 +496,14 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
     };
     let args = &args[index + 1..];
     match command.as_str() {
+        "--expect-machine" => {
+            if dry { return Err(Error::new(2,"Guarded calls do not support --dry-run")); }
+            if !target.is_empty()&&!config.is_self(&target) { return remote(&config,&target,command,args,false); }
+            let expected=require(args,0,"Missing expected machine identity")?;
+            let mut local=vec!["--expect-machine".to_owned(),expected.to_owned()];
+            if client!="local" { local.extend(["--client".into(),client]); }
+            local.extend_from_slice(&args[1..]);return dispatch(local);
+        }
         "-h" | "--help" | "help" => {
             // Capability probes for a selected computer must inspect that
             // computer's installed CLI, including retained older versions.
@@ -497,6 +512,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             }
             print!("{}", usage_text(cfg!(unix)));
             println!("Encrypted workspace ABI: guarded-local-v1");
+            println!("Desktop creation ABI: guarded-create-v1");
             #[cfg(windows)]
             print!("{}\nMobile gateway ABI: windows-local-v1\n", crate::host::admin::HELP);
             return Ok(0);
@@ -645,7 +661,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             if command == "dirs" && has(args, "--create") && dry {
                 return Err(Error::new(1, "folder creation does not support --dry-run"));
             }
-            if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "remove" || s == "sweep" || s == "policy" && args.get(1).is_some_and(|s|s=="set")) && dry {
+            if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "cancel" || s == "remove" || s == "sweep" || s == "policy" && args.get(1).is_some_and(|s|s=="set")) && dry {
                 return Err(Error::new(1, "worktree creation, removal and policy changes do not support --dry-run"));
             }
             if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
@@ -962,6 +978,15 @@ fn remote(
             all.extend(args.clone());
             all
         }
+        "--expect-machine" => {
+            let expected=require(&args,0,"Missing expected machine identity")?;
+            let actual=require(&args,1,"Missing guarded command")?;
+            let terminal=!has(&args,"-d")&&!matches!(actual,"dirs"|"worktrees"|"repository"|"--help"|"dsh"|"opencode");
+            flags=vec!["-o".into(),"BatchMode=yes".into(),"-o".into(),"ConnectTimeout=3".into()];
+            if terminal { flags.insert(0,"-t".into()); }
+            let mut all=vec!["--expect-machine".into(),expected.into(),"--client".into(),config.host().into()];
+            all.extend_from_slice(&args[1..]);all
+        }
         "archives" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
         | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
             flags = vec![
@@ -999,7 +1024,9 @@ fn remote(
         }
     };
     flags.extend(crate::machines::ssh_options(config, target));
-    let remote = if command == "repository" {
+    let remote = if command == "--expect-machine" {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to continue verified creation' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "repository" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "wait" {
         // Old peers otherwise interpret an unknown command as an agent launch.

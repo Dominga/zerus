@@ -840,6 +840,51 @@ pub struct PinnedProcess {
     #[cfg(target_os = "linux")]
     handle: fs::File,
 }
+
+/// A verified process state. Inspection failure is distinct from confirmed exit.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState { Running, Stopped, Exited }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn process_state(pid: u32, birth: Option<&str>) -> std::result::Result<ProcessState, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = PathBuf::from(format!("/proc/{pid}"));
+        let read = || -> io::Result<ProcessState> {
+            if fs::metadata(&path)?.uid() != unsafe { libc::geteuid() } {
+                return Err(io::Error::other("Process ownership is unavailable"));
+            }
+            let stat = fs::read_to_string(path.join("stat"))?;
+            let fields: Vec<_> = stat.rsplit_once(')').ok_or_else(|| io::Error::other("Invalid process identity"))?.1.split_whitespace().collect();
+            if fields.len() < 20 { return Err(io::Error::other("Incomplete process identity")); }
+            Ok(if birth.is_some_and(|birth| birth != fields[19]) || matches!(fields[0], "Z" | "X") { ProcessState::Exited }
+                else if matches!(fields[0], "T" | "t") { ProcessState::Stopped } else { ProcessState::Running })
+        };
+        match read() {
+            Ok(state) => Ok(state),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && presence(pid) == Presence::Gone => Ok(ProcessState::Exited),
+            Err(error) => Err(format!("Could not verify PID {pid}: {error}")),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as i32;
+        let read = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size) };
+        if read != size {
+            return if presence(pid) == Presence::Gone { Ok(ProcessState::Exited) }
+                else { Err(format!("Could not verify PID {pid}")) };
+        }
+        if info.pbi_pid != pid || info.pbi_uid != unsafe { libc::geteuid() } {
+            return Err(format!("Could not verify ownership of PID {pid}"));
+        }
+        let current = format!("{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec);
+        Ok(if birth.is_some_and(|birth| birth != current) || info.pbi_status == libc::SZOMB { ProcessState::Exited }
+            else if info.pbi_status == libc::SSTOP { ProcessState::Stopped } else { ProcessState::Running })
+    }
+}
+
 impl PinnedProcess {
     pub fn pin(pid: u32, birth: &str) -> std::result::Result<Self, String> {
         #[cfg(target_os = "linux")]
@@ -878,7 +923,18 @@ impl PinnedProcess {
     pub fn kill(&self) -> std::result::Result<(), String> {
         self.signal(libc::SIGKILL)
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn state(&self) -> std::result::Result<ProcessState, String> {
+        process_state(self.pid, Some(&self.birth))
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn stop(&self) -> std::result::Result<(), String> { self.signal(libc::SIGSTOP) }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn resume(&self) -> std::result::Result<(), String> { self.signal(libc::SIGCONT) }
     fn signal(&self, signal: i32) -> std::result::Result<(), String> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if self.state()? == ProcessState::Exited { return Ok(()); }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         if !self.alive() {
             return Ok(());
         }
@@ -2051,6 +2107,27 @@ mod tests {
         assert!(!pinned.alive());
         // Gone: no signal reaches whatever has the ID now.
         pinned.kill().unwrap();
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn pinned_process_states_distinguish_stopped_replaced_and_exited() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let birth = process_identity(child.id()).unwrap().birth;
+        let pinned = PinnedProcess::pin(child.id(), &birth).unwrap();
+        assert_eq!(pinned.state().unwrap(), ProcessState::Running);
+        assert_eq!(process_state(child.id(), Some("different birth")).unwrap(), ProcessState::Exited);
+        pinned.stop().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pinned.state().unwrap() == ProcessState::Running && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(pinned.state().unwrap(), ProcessState::Stopped);
+        pinned.resume().unwrap();
+        pinned.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(pinned.state().unwrap(), ProcessState::Exited);
+        assert_eq!(process_state(child.id(), None).unwrap(), ProcessState::Exited);
     }
 
     #[test]

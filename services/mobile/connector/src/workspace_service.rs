@@ -289,17 +289,27 @@ pub(crate) async fn start(
     private: &Path,
     node_id: &str,
     revision: &str,
+    failed_start_revision: Option<&str>,
 ) -> Result<Option<Value>> {
     // Unmanaged configurations do not gain a new mutation-lock dependency.
     if workspace_cli::read_private(private, RECORD)?.is_none() {
+        if failed_start_revision.is_some() {
+            return Err(failure());
+        }
         return Ok(None);
     }
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let store = Store::lock(private, false).map_err(|_| failure())?;
         let Some(record) = read(&store)? else {
+            if failed_start_revision.is_some() {
+                return Err(failure());
+            }
             return Ok(None);
         };
         if record.phase == "manual" && record.managed_node_id.is_none() {
+            if failed_start_revision.is_some() {
+                return Err(failure());
+            }
             return Ok(None);
         }
         // A managed association never silently falls back to a detached process.
@@ -312,6 +322,15 @@ pub(crate) async fn start(
         }
         #[cfg(target_os = "linux")]
         let mut record = record;
+        if let Some(expected) = failed_start_revision {
+            #[cfg(target_os = "linux")]
+            linux::recover_failed_start(&store, &mut record, expected).await?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = expected;
+                return Err(failure());
+            }
+        }
         #[cfg(target_os = "linux")]
         let plan = linux::reserve_start(&store, &mut record).await?;
         #[cfg(target_os = "linux")]
@@ -375,7 +394,14 @@ pub async fn test_start(
     node_id: &str,
     revision: &str,
 ) -> Result<Option<Value>> {
-    start(config, private, node_id, revision).await
+    start(config, private, node_id, revision, None).await
+}
+
+#[cfg(all(target_os = "linux", feature = "test-hooks"))]
+pub async fn test_failed_start_recovery(private: &Path, expected: &str) -> Result<()> {
+    let store = Store::lock(private, false).map_err(|_| failure())?;
+    let mut record = read(&store)?.ok_or_else(failure)?;
+    linux::recover_failed_start(&store, &mut record, expected).await
 }
 
 #[cfg(all(target_os = "linux", feature = "test-hooks"))]

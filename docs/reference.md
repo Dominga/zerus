@@ -178,6 +178,22 @@ session or ordinary shell blocks the operation before the first signal. Once
 stopping begins, some sessions can fail independently; inspect the nonzero result
 before rebooting.
 
+On Linux and macOS, **Terminate** also ends the agent's verified descendant
+processes, including background jobs in separate Unix sessions. It temporarily
+suspends the agent and its descendants while collecting a bounded, fresh tree,
+pins every process to its birth identity, and confirms the complete stopped tree
+before closing the exact terminal. After the terminal accepts teardown, it kills
+the pinned agent and descendants and confirms their exit. The agent stays
+suspended until it is killed, so shutdown handlers cannot fork new jobs after
+verification. An incomplete check keeps the terminal; failed teardown restores
+only processes suspended by this operation. A failed or unconfirmed stop does not
+start worktree cleanup. Pause and native Stop keep their existing behavior.
+
+Process names, shared process groups and the working folder never authorize
+termination of other programs. Already orphaned processes whose session ownership
+cannot be verified stay untouched; a surviving process using the checkout still
+prevents its removal. Run Terminate from outside the target's own process tree.
+
 Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
 supported native DeepSeek operation. It preserves the original folder, account
 and project wrapper. There is no fallback to the latest conversation or a new
@@ -1148,6 +1164,10 @@ For Claude and Kimi messages ending in a literal backslash, the paste includes a
 final newline so the single Enter submits the unchanged message instead of
 activating the agent's backslash-Enter line continuation. This is verified
 against native history; no second Enter is sent as an automatic retry.
+Codex messages ending in an `@mention` likewise include a final pasted newline
+to move the cursor outside file/mention completion before the single Enter.
+Codex trims that newline on submission; the message and receipt retain the
+literal mention, including a recipient that matches an existing filename.
 Confirmed receipts are idempotent by request ID. An uncertain result is never
 retried automatically; inspect the native UI before submitting again. A session
 change or stale request cannot send into another conversation. Busy-session queue
@@ -2034,7 +2054,8 @@ Switching sources keeps the shared controls and action buttons in place.
 
 Select an existing logical project, Inbox, or **New project…**, then use the
 single **Clone and start** action. Progress, access errors and recovery controls
-stay inline. Switching source modes or opening the form never starts a clone.
+move to a selectable creation card in Sessions as soon as the form closes.
+Switching source modes or opening the form never starts a clone.
 **Projects → Clone repository…** offers standalone preparation without starting
 an agent.
 
@@ -2057,8 +2078,9 @@ supported without Git initialization.
 Cloning has a ten-minute Git deadline and never automatically retries an
 uncertain operation. Private native receipts and local pending-request metadata
 retain the original identity across dialog or application restarts. **Check
-result** reads that original receipt; a recovered checkout requires an explicit
-**Use checkout** or **Use checkout and start** action. Failed or partial checkouts
+result** reads that original receipt; a recovered checkout requires explicit
+**Continue setup** on its creation card. Standalone preparation retains its
+**Use checkout** action. Failed or partial checkouts
 are kept for inspection. A timeout or lost connection is not permission to remove
 files or run the clone again. **Choose another destination…** leaves the original
 checkout and native receipt in place and lets you prepare a different clone.
@@ -2070,6 +2092,56 @@ reads its durable receipt. Reusing a request ID with identical fields returns
 the original result without repeating Git; different fields are refused.
 Remote acquisition requires the exact selected CLI's `repository-clone-v1`
 capability. Older peers continue to support ordinary folder selection.
+
+### Session creation progress
+
+The final **Start session** / **Clone and start** action immediately publishes a
+selectable creation card and closes the form. An ordered background writer saves
+the captured choices before any clone, worktree or agent starts. The initial
+**Saving request…** stage is visible even while storage or the selected computer
+is slow. A save failure keeps the card and dispatches no next step.
+
+Select the card to see its current stage, elapsed time, bounded diagnostics and
+retained checkout/branch. Stages distinguish folder and repository checks,
+cloning, worktree creation, checkout verification, agent startup and confirmation
+of the real session. After 30 seconds without a stage update, the detail view
+explains that preparation is taking longer than usual. It never invents a
+percentage. Failed and uncertain creations remain available for review.
+
+Creation cards appear in All and Active, with separate creation counts and the
+same project, machine, account, folder and text scopes. The newly submitted card
+is temporarily revealed without changing those scopes; **Return to filters**
+ends that reveal. The clock button opens bounded pages of creation history,
+including hidden cards. **Hide status** changes presentation only. Moving to
+another conversation leaves preparation running and preserves its draft.
+
+**Stop creating** fences later preparation and launch. Modern worktree receipts
+can cancel only their own Git process group/job. Clone operations and older
+worktree helpers offer **Stop after preparation**. Files and branches are always
+kept. Once launch dispatch is reserved, check its result; use normal confirmed
+session termination after an actual session appears.
+
+**Check result** observes the original clone/worktree request or refreshes session
+evidence. An unknown outcome never permits another creation command. After a
+restart, unfinished cards require explicit **Continue setup**; recovered
+preparation is revalidated before startup. A definitely ended startup can retry
+only startup with a new launch identity. **Edit choices** opens a reviewed new
+request while preserving the original attempt and resources.
+
+Only the exact native launch identity, computer, name and agent replace a card
+with a real session. Command success alone remains **Confirming session…**; a
+late transport error cannot downgrade a proven session. Native early-exit
+evidence keeps its reason and bounded output in the creation card. Project
+placement still follows its existing acquisition/launch success boundary.
+
+When supported by the selected CLI, `dirs --creation` confirms its stable
+computer UUID. Subsequent preparation and launch commands use
+`--expect-machine UUID`; an SSH alias that now points to another computer fails
+before mutation. Older helpers keep one-shot preparation with conservative
+recovery. Creation has at most four active preparations and 32 unfinished
+requests; hidden resolved history is pruned locally, never unresolved requests.
+The private versioned journal is bounded to 128 records / 8 MiB. API v1 and mobile
+action journals retain their existing contracts.
 
 The native operation pins the parent and new destination through Git and checks
 their identities before accepting the result. Unix Git starts in the held
@@ -2145,12 +2217,23 @@ session card can verify publication; Git's default `simple` push mode still
 refuses a bare `git push` to the differently named branch. Commits, tags,
 detached `HEAD`, local upstreams and `push.default=upstream` or `tracking` leave
 the new branch without an upstream. The five-minute operation can leave partial results after failure;
-inspect the destination before retrying. Cancelling the session form preserves
+inspect the destination before retrying. Stopping session preparation preserves
 the created folder and branch. Closing or archiving a session never removes them.
 Automatic creation requires a fresh verified repository on the selected computer.
-The form stays locked during creation, starts only after its matching receipt,
-and never repeats a failed or unconfirmed request. Its destination remains
+The creation card starts the agent only after its matching result and fresh
+checkout checks, and never repeats an unconfirmed request. Its destination remains
 available for inspection or an explicit direct-folder launch.
+
+The opt-in `worktrees create --receipt --request-id UUID` contract reserves a
+private original request before Git. Identical duplicates return that result;
+different arguments refuse. `worktrees status --request-id UUID --json` reads it,
+including fresh ownership verification for a created checkout. An interrupted
+reservation becomes unconfirmed and is never replayed. `worktrees cancel
+--request-id UUID --json` requests shutdown of that operation alone; a running
+receipt is not proof of exit. A final failed receipt with `effects_started:false`
+permits an explicit new attempt after checks. Failures after checkout begins keep
+the request and resources for inspection. Existing calls without `--receipt`
+and mobile API v1 remain compatible.
 
 Catalog reads are on demand, with a 30-second repository cache; `--refresh`
 bypasses it. Identity is machine plus canonical Git common directory, not equal
@@ -2256,20 +2339,25 @@ and staged Git blobs (bounded to 64 MiB and two seconds), and does not override
 any other protection. A changed or incomplete proof requires a new review.
 
 Linux can deny access to a protected process's current folder or executable,
-including desktop services. A completed process inventory with only those
-access denials offers **Check running programs** in manual cleanup. The folder
-stays protected until you explicitly confirm **I checked these folders are not
-in use; remove them anyway**. This accepts the uncertainty about those programs;
-it does not establish that the folder is unused. The confirmation is bound to
-the exact folder review and unreadable process identities and is checked again
-before removal. A protected ancestor that launches the current CLI request
-(including a fresh SSH session) is matched by its verified invocation role,
-program name, hidden-path shape and computer boot rather than its temporary PID. Other
-protected processes retain exact PID and start identities. Readable ancestor
-paths still protect their folders. A known program or session using the folder, another blocker,
-an incomplete inventory, or changed process identities still prevents removal.
-Automatic cleanup never uses this exception. Older owning CLIs without this
-proof keep the folder; update that computer before trying manual cleanup again.
+including desktop services. A complete inventory containing only access denials
+allows explicit manual acceptance: **Remove even if some running programs cannot
+be checked**. This accepts uncertainty; it does not prove those programs are
+unrelated. The acceptance lasts five minutes on the owning computer and is bound
+to the exact checkout review, repository and ownership. Unrelated protected
+processes starting, exiting or changing PID do not invalidate it. Removal still
+requires a fresh complete inventory and refuses known programs or sessions using
+the folder, changed files or ownership, and all other protections. An incomplete
+inventory remains blocked. Automatic cleanup never uses this exception. Process
+names, PIDs and access details remain available under **Details**.
+
+A refusal before deletion shows **Folder kept**. **Check again** refreshes only
+remaining folders and clears the prior local-file, discard and process choices;
+removal needs a new explicit confirmation. File inspection remains available.
+Successfully removed targets are never resubmitted. A lost response, an older CLI
+without a verified outcome, or an error after Git may have started shows **Result
+unknown** and never enables another removal in that operation. Files can still be
+inspected. The CLI preserves nonzero failure exits and stderr while adding a
+request-bound JSON outcome for clients that request `--json`.
 
 Confirmation lists the folders, the ignored data deleted with them (such as build
 output) and any branches that will be deleted. Each removal then repeats the
@@ -2353,17 +2441,27 @@ A replacement checkout at the same path or branch is kept for manual review;
 older sessions without a launch ownership record also require review. Fresh
 removal fingerprints include the ownership nonce, so replacing a checkout after
 review cannot inherit its removal consent.
-It runs only after the exact termination succeeds and checks the original folder
-on its owning computer. A verified Zerus-created, clean, integrated checkout can
-be removed with tool-declared generated caches without another confirmation.
-Supported cache proofs include Cargo's cache-directory tag, source-backed Python
-bytecode, package-manager metadata, Gradle build metadata and a CMake build bound
-to this checkout. A directory name alone does not establish disposable data.
-Other local files, source changes, external checkouts and uncertain process use
-open the ordinary cleanup review. The branch and conversation are retained, and
-managed archive restoration records the exact retained head before removal.
-Cancellation, failed termination and unconfirmed removal never trigger a retry.
-Background maintenance keeps its existing policy and preserves all ignored data.
+After the original confirmation closes, cleanup runs in the background only
+following exact successful termination. A compact workspace notice shows progress,
+then **Working folder removed**, **Working folder kept** with a short reason, or
+an unknown result. **Check again**, **View files**, **Details** and **Keep** provide
+explicit next actions. Review opens only when requested and does not block the
+rest of Zerus. Pending work and retained results are bounded to 64 folders, and
+background batches run sequentially. Closing the review does not cancel an
+accepted removal.
+
+The original folder is checked on its owning computer. A verified Zerus-created,
+clean, integrated checkout can be removed with tool-declared generated caches
+without another confirmation. Supported cache proofs include Cargo's cache-directory
+tag, source-backed Python bytecode, package-manager metadata, Gradle build metadata
+and a CMake build bound to this checkout. A directory name alone does not establish
+disposable data. Other local files, source changes, external checkouts and uncertain
+process use keep the folder for explicit review. The branch and conversation are
+retained, and managed archive restoration records the exact retained head before
+removal. An already completed native cleanup is reported directly; an uncertain
+native cleanup is never restarted by the desktop. Cancellation, failed termination
+and unconfirmed removal never trigger a retry. Background maintenance keeps its
+existing policy and preserves all ignored data.
 
 The cleanup review always shows integration evidence, even when local files
 remain. Git integration uses local refs, not a fresh remote check. The selected

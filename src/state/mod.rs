@@ -84,6 +84,7 @@ mod workspace;
 mod git_status;
 mod repositories;
 mod worktrees;
+mod worktree_requests;
 mod worktree_cleanup;
 mod worktree_caches;
 mod worktree_inspection;
@@ -232,7 +233,7 @@ pub(super) fn home() -> PathBuf {
     crate::platform::home_dir().unwrap_or_else(|| "/".into())
 }
 
-fn directories(path: &str, hidden: bool) -> Result<Value> {
+fn directories(path: &str, hidden: bool, creation: bool) -> Result<Value> {
     if path.chars().any(|c| c < ' ') {
         return Err("directory paths cannot contain control characters".into());
     }
@@ -248,7 +249,8 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
         return Err(format!("not a directory: {path}"));
     }
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(&directory).map_err(|e| e.to_string())? {
+    let listing=if creation { None }else{Some(std::fs::read_dir(&directory).map_err(|e|e.to_string())?)};
+    for entry in listing.into_iter().flatten() {
         let Ok(entry) = entry else { continue };
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -272,6 +274,10 @@ fn directories(path: &str, hidden: bool) -> Result<Value> {
     let mut result = json!({"path": directory, "parent": directory.parent().unwrap_or(Path::new("/")),
         "home": home(), "directories": entries, "truncated": truncated});
     if let Ok(config) = crate::config::Config::load() {
+        if creation {
+            result["computer_id"]=json!(crate::swarm::local_node_id(&config).map_err(|e|e.to_string())?);
+            result["creation_identity_v1"]=json!(true);
+        }
         if let Some(project) = crate::swarm::directory_project(&config, &directory) {
             result["project_inference"] = project;
         }
@@ -706,6 +712,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str)==Some("repository") { return repositories::dispatch(&args[1..]); }
     #[cfg(unix)]
     if args.first().map(String::as_str)==Some("repository-git-worker") { return repositories::git_worker(&args[1..]); }
+    #[cfg(unix)]
+    if args.first().map(String::as_str)==Some("worktree-request-worker") { return worktree_requests::worker(&args[1..]); }
     session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
@@ -726,6 +734,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             println!("{}", create_directory(path, id)?);
             return Ok(0);
         }
+        let creation=args.first().map(String::as_str)==Some("--creation");
+        let args=if creation { &args[1..] }else{args};
         let hidden = args.first().map(String::as_str) == Some("--hidden");
         let paths = if hidden { &args[1..] } else { args };
         if paths.len() > 1 {
@@ -733,7 +743,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         }
         println!(
             "{}",
-            directories(paths.first().map(String::as_str).unwrap_or("~"), hidden)?
+            directories(paths.first().map(String::as_str).unwrap_or("~"), hidden, creation)?
         );
         return Ok(0);
     }

@@ -43,7 +43,35 @@ forward secrecy. See the [wire contract](../../services/mobile/crypto/README.md)
 
 Shared protocol fixtures and HTTP tests cover signature/key substitution,
 membership history, exact ciphertext retry and receipt-only recovery. The
-emulator-only `WorkspaceJournalSmokeInstrumentation` separately exercises real
+activity and history reads first poll their retained receipt after 100 ms,
+then at 200 ms through the first eight polls, returning to the ordinary 800 ms
+cadence. The maximum
+poll count remains bounded; a pending receipt never resubmits its request.
+Encrypted receipt HTTP overlaps a fresh signed membership check, but the app
+requires the original protected request and active enrollment before fetching,
+and verifies current membership before decrypting or settling any result.
+
+For a privately signed diagnostic preview, `-PzerusReadTiming=true` enables the
+`ZerusReadTiming` logcat tag. It contains only fixed operation/stage names,
+process-local sequence numbers and monotonic durations. It records no request
+IDs, workspace identities, paths, bodies, keys or error strings. Ordinary builds
+leave it disabled; do not use a diagnostic preview's local measurements as
+evidence of a published version or an end-to-end latency guarantee.
+
+Catalog history-head probes pause while a conversation is selected, so unseen
+chat metadata does not queue ahead of its visible inspection and history. An
+already submitted probe keeps its request identity and may finish; explicit
+read-evidence preparation remains available. Returning to the list resumes the
+bounded fair head scheduler.
+
+While an ordinary conversation is visible, automatic inspection waits for the
+current read to finish, with a two-second minimum cycle and at least a 200 ms
+pause after a slower read. Errors, catalog views and native-input review keep
+their five-second pacing. The timer waits on the existing read job; navigation
+and journal handling keep their current behavior. Manual refresh still shares
+any in-flight read.
+
+The emulator-only `WorkspaceJournalSmokeInstrumentation` separately exercises real
 Keystore/SQLite recovery with private state and ciphertext larger than 2 MiB.
 Compiling its test APK does not qualify that native runtime path; running it
 requires an isolated emulator and separately authorized installation.
@@ -190,9 +218,16 @@ uncertain messages.
 An unopened conversation immediately shows “Loading conversation…” while its
 messages load. A resolved empty conversation keeps “No messages yet.” during
 background reads instead of returning to the initial placeholder. Opening cached
-messages immediately animates the existing **Refresh** action until the initial
-inspection and history reads settle. Cached messages remain readable, and the
-indicator never inserts a row or moves the transcript. Later background reads
+messages immediately shows a pinned status beneath the session tools, distinguishing
+saved messages from checking activity and loading history. The status remains outside
+the scrolling transcript; its two lines and indicator slot retain their geometry as
+reads settle. The Refresh action remains in place. Opening starts exact-target
+inspection and canonical history independently instead of serializing their relay
+round trips. Either may finish first; a complete page already covered by the opening
+inspection is not immediately fetched again. Cached messages remain readable, and
+only the fresh inspection permits actions. The periodic loop does not start another
+inspection while that verified opening is still waiting for its first history page;
+explicit refresh remains available. Later background reads
 show progress only after five seconds; manual refresh shows it immediately and
 reuses any matching in-flight read. Catalogs retain their thin progress bar.
 Pulling a conversation up past its newest

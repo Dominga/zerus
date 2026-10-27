@@ -90,6 +90,15 @@ worker converges within that interval. Protect database/storage capacity and
 network bandwidth separately; admission reservations do not establish a latency
 SLA or permit canceling already accepted work.
 
+Payload database admission absorbs short cross-worker bursts with at most
+250 ms of capacity waiting and bounded exponential backoff. Every attempt
+still requires the same local and shared class/total reservations; no permit or
+transaction is held during backoff, and ordinary work never borrows the team
+reserve. This is an admission wait, not a retry of a request or SQL operation.
+Existing SQL and request deadlines remain in force; the waiting budget does
+not preempt an in-progress acquisition. Sustained pressure still returns busy,
+and disconnect/shutdown releases application-owned acquisition custody.
+
 API v2 transports signed public membership and opaque ciphertext. Devices create
 their own independent signing/encryption keys and service bearer. The invitation
 secret remains solely in copied typed codes and endpoint private storage. The

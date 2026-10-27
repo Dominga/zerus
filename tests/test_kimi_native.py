@@ -637,7 +637,13 @@ class NativeKimi(lifecycle.Harness):
         conversation only with that message."""
         name = 'kimi/p/native'
         self.hgs('kimi', 'p', '-n', 'native', '-d')
-        self.until(lambda: self.binding(name).get('pid'), name)
+        def agent_started():
+            record = self.binding(name)
+            supervisor = (record.get('supervisor') or {}).get('pid')
+            # Lifecycle first publishes the supervisor itself as a placeholder.
+            # Pin the native identity only after spawn publishes its actual child.
+            return record.get('pid') and supervisor and record['pid'] != supervisor
+        self.until(agent_started, name)
         self.assert_process(name, 'initial')
         answered = []
 
@@ -881,6 +887,10 @@ class NativeKimi(lifecycle.Harness):
                    self.inspect(name).get('activity') == 'idle', name)
         self.assert_process(name, 'resumed')
         self.assertEqual(self.binding(name)['conversation_id'], before['conversation_id'])
+        resumed = self.binding(name)
+        self.hgs('terminate', name, '--expected-run-id', resumed['run_id'])
+        archives = [json.loads(path.read_text()) for path in (self.root / 'state/archives').glob('*.json')]
+        self.assertTrue(any(row['conversation_id'] == before['conversation_id'] and row['run_id'] == resumed['run_id'] for row in archives))
 
     def test_rolling_window_429_recovers_in_the_same_conversation(self):
         name = self.launch()
@@ -1444,6 +1454,7 @@ class FixtureControls(unittest.TestCase):
         class Scripted(NativeKimi):
             """Kimi's composer takes input before its banner request and warning."""
             ticks = 0
+            binding_reads = 0
             requests = []
 
             def tick(self):
@@ -1474,7 +1485,8 @@ class FixtureControls(unittest.TestCase):
                 return ''
 
             def binding(self, name):
-                return dict(pid=1, run_id='run')
+                self.binding_reads += 1
+                return dict(pid=1 if self.binding_reads == 1 else 2, run_id='run', supervisor=dict(pid=1))
 
             def assert_process(self, name, stage):
                 pass
@@ -1487,6 +1499,7 @@ class FixtureControls(unittest.TestCase):
                 return 'off\n'
         kimi = Scripted()
         kimi.launch()
+        self.assertGreaterEqual(kimi.binding_reads, 2, 'the initial supervisor PID is not a native agent identity')
         self.assertIn(TMUX_KEYS, kimi.shown(), 'the start was ready before Kimi drew its tmux warning')
         self.assertGreaterEqual(kimi.ticks, 6)
 

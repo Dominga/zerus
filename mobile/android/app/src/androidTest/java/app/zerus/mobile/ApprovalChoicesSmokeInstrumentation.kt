@@ -409,17 +409,31 @@ class ApprovalChoicesSmokeInstrumentation : Instrumentation() {
     }
     private fun reveal(label: String, disclosureLabel: String, captureDisclosure: Boolean = false): DisclosureScroll? {
         var disclosureScroll: DisclosureScroll? = null
+        var stableBounds: Rect? = null
+        var stableSince = 0L
         await("option $label") {
-            if (visible(label) != null && !captureDisclosure) true else {
+            val option = visible(label)
+            if (option != null) {
+                // Accessibility can expose the label while either enclosing scroll still moves.
+                // Observe stable geometry before the one physical tap, never retry the tap.
+                if (captureDisclosure && disclosureScroll == null)
+                    disclosureScroll = bindDisclosureScroll(disclosureLabel)
+                val bounds = Rect().also(option::getBoundsInScreen)
+                val now = SystemClock.uptimeMillis()
+                if (stableBounds != bounds) { stableBounds = bounds; stableSince = now }
+                now - stableSince >= 500
+            } else {
+                stableBounds = null
                 // Keep the bound inner node when its label scrolls offscreen; never rebind to the history.
                 val disclosure = disclosureScroll ?: bindDisclosureScroll(disclosureLabel).also { disclosureScroll = it }
                 check(disclosureScrollReady(disclosure)) { "Bound disclosure is not in the active window" }
-                if (captureDisclosure && visible(label) != null) true else {
-                    disclosure.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                    false
-                }
+                disclosure.node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                // Do not queue more animated scrolls while the previous one is still being announced.
+                uiAutomation.waitForIdle(500, 2000)
+                false
             }
         }
+        phase("disclosure-stable:$label")
         return disclosureScroll
     }
     private data class DisclosureScroll(val node: AccessibilityNodeInfo, val window: Int)

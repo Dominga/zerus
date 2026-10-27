@@ -99,6 +99,18 @@ replaced ownership, unknown local data, source changes, other occupants and
 uncertain process use require fresh manual review. Background
 maintenance continues to preserve all ignored data. Never stop unrelated system
 services to make a worktree removable; uncertain removals are never replayed.
+Termination cleanup runs in the background after its original confirmation.
+Show removed, kept and unknown outcomes with explicit review actions. Only a
+verified refusal before deletion may be checked for a new removal; never replay
+an unknown outcome. Manual acceptance of unreadable process paths lasts five
+minutes for the exact checkout review and tolerates unrelated process churn.
+Fresh known-use, session, ownership and file protections still apply; automatic
+cleanup never uses that manual acceptance.
+On Linux and macOS, Terminate must confirm the exit of the selected agent's
+verified background process trees before worktree cleanup. Pin birth identities
+before terminal teardown loses ancestry; bound verification and restore temporary
+stops on refusal. Folder paths, executable names and shared process groups never
+authorize stopping other programs. Keep Pause and native Stop semantics unchanged.
 
 An idle agent with confirmed owned live shell or native jobs shows `Background`,
 remains in Active and accepts new messages. Native work and explicit attention

@@ -1,8 +1,8 @@
 //! Review and guarded removal of linked worktrees. Removal repeats every check
 //! under the repository lock used by creation, compares the fingerprint the
 //! person reviewed. Force is limited to explicitly confirmed, content-fingerprinted
-//! uncommitted files. A separate manual process confirmation accepts only stable
-//! access-denied paths; active/locked/nested and other unknowns stay protected.
+//! uncommitted files. A short-lived manual process confirmation accepts incomplete
+//! access to process paths; active/locked/nested and other unknowns stay protected.
 use super::worktrees::{cache_file, canonical, error, git, list, GitError};
 use super::*;
 use fs2::FileExt;
@@ -17,6 +17,29 @@ const WALK_ENTRIES: usize = 200_000;
 const WALK_TIME: Duration = Duration::from_secs(2);
 const MAX_IGNORED: usize = 20;
 const MAX_SAMPLES: usize = 5;
+const PROCESS_CONSENT_SECONDS: u64 = 300;
+
+fn process_consent(row: &Value, common: &Path, issued: u64) -> String {
+    let proof = fingerprint(json!({"scope":"manual-process-uncertainty-v2",
+        "worktree":row["fingerprint"],"common_dir":common,"issued":issued}));
+    format!("v2:{issued}:{proof}")
+}
+
+fn valid_process_consent(proof: &str, row: &Value, common: &Path, at: u64) -> bool {
+    let Some(issued) = proof.strip_prefix("v2:").and_then(|s| s.split_once(':'))
+        .and_then(|(issued, _)| issued.parse::<u64>().ok()) else { return false; };
+    if issued > at || at - issued >= PROCESS_CONSENT_SECONDS
+        || row["fingerprint"].as_str().is_none_or(str::is_empty) {
+        return false;
+    }
+    // The person accepts unknown process paths for this checkout for five minutes,
+    // including ordinary unrelated process churn. A fresh complete inventory is
+    // still required. Any known use or other protection removes this authority.
+    let reviewable = row["process_fingerprint"].as_str().is_some_and(|s| !s.is_empty());
+    let clear = matches!(row["verdict"].as_str(), Some("ready" | "review"))
+        && row["reasons"].as_array().is_some_and(Vec::is_empty);
+    (reviewable || clear) && proof == process_consent(row, common, issued)
+}
 
 /// Folders a Zerus session record refers to.
 struct Reference {
@@ -543,7 +566,7 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
         Ok(processes) => {
             if !processes.unreadable.is_empty() {
                 reasons.push(reason("processes_unavailable", format!(
-                    "The OS hides folder or executable paths for {}. Check that no program uses this folder before confirming manual removal.",
+                    "Zerus cannot check whether some running programs use this folder ({} with hidden paths).",
                     plural(processes.unreadable.len(), "process")
                 )));
                 row["unreadable_processes"] = json!(processes.unreadable);
@@ -916,17 +939,7 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     if context.processes.as_ref().is_ok_and(|p| !p.unreadable.is_empty())
         && reasons.len() == 1 && reasons[0]["code"] == "processes_unavailable"
     {
-        // Separate SSH requests have different protected launch PIDs. Only
-        // ancestors verified from /proc before AND after the roster use a role
-        // identity. Every other unknown process keeps its exact PID/boot/start.
-        // Retain command, denied-path shape and multiplicity, and keep all
-        // readable paths as blockers even for invocation ancestors.
-        let mut unreadable:Vec<_>=context.processes.as_ref().unwrap().unreadable.iter()
-            .map(crate::platform::UnreadableWorktreeProcess::confirmation_identity).collect();
-        unreadable.sort_by_cached_key(Value::to_string);
-        row["process_fingerprint"] = json!(fingerprint(json!({
-            "worktree":row["fingerprint"], "unreadable":unreadable
-        })));
+        row["process_fingerprint"] = json!(process_consent(&row, &context.common, now() as u64));
     }
     finish(row, reasons, notes)
 }
@@ -1032,6 +1045,18 @@ pub(super) fn review_command(args: &[String]) -> Result<Value> {
 }
 
 pub(super) fn remove_command(args: &[String]) -> Result<Value> {
+    remove_with_outcome(args).0
+}
+
+/// Only the CLI exposes the structured outcome. Internal lifecycle callers keep
+/// the existing Result contract. Once Git may have started, errors are uncertain.
+pub(super) fn remove_with_outcome(args: &[String]) -> (Result<Value>, bool) {
+    let mut attempted = false;
+    let result = remove(args, &mut attempted);
+    (result, attempted)
+}
+
+fn remove(args: &[String], attempted: &mut bool) -> Result<Value> {
     const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut delete_branch = false;
@@ -1171,8 +1196,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     }
     let process_consent = options.get("--process-fingerprint").copied();
     if process_consent.is_some()
-        && (automatic || process_consent != row["process_fingerprint"].as_str()
-            || string(&row, "process_fingerprint").is_empty())
+        && (automatic || !valid_process_consent(process_consent.unwrap(), &row, &common, now() as u64))
     {
         return Err("Process confirmation is stale or this worktree is still protected. Review it again.".into());
     }
@@ -1252,6 +1276,7 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
         command.push("--force");
     }
     command.extend(["--", &spelling]);
+    *attempted = true;
     git(
         &common,
         &command,
@@ -1299,4 +1324,39 @@ pub(super) fn remove_command(args: &[String]) -> Result<Value> {
     }
     drop(lock);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_process_consent_expires_and_binds_the_checkout() {
+        let common = Path::new("/fixture/repository/.git");
+        let mut row = json!({"fingerprint":"original-checkout", "process_fingerprint":"available",
+            "verdict":"blocked", "reasons":[{"code":"processes_unavailable"}]});
+        let proof = process_consent(&row, common, 1000);
+        assert!(valid_process_consent(&proof, &row, common, 1000));
+        assert!(valid_process_consent(&proof, &row, common, 1299));
+        assert!(!valid_process_consent(&proof, &row, common, 1300));
+        assert!(!valid_process_consent(&proof, &row, common, 999));
+        assert!(!valid_process_consent(&proof, &row, Path::new("/fixture/other/.git"), 1000));
+        assert!(!valid_process_consent(&proof.replace("1000", "1001"), &row, common, 1001));
+        row["fingerprint"] = json!("replacement-checkout");
+        assert!(!valid_process_consent(&proof, &row, common, 1000));
+    }
+
+    #[test]
+    fn manual_process_consent_does_not_admit_another_blocker() {
+        let common = Path::new("/fixture/repository/.git");
+        let mut row = json!({"fingerprint":"checkout", "process_fingerprint":"available", "verdict":"blocked"});
+        let proof = process_consent(&row, common, 1000);
+        row.as_object_mut().unwrap().remove("process_fingerprint");
+        for code in ["processes", "sessions", "processes_unavailable", "status_unavailable", "locked"] {
+            row["reasons"] = json!([{"code":code}]);
+            assert!(!valid_process_consent(&proof, &row, common, 1000));
+        }
+        row["verdict"] = json!("ready");row["reasons"] = json!([]);
+        assert!(valid_process_consent(&proof, &row, common, 1000), "Complete readable coverage also satisfies the accepted risk");
+    }
 }

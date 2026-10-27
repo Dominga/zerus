@@ -511,7 +511,11 @@ class OwnedWindowTouchObserverTests(unittest.TestCase):
         self.assertIn('MotionEvent.obtain(down, SystemClock.uptimeMillis(), type, bounds.exactCenterX(), bounds.exactCenterY(), 0)', tap)
         self.assertIn('SystemClock.elapsedRealtime() + 10_000', source)
         self.assertIn('elapsed < 3_000', source)
-        self.assertNotIn('waitForIdle', source)
+        # Only the separately sealed pre-tap scroll preparation may observe idle.
+        # The physical injection, review window and callbacks retain the old guard.
+        spec = importlib.util.spec_from_file_location('touch_scroll_preparation', ROOT / 'tests/review_focus_projection.py')
+        projection = importlib.util.module_from_spec(spec); spec.loader.exec_module(projection)
+        self.assertNotIn('waitForIdle', projection.reverse_scroll_idle(source))
 
     def test_success_and_failure_retain_trace_without_changing_seven_case_parser(self):
         source = FIXTURE.read_text()

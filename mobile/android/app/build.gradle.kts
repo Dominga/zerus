@@ -13,6 +13,7 @@ val signingPropertiesPath = providers.gradleProperty("zerusSigningProperties").o
 val privateSigningFile = file(signingPropertiesPath)
 val privateSigning = Properties().apply { if(privateSigningFile.isFile) privateSigningFile.inputStream().use { load(it) } }
 val firebaseEnabled = providers.gradleProperty("zerusFirebase").orNull == "true"
+val readTimingEnabled = providers.gradleProperty("zerusReadTiming").orNull == "true"
 val previewVersionName = providers.gradleProperty("zerusVersionName").orNull?.also {
     require(it.matches(Regex("[A-Za-z0-9][A-Za-z0-9.+-]{0,79}"))) { "Invalid Android preview version name." }
 }
@@ -96,6 +97,7 @@ android {
         versionCode = updateVersionCode ?: stableVersionCode
         versionName = previewVersionName ?: (devBuildNumber?.let { "$devBaseVersion-dev.$it" } ?: stableVersionName)
         buildConfigField("boolean", "FIREBASE_ENABLED", firebaseEnabled.toString())
+        buildConfigField("boolean", "READ_TIMING_ENABLED", readTimingEnabled.toString())
         testInstrumentationRunner = providers.gradleProperty("zerusInstrumentationRunner").orNull ?: "androidx.test.runner.AndroidJUnitRunner"
         // The ABIs the task replica's library is built for (crates/replica-ffi). JNA's own
         // library would otherwise add ABIs on which the replica is missing.

@@ -23,7 +23,7 @@ class Repository:
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(prefix='hgs-worktrees-');self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.home=self.root/'home';self.home.mkdir()
-        self.env=dict(os.environ,HOME=str(self.home),XDG_CONFIG_HOME=str(self.home/'.config'),HGS_STATE_DIR=str(self.root/'state'),HGS_SELF='fixture',HGS_PEERS='',GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null')
+        self.env=dict(os.environ,HOME=str(self.home),XDG_CONFIG_HOME=str(self.home/'.config'),HGS_CONFIG_DIR=str(self.home/'.config/hgs'),HGS_STATE_DIR=str(self.root/'state'),HGS_SELF='fixture',HGS_PEERS='',GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL='/dev/null')
         for key in ('GIT_DIR','GIT_COMMON_DIR','GIT_WORK_TREE','GIT_INDEX_FILE','GIT_CONFIG_COUNT'):self.env.pop(key,None)
         self.repo=self.root/'проект repo';self.repo.mkdir();self.git('init','-q','-b','main',str(self.repo))
         self.git('-C',str(self.repo),'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','--allow-empty','-qm','initial')
@@ -39,6 +39,110 @@ class Repository:
         path=self.root/name;self.git('-C',str(self.repo),'worktree','add','-qb','feature/'+name.replace(' ','-'),str(path));return path
 
 class Worktrees(Repository,unittest.TestCase):
+    def test_creation_identity_binds_guarded_local_and_explicit_self_routing(self):
+        result=subprocess.run([str(HGS),'dirs','--creation',str(self.repo)],env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr);identity=json.loads(result.stdout)['computer_id']
+        self.assertEqual(str(uuid.UUID(identity)),identity)
+        for prefix in ([],['@fixture']):
+            guarded=subprocess.run([str(HGS),*prefix,'--expect-machine',identity,'--client','fixture-control','dirs',str(self.repo)],env=self.env,text=True,capture_output=True,timeout=10)
+            self.assertEqual(guarded.returncode,0,guarded.stderr);self.assertEqual(json.loads(guarded.stdout)['path'],str(self.repo.resolve()))
+        wrong=subprocess.run([str(HGS),'@fixture','--expect-machine',str(uuid.uuid4()),'dirs',str(self.repo)],env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertNotEqual(wrong.returncode,0);self.assertIn('identity changed',wrong.stderr)
+        hop=subprocess.run([str(HGS),'--expect-machine',identity,'--client','fixture-control','@other.example.invalid','dirs',str(self.repo)],env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertNotEqual(hop.returncode,0);self.assertIn('requires a local command',hop.stderr)
+
+        compact=subprocess.run([str(HGS),'--expect-machine',identity,'worktrees','--creation','--path',str(self.repo),'--refresh','--json'],env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(compact.returncode,0,compact.stderr);catalog=json.loads(compact.stdout)
+        self.assertEqual(catalog['selected_branch'],'main');self.assertEqual(catalog['worktrees'],[])
+        self.assertTrue(catalog['creation_receipts_v1'])
+        compact_directory=json.loads(result.stdout)
+        self.assertEqual(compact_directory['directories'],[])
+
+    def receipt_create(self, request, branch='receipt-work', destination=None):
+        return [str(HGS),'worktrees','create','--path',str(self.repo),'--common-dir',str(self.repo/'.git'),
+                '--branch',branch,'--base','HEAD','--destination',str(destination or self.root/'receipt-checkout'),
+                '--request-id',request,'--receipt','--json']
+
+    def receipt_control(self, action, request):
+        result=subprocess.run([str(HGS),'worktrees',action,'--request-id',request,'--json'],env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        return json.loads(result.stdout)
+
+    def test_receipt_replays_original_result_and_refuses_changed_arguments(self):
+        request=str(uuid.uuid4());args=self.receipt_create(request)
+        first=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(first.returncode,0,first.stderr);value=json.loads(first.stdout);self.assertEqual(value['status'],'created')
+        (self.root/'receipt-checkout'/'keep.txt').write_text('local data')
+        repeated=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertEqual(json.loads(repeated.stdout),value)
+        self.assertEqual(self.receipt_control('status',request),value)
+        changed=subprocess.run(self.receipt_create(request,branch='another',destination=self.root/'another'),env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertNotEqual(changed.returncode,0);self.assertFalse((self.root/'another').exists())
+        self.assertEqual((self.root/'receipt-checkout'/'keep.txt').read_text(),'local data')
+
+    def test_interrupted_or_corrupt_receipt_never_restarts_creation(self):
+        request=str(uuid.uuid4());args=self.receipt_create(request)
+        result=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        receipt=self.root/'state'/'worktree-requests'/f'{request}.json'
+        saved=json.loads(receipt.read_text());saved['status']='running';receipt.write_text(json.dumps(saved))
+        self.assertEqual(self.receipt_control('status',request)['status'],'unconfirmed')
+        repeated=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertEqual(repeated.returncode,0,repeated.stderr);self.assertEqual(json.loads(repeated.stdout)['status'],'unconfirmed')
+        receipt.write_text('{broken')
+        repeated=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertNotEqual(repeated.returncode,0);self.assertEqual(receipt.read_text(),'{broken')
+
+    def test_created_receipt_checks_current_ownership_and_keeps_replaced_marker(self):
+        request=str(uuid.uuid4());result=subprocess.run(self.receipt_create(request),env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr);value=json.loads(result.stdout)
+        marker=Path(value['creation_owner']['metadata'])/'zerus-owner.json'
+        marker.write_text('{replaced')
+        status=self.receipt_control('status',request)
+        self.assertEqual(status['status'],'created');self.assertIn('ownership changed',status['resource_error'])
+        self.assertEqual(marker.read_text(),'{replaced');self.assertTrue((self.root/'receipt-checkout').is_dir())
+
+    def test_definite_precheckout_refusal_is_recorded_without_effects(self):
+        request=str(uuid.uuid4());args=self.receipt_create(request,branch='main')
+        result=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr);value=json.loads(result.stdout)
+        self.assertEqual(value['status'],'failed');self.assertIs(value['effects_started'],False)
+        self.assertFalse((self.root/'receipt-checkout').exists());self.assertEqual(self.receipt_control('status',request),value)
+
+    @unittest.skipUnless(os.name=='posix','Unix hook process group qualification')
+    def test_receipt_cancellation_stops_only_original_checkout_and_keeps_files(self):
+        hook=self.repo/'.git'/'hooks'/'post-checkout';ready=self.root/'hook-ready'
+        hook.write_text('#!'+sys.executable+'\nimport pathlib,time\npathlib.Path('+repr(str(ready))+').touch()\ntime.sleep(30)\n');hook.chmod(0o755)
+        request=str(uuid.uuid4());child=subprocess.Popen(self.receipt_create(request),env=self.env,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.addCleanup(lambda: child.kill() if child.poll() is None else None)
+        end=time.monotonic()+5
+        while not ready.exists() and time.monotonic()<end:time.sleep(.01)
+        self.assertTrue(ready.exists(),'Original checkout hook did not start')
+        self.assertEqual(self.receipt_control('status',request)['status'],'running')
+        duplicate=subprocess.run(self.receipt_create(request),env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertEqual(duplicate.returncode,0,duplicate.stderr);self.assertEqual(json.loads(duplicate.stdout)['status'],'running')
+        self.assertEqual(self.receipt_control('cancel',request)['status'],'running')
+        out,err=child.communicate(timeout=5);self.assertEqual(child.returncode,0,err)
+        self.assertEqual(json.loads(out)['status'],'failed');self.assertEqual(self.receipt_control('status',request)['status'],'failed')
+        self.assertTrue((self.root/'receipt-checkout').exists())
+        self.assertEqual(self.git('-C',str(self.repo),'branch','--show-current'),'main')
+
+    @unittest.skipUnless(os.name=='posix','Unix wrapper lifeline qualification')
+    def test_receipt_worker_finishes_checkout_shutdown_after_wrapper_is_killed(self):
+        hook=self.repo/'.git'/'hooks'/'post-checkout';ready=self.root/'hook-ready'
+        hook.write_text('#!'+sys.executable+'\nimport pathlib,time\npathlib.Path('+repr(str(ready))+').touch()\ntime.sleep(30)\n');hook.chmod(0o755)
+        request=str(uuid.uuid4());child=subprocess.Popen(self.receipt_create(request),env=self.env,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.addCleanup(lambda: child.kill() if child.poll() is None else None)
+        end=time.monotonic()+5
+        while not ready.exists() and time.monotonic()<end:time.sleep(.01)
+        self.assertTrue(ready.exists(),'Original checkout hook did not start')
+        child.kill();child.communicate(timeout=5)
+        end=time.monotonic()+5;status=self.receipt_control('status',request)
+        while status['status']=='running' and time.monotonic()<end:
+            time.sleep(.01);status=self.receipt_control('status',request)
+        self.assertEqual(status['status'],'failed',status)
+        self.assertTrue((self.root/'receipt-checkout').exists())
+
     def test_main_linked_subdirectory_symlink_and_identity(self):
         linked=self.linked();nested=linked/'nested';nested.mkdir();alias=self.root/'alias';alias.symlink_to(nested,target_is_directory=True)
         data=self.catalog(alias);self.assertEqual(data['state'],'ok');self.assertEqual(data['path'],str(nested.resolve()));self.assertEqual(data['selected_root'],str(linked.resolve()))
@@ -236,25 +340,26 @@ class Cleanup(Repository,unittest.TestCase):
         self.assertEqual(row['verdict'],'review',row);self.assertIn('ignored_data',codes(row['notes']));self.assertEqual(row['ignored'],[{'path':'target','bytes':1024,'complete':True}]);self.assertEqual(row['ignored_bytes'],1024)
         row=self.row(gone,data);self.assertEqual(row['verdict'],'missing');self.assertFalse(row['available'])
     @unittest.skipUnless(sys.platform == 'linux', 'Linux protected-process review')
-    def test_manual_process_confirmation_is_exact_and_never_overrides_other_blockers(self):
+    def test_manual_process_confirmation_survives_churn_but_never_overrides_other_blockers(self):
         def protected():
             child=subprocess.Popen([sys.executable,'-I','-c',
                 'import ctypes,time; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print("ready",flush=True); time.sleep(90)'],
                 cwd=self.root,stdout=subprocess.PIPE,text=True)
-            self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(child.kill)
+            self.addCleanup(child.stdout.close);self.addCleanup(child.wait);self.addCleanup(lambda: child.poll() is None and child.kill())
             self.assertEqual(child.stdout.readline().strip(),'ready');return child
         tree=self.linked('manual');self.age(tree);unknown=protected();row=self.row(tree)
         self.assertEqual(codes(row['reasons']),['processes_unavailable'])
         self.assertEqual(row['unreadable_processes'][0]['pid'],unknown.pid)
-        self.assertTrue(row['unreadable_processes'][0]['identity']);self.assertEqual(len(row['process_fingerprint']),64)
+        self.assertTrue(row['unreadable_processes'][0]['identity']);self.assertRegex(row['process_fingerprint'],r'^v2:[0-9]+:[a-f0-9]{64}$')
         refused=self.remove(tree,row['fingerprint']);self.assertNotEqual(refused.returncode,0);self.assertTrue(tree.exists())
         stale=self.remove(tree,row['fingerprint'],extra=('--process-fingerprint','0'*64))
         self.assertNotEqual(stale.returncode,0);self.assertIn('confirmation is stale',stale.stderr)
         automatic=self.remove(tree,row['fingerprint'],extra=('--automatic','--process-fingerprint',row['process_fingerprint']))
         self.assertNotEqual(automatic.returncode,0);self.assertTrue(tree.exists())
-        protected();changed=self.row(tree);self.assertNotEqual(changed['process_fingerprint'],row['process_fingerprint'])
-        stale=self.remove(tree,row['fingerprint'],extra=('--process-fingerprint',row['process_fingerprint']))
-        self.assertNotEqual(stale.returncode,0);self.assertTrue(tree.exists())
+        churn=self.linked('churn');self.age(churn);old=self.row(churn)
+        unknown.terminate();unknown.wait(timeout=5);protected();changed=self.row(tree)
+        allowed=self.remove(churn,old['fingerprint'],extra=('--process-fingerprint',old['process_fingerprint']))
+        self.assertEqual(allowed.returncode,0,allowed.stderr);self.assertFalse(churn.exists())
         known=subprocess.Popen(['sleep','90'],cwd=tree)
         self.addCleanup(lambda: known.poll() is None and (known.terminate(),known.wait(timeout=5)))
         busy=self.row(tree);self.assertIn('processes',codes(busy['reasons']));self.assertIn(known.pid,[p['pid'] for p in busy['processes']])
@@ -302,7 +407,7 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         first,row=review();second,current=review()
         self.assertNotEqual(first,second)
         self.assertEqual(row['fingerprint'],current['fingerprint'])
-        self.assertEqual(row['process_fingerprint'],current['process_fingerprint'])
+        self.assertTrue(current['process_fingerprint'].startswith('v2:'))
         self.assertTrue(next(r for r in current['unreadable_processes'] if r['pid']==second)['invocation_ancestor'])
         args=['remove','--path',str(tree),'--common-dir',str(self.repo/'.git'),
             '--fingerprint',row['fingerprint'],'--process-fingerprint',row['process_fingerprint']]
@@ -319,11 +424,22 @@ print(json.dumps(dict(pid=os.getpid(),rc=p.returncode,stdout=p.stdout,stderr=p.s
         tree=self.linked('task');self.age(tree);before=self.row(tree);self.catalog()
         self.commit(tree,'late work')
         stale=self.remove(tree,before['fingerprint']);self.assertNotEqual(stale.returncode,0);self.assertIn('changed since the review',stale.stderr);self.assertTrue(tree.exists())
+        refusal=json.loads(stale.stdout);self.assertEqual(refusal['status'],'kept');self.assertEqual(refusal['operation'],'worktree_remove');self.assertEqual(refusal['request_id'],'test-remove')
         result=self.remove(tree,self.row(tree)['fingerprint']);self.assertEqual(result.returncode,0,result.stderr)
         data=json.loads(result.stdout);self.assertEqual(data['status'],'removed');self.assertEqual(data['request_id'],'test-remove');self.assertFalse(data['branch_deleted'])
         self.assertEqual(data['path'],str(tree.resolve()));self.assertEqual(data['common_dir'],str((self.repo/'.git').resolve()))
         self.assertFalse(tree.exists());self.assertIn('feature/task',self.git('-C',str(self.repo),'branch','--list','feature/task'))
         self.assertNotIn(str(tree.resolve()),[r['path'] for r in self.catalog()['worktrees']])
+    def test_remove_failure_after_git_admission_has_an_unknown_structured_outcome(self):
+        tree=self.linked('git-failure');self.age(tree);row=self.row(tree)
+        self.fake("if any(sys.argv[i:i+2]==['worktree','remove'] for i in range(len(sys.argv)-1)):\n sys.stderr.write('fixture removal failure\\n');sys.exit(1)\nelse: os.execv("+repr(GIT)+",["+repr(GIT)+",*sys.argv[1:]])\n")
+        result=self.remove(tree,row['fingerprint'])
+        self.assertNotEqual(result.returncode,0);self.assertTrue(tree.exists())
+        outcome=json.loads(result.stdout)
+        self.assertEqual(outcome['status'],'unconfirmed');self.assertEqual(outcome['outcome_version'],1)
+        self.assertEqual(outcome['request_id'],'test-remove');self.assertEqual(outcome['path'],str(tree))
+        self.assertIn('fixture removal failure',outcome['detail'])
+
     def test_remove_deletes_ignored_data_and_only_merged_branches(self):
         merged=self.linked('merged');(merged/'target').mkdir();(merged/'target'/'out').write_text('build');self.age(merged)
         reviewed=self.row(merged);result=self.remove(merged,reviewed['fingerprint'],extra=('--delete-branch','--ignored-fingerprint',reviewed['ignored_fingerprint']));self.assertEqual(result.returncode,0,result.stderr)

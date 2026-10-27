@@ -232,7 +232,22 @@ class MainActivity : ComponentActivity() {
         onDispose { lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(invitation) { invitation?.let { server = it.server; code = it.code; tab = 3; pairing = true; onInvitationUsed() } }
-    LaunchedEffect(model, lifecycle, tab) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+    val refreshTarget = model.selected?.target
+    val reviewingNativeInput = refreshTarget != null && model.conversationQuestions.isNotEmpty()
+    LaunchedEffect(model, lifecycle, tab, refreshTarget, reviewingNativeInput, model.demo) { lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+        if (refreshTarget?.archiveId?.isBlank() == true && !reviewingNativeInput && !model.demo) {
+            var started = android.os.SystemClock.elapsedRealtime()
+            model.awaitActivityRead()
+            while (true) {
+                // At most one inspection: wait for its actual completion before the
+                // next turn, with a two-second floor and a short idle yield.
+                delay(if (model.error.isNotBlank()) 5_000L else
+                    maxOf(200L, 2_000L - (android.os.SystemClock.elapsedRealtime() - started)))
+                started = android.os.SystemClock.elapsedRealtime()
+                model.refreshActivity()
+                model.awaitActivityRead()
+            }
+        }
         while (true) {
             delay(5_000)
             if (model.selected != null) model.refreshActivity()
@@ -287,11 +302,9 @@ class MainActivity : ComponentActivity() {
                 IconButton(onClick = { if (selected == null) model.refresh(explicit = true) else model.refreshActivity(explicit = true) },
                     modifier = Modifier.semantics {
                         contentDescription = "Refresh"
-                        if (!conversationObscured) conversationLoad?.let { stateDescription = it.text; liveRegion = LiveRegionMode.Polite }
+                        if (!conversationObscured) conversationLoad?.let { stateDescription = it.text }
                     }) {
-                    if (conversationLoad?.spinner == true && !conversationObscured)
-                        CircularProgressIndicator(Modifier.size(24.dp), color = Mint, strokeWidth = 2.dp)
-                    else Icon(Icons.Default.Refresh, null)
+                    Icon(Icons.Default.Refresh, null)
                 }
                 if (selected == null) IconButton(onClick = { keyboard?.hide(); settings = true }, modifier = Modifier.semantics {
                     if (updateState.sessionId >= 0) stateDescription = "Installation pending"
@@ -316,7 +329,11 @@ class MainActivity : ComponentActivity() {
                     LinearProgressIndicator(Modifier.fillMaxWidth(), color = Mint)
             }
             if (selected == null) CatalogRefreshStatus(model)
-            if (selected != null) SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
+            // Give the request disclosure room above the IME. The title still opens details;
+            // the secondary tools return when editing ends, while refresh stays visible.
+            if (selected != null && WindowInsets.ime.getBottom(LocalDensity.current) == 0)
+                SessionHeaderTools(model,selected,onDetails = { sessionDetails = true }) { messageJump = it }
+            if (selected != null) ConversationRefreshStatus(model, conversationLoad)
             if (model.error.isNotBlank()) Surface(color = Color(0xFF3A2821), modifier = Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(model.error, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
@@ -755,6 +772,44 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
         target.archiveId.isBlank() && model.conversationQuestions.isNotEmpty() || model.speech.outgoing.any { it.belongsTo(target) }
     return ConversationLoadPresentation.status(hasContent, model.detailBusy, model.detailProgress,
         model.olderLoading, historyProgress, model.demo, resolved = model.activity != null, opening = opening)
+}
+
+@Composable private fun ConversationRefreshStatus(model: ZerusViewModel, status: ConversationLoadPresentation.Status?) {
+    val banner = ConversationLoadPresentation.banner(status, model.conversationEvents.isNotEmpty(),
+        model.activityVerified, model.historyComplete && model.readPositionReady, model.demo) ?: return
+    if (BuildConfig.READ_TIMING_ENABLED) {
+        val stage = when {
+            banner.text == "Latest activity checked" -> RelayReadTiming.Stage.VisibleChecked
+            banner.spinner -> RelayReadTiming.Stage.VisibleChecking
+            else -> null
+        }
+        LaunchedEffect(model.selected?.target, stage, banner.detail) {
+            if (stage != null) withFrameNanos {
+                RelayReadTiming.point(stage)
+                if (stage == RelayReadTiming.Stage.VisibleChecked && banner.detail == "Message history loaded.")
+                    RelayReadTiming.point(RelayReadTiming.Stage.VisibleHistory)
+            }
+        }
+    }
+    val compact = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    // Keep a stable slot across read phases. With the keyboard open, preserve
+    // space for the request disclosure; its delivery detail remains accessible.
+    Surface(color = Surface, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = if (compact) 3.dp else 6.dp)
+            .heightIn(min = if (compact) 24.dp else 40.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                if (banner.spinner) CircularProgressIndicator(Modifier.fillMaxSize(), color = Mint, strokeWidth = 2.dp)
+            }
+            Column(Modifier.weight(1f).semantics(mergeDescendants = true) {
+                liveRegion = LiveRegionMode.Polite
+                if (compact) stateDescription = banner.detail
+            }) {
+                Text(banner.text, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!compact) Text(banner.detail, style = MaterialTheme.typography.labelSmall, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
 }
 
 @Composable private fun Conversation(model: ZerusViewModel, session: Session, loadStatus: ConversationLoadPresentation.Status?, onReview: (Draft) -> Unit,

@@ -135,6 +135,40 @@ void inspectMemberMenu(QWidget *root, const QString &member, const std::function
     QTRY_VERIFY(seen);
 }
 
+// U25 part 5 (spec 5.4): the prototype's checkout - phase 1 done, phase 2
+// Build running (a question on #2, #3 at work, a long edge #3 -> #6 past #5),
+// phase 3 a draft that takes edge edits.
+QJsonObject graphTeam()
+{
+    auto t = QJsonDocument::fromJson(R"({
+ "id":"team-1","name":"Checkout v2","status":"running","project":"Checkout","folder":"/work/checkout","lead":"lead",
+ "revision":21,"created":1000,"updated":5000,"settings":{"approval":"review","phase_approval":"review"},
+ "members":[
+  {"id":"lead","role":"Lead","agent":"claude","model":"claude-opus-4-6","state":"active","session":{"host":"","name":"claude/checkout/lead"}},
+  {"id":"backend","role":"Backend","agent":"dsh","model":"deepseek-v4-pro","state":"active","session":{"host":"","name":"dsh/checkout/backend"}},
+  {"id":"frontend","role":"Frontend","agent":"codex","model":"gpt-6.1-sol","state":"active","session":{"host":"","name":"codex/checkout/frontend"}},
+  {"id":"tester","role":"Tester","agent":"kimi","model":"kimi-k2.5","state":"active","session":{"host":"","name":"kimi/checkout/tester"}}],
+ "phases":[
+  {"n":2,"order":2,"title":"Build","state":"approved","tasks":[2,3,4,5,6],"added_by":"Lead","added_at":1500},
+  {"n":3,"order":3,"title":"Verify & ship","state":"draft","tasks":[7,8,9],"added_by":"Lead","added_at":1700}],
+ "tasks":[
+  {"id":1,"phase":1,"title":"Requirements and acceptance","assignee":"lead","status":"accepted"},
+  {"id":2,"phase":2,"title":"Saved cards API","assignee":"backend","status":"in_progress","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a2","member":"backend","state":"delivered","sent_at":1600,"questions":[{"id":"q1","text":"Keep the old field?","at":1650}]}]},
+  {"id":3,"phase":2,"title":"Card form UI","assignee":"frontend","status":"in_progress","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a3","member":"frontend","state":"delivered","sent_at":1600,"started_at":1610}]},
+  {"id":4,"phase":2,"title":"Address validation","assignee":"frontend","status":"submitted","deps":[{"task":1}],
+   "attempts":[{"n":1,"id":"a4","member":"frontend","state":"reported","report":{"text":"Done","at":1700}}]},
+  {"id":5,"phase":2,"title":"Contract tests","assignee":"tester","status":"pending","deps":[{"task":2},{"task":3}]},
+  {"id":6,"phase":2,"title":"E2E checkout flow","assignee":"tester","status":"pending","deps":[{"task":3},{"task":4},{"task":5}]},
+  {"id":7,"phase":3,"title":"Release notes","assignee":"lead","status":"draft","deps":[{"task":8},{"task":9}]},
+  {"id":8,"phase":3,"title":"Rate limits on /v1/cards","assignee":"backend","status":"draft","deps":[{"task":2}]},
+  {"id":9,"phase":3,"title":"Load test checkout","assignee":"tester","status":"draft","deps":[{"task":6}]}],
+ "layers":{"1":0,"2":1,"3":1,"4":1,"5":2,"6":3,"7":5,"8":2,"9":4},"cycle":[],"ready":[],
+ "validation":{"errors":[],"warnings":[]}})").object();
+    return t;
+}
+
 // A running team with two phases appended: phase 1 is finished (it starts
 // collapsed), phase 2 has a barrier, phase 3 waits as a draft.
 QJsonObject phasedTeam()
@@ -537,6 +571,9 @@ private slots:
     void reportPreviewsAndFindings();
     void hierarchyInTeamViewsAndMemberCards();
     void workspaceAddsAMember();
+    void graphRoutesEdgesAroundNodes();
+    void graphEdgesAreEditedByHandleAndSelection();
+    void graphNodesInTwoLinesWithDraftEdits();
     void subLeadsAreATreeInMembersAndTheInspector();
     void designerPageStartsOrOpensTheDesigner();
     void catalogEditorMarksManualEdits();
@@ -3301,6 +3338,165 @@ void TestTeamsUi::subLeadsAreATreeInMembersAndTheInspector()
     workspace.setTheme(false); panel.setTheme(false);
     lightShot(&workspace, "ux-10-members-tree-light");
     lightShot(&panel, "ux-10-inspector-tree-light");
+}
+
+// Spec 5.4: the Wide graph's geometry and routes - nodes 196x54, columns 236
+// apart and centered, rows 74 apart, orthogonal edges that never cross a node
+// of an intermediate column, 6 px lanes, back edges under every node.
+void TestTeamsUi::graphRoutesEdgesAroundNodes()
+{
+    TeamUi::TaskView view(TeamUi::colorsFor(true), TeamUi::TaskView::Wide);
+    const auto node = [](int id, int layer) { TeamUi::TaskView::Node n; n.id = id; n.layer = layer; n.title = QStringLiteral("Task %1").arg(id); n.role = "Backend"; return n; };
+    // Layer 0: #1; layer 1: #2 #3 #4; layer 2: #5 #6; layer 3: #7.
+    view.nodes = {node(1, 0), node(2, 1), node(3, 1), node(4, 1), node(5, 2), node(6, 2), node(7, 3)};
+    view.edges[2] = {1}; view.edges[3] = {1}; view.edges[4] = {1};
+    view.edges[5] = {2, 3}; view.edges[6] = {4};
+    view.edges[7] = {1, 2, 5, 6};   // #1 -> #7 and #2 -> #7 pass the columns between
+    view.edges[3].append(7);        // a back edge (a cycle)
+    view.cycle = {3, 7};
+    view.area = QSize(1400, 700);
+    view.layout();
+    const auto r = [&](int id) { return view.nodeRect(id); };
+    QCOMPARE(r(1).size(), QSizeF(196, 54));
+    QCOMPARE(r(2).left() - r(1).left(), 236.0);
+    QCOMPARE(r(3).top() - r(2).top(), 74.0);
+    // A shorter column is centered on the tallest.
+    QCOMPARE(r(1).center().y(), r(3).center().y());
+    QCOMPARE(r(5).center().y(), (r(2).center().y() + r(3).center().y()) / 2);
+    QMap<int, int> layerOf; for (const auto &n : view.nodes) layerOf.insert(n.id, n.layer);
+    double lowest = 0; for (const auto &n : view.nodes) lowest = qMax(lowest, r(n.id).bottom());
+    QList<double> gapLanes;
+    for (auto it = view.edges.cbegin(); it != view.edges.cend(); ++it) for (int dep : it.value()) {
+        const int task = it.key();
+        QVERIFY2(view.routed(dep, task), qPrintable(QStringLiteral("%1->%2").arg(dep).arg(task)));
+        const auto route = view.route(dep, task).points;
+        // It leaves the dependency's right side and ends at the arrow before the task.
+        QCOMPARE(route.first(), QPointF(r(dep).right(), r(dep).center().y()));
+        QCOMPARE(route.last(), QPointF(r(task).left() - 2, r(task).center().y()));
+        for (int i = 1; i < route.size(); ++i) {
+            const QPointF a = route.at(i - 1), b = route.at(i);
+            QVERIFY2(qFuzzyCompare(a.x() + 1, b.x() + 1) || qFuzzyCompare(a.y() + 1, b.y() + 1), "every leg is horizontal or vertical");
+            // No leg crosses a node of a column between the two ends.
+            const QRectF leg = QRectF(a, b).normalized().adjusted(-.01, -.01, .01, .01);
+            for (const auto &n : view.nodes) {
+                const int l = n.layer;
+                const bool between = layerOf[task] > layerOf[dep] ? (l > layerOf[dep] && l < layerOf[task]) : false;
+                if (between) QVERIFY2(!leg.intersects(r(n.id).adjusted(1, 1, -1, -1)),
+                                      qPrintable(QStringLiteral("edge #%1->#%2 crosses #%3").arg(dep).arg(task).arg(n.id)));
+            }
+        }
+        if (layerOf[task] <= layerOf[dep]) {
+            // A back edge runs under every node.
+            double deepest = 0; for (const QPointF &point : route) deepest = qMax(deepest, point.y());
+            QVERIFY(deepest > lowest);
+        }
+        if (dep == 1 && layerOf[task] == 1) gapLanes << route.at(1).x();
+    }
+    // The three edges from #1 through one gap spread over lanes 6 px apart.
+    std::sort(gapLanes.begin(), gapLanes.end());
+    QCOMPARE(gapLanes.size(), 3);
+    QCOMPARE(gapLanes.at(1) - gapLanes.at(0), 6.0);
+    QCOMPARE(gapLanes.at(2) - gapLanes.at(1), 6.0);
+}
+
+// Spec 5.4: in planning a click on a node's handle starts a link and a click
+// on the dependent task makes it; a selected edge goes with its × or Delete.
+void TestTeamsUi::graphEdgesAreEditedByHandleAndSelection()
+{
+    TeamUi::TaskView view(TeamUi::colorsFor(true), TeamUi::TaskView::Wide);
+    const auto node = [](int id, int layer) {
+        TeamUi::TaskView::Node n; n.id = id; n.layer = layer; n.title = QStringLiteral("Task %1").arg(id); n.role = "Backend";
+        n.tone = TeamUi::colorsFor(true).muted; n.roleTone = TeamUi::roleColor(n.role, true); n.kind = "pending"; n.agent = "codex";
+        return n;
+    };
+    view.nodes = {node(1, 0), node(2, 1), node(3, 1)};
+    view.edges[2] = {1};
+    view.editable = true;
+    QList<QPair<int, int>> linked, unlinked;
+    view.linked = [&](int dep, int task) { linked << qMakePair(dep, task); };
+    view.unlinked = [&](int dep, int task) { unlinked << qMakePair(dep, task); };
+    view.area = QSize(900, 400);
+    view.resize(900, 400); view.show();
+    view.layout();
+    QVERIFY(QTest::qWaitForWindowExposed(&view));
+    const QRectF one = view.nodeRect(1), three = view.nodeRect(3);
+    QTest::mouseMove(&view, one.center().toPoint());
+    const QPoint port(int(one.right() - 4), int(one.center().y()));
+    QTest::mouseClick(&view, Qt::LeftButton, {}, port);
+    QCOMPARE(view.connecting(), 1);
+    QTest::mouseMove(&view, three.center().toPoint());
+    shot(&view, "ux-5-graph-connect-dark");
+    QTest::mouseClick(&view, Qt::LeftButton, {}, three.center().toPoint());
+    QCOMPARE(linked, (QList<QPair<int, int>>{{1, 3}}));
+    QCOMPARE(view.connecting(), 0);
+    // Escape leaves the connect mode without a link.
+    QTest::mouseClick(&view, Qt::LeftButton, {}, port);
+    QCOMPARE(view.connecting(), 1);
+    QTest::keyClick(&view, Qt::Key_Escape);
+    QCOMPARE(view.connecting(), 0);
+    // Click the edge, then Delete.
+    const auto route = view.route(1, 2).points;
+    const QPointF onLeg = (route.at(0) + route.at(1)) / 2;
+    QTest::mouseClick(&view, Qt::LeftButton, {}, onLeg.toPoint());
+    QCOMPARE(view.selectedEdge(), qMakePair(1, 2));
+    QTest::keyClick(&view, Qt::Key_Delete);
+    QCOMPARE(unlinked, (QList<QPair<int, int>>{{1, 2}}));
+    // Outside planning only the tasks of a draft take edits.
+    view.editable = false;
+    view.editableTasks = {3};
+    QVERIFY(!view.canEdit(2) && view.canEdit(3));
+}
+
+void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
+{
+    setTeam(graphTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    const LiveLookup live = [](const Member &m) { Live l; l.working = m.id == "frontend"; return l; };
+    panel.setLive(live); workspace.setLive(live);
+    darkPalette(); workspace.setTheme(true);
+    workspace.resize(1500, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    TeamUi::TaskView *graph = nullptr;
+    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph && graph->nodeRect(6).width() > 0; })());
+    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    const auto nodeOf = [&](int id) { for (const auto &n : graph->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    // Only the dependencies from other phases show on the node; the edge
+    // from #1 (phase 1) is not drawn inside phase 2.
+    QCOMPARE(nodeOf(2).ext, QStringLiteral("↤#1"));
+    QVERIFY(nodeOf(5).ext.isEmpty());
+    QVERIFY(!graph->routed(1, 2));
+    QVERIFY(graph->routed(3, 6) && graph->routed(2, 5));
+    // The second line: the problem, never a status word; the full status in the tooltip.
+    QCOMPARE(nodeOf(2).problemText, QStringLiteral("Waiting for your answer"));
+    QVERIFY(nodeOf(5).problemText.isEmpty());
+    QVERIFY2(nodeOf(2).tooltip.startsWith(QStringLiteral("#2 Saved cards API — ")), qPrintable(nodeOf(2).tooltip));
+    QVERIFY(nodeOf(2).tooltip.contains(QStringLiteral(" · after #1 (earlier phase) · Backend · deepseek-v4-pro")));
+    QVERIFY(nodeOf(3).working);
+    QVERIFY(!nodeOf(2).working);
+    // The long edge #3 -> #6 passes #5's column without crossing it.
+    const auto route = graph->route(3, 6).points;
+    for (int i = 1; i < route.size(); ++i)
+        QVERIFY(!QRectF(route.at(i - 1), route.at(i)).normalized().adjusted(-.01, -.01, .01, .01).intersects(graph->nodeRect(5).adjusted(1, 1, -1, -1)));
+    // The draft phase's tasks take edge edits through edit-draft.
+    QVERIFY(graph->canEdit(7) && !graph->canEdit(5));
+    QVERIFY(graph->linked);
+    graph->linked(9, 8);
+    QTRY_COMPARE(calls(script(), "edit-draft").size(), 1);
+    const auto input = calls(script(), "edit-draft").first();
+    QCOMPARE(input["phase"].toInt(), 3);
+    const auto update = input["tasks_update"].toArray().first().toObject();
+    QCOMPARE(update["id"].toInt(), 8);
+    QCOMPARE(update["deps"].toArray().size(), 2);
+    QCOMPARE(update["deps"].toArray().last().toObject()["task"].toInt(), 9);
+    shot(&workspace, "ux-5-graph-dark");
+    workspace.setTheme(false);
+    lightShot(&workspace, "ux-5-graph-light");
 }
 
 void TestTeamsUi::designerPageStartsOrOpensTheDesigner()

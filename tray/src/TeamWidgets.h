@@ -2,6 +2,7 @@
 // WhiteWh fork: agent teams. Painted pieces shared by the Team tab, the task
 // card and the team workspace: theme colors, role and status badges, the
 // segmented progress and the task graph or layered list.
+#include "AgentWorking.h"
 #include "NewSessionDense.h"
 #include "TeamModel.h"
 #include "WorkspaceIcons.h"
@@ -16,9 +17,11 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
+#include <QPolygonF>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QKeyEvent>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -477,7 +480,11 @@ inline QColor phaseStatusColor(const Colors &c, const QString &status)
 class TaskView : public QWidget {
 public:
     enum Mode { List, Graph, Wide };
-    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip, subteam; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0; };
+    struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip, subteam; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0;
+        // U25 part 5 (spec 5.4): "↤#2" - only the dependencies from other
+        // phases (the ones inside it are edges); the problem text on the
+        // second line; whether the assignee's agent really works on it.
+        QString ext, problemText; bool working = false; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -498,6 +505,9 @@ public:
         setMouseTracking(true);
         setFocusPolicy(Qt::ClickFocus);
         QFont f = font(); f.setPixelSize(12); setFont(f);
+        // Spec 1.4: the working dots under a model tile move while animated.
+        m_dots.setInterval(AgentWorking::FrameMs);
+        QObject::connect(&m_dots, &QTimer::timeout, this, [this] { update(); });
     }
     // Compatibility with the two-mode form.
     TaskView(const Colors &colors, bool graph, QWidget *parent = nullptr) : TaskView(colors, graph ? Graph : List, parent) {}
@@ -505,6 +515,18 @@ public:
     // Planning: `task` gains a dependency on `dependency`, or loses it.
     std::function<void(int dependency, int task)> linked, unlinked;
     bool editable = false;
+    // U25 part 5: in a running team only these tasks (a draft phase's) take
+    // or lose a dependency; `editable` opens the whole plan.
+    QSet<int> editableTasks;
+    bool canEdit(int task) const { return editable || editableTasks.contains(task); }
+    // U25 part 5 (spec 5.4): an edge's orthogonal route in the Wide graph, its
+    // corner points from the dependency's right side to just before the
+    // task's left side, and where its middle (the remove ×) is.
+    struct Route { QPolygonF points; QPointF mid; };
+    Route route(int dependency, int task) const { return m_routes.value({dependency, task}); }
+    bool routed(int dependency, int task) const { return m_routes.contains({dependency, task}); }
+    // The task a click on a node's handle started to connect from (0: none).
+    int connecting() const { return m_connectFrom; }
     QList<Node> nodes;
     // Phase grouping: empty while the plan is phase 1 only. The owner's
     // toggles call phaseToggled; the caller re-renders with the new collapse.
@@ -559,7 +581,7 @@ public:
                 int rows = 0;
                 for (int count : lines) rows = qMax(rows, count);
                 wide = qMax(wide, double(bandWidth(band)));
-                tall += BandHead + (band.collapsed ? 0 : (BandTop - BandHead) + qMax(1, rows) * (WideH + 12) + 4) + BandGap;
+                tall += BandHead + (band.collapsed ? 0 : bandBody(rows)) + BandGap;
             }
             return {wide + 8, double(tall + 2)};
         }
@@ -567,12 +589,13 @@ public:
         for (const auto &n : nodes) ++column[n.layer];
         int layers = 0, tall = 0;
         for (auto it = column.cbegin(); it != column.cend(); ++it) { layers = qMax(layers, it.key() + 1); tall = qMax(tall, it.value()); }
-        return {12.0 + layers * WideStep, 30.0 + tall * (WideH + 12) + 8};
+        return {double(WideX + (qMax(1, layers) - 1) * WideStep + WideW + 16), double(WideTop + (qMax(1, tall) - 1) * WideRow + WideH + WideUnder)};
     }
     void layout()
     {
         m_rects.clear(); m_bandRects.clear(); m_summaries.clear(); m_bandBackgrounds.clear(); m_listLayers.clear(); m_bandLayers.clear();
         m_approve.clear(); m_discard.clear(); m_moveUp.clear(); m_moveDown.clear();
+        m_routes.clear(); m_groupOf.clear(); m_groups.clear();
         // G3: inside a layer (and inside a phase band) a task other tasks depend
         // on comes first, in the existing order; a dead-end task — nothing
         // depends on it — sinks to the bottom of its column.
@@ -629,7 +652,7 @@ public:
                     for (int id : band.tasks) if (const Node *node = nodeOf(id)) ++counts[node->layer];
                     int rows = 0;
                     for (int count : counts) rows = qMax(rows, count);
-                    const double body = band.collapsed ? 0 : (BandTop - BandHead) + qMax(1, rows) * (WideH + 12) + 4;
+                    const double body = band.collapsed ? 0 : bandBody(rows);
                     m_bandRects.insert(band.n, QRectF(8, y, width, BandHead - 4));
                     m_bandBackgrounds.append(QRectF(0, y - 4, width + 16, BandHead + body + 6));
                     if (band.collapsed) {
@@ -637,16 +660,12 @@ public:
                         // that end in it attach to the header.
                         m_rects.insert(-band.n, m_bandRects.value(band.n));
                     } else {
-                        QMap<int, int> used;
-                        for (int id : band.tasks) {
-                            const Node *node = nodeOf(id);
-                            if (!node) continue;
-                            m_rects.insert(id, QRectF(14 + node->layer * WideStep, y + BandTop + used[node->layer]++ * (WideH + 12), WideW, WideH));
-                        }
+                        // Spec 5.4: the band's own layers, its columns centered.
+                        placeWide(band.tasks, WideX, y + BandTop + WidePad);
                         // G4: each layer inside the band keeps its stripe and
                         // small label above the band's tasks.
                         for (auto it = counts.cbegin(); it != counts.cend(); ++it) {
-                            const double left = 14 + it.key() * WideStep;
+                            const double left = qMax(0.0, WideX + it.key() * WideStep - (WideStep - WideW) / 2.0);
                             const double w = qMin(double(WideStep), width - left + 8);
                             if (w <= 4) continue;
                             BandLayer layer; layer.phase = band.n; layer.layer = it.key(); layer.count = it.value();
@@ -661,15 +680,15 @@ public:
                 const double finalH = qMax(qMax(double(y), size.height()), viewH);
                 setFixedSize(int(finalW * zoom), int(finalH * zoom));
             } else {
-                for (const auto &n : nodes) {
-                    const double x = m_ox + 12 + n.layer * WideStep, y = m_oy + 30 + column[n.layer]++ * (WideH + 12);
-                    m_rects.insert(n.id, QRectF(x, y, WideW, WideH));
-                }
+                QList<int> all;
+                for (const auto &n : nodes) { all.append(n.id); ++column[n.layer]; }
+                placeWide(all, m_ox + WideX, m_oy + WideTop);
                 int layers = 0;
                 for (auto it = column.cbegin(); it != column.cend(); ++it) layers = qMax(layers, it.key() + 1);
                 m_layers = layers;
                 setFixedSize(int(qMax(size.width(), viewW) * zoom), int(qMax(size.height(), viewH) * zoom));
             }
+            routeAll();
         } else if (banded()) {
             int y = 0;
             for (const auto &band : bands) {
@@ -702,11 +721,19 @@ public:
             }
             setMinimumHeight(y + 4); setMaximumHeight(y + 4);
         }
+        bool working = false;
+        for (const auto &n : nodes) working = working || n.working;
+        if (m_mode == Wide && working && AgentWorking::animated()) m_dots.start(); else m_dots.stop();
         update();
     }
     QPair<int, int> selectedEdge() const { return m_edge; }
 protected:
-    static constexpr int NodeW = 118, NodeH = 46, Gutter = 20, WideW = 146, WideH = 76, WideStep = 170;
+    static constexpr int NodeW = 118, NodeH = 46, Gutter = 20;
+    // U25 part 5 (spec 5.4): the prototype's node 196x54, column step 236, row
+    // step 74, 7 px corners; room above the nodes for a corridor and below
+    // them for back edges.
+    static constexpr int WideW = 196, WideH = 54, WideStep = 236, WideRow = 74, WideCorner = 7, WideX = 14, WideTop = 34;
+    static constexpr int WidePad = 14, WideUnder = 26, WideLane = 6;
     static constexpr int BandHead = 40, BandTop = 58, BandGap = 10, BandMin = 240;
     bool banded() const { return !bands.isEmpty(); }
     const Node *nodeOf(int id) const
@@ -719,7 +746,179 @@ protected:
     {
         int layers = 0;
         for (int id : band.tasks) if (const Node *node = nodeOf(id)) layers = qMax(layers, node->layer + 1);
-        return qMax(BandMin, qMax(1, layers) * WideStep);
+        return qMax(BandMin, WideX + (qMax(1, layers) - 1) * WideStep + WideW + 16);
+    }
+    // Wide: an open band's height under its header for `rows` rows.
+    static double bandBody(int rows) { return (BandTop - BandHead) + WidePad + (qMax(1, rows) - 1) * WideRow + WideH + WideUnder; }
+    // Spec 5.4: one group's tasks (a phase band, or the whole plan) in columns
+    // by layer, each column centered on the tallest; returns the lowest bottom.
+    double placeWide(const QList<int> &ids, double left, double top)
+    {
+        QMap<int, QList<int>> columns;
+        for (int id : ids) if (const Node *node = nodeOf(id)) columns[node->layer].append(id);
+        int tallest = 1;
+        for (const auto &column : columns) tallest = qMax(tallest, int(column.size()));
+        const int group = m_groups.size();
+        for (auto it = columns.cbegin(); it != columns.cend(); ++it)
+            for (int i = 0; i < it.value().size(); ++i) {
+                const double y = top + i * WideRow + (tallest - it.value().size()) * WideRow / 2.0;
+                m_rects.insert(it.value().at(i), QRectF(left + it.key() * WideStep, y, WideW, WideH));
+                m_groupOf.insert(it.value().at(i), group);
+            }
+        const double bottom = top + (tallest - 1) * WideRow + WideH;
+        m_groups.append({top, bottom});
+        return bottom;
+    }
+    // Spec 5.4: orthogonal routes inside each group. Next layer: right into
+    // the gap, down or up, into the task. Further: into the gap, along the
+    // free corridor (above, below, or between rows) with the least deviation,
+    // into the gap before the task, into it. Edges through one gap spread by
+    // 6 px; a back edge (a cycle) runs under every node. Edges between groups
+    // (phases) are not drawn: the node names them ("↤#2").
+    void routeAll()
+    {
+        if (m_mode != Wide) return;
+        const double gap = WideStep - WideW;
+        QMap<QPair<int, int>, int> uses;
+        const auto lane = [&](int group, double gx) {
+            const int k = uses[{group, qRound(gx)}]++;
+            return gx + (k % 2 ? 1 : -1) * std::ceil(k / 2.0) * WideLane;
+        };
+        const auto layerOf = [&](int id) { const Node *node = nodeOf(id); return node ? node->layer : 0; };
+        const auto freeY = [&](int group, double y, int la, int lb) {
+            for (auto it = m_groupOf.cbegin(); it != m_groupOf.cend(); ++it) {
+                if (it.value() != group) continue;
+                const int l = layerOf(it.key());
+                if (l <= la || l >= lb) continue;
+                const QRectF q = m_rects.value(it.key());
+                if (y > q.top() - 6 && y < q.bottom() + 6) return false;
+            }
+            return true;
+        };
+        for (auto it = edges.cbegin(); it != edges.cend(); ++it) for (int dep : it.value()) {
+            const int task = it.key();
+            if (dep <= 0 || task <= 0 || !m_groupOf.contains(dep) || !m_groupOf.contains(task)) continue;
+            const int group = m_groupOf.value(dep);
+            if (m_groupOf.value(task) != group) continue;
+            const QRectF a = m_rects.value(dep), b = m_rects.value(task);
+            const int la = layerOf(dep), lb = layerOf(task);
+            const double x1 = a.right(), y1 = a.center().y(), x2 = b.left(), y2 = b.center().y();
+            const double bottom = m_groups.at(group).second, top = m_groups.at(group).first;
+            Route r;
+            if (lb <= la) {
+                const double yb = bottom + 12;
+                r.points << QPointF(x1, y1) << QPointF(x1 + 14, y1) << QPointF(x1 + 14, yb) << QPointF(x2 - 14, yb) << QPointF(x2 - 14, y2) << QPointF(x2 - 2, y2);
+                r.mid = QPointF((x1 + x2) / 2, yb);
+            } else if (lb == la + 1) {
+                const double gx = lane(group, a.left() + WideW + gap / 2);
+                r.points << QPointF(x1, y1) << QPointF(gx, y1) << QPointF(gx, y2) << QPointF(x2 - 2, y2);
+                r.mid = QPointF(gx, (y1 + y2) / 2);
+            } else {
+                QList<double> candidates{top - 9, bottom + 10};
+                for (auto g = m_groupOf.cbegin(); g != m_groupOf.cend(); ++g) {
+                    if (g.value() != group) continue;
+                    const QRectF q = m_rects.value(g.key());
+                    candidates << q.top() - (WideRow - WideH) / 2.0 << q.bottom() + (WideRow - WideH) / 2.0;
+                }
+                QList<double> free;
+                for (double c : candidates) if (freeY(group, c, la, lb)) free << c;
+                std::stable_sort(free.begin(), free.end(), [&](double u, double v) {
+                    return std::abs(u - y1) + std::abs(u - y2) < std::abs(v - y1) + std::abs(v - y2);
+                });
+                const double cy = free.isEmpty() ? bottom + 10 : free.first();
+                if (freeY(group, y1, la, lb) && std::abs(y1 - y2) < 1) {
+                    r.points << QPointF(x1, y1) << QPointF(x2 - 2, y2);
+                    r.mid = QPointF((x1 + x2) / 2, y1);
+                } else {
+                    const double g1 = lane(group, a.left() + WideW + gap / 2), g2 = lane(group, b.left() - gap / 2);
+                    r.points << QPointF(x1, y1) << QPointF(g1, y1) << QPointF(g1, cy) << QPointF(g2, cy) << QPointF(g2, y2) << QPointF(x2 - 2, y2);
+                    r.mid = QPointF((g1 + g2) / 2, cy);
+                }
+            }
+            m_routes.insert({dep, task}, r);
+        }
+    }
+    // The route as a path with rounded corners (at most 7 px, at most half
+    // of either leg).
+    static QPainterPath orthoPath(const QPolygonF &route)
+    {
+        QPolygonF points;
+        for (const QPointF &point : route) if (points.isEmpty() || points.last() != point) points << point;
+        QPainterPath path;
+        if (points.isEmpty()) return path;
+        path.moveTo(points.first());
+        for (int i = 1; i + 1 < points.size(); ++i) {
+            const QPointF a = points.at(i - 1), b = points.at(i), c = points.at(i + 1);
+            const double l1 = QLineF(a, b).length(), l2 = QLineF(b, c).length();
+            const double r = qMin(double(WideCorner), qMin(l1 / 2, l2 / 2));
+            const QPointF p1 = b - (b - a) / (l1 > 0 ? l1 : 1) * r, p2 = b + (c - b) / (l2 > 0 ? l2 : 1) * r;
+            path.lineTo(p1); path.quadTo(b, p2);
+        }
+        path.lineTo(points.last());
+        return path;
+    }
+    // Where an edge's remove × sits.
+    QPointF edgeMid(int dep, int task) const
+    {
+        if (m_mode == Wide) return m_routes.value({dep, task}).mid;
+        return edgePath(dep, task).pointAtPercent(.5);
+    }
+    // A two-line Wide node (spec 5.4): status icon, #id, the dependencies from
+    // other phases, the title; the role chip, the model tile with the working
+    // dots and the problem text. No status word: the tooltip has it.
+    void paintWideNode(QPainter &p, const Node &n, const QRectF &r, bool lit, bool target)
+    {
+        const QColor stroke = target ? m_c.accent
+                            : n.error ? m_c.danger
+                            : n.problem ? (n.tone == m_c.danger ? m_c.danger : m_c.warn)
+                            : lit ? m_c.accent : m_c.border;
+        QColor fill = m_c.surface;
+        if (n.error) fill = alpha(m_c.danger, m_c.dark ? .1 : .08);
+        else if (target) fill = alpha(m_c.accent, .08);
+        QPainterPath box; box.addRoundedRect(r.adjusted(.5, .5, -.5, -.5), 9, 9);
+        p.setPen(QPen(stroke, 1, n.draft ? Qt::DashLine : Qt::SolidLine)); p.setBrush(fill); p.drawPath(box);
+        // The 3 px status edge on the left.
+        p.save(); p.setClipPath(box); p.fillRect(QRectF(r.left(), r.top(), 3, r.height()), n.tone); p.restore();
+        // Show on graph: the blockers carry a warn ring.
+        if (!emphasis.isEmpty() && emphasis.contains(n.id)) {
+            p.setPen(QPen(m_c.warn, 2)); p.setBrush(Qt::NoBrush); p.drawRoundedRect(r.adjusted(-1.5, -1.5, 1.5, 1.5), 10, 10);
+        }
+        const double line1 = r.top() + 7, line2 = r.top() + 29, lineH = 18;
+        double x = r.left() + 11;
+        glyph(p, QRectF(x, line1 + 3, 12, 12), n.tone, n.kind);
+        x += 18;
+        QFont mono = NewSessionDense::mono(11); mono.setBold(true); p.setFont(mono); p.setPen(m_c.fg);
+        const QString id = QStringLiteral("#%1").arg(n.id);
+        const int idw = QFontMetrics(mono).horizontalAdvance(id);
+        p.drawText(QRectF(x, line1, idw + 2, lineH), Qt::AlignLeft | Qt::AlignVCenter, id);
+        x += idw + 6;
+        if (!n.ext.isEmpty()) {
+            QFont ext = NewSessionDense::mono(10); p.setFont(ext); p.setPen(m_c.folder);
+            const int ew = QFontMetrics(ext).horizontalAdvance(n.ext);
+            p.drawText(QRectF(x, line1, ew + 2, lineH), Qt::AlignLeft | Qt::AlignVCenter, n.ext);
+            x += ew + 6;
+        }
+        QFont title = font(); title.setPixelSize(12); title.setWeight(QFont::DemiBold); p.setFont(title); p.setPen(m_c.fg);
+        const double room = qMax(0.0, r.right() - 10 - x);
+        p.drawText(QRectF(x, line1, room, lineH), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(title).elidedText(n.title, Qt::ElideRight, int(room)));
+        // The role chip (the prototype's .role: 18 high, 9 px radius).
+        QFont small = font(); small.setPixelSize(11); small.setWeight(QFont::DemiBold);
+        const int roleW = QFontMetrics(small).horizontalAdvance(n.role) + 12;
+        const QRectF chip(r.left() + 11, line2, roleW, lineH);
+        p.setPen(QPen(alpha(n.roleTone, .45), 1)); p.setBrush(alpha(n.roleTone, .12)); p.drawRoundedRect(chip.adjusted(.5, .5, -.5, -.5), 9, 9);
+        p.setFont(small); p.setPen(n.roleTone); p.drawText(chip, Qt::AlignCenter, n.role);
+        double right = chip.right() + 6;
+        if (!n.agent.isEmpty()) {
+            const QRectF tile(right, line2 + .5, 17, 17);
+            AgentWorking::paintTile(p, tile, agentLogo(n.agent, m_c.fg), m_c.dark, n.working, AgentWorking::phase());
+            right = tile.right() + 6;
+        }
+        if (!n.problemText.isEmpty()) {
+            QFont meta = font(); meta.setPixelSize(11); p.setFont(meta); p.setPen(n.tone);
+            const double w = qMax(0.0, r.right() - 8 - right);
+            p.drawText(QRectF(right, line2, w, lineH), Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(meta).elidedText(n.problemText, Qt::ElideRight, int(w)));
+        }
+        if (n.error) { p.setPen(m_c.danger); p.setFont(small); p.drawText(QRectF(r.right() - 16, r.top() + 4, 12, 12), Qt::AlignCenter, QStringLiteral("!")); }
     }
     // A collapsed phase's tasks hang their edges on the phase summary node.
     int anchor(int id) const
@@ -882,7 +1081,7 @@ protected:
     QPointF in(const QRectF &r) const { return m_mode == Wide ? QPointF(r.left(), r.center().y()) : QPointF(r.center().x(), r.top()); }
     QRectF handle(const QRectF &r) const
     {
-        return m_mode == Wide ? QRectF(r.right() - 4, r.center().y() - 6, 8, 12) : QRectF(r.center().x() - 6, r.bottom() - 4, 12, 8);
+        return m_mode == Wide ? QRectF(r.right() - 9, r.center().y() - 8, 10, 16) : QRectF(r.center().x() - 6, r.bottom() - 4, 12, 8);
     }
     QPainterPath edgePath(int dep, int task) const
     {
@@ -945,6 +1144,7 @@ protected:
                 }
             }
             for (auto it = edges.cbegin(); it != edges.cend(); ++it) for (int dep : it.value()) {
+                if (m_mode == Wide) { paintWideEdge(p, dep, it.key(), lit); continue; }
                 const int from = anchor(dep), to = anchor(it.key());
                 if (!from || !to || from == to) continue;
                 const bool hot = lit.contains(dep) && lit.contains(it.key());
@@ -966,13 +1166,21 @@ protected:
                     p.setPen(QPen(Qt::white, 1.5)); p.drawLine(mid + QPointF(-3, -3), mid + QPointF(3, 3)); p.drawLine(mid + QPointF(-3, 3), mid + QPointF(3, -3));
                 }
             }
-            if (m_dragFrom && m_rects.contains(m_dragFrom)) {
-                p.setPen(QPen(m_c.accent, 1.6, Qt::DashLine)); p.drawLine(out(m_rects[m_dragFrom]), m_dragAt / zoom);
+            if (const int from = m_dragFrom ? m_dragFrom : m_connectFrom; from && m_rects.contains(from)) {
+                p.setPen(QPen(m_c.accent, 1.6, Qt::DashLine)); p.drawLine(out(m_rects[from]), m_dragAt / zoom);
             }
             for (const auto &n : nodes) {
                 const QRectF r = m_rects[n.id];
-                p.setOpacity(dimmed(n) ? .35 : 1);
-                const bool target = m_dragFrom && m_hover == n.id && n.id != m_dragFrom;
+                p.setOpacity(dimmed(n) ? (m_mode == Wide ? .33 : .35) : 1);
+                const int from = m_dragFrom ? m_dragFrom : m_connectFrom;
+                const bool target = from && m_hover == n.id && n.id != from;
+                if (m_mode == Wide) {
+                    paintWideNode(p, n, r, lit.contains(n.id), target || (m_connectFrom && n.id != m_connectFrom && canEdit(n.id)));
+                    if (canEdit(n.id) && (m_hover == n.id || from == n.id)) {
+                        p.setOpacity(1); p.setPen(Qt::NoPen); p.setBrush(m_c.accent); p.drawRoundedRect(handle(r), 5, 5);
+                    }
+                    continue;
+                }
                 p.setPen(target ? QPen(m_c.accent, 2)
                          : n.error || n.problem ? QPen(n.error || n.tone == m_c.danger ? m_c.danger : m_c.warn, 1)
                                                 : QPen(m_c.border, 1, n.draft ? Qt::DashLine : Qt::SolidLine));
@@ -1051,6 +1259,40 @@ protected:
             paintListRow(p, n, dimmed(n));
         }
     }
+    // Spec 5.4: an edge of the Wide graph - border, accent on the hovered
+    // chain, warn for Show on graph, danger for a cycle or the selected one,
+    // dashed when soft; the arrow at the task.
+    void paintWideEdge(QPainter &p, int dep, int task, const QSet<int> &lit)
+    {
+        if (!m_routes.contains({dep, task})) return;
+        const Route &r = m_routes[{dep, task}];
+        const bool hot = lit.contains(dep) && lit.contains(task);
+        const bool bad = cycle.contains(dep) && cycle.contains(task);
+        const bool selected = m_edge == qMakePair(dep, task);
+        const bool blocking = !emphasis.isEmpty() && emphasis.contains(dep);
+        QColor color = m_c.border; double width = 1.5;
+        Qt::PenStyle style = soft.contains({dep, task}) ? Qt::DashLine : Qt::SolidLine;
+        if (selected) { color = m_c.danger; width = 2.2; style = Qt::DashLine; }
+        else if (bad) { color = m_c.danger; width = 2; }
+        else if (hot) { color = m_c.accent; width = 2; }
+        else if (blocking) { color = m_c.warn; width = 2; }
+        const Node *a = nodeOf(dep), *b = nodeOf(task);
+        const bool focusDim = (a && !a->match) && (b && !b->match);
+        const bool dim = (!lit.isEmpty() && !hot) || (!emphasis.isEmpty() && !blocking && !selected) || focusDim;
+        p.setOpacity(dim ? .2 : 1);
+        QPen pen(color, width, style); pen.setCapStyle(Qt::FlatCap); pen.setJoinStyle(Qt::RoundJoin);
+        if (style == Qt::DashLine) pen.setDashPattern(selected ? QList<qreal>{5 / width, 3 / width} : QList<qreal>{4 / width, 3 / width});
+        p.setPen(pen); p.setBrush(Qt::NoBrush);
+        p.drawPath(orthoPath(r.points));
+        const QPointF e = r.points.last();
+        QPen arrow(color, 1.5); arrow.setJoinStyle(Qt::MiterJoin); p.setPen(arrow);
+        p.drawPolyline(QPolygonF{e + QPointF(-7, -4.5), e, e + QPointF(-7, 4.5)});
+        p.setOpacity(1);
+        if (selected) {   // the × that removes it
+            p.setPen(Qt::NoPen); p.setBrush(m_c.danger); p.drawEllipse(r.mid, 10, 10);
+            p.setPen(QPen(Qt::white, 1.6)); p.drawLine(r.mid + QPointF(-3.5, -3.5), r.mid + QPointF(3.5, 3.5)); p.drawLine(r.mid + QPointF(-3.5, 3.5), r.mid + QPointF(3.5, -3.5));
+        }
+    }
     int at(const QPointF &position) const
     {
         const QPointF point = graph() ? position / zoom : position;
@@ -1065,6 +1307,21 @@ protected:
     QPair<int, int> edgeAt(const QPointF &position) const
     {
         const QPointF point = position / zoom;
+        if (m_mode == Wide) {
+            // A 12 px wide hit line along the route, as the prototype's .hit.
+            for (auto it = m_routes.cbegin(); it != m_routes.cend(); ++it) {
+                if (!canEdit(it.key().second)) continue;
+                const auto &points = it.value().points;
+                for (int i = 1; i < points.size(); ++i) {
+                    const QLineF leg(points.at(i - 1), points.at(i));
+                    const QPointF d = leg.p2() - leg.p1();
+                    const double len2 = d.x() * d.x() + d.y() * d.y();
+                    const double t = len2 > 0 ? qBound(0.0, QPointF::dotProduct(point - leg.p1(), d) / len2, 1.0) : 0;
+                    if (QLineF(leg.p1() + d * t, point).length() <= 6) return it.key();
+                }
+            }
+            return {0, 0};
+        }
         for (auto it = edges.cbegin(); it != edges.cend(); ++it) for (int dep : it.value()) {
             if (!m_rects.contains(dep) || !m_rects.contains(it.key())) continue;
             const auto path = edgePath(dep, it.key());
@@ -1075,21 +1332,23 @@ protected:
     void mousePressEvent(QMouseEvent *e) override
     {
         if (e->button() == Qt::LeftButton && phaseAt(e->position())) return;   // toggled on release
-        if (!editable || !graph() || e->button() != Qt::LeftButton) return QWidget::mousePressEvent(e);
+        if (!(editable || !editableTasks.isEmpty()) || !graph() || e->button() != Qt::LeftButton) return QWidget::mousePressEvent(e);
         const QPointF point = e->position() / zoom;
-        if (m_edge.first && QLineF(edgePath(m_edge.first, m_edge.second).pointAtPercent(.5), point).length() <= 8) {
+        m_pressAt = e->position();
+        if (m_connectFrom) return;   // the click that picks the task is taken on release
+        if (m_edge.first && QLineF(edgeMid(m_edge.first, m_edge.second), point).length() <= (m_mode == Wide ? 10 : 8)) {
             const auto edge = m_edge; m_edge = {0, 0}; update();
             if (unlinked) unlinked(edge.first, edge.second);
             return;
         }
         for (auto it = m_rects.cbegin(); it != m_rects.cend(); ++it)
-            if (it.key() > 0 && handle(it.value()).adjusted(-4, -4, 4, 4).contains(point)) { m_dragFrom = it.key(); m_dragAt = e->position(); m_edge = {0, 0}; update(); return; }
+            if (it.key() > 0 && canEdit(it.key()) && handle(it.value()).adjusted(-4, -4, 4, 4).contains(point)) { m_dragFrom = it.key(); m_dragAt = e->position(); m_edge = {0, 0}; update(); return; }
         if (!at(e->position())) { m_edge = edgeAt(e->position()); update(); }
     }
     void mouseMoveEvent(QMouseEvent *e) override
     {
         const int id = at(e->position());
-        if (m_dragFrom) { m_dragAt = e->position(); m_hover = id; update(); return; }
+        if (m_dragFrom || m_connectFrom) { m_dragAt = e->position(); m_hover = id; update(); return; }
         if (phaseAt(e->position())) {
             if (m_hover) { m_hover = 0; update(); }
             setCursor(Qt::PointingHandCursor);
@@ -1107,13 +1366,22 @@ protected:
             update();
         }
     }
-    void leaveEvent(QEvent *) override { if (!m_dragFrom) { m_hover = 0; setToolTip({}); update(); } }
+    void leaveEvent(QEvent *) override { if (!m_dragFrom && !m_connectFrom) { m_hover = 0; setToolTip({}); update(); } }
     void mouseReleaseEvent(QMouseEvent *e) override
     {
         const int id = at(e->position());
         if (m_dragFrom) {
-            const int from = m_dragFrom; m_dragFrom = 0; update();
-            if (id && id != from && linked) linked(from, id);
+            const int from = m_dragFrom; m_dragFrom = 0;
+            // Spec 5.4: a click on the handle (no drag) starts connecting; the
+            // next click on a task links it.
+            if (QLineF(m_pressAt, e->position()).length() < 4 && (!id || id == from)) { m_connectFrom = from; m_dragAt = e->position(); update(); return; }
+            update();
+            if (id && id != from && canEdit(id) && linked) linked(from, id);
+            return;
+        }
+        if (m_connectFrom) {
+            const int from = m_connectFrom; m_connectFrom = 0; update();
+            if (id && id != from && canEdit(id) && linked) linked(from, id);
             return;
         }
         if (e->button() == Qt::LeftButton) {
@@ -1149,7 +1417,8 @@ protected:
     }
     void keyPressEvent(QKeyEvent *e) override
     {
-        if (editable && m_edge.first && (e->key() == Qt::Key_Delete || e->key() == Qt::Key_Backspace)) {
+        if (m_connectFrom && e->key() == Qt::Key_Escape) { m_connectFrom = 0; update(); return; }
+        if (canEdit(m_edge.second) && m_edge.first && (e->key() == Qt::Key_Delete || e->key() == Qt::Key_Backspace)) {
             const auto edge = m_edge; m_edge = {0, 0}; update();
             if (unlinked) unlinked(edge.first, edge.second);
             return;
@@ -1159,9 +1428,15 @@ protected:
 private:
     Colors m_c;
     Mode m_mode;
-    int m_hover = 0, m_dragFrom = 0, m_layers = 0;
+    int m_hover = 0, m_dragFrom = 0, m_layers = 0, m_connectFrom = 0;
     double m_ox = 0, m_oy = 0;
-    QPointF m_dragAt;
+    QPointF m_dragAt, m_pressAt;
+    // U25 part 5: the Wide graph's routes, each task's group (phase band) and
+    // each group's node top and bottom; the timer of the working dots.
+    QMap<QPair<int, int>, Route> m_routes;
+    QMap<int, int> m_groupOf;
+    QList<QPair<double, double>> m_groups;
+    QTimer m_dots;
     QPair<int, int> m_edge{0, 0};
     QMap<int, QRectF> m_rects;
     // Phase grouping: a header per band, one summary rect per collapsed band

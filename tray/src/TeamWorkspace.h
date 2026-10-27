@@ -76,6 +76,7 @@ private:
     QWidget *answers(const Teams::Team &team);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
+    void linkDraft(const Teams::Team &team, int dependency, int task, bool add);
     QWidget *board(const Teams::Team &team);
     QWidget *members(const Teams::Team &team);
     QWidget *feed(const Teams::Team &team);

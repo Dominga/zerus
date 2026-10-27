@@ -569,17 +569,24 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
         });
         discard->setProperty("danger", true); discard->setProperty("ghost", true); discard->setToolTip(tr("Drop the draft"));
         auto *back = add(tr("Send back"), "teamWorkspaceSendBack", false, [this] {
-            bool ok = false;
-            const auto comment = QInputDialog::getMultiLineText(this, tr("Send back to the coordinator"), tr("What should change in the plan?"), {}, &ok);
-            if (ok && !comment.trimmed().isEmpty()) m_conversation->send(tr("Your plan needs changes before I approve it: %1").arg(comment.trimmed()));
+            // The dialog runs its own event loop and a poll rebuilds the header
+            // meanwhile: it opens from the workspace, never from this button.
+            QTimer::singleShot(0, this, [this] {
+                bool ok = false;
+                const auto comment = QInputDialog::getMultiLineText(this, tr("Send back to the coordinator"), tr("What should change in the plan?"), {}, &ok);
+                if (ok && !comment.trimmed().isEmpty()) m_conversation->send(tr("Your plan needs changes before I approve it: %1").arg(comment.trimmed()));
+            });
         });
         back->setToolTip(tr("Ask the coordinator to change the plan")); iconFor(back, "arrow-left");
         auto *approve = add(tr("Approve && Run"), "teamWorkspaceApprove", true, [this, id = team.id] {
             if (const auto *current = currentTeam(id)) approveTeam(*current);
         });
         iconFor(approve, "play");
-        approve->setEnabled(team.errors.isEmpty() && !team.tasks.isEmpty());
-        if (!approve->isEnabled()) approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet") : tr("Fix the plan errors first"));
+        // The plan's errors come only with `team status`: until it has answered
+        // (a list poll carries no validation), Approve & Run waits.
+        approve->setEnabled(team.full && team.errors.isEmpty() && !team.tasks.isEmpty());
+        if (!team.full) approve->setToolTip(tr("Checking the plan…"));
+        else if (!approve->isEnabled()) approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet") : tr("Fix the plan errors first"));
         else if (!team.widenings.isEmpty()) approve->setToolTip(tr("A permission widening needs your confirmation"));
         else approve->setToolTip(tr("Create members and hand out ready tasks"));
     } else if (team.status == "running") {
@@ -1392,7 +1399,9 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         });
         h->addWidget(reject);
         auto *accept = button(tr("Accept"), "teamPhaseAccept", true); accept->setProperty("phase", group.n);
-        const QString blocked = !errors.isEmpty() ? tr("Fix the plan errors first:\n%1").arg(errors.join(QLatin1Char('\n'))) : acceptBlocked(team, group.n);
+        // Errors come only with `team status`; a list poll carries none.
+        const QString blocked = !team.full ? tr("Checking the plan…")
+                              : !errors.isEmpty() ? tr("Fix the plan errors first:\n%1").arg(errors.join(QLatin1Char('\n'))) : acceptBlocked(team, group.n);
         accept->setEnabled(blocked.isEmpty() && !decided);
         accept->setToolTip(blocked.isEmpty() ? tr("Hand the phase's tasks out (it waits if an earlier phase is still running)") : blocked);
         QObject::connect(accept, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { approvePhase(id, phase); });

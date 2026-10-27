@@ -54,6 +54,7 @@
 #include "TeamWorkspace.h"
 #include "TeamPhaseScroll.h"
 #include "WorkspaceStyle.h"
+#include <QInputDialog>
 #include "support/FakeCli.h"
 
 using namespace Teams;
@@ -1450,7 +1451,8 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     workspace.render();
     QTest::qWait(100);
     shot(&workspace, "d3-phases-draft");
-    QVERIFY(phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());   // the draft is ready
+    // The draft is ready once `team status` has answered (a list poll carries no validation).
+    QTRY_VERIFY(phaseAction(&workspace, 3, "teamPhaseAccept") && phaseAction(&workspace, 3, "teamPhaseAccept")->isEnabled());
     QVERIFY(phaseAction(&workspace, 3, "teamPhaseReject"));
     QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceFinish"));   // tasks are still open
     // The header folds the scroll to its header row; the members column folds independently.
@@ -2238,8 +2240,9 @@ void TestTeamsUi::permissionCardsAndGraphOrder()
     workspace.setTheme(false);
     lightShot(&workspace, "widening-strip-light");
     workspace.setTheme(true); darkPalette();
-    auto *approve = workspace.findChild<QPushButton *>("teamWorkspaceApprove");
-    QVERIFY(approve && approve->isEnabled());
+    // Approve & Run waits for `team status` (a list poll carries no validation).
+    QPushButton *approve = nullptr;
+    QTRY_VERIFY((approve = workspace.findChild<QPushButton *>("teamWorkspaceApprove")) && approve->isEnabled());
     // Declining the confirmation sends nothing; confirming sends approve with confirm_widening.
     QTimer::singleShot(0, &panel, [&panel] {
         if (auto *box = panel.findChild<QMessageBox *>("teamWideningConfirm"))
@@ -2346,12 +2349,13 @@ void TestTeamsUi::severalDraftPhasesRenderAndApproveInOrder()
     workspace.showTeam("team-1");
     QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceView"));
     // Spec 10: three drafts, one band each; only the next one can be approved.
-    QCOMPARE(workspace.findChild<QWidget *>("teamBarPendingPhase")->toolTip(), QStringLiteral("phases 2, 3, 4 pending approval"));
+    QTRY_COMPARE(([&] { auto *pending = workspace.findChild<QWidget *>("teamBarPendingPhase"); return pending ? pending->toolTip() : QString(); })(),
+                 QStringLiteral("phases 2, 3, 4 pending approval"));
     // Several drafts render as scrolls in the graph, the layers and the board;
     // only the next one can be accepted, the others say what they wait for.
     QTRY_COMPARE(workspace.findChildren<QFrame *>("teamPhaseScroll").size(), 4);
     for (int n = 2; n <= 4; ++n) QCOMPARE(phaseScrollOf(&workspace, n)->property("state").toString(), QStringLiteral("draft"));
-    QVERIFY(phaseAction(&workspace, 2, "teamPhaseAccept")->isEnabled());
+    QTRY_VERIFY(phaseAction(&workspace, 2, "teamPhaseAccept") && phaseAction(&workspace, 2, "teamPhaseAccept")->isEnabled());
     QVERIFY(!phaseScrollOf(&workspace, 2)->findChild<QLabel *>("teamPhaseWaiting"));
     QCOMPARE(phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseWaiting")->text(), QStringLiteral("after phase 2"));
     QVERIFY(phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseWaiting")->toolTip().contains(QStringLiteral("Phase 3 opens after phase 2 is approved")));
@@ -3239,11 +3243,11 @@ void TestTeamsUi::phaseBandsStackWithStatusDecisionAndHealth()
     // U25: every state reads from phase_summary (an older hgs's G9 status: an
     // approved phase that has not started waits as queued).
     const auto state = [&](int n) { auto *f = phaseScrollOf(&workspace, n); return f ? f->property("state").toString() : QString(); };
-    QCOMPARE(state(1), QStringLiteral("done"));
-    QCOMPARE(state(2), QStringLiteral("done"));
-    QCOMPARE(state(3), QStringLiteral("running"));
-    QCOMPARE(state(4), QStringLiteral("queued"));
-    QCOMPARE(state(5), QStringLiteral("draft"));
+    QTRY_COMPARE(state(1), QStringLiteral("done"));
+    QTRY_COMPARE(state(2), QStringLiteral("done"));
+    QTRY_COMPARE(state(3), QStringLiteral("running"));
+    QTRY_COMPARE(state(4), QStringLiteral("queued"));
+    QTRY_COMPARE(state(5), QStringLiteral("draft"));
     // The health tip of a running phase, its done/total bar.
     QVERIFY(phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseHealth"));
     QCOMPARE(phaseScrollOf(&workspace, 4)->findChild<QWidget *>("teamPhaseProgress")->property("total").toInt(), 1);
@@ -4086,8 +4090,34 @@ void TestTeamsUi::leadHeaderFollowsTheTeamState()
     QVERIFY(!find("teamWorkspaceBar"));
     // Planning: Discard plan…, Send back, Approve & Run held by the plan error.
     QVERIFY(shows("teamWorkspaceDiscard") && shows("teamWorkspaceSendBack") && shows("teamWorkspaceApprove"));
-    auto *approve = workspace.findChild<QPushButton *>("teamWorkspaceApprove");
-    QVERIFY(!approve->isEnabled()); QCOMPARE(approve->toolTip(), QStringLiteral("Fix the plan errors first"));
+    // Approve & Run reads the plan errors from `team status`: until it answers
+    // it says it is checking, then it names the errors (#382 review: no fixed wait).
+    const auto approveTip = [&] { auto *b = workspace.findChild<QPushButton *>("teamWorkspaceApprove"); return b && !b->isEnabled() ? b->toolTip() : QString(); };
+    QTRY_COMPARE(approveTip(), QStringLiteral("Fix the plan errors first"));
+    // Send back opens its dialog from the workspace: a poll that rebuilds the
+    // header under the dialog deletes the button, never code that still runs.
+    {
+        QPointer<QWidget> sendBack = find("teamWorkspaceSendBack");
+        bool rebuiltUnder = false, sawDialog = false;
+        QTimer watch; watch.setInterval(5);
+        QObject::connect(&watch, &QTimer::timeout, [&] {
+            auto *dialog = qobject_cast<QInputDialog *>(QApplication::activeModalWidget());
+            if (!dialog || sawDialog) return;
+            sawDialog = true;
+            controller.refresh(); QTest::qWait(150);
+            workspace.render();
+            // Rebuilt: the old button is retired (unnamed, hidden) or gone already.
+            rebuiltUnder = sendBack.isNull() || (sendBack->objectName().isEmpty() && !sendBack->isVisible());
+            dialog->reject();
+        });
+        watch.start();
+        static_cast<QPushButton *>(sendBack.data())->click();
+        QTRY_VERIFY(sawDialog);
+        QTRY_VERIFY(rebuiltUnder);
+        watch.stop();
+        QTRY_VERIFY(sendBack.isNull());
+        QVERIFY(find("teamWorkspaceSendBack"));
+    }
     QVERIFY(!find("teamWorkspacePause") && !find("teamWorkspaceStop") && !find("teamBarPendingPhase"));
     // Running: Pause and Stop…; the bars count the team's tasks and phases.
     setTeam(team());

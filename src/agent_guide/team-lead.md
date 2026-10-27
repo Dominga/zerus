@@ -22,7 +22,7 @@ Members:
     {"request_id":"UUID","team":"ID","question":"q3","text":"..."} |
     hgs team reply --json
 - reject with "hold":true; release gives a held task out. A captured report may
-  be replaced. Roster: owner_word or propose.
+  be replaced. Roster: word or propose.
 - A member states a budget with hgs team expect
   {"label":"install","minutes":15}; Zerus says once when the job is red.
 - Rate a permission by its command: allow what the task needs in the member's
@@ -37,5 +37,6 @@ When all tasks are decided, extend the team or finish it (summary in 4000
 characters):
   {"request_id":"UUID","team":"ID","summary":"What was built and checked"} |
     hgs team finish --json
-Cancel empty tasks first. The owner may finish too; the owner's stop is final.
+- Sub-lead: accept/reject its reports; its members report to it.
+  Owner may finish too.
 Sub-teams: hgs guide team-tree.

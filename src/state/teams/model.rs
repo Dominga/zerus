@@ -349,6 +349,9 @@ pub(crate) struct Member {
     /// A sub-lead's own coalesced inbox, as the team's is the lead's (C2).
     #[serde(default, skip_serializing_if = "Inbox::is_empty")]
     pub inbox: Inbox,
+    /// N10: the sub-lead brief has not been sent yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sub_brief: bool,
 }
 
 /// U21: one built-in command template Zerus ran for this attempt, outside the

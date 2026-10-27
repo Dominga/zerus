@@ -102,6 +102,10 @@ fn hierarchy(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
     }
     let member = team.members.iter_mut().find(|member| member.id == id).context("Unknown member")?;
     member.sub = sub;
+    if sub {
+        // N10: a new sub-lead gets a short brief once.
+        member.sub_brief = true;
+    }
     if !sub {
         member.inbox = Inbox::default();
     }

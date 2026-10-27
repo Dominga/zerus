@@ -49,6 +49,11 @@ struct Result {
 // kills and reaps its running children before returning and drops their results.
 void run(Request request, QObject *owner, std::function<void(const Result &)> done);
 
+// Tests (application thread): how long ago the oldest child that has not
+// reported yet was asked for, -1 when none is in flight. A wait follows this
+// work instead of a clock, and tells it from polls started after the wait.
+qint64 oldestInFlightMs();
+
 // Tests: the worker thread, and a hook run there right before each start.
 QThread *workerThread();
 // Tests: how children start, "posix_spawn" on macOS and "QProcess" elsewhere.

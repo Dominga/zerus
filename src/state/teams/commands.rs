@@ -664,15 +664,40 @@ pub(crate) fn lead_stops() -> Vec<(String, String)> {
     LEAD_STOPS.with(|stops| stops.borrow().clone())
 }
 
-/// F5: the draft with its revision, unseen fields and preflight.
+/// F5: the draft with its revision, unseen fields and preflight. N1/F5: a read
+/// by the draft's own lead clears the owner-edited marks - the owner's edit wins
+/// only over a lead edit made before the lead read it (spec 3) - so the lead can
+/// change those fields after reading.
 fn draft_get(input: &Value) -> anyhow::Result<Value> {
-    let store = Store::open(false)?;
-    draft_get_in(&store, input)
+    // A lead's read writes the marks away; the owner's read does not. A store
+    // the sandbox leaves read-only still reads the draft (the marks stay).
+    let mut store = match Store::open(true) {
+        Ok(store) => store,
+        Err(error) if read_only(&error) => Store::open(false)?,
+        Err(error) => return Err(super::store::write_error(error)),
+    };
+    draft_get_in(&mut store, input)
 }
 
-fn draft_get_in(store: &Store, input: &Value) -> anyhow::Result<Value> {
-    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
+    let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
     ensure!(team.status == TeamStatus::Draft, "The team is not a draft");
+    let lead_reads = matches!(actor(&team, "draft", input), Ok(Actor::Member(member)) if member == team.lead);
+    let marked = team.draft.as_ref().is_some_and(|draft| !draft.owner_edited.is_empty());
+    if lead_reads && marked {
+        let label = team.role_of(&team.lead);
+        let cleared = store.mutate(None, &team.id, None, |team, events| {
+            if let Some(draft) = team.draft.as_mut() {
+                draft.owner_edited.clear();
+            }
+            events.push(Event::new("draft_read", json!({"by":label})));
+            Ok(Value::Null)
+        });
+        // A read that cannot write (a read-only store) still answers the draft.
+        if cleared.is_ok() {
+            team = store.load(&team.id)?.context("Unknown team")?;
+        }
+    }
     let draft = team.draft.clone().unwrap_or_default();
     let validation = super::plan::validate(&team, &BTreeSet::new());
     Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"preflight":validation}))
@@ -685,12 +710,8 @@ fn draft_start(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id").to_owned();
     ensure!(super::store::canonical_uuid(&request), "A canonical request_id is required");
     // C2: there is no team yet to prove a member by, so only you start one.
-    owner_without_team(
-        input,
-        caller_record().is_some(),
-        nonempty_env("DSH_SESSION_ID").is_some(),
-        nonempty_env("HGS_SESSION").is_some(),
-    )?;
+    let (dsh, session, _) = caller_identities();
+    owner_without_team(input, caller_record().is_some(), dsh.is_some(), session.is_some())?;
     let mut store = Store::open(true)?;
     let mut lead = input["lead"].clone();
     if store.receipt(&request, input)?.is_none() && lead["session"].is_object() {
@@ -3030,6 +3051,97 @@ mod tests {
         });
     }
 
+    /// F5: the owner's edit wins only over a lead edit made before the lead read
+    /// it; the lead's read clears the marks, so the lead can change the field.
+    #[test]
+    fn a_lead_changes_an_owner_edited_field_after_reading_the_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.status = TeamStatus::Draft;
+            team.draft = Some(Draft { revision: 5, owner_edited: vec!["members".into()], ..Default::default() });
+            let lead_id = team.lead.clone();
+            {
+                let lead = team.members.iter_mut().find(|member| member.id == lead_id).unwrap();
+                lead.session =
+                    Some(SessionRef { name: "dsh/x/lead".into(), run_id: "r1".into(), conversation_id: "conv-lead".into(), ..Default::default() });
+            }
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let update = json!({"team":id,"action":"update","revision":5,"by":"human",
+                "set":{"members":[{"id":"dev2","role":"Ops","agent":"codex"}]},
+                "request_id":"22222222-2222-4222-8222-222222222222"});
+            // As the lead, before it reads, the owner-edited field is refused.
+            super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+            let error = run("draft", &update, false).unwrap_err().to_string();
+            assert!(error.contains("Owner changed members"), "{error}");
+            // The owner's read leaves the marks alone.
+            super::set_test_caller_identities(Some((None, None, None)));
+            let owner = run("draft", &json!({"team":id,"action":"get","by":"human"}), false).unwrap();
+            assert_eq!(owner["draft"]["owner_edited"], json!(["members"]), "{owner}");
+            // The lead's read clears them, and the same field can be changed.
+            super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+            let get = run("draft", &json!({"team":id,"action":"get","by":"human"}), false).unwrap();
+            assert!(get["draft"]["owner_edited"].is_null() || get["draft"]["owner_edited"] == json!([]), "{get}");
+            let mut again = update;
+            again["request_id"] = json!("33333333-3333-4333-8333-333333333333");
+            let value = run("draft", &again, false).unwrap();
+            assert_eq!(value["status"], "updated", "{value}");
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert!(saved.member("dev2").is_some(), "{:?}", saved.members.iter().map(|member| member.id.clone()).collect::<Vec<_>>());
+            assert!(saved.draft.as_ref().unwrap().owner_edited.is_empty());
+        });
+    }
+
+    /// F5/N6: a draft started with a new lead launches it in the team folder and
+    /// gives it the draft brief, like a desktop team's lead.
+    #[test]
+    fn a_started_draft_launches_and_briefs_its_new_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let value = run(
+                "draft",
+                &json!({"action":"start","by":"human","request_id":"11111111-1111-4111-8111-111111111111",
+                    "folder":project.display().to_string(),"name":"New team",
+                    "lead":{"agent":"claude","model":"opus","effort":"high","account":"work"}}),
+                false,
+            )
+            .unwrap();
+            let id = value["team"].as_str().unwrap().to_owned();
+            let team = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert_eq!((team.status, team.brief), (TeamStatus::Draft, Notice::Pending));
+            let lead = team.member("lead").unwrap();
+            assert_eq!((lead.state, lead.session.is_some(), lead.folder), (MemberState::NotCreated, false, MemberFolder::Shared));
+            // The lead starts in the team's folder, never a worktree.
+            assert_eq!(super::super::dispatcher::member_folder_path(&team, lead).unwrap(), project.display().to_string());
+            // The dispatcher's next tick starts it, then briefs it once.
+            let steps = super::super::dispatcher::steps(&team, &[], 100.0);
+            assert!(steps.contains(&crate::state::teams::dispatcher::Step::Launch { member: "lead".into() }), "{steps:?}");
+            let mut launched = team.clone();
+            {
+                let lead = launched.members.iter_mut().find(|member| member.id == "lead").unwrap();
+                lead.launch_id = "L".into();
+                lead.session = Some(SessionRef { name: "claude/x/newlead".into(), run_id: "r1".into(), ..Default::default() });
+            }
+            let free = crate::state::teams::dispatcher::Seen {
+                name: "claude/x/newlead".into(),
+                run_id: "r1".into(),
+                free: true,
+                idle: true,
+                live: true,
+                ..Default::default()
+            };
+            assert!(super::super::dispatcher::steps(&launched, &[free], 100.0).contains(&crate::state::teams::dispatcher::Step::Brief));
+            let brief = super::super::dispatcher::brief_text(&launched);
+            assert!(brief.contains("hgs guide designer") && brief.contains(&id), "{brief}");
+        });
+    }
+
     #[test]
     fn findings_pages_are_stable_with_a_before_cursor() {
         use crate::state::teams::model::{Finding, Team};
@@ -3083,7 +3195,7 @@ mod tests {
         let input = json!({"request_id":request,"folder":dir.path().display().to_string(),"lead":{"agent":"claude"}});
         let value = super::draft_start_in(&mut store, request, &input, input["lead"].clone()).unwrap();
         let id = value["team"].as_str().unwrap().to_owned();
-        let get = super::draft_get_in(&store, &json!({"team":id})).unwrap();
+        let get = super::draft_get_in(&mut store, &json!({"team":id})).unwrap();
         assert_eq!(get["revision"], 1);
         assert_eq!(get["draft"]["revision"], 1);
         assert!(get["preflight"]["errors"].is_array());

@@ -990,6 +990,9 @@ fn send_back(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
             ensure_subteam_approver(team, actor)?;
             ensure!(matches!(actor, Actor::Human) || parent_approves(team, actor), "Only you send a phase back");
             ensure!(team.phases[at].state == PhaseState::Draft, "Phase {n} is not waiting for approval");
+            // N14 (#383): words written for a phase before the drafts were
+            // renumbered never reach the phase that now has its number.
+            ensure_draft_revision(team, input)?;
             let comment = clean(text(input, "comment").trim(), REJECT_COMMENT, "A comment")?;
             ensure!(!comment.is_empty(), "Say what the lead should change in this phase");
             let record = &mut team.phases[at];
@@ -5869,6 +5872,25 @@ mod tests {
 
     fn kinds(events: &[Event]) -> Vec<String> {
         events.iter().map(|event| event.kind.to_owned()).collect()
+    }
+
+    #[test]
+    fn a_send_back_written_before_the_drafts_were_renumbered_is_refused() {
+        let mut team = running_team();
+        team.settings.approval = Approval::Review;
+        let mut events = Vec::new();
+        let none = BTreeSet::new();
+        let lead = Actor::Member("lead".into());
+        extend(&mut team, &json!({"phase_title":"Build","tasks":[{"id":3,"title":"Fix","assignee":"dev"}]}), &lead, &none, &mut events).unwrap();
+        let seen = team.revision;
+        team.phase_numbers_revision = seen + 1;
+        let error = apply(&mut team, "reject-phase", &json!({"phase":2,"comment":"Split it","revision":seen}), &Actor::Human, &none, &mut events)
+            .unwrap_err();
+        assert_eq!(error.to_string(), format!("Draft numbers changed after revision {seen}; read status again"));
+        assert_eq!(team.phases[0].state, PhaseState::Draft);
+        let receipt =
+            apply(&mut team, "reject-phase", &json!({"phase":2,"comment":"Split it","revision":seen + 1}), &Actor::Human, &none, &mut events).unwrap();
+        assert_eq!(receipt, json!({"status":"phase_rejected","phase":2}));
     }
 
     #[test]

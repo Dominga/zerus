@@ -160,6 +160,40 @@ void TeamPanel::releaseHold()
         QTimer::singleShot(0, this, [this] { scheduleRender(); if (confirmClosed) confirmClosed(); });
 }
 
+void TeamPanel::approvePlan(const Team &team)
+{
+    QStringList sessions;
+    for (const auto &m : team.members) {
+        if (m.lead || !m.session.isEmpty()) continue;
+        const QString role = team.roleOf(m.id);
+        sessions << (m.computer.isEmpty() ? tr("%1 (%2)").arg(role, m.agent) : tr("%1 (%2 on %3)").arg(role, m.agent, m.computer));
+    }
+    const QString starts = sessions.isEmpty() ? tr("Every member has a session already; none starts.")
+                                              : sessions.size() == 1 ? tr("It starts 1 member session: %1.").arg(sessions.first())
+                                              : tr("It starts %1 member sessions: %2.").arg(sessions.size()).arg(sessions.join(QStringLiteral(", ")));
+    // The question names the team; the answer goes to that team, whatever shows by then.
+    const QString id = team.id;
+    if (!team.widenings.isEmpty()) {
+        QStringList lines;
+        for (const auto &widening : team.widenings) {
+            const QString who = widening.role.isEmpty() ? widening.member : widening.role;
+            lines << tr("%1: %2 → %3").arg(who, widening.from, widening.to);
+        }
+        if (!confirm("teamWideningConfirm", tr("Widen permissions?"),
+                     tr("This plan widens the permissions of its members beyond the template:\n\n%1\n\n"
+                        "Approve it only if they need it.").arg(lines.join(QStringLiteral("\n"))) + QStringLiteral("\n\n") + starts,
+                     tr("Confirm and approve")))
+            return;
+        act("approve", {{"team", id}, {"confirm_widening", true}});
+        return;
+    }
+    if (!confirm("teamApproveConfirm", tr("Approve plan and run?"),
+                 tr("Approve the plan of %1 and run it? %2 Ready tasks are handed out at once.").arg(team.name, starts),
+                 tr("Approve and run")))
+        return;
+    act("approve", {{"team", id}});
+}
+
 void TeamPanel::act(const QString &operation, const QJsonObject &input, const std::function<void(bool, const QString &)> &done)
 {
     QJsonObject body = input;

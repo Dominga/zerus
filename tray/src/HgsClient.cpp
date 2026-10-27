@@ -50,9 +50,14 @@ ProcessRunner::Request processRequest(const QString &program, const QStringList 
 {
     ProcessRunner::Request request;
     // GUI actions are human input even when this GUI was launched from an
-    // agent's shell tool. Never inherit that tool's attribution identity.
+    // agent's shell tool. Never inherit that tool's attribution identity: its
+    // hgs session and run, a dsh conversation (N5: resolve_actor refuses an
+    // owner action that carries one, U12) and the launch markers hgs gives a
+    // session it starts.
     auto environment = QProcessEnvironment::systemEnvironment();
-    environment.remove("HGS_SESSION");environment.remove("HGS_RUN_ID");
+    for (const char *marker : {"HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID", "HGS_LAUNCH_ID", "HGS_ARCHIVE_ID", "HGS_REQUESTED_ID",
+                               "HGS_EXPECTED_ID", "HGS_FRESH", "HGS_FRESH_REPLACES", "HGS_FORK_PARENT_ID", "HGS_FORK_SOURCE_NAME"})
+        environment.remove(QString::fromLatin1(marker));
     request.environment=environment;
 #ifdef Q_OS_MACOS
     // Qt encodes argv with QFile::encodeName(), which decomposes Unicode on

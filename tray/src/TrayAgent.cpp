@@ -162,6 +162,8 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
                          tr("Fork build %1 is downloaded. Choose Restart to finish update; drafts are kept and sessions keep running.").arg(build));});
     connect(m_notifier.get(), &AttentionNotifier::activated, this, [this](const QString &token, const QString &activationToken) {
         if(token.startsWith(QLatin1String("zerus-fork-update:"))){showSessions();return;}
+        // N7: a team's attention item opens its team.
+        if(token.startsWith(QLatin1String("zerus-team-attention:"))){showSessions();if(m_sessionsWindow)m_sessionsWindow->showTeamAttention(token);return;}
         if(UpdateController::isUpdateToken(token)){
             auto *updates=UpdateController::instance();if(!updates->updateAvailable()||updates->updateToken()!=token)return;
             showSessions();m_sessionsWindow->showUpdates();
@@ -189,7 +191,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     });
     connect(m_notifier.get(), &AttentionNotifier::failed, this, [this](const QString &token, const QString &detail) {
         qWarning().noquote() << "Zerus: notification:" << detail;
-        if(UpdateController::isUpdateToken(token)||token.startsWith(QLatin1String("zerus-fork-update:")))return;
+        if(UpdateController::isUpdateToken(token)||token.startsWith(QLatin1String("zerus-fork-update:"))||token.startsWith(QLatin1String("zerus-team-attention:")))return;
         m_attention.deliveryFailed(token);
         QSettings().setValue("attention/observed", QJsonDocument(m_attention.state()).toJson(QJsonDocument::Compact));
         if (m_sessionsWindow) m_sessionsWindow->showNotificationNotice(tr("System notification was not delivered: %1").arg(detail));
@@ -684,6 +686,10 @@ void TrayAgent::showSessions()
                     copyText(SessionCommands::open(m_cfg.hgsPath, host, name, archiveId));
                 });
         connect(m_sessionsWindow, &SessionsWindow::copyTextRequested, this, &TrayAgent::copyText);
+        connect(m_sessionsWindow, &SessionsWindow::teamAttentionRaised, this, [this](const QString &token, const QString &title, const QString &body) {
+            m_notifier->post(token, title, body);
+        });
+        connect(m_sessionsWindow, &SessionsWindow::teamAttentionCleared, this, [this](const QString &token) { m_notifier->withdraw(token); });
         connect(m_sessionsWindow, &SessionsWindow::newSessionRequested, this, &TrayAgent::launchSession);
         connect(m_sessionsWindow, &SessionsWindow::accountLoginRequested, this, [this](const QString &host, const QString &id) {
             auto backend = makeLaunchTerminal(m_cfg); QString error; QStringList args;

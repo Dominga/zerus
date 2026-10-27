@@ -59,6 +59,10 @@ public:
     void act(const QString &operation, const QJsonObject &input,
              const std::function<void(bool ok, const QString &message)> &done = {});
     bool confirm(const QString &name, const QString &title, const QString &text, const QString &action);
+    // N17 (#382): Approve & Run, from the header or the plan's footer: it
+    // always asks, names the member sessions it starts, and a permission
+    // widening needs its own confirmation (B5).
+    void approvePlan(const Teams::Team &team);
     // A confirmation runs its own event loop: while it is open the team views
     // do not rebuild, or the widget that asked would be deleted under it.
     bool confirming() const { return m_confirming > 0; }

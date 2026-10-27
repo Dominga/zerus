@@ -260,6 +260,8 @@ private slots:
     void teamLeftoverStopAsksTheRealAction();
     void readmeScreenshots();
     void leadSessionHeaderCarriesTheTeam();
+    void teamAttentionReachesTheNotifications();
+    void designerSessionDropsTheTeamHeader();
     void groupsPersistFilterAndRevealAttention();
     void rebuildKeepsProjectOrderAtScale_data();
     void rebuildKeepsProjectOrderAtScale();
@@ -1687,6 +1689,81 @@ void TestSessionsWindow::readmeScreenshots()
 // the chips; a member's header does not, and the Team tab has no name bar.
 // The compact composer's row under the field has three zones, the centre one
 // centred under the field. ZERUS_TEAM_SHOTS=<dir> keeps both, dark and light.
+// N7 (#364, U18): a team's attention item reaches the desktop notifications
+// once (TrayAgent posts teamAttentionRaised to its AttentionNotifier), is
+// withdrawn when it is gone, and its click opens the team.
+void TestSessionsWindow::teamAttentionReachesTheNotifications()
+{
+    const QStringList keys{"workspace/organization", "workspace/inspectorVisible", "teams/attentionNotified"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); });
+    QSettings().remove("teams/attentionNotified");
+    QSettings().setValue("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    const double now = QDateTime::currentSecsSinceEpoch();
+    const auto plain = ReadmeShots::fleet(now);
+    auto team = ReadmeShots::team(now);
+    team["attention"] = QJsonArray{QJsonObject{{"kind", "permission"}, {"member", "Backend"}, {"since", now - 1800}, {"minutes", 30},
+        {"summary", "Backend waits for your answer: Bash cargo test -p payments"},
+        {"command", R"({"request_id":"<new request id>","team":"team-checkout","member":"backend"} | hgs team answer --json)"}}};
+    QJsonObject data{{"inspect", ReadmeShots::conversations(plain, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", team},
+                     {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+    const QString fixture = m_dir->filePath("hgs-team-attention");
+    QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(plain);
+    QSignalSpy raised(&window, &SessionsWindow::teamAttentionRaised), cleared(&window, &SessionsWindow::teamAttentionCleared);
+    window.show();
+    auto *controller = window.findChild<TeamController *>(); QVERIFY(controller);
+    QTRY_COMPARE_WITH_TIMEOUT(raised.size(), 1, 10000);
+    QCOMPARE(raised[0][1].toString(), QStringLiteral("Team Checkout v2 needs you"));
+    QCOMPARE(raised[0][2].toString(), QStringLiteral("Backend waits for your answer: Bash cargo test -p payments · 30 min"));
+    QVERIFY(raised[0][0].toString().startsWith(QStringLiteral("zerus-team-attention:team-checkout:permission:Backend:")));
+    // Later polls: the same item, no second notification.
+    for (int poll = 0; poll < 3; ++poll) { controller->refresh(); QTest::qWait(300); }
+    QCOMPARE(raised.size(), 1); QCOMPARE(cleared.size(), 0);
+    // A click opens the team.
+    window.showTeamAttention(raised[0][0].toString());
+    QTRY_VERIFY(window.findChild<QWidget *>("teamWorkspace") && window.findChild<QWidget *>("teamWorkspace")->isVisible());
+    // Answered: the notification is withdrawn.
+    team.remove("attention"); data["team"] = team;
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { controller->refresh(); return cleared.size() == 1; })(), 10000);
+    QCOMPARE(cleared[0][0].toString(), raised[0][0].toString());
+    QCOMPARE(raised.size(), 1);
+}
+
+// N12 (#382): from the lead's session (its team's pill, Pause and Stop in the
+// header) to the Team designer's session: no team header and no team action
+// stays behind to act on that team.
+void TestSessionsWindow::designerSessionDropsTheTeamHeader()
+{
+    const QStringList keys{"workspace/skin", "workspace/organization", "workspace/inspectorVisible", "teams/attentionNotified"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) QSettings().remove(key); sessionCardTileInset() = 0; });
+    QSettings().setValue("workspace/skin", "whitewh");
+    QSettings().setValue("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    QSettings().setValue("workspace/inspectorVisible", false);
+    const double now = QDateTime::currentSecsSinceEpoch();
+    QTemporaryDir git; QVERIFY(git.isValid()); QVERIFY(QDir(git.path()).mkdir(".git"));
+    const auto fleet = ReadmeShots::fleet(now, git.path());
+    const QJsonObject data{{"inspect", ReadmeShots::conversations(fleet, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", ReadmeShots::team(now)},
+                           {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+    const QString fixture = m_dir->filePath("hgs-designer-header");
+    QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(fleet); window.show();
+    auto *controller = window.findChild<TeamController *>(); QVERIFY(controller);
+    QTRY_COMPARE_WITH_TIMEOUT(controller->teams().size(), 1, 10000);
+    auto *details = window.findChild<QWidget *>("sessionDetailPanel"); QVERIFY(details);
+    const auto shown = [details](const char *name) { auto *w = details->findChild<QWidget *>(name); return w && w->isVisible(); };
+    window.showSession({}, "claude/orbit/checkout");
+    QTRY_VERIFY_WITH_TIMEOUT(shown("teamHeaderStatus") && shown("teamWorkspacePause"), 10000);
+    window.showSession({}, "claude/team-designer/team-designer");
+    QTRY_VERIFY(!shown("teamHeaderStatus"));
+    QVERIFY(!shown("teamWorkspacePause")); QVERIFY(!shown("teamWorkspaceStop"));
+    // And back: the lead's header returns.
+    window.showSession({}, "claude/orbit/checkout");
+    QTRY_VERIFY(shown("teamHeaderStatus") && shown("teamWorkspacePause"));
+}
+
 void TestSessionsWindow::leadSessionHeaderCarriesTheTeam()
 {
     const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};

@@ -13,6 +13,7 @@
 #include "ExternalFile.h"
 #include "LocalFile.h"
 #include "SessionPresentation.h"
+#include "TeamAttentionNotices.h"
 #include "AccountUsage.h"
 #include "SessionUsage.h"
 #include "CacheKeepalive.h"
@@ -1549,7 +1550,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamPanel->newTeam=[this]{showNewTeam();};
     m_teamPanel->openDesigner=[this]{showTeamDesigner();};
     m_teamPanel->openWorkspace=[this]{if(m_detailTabs->indexOf(m_teamWorkspace)<0)m_detailTabs->addTab(m_teamWorkspace,tr("Team"));m_detailTabs->setCurrentWidget(m_teamWorkspace);};
-    connect(m_teams,&TeamController::teamsChanged,this,[this]{rebuild();updateTeamPanel();});
+    // N7 (U18): every team's attention items reach the desktop notifications,
+    // once each; the known ones are kept across restarts.
+    m_teamNotices=std::make_shared<TeamAttentionNotices>(QSettings().value("teams/attentionNotified").toStringList());
+    connect(m_teams,&TeamController::teamsChanged,this,[this]{
+        rebuild();updateTeamPanel();
+        const auto changes=m_teamNotices->observe(m_teams->teams());
+        if(changes.raised.isEmpty()&&changes.cleared.isEmpty())return;
+        QSettings().setValue("teams/attentionNotified",m_teamNotices->known());
+        for(const auto &token:changes.cleared)emit teamAttentionCleared(token);
+        for(const auto &notice:changes.raised)emit teamAttentionRaised(notice.token,notice.title,notice.body);
+    });
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
     m_workSplitter->addWidget(m_inspectorPanel);
@@ -6671,7 +6682,12 @@ void SessionsWindow::updateTeamPanel()
     {const auto *entry=selected();
      const bool designer=m_selectedTeam.isEmpty()&&entry&&Teams::isDesignerSession(entry->host,entry->session.name);
      m_teamPanel->showDesigner(designer);
-     if(designer){setNewTeamTab(false);return;}}
+     // N12 (#382): no team's header (pill, Pause, Stop) stays on the designer.
+     if(designer){
+         if(m_teamWorkspace)m_teamWorkspace->setHeaderShown(false);
+         if(m_teamHeader){m_teamHeader=false;updateHeaderText();}
+         setNewTeamTab(false);return;
+     }}
     QString team=m_selectedTeam;
     if(team.isEmpty()||!m_teams->team(team)){
         m_selectedTeam.clear();
@@ -6825,6 +6841,13 @@ void SessionsWindow::openTeamTask(int task)
     if(!team)return;
     showTeam(team->id);
     m_teamPanel->openTask(task);
+}
+void SessionsWindow::showTeamAttention(const QString &token)
+{
+    const auto team=TeamAttentionNotices::teamOf(token);
+    if(team.isEmpty()||!m_teams||!m_teams->team(team))return;
+    showTeam(team);
+    if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
 }
 void SessionsWindow::showTeam(const QString &team)
 {

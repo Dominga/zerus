@@ -16,6 +16,7 @@ class SwarmController;
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
 #include <QWidget>
+#include <memory>
 #include <optional>
 #include "FleetState.h"
 #include "HgsClient.h"
@@ -74,6 +75,8 @@ public:
     void showSession(const QString &host, const QString &name);
     void showAttentionSession(const QString &host, const QString &name);
     void showNotificationNotice(const QString &message) { showNotice(message, false); }
+    // N7: a click on a team attention notification opens that team.
+    void showTeamAttention(const QString &token);
     void showProjects(const QString &host = {});
     void showNewSession(const QString &agent = {}, const QString &project = {}, const QString &host = {}, const QString &folder = {}, const QString &path = {}, const QString &account = {});
     void newSessionLaunchFailed(const QString &launchId, const QString &error = {});
@@ -107,6 +110,9 @@ signals:
     void accountLoginRequested(const QString &host, const QString &id);
     void accountInstallRequested(const QString &host, const QString &provider);
     void machineSshRequested(const QString &alias);
+    // N7 (U18): a team's attention item, raised once and withdrawn when gone.
+    void teamAttentionRaised(const QString &token, const QString &title, const QString &body);
+    void teamAttentionCleared(const QString &token);
 
 public:
     // WhiteWh fork: apply the selected skin again, as after a change in Settings.
@@ -402,6 +408,7 @@ private:
     class SocratiCodePanel *m_socratiCode=nullptr;
     // WhiteWh fork: agent teams on this computer and the inspector's Team tab.
     class TeamController *m_teams=nullptr;
+    std::shared_ptr<class TeamAttentionNotices> m_teamNotices;
     class TeamPanel *m_teamPanel=nullptr;
     // The team header the user selected in the list; a selected session shows its own team.
     QString m_selectedTeam;

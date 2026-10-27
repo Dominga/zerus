@@ -87,6 +87,14 @@ private:
     // F7/F8: opens another team in this workspace (previous, next, a new one).
     void openOtherTeam(const QString &team);
     QWidget *attentionStrip(const Teams::Team &team);
+    // N7: Answer on a permission item: the member's Allow / Deny box, or its
+    // command on the clipboard when this hgs sends no box.
+    void answerAttention(const QString &teamId, const QString &member, const QString &command);
+    // A planning, running or paused team takes a settings change (ops.rs settings).
+    static bool settingsOpen(const Teams::Team &team)
+    {
+        return team.status == QLatin1String("planning") || team.status == QLatin1String("running") || team.status == QLatin1String("paused");
+    }
     QWidget *errorStrip();
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).
@@ -147,8 +155,11 @@ private:
     QSet<QString> m_subFolded;
     // U25: the draft whose send-back form is open, its text kept across
     // renders, and Team stuck's Show on graph.
-    int m_rejectPhase = 0;
+    // N14 (#383): the open send-back form: its team, phase (number and when
+    // it was added) and the phase numbers' revision (rejectKey); the comment.
+    QString m_rejectPhase;
     QString m_rejectText;
+    static QString rejectKey(const Teams::Team &team, int phase);
     bool m_showBlockers = false, m_rejectFocus = false, m_zoomManual = false;
     double m_zoom = 1.0;
     int m_drawerTask = 0;

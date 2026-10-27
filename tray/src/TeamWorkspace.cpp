@@ -1,4 +1,5 @@
 #include "TeamWorkspace.h"
+#include "TeamAttentionNotices.h"
 
 #include <QPointer>
 #include "HgsClient.h"
@@ -11,6 +12,7 @@
 #include "TeamPhaseScroll.h"
 #include "CollapsibleBlock.h"
 #include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -200,8 +202,20 @@ void TeamWorkspace::setTheme(bool dark)
 
 void TeamWorkspace::showTeam(const QString &team)
 {
-    if (m_team != team) { m_team = team; m_focus.clear(); m_drawerTask = 0; m_fit = true; if (m_popover) m_popover->hide(); }
+    if (m_team != team) {
+        m_team = team; m_focus.clear(); m_drawerTask = 0; m_fit = true; if (m_popover) m_popover->hide();
+        // N14/N15: another team's send-back words and blocker emphasis stay behind.
+        m_rejectPhase.clear(); m_rejectText.clear(); m_showBlockers = false;
+    }
     scheduleRender();
+}
+
+QString TeamWorkspace::rejectKey(const Team &team, int phase)
+{
+    double added = 0;
+    for (const auto &p : team.phases) if (p.n == phase) added = p.addedAt;
+    return team.id + QLatin1Char('\n') + QString::number(phase) + QLatin1Char('\n') + QString::number(added, 'f', 3)
+           + QLatin1Char('\n') + QString::number(team.phaseNumbersRevision);
 }
 
 void TeamWorkspace::scheduleRender()
@@ -257,6 +271,12 @@ void TeamWorkspace::render()
     if (team) {
         const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
         const QString status = displayStatus(*team, live);
+        // N15: the blockers light up only while the team is stuck.
+        if (status != "stuck") m_showBlockers = false;
+        // N14: renumbered drafts (a discard, a move) close the send-back form.
+        if (!m_rejectPhase.isEmpty() && !m_rejectPhase.endsWith(QLatin1Char('\n') + QString::number(team->phaseNumbersRevision))) {
+            m_rejectPhase.clear(); m_rejectText.clear();
+        }
         // G5: the drafts wait in the members column; the canvas keeps its height.
         if (team->hasFinish) tv->addWidget(finishSummary(*team));
         // B5: a plan that widens a role's permissions waits for the owner's
@@ -409,14 +429,19 @@ QWidget *TeamWorkspace::headerStatusContent(const Team &team, const QString &sta
     if (progress.valid()) {
         const QString caption = progress.title.isEmpty() ? tr("Phase %1").arg(progress.phase)
                                                          : tr("Phase %1 · %2").arg(progress.phase).arg(progress.title);
-        auto *phase = new MiniProgress(c, caption, progress.done, progress.total, c.accent, 150);
+        // N16 (#382): accepted tasks, as the phase's scroll counts them; a
+        // rejected or cancelled task is decided, not done.
+        int accepted = 0;
+        for (const auto &task : team.tasks) accepted += task.phase == progress.phase && task.status == "accepted";
+        if (phaseGroups(team).isEmpty()) { accepted = 0; for (const auto &task : team.tasks) accepted += task.status == "accepted"; }
+        auto *phase = new MiniProgress(c, caption, accepted, progress.total, c.accent, 150);
         phase->setObjectName("teamHeaderPhase");
-        phase->setToolTip(tr("Current phase: decided / tasks in phase %1").arg(progress.phase));
+        phase->setToolTip(tr("Current phase: accepted / tasks in phase %1").arg(progress.phase));
         row->add(phase, 5);
     }
-    int decided = 0; for (const auto &task : team.tasks) decided += task.finished();
-    auto *tasks = new MiniProgress(c, tr("Tasks"), decided, int(team.tasks.size()), c.accent, 72);
-    tasks->setObjectName("teamHeaderTasks"); tasks->setToolTip(tr("Decided / all tasks of the team"));
+    int accepted = 0; for (const auto &task : team.tasks) accepted += task.status == "accepted";
+    auto *tasks = new MiniProgress(c, tr("Tasks"), accepted, int(team.tasks.size()), c.accent, 72);
+    tasks->setObjectName("teamHeaderTasks"); tasks->setToolTip(tr("Accepted / all tasks of the team"));
     row->add(tasks, 7);
     if (progress.phasesTotal > 0) {
         auto *phases = new MiniProgress(c, tr("Phases"), progress.phasesDone, progress.phasesTotal, c.accentMuted, 72);
@@ -617,7 +642,15 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
         stop->setProperty("danger", true); stop->setToolTip(tr("Cancel every open task")); iconFor(stop, "stop");
     }
     if (team.status == "done" || team.status == "stopped") {
-        auto *archive = add(tr("Archive"), "teamWorkspaceArchive", false, [this] { m_panel->act("archive", {}); });
+        // N17 (#382): Archive asks first, as the prototype does.
+        auto *archive = add(tr("Archive"), "teamWorkspaceArchive", false, [this, id = team.id, name = team.name] {
+            if (!m_panel->confirm("teamArchiveConfirm", tr("Archive team?"),
+                                  tr("Archive %1? Its history, tasks and reports stay; the team leaves the list of teams.").arg(name), tr("Archive")))
+                return;
+            // Read it again: a poll may have changed it while the question was open.
+            const auto *current = currentTeam(id);
+            if (current && (current->status == "done" || current->status == "stopped")) m_panel->act("archive", {{"team", id}});
+        });
         archive->setToolTip(tr("Keep the history, hide the team")); iconFor(archive, "archive");
     }
     return bar;
@@ -658,23 +691,9 @@ QWidget *TeamWorkspace::wideningStrip(const Team &team)
 
 void TeamWorkspace::approveTeam(const Team &team)
 {
-    // B5: a widening is the owner's decision, every time; the approve request
-    // carries confirm_widening only after this confirmation.
-    if (!team.widenings.isEmpty()) {
-        QStringList lines;
-        for (const auto &widening : team.widenings) {
-            const QString who = widening.role.isEmpty() ? widening.member : widening.role;
-            lines << tr("%1: %2 → %3").arg(who, widening.from, widening.to);
-        }
-        if (!m_panel->confirm("teamWideningConfirm", tr("Widen permissions?"),
-                              tr("This plan widens the permissions of its members beyond the template:\n\n%1\n\n"
-                                 "Approve it only if they need it.").arg(lines.join(QStringLiteral("\n"))),
-                              tr("Confirm and approve")))
-            return;
-        m_panel->act("approve", {{"confirm_widening", true}});
-        return;
-    }
-    m_panel->act("approve", {});
+    // B5/N17: always asked; a widening asks for its own confirmation, and the
+    // approve request carries confirm_widening only after it.
+    m_panel->approvePlan(team);
 }
 
 // G9: a decision sent for this phase holds until the store's revision moves,
@@ -790,19 +809,56 @@ QWidget *TeamWorkspace::attentionStrip(const Team &team)
     auto *strip = new QFrame; strip->setObjectName("teamAttentionStrip"); strip->setMinimumHeight(26);
     strip->setStyleSheet(QStringLiteral("QFrame#teamAttentionStrip{background:%1;}")
                              .arg(alpha(c.warn, .12).name(QColor::HexArgb)));
-    auto *h = new QHBoxLayout(strip); h->setContentsMargins(12, 4, 12, 4); h->setSpacing(8);
-    h->addWidget(label(tr("Needs your attention"), c.warn, 11, true, "teamAttentionTitle"));
-    QStringList lines;
-    for (const auto &attention : team.attention) {
-        QString line = attention.kind == "report" ? tr("report on #%1 from %2 · %3 min").arg(attention.task).arg(attention.member).arg(attention.minutes)
-                                                  : tr("%1 · #%2 · %3 min").arg(attention.kind).arg(attention.task).arg(attention.minutes);
-        lines << line;
+    auto *v = new QVBoxLayout(strip); v->setContentsMargins(12, 4, 12, 4); v->setSpacing(3);
+    v->addWidget(label(tr("Needs your attention"), c.warn, 11, true, "teamAttentionTitle"));
+    // N7 (U18): one line per item - the member, what waits and its age - and
+    // Answer on a permission the lead left unanswered.
+    int shown = 0;
+    for (const auto &item : team.attention) {
+        if (shown == 5) break;
+        ++shown;
+        const QString line = TeamAttentionNotices::what(item) + QStringLiteral(" · ") + TeamAttentionNotices::age(item);
+        auto *r = row(6);
+        auto *text = elided(line, c.text2, 11);
+        text->setObjectName("teamAttentionLine"); text->setProperty("kind", item.kind);
+        text->setToolTip(item.command.isEmpty() ? line : line + QLatin1Char('\n') + item.command);
+        r->addWidget(text, 1);
+        if (item.kind == "permission") {
+            auto *answer = button(tr("Answer"), "teamAttentionAnswer", true);
+            answer->setProperty("member", item.member);
+            answer->setToolTip(tr("Allow or deny it in %1's card").arg(item.member));
+            connect(answer, &QPushButton::clicked, this, [this, teamId = team.id, member = item.member, command = item.command] {
+                answerAttention(teamId, member, command);
+            });
+            r->addWidget(answer);
+        }
+        v->addLayout(r);
     }
-    auto *text = elided(lines.join(QStringLiteral("  ·  ")), c.text2, 11);
-    text->setObjectName("teamAttentionText");
-    text->setToolTip(lines.join(QStringLiteral("\n")));
-    h->addWidget(text, 1);
+    if (team.attention.size() > shown) v->addWidget(label(tr("+%1 more").arg(team.attention.size() - shown), c.muted, 10));
     return strip;
+}
+
+void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command)
+{
+    // Read the team again: a poll may have rebuilt everything since the click.
+    const auto *team = m_teams->team(teamId);
+    if (!team) return;
+    QString id;
+    for (const auto &m : team->members)
+        if (m.id == member || team->roleOf(m.id) == member) { id = m.id; break; }
+    for (auto *box : findChildren<QFrame *>("teamMemberPermission")) {
+        if (box->property("member").toString() != id || !box->isVisible()) continue;
+        m_members->ensureWidgetVisible(box, 0, 24);
+        auto *allow = box->findChild<QPushButton *>("teamMemberPermissionAllow");
+        if (allow && allow->isEnabled()) allow->setFocus(Qt::OtherFocusReason);
+        else if (auto *reason = box->findChild<QLineEdit *>("teamMemberPermissionDenyReason")) reason->setFocus(Qt::OtherFocusReason);
+        return;
+    }
+    // No answer box here (an older hgs sends no question): the command.
+    if (command.isEmpty()) return;
+    QGuiApplication::clipboard()->setText(command);
+    m_error = tr("The answer command is on the clipboard: fill in the option and run it.");
+    render();
 }
 
 QWidget *TeamWorkspace::errorStrip()
@@ -882,6 +938,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         auto *autoSwitch = new ToggleSwitch(c); autoSwitch->setObjectName("teamWorkspaceAutoAccept"); autoSwitch->setChecked(team.autoAccept);
         autoSwitch->setAccessibleName(tr("Auto-accept drafts"));
         autoSwitch->setToolTip(team.autoAccept ? tr("On: phase drafts without errors start by themselves") : tr("Off: every phase draft waits for you"));
+        autoSwitch->setEnabled(settingsOpen(team));
         QObject::connect(autoSwitch, &QAbstractButton::clicked, this, [this, id = team.id](bool on) { if (const auto *t = currentTeam(id)) setAutoAccept(*t, on); });
         h->addWidget(autoSwitch);
         h->addWidget(label(tr("Auto-accept drafts"), c.text3, 11));
@@ -951,6 +1008,8 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     view->zoom = m_zoom;
     view->chain = [team](int id) { return Teams::chain(team, id); };
     view->cycle = team.cycle;
+    // N15: Show on graph lights the blockers here too, without phases.
+    if (m_showBlockers) view->emphasis = blockers(team);
     view->bands = phaseBands(team, [this, &team](const PhaseGroup &group) { return m_panel->phaseOpen(team, group); });
     // G9: a decision already sent keeps its header controls off until the
     // store's revision moves, across re-renders.
@@ -1042,7 +1101,8 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         for (const auto &d : task->deps) deps << QStringLiteral("#%1").arg(d.task);
         node.deps = deps.isEmpty() ? QString() : QStringLiteral("← ") + deps.join(' ');
         const bool active = QStringList{"assigned", "in_progress", "submitted"}.contains(task->status);
-        node.match = (m_filter == "all" || team.status == "planning" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem))
+        node.match = m_showBlockers ? view->emphasis.contains(id)
+                   : (m_filter == "all" || team.status == "planning" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem))
                      && (m_focus.isEmpty() || task->assignee == m_focus);
         view->nodes.append(node);
     }
@@ -1279,9 +1339,10 @@ QSet<int> TeamWorkspace::blockers(const Team &team) const
 
 void TeamWorkspace::setAutoAccept(const Team &team, bool on)
 {
-    QJsonObject changed = team.settingsJson;
-    changed.insert("auto_accept", on);
-    m_panel->act("settings", {{"settings", changed}});
+    // N13 (#383): only the switch's own field; the server merges it, so a
+    // lead's change after the last poll stays.
+    if (!settingsOpen(team)) return;
+    m_panel->act("settings", {{"settings", QJsonObject{{"auto_accept", on}}}});
 }
 
 // Spec 5.2: Reject… sends the draft back to the lead with the owner's words.
@@ -1290,9 +1351,12 @@ void TeamWorkspace::rejectPhase(const QString &id, int phase)
     const QString comment = m_rejectText.trimmed();
     const auto *team = currentTeam(id);
     if (!team || comment.isEmpty() || m_phaseAct || phaseDecided(*team, phase)) return;
+    // N14: the words go only to the phase they were written for.
+    if (m_rejectPhase != rejectKey(*team, phase)) { m_rejectPhase.clear(); m_rejectText.clear(); scheduleRender(); return; }
     const QString key = markPhaseDecided(*team, phase);
-    m_rejectPhase = 0; m_rejectText.clear();
-    m_panel->act("reject-phase", {{"team", id}, {"phase", phase}, {"comment", comment.left(2000)}},
+    m_rejectPhase.clear(); m_rejectText.clear();
+    // The server refuses it when the drafts were renumbered since (F11).
+    m_panel->act("reject-phase", {{"team", id}, {"phase", phase}, {"comment", comment.left(2000)}, {"revision", team->revision}},
                  [this, key](bool ok, const QString &message) { phaseSent(key, ok, message); });
     scheduleRender();
 }
@@ -1438,13 +1502,15 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *autoSwitch = new ToggleSwitch(c); autoSwitch->setObjectName("teamPhaseAutoAccept"); autoSwitch->setChecked(team.autoAccept);
         autoSwitch->setToolTip(tr("Accept phase drafts without errors by themselves"));
         autoSwitch->setAccessibleName(tr("Auto-accept drafts"));
+        autoSwitch->setEnabled(settingsOpen(team));
         QObject::connect(autoSwitch, &QAbstractButton::clicked, this, [this, id = team.id](bool on) { if (const auto *t = currentTeam(id)) setAutoAccept(*t, on); });
         h->addWidget(autoSwitch);
         auto *reject = button(tr("Reject…"), "teamPhaseReject"); reject->setProperty("phase", group.n);
         reject->setToolTip(tr("Send the draft back to the lead with what should change"));
         reject->setEnabled(!decided);
-        QObject::connect(reject, &QPushButton::clicked, this, [this, phase = group.n] {
-            m_rejectPhase = m_rejectPhase == phase ? 0 : phase; m_rejectFocus = m_rejectPhase != 0; scheduleRender();
+        QObject::connect(reject, &QPushButton::clicked, this, [this, key = rejectKey(team, group.n)] {
+            if (m_rejectPhase != key) m_rejectText.clear();
+            m_rejectPhase = m_rejectPhase == key ? QString() : key; m_rejectFocus = !m_rejectPhase.isEmpty(); scheduleRender();
         });
         h->addWidget(reject);
         auto *accept = button(tr("Accept"), "teamPhaseAccept", true); accept->setProperty("phase", group.n);
@@ -1520,7 +1586,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *text = label(note, c.muted, 12, false, "teamPhaseNoteText"); text->setWordWrap(true); nh->addWidget(text, 1);
         fv->addWidget(noteRow);
     }
-    if (m_rejectPhase == group.n && state == "draft" && team.status != "planning") {
+    if (!m_rejectPhase.isEmpty() && m_rejectPhase == rejectKey(team, group.n) && state == "draft" && team.status != "planning") {
         auto *form = new QWidget; form->setObjectName("teamPhaseRejectForm");
         auto *rh = new QHBoxLayout(form); rh->setContentsMargins(42, 0, 12, 10); rh->setSpacing(6);
         auto *edit = new QPlainTextEdit; edit->setObjectName("teamPhaseRejectText");
@@ -1533,7 +1599,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         QObject::connect(edit, &QPlainTextEdit::textChanged, this, [this, edit, send] { m_rejectText = edit->toPlainText(); send->setEnabled(!m_rejectText.trimmed().isEmpty()); });
         QObject::connect(send, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { rejectPhase(id, phase); });
         auto *cancel = button(tr("Cancel"), "teamPhaseRejectCancel"); cancel->setProperty("ghost", true);
-        QObject::connect(cancel, &QPushButton::clicked, this, [this] { m_rejectPhase = 0; m_rejectText.clear(); scheduleRender(); });
+        QObject::connect(cancel, &QPushButton::clicked, this, [this] { m_rejectPhase.clear(); m_rejectText.clear(); scheduleRender(); });
         rh->addWidget(send, 0, Qt::AlignTop); rh->addWidget(cancel, 0, Qt::AlignTop);
         fv->addWidget(form);
         // Typing survives the workspace's re-renders: the text, and the focus it had.

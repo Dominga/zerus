@@ -40,6 +40,7 @@ pub(crate) fn verify_roster(team: &Team, input: &Value, needed: &[String], now: 
 }
 
 /// The fixture-testable roster check.
+#[cfg(test)]
 pub(crate) fn verify_roster_in(db: &Connection, name: &str, conversation: &str, text: &str, needed: &[String], now: f64) -> anyhow::Result<OwnerWord> {
     verify_scan(db, name, conversation, text, now, ROSTER_PHRASES, needed)
 }
@@ -74,6 +75,7 @@ fn verify_scan(
     needed: &[String],
 ) -> anyhow::Result<OwnerWord> {
     ensure!(!name.is_empty(), "The lead's session has no name to check the owner's word in");
+    ensure!(!text.trim().is_empty(), "owner_word.text is required: quote the owner's sentence");
     let mut statement = db
         .prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 200")
         .context("The session events cannot be read")?;

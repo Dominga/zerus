@@ -1695,6 +1695,35 @@ fn roster_word_names(team: &Team, op: &str, input: &Value) -> Vec<String> {
     }
 }
 
+/// U26: fills the verified roster word for a lead caller, or refuses. The
+/// verifier is a parameter so a test can use a fixture events database.
+fn check_roster_word(
+    team: &Team,
+    op: &str,
+    input: &Value,
+    filled: &mut Value,
+    caller: &Actor,
+    verify: impl Fn(&Team, &Value, &[String], f64) -> anyhow::Result<super::model::OwnerWord>,
+) -> anyhow::Result<()> {
+    if !matches!(caller, Actor::Member(id) if *id == team.lead) {
+        return Ok(());
+    }
+    let needed = roster_word_names(team, op, filled);
+    if needed.is_empty() {
+        return Ok(());
+    }
+    // `roster_word` itself is never the caller's to send: strip it first, so a
+    // caller cannot assert a word that was not verified.
+    if let Some(object) = filled.as_object_mut() {
+        object.remove("roster_word");
+    }
+    let word = verify(team, input, &needed, super::super::now())
+        .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
+    filled["owner_word_checked"] = serde_json::to_value(&word)?;
+    filled["roster_word"] = Value::Bool(true);
+    Ok(())
+}
+
 /// 9.7: a task with a sub-team cannot be cancelled or reassigned without
 /// saying whether the sub-team stops or keeps running.
 fn choose_subteam(store: &mut Store, team: &Team, input: &Value) -> anyhow::Result<()> {
@@ -1983,6 +2012,7 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             // check below fills it, from the lead's own session.
             if let Some(object) = filled.as_object_mut() {
                 object.remove("owner_word_checked");
+                object.remove("roster_word");
             }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
                 // Without an attempt, the task's open one.
@@ -2046,15 +2076,9 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             if matches!(op, "add-member" | "swap-member" | "remove-member" | "settings") {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
-                if matches!(&caller, Actor::Member(id) if *id == team.lead) {
-                    let needed = roster_word_names(&team, op, &filled);
-                    if !needed.is_empty() {
-                        let word = super::owner_word::verify_roster(&team, input, &needed, super::super::now())
-                            .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
-                        filled["owner_word_checked"] = serde_json::to_value(&word)?;
-                        filled["roster_word"] = Value::Bool(true);
-                    }
-                }
+                check_roster_word(&team, op, input, &mut filled, &caller, |team, input, needed, now| {
+                    super::owner_word::verify_roster(team, input, needed, now)
+                })?;
             }
             let receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
@@ -2295,6 +2319,65 @@ mod tests {
         assert_eq!((next.previous.as_str(), next.goal.as_str()), (old_id, "two"));
         assert_eq!(next.member("dev").unwrap().session.as_ref().map(|session| session.name.as_str()), Some("claude/x/dev"));
         assert_eq!(store.load(old_id).unwrap().unwrap().next, next_id);
+    }
+
+    #[test]
+    fn every_roster_change_needs_the_owner_word_naming_it() {
+        use rusqlite::Connection;
+        let now = crate::state::now();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+        let add = |text: &str| {
+            db.execute(
+                "INSERT INTO events(name, conversation, payload) VALUES ('claude/x/lead','c1',?1)",
+                rusqlite::params![json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":text}).to_string()],
+            ).unwrap();
+        };
+        add("Please add bob to the roster");
+        add("Please add alice to the roster");
+        add("Please swap dev for another member");
+        add("Please remove dev from the roster");
+        add("Please change max members to 5");
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(),
+            session: Some(SessionRef { name: "claude/x/lead".into(), conversation_id: "c1".into(), ..Default::default() }), ..Default::default() });
+        team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
+        let caller = Actor::Member("lead".into());
+        let verify = |_: &Team, input: &Value, needed: &[String], now: f64| {
+            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", input["owner_word"]["text"].as_str().unwrap_or_default(), needed, now)
+        };
+        let cases = [
+            ("add-member", json!({"member":{"id":"bob"}}), "Please add bob to the roster", "Please add alice to the roster"),
+            ("swap-member", json!({"member":"dev"}), "Please swap dev for another member", "Please add alice to the roster"),
+            ("remove-member", json!({"member":"dev"}), "Please remove dev from the roster", "Please add alice to the roster"),
+            ("settings", json!({"settings":{"max_members":5}}), "Please change max members to 5", "Please add alice to the roster"),
+        ];
+        for (op, base, sentence, other) in cases {
+            let mut without = base.clone();
+            let input = base.clone();
+            assert!(!super::roster_word_names(&team, op, &input).is_empty(), "{op}");
+            let error = super::check_roster_word(&team, op, &input, &mut without, &caller, verify).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{op}: {error}");
+            // A caller-supplied roster_word is not a word.
+            let mut claimed = base.clone();
+            claimed["roster_word"] = Value::Bool(true);
+            let input = claimed.clone();
+            let error = super::check_roster_word(&team, op, &input, &mut claimed, &caller, verify).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{op}: {error}");
+            // A word naming something else is refused.
+            let mut wrong = base.clone();
+            wrong["owner_word"] = json!({"text": other});
+            let input = wrong.clone();
+            let error = super::check_roster_word(&team, op, &input, &mut wrong, &caller, verify).unwrap_err().to_string();
+            assert!(error.contains("your word") || error.contains("not in the lead session"), "{op}: {error}");
+            // The fresh word naming the change fills the verified flag.
+            let mut good = base.clone();
+            good["owner_word"] = json!({"text": sentence});
+            let input = good.clone();
+            super::check_roster_word(&team, op, &input, &mut good, &caller, verify).unwrap();
+            assert_eq!(good["roster_word"], true, "{op}");
+            assert!(good["owner_word_checked"].is_object(), "{op}");
+        }
     }
 
     #[test]

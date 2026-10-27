@@ -1744,7 +1744,8 @@ quint64 HgsClient::requestAnswerQuestion(const QString &host, const QString &nam
 
 quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, const QString &text,
                                      const QList<MessageAttachment> &attachments,
-                                     const QString &expectedRunId, const QString &expectedConversationId, const QString &agentId, const QString &compactionId)
+                                     const QString &expectedRunId, const QString &expectedConversationId, const QString &agentId, const QString &compactionId,
+                                     bool holdWhenUnconfirmed)
 {
     const quint64 request = ++m_messageRequest;
     const QString key = host + QLatin1Char('\n') + name + '\n' + agentId;
@@ -1803,6 +1804,8 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
     };
     if (!agentId.isEmpty()) message["agent_id"] = agentId;
     if (!compactionId.isEmpty()) message["expected_compaction_id"] = compactionId;
+    // U35: only for an hgs whose inspection reports input_hold_supported.
+    if (holdWhenUnconfirmed) message["queue_when_unconfirmed"] = true;
     const auto payload = QJsonDocument(message).toJson(QJsonDocument::Compact);
     QStringList args{QStringLiteral("send"), name, QStringLiteral("--json")};
     if (!host.isEmpty()) args.prepend(QLatin1Char('@') + host);
@@ -1849,7 +1852,7 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
             }
         });
     connect(process, &QProcess::finished, process,
-        [this, process, timer, fail, reported, request, host, name, key, messageId, expectedRunId, expectedConversationId, agentId]
+        [this, process, timer, fail, reported, request, host, name, key, messageId, expectedRunId, expectedConversationId, agentId, holdWhenUnconfirmed]
         (int code, QProcess::ExitStatus status) {
             timer->stop();
             if (*reported) { process->deleteLater(); return; }
@@ -1862,15 +1865,17 @@ quint64 HgsClient::requestSendMessage(const QString &host, const QString &name, 
                 QJsonParseError error;
                 const auto document = QJsonDocument::fromJson(process->readAllStandardOutput(), &error);
                 const QJsonObject receipt = document.object();
+                // A held message ("queued") is sent later by hgs, in order.
+                const bool held = holdWhenUnconfirmed && receipt.value("status").toString() == QLatin1String("queued");
                 if (error.error != QJsonParseError::NoError || !document.isObject()
-                    || receipt.value("status").toString() != QLatin1String("submitted")
+                    || (receipt.value("status").toString() != QLatin1String("submitted") && !held)
                     || receipt.value("request_id").toString() != messageId
                     || receipt.value("agent_id").toString() != agentId
                     || receipt.value("name").toString() != name
                     || receipt.value("run_id").toString() != expectedRunId
                     || !receipt.value("conversation_id").isString()
                     || receipt.value("conversation_id").toString() != expectedConversationId
-                    || (expectedConversationId.isEmpty() && !receipt.value("first_message").toBool())) {
+                    || (expectedConversationId.isEmpty() && !held && !receipt.value("first_message").toBool())) {
                     fail(tr("Delivery acknowledgement is invalid. Inspect Terminal before retrying."), true);
                 } else {
                     *reported = true;
@@ -2015,6 +2020,23 @@ quint64 HgsClient::runSessionAction(const QString &host, const QString &name, co
         process->deleteLater();
     });
     timer->start(host.isEmpty() ? 15000 : 45000); process->start(); return request;
+}
+
+quint64 HgsClient::requestCancelHeld(const QString &host, const QString &name, const QString &requestId)
+{
+    const auto request = ++m_messageRequest;
+    QStringList args{QStringLiteral("send-cancel"), name, QStringLiteral("--json")};
+    if (!host.isEmpty()) args.prepend(QLatin1Char('@') + host);
+    const auto payload = QJsonDocument(QJsonObject{{"request_id", requestId}}).toJson(QJsonDocument::Compact);
+    runHgs(m_hgs, args, host.isEmpty() ? 15000 : 45000, this,
+        [this, request, host, name, requestId](const QByteArray &bytes) {
+            const auto receipt = QJsonDocument::fromJson(bytes).object();
+            const bool ok = receipt.value("request_id").toString() == requestId && receipt.value("status").toString() == QLatin1String("cancelled");
+            emit heldCancelFinished(request, host, name, ok, receipt, ok ? QString() : tr("The message could not be cancelled."));
+        }, [this, request, host, name](const QString &, const QString &error) {
+            emit heldCancelFinished(request, host, name, false, {}, error);
+        }, payload);
+    return request;
 }
 
 quint64 HgsClient::requestQueueSendNow(const QString &host, const QString &name, const QString &run, const QString &conversation, const QString &queue)

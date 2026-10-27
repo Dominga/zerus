@@ -84,6 +84,8 @@ TeamDesignerPage::TeamDesignerPage(TeamController *teams, QWidget *parent) : QWi
     m_chat = new TeamConversation(teams->client());
     // U16: the designer's questions and permission requests are answered here.
     m_chat->setQuestionsShown(true);
+    m_chat->setAgentName(tr("the designer"));
+    m_chat->openTerminal = [this](const QString &host, const QString &session) { if (openTerminal) openTerminal(host, session); };
     m_chat->useDesignerLayout(intro(), above);
     m_chat->openSession = [this] {
         const QString session = designerSession ? designerSession() : QString();

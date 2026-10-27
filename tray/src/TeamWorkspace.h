@@ -35,6 +35,8 @@ public:
     void setLive(const Teams::LiveLookup &live) { m_live = live; scheduleRender(); }
     void setComputers(const QList<Computer> &computers) { m_computers = computers; }
     std::function<void(const QString &host, const QString &session)> openSession;
+    // U35: the lead's terminal, when the coordinator's send meets a dialog or draft.
+    std::function<void(const QString &host, const QString &session)> openTerminal;
     std::function<void(const QString &host, const QString &session, const QString &text)> sendMessage;
     std::function<void()> openTeamTab;
     // U25 (spec 3): the lead session's header carries the team. headerStatus()
@@ -154,7 +156,7 @@ private:
     QWidget *sideLists(const Teams::Team &team, const QString &status);
     QWidget *members(const Teams::Team &team);
     QWidget *feed(const Teams::Team &team);
-    void renderCoordinator(const Teams::Team &team, const QString &status);
+    void renderCoordinator(const Teams::Team &team);
     void memberMenu(const Teams::Team &team, const Teams::Member &member, const QPoint &global);
     void assignMenu(const Teams::Team &team, const QString &member, const QPoint &global);
     void placeDrawer();

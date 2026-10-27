@@ -53,6 +53,10 @@ fn parse(agent: &str, screen: &str) -> Option<Queue> {
     Some(Queue { text, keys, hint: if agent == "claude" {"Send the queued messages now"}
         else {"Steer the agent with the queued messages now"}.into() })
 }
+/// The text of the agent's own queue panel on `screen`, if it shows one (U35).
+pub(super) fn panel_text(agent: &str, screen: &str) -> Option<String> {
+    parse(agent, screen).map(|queue| queue.text)
+}
 /// Stop's Escape returns ordinary Codex follow-ups to its input as one unsent draft
 /// (pinned 0.160.1 and 0.162.0). Stop notes the ones this turn's panel shows.
 const STOP_FOLLOW_UPS: &str = "codex_stop_follow_ups";

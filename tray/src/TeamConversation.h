@@ -1,4 +1,5 @@
 #pragma once
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QPointer>
@@ -15,6 +16,7 @@ class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QuestionCard;
+class HeldInputBar;
 
 // WhiteWh fork: agent teams. One session's conversation shown inside another
 // view: the Team designer's chat (D1) and the coordinator (D3). It reads the
@@ -58,6 +60,11 @@ public:
     // Voice and video record in the designer's own session (Activity).
     std::function<void()> openSession;
     void startFinished(const QString &error);
+    // U35: who takes the owner's messages, in "Queued until %1 takes your
+    // previous message" ("the lead"); the agent's name when empty.
+    void setAgentName(const QString &name);
+    // Opens the session's terminal when a send is refused at a dialog or draft.
+    std::function<void(const QString &host, const QString &name)> openTerminal;
 protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
@@ -69,6 +76,8 @@ private:
     void answerQuestion(const QString &key, const QString &questionId, const QJsonArray &answers);
     QJsonObject actionableQuestion(const QString &key, const QString &questionId, bool skipping) const;
     void finishAnswer(quint64 request, bool ok, const QString &error = {}, bool uncertain = false, bool submitted = false);
+    void renderHeld();
+    void showRefusal(const QString &error, bool uncertain);
     QString sessionKey() const { return m_name.isEmpty() ? QString() : m_host + '\n' + m_name; }
     void fitDesigner();
     void fitInput();
@@ -91,6 +100,12 @@ private:
     ActivityView *m_view;
     QWidget *m_asks, *m_composerRow;
     QuestionCard *m_question = nullptr;
+    // U35: the messages hgs holds, and the one just queued until the next read.
+    HeldInputBar *m_held = nullptr;
+    QJsonArray m_justHeld;
+    QString m_agentName;
+    QPushButton *m_openTerminal = nullptr;
+    QHash<quint64, QString> m_cancels;
     // The answer in flight: its request, card key and question.
     quint64 m_answerRequest = 0;
     QString m_answerKey, m_answerQuestion, m_questionChoice;

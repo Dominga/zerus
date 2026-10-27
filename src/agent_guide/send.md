@@ -11,7 +11,12 @@ Message another session (hgs guide send)
    text places them.
 3. "status":"submitted" means the agent received the input, not that it
    replied. An error saying delivery is uncertain means: inspect the session
-   and never resend automatically.
+   and never resend automatically. While the target has not taken your
+   previous message, a send is refused; add queue_when_unconfirmed:true when
+   inspect shows input_hold_supported: the message is then held
+   ("status":"queued") and sent in order once the target takes the
+   previous one. Cancel a
+   held one with hgs [@h] send-cancel SESSION --json and {"request_id":ID}.
 4. Read the reply by polling sparingly (for example every 30 seconds):
      hgs [@h] inspect SESSION | jq '{activity,reply_id,last_message}'
    The reply is complete when activity is "idle" and reply_id has changed.

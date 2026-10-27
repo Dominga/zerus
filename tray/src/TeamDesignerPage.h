@@ -35,6 +35,8 @@ public:
     // The start failed: the first message stays in the composer with the reason.
     void startFailed(const QString &error);
     std::function<void(const QString &session)> openDesigner;
+    // U35: the designer's terminal, when a send meets a dialog or draft.
+    std::function<void(const QString &host, const QString &session)> openTerminal;
     std::function<bool(const QString &name, const QString &title, const QString &text, const QString &action)> confirm;
     // After the session list or the catalog changes.
     void refresh();

@@ -3680,7 +3680,23 @@ place attachments at their first marker; otherwise they append. IDs come from a
 fresh inspection. `status: submitted` confirms native input delivery, not a model
 reply. Saved receipts make identical requests idempotent. An uncertain result
 needs manual inspection before another request. `agent_id` is supported only for
-verified DeepSeek continuable children. Questions carry request identity/hash
+verified DeepSeek continuable children.
+
+The agent confirms an input with its next native event: UserPromptSubmit at once
+for an idle Claude or Codex, UserPromptQueued for Kimi while it works (DeepSeek
+confirms in its own request). A working Claude or Codex holds the text in its own
+queue and reports it only when that turn ends, so there the text shown in its
+queue panel confirms it. Until then a further send is refused, unless the request
+sets `queue_when_unconfirmed: true` and the inspection reports
+`input_hold_supported`: hgs then holds the message (at most 8 per session, in
+order) and answers `status: queued` under its request ID. One deliverer per
+session sends each held message through the same checks once the previous input
+is confirmed; `held_inputs` in the inspection lists those still waiting. A held
+message's receipt ends `submitted`, `cancelled` or `failed`. `hgs [@host]
+send-cancel SESSION --json` with `{"request_id"}` cancels one still held; a
+cancelled message is never sent. After an uncertain delivery nothing more is sent
+automatically, and a held message is never replayed. Dialogs, drafts and unknown
+prompts still refuse a direct send; open the terminal there. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
 
 ## Validation

@@ -289,7 +289,11 @@ public:
     static constexpr qsizetype MaximumAttachments = 8;
     quint64 requestSendMessage(const QString &host, const QString &name, const QString &text,
                                const QList<MessageAttachment> &attachments,
-                               const QString &expectedRunId, const QString &expectedConversationId = {}, const QString &agentId = {}, const QString &compactionId = {});
+                               const QString &expectedRunId, const QString &expectedConversationId = {}, const QString &agentId = {}, const QString &compactionId = {},
+                               bool holdWhenUnconfirmed = false);
+    // U35: `hgs [@host] send-cancel <session> --json` for a message hgs still
+    // holds; heldCancelFinished answers with its receipt ("cancelled") or why not.
+    quint64 requestCancelHeld(const QString &host, const QString &name, const QString &requestId);
     quint64 requestQueueSendNow(const QString &host, const QString &name, const QString &run, const QString &conversation, const QString &queue);
     // An untracked session (a shell from `hgs sh -d`) has no run identity: pass
     // empty run and conversation and its listed creation time, which binds the
@@ -397,6 +401,7 @@ signals:
     void readFinished(quint64 request, bool delivered, const QJsonObject &result, const QString &error);
     void notificationsFinished(quint64 request, bool ok, const QJsonObject &result, const QString &error);
     void queueSendFinished(quint64 request, bool ok, const QJsonObject &receipt, const QString &error);
+    void heldCancelFinished(quint64 request, const QString &host, const QString &name, bool ok, const QJsonObject &receipt, const QString &error);
     void messageSent(quint64 request, const QString &host, const QString &name, const QJsonObject &receipt);
     void messageFailed(quint64 request, const QString &host, const QString &name, const QString &detail, bool deliveryUncertain);
     void sessionWriteDone(const QString &host);

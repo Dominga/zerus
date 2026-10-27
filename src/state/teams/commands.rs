@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
@@ -323,6 +323,9 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     value["pending_phase"] = json!(pending_phase(team));
     // U25: only the running phases' open tasks can make the team Stuck.
     value["stuck_scope"] = json!(plan::stuck_scope(team));
+    // U21: the command templates Zerus runs outside a member's sandbox: the
+    // built-ins (with the global switch) and the project's additions.
+    value["templates"] = super::templates::listed(std::path::Path::new(&team.folder));
     // C5: the plan approval view lists every check command with its expected
     // exit code, so the owner sees what will run and where.
     value["checks"] = json!(team
@@ -1172,7 +1175,7 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     // L1: a repeated request returns the stored receipt, never a second commit.
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
-    let mut store = Store::open(false)?;
+    let store = Store::open(false)?;
     if let Some(receipt) = store.receipt(request, input)? {
         return Ok(receipt);
     }
@@ -1180,10 +1183,27 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     let by = actor(&team, "commit", input)?;
     let Actor::Member(member_id) = by else { bail!("Only a member commits its work") };
     ensure!(member_id != team.lead, "The lead does not commit a member's task");
-    let member = team.member(&member_id).context("Unknown member")?;
+    drop(store);
+    // U20: prove the store is writable before git runs. A member whose sandbox
+    // blocks it queues the whole commit instead (the worker runs it), so no
+    // commit exists without its attempt recording it.
+    Store::open(true)?;
+    commit_in_team(&team, &member_id, input)
+}
+
+/// The commit itself, as the member's own (B4): the worker applies a queued
+/// commit with the same code and checks.
+pub(crate) fn commit_in_team(team: &Team, member_id: &str, input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id");
+    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    if let Some(receipt) = Store::open(false)?.receipt(request, input)? {
+        return Ok(receipt);
+    }
+    ensure!(member_id != team.lead, "The lead does not commit a member's task");
+    let member = team.member(member_id).context("Unknown member")?;
     let message = text(input, "message").trim().to_owned();
     ensure!(!message.is_empty() && message.chars().count() <= 4000, "A commit message is required (at most 4000 characters)");
-    let folder = super::dispatcher::member_folder_path(&team, member)?;
+    let folder = super::dispatcher::member_folder_path(team, member)?;
     ensure!(!folder.is_empty() && folder != team.folder, "Zerus commits in the member's own folder, not the team's");
     let branch = format!("team/{}/{}", &team.id[..8.min(team.id.len())], super::dispatcher::tag(&member.id));
     let paths: Vec<String> = input["paths"].as_array().into_iter().flatten().filter_map(|path| path.as_str()).map(str::to_owned).collect();
@@ -1193,7 +1213,7 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     let result = super::dispatcher::commit_in(&folder, &branch, &message, &paths)?;
     if result["status"] != "committed" {
         // Nothing changed: the receipt still records this request as done.
-        store.mutate(Some((request, input)), &team.id, None, |_, _| Ok(result.clone()))?;
+        Store::open(true)?.mutate(Some((request, input)), &team.id, None, |_, _| Ok(result.clone()))?;
         return Ok(result);
     }
     let sha = result["sha"].as_str().unwrap_or_default().to_owned();
@@ -1201,7 +1221,7 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     let attempt_id = text(input, "attempt").to_owned();
     let mut store = Store::open(true)?;
     store.mutate(Some((request, input)), &team.id, None, |team, events| {
-        let role = team.role_of(&member_id);
+        let role = team.role_of(member_id);
         let task = team.tasks.iter_mut().find(|task| {
             task.open_attempt().is_some_and(|attempt| {
                 (!attempt_id.is_empty() && attempt.id == attempt_id) || (attempt_id.is_empty() && attempt.member == member_id)
@@ -1561,14 +1581,32 @@ fn read_only(error: &anyhow::Error) -> bool {
         .any(|sign| text.contains(sign))
 }
 
-fn drop_report(input: &Value) -> anyhow::Result<Value> {
-    ensure!(!text(input, "attempt").is_empty() && !text(input, "team").is_empty(), "A report names its team and attempt");
-    ensure!(!text(input, "text").trim().is_empty(), "A report needs text");
-    let path = super::dispatcher::dropped_report(&std::env::current_dir()?, text(input, "attempt"));
-    std::fs::create_dir_all(path.parent().context("no report folder")?)?;
-    std::fs::write(&path, serde_json::to_vec(input)?)?;
-    Ok(json!({"status":"queued","request_id":input["request_id"],"task":input["task"],
-        "note":"The team's files are read-only here; Zerus records this report from your folder."}))
+/// U20: a member in a sandbox may not write the team store, but it writes its
+/// own folder. The report, ask or commit waits there as `<request_id>.json` for
+/// the worker, which applies it with the same identity checks (folder + attempt
+/// id); `--wait` polls for the outcome (up to 30 s).
+fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let Actor::Member(member_id) = actor(&team, op, input)? else {
+        bail!("Only a member queues this request; a sandbox does not block the lead");
+    };
+    let request_id = text(input, "request_id").to_owned();
+    let folder = std::env::current_dir().context("The member has no folder to queue in")?;
+    let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
+        "attempt":text(input, "attempt"), "input":input});
+    let path = super::outbox::push(&folder, &request)?;
+    let queued = json!({
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
+        "note":"The sandbox blocks the team store: the request waits in the member's folder and the team worker applies it. Run it again with --wait to read the outcome."
+    });
+    if !wait {
+        return Ok(queued);
+    }
+    Ok(super::outbox::wait(&folder, &request_id, 30.0).unwrap_or_else(|| json!({
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
+        "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder."
+    })))
 }
 
 /// The teams a finished team's `left_running` looks at: only the ones that
@@ -1831,7 +1869,64 @@ fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow
     .map(|_| ())
 }
 
-fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
+/// U21: a member asks Zerus to run one built-in command template. Zerus runs it
+/// outside the member's sandbox (the worker is not confined), so the request
+/// goes through the U20 outbox in the member's own folder; the member waits for
+/// the exit code and the output tail.
+fn team_run(input: &Value, _wait: bool) -> anyhow::Result<Value> {
+    let request_id = text(input, "request_id").to_owned();
+    ensure!(canonical_uuid(&request_id), "A canonical request_id is required");
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let Actor::Member(member_id) = actor(&team, "run", input)? else {
+        bail!("Only a member runs a template; the lead runs commands itself")
+    };
+    ensure!(member_id != team.lead, "The lead runs commands itself");
+    let attempt_id = text(input, "attempt").to_owned();
+    let task = team
+        .tasks
+        .iter()
+        .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member_id));
+    let Some(task) = task else { bail!("attempt {attempt_id} does not run for this member") };
+    let folder = std::env::current_dir().context("The member has no folder to run in")?;
+    // Validate here too: a bad template never reaches the worker's queue.
+    let template = text(input, "template").to_owned();
+    super::templates::plan(&template, &input["args"], &folder)?;
+    let request = json!({"op":"run","request_id":request_id,"team":team.id,"member":member_id,"attempt":attempt_id,
+        "template":template,"args":input["args"].clone(),"task":task.id,"input":input});
+    let path = super::outbox::push(&folder, &request)?;
+    let bounded = super::templates::timeout_for(&template, &folder);
+    let queued = json!({
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
+        "note":"Zerus runs the template outside your sandbox; the result waits in your folder."
+    });
+    // The run's own bound plus the worker's poll: a long build is not cut short.
+    Ok(super::outbox::wait(&folder, &request_id, bounded as f64 + 30.0).unwrap_or(queued))
+}
+
+/// U21: the built-in set, the project's additions and the global off switch.
+/// Only the owner (the desktop, not an agent) turns it off.
+fn templates_command(input: &Value) -> anyhow::Result<Value> {
+    let folder = match text(input, "folder") {
+        "" => std::env::current_dir().context("The owner's settings need a folder")?,
+        folder => std::path::PathBuf::from(folder),
+    };
+    match text(input, "action") {
+        "" | "get" => Ok(super::templates::listed(&folder)),
+        "set" => {
+            ensure!(
+                caller_record().is_none() && nonempty_env("DSH_SESSION_ID").is_none(),
+                "Only the owner changes the command templates"
+            );
+            let enabled = input["enabled"].as_bool().context("templates set names \"enabled\": true or false")?;
+            super::templates::set_enabled(enabled)?;
+            Ok(super::templates::listed(&folder))
+        }
+        other => bail!("templates action is get or set (got {other})"),
+    }
+}
+
+fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     // F5: the draft's read and its start are not mutations.
     if op == "draft" {
         match text(input, "action") {
@@ -1840,6 +1935,14 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             _ => {}
         }
     }
+    // U21: a member's template run and the owner's off switch are not team
+    // mutations: the worker runs the template outside the member's sandbox.
+    if op == "run" {
+        return team_run(input, wait);
+    }
+    if op == "templates" {
+        return templates_command(input);
+    }
     // F8: a decision may create the next team, so it runs with the store.
     if op == "decide-proposal" {
         return decide_proposal(input);
@@ -1847,7 +1950,12 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
         "answer" => answer(input),
-        "commit" => commit(input),
+        // U20: a sandbox that cannot write the store queues the whole commit, so
+        // no commit exists without the attempt recording it.
+        "commit" => match commit(input) {
+            Err(error) if read_only(&error) => queue_write("commit", input, wait),
+            result => result,
+        },
         "next-goal" => next_goal(input),
         "leftovers" => {
             let store = Store::open(false)?;
@@ -1925,8 +2033,12 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             // refusal can come with the write as well as with the open.
             let mut store = match Store::open(true) {
                 Ok(store) => store,
-                Err(_) if op == "report" => return drop_report(input),
-                Err(error) => return Err(error),
+                Err(error) if matches!(op, "report" | "ask" | "commit") && read_only(&error) => {
+                    return queue_write(op, input, wait)
+                }
+                // U20: a write the sandbox blocked says what to do, not a bare
+                // SQLite error.
+                Err(error) => return Err(super::store::write_error(error)),
             };
             let mut filled = input.clone();
             // C1: a caller can never hand in a verified owner word; only the
@@ -1996,8 +2108,10 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
             }) {
                 Ok(receipt) => receipt,
-                Err(error) if op == "report" && read_only(&error) => return drop_report(input),
-                Err(error) => return Err(error),
+                Err(error) if matches!(op, "report" | "ask" | "commit") && read_only(&error) => {
+                    return queue_write(op, input, wait)
+                }
+                Err(error) => return Err(super::store::write_error(error)),
             };
             if starts_worker(op) {
                 // The dispatcher runs while any team runs; it exits by itself.
@@ -2060,6 +2174,12 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if catalog {
         args.remove(0);
     }
+    // U20: `--wait` asks for the worker's outcome of a queued request.
+    let mut wait = false;
+    if let Some(index) = args.iter().position(|arg| arg == "--wait") {
+        args.remove(index);
+        wait = true;
+    }
     if args.len() != 2 || (args[1] != "--json" && file.is_none()) {
         return Err(USAGE.into());
     }
@@ -2083,7 +2203,7 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         let human = caller_record().is_none() && nonempty_env("HGS_SESSION").is_none() && text(&input, "by") == "human";
         super::catalog::run(&operation, &input, human)
     } else {
-        run(&operation, &input)
+        run(&operation, &input, wait)
     }
     .map_err(|e| e.to_string())?;
     println!("{result}");

@@ -260,6 +260,34 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
             detail: super::dispatcher::permission_command_line(&pending.card).trim_end().to_owned(),
         });
     }
+    // U20: a delivered attempt whose turn ended long ago and still has no
+    // report is an item, whatever the capture did.
+    let now = crate::state::now();
+    for task in &team.tasks {
+        let Some(attempt) = task.open_attempt() else { continue };
+        if attempt.member == team.lead || attempt.report.is_some() {
+            continue;
+        }
+        let Some(ended) = attempt.turn_ended_at else { continue };
+        if now - ended < team.settings.report_timeout_seconds as f64 * 2.0 {
+            continue;
+        }
+        let role = team.role_of(&attempt.member);
+        let minutes = ((now - ended) / 60.0).round() as u64;
+        items.push(Item {
+            kind: "no_report",
+            key: format!("no_report:{}:{}", task.id, attempt.id),
+            task: Some(task.id),
+            member: role.clone(),
+            since: ended,
+            summary: summary(&format!("{role} ended its turn {minutes} min ago on #{} without a report: {}", task.id, task.title)),
+            command: format!(
+                "{} | hgs team report --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
+            ),
+            detail: attempt.turn_reply.clone(),
+        });
+    }
     // H1: a member stopped by a usage limit is one item, with its reset time
     // when the session reports one.
     for member in &team.members {
@@ -537,6 +565,29 @@ mod tests {
         .unwrap();
         ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
         team
+    }
+
+    #[test]
+    fn an_ended_turn_without_a_report_is_an_owner_visible_item() {
+        let mut team = team();
+        delivered(&mut team, 1);
+        let ended = crate::state::now() - 10_000.0;
+        {
+            let attempt = &mut team.task_mut(1).unwrap().attempts[0];
+            attempt.turn_ended_at = Some(ended);
+            attempt.turn_reply = "Done: the report is the last message".into();
+        }
+        let list = items(&team);
+        let found = list.iter().find(|item| item.kind == "no_report").unwrap();
+        assert!(found.summary.contains("without a report"), "{}", found.summary);
+        assert_eq!(found.detail, "Done: the report is the last message");
+        // A report ends the item.
+        team.task_mut(1).unwrap().attempts[0].report = Some(crate::state::teams::model::Report {
+            text: "Done".into(),
+            at: crate::state::now(),
+            ..Default::default()
+        });
+        assert!(!items(&team).iter().any(|item| item.kind == "no_report"));
     }
 
     #[test]

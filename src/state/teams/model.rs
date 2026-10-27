@@ -330,6 +330,23 @@ pub(crate) struct Member {
     pub launch_after_swap: bool,
 }
 
+/// U21: one built-in command template Zerus ran for this attempt, outside the
+/// member's sandbox.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct RunRecord {
+    pub template: String,
+    #[serde(default)]
+    pub args: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default)]
+    pub ms: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
+}
+
 /// One commit Zerus made for an attempt (B4).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct CommitRef {
@@ -814,6 +831,10 @@ pub(crate) struct Attempt {
     /// Commits Zerus made for this attempt (B4), newest last, at most 20.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<CommitRef>,
+    /// U21: the built-in command templates Zerus ran for this attempt, newest
+    /// last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunRecord>,
 }
 
 impl Attempt {

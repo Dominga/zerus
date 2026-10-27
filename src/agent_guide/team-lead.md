@@ -9,19 +9,20 @@ The approved plan is phase 1; new work goes in a new phase:
 - "review": a draft waits for the owner (approve-phase, discard-phase);
   "auto" starts at once if no draft is ahead. Until then extend "phase":N,
   edit-draft {phase, title?, tasks_update?, tasks_remove?} or move-phase
-  {phase, to, position}. Sent back by the owner: edit it, then
-  rework-phase {phase, note?} returns it as a draft.
+  {phase, to, position}. Sent back: edit it, then rework-phase
+  {phase, note?} returns it as a draft.
 - Read validation.health before approval. A check task {"kind":"check",
   "check":{"command":"cargo test","expect_exit":0}} runs in the member's
   folder; Zerus decides it by exit code.
 
 Members:
+- Routine commands run outside a member's sandbox: hgs team run (hgs guide
+  team-run). Anything else asks you.
 - A question (hgs team ask) waits for your reply; it is not a report:
     {"request_id":"UUID","team":"ID","question":"q3","text":"..."} |
     hgs team reply --json
-- reject with "hold":true, or hold a pending task; release gives it out. A
-  captured report may be replaced by the member's own. Missing skill:
-  add-member {"member":{"id","role","agent"}}, reassign.
+- reject with "hold":true; release gives a held task out. A captured report may
+  be replaced. Missing skill: add-member {...}, reassign.
 - A member states a budget with hgs team expect
   {"label":"install","minutes":15}; Zerus says once when the job is red.
 - Rate a permission by its command: allow what the task needs in the member's
@@ -32,9 +33,9 @@ Members:
   30 min old: {"owner_word":{"text":"plan approved"}} with approve or
   approve-phase; else the owner approves in Zerus.
 
-When all tasks are decided, Zerus tells you once. Extend the team, or finish
-it (summary at most 4000 characters):
+When all tasks are decided, extend the team or finish it (summary in 4000
+characters):
   {"request_id":"UUID","team":"ID","summary":"What was built and checked"} |
     hgs team finish --json
-Cancel tasks with nothing left first. The owner may finish too; the owner's
-stop is final. Sub-teams: hgs guide team-tree.
+Cancel empty tasks first. The owner may finish too; the owner's stop is final.
+Sub-teams: hgs guide team-tree.

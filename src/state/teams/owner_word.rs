@@ -55,13 +55,13 @@ pub(crate) fn verify_roster(team: &Team, input: &Value, needed: &[String], now: 
     let lead = team.member(&team.lead).context("The team has no lead")?;
     let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
     let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
-    verify_scan(&db, &session.name, &session.conversation_id, text, now, ROSTER_PHRASES, needed)
+    verify_scan(&db, &session.name, &session.conversation_id, text, now, ROSTER_PHRASES, needed, true)
 }
 
 /// The fixture-testable roster check.
 #[cfg(test)]
 pub(crate) fn verify_roster_in(db: &Connection, name: &str, conversation: &str, text: &str, needed: &[String], now: f64) -> anyhow::Result<OwnerWord> {
-    verify_scan(db, name, conversation, text, now, ROSTER_PHRASES, needed)
+    verify_scan(db, name, conversation, text, now, ROSTER_PHRASES, needed, true)
 }
 
 /// Checks the lead's `owner_word` request against the lead session's events
@@ -81,7 +81,7 @@ pub(crate) fn verify(team: &Team, input: &Value, now: f64) -> anyhow::Result<Own
 /// The verification against one events database, so it is tested with a
 /// fixture instead of the live state.
 pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &str, now: f64) -> anyhow::Result<OwnerWord> {
-    verify_scan(db, name, conversation, text, now, KEY_PHRASES, &[])
+    verify_scan(db, name, conversation, text, now, KEY_PHRASES, &[], false)
 }
 
 fn verify_scan(
@@ -92,6 +92,7 @@ fn verify_scan(
     now: f64,
     phrases: &[&str],
     needed: &[String],
+    exact: bool,
 ) -> anyhow::Result<OwnerWord> {
     ensure!(!name.is_empty(), "The lead's session has no name to check the owner's word in");
     ensure!(!text.trim().is_empty(), "owner_word.text is required: quote the owner's sentence");
@@ -134,7 +135,7 @@ fn verify_scan(
         if !phrases.iter().any(|phrase| lowered.contains(phrase)) {
             continue;
         }
-        if !detail.contains(text) {
+        if if exact { detail.trim() != text.trim() } else { !detail.contains(text) } {
             continue;
         }
         if !needed.iter().all(|value| has_token(&lowered, &value.to_lowercase())) {

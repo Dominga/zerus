@@ -1133,9 +1133,28 @@ pub(crate) struct Team {
     /// Section 9.1: the sub-teams delegated from this team, at most 32.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<String>,
+    /// U26: verified owner events already spent on a change, so one sentence
+    /// authorizes one change: [{event, change}].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub used_owner_words: Vec<serde_json::Value>,
 }
 
 impl Team {
+    /// U26: the change an already-spent owner word paid for, if any.
+    pub(crate) fn owner_word_used(&self, event: i64) -> Option<String> {
+        self.used_owner_words
+            .iter()
+            .find(|used| used["event"].as_i64() == Some(event))
+            .map(|used| used["change"].as_str().unwrap_or_default().to_owned())
+    }
+
+    pub(crate) fn record_owner_word(&mut self, event: i64, change: &str) {
+        if self.owner_word_used(event).is_none() {
+            self.used_owner_words.push(serde_json::json!({"event":event,"change":change}));
+            let excess = self.used_owner_words.len().saturating_sub(50);
+            self.used_owner_words.drain(..excess);
+        }
+    }
     pub(crate) fn member(&self, id: &str) -> Option<&Member> {
         self.members.iter().find(|member| member.id == id)
     }

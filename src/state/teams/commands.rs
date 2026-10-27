@@ -1835,7 +1835,12 @@ fn check_roster_word(
     }
     let word = verify(team, input, &needed, super::super::now())
         .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
+    if let Some(used) = team.owner_word_used(word.event) {
+        bail!("That word was already used for {used}; ask the owner again");
+    }
     filled["owner_word_checked"] = serde_json::to_value(&word)?;
+    filled["owner_word_event"] = json!(word.event);
+    filled["owner_word_change"] = json!("the roster change");
     filled["roster_word"] = Value::Bool(true);
     Ok(())
 }
@@ -2208,6 +2213,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // check below fills it, from the lead's own session.
             if let Some(object) = filled.as_object_mut() {
                 object.remove("owner_word_checked");
+                object.remove("owner_word_event");
+                object.remove("owner_word_change");
                 object.remove("roster_word");
             }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
@@ -2264,7 +2271,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                         .filter(|word| word.is_object())
                         .context("The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence")?;
                     let verified = super::owner_word::verify(&team, word, super::super::now())?;
+                    if let Some(used) = team.owner_word_used(verified.event) {
+                        bail!("That word was already used for {used}; ask the owner again");
+                    }
                     filled["owner_word_checked"] = serde_json::to_value(&verified)?;
+                    filled["owner_word_event"] = json!(verified.event);
+                    filled["owner_word_change"] = json!(if op == "approve" { "the plan approval" } else { "the phase approval" });
                 }
             }
             // U26: a lead changes the roster (or max_members) only on the
@@ -2724,6 +2736,42 @@ mod tests {
             assert_eq!(good["roster_word"], true, "{op}");
             assert!(good["owner_word_checked"].is_object(), "{op}");
         }
+    }
+
+    #[test]
+    fn one_owner_word_is_spent_on_one_roster_change() {
+        use rusqlite::Connection;
+        let now = crate::state::now();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
+        for (seq, text) in [(1, "Please remove dev from the roster"), (2, "Please remove dev from the roster again")] {
+            db.execute("INSERT INTO events(seq,name,conversation,payload) VALUES (?1,'claude/x/lead','c1',?2)",
+                rusqlite::params![seq, json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":text}).to_string()]).unwrap();
+        }
+        let mut team = Team { id: "t".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, ..Default::default() };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        let caller = Actor::Member("lead".into());
+        let verify = |_: &Team, input: &Value, needed: &[String], now: f64| {
+            super::super::owner_word::verify_roster_in(&db, "claude/x/lead", "c1", input["owner_word"]["text"].as_str().unwrap_or_default(), needed, now)
+        };
+        let base = json!({"member":"dev"});
+        let mut first = base.clone();
+        first["owner_word"] = json!({"text":"Please remove dev from the roster"});
+        let input = first.clone();
+        super::check_roster_word(&team, "remove-member", &input, &mut first, &caller, verify).unwrap();
+        // The operation spends the event on the team.
+        let event = first["owner_word_event"].as_i64().unwrap();
+        team.record_owner_word(event, "the roster change");
+        let mut second = base.clone();
+        second["owner_word"] = json!({"text":"Please remove dev from the roster"});
+        let input = second.clone();
+        let error = super::check_roster_word(&team, "remove-member", &input, &mut second, &caller, verify).unwrap_err().to_string();
+        assert!(error.contains("already used"), "{error}");
+        // A new sentence works.
+        let mut third = base.clone();
+        third["owner_word"] = json!({"text":"Please remove dev from the roster again"});
+        let input = third.clone();
+        super::check_roster_word(&team, "remove-member", &input, &mut third, &caller, verify).unwrap();
     }
 
     #[test]

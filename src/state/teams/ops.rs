@@ -2967,6 +2967,11 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         }
         _ => bail!("Unknown team operation {op}"),
     }?;
+    // U26: a verified owner word is spent on the change it authorized.
+    if let Some(event) = input["owner_word_event"].as_i64() {
+        let change = input["owner_word_change"].as_str().unwrap_or("this change");
+        team.record_owner_word(event, change);
+    }
     // U25: auto-accept takes every error-free draft, then a queued phase whose
     // earlier work ended starts.
     auto_accept(team, offline, events);

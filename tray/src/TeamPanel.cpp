@@ -132,8 +132,13 @@ bool TeamPanel::confirm(const QString &name, const QString &title, const QString
     auto *ok = dialog.addButton(action, QMessageBox::DestructiveRole);
     auto *cancel = dialog.addButton(QMessageBox::Cancel);
     dialog.setDefaultButton(cancel); dialog.setEscapeButton(cancel);
+    ++m_confirming;
     dialog.exec();
-    return dialog.clickedButton() == ok;
+    const bool yes = dialog.clickedButton() == ok;
+    // The polls kept coming: the views catch up once the caller has returned.
+    if (--m_confirming == 0)
+        QTimer::singleShot(0, this, [this] { scheduleRender(); if (confirmClosed) confirmClosed(); });
+    return yes;
 }
 
 void TeamPanel::act(const QString &operation, const QJsonObject &input, const std::function<void(bool, const QString &)> &done)
@@ -220,6 +225,7 @@ void TeamPanel::render()
 {
     // A hidden tab renders once it is shown; polls keep coming meanwhile.
     if (!isVisible() && m_content) { m_dirty = true; return; }
+    if (m_confirming) return;
     if (m_designerShown) { m_stack->setCurrentWidget(m_designer); return; }
     m_dirty = false;
     const Colors c = colorsFor(m_dark);

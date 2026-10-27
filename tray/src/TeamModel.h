@@ -129,8 +129,9 @@ struct StructuredReport {
 
 // D2: one finding as `hgs team status` pages it.
 struct TeamFinding {
-    QString id, fromTask, severity, title, file, scenario, task, state, by, note;
-    int line = 0;
+    // N17, N18: the owner's replan proposal and a fix_phase finding's phase.
+    QString id, fromTask, severity, title, file, scenario, task, state, by, note, proposal;
+    int line = 0, phase = 0;
     double at = 0;
 };
 

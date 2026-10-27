@@ -1,5 +1,6 @@
 #pragma once
 
+#include "JsonParse.h"
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -19,9 +20,9 @@ inline QJsonArray parse(QString text)
     const QString start = "<send_user_message_question_reply>";
     const QString end = "</send_user_message_question_reply>";
     if (!text.startsWith(start) || !text.endsWith(end)) return {};
-    QJsonParseError error;
-    const auto document = QJsonDocument::fromJson(text.mid(start.size(), text.size() - start.size() - end.size()).toUtf8(), &error);
-    if (error.error != QJsonParseError::NoError) return {};
+    QString error;
+    const auto document = JsonParse::local(text.mid(start.size(), text.size() - start.size() - end.size()).toUtf8(), &error);
+    if (!error.isEmpty()) return {};
     const auto replies = document.isObject() ? QJsonArray{document.object()} : document.array();
     for (const auto &value : replies) {
         if (!value.isObject()) return {};

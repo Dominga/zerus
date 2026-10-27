@@ -1,6 +1,6 @@
 #pragma once
+#include "IdentityHash.h"
 #include "MachinePlatform.h"
-#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMap>
@@ -22,7 +22,7 @@ inline QString key(const QJsonObject &p) {
         return "profile:" + profileKey(p);
     const auto scope = identity["organization"].toString().trimmed().toCaseFolded();
     const auto identityKey = p["provider"].toString() + '\n' + (account.isEmpty() ? "email:" + email : "id:" + account) + '\n' + scope;
-    return "account:" + QString::fromLatin1(QCryptographicHash::hash(identityKey.toUtf8(), QCryptographicHash::Sha256).toHex());
+    return "account:" + QString::fromLatin1(IdentityHash::sha256(identityKey.toUtf8()).toHex());
 }
 // A quota belongs to the account: select a snapshot, never add quotas from
 // several machines or let a failed probe replace a good snapshot.

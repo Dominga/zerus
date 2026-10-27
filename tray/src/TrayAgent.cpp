@@ -1,4 +1,6 @@
 #include "TrayAgent.h"
+#include "ProcessRunner.h"
+#include "SettingsJson.h"
 #include "QuestionNotificationSettings.h"
 #include "AutomaticApprovals.h"
 
@@ -144,7 +146,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
     , m_notifier(makeAttentionNotifier())
 #endif
     , m_badge(makeApplicationBadge())
-    , m_attention(QJsonDocument::fromJson(QSettings().value("attention/observed").toByteArray()).object())
+    , m_attention(SettingsJson::object("attention/observed"))
     , m_localTimer(this)
     , m_peerTimer(this)
 {
@@ -284,6 +286,13 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
         pollAllKnownPeers(m_client, m_state);
     });
 
+    // Parse the large saved values on the preparation thread before their first use.
+    SettingsJson::warm(this, {QStringLiteral("attention/readReplies"), QStringLiteral("attention/sessionMarks"),
+                              QStringLiteral("attention/pendingReads"), QStringLiteral("attention/sharedReadMigrated"),
+                              QStringLiteral("workspace/organization"), QStringLiteral("workspace/pendingLaunches"),
+                              QStringLiteral("workspace/launchAccounts"), QStringLiteral("swarm/observedOrganization"),
+                              QStringLiteral("swarm/observedVersions"), QStringLiteral("workspace/worktreeSnapshots")});
+
     auto *discover = new QProcess(this);
     discover->setProgram(cfg.hgsPath.isEmpty() ? QStringLiteral("hgs") : cfg.hgsPath);
     discover->setArguments({QStringLiteral("ls"), QStringLiteral("--json")});
@@ -328,10 +337,13 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
         *done = true;
 
         if (status == QProcess::NormalExit && exitCode == 0) {
-            QString err;
-            const QList<BoxState> fleet =
-                HgsClient::parseFleet(discover->readAllStandardOutput(), &err);
-            if (err.isEmpty()) {
+            // The whole fleet's listing is parsed off the GUI thread (ProcessRunner.h).
+            struct Fleet { QList<BoxState> boxes; QString error; };
+            ProcessRunner::post(this, [bytes = discover->readAllStandardOutput()] {
+                Fleet parsed; parsed.boxes = HgsClient::parseFleet(bytes, &parsed.error); return parsed;
+            }, [this](const Fleet &parsed) {
+            const QList<BoxState> &fleet = parsed.boxes;
+            if (parsed.error.isEmpty()) {
                 // The first box is this computer (onLocalReady brings its state) and
                 // its "peers" are the aliases to poll; requestPeer() below brings their
                 // sessions. A reachable peer's own entry carries the name it reports
@@ -347,6 +359,7 @@ TrayAgent::TrayAgent(const AppConfig &cfg, QObject *parent)
                 m_peerTimer.start();
                 pollAllKnownPeers(m_client, m_state);
             }
+            });
         }
         discover->deleteLater();
     });
@@ -369,8 +382,8 @@ TrayAgent::~TrayAgent()
 void TrayAgent::onLocalReady(const BoxState &box)
 {
     m_localReadError = box.ok ? QString() : (box.error.isEmpty() ? tr("Could not read local sessions") : box.error);
-    m_state.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
-    m_state.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object());
+    m_state.setReadReplies(SettingsJson::object("attention/readReplies"));
+    m_state.setAttentionMarks(SettingsJson::object("attention/sessionMarks"));
     m_state.setPendingReads(ReadMarkStore::load());
     m_lastError.clear();
     const auto previousPeers = m_state.peerNames();
@@ -404,8 +417,8 @@ void TrayAgent::onPeerReady(const BoxState &box)
 {
     // box.host is the alias this answer was polled under (see HgsClient::requestPeer).
     if (m_sessionsWindow) m_sessionsWindow->setPollingHosts(m_client.pollingHosts());
-    m_state.setReadReplies(QJsonDocument::fromJson(QSettings().value("attention/readReplies").toByteArray()).object());
-    m_state.setAttentionMarks(QJsonDocument::fromJson(QSettings().value("attention/sessionMarks").toByteArray()).object());
+    m_state.setReadReplies(SettingsJson::object("attention/readReplies"));
+    m_state.setAttentionMarks(SettingsJson::object("attention/sessionMarks"));
     m_state.setPendingReads(ReadMarkStore::load());
     if (m_state.local().peersKnown && !m_state.local().peers.contains(box.host)) return;
     m_lastError.clear();

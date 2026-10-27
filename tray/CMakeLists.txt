@@ -99,7 +99,7 @@ endif()
 add_library(hgs-updates STATIC src/UpdateController.cpp src/UpdateController.h
     src/WindowsUpdateTrust.cpp src/WindowsUpdateTrust.h)
 target_include_directories(hgs-updates PUBLIC src)
-target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network)
+target_link_libraries(hgs-updates PUBLIC Qt6::Widgets Qt6::Network hgs-tray-core)
 if(WIN32)
     # WindowsUpdateTrust: CNG for the update manifest, WinVerifyTrust for installers.
     target_link_libraries(hgs-updates PRIVATE bcrypt wintrust crypt32)
@@ -143,7 +143,7 @@ include(cmake/BuildVersion.cmake)
 # link; tests/CMakeLists.txt fails when a suite lists a source that one of them
 # builds. Each layer adds Qt modules, so a suite that links the lowest layer
 # covering its code keeps its QTEST_MAIN application type.
-add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/HgsClient.cpp src/FleetState.cpp
+add_library(hgs-tray-core STATIC src/ProcessRunner.cpp src/JsonParse.cpp src/SettingsJson.cpp src/HgsClient.cpp src/FleetState.cpp
     src/SessionCreationController.cpp
     src/AnalyticsClient.cpp src/AnalyticsData.cpp
     src/ReadMarkSync.cpp src/AppConfig.cpp src/AccountUsageStore.cpp src/ComposerDraftStore.cpp
@@ -192,7 +192,7 @@ target_link_libraries(hgs-tray-ui PUBLIC hgs-tray-core Qt6::Widgets
 
 add_library(hgs-tray-activity STATIC src/ActivityView.cpp)
 target_include_directories(hgs-tray-activity PUBLIC src)
-target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-markdown hgs-round-video)
+target_link_libraries(hgs-tray-activity PUBLIC Qt6::Widgets Qt6::Multimedia PRIVATE hgs-tray-core hgs-markdown hgs-round-video)
 target_link_libraries(hgs-tray-ui PRIVATE hgs-tray-activity)
 
 add_library(hgs-tray-views STATIC src/ArchiveDatePicker.cpp src/ArchiveDatePicker.h src/ArchiveBrowser.cpp src/ArchiveBrowser.h src/SessionsWindow.cpp src/SessionsWindowShortcuts.cpp src/SessionsWindowGoTo.cpp src/SessionSelection.cpp src/NativeUiView.cpp

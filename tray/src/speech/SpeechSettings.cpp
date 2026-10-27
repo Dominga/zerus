@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "SpeechSettings.h"
 #include "SpeechClient.h"
 #include <QAudioDevice>
@@ -214,7 +215,7 @@ SpeechSettings::SpeechSettings(const QString &executable, QWidget *parent, std::
     m_microphone = new QComboBox; m_microphone->setObjectName("speechMicrophone"); layout->addWidget(m_microphone);
     layout->addWidget(label(tr("Provider settings and credentials stay on their processing computer. Recordings are limited to two minutes. Original audio and recognized text remain in conversation history; your typed draft stays separate.")));
     m_statistics = label({}); m_statistics->setObjectName("speechStatistics"); layout->addWidget(m_statistics); layout->addStretch();
-    m_pending = QJsonDocument::fromJson(QSettings().value(pendingKey).toByteArray()).object();
+    m_pending = SettingsJson::object(pendingKey);
     if (!validMachine(m_pending.value("machine_id").toString()) || QUuid(m_pending.value("request_id").toString()).isNull()) m_pending = {};
     setPeers({}); microphones(); controls();
     connect(m_host, &QComboBox::currentIndexChanged, this, [this] { QSettings().setValue("speech/manage_host", m_host->currentData()); refresh(); });

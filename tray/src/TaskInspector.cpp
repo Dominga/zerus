@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "TaskInspector.h"
 #include <QScopeGuard>
 #include "ActivityWidth.h"
@@ -1026,7 +1027,7 @@ QString TaskInspector::inputKey(const QJsonObject &task) const {
 }
 void TaskInspector::restoreNewCard() {
     QSettings settings; const auto key = "tasks/newCard/" + m_project;
-    m_creation = QJsonDocument::fromJson(settings.value(key + "/request").toByteArray()).object();
+    m_creation = SettingsJson::object(key + "/request");
     m_newTitle->setText(m_creation.isEmpty() ? settings.value(key + "/title").toString() : m_creation.value("title").toString());
     m_newTitle->setReadOnly(!m_creation.isEmpty()); m_creationHeader->setCurrentWidget(m_newTitle->text().isEmpty() ? static_cast<QWidget *>(m_scope) : m_newTitle);
     m_add->setEnabled(!m_project.isEmpty()); m_createError->hide();

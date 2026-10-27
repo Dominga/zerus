@@ -1,3 +1,4 @@
+#include "JsonParse.h"
 #include "WorktreesDialog.h"
 #include "DialogButtons.h"
 #include "WorktreeBatchCleanupDialog.h"
@@ -599,7 +600,7 @@ void WorktreesDialog::invalidateReview(const QString &repository)
 {
     m_reviews.remove(repository); m_reviewErrors.remove(repository); m_reviewAttempted.remove(repository);
     for (auto it = m_reviewAttempted.begin(); it != m_reviewAttempted.end();) {
-        const auto parts = QJsonDocument::fromJson(it->toUtf8()).array();
+        const auto parts = JsonParse::localArray(it->toUtf8());
         if (!parts.isEmpty() && parts.first().toString() == repository) it = m_reviewAttempted.erase(it); else ++it;
     }
 }

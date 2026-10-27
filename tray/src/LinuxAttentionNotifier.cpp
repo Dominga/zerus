@@ -1,3 +1,4 @@
+#include "SettingsJson.h"
 #include "LinuxAttentionNotifier.h"
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
@@ -20,7 +21,7 @@ LinuxAttentionNotifier::LinuxAttentionNotifier(const QDBusConnection &bus) : m_b
     if (m_bus.interface()) m_owner = m_bus.interface()->serviceOwner(service).value();
     QSettings settings;
     if (!m_owner.isEmpty() && settings.value("attention/linuxOwner").toString() == m_owner) {
-        const auto saved = QJsonDocument::fromJson(settings.value("attention/linuxTokens").toByteArray()).object();
+        const auto saved = SettingsJson::object("attention/linuxTokens");
         for (auto it = saved.begin(); it != saved.end(); ++it) m_tokens[it.key().toUInt()] = it.value().toString();
     }
     m_bus.connect(service, "/org/freedesktop/Notifications", service, "ActionInvoked", this, SLOT(action(uint,QString)));

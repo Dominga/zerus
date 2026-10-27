@@ -1,4 +1,5 @@
 #pragma once
+#include "JsonParse.h"
 #include "TaskBoard.h"
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -32,7 +33,7 @@ struct TaskDrag {
     }
     static std::optional<TaskDrag> from(const QMimeData *mime) {
         if (!mime || !mime->hasFormat(mimeType())) return std::nullopt;
-        const auto data = QJsonDocument::fromJson(mime->data(mimeType())).object();
+        const auto data = JsonParse::localObject(mime->data(mimeType()));
         TaskDrag drag{data.value("project").toString(), data.value("uuid").toString(), data.value("id").toString(),
                       data.value("stage").toString(), data.value("host").toString(), data.value("session").toString(),
                       data.value("known").toBool(true)};

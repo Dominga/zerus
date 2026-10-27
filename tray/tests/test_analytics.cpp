@@ -6,6 +6,7 @@
 // native-preference and service panels in this isolated component suite.
 #include "SettingsPage.h"
 #include "FakeCli.h"
+#include "OffGuiThread.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateEdit>
@@ -22,6 +23,14 @@
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTimer>
+
+namespace {
+// The client parses analytics on a worker; these call the same parsers off the GUI thread.
+std::optional<QJsonObject> offGuiSummary(const QByteArray &bytes, QDate from, QDate through)
+{ return offGuiThread([&] { return AnalyticsData::summary(bytes, from, through); }); }
+std::optional<QJsonObject> offGuiSpeech(const QByteArray &bytes, QDate from, QDate through)
+{ return offGuiThread([&] { return AnalyticsData::speech(bytes, from, through); }); }
+}
 #include <memory>
 
 namespace {
@@ -140,21 +149,21 @@ void TestAnalytics::parserKeepsOnlyReviewedFieldsAndUnknowns() {
     auto rows=raw.value("buckets").toArray();auto row=rows[0].toObject();row.insert("path","private-path-sentinel");
     auto counts=row.value("counters").toObject();counts.insert("arbitrary_counter_sentinel",123);row.insert("counters",counts);rows[0]=row;raw.insert("buckets",rows);
     auto coverage=raw.value("coverage").toObject();coverage.insert("gaps",QJsonArray{"private-error-sentinel"});raw.insert("coverage",coverage);
-    const auto parsed=AnalyticsData::summary(bytes(raw),first,last);QVERIFY(parsed);
+    const auto parsed=offGuiSummary(bytes(raw),first,last);QVERIFY(parsed);
     QVERIFY(!bytes(*parsed).contains("sentinel"));QCOMPARE(parsed->value("coverage").toObject().value("gaps").toArray(),QJsonArray{"unknown"});
     const auto kept=parsed->value("buckets").toArray()[0].toObject().value("counters").toObject();QCOMPARE(kept.value("input_tokens").toInt(),17);QVERIFY(!kept.contains("output_tokens"));
-    raw.insert("source_epoch","00000000-0000-0000-0000-000000000000");QVERIFY(AnalyticsData::summary(bytes(raw),first,last));
+    raw.insert("source_epoch","00000000-0000-0000-0000-000000000000");QVERIFY(offGuiSummary(bytes(raw),first,last));
 }
 
 void TestAnalytics::parserRejectsInvalidAndUnboundedSummaries() {
-    QVERIFY(!AnalyticsData::summary(QByteArray(AnalyticsData::MaximumBytes+1,'x'),first,last));
-    QVERIFY(!AnalyticsData::summary(bytes(summary()),first,first.addDays(90)));
-    for(const auto &key:{"machine_id","source_epoch","generated_at","revision"}){auto invalid=summary();invalid.insert(key,"private");QVERIFY2(!AnalyticsData::summary(bytes(invalid),first,last),key);}
-    auto duplicate=summary(QJsonArray{bucket(),bucket()});QVERIFY(!AnalyticsData::summary(bytes(duplicate),first,last));
-    auto bad=bucket();auto c=bad.value("counters").toObject();c.insert("work_ms",-1);bad.insert("counters",c);QVERIFY(!AnalyticsData::summary(bytes(summary(QJsonArray{bad})),first,last));
-    bad=bucket();bad.insert("provider","private-account-name");QVERIFY(!AnalyticsData::summary(bytes(summary(QJsonArray{bad})),first,last));
-    auto histogram=bucket().value("histograms").toObject();auto work=histogram.value("work_ms").toObject();work.insert("count",2);histogram.insert("work_ms",work);bad=bucket();bad.insert("histograms",histogram);QVERIFY(!AnalyticsData::summary(bytes(summary(QJsonArray{bad})),first,last));
-    QJsonArray excessive;for(int n=0;n<=AnalyticsData::MaximumBuckets;++n)excessive.append(bucket());QVERIFY(!AnalyticsData::summary(bytes(summary(excessive)),first,last));
+    QVERIFY(!offGuiSummary(QByteArray(AnalyticsData::MaximumBytes+1,'x'),first,last));
+    QVERIFY(!offGuiSummary(bytes(summary()),first,first.addDays(90)));
+    for(const auto &key:{"machine_id","source_epoch","generated_at","revision"}){auto invalid=summary();invalid.insert(key,"private");QVERIFY2(!offGuiSummary(bytes(invalid),first,last),key);}
+    auto duplicate=summary(QJsonArray{bucket(),bucket()});QVERIFY(!offGuiSummary(bytes(duplicate),first,last));
+    auto bad=bucket();auto c=bad.value("counters").toObject();c.insert("work_ms",-1);bad.insert("counters",c);QVERIFY(!offGuiSummary(bytes(summary(QJsonArray{bad})),first,last));
+    bad=bucket();bad.insert("provider","private-account-name");QVERIFY(!offGuiSummary(bytes(summary(QJsonArray{bad})),first,last));
+    auto histogram=bucket().value("histograms").toObject();auto work=histogram.value("work_ms").toObject();work.insert("count",2);histogram.insert("work_ms",work);bad=bucket();bad.insert("histograms",histogram);QVERIFY(!offGuiSummary(bytes(summary(QJsonArray{bad})),first,last));
+    QJsonArray excessive;for(int n=0;n<=AnalyticsData::MaximumBuckets;++n)excessive.append(bucket());QVERIFY(!offGuiSummary(bytes(summary(excessive)),first,last));
 }
 
 void TestAnalytics::fleetReplacesSnapshotsAndEpochsInsteadOfSumming() {
@@ -198,21 +207,21 @@ void TestAnalytics::invalidMissingAndOverflowingHistogramsStayUnavailable() {
     bad=validHistogram;bad.insert("counts",QJsonArray{0,0,0,0,0,0});bad.insert("count",0);malformed.append(bad);
     for(const auto &h:malformed) {
         auto invalid=valid;invalid.insert("histograms",QJsonObject{{"work_ms",h}});
-        QVERIFY(!AnalyticsData::summary(bytes(summary({invalid})),first,last));
+        QVERIFY(!offGuiSummary(bytes(summary({invalid})),first,last));
         QVERIFY(!AnalyticsData::histogramTotals({valid,invalid,valid}).contains("work_ms"));
     }
     auto missing=valid;missing.insert("histograms",QJsonObject{});
-    QVERIFY(AnalyticsData::summary(bytes(summary({missing})),first,last));
+    QVERIFY(offGuiSummary(bytes(summary({missing})),first,last));
     QVERIFY(!AnalyticsData::histogramTotals({valid,missing,valid}).contains("work_ms"));
     QVERIFY(!AnalyticsData::histogramTotals({missing,valid}).contains("work_ms"));
     constexpr qint64 maximum=9007199254740991LL;
     const auto countLimit=workBucket({maximum,0,0,0,0,0},maximum,0);
-    QVERIFY(AnalyticsData::summary(bytes(summary({countLimit})),first,last));
+    QVERIFY(offGuiSummary(bytes(summary({countLimit})),first,last));
     // Both same-bin overflow and total-count overflow across different bins fail closed.
     QVERIFY(!AnalyticsData::histogramTotals({countLimit,valid}).contains("work_ms"));
     QVERIFY(!AnalyticsData::histogramTotals({countLimit,workBucket({0,1,0,0,0,0},1,101)}).contains("work_ms"));
     const auto sumLimit=workBucket({0,0,0,0,0,1},1,maximum);
-    QVERIFY(AnalyticsData::summary(bytes(summary({sumLimit})),first,last));
+    QVERIFY(offGuiSummary(bytes(summary({sumLimit})),first,last));
     QVERIFY(!AnalyticsData::histogramTotals({sumLimit,valid}).contains("work_ms"));
     const auto justBelow=workBucket({0,0,0,0,0,1},1,maximum-100);
     QCOMPARE(AnalyticsData::histogramTotals({justBelow,valid}).value("work_ms").toObject().value("sum").toInteger(),maximum);
@@ -220,9 +229,9 @@ void TestAnalytics::invalidMissingAndOverflowingHistogramsStayUnavailable() {
 
 void TestAnalytics::voiceCollapsesPrivateProfilesAndPreservesUnits() {
     auto raw=voice();auto days=raw.value("days").toArray();auto row=days[0].toObject();row.insert("profile_id","second-private-profile");row.insert("queue_ms",1.5);row.insert("error_codes",QJsonObject{{"private-provider-message",2}});days.append(row);raw.insert("days",days);
-    const auto parsed=AnalyticsData::speech(bytes(raw),first,last);QVERIFY(parsed);QVERIFY(!bytes(*parsed).contains("private"));QCOMPARE(parsed->value("days").toArray().size(),1);
+    const auto parsed=offGuiSpeech(bytes(raw),first,last);QVERIFY(parsed);QVERIFY(!bytes(*parsed).contains("private"));QCOMPARE(parsed->value("days").toArray().size(),1);
     const auto result=parsed->value("days").toArray()[0].toObject();QCOMPARE(result.value("submitted").toInt(),4);QCOMPARE(result.value("queue_ms").toDouble(),60001.5);QCOMPARE(result.value("error_codes").toObject().value("unknown").toInt(),2);
-    days.append(days[0]);raw.insert("days",days);QVERIFY(!AnalyticsData::speech(bytes(raw),first,last));
+    days.append(days[0]);raw.insert("days",days);QVERIFY(!offGuiSpeech(bytes(raw),first,last));
 }
 
 void TestAnalytics::retiredEpochNeverRevivesWithNewTimestamp() {
@@ -236,7 +245,7 @@ void TestAnalytics::retiredEpochNeverRevivesWithNewTimestamp() {
 }
 
 void TestAnalytics::diagnosticsExcludeIdentityContentAndDetailedHistory() {
-    const auto agent=AnalyticsData::summary(bytes(summary()),first,last),v=AnalyticsData::speech(bytes(voice()),first,last);QVERIFY(agent&&v);
+    const auto agent=offGuiSummary(bytes(summary()),first,last),v=offGuiSpeech(bytes(voice()),first,last);QVERIFY(agent&&v);
     const auto exported=bytes(AnalyticsData::diagnostic({{"private-host-sentinel",*agent,*v,true,true}},first,last));
     QVERIFY(!exported.contains(machine.toUtf8()));QVERIFY(!exported.contains(epoch.toUtf8()));QVERIFY(!exported.contains("private"));QVERIFY(!exported.contains("profile_id"));QVERIFY(!exported.contains("buckets"));QVERIFY(!exported.contains("\"days\":"));QVERIFY(exported.contains("reported_totals"));
 }

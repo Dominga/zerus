@@ -298,6 +298,8 @@ public:
     quint64 requestArchivePage(const QString &host, const QJsonObject &query);
     static QList<SessionInfo> parseSessions(const QJsonArray &rows);
     static BoxState parseBox(const QByteArray &json, QString *error);
+    // A listing that is already an object, as tests and prepared values hold it.
+    static BoxState box(const QJsonObject &object);
     static QList<BoxState> parseFleet(const QByteArray &json, QString *error);
     static QList<ProjectInfo> parseProjects(const QByteArray &json, QString *error);
 
@@ -450,6 +452,10 @@ private:
     QHash<QString, QList<quint64>> m_reviewsInFlight;
     QHash<QString, QJsonObject> m_worktreeReviews;
     QHash<QString, QJsonObject> m_worktreeInspections;
+    // Reply sizes of cached reviews and inspections, and each inspection's
+    // {host, path, common dir} scope, so trimming and invalidation never parse.
+    QHash<QString, qsizetype> m_worktreeReviewBytes, m_worktreeInspectionBytes;
+    QHash<QString, QStringList> m_worktreeInspectionScopes;
     QHash<QString, QList<quint64>> m_worktreeInspectionsInFlight;
     QHash<QString, quint64> m_worktreeCacheGenerations;
     quint64 m_nativeUiRequest = 0;

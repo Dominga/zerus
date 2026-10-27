@@ -1,4 +1,5 @@
 #pragma once
+#include "SettingsJson.h"
 #include "HgsClient.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -20,7 +21,7 @@ class RecoverySync : public QObject {
 public:
     std::function<void()> changed;
     explicit RecoverySync(const QString &executable,QObject *parent):QObject(parent),client(executable,this) {
-        best=QJsonDocument::fromJson(QSettings().value("recovery/sharedPolicy").toByteArray()).object();
+        best=SettingsJson::object("recovery/sharedPolicy");
         if(!best.value("policy").isObject()||best.value("order").toArray().size()!=2)best={};
         connect(&client,&HgsClient::recoveryFinished,this,[this](quint64 id,bool ok,const QJsonObject &data,const QString &error){
             if(!pending.contains(id))return;const auto request=pending.take(id);

@@ -138,7 +138,10 @@ class Worktrees(Repository,unittest.TestCase):
         self.assertTrue(ready.exists(),'Original checkout hook did not start')
         child.kill();child.communicate(timeout=5)
         end=time.monotonic()+5;status=self.receipt_control('status',request)
-        while status['status']=='running' and time.monotonic()<end:
+        # A status reader can read the old running receipt just before the worker
+        # writes its terminal receipt and releases its lock. That one snapshot
+        # is conservatively unconfirmed; wait for the persisted terminal result.
+        while status['status'] in ('running','unconfirmed') and time.monotonic()<end:
             time.sleep(.01);status=self.receipt_control('status',request)
         self.assertEqual(status['status'],'failed',status)
         self.assertTrue((self.root/'receipt-checkout').exists())

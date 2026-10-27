@@ -233,6 +233,16 @@ internal suspend fun RelayApi.encryptedPost(connection:Connection,body:JSONObjec
     decodeEncryptedReceipt(connection,state,result,id,retained.header)
 }
 
+/** Establish local retained authority before registering any readiness watch.
+ * This does not replace the NEW membership check in encryptedReceipt(). */
+internal suspend fun RelayApi.prepareReceiptWatch(connection:Connection,id:String)=withContext(Dispatchers.IO) {
+    WorkspaceProtocol.identifier(id)
+    val journal=journal();val previous=journal.load(connection)
+    previous.requireActive();previous.requireEnrollmentHistory(journal,connection)
+    journal.request(connection,id)
+    Unit
+}
+
 internal suspend fun RelayApi.encryptedReceipt(connection:Connection,id:String):JSONObject=withContext(Dispatchers.IO) {
     WorkspaceProtocol.identifier(id)
     val journal=journal();val previous=journal.load(connection)

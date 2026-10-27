@@ -118,7 +118,9 @@ pub enum TaskTarget {
 impl From<replica::Target> for TaskTarget {
     fn from(target: replica::Target) -> Self {
         match target {
-            replica::Target::Any | replica::Target::NewSession { .. } | replica::Target::Subagent { .. } => Self::AnySession,
+            replica::Target::Any
+            | replica::Target::NewSession { .. }
+            | replica::Target::Subagent { .. } => Self::AnySession,
             replica::Target::Session(key) => Self::Session {
                 session: key.into(),
             },
@@ -200,7 +202,13 @@ pub struct TaskInfo {
 
 impl From<replica::TaskView> for TaskInfo {
     fn from(view: replica::TaskView) -> Self {
-        let text = if view.title.is_empty() { view.text.clone() } else if view.text.is_empty() { view.title.clone() } else { format!("{}\n\n{}", view.title, view.text) };
+        let text = if view.title.is_empty() {
+            view.text.clone()
+        } else if view.text.is_empty() {
+            view.title.clone()
+        } else {
+            format!("{}\n\n{}", view.title, view.text)
+        };
         Self {
             uuid: view.uuid,
             id: view.id,
@@ -384,7 +392,11 @@ impl TaskStore {
     ) -> Result<TaskInfo> {
         let store = self.store()?;
         let mut task = store.find(reference)?;
-        if task.schema() > 2 { return Err(ReplicaError::Refused("This task needs a newer mobile task editor.".into())); }
+        if task.schema() > 2 {
+            return Err(ReplicaError::Refused(
+                "This task needs a newer mobile task editor.".into(),
+            ));
+        }
         change(&store, &mut task)?;
         store.save(&mut task)?;
         Ok(task.view()?.into())

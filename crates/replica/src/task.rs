@@ -1,9 +1,13 @@
 //! One task as one Loro document: `meta` (identity, set once), `fields`
 //! (last writer wins), `text` (the prompt, merged by character) and `log`
 //! (history, append only).
-use crate::attachment::{check_attachments, TaskAttachment, BASE_TASK_SCHEMA, DISCUSSION_TASK_SCHEMA, NAMED_TASK_SCHEMA, TASK_SCHEMA};
+use crate::attachment::{
+    check_attachments, TaskAttachment, BASE_TASK_SCHEMA, DISCUSSION_TASK_SCHEMA, NAMED_TASK_SCHEMA,
+    TASK_SCHEMA,
+};
 use crate::schema::{
-    check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, TaskWorker, MAX_DOCUMENT, SCHEMA,
+    check_text, Actor, LogEntry, SessionKey, Stage, Target, TaskView, TaskWorker, MAX_DOCUMENT,
+    SCHEMA,
 };
 use crate::{ids, rank, Error, Result};
 use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, UpdateOptions, VersionVector};
@@ -68,17 +72,34 @@ pub(crate) fn check_title(title: &str) -> Result<()> {
 }
 
 impl TaskDoc {
-    pub fn create(task: NewTask<'_>) -> Result<Self> { Self::create_inner(task, None, None) }
+    pub fn create(task: NewTask<'_>) -> Result<Self> {
+        Self::create_inner(task, None, None)
+    }
 
-    pub(crate) fn create_named(task: NewTask<'_>, title: &str, identity: Option<(&str, &str)>) -> Result<Self> {
+    pub(crate) fn create_named(
+        task: NewTask<'_>,
+        title: &str,
+        identity: Option<(&str, &str)>,
+    ) -> Result<Self> {
         Self::create_inner(task, Some(title), identity)
     }
 
-    fn create_inner(task: NewTask<'_>, title: Option<&str>, identity: Option<(&str, &str)>) -> Result<Self> {
+    fn create_inner(
+        task: NewTask<'_>,
+        title: Option<&str>,
+        identity: Option<(&str, &str)>,
+    ) -> Result<Self> {
         check_new_stage(task.stage)?;
-        if let Some(title) = title { check_title(title)?; }
-        if title.is_none() || !task.text.trim().is_empty() { check_text(task.text, "prompt")?; }
-        else if !task.text.is_empty() { return Err(Error::new("an empty description must contain no whitespace")); }
+        if let Some(title) = title {
+            check_title(title)?;
+        }
+        if title.is_none() || !task.text.trim().is_empty() {
+            check_text(task.text, "prompt")?;
+        } else if !task.text.is_empty() {
+            return Err(Error::new(
+                "an empty description must contain no whitespace",
+            ));
+        }
         if !ids::is_short_id(task.id) {
             return Err(Error::new(format!("invalid task ID {:?}", task.id)));
         }
@@ -95,26 +116,48 @@ impl TaskDoc {
         };
         let doc = LoroDoc::new();
         let meta = doc.get_map("meta");
-        let planned = matches!(&task.target, Target::NewSession { .. } | Target::Subagent { .. });
+        let planned = matches!(
+            &task.target,
+            Target::NewSession { .. } | Target::Subagent { .. }
+        );
         if let Target::NewSession { parent } | Target::Subagent { parent } = &task.target {
-            if parent.session_id.is_empty() || parent.machine.is_empty() { return Err(Error::new("choose a parent with a confirmed session identity")); }
+            if parent.session_id.is_empty() || parent.machine.is_empty() {
+                return Err(Error::new(
+                    "choose a parent with a confirmed session identity",
+                ));
+            }
         }
         let identified = matches!(&task.target, Target::Session(key) if !key.session_id.is_empty())
             || matches!(&task.author, Actor::Agent(key) if !key.session_id.is_empty());
-        meta.insert("schema", if title.is_some() { NAMED_TASK_SCHEMA } else if planned { DISCUSSION_TASK_SCHEMA } else if identified { BASE_TASK_SCHEMA } else { SCHEMA })?;
+        meta.insert(
+            "schema",
+            if title.is_some() {
+                NAMED_TASK_SCHEMA
+            } else if planned {
+                DISCUSSION_TASK_SCHEMA
+            } else if identified {
+                BASE_TASK_SCHEMA
+            } else {
+                SCHEMA
+            },
+        )?;
         meta.insert("uuid", uuid.as_str())?;
         meta.insert("id", task.id)?;
         meta.insert("project", task.project)?;
         meta.insert("created_at", task.now)?;
         meta.insert("author", serde_json::to_string(&task.author)?)?;
-        if let Some((_, fingerprint)) = identity { meta.insert("creation_fingerprint", fingerprint)?; }
+        if let Some((_, fingerprint)) = identity {
+            meta.insert("creation_fingerprint", fingerprint)?;
+        }
         let fields = doc.get_map("fields");
         fields.insert("stage", task.stage.as_str())?;
         fields.insert("stage_at", task.now)?;
         fields.insert("target", serde_json::to_string(&task.target)?)?;
         fields.insert("rank", task.rank)?;
         fields.insert("summary", "")?;
-        if let Some(title) = title { fields.insert("title", title)?; }
+        if let Some(title) = title {
+            fields.insert("title", title)?;
+        }
         doc.get_text("text").insert(0, task.text)?;
         let this = Self {
             uuid,
@@ -199,7 +242,10 @@ impl TaskDoc {
         let list = self.doc.get_list("log");
         let entries: usize = (0..list.len())
             .filter_map(|index| list.get(index)?.into_container().ok()?.into_map().ok())
-            .map(|entry| string(&entry, "text").map_or(0, |text| text.len()) + string(&entry, "delivery").map_or(0, |text| text.len()))
+            .map(|entry| {
+                string(&entry, "text").map_or(0, |text| text.len())
+                    + string(&entry, "delivery").map_or(0, |text| text.len())
+            })
             .sum();
         self.doc.get_text("text").len_utf8() + entries
     }
@@ -215,17 +261,28 @@ impl TaskDoc {
         string(&self.meta(), "id").unwrap_or_default()
     }
 
-    pub(crate) fn creation_fingerprint(&self) -> Option<String> { string(&self.meta(), "creation_fingerprint") }
+    pub(crate) fn creation_fingerprint(&self) -> Option<String> {
+        string(&self.meta(), "creation_fingerprint")
+    }
 
-    pub fn title(&self) -> String { string(&self.fields(), "title").unwrap_or_default() }
+    pub fn title(&self) -> String {
+        string(&self.fields(), "title").unwrap_or_default()
+    }
 
     pub fn set_title(&mut self, title: &str, actor: &Actor, now: i64) -> Result<()> {
-        self.writable()?; check_title(title)?;
-        if self.title() == title { return Ok(()); }
-        if self.content_len() + title.len() > MAX_DOCUMENT { return Err(Error::new("task history is full")); }
+        self.writable()?;
+        check_title(title)?;
+        if self.title() == title {
+            return Ok(());
+        }
+        if self.content_len() + title.len() > MAX_DOCUMENT {
+            return Err(Error::new("task history is full"));
+        }
         self.upgrade_schema(NAMED_TASK_SCHEMA)?;
         self.fields().insert("title", title)?;
-        self.log("title", actor, now, title, None)?; self.doc.commit(); Ok(())
+        self.log("title", actor, now, title, None)?;
+        self.doc.commit();
+        Ok(())
     }
 
     pub fn schema(&self) -> i64 {
@@ -275,15 +332,23 @@ impl TaskDoc {
                 text: string(&entry, "text").unwrap_or_default(),
                 session: string(&entry, "session").and_then(|s| serde_json::from_str(&s).ok()),
                 request_id: string(&entry, "request_id"),
-                delivery: match string(&entry, "delivery").map(|raw| serde_json::from_str(&raw)).transpose() {
+                delivery: match string(&entry, "delivery")
+                    .map(|raw| serde_json::from_str(&raw))
+                    .transpose()
+                {
                     Err(_) if !writable => None,
                     delivery => delivery?,
                 },
                 attachments: match string(&entry, "attachments") {
-                    Some(raw) => match serde_json::from_str::<Vec<TaskAttachment>>(&raw).map_err(Error::from).and_then(|files| { check_attachments(&files)?; Ok(files) }) {
+                    Some(raw) => match serde_json::from_str::<Vec<TaskAttachment>>(&raw)
+                        .map_err(Error::from)
+                        .and_then(|files| {
+                            check_attachments(&files)?;
+                            Ok(files)
+                        }) {
                         Err(_) if !writable => Vec::new(),
                         files => files?,
-                    }
+                    },
                     None => Vec::new(),
                 },
             });
@@ -292,19 +357,35 @@ impl TaskDoc {
         // the history reads oldest first, keeping the order of equal times.
         log.sort_by_key(|entry| entry.at);
         // Receipt events refine the original message without rewriting its text.
-        let mut receipts: std::collections::BTreeMap<String, crate::TaskDelivery> = std::collections::BTreeMap::new();
-        let strength = |state: &str| match state { "submitted" => 3, "failed" => 2, "uncertain" => 1, _ => 0 };
+        let mut receipts: std::collections::BTreeMap<String, crate::TaskDelivery> =
+            std::collections::BTreeMap::new();
+        let strength = |state: &str| match state {
+            "submitted" => 3,
+            "failed" => 2,
+            "uncertain" => 1,
+            _ => 0,
+        };
         for entry in log.iter().filter(|e| e.kind == "message_delivery") {
             if let (Some(id), Some(delivery)) = (&entry.request_id, &entry.delivery) {
-                if receipts.get(id).is_none_or(|old| strength(&delivery.state) >= strength(&old.state)) {
+                if receipts
+                    .get(id)
+                    .is_none_or(|old| strength(&delivery.state) >= strength(&old.state))
+                {
                     receipts.insert(id.clone(), delivery.clone());
                 }
             }
         }
         for message in log.iter_mut().filter(|e| e.kind == "message") {
             if let Some(receipt) = message.request_id.as_ref().and_then(|id| receipts.get(id)) {
-                let prompt = message.delivery.as_ref().map(|d| d.prompt.clone()).unwrap_or_default();
-                message.delivery = Some(crate::TaskDelivery { prompt, ..receipt.clone() });
+                let prompt = message
+                    .delivery
+                    .as_ref()
+                    .map(|d| d.prompt.clone())
+                    .unwrap_or_default();
+                message.delivery = Some(crate::TaskDelivery {
+                    prompt,
+                    ..receipt.clone()
+                });
             }
         }
         // Concurrent replicas may append the same queued request. It appears and
@@ -316,7 +397,11 @@ impl TaskDoc {
                 if let Some(id) = &entry.request_id {
                     if let Some(old) = messages.get(id) {
                         let old: &LogEntry = old;
-                        if old.text != entry.text || old.actor != entry.actor || old.attachments != entry.attachments || old.delivery != entry.delivery {
+                        if old.text != entry.text
+                            || old.actor != entry.actor
+                            || old.attachments != entry.attachments
+                            || old.delivery != entry.delivery
+                        {
                             return Err(Error::new("conflicting task message identity"));
                         }
                         continue;
@@ -358,7 +443,10 @@ impl TaskDoc {
             target,
             rank: self.rank(),
             session: self.session(),
-            worker: match string(&fields, "worker").map(|raw| serde_json::from_str(&raw)).transpose() {
+            worker: match string(&fields, "worker")
+                .map(|raw| serde_json::from_str(&raw))
+                .transpose()
+            {
                 Err(_) if !writable => None,
                 worker => worker?,
             },
@@ -395,18 +483,30 @@ impl TaskDoc {
     }
 
     fn upgrade_schema(&self, required: i64) -> Result<()> {
-        if self.schema() < required { self.meta().insert("schema", required)?; }
+        if self.schema() < required {
+            self.meta().insert("schema", required)?;
+        }
         Ok(())
     }
 
-    fn check_media_budget(&self, description: &[TaskAttachment], extra: &[TaskAttachment]) -> Result<()> {
+    fn check_media_budget(
+        &self,
+        description: &[TaskAttachment],
+        extra: &[TaskAttachment],
+    ) -> Result<()> {
         let mut total = 0usize;
-        for file in description.iter().chain(extra) { total += file.bytes()?.len(); }
+        for file in description.iter().chain(extra) {
+            total += file.bytes()?.len();
+        }
         for entry in self.view()?.log {
-            for file in entry.attachments { total += file.bytes()?.len(); }
+            for file in entry.attachments {
+                total += file.bytes()?.len();
+            }
         }
         if total > crate::MAX_ATTACHMENT_TOTAL {
-            return Err(Error::new("task attachments are full: 20 MiB across description and comments"));
+            return Err(Error::new(
+                "task attachments are full: 20 MiB across description and comments",
+            ));
         }
         Ok(())
     }
@@ -465,11 +565,18 @@ impl TaskDoc {
         self.upgrade_schema(BASE_TASK_SCHEMA)?;
         let target = match decode::<Target>(&self.fields(), "target")? {
             Target::Session(key) if &key == old => Some(Target::Session(current.clone())),
-            Target::NewSession { parent } if &parent == old => Some(Target::NewSession { parent: current.clone() }),
-            Target::Subagent { parent } if &parent == old => Some(Target::Subagent { parent: current.clone() }),
+            Target::NewSession { parent } if &parent == old => Some(Target::NewSession {
+                parent: current.clone(),
+            }),
+            Target::Subagent { parent } if &parent == old => Some(Target::Subagent {
+                parent: current.clone(),
+            }),
             _ => None,
         };
-        if let Some(target) = target { self.fields().insert("target", serde_json::to_string(&target)?)?; }
+        if let Some(target) = target {
+            self.fields()
+                .insert("target", serde_json::to_string(&target)?)?;
+        }
         if self.session().as_ref() == Some(old) {
             self.fields()
                 .insert("session", serde_json::to_string(current)?)?;
@@ -492,7 +599,9 @@ impl TaskDoc {
             &[Stage::Backlog, Stage::Todo],
             "the prompt can be edited only in Backlog or To do",
         )?;
-        if !text.is_empty() || self.title().is_empty() { check_text(text, "prompt")?; }
+        if !text.is_empty() || self.title().is_empty() {
+            check_text(text, "prompt")?;
+        }
         let current = self.doc.get_text("text");
         let quick = UpdateOptions {
             timeout_ms: Some(200.0),
@@ -563,7 +672,11 @@ impl TaskDoc {
             self.upgrade_schema(BASE_TASK_SCHEMA)?;
         }
         if let Target::NewSession { parent } | Target::Subagent { parent } = target {
-            if parent.session_id.is_empty() || parent.machine.is_empty() { return Err(Error::new("choose a parent with a confirmed session identity")); }
+            if parent.session_id.is_empty() || parent.machine.is_empty() {
+                return Err(Error::new(
+                    "choose a parent with a confirmed session identity",
+                ));
+            }
             self.upgrade_schema(DISCUSSION_TASK_SCHEMA)?;
         }
         self.fields()
@@ -705,15 +818,34 @@ impl TaskDoc {
         };
         let view = self.view()?;
         if view.stage == Stage::Active {
-            if matches!(view.target, Target::Subagent { .. }) && view.worker.is_none() { return Err(Error::new("register the native subagent worker before starting")); }
-            if view.session.as_ref() != Some(own) { return Err(Error::new("the task is active in another session")); }
-            let current = view.log.iter().rev().take_while(|entry| entry.kind != "sent");
-            if current.clone().any(|entry| entry.kind == "started") { return Ok(()); }
-            self.log("started", actor, now, "", Some(own))?; self.doc.commit(); return Ok(());
+            if matches!(view.target, Target::Subagent { .. }) && view.worker.is_none() {
+                return Err(Error::new(
+                    "register the native subagent worker before starting",
+                ));
+            }
+            if view.session.as_ref() != Some(own) {
+                return Err(Error::new("the task is active in another session"));
+            }
+            let current = view
+                .log
+                .iter()
+                .rev()
+                .take_while(|entry| entry.kind != "sent");
+            if current.clone().any(|entry| entry.kind == "started") {
+                return Ok(());
+            }
+            self.log("started", actor, now, "", Some(own))?;
+            self.doc.commit();
+            return Ok(());
         }
         self.check_send()?;
-        if matches!(view.target, Target::NewSession { .. } | Target::Subagent { .. }) {
-            return Err(Error::new("start this task through its selected executor plan"));
+        if matches!(
+            view.target,
+            Target::NewSession { .. } | Target::Subagent { .. }
+        ) {
+            return Err(Error::new(
+                "start this task through its selected executor plan",
+            ));
         }
         if let Target::Session(target) = &view.target {
             if target != own {
@@ -758,31 +890,58 @@ impl TaskDoc {
     pub fn record_worker(&mut self, worker: &TaskWorker, actor: &Actor, now: i64) -> Result<()> {
         self.writable()?;
         let view = self.view()?;
-        if view.stage != Stage::Active || actor != &Actor::Agent(worker.parent.clone()) || view.session.as_ref() != Some(&worker.parent) {
-            return Err(Error::new("only the task's current coordinator can bind its subagent"));
+        if view.stage != Stage::Active
+            || actor != &Actor::Agent(worker.parent.clone())
+            || view.session.as_ref() != Some(&worker.parent)
+        {
+            return Err(Error::new(
+                "only the task's current coordinator can bind its subagent",
+            ));
         }
         let sent = view.log.iter().rev().find(|entry| entry.kind == "sent");
         if sent.and_then(|entry| entry.request_id.as_deref()) != Some(worker.request_id.as_str()) {
-            return Err(Error::new("task dispatch changed; read the current request_id"));
+            return Err(Error::new(
+                "task dispatch changed; read the current request_id",
+            ));
         }
         if worker.id.is_empty() || worker.conversation_id.is_empty() || worker.provider.is_empty() {
-            return Err(Error::new("a worker needs its native child and parent conversation identities"));
+            return Err(Error::new(
+                "a worker needs its native child and parent conversation identities",
+            ));
         }
-        if view.worker.as_ref() == Some(worker) { return Ok(()); }
+        if view.worker.as_ref() == Some(worker) {
+            return Ok(());
+        }
         self.upgrade_schema(DISCUSSION_TASK_SCHEMA)?;
-        self.fields().insert("worker", serde_json::to_string(worker)?)?;
-        self.log("worker", actor, now, &format!("Delegated to {} ({})", worker.name, worker.id), Some(&worker.parent))?;
-        self.doc.commit(); Ok(())
+        self.fields()
+            .insert("worker", serde_json::to_string(worker)?)?;
+        self.log(
+            "worker",
+            actor,
+            now,
+            &format!("Delegated to {} ({})", worker.name, worker.id),
+            Some(&worker.parent),
+        )?;
+        self.doc.commit();
+        Ok(())
     }
 
     pub fn comment(&mut self, text: &str, actor: &Actor, now: i64) -> Result<()> {
         self.comment_with_attachments(text, &[], actor, now)
     }
 
-    pub fn comment_with_attachments(&mut self, text: &str, files: &[TaskAttachment], actor: &Actor, now: i64) -> Result<()> {
+    pub fn comment_with_attachments(
+        &mut self,
+        text: &str,
+        files: &[TaskAttachment],
+        actor: &Actor,
+        now: i64,
+    ) -> Result<()> {
         self.writable()?;
         check_attachments(files)?;
-        if !files.is_empty() { self.check_media_budget(&self.attachments()?, files)?; }
+        if !files.is_empty() {
+            self.check_media_budget(&self.attachments()?, files)?;
+        }
         check_text(text, "comment")?;
         if self.content_len() + text.len() > MAX_DOCUMENT {
             return Err(Error::new(
@@ -799,91 +958,182 @@ impl TaskDoc {
     }
 
     /// Reserve before transport. Existing identities are read/recovered, never sent again.
-    pub fn reserve_message(&mut self, id: &str, text: &str, files: &[TaskAttachment],
-        delivery: &crate::TaskDelivery, session: Option<&SessionKey>, actor: &Actor, now: i64) -> Result<bool> {
+    pub fn reserve_message(
+        &mut self,
+        id: &str,
+        text: &str,
+        files: &[TaskAttachment],
+        delivery: &crate::TaskDelivery,
+        session: Option<&SessionKey>,
+        (actor, now): (&Actor, i64),
+    ) -> Result<bool> {
         self.writable()?;
-        if uuid::Uuid::parse_str(id).map(|id| id.to_string()).ok().as_deref() != Some(id) {
+        if uuid::Uuid::parse_str(id)
+            .map(|id| id.to_string())
+            .ok()
+            .as_deref()
+            != Some(id)
+        {
             return Err(Error::new("message request_id must be a canonical UUID"));
         }
         let view = self.view()?;
-        if let Some(old) = view.log.iter().find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id)) {
-            if old.text != text || old.attachments != files || old.actor != *actor
-                || old.delivery.as_ref().map(|d| (&d.mode, &d.dispatch_id)) != Some((&delivery.mode, &delivery.dispatch_id)) {
-                return Err(Error::new("message request_id already identifies different content or execution"));
+        if let Some(old) = view
+            .log
+            .iter()
+            .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id))
+        {
+            if old.text != text
+                || old.attachments != files
+                || old.actor != *actor
+                || old.delivery.as_ref().map(|d| (&d.mode, &d.dispatch_id))
+                    != Some((&delivery.mode, &delivery.dispatch_id))
+            {
+                return Err(Error::new(
+                    "message request_id already identifies different content or execution",
+                ));
             }
             return Ok(false);
         }
         match delivery.mode.as_str() {
-            "queue" if matches!(view.stage, Stage::Todo | Stage::Backlog) && delivery.state == "queued" => {},
-            "note" if delivery.state == "note" => {},
+            "queue"
+                if matches!(view.stage, Stage::Todo | Stage::Backlog)
+                    && delivery.state == "queued" => {}
+            "note" if delivery.state == "note" => {}
             // A refused delivery still belongs in the task discussion. It
             // carries no native submission authority and cannot reopen work.
-            "queue" | "note" | "send" | "reopen" if matches!(delivery.state.as_str(), "failed" | "uncertain") && !delivery.error.is_empty()
-                && delivery.run_id.is_empty() && delivery.conversation_id.is_empty()
-                && delivery.prompt.is_empty() && delivery.submitted_id.is_empty() => {},
+            "queue" | "note" | "send" | "reopen"
+                if matches!(delivery.state.as_str(), "failed" | "uncertain")
+                    && !delivery.error.is_empty()
+                    && delivery.run_id.is_empty()
+                    && delivery.conversation_id.is_empty()
+                    && delivery.prompt.is_empty()
+                    && delivery.submitted_id.is_empty() => {}
             "send" | "reopen" if delivery.state == "reserved" => {
-                let expected_stage = if delivery.mode == "send" { view.stage == Stage::Active } else { matches!(view.stage, Stage::Review | Stage::Done) };
-                if !expected_stage || delivery.stage != view.stage.as_str() || delivery.stage_at != view.stage_at
-                    || session.is_none() || session != view.session.as_ref()
+                let expected_stage = if delivery.mode == "send" {
+                    view.stage == Stage::Active
+                } else {
+                    matches!(view.stage, Stage::Review | Stage::Done)
+                };
+                if !expected_stage
+                    || delivery.stage != view.stage.as_str()
+                    || delivery.stage_at != view.stage_at
+                    || session.is_none()
+                    || session != view.session.as_ref()
                     || session.is_some_and(|s| s.session_id.is_empty())
-                    || delivery.run_id.is_empty() || delivery.dispatch_id.is_empty()
-                    || view.execution_id().as_deref() != Some(delivery.dispatch_id.as_str()) {
+                    || delivery.run_id.is_empty()
+                    || delivery.dispatch_id.is_empty()
+                    || view.execution_id().as_deref() != Some(delivery.dispatch_id.as_str())
+                {
                     return Err(Error::new("task execution changed; refresh before sending"));
                 }
-            },
+            }
             _ => return Err(Error::new("message mode does not match the task state")),
         }
-        if !text.is_empty() || files.is_empty() { check_text(text, "message")?; }
+        if !text.is_empty() || files.is_empty() {
+            check_text(text, "message")?;
+        }
         check_attachments(files)?;
         self.check_media_budget(&view.attachments, files)?;
-        if self.content_len() + text.len() + serde_json::to_string(delivery)?.len() + 8192 > MAX_DOCUMENT {
+        if self.content_len() + text.len() + serde_json::to_string(delivery)?.len() + 8192
+            > MAX_DOCUMENT
+        {
             return Err(Error::new("task discussion is full"));
         }
         self.upgrade_schema(TASK_SCHEMA)?;
         let entry = self.log("message", actor, now, text, session)?;
         entry.insert("request_id", id)?;
         entry.insert("delivery", serde_json::to_string(delivery)?)?;
-        if !files.is_empty() { entry.insert("attachments", serde_json::to_string(files)?)?; }
-        self.doc.commit(); Ok(true)
+        if !files.is_empty() {
+            entry.insert("attachments", serde_json::to_string(files)?)?;
+        }
+        self.doc.commit();
+        Ok(true)
     }
 
-    pub fn finish_message(&mut self, id: &str, state: &str, error: &str, actor: &Actor, now: i64) -> Result<()> {
+    pub fn finish_message(
+        &mut self,
+        id: &str,
+        state: &str,
+        error: &str,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<()> {
         self.writable()?;
-        if !matches!(state, "submitted" | "failed" | "uncertain") { return Err(Error::new("invalid message receipt")); }
+        if !matches!(state, "submitted" | "failed" | "uncertain") {
+            return Err(Error::new("invalid message receipt"));
+        }
         let view = self.view()?;
-        let message = view.log.iter().find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id))
+        let message = view
+            .log
+            .iter()
+            .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id))
             .ok_or_else(|| Error::new("message reservation is missing"))?;
-        let mut delivery = message.delivery.clone().ok_or_else(|| Error::new("message has no reservation"))?;
-        if state == "submitted" && delivery.run_id.is_empty() { return Err(Error::new("message has no native execution reservation")); }
-        if delivery.state == "submitted" || delivery.state == state && delivery.error == error { return Ok(()); }
-        if !matches!(delivery.state.as_str(), "reserved" | "uncertain") { return Err(Error::new("message is not awaiting a receipt")); }
-        delivery.state = state.into(); delivery.error = error.chars().take(1000).collect();
-        if state == "submitted" { delivery.submitted_id = id.into(); }
+        let mut delivery = message
+            .delivery
+            .clone()
+            .ok_or_else(|| Error::new("message has no reservation"))?;
+        if state == "submitted" && delivery.run_id.is_empty() {
+            return Err(Error::new("message has no native execution reservation"));
+        }
+        if delivery.state == "submitted" || delivery.state == state && delivery.error == error {
+            return Ok(());
+        }
+        if !matches!(delivery.state.as_str(), "reserved" | "uncertain") {
+            return Err(Error::new("message is not awaiting a receipt"));
+        }
+        delivery.state = state.into();
+        delivery.error = error.chars().take(1000).collect();
+        if state == "submitted" {
+            delivery.submitted_id = id.into();
+        }
         delivery.prompt.clear();
         let entry = self.log("message_delivery", actor, now, "", message.session.as_ref())?;
-        entry.insert("request_id", id)?; entry.insert("delivery", serde_json::to_string(&delivery)?)?;
-        if state == "submitted" && delivery.mode == "reopen" && matches!(view.stage, Stage::Review | Stage::Done)
-            && delivery.stage == view.stage.as_str() && delivery.stage_at == view.stage_at
+        entry.insert("request_id", id)?;
+        entry.insert("delivery", serde_json::to_string(&delivery)?)?;
+        if state == "submitted"
+            && delivery.mode == "reopen"
+            && matches!(view.stage, Stage::Review | Stage::Done)
+            && delivery.stage == view.stage.as_str()
+            && delivery.stage_at == view.stage_at
             && view.session == message.session
-            && view.execution_id().as_deref() == Some(delivery.dispatch_id.as_str()) {
+            && view.execution_id().as_deref() == Some(delivery.dispatch_id.as_str())
+        {
             self.fields().insert("stage", Stage::Active.as_str())?;
             self.fields().insert("stage_at", now)?;
-            self.fields().delete("cancelled_at")?; self.fields().insert("cancel_reason", "")?;
-            self.log("resumed", actor, now, "Changes requested and submitted", message.session.as_ref())?;
+            self.fields().delete("cancelled_at")?;
+            self.fields().insert("cancel_reason", "")?;
+            self.log(
+                "resumed",
+                actor,
+                now,
+                "Changes requested and submitted",
+                message.session.as_ref(),
+            )?;
         }
-        self.doc.commit(); Ok(())
+        self.doc.commit();
+        Ok(())
     }
 
-    pub fn record_queued_messages(&mut self, dispatch: &str, actor: &Actor, now: i64) -> Result<()> {
+    pub fn record_queued_messages(
+        &mut self,
+        dispatch: &str,
+        actor: &Actor,
+        now: i64,
+    ) -> Result<()> {
         self.writable()?;
-        for message in self.view()?.log.into_iter().filter(|e| e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued")) {
+        for message in self.view()?.log.into_iter().filter(|e| {
+            e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued")
+        }) {
             let mut delivery = message.delivery.expect("queued message");
-            delivery.state = "submitted".into(); delivery.submitted_id = dispatch.into(); delivery.prompt.clear();
+            delivery.state = "submitted".into();
+            delivery.submitted_id = dispatch.into();
+            delivery.prompt.clear();
             let entry = self.log("message_delivery", actor, now, "", None)?;
             entry.insert("request_id", message.request_id.unwrap_or_default())?;
             entry.insert("delivery", serde_json::to_string(&delivery)?)?;
         }
-        self.doc.commit(); Ok(())
+        self.doc.commit();
+        Ok(())
     }
 
     /// A line Zerus adds to the history, such as a refused cancel message.
@@ -997,58 +1247,181 @@ mod tests {
     fn message_intent_survives_dispatch_receipts_and_changed_stages() {
         let mut task = task(Stage::Todo);
         let id = uuid::Uuid::new_v4().to_string();
-        let delivery = crate::TaskDelivery { mode:"queue".into(),state:"queued".into(),stage:"todo".into(),stage_at:1,dispatch_id:String::new(),submitted_id:String::new(),
-            run_id:String::new(),conversation_id:String::new(),prompt:String::new(),error:String::new() };
-        assert!(task.reserve_message(&id,"Clarification",&[],&delivery,None,&Actor::Person,2).unwrap());
-        task.record_send(&api(),"dispatch",&Actor::Person,3).unwrap();
-        task.record_queued_messages("dispatch",&Actor::Person,4).unwrap();
-        assert!(!task.reserve_message(&id,"Clarification",&[],&delivery,None,&Actor::Person,5).unwrap());
-        assert!(task.reserve_message(&id,"Changed",&[],&delivery,None,&Actor::Person,6).is_err());
+        let delivery = crate::TaskDelivery {
+            mode: "queue".into(),
+            state: "queued".into(),
+            stage: "todo".into(),
+            stage_at: 1,
+            dispatch_id: String::new(),
+            submitted_id: String::new(),
+            run_id: String::new(),
+            conversation_id: String::new(),
+            prompt: String::new(),
+            error: String::new(),
+        };
+        assert!(task
+            .reserve_message(
+                &id,
+                "Clarification",
+                &[],
+                &delivery,
+                None,
+                (&Actor::Person, 2)
+            )
+            .unwrap());
+        task.record_send(&api(), "dispatch", &Actor::Person, 3)
+            .unwrap();
+        task.record_queued_messages("dispatch", &Actor::Person, 4)
+            .unwrap();
+        assert!(!task
+            .reserve_message(
+                &id,
+                "Clarification",
+                &[],
+                &delivery,
+                None,
+                (&Actor::Person, 5)
+            )
+            .unwrap());
+        assert!(task
+            .reserve_message(&id, "Changed", &[], &delivery, None, (&Actor::Person, 6))
+            .is_err());
         let view = task.view().unwrap();
-        let message = view.log.iter().find(|e| e.kind=="message").unwrap();
-        assert_eq!(message.delivery.as_ref().unwrap().state,"submitted");
-        assert_eq!(message.delivery.as_ref().unwrap().submitted_id,"dispatch");
+        let message = view.log.iter().find(|e| e.kind == "message").unwrap();
+        assert_eq!(message.delivery.as_ref().unwrap().state, "submitted");
+        assert_eq!(message.delivery.as_ref().unwrap().submitted_id, "dispatch");
     }
 
     #[test]
     fn unconfirmed_feedback_cannot_reopen_or_change_owner() {
         let mut task = task(Stage::Todo);
-        let owner = SessionKey { session_id:"launch_id:one".into(), ..api() };
-        task.record_send(&owner,"dispatch",&Actor::Person,2).unwrap();
-        task.record_report("Review",&Actor::Agent(owner.clone()),3).unwrap();
+        let owner = SessionKey {
+            session_id: "launch_id:one".into(),
+            ..api()
+        };
+        task.record_send(&owner, "dispatch", &Actor::Person, 2)
+            .unwrap();
+        task.record_report("Review", &Actor::Agent(owner.clone()), 3)
+            .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        let delivery = crate::TaskDelivery { mode:"reopen".into(),state:"reserved".into(),stage:"review".into(),stage_at:3,dispatch_id:"dispatch".into(),submitted_id:String::new(),
-            run_id:"run-one".into(),conversation_id:"conversation-one".into(),prompt:"[Task feedback]".into(),error:String::new() };
-        task.reserve_message(&id,"Revise",&[],&delivery,Some(&owner),&Actor::Person,4).unwrap();
-        task.finish_message(&id,"uncertain","Check receipt",&Actor::Person,50).unwrap();
-        assert_eq!(task.stage().unwrap(),Stage::Review);
+        let delivery = crate::TaskDelivery {
+            mode: "reopen".into(),
+            state: "reserved".into(),
+            stage: "review".into(),
+            stage_at: 3,
+            dispatch_id: "dispatch".into(),
+            submitted_id: String::new(),
+            run_id: "run-one".into(),
+            conversation_id: "conversation-one".into(),
+            prompt: "[Task feedback]".into(),
+            error: String::new(),
+        };
+        task.reserve_message(
+            &id,
+            "Revise",
+            &[],
+            &delivery,
+            Some(&owner),
+            (&Actor::Person, 4),
+        )
+        .unwrap();
+        task.finish_message(&id, "uncertain", "Check receipt", &Actor::Person, 50)
+            .unwrap();
+        assert_eq!(task.stage().unwrap(), Stage::Review);
         let snapshot = task.snapshot().unwrap();
         let mut accepted = TaskDoc::from_bytes(&snapshot).unwrap();
         accepted.set_stage(Stage::Done, &Actor::Person, 6).unwrap();
-        accepted.finish_message(&id,"submitted","",&Actor::Person,7).unwrap();
-        assert_eq!(accepted.stage().unwrap(),Stage::Done, "a late receipt cannot undo acceptance");
-        task.finish_message(&id,"submitted","",&Actor::Person,6).unwrap();
-        assert_eq!(task.stage().unwrap(),Stage::Active);
-        assert_eq!(task.session(),Some(owner));
-        assert_eq!(task.view().unwrap().log.iter().find(|e| e.kind=="message").unwrap().delivery.as_ref().unwrap().state,"submitted", "clock changes cannot downgrade a native receipt");
-        assert_eq!(task.view().unwrap().log.iter().find(|e| e.kind=="message").unwrap().delivery.as_ref().unwrap().prompt,"[Task feedback]");
+        accepted
+            .finish_message(&id, "submitted", "", &Actor::Person, 7)
+            .unwrap();
+        assert_eq!(
+            accepted.stage().unwrap(),
+            Stage::Done,
+            "a late receipt cannot undo acceptance"
+        );
+        task.finish_message(&id, "submitted", "", &Actor::Person, 6)
+            .unwrap();
+        assert_eq!(task.stage().unwrap(), Stage::Active);
+        assert_eq!(task.session(), Some(owner));
+        assert_eq!(
+            task.view()
+                .unwrap()
+                .log
+                .iter()
+                .find(|e| e.kind == "message")
+                .unwrap()
+                .delivery
+                .as_ref()
+                .unwrap()
+                .state,
+            "submitted",
+            "clock changes cannot downgrade a native receipt"
+        );
+        assert_eq!(
+            task.view()
+                .unwrap()
+                .log
+                .iter()
+                .find(|e| e.kind == "message")
+                .unwrap()
+                .delivery
+                .as_ref()
+                .unwrap()
+                .prompt,
+            "[Task feedback]"
+        );
     }
 
     #[test]
     fn saved_refused_and_receiptless_comments_never_authorize_native_delivery() {
         let mut task = task(Stage::Todo);
-        let owner = SessionKey { session_id:"launch_id:one".into(), ..api() };
-        task.record_send(&owner,"dispatch",&Actor::Person,2).unwrap();
-        task.record_report("Review",&Actor::Agent(owner.clone()),3).unwrap();
+        let owner = SessionKey {
+            session_id: "launch_id:one".into(),
+            ..api()
+        };
+        task.record_send(&owner, "dispatch", &Actor::Person, 2)
+            .unwrap();
+        task.record_report("Review", &Actor::Agent(owner.clone()), 3)
+            .unwrap();
         for state in ["failed", "uncertain"] {
             let id = uuid::Uuid::new_v4().to_string();
-            let delivery = crate::TaskDelivery { mode:"reopen".into(),state:state.into(),stage:"review".into(),stage_at:3,dispatch_id:"dispatch".into(),submitted_id:String::new(),
-                run_id:String::new(),conversation_id:String::new(),prompt:String::new(),error:"Executor could not be verified".into() };
-            assert!(task.reserve_message(&id,"Keep this comment",&[],&delivery,Some(&owner),&Actor::Person,4).unwrap());
-            assert!(!task.reserve_message(&id,"Keep this comment",&[],&delivery,Some(&owner),&Actor::Person,5).unwrap());
-            assert!(task.finish_message(&id,"submitted","",&Actor::Person,6).is_err());
-            assert_eq!(task.stage().unwrap(),Stage::Review);
-            assert_eq!(task.session(),Some(owner.clone()));
+            let delivery = crate::TaskDelivery {
+                mode: "reopen".into(),
+                state: state.into(),
+                stage: "review".into(),
+                stage_at: 3,
+                dispatch_id: "dispatch".into(),
+                submitted_id: String::new(),
+                run_id: String::new(),
+                conversation_id: String::new(),
+                prompt: String::new(),
+                error: "Executor could not be verified".into(),
+            };
+            assert!(task
+                .reserve_message(
+                    &id,
+                    "Keep this comment",
+                    &[],
+                    &delivery,
+                    Some(&owner),
+                    (&Actor::Person, 4)
+                )
+                .unwrap());
+            assert!(!task
+                .reserve_message(
+                    &id,
+                    "Keep this comment",
+                    &[],
+                    &delivery,
+                    Some(&owner),
+                    (&Actor::Person, 5)
+                )
+                .unwrap());
+            assert!(task
+                .finish_message(&id, "submitted", "", &Actor::Person, 6)
+                .is_err());
+            assert_eq!(task.stage().unwrap(), Stage::Review);
+            assert_eq!(task.session(), Some(owner.clone()));
         }
     }
 
@@ -1160,8 +1533,18 @@ mod tests {
 
     #[test]
     fn executor_plans_only_store_intent_and_follow_identity() {
-        let parent = SessionKey { session_id: "launch_id:parent".into(), ..api() };
-        for target in [Target::NewSession { parent: parent.clone() }, Target::Subagent { parent: parent.clone() }] {
+        let parent = SessionKey {
+            session_id: "launch_id:parent".into(),
+            ..api()
+        };
+        for target in [
+            Target::NewSession {
+                parent: parent.clone(),
+            },
+            Target::Subagent {
+                parent: parent.clone(),
+            },
+        ] {
             let mut task = task(Stage::Todo);
             task.set_target(&target, &Actor::Person, 2).unwrap();
             let before = task.view().unwrap();
@@ -1170,9 +1553,15 @@ mod tests {
             assert!(before.session.is_none() && before.worker.is_none());
             assert_eq!(before.log.last().unwrap().kind, "target");
             assert!(task.record_start(&Actor::Agent(parent.clone()), 3).is_err());
-            let renamed = SessionKey { session: "codex/renamed".into(), ..parent.clone() };
+            let renamed = SessionKey {
+                session: "codex/renamed".into(),
+                ..parent.clone()
+            };
             task.bind_session_identity(&parent, &renamed).unwrap();
-            let current = match task.view().unwrap().target { Target::NewSession { parent } | Target::Subagent { parent } => parent, _ => panic!("lost executor plan") };
+            let current = match task.view().unwrap().target {
+                Target::NewSession { parent } | Target::Subagent { parent } => parent,
+                _ => panic!("lost executor plan"),
+            };
             assert_eq!(current.session, renamed.session);
             assert_eq!(task.schema(), DISCUSSION_TASK_SCHEMA);
         }
@@ -1181,33 +1570,82 @@ mod tests {
     #[test]
     fn current_dispatch_start_is_acknowledged_once_without_resending() {
         let mut task = task(Stage::Todo);
-        task.record_send(&api(), "dispatch", &Actor::Person, 2).unwrap();
+        task.record_send(&api(), "dispatch", &Actor::Person, 2)
+            .unwrap();
         assert!(task.record_start(&agent("codex/other"), 3).is_err());
         task.record_start(&agent("codex/api"), 4).unwrap();
         task.record_start(&agent("codex/api"), 5).unwrap();
         let view = task.view().unwrap();
         assert_eq!(view.stage_at, 2);
-        assert_eq!(view.log.iter().filter(|entry| entry.kind == "started").count(), 1);
-        assert_eq!(view.log.iter().filter(|entry| entry.kind == "sent").count(), 1);
+        assert_eq!(
+            view.log
+                .iter()
+                .filter(|entry| entry.kind == "started")
+                .count(),
+            1
+        );
+        assert_eq!(
+            view.log.iter().filter(|entry| entry.kind == "sent").count(),
+            1
+        );
     }
 
     #[test]
     fn worker_binding_is_scoped_to_the_coordinator_and_dispatch() {
         let mut task = task(Stage::Todo);
-        let parent = SessionKey { session_id: "launch_id:parent".into(), ..api() };
-        task.set_target(&Target::Subagent { parent: parent.clone() }, &Actor::Person, 2).unwrap();
-        task.record_send(&parent, "dispatch", &Actor::Person, 3).unwrap();
+        let parent = SessionKey {
+            session_id: "launch_id:parent".into(),
+            ..api()
+        };
+        task.set_target(
+            &Target::Subagent {
+                parent: parent.clone(),
+            },
+            &Actor::Person,
+            2,
+        )
+        .unwrap();
+        task.record_send(&parent, "dispatch", &Actor::Person, 3)
+            .unwrap();
         let actor = Actor::Agent(parent.clone());
         assert!(task.record_start(&actor, 4).is_err());
-        let worker = TaskWorker { parent: parent.clone(), conversation_id: "conversation".into(), provider: "codex".into(), id: "child".into(), name: "Builder".into(), request_id: "dispatch".into() };
+        let worker = TaskWorker {
+            parent: parent.clone(),
+            conversation_id: "conversation".into(),
+            provider: "codex".into(),
+            id: "child".into(),
+            name: "Builder".into(),
+            request_id: "dispatch".into(),
+        };
         assert!(task.record_worker(&worker, &Actor::Person, 5).is_err());
-        assert!(task.record_worker(&TaskWorker { request_id: "old".into(), ..worker.clone() }, &actor, 5).is_err());
+        assert!(task
+            .record_worker(
+                &TaskWorker {
+                    request_id: "old".into(),
+                    ..worker.clone()
+                },
+                &actor,
+                5
+            )
+            .is_err());
         task.record_worker(&worker, &actor, 5).unwrap();
         task.record_worker(&worker, &actor, 6).unwrap();
         task.record_start(&actor, 7).unwrap();
         assert_eq!(task.view().unwrap().worker.as_ref(), Some(&worker));
-        assert_eq!(task.view().unwrap().log.iter().filter(|entry| entry.kind == "worker").count(), 1);
-        let other = SessionKey { session: "codex/other".into(), session_id: "launch_id:other".into(), ..api() };
+        assert_eq!(
+            task.view()
+                .unwrap()
+                .log
+                .iter()
+                .filter(|entry| entry.kind == "worker")
+                .count(),
+            1
+        );
+        let other = SessionKey {
+            session: "codex/other".into(),
+            session_id: "launch_id:other".into(),
+            ..api()
+        };
         task.record_handoff(&other, "next", &actor, 8).unwrap();
         assert!(task.view().unwrap().worker.is_none());
         assert!(task.record_worker(&worker, &actor, 9).is_err());
@@ -1217,23 +1655,59 @@ mod tests {
     fn comment_media_and_description_share_one_storage_budget() {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let mut task = task(Stage::Todo);
-        let file = TaskAttachment { name: "image.bin".into(), mime: "application/octet-stream".into(), data_base64: STANDARD.encode(vec![0; crate::attachment::MAX_ATTACHMENT]), reference: String::new() };
-        task.set_attachments(&[file.clone()], &Actor::Person, 2).unwrap();
-        task.comment_with_attachments("First image", &[file.clone()], &Actor::Person, 3).unwrap();
+        let file = TaskAttachment {
+            name: "image.bin".into(),
+            mime: "application/octet-stream".into(),
+            data_base64: STANDARD.encode(vec![0; crate::attachment::MAX_ATTACHMENT]),
+            reference: String::new(),
+        };
+        task.set_attachments(std::slice::from_ref(&file), &Actor::Person, 2)
+            .unwrap();
+        task.comment_with_attachments(
+            "First image",
+            std::slice::from_ref(&file),
+            &Actor::Person,
+            3,
+        )
+        .unwrap();
         let before = task.view().unwrap().log;
-        assert!(task.comment_with_attachments("Too much", &[file.clone()], &Actor::Person, 4).is_err());
+        assert!(task
+            .comment_with_attachments("Too much", std::slice::from_ref(&file), &Actor::Person, 4)
+            .is_err());
         assert_eq!(task.view().unwrap().log, before);
-        assert!(task.set_attachments(&[file.clone(), file], &Actor::Person, 5).is_err());
+        assert!(task
+            .set_attachments(&[file.clone(), file], &Actor::Person, 5)
+            .is_err());
         assert_eq!(task.attachments().unwrap().len(), 1);
     }
 
     #[test]
     fn comment_media_survives_replication_and_schema_never_downgrades() {
         let mut task = task(Stage::Todo);
-        let file = TaskAttachment { name: "image.png".into(), mime: "image/png".into(), data_base64: "cG5n".into(), reference: "[Image #1]".into() };
-        task.comment_with_attachments("Inspect [Image #1]", &[file.clone()], &Actor::Person, 2).unwrap();
-        task.set_target(&Target::Session(SessionKey { session_id: "launch_id:parent".into(), ..api() }), &Actor::Person, 3).unwrap();
-        task.set_attachments(&[file.clone()], &Actor::Person, 4).unwrap();
+        let file = TaskAttachment {
+            name: "image.png".into(),
+            mime: "image/png".into(),
+            data_base64: "cG5n".into(),
+            reference: "[Image #1]".into(),
+        };
+        task.comment_with_attachments(
+            "Inspect [Image #1]",
+            std::slice::from_ref(&file),
+            &Actor::Person,
+            2,
+        )
+        .unwrap();
+        task.set_target(
+            &Target::Session(SessionKey {
+                session_id: "launch_id:parent".into(),
+                ..api()
+            }),
+            &Actor::Person,
+            3,
+        )
+        .unwrap();
+        task.set_attachments(std::slice::from_ref(&file), &Actor::Person, 4)
+            .unwrap();
         assert_eq!(task.schema(), DISCUSSION_TASK_SCHEMA);
         let log = task.view().unwrap().log;
         assert_eq!(log[1].attachments, [file]);

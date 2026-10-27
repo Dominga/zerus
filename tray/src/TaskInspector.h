@@ -82,6 +82,7 @@ private:
     QList<TaskSession> m_sessions;
     QJsonObject m_detail;
     quint64 m_request = 0, m_generation = 0;
+    bool m_refetchPending = false;
     QLabel *m_scope, *m_state;
     QLabel *m_title, *m_identity;
     QPlainTextEdit *m_titleEditor;

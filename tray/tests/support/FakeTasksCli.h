@@ -38,7 +38,15 @@ def log(t,kind,body=''): t.setdefault('log',[]).append({'kind':kind,'actor':{'ki
 def top(t): data['tasks'].remove(t); data['tasks'].insert(0,t)
 order=['review','active','todo','backlog','done']
 cmd=a[1]
-if cmd=='get' and (here/'delay-get').exists(): time.sleep(min(.5,float((here/'delay-get').read_text())))
+if cmd=='get':
+    if (here/'delay-get').exists(): time.sleep(min(.5,float((here/'delay-get').read_text())))
+    if (here/'gated-gets').exists():
+        counter=here/'get-count'; n=int(counter.read_text())+1 if counter.exists() else 1
+        counter.write_text(str(n)); (here/('get-started-'+str(n))).write_text('captured')
+        while (here/'gated-gets').exists() and not (here/('get-release-'+str(n))).exists(): time.sleep(.01)
+    if (here/'get-gate').exists():
+        (here/'get-snapshot').write_text('captured')
+        while (here/'get-gate').exists(): time.sleep(.01)
 content={}
 if cmd in ('add','edit','comment','message') and '--content-json' in a:
     content=json.loads(text); text=content['text']

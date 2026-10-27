@@ -31,6 +31,13 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod result_stream;
+
+/// Upgraded sockets retain the SAME accepted-connection slot after Hyper's
+/// HTTP future completes. A successful upgrade must not evade max_connections.
+#[derive(Clone)]
+struct ConnectionSlot(Arc<OwnedSemaphorePermit>);
+
 #[derive(Clone)]
 pub struct App {
     pub store: Store,
@@ -588,7 +595,7 @@ impl App {
         if path == "/v2/capabilities" && method == Method::GET {
             let _lane = take(&self.anonymous)?;
             let mut value = protocol::capabilities(self.push.providers());
-            value["encrypted_transport"] = json!({"version":1,"membership":"signed-linear-v1","public_enrollment":true,"request_max_bytes":ENCRYPTED_REQUEST_MAX,"result_max_bytes":ENCRYPTED_SMALL_MAX});
+            value["encrypted_transport"] = json!({"version":1,"membership":"signed-linear-v1","public_enrollment":true,"request_max_bytes":ENCRYPTED_REQUEST_MAX,"result_max_bytes":ENCRYPTED_SMALL_MAX,"result_stream":{"version":1,"path":"/v2/stream","max_requests":16,"lifetime_seconds":60}});
             return Ok(axum::Json(value).into_response());
         }
         if (path == "/v2/workspaces" || path == "/v2/enrollments") && method == Method::POST {
@@ -705,6 +712,13 @@ impl App {
             }
         }
         let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+        if path == "/v2/stream" && method == Method::GET {
+            if !params.is_empty() {
+                return Err(Error::BAD);
+            }
+            drop(pre_database);
+            return self.result_stream(unread, c, admission).await;
+        }
         if (path == "/v2/events" || path == "/v2/node/requests") && method == Method::GET {
             let wait = params
                 .get("wait")
@@ -1205,9 +1219,10 @@ pub async fn serve(
     loop {
         tokio::select! {biased;_=shutdown.cancelled()=>break,accept=listener.accept()=>{
             let (stream,addr)=accept?;let Ok(permit)=connections.clone().try_acquire_owned()else{drop(stream);continue;};stream.set_nodelay(true)?;
-            let service=router.clone().layer(axum::Extension(ConnectInfo(addr)));let stop=shutdown.clone();
-            tasks.spawn(async move{let _permit=permit;let mut builder=hyper::server::conn::http1::Builder::new();builder.timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10)).max_headers(100).max_buf_size(32768);
-                let connection=builder.serve_connection(TokioIo::new(stream),TowerToHyperService::new(service));tokio::pin!(connection);
+            let slot=ConnectionSlot(Arc::new(permit));
+            let service=router.clone().layer(axum::Extension(ConnectInfo(addr))).layer(axum::Extension(slot.clone()));let stop=shutdown.clone();
+            tasks.spawn(async move{let _slot=slot;let mut builder=hyper::server::conn::http1::Builder::new();builder.timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(10)).max_headers(100).max_buf_size(32768);
+                let connection=builder.serve_connection(TokioIo::new(stream),TowerToHyperService::new(service)).with_upgrades();tokio::pin!(connection);
                 tokio::select!{_= &mut connection=>{},_=tokio::time::sleep(Duration::from_secs(120))=>{},_=stop.cancelled()=>{connection.as_mut().graceful_shutdown();let _=tokio::time::timeout(Duration::from_secs(30),&mut connection).await;}}
             });
         }}

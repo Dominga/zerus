@@ -80,8 +80,12 @@ pub enum Target {
     Any,
     Session(SessionKey),
     #[serde(rename = "new_session")]
-    NewSession { parent: SessionKey },
-    Subagent { parent: SessionKey },
+    NewSession {
+        parent: SessionKey,
+    },
+    Subagent {
+        parent: SessionKey,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,9 +181,18 @@ impl TaskView {
     /// Dispatch receipt, or an explicit direct-work acknowledgement. Names do
     /// not identify an execution. This anchor is not a distributed claim.
     pub fn execution_id(&self) -> Option<String> {
-        self.log.iter().rev().find(|e| e.kind == "sent").and_then(|e| e.request_id.clone())
-            .or_else(|| self.log.iter().rev().find(|e| e.kind == "started" && e.session == self.session)
-                .map(|e| format!("started:{}", e.at)))
+        self.log
+            .iter()
+            .rev()
+            .find(|e| e.kind == "sent")
+            .and_then(|e| e.request_id.clone())
+            .or_else(|| {
+                self.log
+                    .iter()
+                    .rev()
+                    .find(|e| e.kind == "started" && e.session == self.session)
+                    .map(|e| format!("started:{}", e.at))
+            })
     }
 }
 

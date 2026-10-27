@@ -1,4 +1,5 @@
 #include "TaskInspector.h"
+#include <QScopeGuard>
 #include "ActivityWidth.h"
 #include "ActivityView.h"
 #include "TaskDialogs.h"
@@ -361,6 +362,10 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
         if (id != m_request) return;
         const auto generation = property("requestGeneration").toULongLong(); m_request = 0;
         if (generation != m_generation) { fetch(); return; }
+        const bool refetch = m_refetchPending; m_refetchPending = false;
+        // Keep making progress when list polling is faster than detail reads.
+        // Publish this same-selection snapshot, then coalesce the next read.
+        const auto followUp = qScopeGuard([this, refetch] { if (refetch) fetch(); });
         auto task = reply.value("task").toObject();
         if (task.value("uuid").toString() != m_selected) {
             m_detail = {}; renderDetail(); m_state->setText(tr("The task reply did not match the selected task.")); return;
@@ -389,7 +394,7 @@ TaskInspector::TaskInspector(HgsClient *client, TasksView *board, QWidget *paren
     connect(m_client, &HgsClient::taskFailed, this, [this](quint64 id, const QString &error) {
         if (id != m_request) return;
         const auto generation = property("requestGeneration").toULongLong(); m_request = 0;
-        if (generation != m_generation) { fetch(); return; }
+        if (generation != m_generation || m_refetchPending) { fetch(); return; }
         m_noteError->setText(tr("Task could not be read: %1").arg(error)); m_noteError->show();
     });
     for (auto *child : m_details->findChildren<QWidget *>()) child->installEventFilter(this);
@@ -430,7 +435,7 @@ void TaskInspector::selectTask(const QString &uuid) {
         m_noteError->hide(); m_descriptionEditing = false; m_descriptionSeed = false; m_pendingDetail = {}; m_selected = uuid; m_inlineRequested.clear(); ++m_generation; m_historyVisible = 8; m_historyBefore = {};
         const QSignalBlocker blocker(m_detailTabs); m_detailTabs->setCurrentIndex(0);
     }
-    refresh(); fetch();
+    refresh();
 }
 
 void TaskInspector::refresh() {
@@ -588,7 +593,11 @@ bool TaskInspector::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void TaskInspector::fetch() {
-    if (m_request || m_selected.isEmpty() || m_project.isEmpty() || (!isVisible() && !m_details->isVisible())) return;
+    if (m_selected.isEmpty() || m_project.isEmpty() || (!isVisible() && !m_details->isVisible())) return;
+    // A saved comment or board update must supersede an older detail snapshot,
+    // even with polling disabled. Keep only one read and one pending refresh.
+    if (m_request) { m_refetchPending = true; return; }
+    m_refetchPending = false;
     setProperty("requestGeneration", QVariant::fromValue(m_generation));
     m_request = m_client->requestTask({"get", m_selected, "--project", m_project});
 }
@@ -965,7 +974,12 @@ void TaskInspector::setColumnWidth(int width) {
 }
 
 void TaskInspector::setTheme(bool dark) {
-    if (property("taskThemeApplied").toBool() && m_dark == dark) return;
+    if (property("taskThemeApplied").toBool() && m_dark == dark) {
+        // The detached pane's new parent and workspace repolishing can replace
+        // its Window palette even when the selected theme has not changed.
+        m_activity->setTheme(dark);
+        return;
+    }
     setProperty("taskThemeApplied", true); m_dark = dark; if (!m_cards) return;
     const auto colors = TaskColors::of(dark);
     const auto sheet = QStringLiteral("#taskInspector{background:%2;color:%1;}"

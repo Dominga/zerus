@@ -114,7 +114,7 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         let worker = before.worker.as_ref().map(|w| format!("\nCoordinator: relay this feedback to the registered child {} only if its exact current identity still matches; otherwise explain why it cannot be delivered.", w.id)).unwrap_or_default();
         delivery.prompt = format!("[Zerus task {}/{} message {id}]\n{}\n\n{}{}\n\n{}",
             r.project.1, before.id, if mode == "reopen" { "The person requests changes. Continue this task." } else { "The person added task feedback." },
-            content.text, worker, format!("Read the task context with `hgs task get {}/{}` and report the result with `hgs task report {}/{}`.", r.project.1, before.id, r.project.1, before.id));
+            content.text, worker, format_args!("Read the task context with `hgs task get {}/{}` and report the result with `hgs task report {}/{}`.", r.project.1, before.id, r.project.1, before.id));
         let attachments = files
             .iter()
             .map(serde_json::to_value)
@@ -137,14 +137,12 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
             &files,
             &delivery,
             to.as_ref(),
-            &who,
-            now(),
-        );
+            (&who, now()),);
     let fresh = match reserved {
         Ok(fresh) => fresh,
         Err(error) if !recovering && matches!(mode, "send" | "reopen") && delivery.state == "reserved" => {
             refuse_delivery(&mut delivery, &error.to_string());
-            task.reserve_message(id, &content.text, &files, &delivery, to.as_ref(), &who, now()).map_err(fail)?
+            task.reserve_message(id, &content.text, &files, &delivery, to.as_ref(), (&who, now())).map_err(fail)?
         },
         Err(error) => return Err(fail(error)),
     };

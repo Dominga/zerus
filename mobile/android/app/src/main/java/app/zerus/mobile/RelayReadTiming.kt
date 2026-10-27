@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicInteger
 internal object RelayReadTiming {
     enum class Stage {
         MembershipHttp, SubmitHttp, ReceiptHttp, CatalogHttp, EventsHttp, OtherHttp,
-        MembershipSync, MembershipLock, Seal, Reserve, OpenResult, PollDelay, Read,
+        MembershipSync, MembershipLock, Seal, Reserve, OpenResult, ResultSignalWait, ResultStreamOpen, ResultSignalReady, ResultSignalFallback, PollDelay, Read,
         OpenConversation, VisibleChecking, VisibleChecked, VisibleHistory,
     }
     enum class Operation { Inspect, History, Projection, Catalog, Other }

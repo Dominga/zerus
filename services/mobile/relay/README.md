@@ -124,11 +124,47 @@ workspace ID or accepts client-selected priority.
 | `POST /v2/node/snapshot` | `{computer_id,envelope}` encrypted separately for each phone and route. |
 | `GET /v2/computers` | Stable `(computer_id,gateway_id,route_id)` pages; receiver-specific ciphertext, at most 2 MiB ciphertext/page. |
 | `POST /v2/requests`, `GET /v2/requests/{id}` | `{envelope}` submission and permanent no-replay receipt with encrypted result in `envelope`. |
+| `GET /v2/stream` | Authenticated WebSocket readiness hints for up to 16 of this phone's durable request IDs; no command submission, claim or payload acknowledgement. |
 | `GET /v2/node/requests` | Claims at most one encrypted request; optional `wait <= 25` seconds. |
 | `POST /v2/node/requests/{id}/result` | `{envelope}` immutable signed encrypted outcome. Outer completion is not an authenticated native result. |
 | `POST /v2/node/signals` | Bounded generic scope/change IDs, presence (including explicit `null`) and existing delivery enum; no native names. |
 | `GET /v2/events` | Ordered generic hints with `id,computer_id,kind,scope_id,alert_kind,created_at`; phones refresh authenticated private content. |
 | `POST /v2/push`, `DELETE /v2/push` | Existing bounded provider registration/removal and generic wake delivery. |
+
+### WebSocket result readiness
+
+`encrypted_transport.result_stream` in `/v2/capabilities` advertises version 1.
+Use the same phone Bearer header and TLS endpoint as HTTP. Tokens are never
+accepted in the URL or a cookie. Send a text frame
+`{"type":"watch","request_ids":["<request UUID>"]}` to replace the watched set.
+The service sends `{"type":"ready","request_id":"<request UUID>","state":"completed"}`
+(or another terminal receipt state). This is a generic hint, not an authenticated
+native result. Fetch the usual encrypted receipt and verify fresh membership,
+signature, original request/route binding and the local journal before settling.
+
+The relay subscribes before checking committed receipt metadata. On reconnect,
+register the same pending IDs: this checks already-completed results without
+depending on an event cursor and never resubmits or reclaims a command. Existing
+ordered `/v2/events` cursor recovery and background push remain unchanged. The
+first migration replaces phone receipt polling waits; it does not make native
+execution run on the relay or replace the foreground refresh scheduler.
+
+Each socket lasts at most 60 seconds, retains its accepted-connection slot and
+existing local/shared poll admission, and rechecks authorization before hints
+and every five seconds while idle. Frames/messages are capped at 4 KiB, watches
+at 16 IDs, inbound watch messages at 128 per socket and each write at two seconds.
+No database permit is held during socket writes. Commit notifications wake other
+PostgreSQL workers; the five-second check also recovers missed notifications.
+Malformed, revoked, slow or expired sockets release their owned admission.
+
+Android multiplexes pending receipts on one socket per connection and closes an
+unused socket after ten seconds. It falls back to ordinary receipt GETs on old
+servers, unsupported proxy upgrades or disconnects, using the same IDs and the
+remaining wait budget. There is no automatic POST replay. A disconnected socket
+has a 30-second reconnect cooldown for network/upgrade failures; normal server
+rotation (close 1000) allows the next watch immediately. This foreground optimization does not create
+a background keepalive service. Reverse proxies must forward HTTP/1.1 `Upgrade`
+and `Connection: upgrade` for `/v2/stream`; their read timeout must exceed 60 seconds.
 
 Encrypted request identities, body/result digests and receipt state remain
 permanent. Their ciphertext payload cache is separate. A completed result has

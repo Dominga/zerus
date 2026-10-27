@@ -2033,12 +2033,18 @@ void TestSessionsWindow::activitySurfaceRemainsOpaque()
     QSettings().setValue("workspace/theme",theme); QSettings().setValue("workspace/contentScale",scale);
     SessionsWindow window(program()); window.resize(1180,820); window.setFleet(fleet()); window.show();
     window.showSession({},"codex/hgs/dashboard");
-    const auto views=window.findChildren<ActivityView *>(); QVERIFY(views.size()>=2);
-    for (auto *view : views) {
-        auto *browser=view->browser(); browser->ensurePolished(); browser->viewport()->ensurePolished();
-        const auto base=browser->viewport()->palette().brush(QPalette::Base);
-        QVERIFY2(base.isOpaque(),"Workspace CSS disabled the fast Activity canvas renderer");
-        QCOMPARE(base.color(),view->palette().color(QPalette::Window));
+    const auto views=window.findChildren<ActivityView *>(); QVERIFY(views.size()>=3);
+    QVERIFY(window.findChild<ActivityView *>("taskDetailActivity"));
+    auto *compact=window.findChild<QCheckBox *>("workspaceCompact"); QVERIFY(compact);
+    for (int pass=0;pass<2;++pass) {
+        if (pass) compact->toggle(); // Repolish the workspace without changing its theme.
+        for (auto *view : views) {
+            auto *browser=view->browser(); browser->ensurePolished(); browser->viewport()->ensurePolished();
+            const auto base=browser->viewport()->palette().brush(QPalette::Base);
+            QVERIFY2(base.isOpaque(),"Workspace CSS disabled the fast Activity canvas renderer");
+            QCOMPARE(base.color(),QColor(theme=="dark"?"#1c2229":"#ffffff"));
+            QCOMPARE(base.color(),view->palette().color(QPalette::Window));
+        }
     }
 }
 
@@ -3410,7 +3416,7 @@ if a[:1]!=['a']:
     constexpr int activityMs=1000;window.setDetailsPollForTests(100,activityMs);
     auto log=[&]{QList<QJsonArray> result;QFile file(temp.filePath("inspections.jsonl"));if(file.open(QIODevice::ReadOnly))while(!file.atEnd())result<<QJsonDocument::fromJson(file.readLine()).array();return result;};
     auto *tabs=window.findChild<QTabWidget *>("sessionDetailTabs");QVERIFY(tabs);
-    const int processes=tabs->indexOf(window.findChild<ProcessView *>());QCOMPARE(processes,4);
+    const int processes=tabs->indexOf(window.findChild<ProcessView *>());QVERIFY(processes>=0);
     QTRY_VERIFY(!log().isEmpty());QTest::qWait(200);
     QVERIFY(!tabs->isTabVisible(processes));for(const auto &call:log())QVERIFY(call.contains("--skip-processes"));
     auto *settings=window.findChild<QWidget *>("settingsPage");
@@ -11506,7 +11512,9 @@ else: print('{}')
     // no browser endpoint. It must not open an external browser automatically.
     QSignalSpy external(client, &HgsClient::writeDone), connection(client, &HgsClient::nativeUiFailed);
     auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs");
-    QVERIFY(!tabs->isTabVisible(1)); QCOMPARE(tabs->tabText(3), QString("Native UI")); QVERIFY(tabs->isTabVisible(3));
+    const int native=tabs->indexOf(window.findChild<QWidget *>("nativeUiView")); QVERIFY(native>=0);
+    QVERIFY(!tabs->isTabVisible(tabs->indexOf(window.findChild<TerminalView *>())));
+    QCOMPARE(tabs->tabText(native), QString("Native UI")); QVERIFY(tabs->isTabVisible(native));
     window.findChild<QPushButton *>("nativeSignInButton")->click();
     QCOMPARE(tabs->currentWidget()->objectName(), QString("nativeUiView"));
     QTRY_COMPARE(connection.size(), 1); QCOMPARE(external.size(), 0);
@@ -12818,9 +12826,12 @@ void TestSessionsWindow::shortcutsCycleSessionTabs()
         window.showSession({}, "codex/hgs/dashboard");
         auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); auto *terminal = window.findChild<TerminalView *>();
         auto *processView = window.findChild<ProcessView *>(); QVERIFY(tabs); QVERIFY(terminal); QVERIFY(processView);
-        QVERIFY(!tabs->isTabVisible(3)); // Native UI belongs to DeepSeek sessions.
+        QVERIFY(!tabs->isTabVisible(tabs->indexOf(window.findChild<QWidget *>("nativeUiView"))));
         QCOMPARE(tabs->isTabVisible(tabs->indexOf(processView)), processes);
-        QList<QWidget *> order{tabs->widget(0), terminal, window.findChild<TasksView *>()}; if (processes) order << processView;
+        QCOMPARE(tabs->indexOf(window.findChild<TasksView *>()), -1); // The board lives in the side panel.
+        const int taskView=tabs->indexOf(window.findChild<QWidget *>("taskDetailsPane")); QVERIFY(taskView>=0);
+        QVERIFY(!tabs->isTabVisible(taskView));
+        QList<QWidget *> order{tabs->widget(0), terminal}; if (processes) order << processView;
         auto *composer = window.findChild<MessageComposer *>("messageComposer");
         composer->editor()->setFocus(); QTRY_VERIFY(composer->editor()->hasFocus());
         for (int step = 1; step <= order.size(); ++step) {
@@ -13040,7 +13051,7 @@ void TestSessionsWindow::reboundChordsApplyAtOnce()
     pressSequence(&window, previousTab); // No longer bound: Terminal keeps it.
     QCOMPARE(tabs->currentWidget(), terminal);
     pressCommand(&window, "tab.next");
-    QCOMPARE(tabs->currentWidget(), window.findChild<TasksView *>());
+    QCOMPARE(tabs->currentWidget(), tabs->widget(0));
 }
 
 void TestSessionsWindow::projectListKeepsItsReorderKeys()

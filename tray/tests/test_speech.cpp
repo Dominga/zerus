@@ -297,8 +297,10 @@ private slots:
         auto *voice = composer.findChild<ToolbarChip *>("voiceRecord"); QTRY_VERIFY(voice->isEnabled()); voice->click(); voice->click();
         auto *transcribe = composer.findChild<QPushButton *>("voiceSend"); QTRY_VERIFY(transcribe->isEnabled()); transcribe->click();
         composer.editor()->setPlainText("Typed while transcribing"); QVERIFY(gate.remove());
-        QTRY_COMPARE(transcribe->text(), QString("Add to draft")); QCOMPARE(composer.editor()->toPlainText(), QString("Typed while transcribing"));
-        QVERIFY(transcribe->isEnabled()); transcribe->click();
+        QTRY_COMPARE(transcribe->text(), QString("Add to draft"));
+        // The caption arrives before the transcript's durable save completes.
+        QTRY_VERIFY(transcribe->isEnabled()); QCOMPARE(composer.editor()->toPlainText(), QString("Typed while transcribing"));
+        transcribe->click();
         QTRY_VERIFY(composer.editor()->toPlainText().contains("Recognized task content"));
         QVERIFY(composer.editor()->toPlainText().contains("Typed while transcribing"));
         const auto text = composer.editor()->toPlainText(); const auto id = composer.draftSnapshot().formState.value("voice_insertions").toArray().first().toString();

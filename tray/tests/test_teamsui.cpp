@@ -1502,7 +1502,9 @@ void TestTeamsUi::phaseApprovalAndFinishAskTheOwner()
     auto decidedTeam = ready;
     decidedTeam["revision"] = decidedTeam["revision"].toInt(1) + 1;
     setTeam(decidedTeam);
-    QTRY_VERIFY(([&] { controller.refresh(); auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return v && v->bandOf(3); })());
+    // The approve's answer has landed and the new revision reopened the header
+    // (a Discard before that is refused as a decision in flight).
+    QTRY_VERIFY(([&] { controller.refresh(); auto *v = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return v && v->bandOf(3) && !v->decided.contains(3); })());
     // Discard asks to confirm: Cancel sends nothing, the confirmation sends once.
     graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
     QTRY_VERIFY(graph);

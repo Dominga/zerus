@@ -321,25 +321,8 @@ QWidget *TeamPanel::planFooter(const Team &team)
     approve->setToolTip(team.tasks.isEmpty() ? tr("The plan has no tasks yet")
                         : team.errors.isEmpty() ? tr("Start the members and hand out the first tasks")
                                                 : tr("Fix %n plan error(s) to run", nullptr, int(team.errors.size())));
-    QObject::connect(approve, &QPushButton::clicked, this, [this, team] {
-        // N8: a plan that widens a role's profile needs the owner's explicit
-        // confirmation here too, as on the workspace's Approve & Run.
-        if (!team.widenings.isEmpty()) {
-            QStringList lines;
-            for (const auto &widening : team.widenings) {
-                const QString who = widening.role.isEmpty() ? widening.member : widening.role;
-                lines << tr("%1: %2 → %3").arg(who, widening.from, widening.to);
-            }
-            if (!confirm("teamWideningConfirm", tr("Widen permissions?"),
-                         tr("This plan widens the permissions of its members beyond the template:\n\n%1\n\n"
-                            "Approve it only if they need it.").arg(lines.join(QStringLiteral("\n"))),
-                         tr("Confirm and approve")))
-                return;
-            act("approve", {{"confirm_widening", true}});
-            return;
-        }
-        act("approve", {});
-    });
+    // N8/N17: the same question as the workspace's Approve & Run.
+    QObject::connect(approve, &QPushButton::clicked, this, [this, team] { approvePlan(team); });
     auto *sendBack = button(tr("Send back to lead"), "teamSendBack");
     sendBack->setCheckable(true); sendBack->setChecked(m_sendBack);
     QObject::connect(sendBack, &QPushButton::toggled, this, [this](bool on) { m_sendBack = on; scheduleRender(); });

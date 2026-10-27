@@ -13,6 +13,7 @@
 #include "ExternalFile.h"
 #include "LocalFile.h"
 #include "SessionPresentation.h"
+#include "TeamAttentionNotices.h"
 #include "AccountUsage.h"
 #include "SessionUsage.h"
 #include "CacheKeepalive.h"
@@ -1549,7 +1550,17 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_teamPanel->newTeam=[this]{showNewTeam();};
     m_teamPanel->openDesigner=[this]{showTeamDesigner();};
     m_teamPanel->openWorkspace=[this]{if(m_detailTabs->indexOf(m_teamWorkspace)<0)m_detailTabs->addTab(m_teamWorkspace,tr("Team"));m_detailTabs->setCurrentWidget(m_teamWorkspace);};
-    connect(m_teams,&TeamController::teamsChanged,this,[this]{rebuild();updateTeamPanel();});
+    // N7 (U18): every team's attention items reach the desktop notifications,
+    // once each; the known ones are kept across restarts.
+    m_teamNotices=std::make_shared<TeamAttentionNotices>(QSettings().value("teams/attentionNotified").toStringList());
+    connect(m_teams,&TeamController::teamsChanged,this,[this]{
+        rebuild();updateTeamPanel();
+        const auto changes=m_teamNotices->observe(m_teams->teams());
+        if(changes.raised.isEmpty()&&changes.cleared.isEmpty())return;
+        QSettings().setValue("teams/attentionNotified",m_teamNotices->known());
+        for(const auto &token:changes.cleared)emit teamAttentionCleared(token);
+        for(const auto &notice:changes.raised)emit teamAttentionRaised(notice.token,notice.title,notice.body);
+    });
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
     m_workSplitter->addWidget(m_inspectorPanel);
@@ -1647,6 +1658,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // U25 part 7 (spec 7): New team… from a project, and its sessions with
     // their team role, machine, branch and status.
     connect(m_projectsPage,&ProjectsDialog::newTeamRequested,this,[this](const QString &){m_pages->setCurrentIndex(0);showNewTeam();});
+    // N23: the Sessions block lists the newest rows; the rest open here.
+    connect(m_projectsPage,&ProjectsDialog::projectSessionsRequested,this,[this](const QString &project){
+        m_filter = "all"; m_folderFilterPath.clear(); m_hostFilters.clear(); m_projectFilters = {project}; m_search->clear(); showSessionList();
+    });
     m_projectsPage->setSessionsProvider([this](const QString &project){
         QList<ProjectsDialog::ProjectSession> rows;
         for(const auto &entry:m_entries){
@@ -1654,13 +1669,21 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
             const auto &s=entry.session;
             ProjectsDialog::ProjectSession row;
             row.host=entry.host;row.name=s.name;row.agent=s.cmd;row.machine=entry.machine;row.branch=s.gitBranch;
-            row.title=s.tag.isEmpty()?s.name:s.tag;
+            row.title=s.tag.isEmpty()?s.name:s.tag;row.cwd=s.canonicalCwd.isEmpty()?s.cwd:s.canonicalCwd;row.created=s.created;
             if(m_teams)if(const auto *team=[&]()->const Teams::Team *{for(const auto &t:m_teams->teams())if(t.memberOfSession(entry.host,s.name))return &t;return nullptr;}()){
                 row.team=team->id;const auto *member=team->memberOfSession(entry.host,s.name);row.role=team->roleOf(member->id);
+                // Its own worktree or clone goes with the team (the lead and a
+                // shared member work in the project's folder).
+                row.teamFolder=!member->lead&&(member->folder=="worktree"||member->folder=="clone");
             }
-            const bool attention=!s.attentionId.isEmpty();
-            row.status=!entry.online?tr("Offline"):s.state=="paused"?tr("Paused"):attention?tr("Needs input"):s.phase=="working"?tr("Working"):s.unreadReply?tr("New reply"):tr("Ready");
-            row.tone=attention||s.unreadReply?QStringLiteral("warn"):s.phase=="working"?QStringLiteral("active"):QStringLiteral("muted");
+            // N21: the session list's status (CLAUDE.md status contract): an
+            // idle agent with live jobs is Background, a tool call or a
+            // compaction is not Ready. A reply to read shows once the work
+            // is done; native work and attention come first.
+            const bool working=SessionPresentation::working(s,entry.online);
+            const bool reply=entry.online&&!working&&!s.needsAction()&&s.visibleUnreadReply(entry.online);
+            row.status=reply?tr("New reply"):SessionPresentation::status(s,entry.online);
+            row.tone=entry.online&&(s.needsAction()||reply)?QStringLiteral("warn"):working?QStringLiteral("active"):QStringLiteral("muted");
             rows<<row;
         }
         return rows;
@@ -6659,7 +6682,12 @@ void SessionsWindow::updateTeamPanel()
     {const auto *entry=selected();
      const bool designer=m_selectedTeam.isEmpty()&&entry&&Teams::isDesignerSession(entry->host,entry->session.name);
      m_teamPanel->showDesigner(designer);
-     if(designer){setNewTeamTab(false);return;}}
+     // N12 (#382): no team's header (pill, Pause, Stop) stays on the designer.
+     if(designer){
+         if(m_teamWorkspace)m_teamWorkspace->setHeaderShown(false);
+         if(m_teamHeader){m_teamHeader=false;updateHeaderText();}
+         setNewTeamTab(false);return;
+     }}
     QString team=m_selectedTeam;
     if(team.isEmpty()||!m_teams->team(team)){
         m_selectedTeam.clear();
@@ -6813,6 +6841,13 @@ void SessionsWindow::openTeamTask(int task)
     if(!team)return;
     showTeam(team->id);
     m_teamPanel->openTask(task);
+}
+void SessionsWindow::showTeamAttention(const QString &token)
+{
+    const auto team=TeamAttentionNotices::teamOf(token);
+    if(team.isEmpty()||!m_teams||!m_teams->team(team))return;
+    showTeam(team);
+    if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
 }
 void SessionsWindow::showTeam(const QString &team)
 {

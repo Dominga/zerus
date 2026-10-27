@@ -17,6 +17,7 @@ class QListWidget;
 class QTableWidget;
 class QLineEdit;
 class QSplitter;
+class QTimer;
 
 // App-owned logical projects; folders are addresses on fleet machines.
 class ProjectsDialog : public QDialog {
@@ -36,10 +37,15 @@ public:
     static QString suggestName(const QString &dir, MachinePlatform::Style style = MachinePlatform::Style::Posix);
     // U25 part 7 (spec 7): the project's sessions, one row each - its agent,
     // name, team role, machine, branch and status - from the window.
-    struct ProjectSession { QString host, name, title, agent, role, machine, branch, status, tone, team; };
+    // `cwd` is its working folder, `teamFolder` is set for a team member that
+    // got its own worktree or clone, `created` orders the rows newest first.
+    struct ProjectSession { QString host, name, title, agent, role, machine, branch, status, tone, team, cwd; bool teamFolder = false; qint64 created = 0; };
+    // The Sessions block lists this many rows; "Show all in Sessions" opens the rest.
+    static constexpr int kSessionRows = 50;
     void setSessionsProvider(std::function<QList<ProjectSession>(const QString &project)> provider) { m_sessionsProvider = std::move(provider); showProject(); }
-    // The kind of a folder: "Main checkout · main", "Worktree · team/x/y",
-    // "Clone · release/2.4"; `team` is set for a team member's worktree.
+    // The kind of a folder: "Main checkout · main", "Worktree · feat/x",
+    // "Clone · release/2.4", "Folder" (no Git), "Team folder · team/x/y";
+    // `team` is set for a team member's own worktree or clone.
     QString folderKind(const SessionOrganization::Folder &folder, bool *team = nullptr) const;
 public slots:
     void setProjects(const QList<ProjectInfo> &projects);
@@ -55,8 +61,18 @@ signals:
     void newPathSessionRequested(const QString &project, const QString &host, const QString &path);
     void newSessionRequested(const QString &project, const QString &host, const QString &folder);
     void newTeamRequested(const QString &project);
+    void projectSessionsRequested(const QString &project);
+protected:
+    void showEvent(QShowEvent *event) override;
 private:
+    struct FolderKind { QString text; bool team = false; };
     void showProject();
+    // The Sessions rows and the folders' kinds again, from the fleet the page
+    // has; setFleet asks for it at most once per second while the page shows.
+    void refreshLive();
+    void showSessions();
+    // One pass over the fleet's sessions for every folder of the project.
+    QHash<QString, FolderKind> folderKinds() const;
     void updateSwarmConnections();
     void moveProject(int offset);
     void chooseColor();
@@ -114,6 +130,9 @@ private:
     QPushButton *m_newTeam = nullptr;
     CollapsibleBlock *m_foldersBlock = nullptr, *m_sessionsBlock = nullptr, *m_rulesBlock = nullptr;
     QTableWidget *m_sessions = nullptr;
+    QPushButton *m_allSessions = nullptr;
+    QList<ProjectSession> m_projectSessions;
+    QTimer *m_live = nullptr;
     IronRulesPanel *m_rules = nullptr;
     std::function<QList<ProjectSession>(const QString &)> m_sessionsProvider;
 };

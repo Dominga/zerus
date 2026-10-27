@@ -917,6 +917,36 @@ answered; a denial cannot carry an explanation.
   Remove and swap keep U26's rule of naming the member. The feed and status
   say "Added by Lead on your word" with the quote. Owner: yes.
 
+- **U33. The Board scrolls instead of squeezing its columns (owner,
+  2026-10-27).** The Board fits every column into the window: the phase
+  scrolls turn the horizontal scroll bar off (TeamWorkspace.cpp
+  phaseColumn) and the columns stretch with no minimum width
+  (boardColumns), so on a narrow window the cards shrink to unreadable
+  titles and the layout jumps as tasks move between columns. Each column
+  gets a fixed readable width (about 240 px, the cards' two lines unelided
+  up to it), the whole Board scrolls horizontally as one page (every phase's
+  columns line up and move together), the thin bar of spec 1.2, and the
+  horizontal position is kept across renders and polls like the vertical
+  one. Graph and Layers keep their behaviour. Owner: yes.
+
+- **U34. A DeepSeek member's new worktree is ready for its sandbox (owner,
+  2026-10-27).** backend, backend2, qa and backend4 each started with every
+  command failing: `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<worktree>)`.
+  The DeepSeek sandbox needs WRITE_DAC and WRITE_OWNER on the folder it
+  confines. A folder on a second drive (D:\Tools) inherits the drive's
+  default ACL: Authenticated Users Modify, no explicit right for the user, so
+  the owner has WRITE_DAC but not WRITE_OWNER and the provisioning fails;
+  under C:\Users\<user> the profile's explicit FullControl hides it. Each
+  time the member asked to run its ACL repair script and the owner fixed the
+  folder by hand. Zerus creates these worktrees itself (dispatcher.rs
+  `git worktree add`), so on Windows it grants the signed-in user an
+  explicit inheritable FullControl ACE on the folder it just created, before
+  the member starts; for a folder it did not create (a direct folder, an
+  existing worktree) a DeepSeek session start checks the effective rights
+  and, when they are missing, the session and the lead's inbox say so with
+  the one-line `icacls` fix for the owner instead of a failing sandbox. The
+  member never repairs ACLs itself. Owner: yes.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

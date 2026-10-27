@@ -547,6 +547,9 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "cargo +1.99.1 fmt --check --manifest-path crates/replica-ffi/Cargo.toml",
                      "cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi --all-targets -- -D warnings",
                      "cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi",
+                     "cargo +1.99.1 fmt --check --manifest-path crates/watch-protocol/Cargo.toml",
+                     "cargo +1.99.1 clippy --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol --all-targets -- -D warnings",
+                     "cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol",
                      'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
             self.assertIn(line, quick)
         for name in ("quick", "relay", "connector", "connector-macos", "android", "cli", "cli-macos-debug", "arch", "arch-package",

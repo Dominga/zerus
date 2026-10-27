@@ -56,7 +56,8 @@ sources=(Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_st
   services/mobile/connector/Cargo.toml services/mobile/connector/Cargo.lock services/mobile/connector/.cargo
   services/mobile/connector/src services/mobile/relay/Cargo.toml services/mobile/relay/src
   services/mobile/crypto/Cargo.toml services/mobile/crypto/src
-  crates/replica/Cargo.toml crates/replica/Cargo.lock crates/replica/.cargo crates/replica/src)
+  crates/replica/Cargo.toml crates/replica/Cargo.lock crates/replica/.cargo crates/replica/src
+  crates/watch-protocol/Cargo.toml crates/watch-protocol/Cargo.lock crates/watch-protocol/.cargo crates/watch-protocol/src)
 tar czf - -C "$here" "${sources[@]}" \
   | ssh -o BatchMode=yes "$host" "cd ~/.local/src/hgs/.rust-build && rm -rf ${sources[*]} && tar xzf -"
 # install.sh builds the mobile connector only on request (HGS_MOBILE_CONNECTOR=1)

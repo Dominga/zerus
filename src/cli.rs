@@ -66,6 +66,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs self [--json]              the calling agent's own session reference
        hgs [@host] guide [topic]      how agents message, wait for, launch and stop sessions and use tasks
        hgs inspect 'zerus://session?...'   resolve and inspect a referenced conversation
+       hgs [@host] watch --json   long-lived NDJSON event stream (stdin control)
+       Event stream ABI: watch-v1
        hgs [@host] processes <session> [--archive <id>]   observed shell commands as JSON
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
@@ -192,7 +194,7 @@ fn local_sessions() -> Result<()> {
 // Repository preparation owns only its checkout and receipt. Like the existing
 // configuration/control commands, it does not require or enable a session host.
 fn needs_local_sessions(command: &str) -> bool {
-    !matches!(command, "ls" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository")
+    !matches!(command, "ls" | "watch" | "machine" | "presence" | "swarm" | "project" | "account" | "speech" | "analytics" | "graph" | "wait" | "mobile" | "hooks" | "repository")
 }
 
 /// Fails unless this process may run what the processes of a session run:
@@ -628,6 +630,7 @@ pub fn dispatch(mut args: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         "ls" => list(&config, args, dry),
+        "watch" => crate::watch::run(&config, args, dry),
         "archives" => {
             let mobile = cfg!(windows) && args.last().map(String::as_str)==Some("--windows-mobile");
             let args = if mobile { &args[..args.len()-1] } else { args };
@@ -966,6 +969,23 @@ fn remote(
             all.extend(args.clone());
             all
         }
+        // One long-lived stream: keepalives detect a dropped link, and EOF on
+        // the local stdin reaches the peer's watcher, which then exits.
+        "watch" => {
+            flags = vec![
+                "-o".into(),
+                "BatchMode=yes".into(),
+                "-o".into(),
+                "ConnectTimeout=5".into(),
+                "-o".into(),
+                "ServerAliveInterval=10".into(),
+                "-o".into(),
+                "ServerAliveCountMax=3".into(),
+            ];
+            let mut all = vec![command.into()];
+            all.extend(args.clone());
+            all
+        }
         // Phone management reaches the relay through the gateway peer.
         "mobile" => {
             flags = vec![
@@ -1039,6 +1059,9 @@ fn remote(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hooks-health-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to inspect hook health' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "analytics" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] analytics --json'; then exec ~/.local/bin/hgs {} --read-only; else echo 'hgs: update the selected computer to read analytics' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "watch" {
+        // An older peer would read an unknown command as an agent launch.
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF '{}'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to stream events (watch-v1)' >&2; exit 1; fi",zerus_watch_protocol::HELP_MARKER,platform::join(&remote_args)))
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
     } else { format!("~/.local/bin/hgs {}", platform::remote_join(&remote_args)) };
@@ -1081,6 +1104,8 @@ fn remote(
 }
 
 pub(crate) fn local_json(config: &Config) -> Result<Value> { local_json_archives(config, true) }
+/// `ls --json --local --no-archives`, which `hgs watch` streams.
+pub(crate) fn local_listing(config: &Config) -> Result<Value> { local_json_archives(config, false) }
 fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     if !platform::local_sessions() {
         // A control console: no tmux, session state or local projects. Absent

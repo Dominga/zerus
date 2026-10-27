@@ -160,6 +160,11 @@ jobs:
           cargo +1.99.1 fmt --check --manifest-path crates/replica-ffi/Cargo.toml
           cargo +1.99.1 clippy --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi --all-targets -- -D warnings
           cargo +1.99.1 test --locked --manifest-path crates/replica-ffi/Cargo.toml --target-dir target/replica-ffi
+      - name: Watch protocol crate (format, lints, tests)
+        run: |
+          cargo +1.99.1 fmt --check --manifest-path crates/watch-protocol/Cargo.toml
+          cargo +1.99.1 clippy --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol --all-targets -- -D warnings
+          cargo +1.99.1 test --locked --manifest-path crates/watch-protocol/Cargo.toml --target-dir target/watch-protocol
       # Packages fail without a notice for every shipped crate; find out here.
       - name: Rust license notices
         run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"

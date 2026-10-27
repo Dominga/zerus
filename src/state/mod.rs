@@ -65,6 +65,7 @@ mod resume_input;
 mod scan_cache;
 mod schedules;
 mod waits;
+pub(crate) mod watch_source;
 mod search;
 pub(crate) mod session_graph;
 mod storage;

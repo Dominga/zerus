@@ -22,6 +22,7 @@ mod status;
 mod state;
 mod swarm;
 mod tasks;
+mod watch;
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--macos-session-service") {

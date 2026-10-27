@@ -1402,6 +1402,14 @@ pub(crate) fn permission_record(pending: &PendingQuestion) -> Value {
     if let Some(answer) = answer {
         record["answer"] = answer;
     }
+    // U19 (#520): a subagent card says so, with its rows for the desktop.
+    if pending.card["subagent_confirmation"] == true {
+        record["subagent_confirmation"] = json!(true);
+        record["subagent_calls"] = pending.card["subagent_calls"].clone();
+        if pending.card["subagents"].is_array() {
+            record["subagents"] = pending.card["subagents"].clone();
+        }
+    }
     record
 }
 
@@ -4956,6 +4964,19 @@ mod tests {
         assert_eq!(pending.question_id, card["question_id"].as_str().unwrap());
         let item = inbox::items(&saved).into_iter().find(|item| item.kind == "permission").unwrap();
         assert_eq!(item.member, "Backend");
+        // #520: the rows of a card that lists its calls reach the lead's
+        // record and item; a card without them keeps the text alone.
+        assert!(item.value().get("subagents").is_none());
+        let record = permission_record(&pending);
+        assert_eq!((record["subagent_confirmation"].clone(), record["subagent_calls"].clone()), (json!(true), json!(["toolu_one", "toolu_two"])));
+        assert!(record.get("subagents").is_none());
+        let mut listed = pending.clone();
+        listed.card["subagents"] = json!([{"id":"toolu_one","type":"Explore","model":"haiku","description":"Find the callers"}]);
+        assert_eq!(permission_record(&listed)["subagents"][0]["type"], "Explore");
+        let mut with_rows = saved.clone();
+        with_rows.members.iter_mut().find(|member| member.id == "dev").unwrap().pending = Some(listed);
+        let item = inbox::items(&with_rows).into_iter().find(|item| item.kind == "permission").unwrap();
+        assert_eq!(item.value()["subagents"][0]["model"], "haiku");
         assert!(
             item.summary.contains("Subagents: Start 2 subagents: Explore (model haiku): Find the callers; general (model inherits claude-opus-4-6): Write the fix"),
             "{}",

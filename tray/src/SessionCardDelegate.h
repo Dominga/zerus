@@ -6,6 +6,7 @@
 #include "ProjectAppearance.h"
 #include "MachineAppearance.h"
 #include "SessionStatusBadge.h"
+#include "SessionStates.h"
 #include "SessionElapsed.h"
 #include "WorkspaceIcons.h"
 #include "GitStatusBadge.h"
@@ -97,7 +98,26 @@ public:
         QString state, caption;
         SessionStatusBadge::Kind kind;
         IdentityBadges::RowEmphasis emphasis;
+        // U30 (#508): the session's state as shown, and Cooling's heat.
+        SessionStates::Shown shown;
+        qreal heat = -1;
     };
+    static SessionStates::Shown stateOf(const QModelIndex &index) {
+        return SessionStates::present(index.data(SessionRoles::SessionState).toMap(), double(QDateTime::currentSecsSinceEpoch()));
+    }
+    // U30 (#508): a cold card's + New and Resume on line 3 (clicks never open the card).
+    static std::pair<QRect, QRect> coldActionRects(const QStyleOptionViewItem &option, const QModelIndex &index) {
+        if (index.data(SessionRoles::Header).toBool() || !index.data(SessionRoles::ChildId).toString().isEmpty()
+            || !index.data(SessionRoles::LaunchId).toString().isEmpty() || rowCollapsed(index) || !stateOf(index).coldActions) return {};
+        const bool compact = option.widget && option.widget->property("compact").toBool();
+        const QRect r = sessionCardRect(option.rect).adjusted(sessionCardTileInset() + sessionCardIndent(index), 0, 0, 0);
+        const int right = r.right() - 11;
+        const int detailY = r.y() + (compact ? 3 : 5) + (compact ? 22 : 24) + (compact ? 20 : 22);
+        QFont font = option.font; font.setPixelSize(12);
+        const int resumeWidth = CachedText::width(font, tr("Resume")) + 14, newWidth = CachedText::width(font, tr("+ New")) + 18;
+        const QRect resume(right - resumeWidth, detailY - 1, resumeWidth, 20);
+        return {QRect(resume.left() - 6 - newWidth, detailY - 1, newWidth, 20), resume};
+    }
     static bool rowCollapsed(const QModelIndex &index) {
         return index.data(SessionRoles::RowCollapsed).toBool() && !index.data(SessionRoles::Header).toBool()
             && index.data(SessionRoles::ChildId).toString().isEmpty() && index.data(SessionRoles::LaunchId).toString().isEmpty();
@@ -217,6 +237,19 @@ public:
         if (s.kind == SessionStatusBadge::Waiting) {
             const auto items=index.data(SessionRoles::CoordinationWait).toJsonObject().value("items").toArray();
             s.caption=SessionElapsed::status(tr("Waiting"),items.isEmpty()?0:items.first().toObject().value("created_at").toDouble());
+        }
+        // U30 (#508): the host's state decides the calm badges; attention and
+        // an unsent draft on an idle card keep theirs. Archived rows keep their word.
+        s.shown = stateOf(index);
+        const QString key = s.shown.key;
+        const auto stateKind = key == "deps" ? SessionStatusBadge::Deps : key == "build" ? SessionStatusBadge::Build
+                             : key == "cooling" ? SessionStatusBadge::Cooling : key == "cold" ? SessionStatusBadge::Cold
+                             : key == "stopped" ? SessionStatusBadge::Stopped : SessionStatusBadge::Neutral;
+        if (stateKind != SessionStatusBadge::Neutral && !s.attention && s.state != "Archived" && !(s.draft && (key == "cooling" || key == "cold"))) {
+            s.kind = stateKind; s.caption = s.shown.badge; s.heat = s.shown.heat; s.working = false;
+        } else if (key == "user" && s.shown.badge == tr("Needs you") && !s.attention) {
+            // The lead's "Waiting for you": amber, as the user state is.
+            s.kind = SessionStatusBadge::Attention; s.caption = s.shown.badge;
         }
         s.additionalUnread = s.unread && (s.working || s.attention || s.draft);
         return s;
@@ -621,7 +654,11 @@ private:
                 p->setFont(mark); p->setPen(color); p->drawText(tile, Qt::AlignCenter, initials);
             }
             const auto state = statusForView(option, index);
-            const QColor dot = state.attention ? QColor("#e8a75a") : state.working ? QColor("#7dd3b0") : state.unread ? QColor("#7fb6e0") : QColor();
+            // U30 §5: working accent, user warn, deps / cooling / cold their tokens.
+            QColor dot = state.attention || state.kind == SessionStatusBadge::Attention ? QColor("#e8a75a") : state.working ? QColor("#7dd3b0")
+                       : state.unread ? QColor("#7fb6e0") : QColor();
+            if (state.kind == SessionStatusBadge::Deps || state.kind == SessionStatusBadge::Cooling || state.kind == SessionStatusBadge::Cold
+                || state.kind == SessionStatusBadge::Build) dot = SessionStatusBadge::stateTone(state.kind, dark);
             if (dot.isValid()) {
                 p->setPen(QPen(option.widget && option.widget->property("cardSurface").isValid() ? option.widget->property("cardSurface").value<QColor>() : QColor(dark ? "#181c22" : "#ffffff"), 2));
                 p->setBrush(dot); p->drawEllipse(QRectF(tile.right() - 7, tile.bottom() - 7, 10, 10));
@@ -661,7 +698,7 @@ private:
         if (shared) *shared = {statusBadge, unreadBadge, providerBadge, agent};
         else {
             SessionStatusBadge::paint(p, statusBadge, caption, kind, dark,
-                option.widget ? option.widget->property("workingPulse").toReal() : 0.0);
+                option.widget ? option.widget->property("workingPulse").toReal() : 0.0, 1, false, status.heat);
             if (additionalUnread) SessionStatusBadge::paint(p, unreadBadge, {}, SessionStatusBadge::Unread, dark);
             if (providerWidth) IdentityBadges::paint(p, providerBadge, IdentityBadges::Provider, agent, dark);
         }
@@ -711,11 +748,39 @@ private:
         else if (detail.isEmpty() && state == "Ready") detail = tr("Waiting for your next message");
         else if (detail.isEmpty() && state == "Not tracked") detail = tr("Open terminal to view activity");
         else if (detail.isEmpty() && paused) detail = tr("Resume to continue");
+        // U30 (#508): line 3 says what the state is about, with its glyph:
+        // deps its reason (in its tone), a build what runs, Cooling the warmth
+        // left, Cold how long the cache has been cold, Stopped how to go on.
+        QString lineIcon; QColor lineInk = state == "Offline" ? muted : foreground;
+        const bool stateLine = SessionStatusBadge::isState(kind) || (status.shown.key == "user" && caption == tr("Needs you"));
+        if (stateLine && !status.shown.line.isEmpty()) {
+            detail = status.shown.line; lineIcon = status.shown.icon;
+            if (kind == SessionStatusBadge::Deps) lineInk = SessionStatusBadge::stateTone(kind, dark);
+        }
+        // The user state says what it needs (the question, the command) when
+        // the card has nothing of its own to show.
+        if (detail.isEmpty() && status.shown.key == "user" && !status.shown.line.isEmpty()) detail = status.shown.line;
         const bool reviewLater = index.data(SessionRoles::ReviewLater).toBool();
-        const int detailX = textX + (reviewLater ? 18 : 0);
+        int detailX = textX + (reviewLater ? 18 : 0);
         if (reviewLater) workspaceIcon("attention", status.muted ? SessionStatusBadge::mutedTone(dark) : QColor(dark ? "#f0c77b" : "#885400")).paint(p, QRect(textX, detailY + 2, 14, 14));
-        const int detailWidth = width - (detailX - textX);
-        font.setPixelSize(12); p->setFont(font); p->setPen(state == "Offline" ? muted : foreground);
+        if (!lineIcon.isEmpty()) {
+            SessionStatusBadge::glyph(p, QPointF(detailX + 6, detailY + 9), 12, lineIcon, SessionStatusBadge::isState(kind) ? SessionStatusBadge::stateTone(kind, dark) : lineInk);
+            detailX += 18;
+        }
+        int detailWidth = width - (detailX - textX);
+        const auto cold = coldActionRects(option, index);
+        if (!cold.first.isEmpty()) {
+            detailWidth = qMax(0, cold.first.left() - 8 - detailX);
+            QFont action = font; action.setPixelSize(12); p->setFont(action);
+            const QString hovered = option.widget ? option.widget->property("hoveredColdAction").toString() : QString();
+            const QString rowKey = index.data(SessionRoles::Key).toString();
+            QColor frame = muted; frame.setAlphaF(hovered == rowKey + "\nnew" ? .9 : .55);
+            p->setPen(QPen(frame, 1)); p->setBrush(hovered == rowKey + "\nnew" ? QColor(dark ? "#2b343e" : "#e7edf2") : QColor(Qt::transparent));
+            p->drawRoundedRect(QRectF(cold.first).adjusted(.5, .5, -.5, -.5), 6, 6);
+            p->setPen(foreground); CachedText::draw(p, cold.first, Qt::AlignCenter, tr("+ New"));
+            p->setPen(hovered == rowKey + "\nresume" ? foreground : muted); CachedText::draw(p, cold.second, Qt::AlignCenter, tr("Resume"));
+        }
+        font.setPixelSize(12); p->setFont(font); p->setPen(lineInk);
         CachedText::draw(p, QRect(detailX, detailY, detailWidth, 18), Qt::AlignVCenter, CachedText::elided(font, detail, Qt::ElideRight, detailWidth));
 
         font.setPixelSize(11); p->setFont(font); p->setPen(muted);
@@ -836,7 +901,7 @@ private:
         SharedBadges shared;
         p->save(); p->setOpacity(full); paintCard(p, wide, index, &shared); p->restore();
         const QRect statusBadge = SessionStrip::mix(stripStatus, shared.status, expansion);
-        SessionStatusBadge::paint(p, statusBadge, status.caption, status.kind, dark, pulse, full);
+        SessionStatusBadge::paint(p, statusBadge, status.caption, status.kind, dark, pulse, full, false, status.heat);
         neutralDot(statusBadge);
         if (status.additionalUnread) {
             // A dot on the strip badge grows into the separate unread badge.

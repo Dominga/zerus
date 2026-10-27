@@ -341,6 +341,8 @@ Team parse(const QJsonObject &v)
             member.permission.reason = str(q, "reason");
             member.permission.at = q.value("asked_at").toDouble();
             member.permission.hash = q.value("question_hash").toString(q.value("expected_question_hash").toString());
+            member.permission.subagents = q.value("subagent_confirmation").toBool();
+            member.permission.record = q;
             // C4: the card's own ids for Allow and Deny.
             if (q.value("answer").isObject()) {
                 const auto a = q.value("answer").toObject();

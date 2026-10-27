@@ -15,6 +15,10 @@ class CacheKeepalive : public QObject {
 public:
     static constexpr int DefaultHours = 1, MaxHours = 24;
     static constexpr int DefaultTtl = 300;
+    // U30 (#508): while a session builds (session_state "build"), its context
+    // is kept warm every 30 minutes for as long as the build runs, whatever its
+    // own hours; when the build ends the session follows its setting again.
+    static constexpr int BuildInterval = 1800;
     static QString message();
     // Hours per session, 0 when off. Device-local, keyed like collapsed rows.
     static int hours(const QString &host, const SessionInfo &session);
@@ -42,6 +46,7 @@ private:
         bool inspected = false;
     };
     static bool idle(const SessionInfo &session);
+    static bool building(const SessionInfo &session);
     HgsClient m_client;
     QHash<QByteArray, State> m_states;
     QHash<quint64, QByteArray> m_requests;

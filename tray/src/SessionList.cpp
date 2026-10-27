@@ -281,6 +281,25 @@ bool SessionList::viewportEvent(QEvent *event)
                 QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), teamStrip);
                 return true;
             }
+            // U30 (#508): the cold card's actions and the state badge say what they mean.
+            const auto option = animationOption(index);
+            const auto cold = SessionDelegate::coldActionRects(option, index);
+            if (cold.first.contains(help->pos()) || cold.second.contains(help->pos())) {
+                const bool fresh = cold.first.contains(help->pos());
+                QToolTip::showText(help->globalPos(), fresh ? tr("Start a new session in the same folder and machine") : tr("Keep this session; the first message rebuilds the cache"),
+                                   viewport(), fresh ? cold.first : cold.second);
+                return true;
+            }
+            if (!SessionDelegate::rowCollapsed(index) && index.data(SessionRoles::ChildId).toString().isEmpty()) {
+                const auto status = SessionDelegate::statusForView(option, index);
+                const QRect badge = SessionDelegate::titleLayout(option, index, status).status;
+                if (badge.contains(help->pos()) && !status.shown.tooltip.isEmpty()) {
+                    QString text = status.shown.tooltip;
+                    if (!status.shown.line.isEmpty() && status.shown.key != "working") text += QLatin1Char('\n') + status.shown.line;
+                    QToolTip::showText(help->globalPos(), Qt::convertFromPlainText(text), viewport(), badge);
+                    return true;
+                }
+            }
             // U25 (spec 2.2): each chip names what it counts.
             for (const auto &chip : SessionDelegate::rowChips(visualItemRect(row), index, font(), property("compact").toBool()))
                 if (chip.rect.contains(help->pos())) {
@@ -322,7 +341,7 @@ bool SessionList::viewportEvent(QEvent *event)
 void SessionList::mousePressEvent(QMouseEvent *e)
 {
     setKeyboardFocusVisible(false);
-    m_press = e->position().toPoint(); m_pressedGroup.clear(); m_pressedParent.clear(); m_pressedAdd.clear(); m_pressedChip.clear(); m_togglePress = false;
+    m_press = e->position().toPoint(); m_pressedGroup.clear(); m_pressedParent.clear(); m_pressedAdd.clear(); m_pressedChip.clear(); m_pressedCold.clear(); m_togglePress = false;
     if (e->button() == Qt::RightButton) { e->accept(); return; }
     auto *item = itemAt(m_press);
     const bool additive = e->modifiers().testFlag(Qt::ControlModifier) || e->modifiers().testFlag(Qt::MetaModifier);
@@ -351,6 +370,8 @@ void SessionList::mousePressEvent(QMouseEvent *e)
         const auto target = hoverTarget(m_press);
         if (target.startsWith(QLatin1String("add:"))) { m_pressedAdd = target.mid(4); setFocus(); e->accept(); return; }
         if (target.startsWith(QLatin1String("chip:"))) { m_pressedChip = target.mid(5); setFocus(); e->accept(); return; }
+        // U30 (#508): a cold card's + New and Resume never open the card.
+        if (target.startsWith(QLatin1String("cold:"))) { m_pressedCold = target.mid(5); setFocus(); e->accept(); return; }
     }
     if (e->button() == Qt::LeftButton && item && item->data(SessionRoles::Header).toBool()) {
         m_pressedGroup = item->data(SessionRoles::Group).toString(); setFocus(); e->accept(); return;
@@ -442,6 +463,11 @@ QString SessionList::hoverTarget(const QPoint &point) const
         return projectAddRect(rect).contains(point) ? QStringLiteral("add:") + index.data(SessionRoles::Group).toString() : QString();
     for (const auto &chip : SessionDelegate::rowChips(rect, index, font(), property("compact").toBool()))
         if (chip.rect.contains(point)) return QStringLiteral("chip:") + index.data(SessionRoles::Key).toString() + QLatin1Char('\n') + QString::number(chip.kind);
+    if (SessionStrip::expansion(this) >= 1) {
+        const auto cold = SessionDelegate::coldActionRects(animationOption(index), index);
+        if (cold.first.contains(point)) return QStringLiteral("cold:") + index.data(SessionRoles::Key).toString() + QStringLiteral("\nnew");
+        if (cold.second.contains(point)) return QStringLiteral("cold:") + index.data(SessionRoles::Key).toString() + QStringLiteral("\nresume");
+    }
     return {};
 }
 
@@ -453,8 +479,10 @@ void SessionList::mouseMoveEvent(QMouseEvent *e)
     const QString hovered = childrenControlRect(item).contains(point) ? item->data(SessionRoles::Key).toString() : QString();
     const QString target = hoverTarget(point);
     const QString add = target.startsWith(QLatin1String("add:")) ? target.mid(4) : QString(), chip = target.startsWith(QLatin1String("chip:")) ? target.mid(5) : QString();
-    if (property("hoveredChildren").toString() != hovered || property("hoveredAdd").toString() != add || property("hoveredChip").toString() != chip) {
-        setProperty("hoveredChildren", hovered); setProperty("hoveredAdd", add); setProperty("hoveredChip", chip); viewport()->update();
+    const QString cold = target.startsWith(QLatin1String("cold:")) ? target.mid(5) : QString();
+    if (property("hoveredChildren").toString() != hovered || property("hoveredAdd").toString() != add || property("hoveredChip").toString() != chip
+        || property("hoveredColdAction").toString() != cold) {
+        setProperty("hoveredChildren", hovered); setProperty("hoveredAdd", add); setProperty("hoveredChip", chip); setProperty("hoveredColdAction", cold); viewport()->update();
         if (hovered.isEmpty() && target.isEmpty()) viewport()->unsetCursor(); else viewport()->setCursor(Qt::PointingHandCursor);
     }
     if (!m_pressedParent.isEmpty()) { e->accept(); return; }
@@ -483,6 +511,12 @@ void SessionList::mouseReleaseEvent(QMouseEvent *e)
         if (e->button() == Qt::LeftButton && item
             && item->data(SessionRoles::TeamLead).toMap().value("id").toString() == id
             && (e->position().toPoint() - m_press).manhattanLength() < QApplication::startDragDistance()) emit teamActivated(id);
+        e->accept(); return;
+    }
+    if (!m_pressedCold.isEmpty()) {
+        const QString cold = std::exchange(m_pressedCold, {});
+        const QString target = e->button() == Qt::LeftButton ? hoverTarget(e->position().toPoint()) : QString();
+        if (target == QLatin1String("cold:") + cold) emit coldActionRequested(cold.section(QLatin1Char('\n'), 0, -2), cold.section(QLatin1Char('\n'), -1));
         e->accept(); return;
     }
     if (!m_pressedAdd.isEmpty() || !m_pressedChip.isEmpty()) {

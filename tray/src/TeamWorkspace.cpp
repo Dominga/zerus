@@ -1,4 +1,5 @@
 #include "TeamWorkspace.h"
+#include "SubagentRequest.h"
 #include "TeamAttentionNotices.h"
 
 #include <QPointer>
@@ -2519,12 +2520,37 @@ QWidget *TeamWorkspace::members(const Team &team)
                                    .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
             auto *pv = new QVBoxLayout(box); pv->setContentsMargins(8, 5, 8, 6); pv->setSpacing(3);
             auto *head = row(6);
+            const bool subagents = m.permission.subagents;
             if (!m.permission.tool.isEmpty()) head->addWidget(new Pill(m.permission.tool, c.warn));
-            head->addWidget(label(m.permission.commandSource == "process" ? tr("command from the running process")
-                              : m.permission.commandSource == "tool_input" ? tr("command from the tool input")
-                              : tr("the agent did not show the command"), c.text3, 10), 1);
-            pv->addLayout(head);
-            if (!m.permission.command.isEmpty()) {
+            if (subagents) {
+                // U19 (#520): "Start N subagents", one row each, Allow all / Deny.
+                const auto calls = SubagentRequest::calls(m.permission.record, m.permission.reason);
+                auto *title = label(SubagentRequest::title(SubagentRequest::count(m.permission.record, calls)), c.fg, 12, true, "teamMemberSubagentsTitle");
+                head->addWidget(title, 1);
+                pv->addLayout(head);
+                for (const auto &call : calls) {
+                    auto *line = new QWidget; line->setObjectName("teamMemberSubagent"); line->setProperty("subagentType", call.type);
+                    auto *lv = new QVBoxLayout(line); lv->setContentsMargins(6, 2, 0, 2); lv->setSpacing(1);
+                    auto *top = row(6);
+                    top->addWidget(label(call.type.isEmpty() ? tr("Subagent") : call.type, c.fg, 11, true, "teamMemberSubagentType"));
+                    QStringList meta;
+                    if (!call.model.isEmpty()) meta << tr("model %1").arg(call.model);
+                    if (!call.effort.isEmpty()) meta << tr("effort %1").arg(call.effort);
+                    top->addWidget(elided(meta.join(QStringLiteral(" · ")), c.text3, 10), 1);
+                    lv->addLayout(top);
+                    if (!call.description.isEmpty()) {
+                        auto *task = label(call.description, c.text2, 11, false, "teamMemberSubagentTask"); task->setWordWrap(true);
+                        lv->addWidget(task);
+                    }
+                    pv->addWidget(line);
+                }
+            } else {
+                head->addWidget(label(m.permission.commandSource == "process" ? tr("command from the running process")
+                                  : m.permission.commandSource == "tool_input" ? tr("command from the tool input")
+                                  : tr("the agent did not show the command"), c.text3, 10), 1);
+                pv->addLayout(head);
+            }
+            if (!subagents && !m.permission.command.isEmpty()) {
                 auto *command = label(m.permission.command, c.fg, 11, false, "teamMemberPermissionCommand");
                 command->setFont(NewSessionDense::mono(11));
                 command->setWordWrap(true);
@@ -2532,7 +2558,7 @@ QWidget *TeamWorkspace::members(const Team &team)
                 command->setToolTip(m.permission.command);
                 pv->addWidget(command);
             }
-            if (!m.permission.reason.isEmpty()) {
+            if (!subagents && !m.permission.reason.isEmpty()) {
                 auto *reason = label(tr("Agent: %1").arg(m.permission.reason), c.text2, 11, false, "teamMemberPermissionReason");
                 reason->setWordWrap(true);
                 pv->addWidget(reason);
@@ -2542,7 +2568,7 @@ QWidget *TeamWorkspace::members(const Team &team)
             reasonEdit->setPlaceholderText(tr("Why deny? The member receives this"));
             answerRow->addWidget(reasonEdit, 1);
             auto *deny = button(tr("Deny"), "teamMemberPermissionDeny"); deny->setProperty("danger", true);
-            auto *allow = button(tr("Allow"), "teamMemberPermissionAllow", true);
+            auto *allow = button(subagents ? tr("Allow all") : tr("Allow"), "teamMemberPermissionAllow", true);
             // C4: the answer must carry the card's own question id and option
             // ids (question.answer); without them the card cannot answer.
             const bool hasHash = !m.permission.id.isEmpty() && !m.permission.hash.isEmpty();

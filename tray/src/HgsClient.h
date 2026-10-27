@@ -82,6 +82,14 @@ struct SessionInfo {
     QJsonObject subagents;
     QString processState, conversationState, runtimeState;
     double lastEventAt = 0, turnStarted = 0, compactionStarted = 0, providerStatusAt = 0, attentionStarted = 0;
+    // U30 (#506): the host's session state (working, user, deps, build,
+    // cooling, cold, stopped; empty from an older host), its reason
+    // ({kind, text, ...}), the last native event, the prompt cache's TTL
+    // ({seconds, source, kept_warm}) and a Zerus-run build ({source, label,
+    // command, since}) while one runs.
+    QString sessionState;
+    QJsonObject stateReason, cacheTtl, build;
+    double lastActive = 0;
     int subagentCount = 0;
     // Pending optional Codex questions ("optional_questions"): the exact count,
     // the IDs the host lists (the newest ones) and the newest question's time.
@@ -96,6 +104,8 @@ struct SessionInfo {
         return state == QLatin1String("running") && processState != QLatin1String("exited")
             && activity != QLatin1String("unknown") && !(conversationState == QLatin1String("ended") && activity != QLatin1String("idle"))
             && (activity == QLatin1String("busy") || backgroundProcesses > 0 || subagentActiveCount > 0
+                // U30: a build Zerus runs keeps the reply waiting too.
+                || sessionState == QLatin1String("build")
                 || (activity == QLatin1String("idle") && phase == QLatin1String("idle") && hasCoordinationWait()));
     }
     bool hasCoordinationWait() const {

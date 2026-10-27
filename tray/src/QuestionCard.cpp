@@ -1,4 +1,5 @@
 #include "QuestionCard.h"
+#include "SubagentRequest.h"
 #include "MonospaceFont.h"
 #include "ContentScale.h"
 #include "MarkdownText.h"
@@ -86,6 +87,17 @@ CardColors cardColors(bool dark)
     return {QColor(dark ? "#202a2c" : "#f4f9f7"), QColor(dark ? "#e8edf4" : "#1a2733"), QColor(dark ? "#40544e" : "#cbded4"),
             QColor(dark ? "#293d35" : "#e4f3ec"), QColor(dark ? "#8bdfc0" : "#167357"), QColor(dark ? "#10231b" : "#ffffff"),
             QColor(dark ? "#a2adbc" : "#627082"), QColor(dark ? "#192228" : "#ffffff")};
+}
+
+// U19 (#520): the subagent rows in the card's colors, on build and on a theme change.
+void styleSubagentRows(QWidget *card, const CardColors &colors)
+{
+    for (auto *row : card->findChildren<QFrame *>("questionSubagent"))
+        row->setStyleSheet(QStringLiteral("QFrame#questionSubagent{background:%1;border:1px solid %2;border-radius:8px;}"
+                                          "QLabel#questionSubagentType{color:%3;font-weight:600;font-size:13px;}"
+                                          "QLabel#questionSubagentModel{color:%4;font-size:11px;}"
+                                          "QLabel#questionSubagentTask{color:%3;font-size:12px;}")
+                               .arg(colors.field.name(), colors.border.name(), colors.text.name(), colors.muted.name()));
 }
 
 bool webLink(const QUrl &url)
@@ -231,8 +243,14 @@ QuestionCard::QuestionCard(QWidget *parent) : QWidget(parent)
     for(auto *button:{m_approve,m_deny})connect(button,&QPushButton::clicked,this,[this,button]{
         if(!button->isEnabled()||!m_question.value("approval").toBool())return;
         const auto question=m_question.value("questions").toArray().first().toObject();
+        // U19 (#520): a subagent card is answered by its own one-time Yes or No.
+        QString option=button==m_approve?QStringLiteral("allow"):QStringLiteral("deny");
+        if(SubagentRequest::is(m_question)) {
+            option=SubagentRequest::optionId(question,button==m_approve?QStringLiteral("Yes"):QStringLiteral("No"));
+            if(option.isEmpty())return;
+        }
         emit answerRequested(m_session,m_id,QJsonArray{QJsonObject{{"question_id",question.value("id")},
-            {"selected_option_ids",QJsonArray{button==m_approve?"allow":"deny"}},{"text",""}}});
+            {"selected_option_ids",QJsonArray{option}},{"text",""}}});
     });
     m_reviewTimer.setInterval(100);connect(&m_reviewTimer,&QTimer::timeout,this,[this]{
         if(!m_question.value("approval").toBool())return;
@@ -559,14 +577,45 @@ void QuestionCard::rebuild()
         auto *page = new QWidget; page->setObjectName("questionPage");
         auto *column = new QVBoxLayout(page); column->setContentsMargins(0, 0, 7, 0); column->setSpacing(7);
         const QString promptText = question.value("question").toString();
-        if (literal) {
+        const bool subagents = SubagentRequest::is(m_question);
+        if (subagents) {
+            // U19 (#520): one row per subagent: its type, model, effort when
+            // known, and its task; Allow all and Deny answer the card.
+            form.allowOther = false;
+            auto *list = new QWidget; list->setObjectName("questionSubagents");
+            auto *rows = new QVBoxLayout(list); rows->setContentsMargins(0, 0, 0, 0); rows->setSpacing(6);
+            for (const auto &call : SubagentRequest::calls(m_question, promptText)) {
+                auto *row = new QFrame; row->setObjectName("questionSubagent"); row->setProperty("subagentType", call.type);
+                auto *v = new QVBoxLayout(row); v->setContentsMargins(10, 7, 10, 8); v->setSpacing(3);
+                auto *top = new QHBoxLayout; top->setSpacing(8);
+                auto *type = new QLabel(call.type.isEmpty() ? tr("Subagent") : call.type); type->setObjectName("questionSubagentType");
+                type->setTextFormat(Qt::PlainText);
+                top->addWidget(type);
+                QStringList meta;
+                if (!call.model.isEmpty()) meta << tr("model %1").arg(call.model);
+                if (!call.effort.isEmpty()) meta << tr("effort %1").arg(call.effort);
+                auto *details = new QLabel(meta.join(QStringLiteral(" · "))); details->setObjectName("questionSubagentModel");
+                details->setTextFormat(Qt::PlainText); details->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                top->addWidget(details, 1);
+                v->addLayout(top);
+                if (!call.description.isEmpty()) {
+                    auto *task = new QLabel(call.description); task->setObjectName("questionSubagentTask");
+                    task->setTextFormat(Qt::PlainText); task->setWordWrap(true); task->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                    task->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+                    v->addWidget(task);
+                }
+                rows->addWidget(row);
+            }
+            column->addWidget(list);
+            styleSubagentRows(list, cardColors(m_dark));
+        } else if (literal) {
             auto *prompt = new QLabel(promptText); prompt->setObjectName("questionPrompt");
             prompt->setTextFormat(Qt::PlainText); prompt->setWordWrap(true); prompt->setTextInteractionFlags(Qt::TextSelectableByMouse);
             prompt->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
             column->addWidget(prompt);
         } else column->addWidget(markdownText("questionPrompt", promptText));
         const QString body = question.value("body").toString();
-        if (!body.isEmpty() && body != promptText) {
+        if (!subagents && !body.isEmpty() && body != promptText) {
             if (literal) {
                 auto *detail = new QLabel(body); detail->setObjectName("questionBody"); detail->setTextFormat(Qt::PlainText); detail->setWordWrap(true);
                 detail->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -581,7 +630,7 @@ void QuestionCard::rebuild()
         auto *group = new QButtonGroup(page); group->setExclusive(!form.multi);
         // Claude approvals list native options verbatim. Hide only the
         // synthesized Approve/Deny pairs, which have their own buttons.
-        const bool listed = !m_question.value("approval").toBool() || m_question.value("approval_choices").toBool();
+        const bool listed = !subagents && (!m_question.value("approval").toBool() || m_question.value("approval_choices").toBool());
         for (const auto &optionValue : question.value("options").toArray()) {
             const auto option = optionValue.toObject();
             // A broader option keeps its own description as reported, such as the
@@ -787,7 +836,9 @@ void QuestionCard::updateControls()
         }
     }
     const bool approval=m_question.value("approval").toBool();
-    const bool choices=approval&&m_question.value("approval_choices").toBool();
+    // U19 (#520): a subagent card takes Allow all / Deny, never the list.
+    const bool subagents=approval&&SubagentRequest::is(m_question);
+    const bool choices=approval&&m_question.value("approval_choices").toBool()&&!subagents;
     const QString broader=choices?broaderSelection():QString();
     const bool confirming=!broader.isEmpty()&&draft.confirm==broader;
     m_submit->setEnabled(!m_key.isEmpty() && m_available && supported && complete && !locked && !draft.uncertain
@@ -803,6 +854,10 @@ void QuestionCard::updateControls()
     const bool optional=m_question.value("optional").toBool();
     const bool planReview=m_question.value("plan_review").toBool();
     m_heading->setText((approval||m_question.value("trust_request").toBool()||planReview)?tr("Agent needs your approval"):optional?tr("Optional question"):tr("Agent needs your answer"));
+    if(subagents) {
+        const auto question=m_question.value("questions").toArray().first().toObject();
+        m_heading->setText(SubagentRequest::title(SubagentRequest::count(m_question,SubagentRequest::calls(m_question,question.value("question").toString()))));
+    }
     if(optional && !approval && m_queueCount>1 && m_queueIndex>=0 && m_queueIndex<m_queueCount)
         m_heading->setText(tr("Optional question #%1/%2").arg(m_queueIndex+1).arg(m_queueCount));
     m_skip->setVisible(optional);
@@ -814,7 +869,8 @@ void QuestionCard::updateControls()
     m_approve->setVisible(buttons);m_deny->setVisible(buttons);
     const bool canApprove=buttons&&m_available&&supported&&!locked&&!draft.uncertain;
     m_approve->setEnabled(canApprove&&m_reviewSeconds==0);m_deny->setEnabled(canApprove);
-    m_approve->setText(m_reviewSeconds>0?tr("Approve once (%1)").arg(m_reviewSeconds):tr("Approve once"));
+    m_approve->setText(subagents?(m_reviewSeconds>0?tr("Allow all (%1)").arg(m_reviewSeconds):tr("Allow all"))
+        :m_reviewSeconds>0?tr("Approve once (%1)").arg(m_reviewSeconds):tr("Approve once"));
     int answered = 0;
     for (int i = 0; i < m_forms.size(); ++i) {
         const auto &form = m_forms[i]; const auto answer = draft.answers.value(form.id);
@@ -847,6 +903,7 @@ void QuestionCard::updateControls()
         notice = tr("“%1” changes the agent's permissions beyond this request. Select Confirm to send it.").arg(broader);
     if (notice.isEmpty() && choices) notice = tr("Review the request, then choose one of the agent's options.");
     if (notice.isEmpty() && planReview && !complete) notice = tr("Review the plan, then choose how the agent continues.");
+    if (notice.isEmpty() && subagents) notice = tr("Allow all starts every subagent listed; Deny stops them all.");
     if (notice.isEmpty()) notice = approval?tr("Approval applies only to this command. Review it before continuing."):
         optional ? tr("The agent can continue. Answer when ready or skip this question.") :
         complete ? tr("Your choices are ready to send.") : tr("Answer each question to continue.");
@@ -959,6 +1016,7 @@ void QuestionCard::setTheme(bool dark)
 {
     m_dark = dark;
     const auto colors = cardColors(dark);
+    styleSubagentRows(this, colors);
     setStyleSheet(QString(R"(
         QWidget#questionCard { background:%1; border:1px solid %3; border-radius:10px; }
         QWidget#questionPage, QScrollArea { background:transparent; border:0; }

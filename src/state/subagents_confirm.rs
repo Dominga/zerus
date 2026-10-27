@@ -43,15 +43,22 @@ pub(crate) fn subagent_tool(event: &Value) -> bool {
     string(event, "agent_id").is_empty() && matches!(string(event, "tool_name"), "Agent" | "Task")
 }
 
-/// A definition model from `.claude/agents/<type>.md` below `folder`.
-fn definition_model(folder: &str, kind: &str) -> Option<String> {
+/// A front-matter field (`model:`, `effort:`) of `.claude/agents/<type>.md`
+/// below `folder`.
+fn definition_field(folder: &str, kind: &str, field: &str) -> Option<String> {
     let path = Path::new(folder).join(".claude").join("agents").join(format!("{kind}.md"));
     let text = fs::read_to_string(path).ok()?;
     let front = text.strip_prefix("---")?;
     let end = front.find("\n---")?;
+    let key = format!("{field}:");
     front[..end].lines().find_map(|line| {
-        line.trim().strip_prefix("model:").map(|model| model.trim().trim_matches('"').to_owned())
-    })
+        line.trim().strip_prefix(key.as_str()).map(|value| value.trim().trim_matches('"').to_owned())
+    }).filter(|value| !value.is_empty())
+}
+
+/// A definition model from `.claude/agents/<type>.md` below `folder`.
+fn definition_model(folder: &str, kind: &str) -> Option<String> {
+    definition_field(folder, kind, "model")
 }
 
 fn group_path(session: &str) -> PathBuf {
@@ -200,14 +207,41 @@ fn can_ask_with(entry: Option<&str>) -> bool {
     entry.is_none_or(|entry| entry == "cli")
 }
 
-pub(crate) fn describe(input: &Value, folder: &str, session_model: &str) -> String {
+/// U19 (#520): one subagent call as the desktop lists it: its type, the model
+/// (the tool input, else the definition, else "inherits <session model>"), the
+/// effort only when the tool input or the definition gives it, and the task.
+pub(crate) fn detail(id: &str, input: &Value, folder: &str, session_model: &str) -> Value {
     let kind = string(input, "subagent_type");
     let kind = if kind.is_empty() { "subagent".to_owned() } else { kind.to_owned() };
     let model = match string(input, "model") {
         model if !model.is_empty() => model.to_owned(),
         _ => definition_model(folder, &kind).unwrap_or_else(|| format!("inherits {session_model}")),
     };
-    let effort = string(input, "effort");
+    let effort = match string(input, "effort") {
+        effort if !effort.is_empty() => Some(effort.to_owned()),
+        _ => definition_field(folder, &kind, "effort"),
+    };
+    let mut value = json!({"id":id,"type":kind,"model":model,"description":string(input, "description")});
+    if let Some(effort) = effort {
+        value["effort"] = json!(effort);
+    }
+    value
+}
+
+/// The structured calls a card shows, for `ids` of the group, in its order.
+pub(crate) fn details(session: &str, ids: &[String], folder: &str, session_model: &str) -> Vec<Value> {
+    open_calls(session)
+        .into_iter()
+        .filter(|(id, _)| ids.contains(id))
+        .map(|(id, input)| detail(&id, &input, folder, session_model))
+        .collect()
+}
+
+pub(crate) fn describe(input: &Value, folder: &str, session_model: &str) -> String {
+    let call = detail("", input, folder, session_model);
+    let kind = string(&call, "type").to_owned();
+    let model = string(&call, "model").to_owned();
+    let effort = string(&call, "effort");
     let mut text = format!("{kind} (model {model}");
     if !effort.is_empty() {
         text += &format!(", effort {effort}");

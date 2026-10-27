@@ -3187,6 +3187,37 @@ mod tests {
             let error = super::run("plan", &json!({"request_id":req(10),"team":"c3","by":"human","members":members}), false)
                 .unwrap_err().to_string();
             assert!(error.contains("at most 16 sessions"), "{error}");
+
+            // N28: a replay returns the first receipt; a failed upstream
+            // forward clears the child's forwarded mark.
+            let mut p3 = Team { id: "p3".into(), name: "Parent3".into(), lead: "dev".into(), status: TeamStatus::Running, ..Default::default() };
+            p3.members.push(Member { id: "dev".into(), role: "Lead".into(), agent: "codex".into(),
+                session: Some(SessionRef { name: "codex/x/dev".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() });
+            p3.tasks.push(Task { id: 3, title: "Delegated".into(), assignee: "dev".into(), status: TaskStatus::InProgress,
+                subteam: Some("c4".into()), ..Default::default() });
+            p3.tasks[0].attempts.push(Attempt { n: 1, id: "p3a".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "pq4".into(), text: "Q".into(), at: 1.0, forwarded: "q9".into(), ..Default::default() }], ..Default::default() });
+            let mut c4 = Team { id: "c4".into(), name: "Child4".into(), lead: "dev".into(), status: TeamStatus::Running,
+                parent: Some(Parent { team: "p3".into(), task: 3, lead: "dev".into(), member: "dev".into() }), ..Default::default() };
+            c4.tasks.push(Task { id: 1, title: "W".into(), assignee: "dev".into(), status: TaskStatus::InProgress, ..Default::default() });
+            c4.tasks[0].attempts.push(Attempt { n: 1, id: "c4a".into(), member: "dev".into(), state: AttemptState::Delivered,
+                questions: vec![Question { id: "q9".into(), text: "Q".into(), at: 1.0, ..Default::default() }], ..Default::default() });
+            store.create(&req(11), &json!({}), p3, Vec::new()).unwrap();
+            store.create(&req(12), &json!({}), c4, Vec::new()).unwrap();
+            let escalate = json!({"request_id":req(13),"team":"c4","question":"q9","by":"human"});
+            super::run("escalate", &escalate, false).unwrap();
+            let count = store.load("p3").unwrap().unwrap().tasks[0].attempts[0].questions.len();
+            super::run("escalate", &escalate, false).unwrap();
+            assert_eq!(store.load("p3").unwrap().unwrap().tasks[0].attempts[0].questions.len(), count, "a replay does not duplicate");
+            let mut stopped_parent = store.load("p3").unwrap().unwrap();
+            stopped_parent.tasks[0].status = TaskStatus::Accepted;
+            store.mutate(None, "p3", None, |team, _| { *team = stopped_parent; Ok(Value::Null) }).unwrap();
+            let mut c5 = store.load("c4").unwrap().unwrap();
+            c5.tasks[0].attempts[0].questions.push(Question { id: "q10".into(), text: "Q2".into(), at: 2.0, ..Default::default() });
+            store.mutate(None, "c4", None, |team, _| { *team = c5; Ok(Value::Null) }).unwrap();
+            let _ = super::run("escalate", &json!({"request_id":req(14),"team":"c4","question":"q10","by":"human"}), false);
+            let child = store.load("c4").unwrap().unwrap();
+            assert!(child.tasks[0].attempts[0].questions.iter().find(|q| q.id == "q10").unwrap().forwarded.is_empty());
             super::set_test_caller_identities(None);
             for (key, value) in old {
                 match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }

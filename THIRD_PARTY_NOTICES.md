@@ -15,7 +15,8 @@ No native Codex executable is bundled.
 
 `tray/vendor/libvterm` contains libvterm 0.3.3 under MIT. Its original copyright
 notice and complete license are retained in `tray/vendor/libvterm/LICENSE`;
-source provenance and archive checksum are in `UPSTREAM.md` beside it.
+source provenance, archive checksum and one local patch are in `UPSTREAM.md`
+beside it.
 
 `tray/vendor/md4c` contains the md4c 0.5.2 Markdown parser and entity table
 under MIT. Its original license is retained in `tray/vendor/md4c/LICENSE.md`;

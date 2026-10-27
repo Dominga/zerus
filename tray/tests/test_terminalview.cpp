@@ -319,6 +319,78 @@ private slots:
     screen.reset();
     QCOMPARE(screen.scrollbackLines(), 0);
   }
+  // U10: a long wrapped line, reflowed taller than the new screen with the
+  // cursor on its last row, aborted libvterm 0.3.3 (see UPSTREAM.md).
+  void reflowedLongLineKeepsTheCursorInside() {
+    const QList<QSize> targets{{2, 2}, {40, 3}};
+    for (const QSize target : targets) {
+      VTerm *terminal = vterm_new(24, 80);
+      auto release = qScopeGuard([terminal] { vterm_free(terminal); });
+      vterm_set_utf8(terminal, 1);
+      VTermScreen *screen = vterm_obtain_screen(terminal);
+      vterm_screen_enable_altscreen(screen, 1);
+      vterm_screen_enable_reflow(screen, true);
+      vterm_screen_reset(screen, 1);
+      const QByteArray line(300, 'x');
+      vterm_input_write(terminal, line.constData(), size_t(line.size()));
+      VTermState *state = vterm_obtain_state(terminal);
+      VTermPos cursor{};
+      vterm_state_get_cursorpos(state, &cursor);
+      QCOMPARE(cursor.row, 3);
+      QCOMPARE(cursor.col, 300 - 3 * 80);
+      vterm_set_size(terminal, target.height(), target.width());
+      int rows = 0, columns = 0;
+      vterm_get_size(terminal, &rows, &columns);
+      QCOMPARE(QSize(columns, rows), target);
+      vterm_state_get_cursorpos(state, &cursor);
+      QVERIFY2(cursor.row >= 0 && cursor.row < rows && cursor.col >= 0 &&
+                   cursor.col < columns,
+               qPrintable(QStringLiteral("%1x%2: cursor %3,%4")
+                              .arg(rows)
+                              .arg(columns)
+                              .arg(cursor.row)
+                              .arg(cursor.col)));
+    }
+  }
+  // U10: a tab switch shows the terminal while it is still narrow. A hidden or
+  // tiny viewport keeps the agent's screen size; a normal resize still works.
+  void hiddenOrTinyTerminalKeepsItsSize() {
+    TerminalScreen screen;
+    screen.resize(720, 420);
+    screen.show();
+    QTest::qWait(10);
+    const QSize normal = screen.terminalSize();
+    QVERIFY(normal != QSize(80, 24));
+    QVERIFY(normal.width() >= 12 && normal.height() >= 4);
+    screen.feed(QByteArray(300, 'x'));
+    QSignalSpy sizes(&screen, &TerminalScreen::sizeChanged);
+    screen.hide();
+    screen.resize(1000, 600);
+    QCoreApplication::processEvents();
+    QCOMPARE(screen.terminalSize(), normal);
+    screen.resize(720, 420);
+    screen.show();
+    QTest::qWait(10);
+    screen.resize(30, 30);
+    QTest::qWait(10);
+    QCOMPARE(screen.terminalSize(), normal);
+    QVERIFY(sizes.isEmpty());
+    // Not reflowed: the long line still fills the first row.
+    QCOMPARE(screen.screenText().section(QLatin1Char('\n'), 0, 0),
+             QString(normal.width(), QLatin1Char('x')));
+    screen.resize(1000, 600);
+    QTest::qWait(10);
+    QVERIFY(screen.terminalSize().width() > normal.width());
+    QVERIFY(screen.terminalSize().height() > normal.height());
+    QCOMPARE(sizes.size(), 1);
+    QCOMPARE(sizes.last().at(0).toSize(), screen.terminalSize());
+    // Shown again after a resize while hidden, it takes the new size.
+    screen.hide();
+    screen.resize(720, 420);
+    screen.show();
+    QTest::qWait(10);
+    QCOMPARE(screen.terminalSize(), normal);
+  }
 
   void nativeKeysAndShortcutOverride() {
     TerminalScreen screen;

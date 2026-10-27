@@ -30,6 +30,7 @@ protected:
   bool event(QEvent *event) override;
   void paintEvent(QPaintEvent *) override;
   void resizeEvent(QResizeEvent *) override;
+  void showEvent(QShowEvent *) override;
   void keyPressEvent(QKeyEvent *) override;
   void mousePressEvent(QMouseEvent *) override;
   void mouseMoveEvent(QMouseEvent *) override;

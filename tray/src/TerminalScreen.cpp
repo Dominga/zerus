@@ -20,6 +20,8 @@ namespace {
 constexpr int Padding = 8;
 constexpr int MaxHistoryLines = 5000;
 constexpr qsizetype MaxHistoryBytes = 24 * 1024 * 1024;
+// The smallest grid a resize applies; a smaller viewport keeps the last size.
+constexpr int MinimumColumns = 12, MinimumRows = 4;
 const QColor Background(16, 21, 27), Foreground(216, 226, 237),
     Selection(53, 82, 103);
 bool before(QPoint a, QPoint b) {
@@ -278,10 +280,16 @@ void TerminalScreen::refreshMetrics() {
   }
 }
 void TerminalScreen::updateGrid() {
+  // A tab switch shows the terminal before its layout widens it. A hidden or
+  // tiny viewport keeps the current size, so the agent's screen never reflows
+  // to a few columns; showEvent and the next real resize catch up.
+  if (!isVisible())
+    return;
   const QSize cells(
-      std::clamp((viewport()->width() - 2 * Padding) / m_cellWidth, 2, 1000),
-      std::clamp((viewport()->height() - 2 * Padding) / m_cellHeight, 2, 500));
-  if (cells == terminalSize())
+      std::min((viewport()->width() - 2 * Padding) / m_cellWidth, 1000),
+      std::min((viewport()->height() - 2 * Padding) / m_cellHeight, 500));
+  if (cells.width() < MinimumColumns || cells.height() < MinimumRows ||
+      cells == terminalSize())
     return;
   m_selectionStart = m_selectionEnd = QPoint(-1, -1);
   vterm_set_size(m_terminal, cells.height(), cells.width());
@@ -290,6 +298,10 @@ void TerminalScreen::updateGrid() {
 }
 void TerminalScreen::resizeEvent(QResizeEvent *event) {
   QAbstractScrollArea::resizeEvent(event);
+  updateGrid();
+}
+void TerminalScreen::showEvent(QShowEvent *event) {
+  QAbstractScrollArea::showEvent(event);
   updateGrid();
 }
 VTermScreenCell TerminalScreen::screenCell(int row, int column) const {

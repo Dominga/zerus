@@ -18,8 +18,12 @@ import sys
 import threading
 import time
 
-XVFB = os.environ.get("ZERUS_BENCH_XVFB") == "1" and not os.environ.get("WAYLAND_DISPLAY")
-REAL = os.environ.get("ZERUS_BENCH_DISPLAY") == "wayland" and bool(os.environ.get("WAYLAND_DISPLAY"))
+# Xvfb mode forces GTK to X11 and points WAYLAND_DISPLAY at a socket that does not exist:
+# with it merely unset, GTK falls back to wayland-0 and the window reaches the desktop.
+WAYLAND = os.environ.get("WAYLAND_DISPLAY", "")
+XVFB = (os.environ.get("ZERUS_BENCH_XVFB") == "1" and os.environ.get("GDK_BACKEND") == "x11"
+        and WAYLAND in ("", "zerus-none"))
+REAL = os.environ.get("ZERUS_BENCH_DISPLAY") == "wayland" and WAYLAND not in ("", "zerus-none")
 if not (XVFB or REAL):
     sys.exit("run this through client/bench/run-webkitgtk.sh")
 

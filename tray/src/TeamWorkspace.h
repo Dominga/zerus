@@ -128,6 +128,7 @@ private:
     QMap<int, QString> problemTexts(const Teams::Team &team) const;
     QSet<int> blockers(const Teams::Team &team) const;
     void setAutoAccept(const Teams::Team &team, bool on);
+    void setWorkAhead(const Teams::Team &team, bool on);
     void rejectPhase(const QString &team, int phase);
     // U25 (spec 5.7): the right column's collapsed lists above the members:
     // Needs your answer, Team stuck (with Show on graph) and Plan problems.

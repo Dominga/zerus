@@ -451,6 +451,7 @@ Team parse(const QJsonObject &v)
             // A1/A2: when it was delivered and started, and the turn that ended.
             attempt.deliveredAt = a.value("delivered_at").toDouble(); attempt.startedAt = a.value("started_at").toDouble();
             attempt.startWarned = a.value("start_warned").toBool();
+            attempt.workedAhead = a.value("worked_ahead").toBool();
             attempt.replyAt = a.value("reply_at").toDouble(); attempt.turnEndedAt = a.value("turn_ended_at").toDouble();
             attempt.turnReply = str(a, "turn_reply");
             // The key's presence is the contract: hgs sends null when the task
@@ -700,6 +701,7 @@ Team parse(const QJsonObject &v)
     team.settingsJson = settings;
     team.resumeAfterLimits = settings.value("resume_after_limits").toBool();
     team.autoAccept = settings.value("auto_accept").toBool() || v.value("auto_accept").toBool();
+    team.workAhead = settings.value("work_ahead").toBool();
     for (const auto &id : v.value("stuck_scope").toArray()) team.stuckScope.append(id.toInt());
     team.previous = str(v, "previous"); team.next = str(v, "next");
     for (const auto &value : v.value("proposals").toArray()) {

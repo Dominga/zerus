@@ -660,7 +660,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 10] = [
+pub(crate) const OWNER_SETTINGS: [&str; 11] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -672,6 +672,7 @@ pub(crate) const OWNER_SETTINGS: [&str; 10] = [
     // N6 (U18): the lead cannot switch off the owner's escalations.
     "remind_owner_minutes",
     "remind_owner_permission_minutes",
+    "work_ahead",
 ];
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
@@ -1014,6 +1015,13 @@ fn send_back(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
             let record = &mut team.phases[at];
             record.state = PhaseState::Rejected;
             record.rejection = Some(PhaseRejection { comment: comment.clone(), by: label.clone(), at: now(), reworked_at: None });
+            // U31: sending the phase back revokes work done ahead of it.
+            for task in team.tasks.iter_mut().filter(|task| task.phase == n) {
+                if task.attempts.iter().any(|attempt| attempt.worked_ahead) {
+                    task.status = TaskStatus::Draft;
+                    task.attempts.clear();
+                }
+            }
             events.push(Event::new("phase_rejected", json!({"by":label,"phase":n,"title":title,"comment":comment})));
             Ok(json!({"status":"phase_rejected","phase":n}))
         }
@@ -2780,6 +2788,14 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
     let hold = !accept && input["hold"].as_bool() == Some(true);
     ensure!(!(hold && input["final"].as_bool() == Some(true)), "A final rejection cannot be held");
     let label = actor.label(team);
+    let worked_ahead = team.task(id).is_some_and(|task| task.attempts.iter().rev().find(|a| a.state == AttemptState::Reported).is_some_and(|a| a.worked_ahead));
+    let ahead_phase = team.task(id).map(|task| task.phase).unwrap_or_default();
+    if accept && worked_ahead {
+        ensure!(
+            team.phases.iter().find(|found| found.n == ahead_phase).is_none_or(|found| matches!(found.state, PhaseState::Approved | PhaseState::Queued)),
+            "This result worked ahead of phase {ahead_phase}; wait for the owner's approval of that phase"
+        );
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!(task.decided_by == Some(Decider::Human) && task.status.finished()), "You already decided task #{id}");
     if human {

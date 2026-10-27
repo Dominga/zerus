@@ -1020,14 +1020,24 @@ fn git_continuation(folder: &str, since: f64) -> String {
     if folder.is_empty() {
         return String::new();
     }
-    let run = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(folder)
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
+    // C13: the bounded Git path - a deadline, bounded output, no optional
+    // locks, no fsmonitor and no hooks - so a member's repository can neither
+    // run code here nor hold the dispatcher.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let run = |args: &[&str]| -> Option<String> {
+        let mut hardened = vec!["-c", "core.hooksPath="];
+        hardened.extend_from_slice(args);
+        super::super::worktrees::git(Path::new(folder), &hardened, deadline)
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out).into_owned())
     };
+    // A filter, include, hook path or fsmonitor of the repository's own config
+    // could still run code: such a folder is not read (as `commit_in`).
+    if let Some(listing) = run(&["config", "--list", "--show-scope", "--name-only"]) {
+        if let Some(reason) = refused_repository_config(&listing) {
+            return format!("\nCommits and working tree: not read here, this repository {reason}.\n");
+        }
+    }
     // A missing or zero start time is no date filter: git 2.55 reads
     // `--since @0` as "now" and would hide every commit.
     let since_arg = format!("@{since:.0}");
@@ -1038,8 +1048,7 @@ fn git_continuation(folder: &str, since: f64) -> String {
     };
     let mut text = String::from("\nCommits since the attempt began (at most 20):\n");
     match run(&args) {
-        Ok(output) if output.status.success() => {
-            let read = String::from_utf8_lossy(&output.stdout);
+        Some(read) => {
             let lines: Vec<&str> = read.lines().take(20).collect();
             if lines.is_empty() {
                 text += "(none)\n";
@@ -1049,12 +1058,11 @@ fn git_continuation(folder: &str, since: f64) -> String {
                 }
             }
         }
-        _ => text += "(not read)\n",
+        None => text += "(not read)\n",
     }
     text += "Working tree (git status --short, at most 50 lines):\n";
     match run(&["status", "--short"]) {
-        Ok(output) if output.status.success() => {
-            let read = String::from_utf8_lossy(&output.stdout);
+        Some(read) => {
             let lines: Vec<&str> = read.lines().take(50).collect();
             if lines.is_empty() {
                 text += "(clean)\n";
@@ -1480,6 +1488,9 @@ pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result
 /// without touching the process environment other tests share.
 fn git_command(folder: &str) -> std::process::Command {
     let mut command = std::process::Command::new("git");
+    // A member's folder may carry its own config: no fsmonitor, hooks or
+    // optional locks run for these reads.
+    command.args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath="]);
     command.arg("-C").arg(folder);
     #[cfg(test)]
     if let Some(ceiling) = GIT_CEILING.with(|ceiling| ceiling.borrow().clone()) {
@@ -1523,7 +1534,7 @@ pub(crate) fn folder_problem(folder: &str, source: &str, branch: Option<&str>) -
         let Some(folder_repo) = repo_of(folder) else {
             return Some(format!("{folder} is not a repository like {source}"));
         };
-        if Path::new(&folder_repo) != Path::new(&source_repo) {
+        if Path::new(&folder_repo) != Path::new(&source_repo) && !clone_of(folder, source) {
             return Some(format!("{folder} belongs to another repository"));
         }
     }
@@ -1535,6 +1546,62 @@ pub(crate) fn folder_problem(folder: &str, source: &str, branch: Option<&str>) -
         }
     }
     None
+}
+
+/// C10: a clone of the team's repository has its own `.git`, so its common
+/// dir differs: it is the team's when its origin is the team folder (as
+/// `worktrees create --clone` makes it) or it shares the repository's root
+/// commit.
+fn clone_of(folder: &str, source: &str) -> bool {
+    let canonical = |path: &str| crate::platform::canonical(Path::new(path)).ok();
+    if let Some(origin) = git_at(folder, &["config", "--get", "remote.origin.url"]) {
+        let origin = origin.strip_prefix("file://").unwrap_or(&origin);
+        if canonical(origin).is_some_and(|origin| Some(origin) == canonical(source)) {
+            return true;
+        }
+    }
+    let roots = |at: &str| -> std::collections::BTreeSet<String> {
+        git_at(at, &["rev-list", "--max-parents=0", "HEAD"])
+            .map(|out| out.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let mine = roots(folder);
+    !mine.is_empty() && !mine.is_disjoint(&roots(source))
+}
+
+/// The same folder written two ways (separators, case on Windows drives, the
+/// `\\?\` prefix, a trailing separator).
+fn same_path(left: &str, right: &str) -> bool {
+    let key = |path: &str| {
+        let path = path.strip_prefix(r"\\?\").unwrap_or(path).replace('\\', "/");
+        let path = path.trim_end_matches('/').to_owned();
+        if path.as_bytes().get(1) == Some(&b':') { path.to_lowercase() } else { path }
+    };
+    !left.is_empty() && key(left) == key(right)
+}
+
+/// C11/C12: what is at `path` on a member's other computer, read there with
+/// `hgs worktrees --path`: None when nothing is, else the branch of the
+/// checkout rooted at `path` (empty when it is no checkout of its own).
+fn remote_checkout(run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>, computer: &str, path: &str) -> anyhow::Result<Option<String>> {
+    let output = run(computer, &["worktrees", "--path", path, "--refresh", "--json"])?;
+    anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
+    let value: Value = serde_json::from_slice(&output.stdout).context("unreadable worktree catalog")?;
+    if value["state"] == "folder_unavailable" {
+        return Ok(None);
+    }
+    let root = value["selected_root"].as_str().unwrap_or_default();
+    if value["state"] != "ok" || !same_path(root, path) {
+        return Ok(Some(String::new()));
+    }
+    let branch = value["worktrees"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|tree| tree["path"].as_str().is_some_and(|tree| same_path(tree, root)))
+        .and_then(|tree| tree["branch"].as_str())
+        .unwrap_or_default();
+    Ok(Some(branch.to_owned()))
 }
 
 /// F1.6: the folder's repository and branch, read from git; empty when unknown.
@@ -1587,27 +1654,66 @@ fn file_in_project(team_id: &str, project: &str, folder: &str, computer: &str, s
 /// The folder the member works in: the team's (or its own) folder, or a new
 /// worktree or clone of it, created now.
 fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
+    member_folder_with(team, member, &|host, args| hgs(host, args, None, Duration::from_secs(300)))
+}
+
+/// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
+/// whole decision is tested without a second hgs.
+fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>) -> anyhow::Result<String> {
     let destination = member_folder_path(team, member)?;
+    // C11: a member on another computer works in a folder there; this
+    // computer can neither see nor check it, so the checks run there.
+    let remote = !member.computer.is_empty();
     if member.folder == MemberFolder::Shared {
         // F1.4: a shared folder must exist and belong to the team's repository.
-        if let Some(problem) = folder_problem(&destination, &team.folder, None) {
-            anyhow::bail!("{problem}");
+        // On another computer its session starts there or fails there.
+        if !remote {
+            if let Some(problem) = folder_problem(&destination, &team.folder, None) {
+                anyhow::bail!("{problem}");
+            }
         }
         return Ok(destination);
     }
     let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
     let short = &team.id[..8.min(team.id.len())];
     let branch = format!("team/{short}/{}", tag(&member.id));
-    anyhow::ensure!(!Path::new(&destination).exists(), "{destination} already exists");
+    // C12: the member's own worktree or clone from an earlier start (a
+    // relaunch, a swap) is used again; any other folder there is refused.
+    if remote {
+        if let Some(found) = remote_checkout(run, &member.computer, &destination)? {
+            anyhow::ensure!(
+                found == branch,
+                "{destination} already exists on {} and is not this member's folder ({})",
+                member.computer,
+                if found.is_empty() { "no checkout of its own".to_owned() } else { format!("on {found}, not {branch}") }
+            );
+            return Ok(destination);
+        }
+    } else if Path::new(&destination).exists() {
+        // A failed create may leave its empty reservation: it goes.
+        let empty = std::fs::read_dir(&destination).map(|mut entries| entries.next().is_none()).unwrap_or(false);
+        if empty {
+            std::fs::remove_dir(&destination)?;
+        } else {
+            if let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) {
+                anyhow::bail!("{destination} already exists and is not this member's folder: {problem}");
+            }
+            return Ok(destination);
+        }
+    }
     let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", "HEAD", "--json"];
     if member.folder == MemberFolder::Clone {
         args.insert(2, "--clone");
     }
-    let output = hgs(&member.computer, &args, None, Duration::from_secs(300))?;
+    let output = run(&member.computer, &args)?;
     anyhow::ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
-    // F1.4: the new folder is the repository's, on the member's branch.
-    if let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) {
-        anyhow::bail!("{problem}");
+    // F1.4: the new folder is the repository's (a clone by its origin), on the
+    // member's branch. `worktrees create` confirmed this where it ran; a
+    // member on this computer is checked here again.
+    if !remote {
+        if let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) {
+            anyhow::bail!("{problem}");
+        }
     }
     Ok(destination)
 }
@@ -4912,6 +5018,146 @@ mod tests {
         assert_eq!((payload["swarm_id"].as_str(), payload["project_id"].as_str()), (Some("swarm-1"), Some("billing")));
         assert_eq!(payload["directory"], "D:/projects/checkout");
         assert!(payload["request_id"].as_str().is_some_and(|id| id.len() == 36));
+    }
+
+    /// A Git repository with one commit in `dir/name`, for the folder tests.
+    fn folder_repo(dir: &Path, name: &str) -> PathBuf {
+        let repo = dir.join(name);
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
+        assert!(git(&["init", "-q"]).success());
+        assert!(git(&["config", "user.email", "t@example.com"]).success());
+        assert!(git(&["config", "user.name", "T"]).success());
+        std::fs::write(repo.join(format!("{name}.txt")), name).unwrap();
+        assert!(git(&["add", "."]).success());
+        assert!(git(&["commit", "-qm", name]).success());
+        repo
+    }
+
+    /// What `hgs worktrees create` does on this computer, for `member_folder_with`.
+    fn local_create(args: &[&str]) -> anyhow::Result<Output> {
+        let value = |key: &str| args.iter().position(|arg| *arg == key).map(|at| args[at + 1].to_owned()).unwrap();
+        let (source, branch, destination) = (value("--path"), value("--branch"), value("--destination"));
+        if args.contains(&"--clone") {
+            let cloned = std::process::Command::new("git").args(["clone", "--local", "--no-hardlinks", "--quiet", &source, &destination]).output()?;
+            anyhow::ensure!(cloned.status.success(), "{}", String::from_utf8_lossy(&cloned.stderr));
+            Ok(std::process::Command::new("git").arg("-C").arg(&destination).args(["switch", "--quiet", "-c", &branch]).output()?)
+        } else {
+            Ok(std::process::Command::new("git").arg("-C").arg(&source).args(["worktree", "add", "--quiet", "-b", &branch, &destination, "HEAD"]).output()?)
+        }
+    }
+
+    fn folder_team(folder: &Path, member: Member) -> Team {
+        let mut team = Team { id: "abcdef12-0000-4000-8000-000000000000".into(), name: "T".into(), lead: "lead".into(), folder: folder.display().to_string(), ..Default::default() };
+        team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+        team.members.push(member);
+        team
+    }
+
+    #[test]
+    fn a_clone_member_of_the_teams_repository_starts() {
+        // C10: `worktrees create --clone` makes a clone with its own .git; it
+        // is the team's repository, so the member starts in it.
+        let dir = tempfile::tempdir().unwrap();
+        set_git_ceiling(&dir.path().display().to_string());
+        let repo = folder_repo(dir.path(), "project");
+        let member = Member { id: "dev".into(), role: "Backend".into(), agent: "dsh".into(), folder: MemberFolder::Clone, ..Default::default() };
+        let team = folder_team(&repo, member.clone());
+        let calls = std::cell::Cell::new(0);
+        let run = |_: &str, args: &[&str]| { calls.set(calls.get() + 1); local_create(args) };
+        let folder = member_folder_with(&team, &member, &run).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(folder_facts(&folder).1, "team/abcdef12/dev");
+        // A different repository is still refused.
+        let other = folder_repo(dir.path(), "other");
+        let problem = folder_problem(&other.display().to_string(), &repo.display().to_string(), None).unwrap();
+        assert!(problem.contains("belongs to another repository"), "{problem}");
+    }
+
+    #[test]
+    fn an_existing_member_folder_is_reused_and_a_foreign_one_refused() {
+        // C12: a relaunch or a swap starts the member again in its own worktree
+        // or clone; a foreign folder at that path is refused, an empty
+        // reservation left by a failed create goes.
+        let dir = tempfile::tempdir().unwrap();
+        set_git_ceiling(&dir.path().display().to_string());
+        let repo = folder_repo(dir.path(), "project");
+        for kind in [MemberFolder::Worktree, MemberFolder::Clone] {
+            let member = Member { id: format!("m{}", kind == MemberFolder::Clone), role: "Dev".into(), agent: "codex".into(), folder: kind, ..Default::default() };
+            let team = folder_team(&repo, member.clone());
+            let calls = std::cell::Cell::new(0);
+            let run = |_: &str, args: &[&str]| { calls.set(calls.get() + 1); local_create(args) };
+            let first = member_folder_with(&team, &member, &run).unwrap();
+            let again = member_folder_with(&team, &member, &run).unwrap();
+            assert_eq!((first.as_str(), calls.get()), (again.as_str(), 1), "{kind:?}");
+        }
+        // A foreign repository where the member's folder belongs.
+        let member = Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), folder: MemberFolder::Worktree, ..Default::default() };
+        let team = folder_team(&repo, member.clone());
+        let destination = member_folder_path(&team, &member).unwrap();
+        let foreign = folder_repo(dir.path(), Path::new(&destination).file_name().unwrap().to_str().unwrap());
+        assert_eq!(foreign.display().to_string(), destination);
+        let error = member_folder_with(&team, &member, &|_, args| local_create(args)).unwrap_err().to_string();
+        assert!(error.contains("already exists and is not this member's folder"), "{error}");
+        // An empty reservation from a failed create is replaced.
+        std::fs::remove_dir_all(&foreign).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        let folder = member_folder_with(&team, &member, &|_, args| local_create(args)).unwrap();
+        assert_eq!(folder_facts(&folder).1, "team/abcdef12/qa");
+    }
+
+    #[test]
+    fn a_member_on_another_computer_is_checked_there() {
+        // C11: the folder of a member on another computer is not looked for
+        // here; what is there is read there (`hgs @computer worktrees`).
+        let ok = std::process::Command::new("git").arg("--version").output().unwrap();
+        let reply = |stdout: Value| Output { status: ok.status, stdout: stdout.to_string().into_bytes(), stderr: Vec::new() };
+        let folder = if cfg!(windows) { r"D:\work\shop" } else { "/work/shop" };
+        let member = Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), folder: MemberFolder::Worktree, computer: "devbox".into(), ..Default::default() };
+        let team = folder_team(Path::new(folder), member.clone());
+        let destination = member_folder_path(&team, &member).unwrap();
+        // Nothing there yet: it is created there, with no local check.
+        let seen = std::cell::RefCell::new(Vec::<String>::new());
+        let run = |computer: &str, args: &[&str]| -> anyhow::Result<Output> {
+            seen.borrow_mut().push(format!("{computer} {}", args[..2].join(" ")));
+            Ok(if args[1] == "create" { reply(json!({"status":"created"})) } else { reply(json!({"state":"folder_unavailable"})) })
+        };
+        assert_eq!(member_folder_with(&team, &member, &run).unwrap(), destination);
+        assert_eq!(*seen.borrow(), vec!["devbox worktrees --path".to_owned(), "devbox worktrees create".to_owned()]);
+        // Its own checkout there is used again; another branch is refused.
+        let catalog = |branch: &str| json!({"state":"ok","selected_root":destination,"worktrees":[{"path":folder,"branch":"main"},{"path":destination,"branch":branch}]});
+        let created = std::cell::Cell::new(false);
+        let mine = |_: &str, args: &[&str]| -> anyhow::Result<Output> { created.set(created.get() || args[1] == "create"); Ok(reply(catalog("team/abcdef12/dev"))) };
+        assert_eq!(member_folder_with(&team, &member, &mine).unwrap(), destination);
+        assert!(!created.get());
+        let error = member_folder_with(&team, &member, &|_, _| Ok(reply(catalog("main")))).unwrap_err().to_string();
+        assert!(error.contains("on devbox and is not this member's folder (on main"), "{error}");
+        // A shared folder there is not looked for on this computer.
+        let shared = Member { folder: MemberFolder::Shared, ..member.clone() };
+        let team = folder_team(Path::new(folder), shared.clone());
+        assert_eq!(member_folder_with(&team, &shared, &|_, _| anyhow::bail!("no call")).unwrap(), folder);
+    }
+
+    #[test]
+    fn the_continuation_reads_no_repository_that_would_run_code() {
+        // C13: the git part of a swap's hand-off goes through the bounded,
+        // hardened path, and a folder whose own config names a filter, hook path
+        // or fsmonitor is not read at all.
+        let dir = tempfile::tempdir().unwrap();
+        set_git_ceiling(&dir.path().display().to_string());
+        let repo = folder_repo(dir.path(), "project");
+        let folder = repo.display().to_string();
+        let text = git_continuation(&folder, 0.0);
+        assert!(text.contains("Commits since the attempt began") && text.contains("project"), "{text}");
+        let marker = dir.path().join("ran");
+        let config = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success());
+        config(&["config", "--local", "core.fsmonitor", &format!("echo x > {}", marker.display())]);
+        let refused = git_continuation(&folder, 0.0);
+        assert!(refused.contains("not read here, this repository configures core.fsmonitor"), "{refused}");
+        assert!(!marker.exists());
+        config(&["config", "--local", "--unset", "core.fsmonitor"]);
+        config(&["config", "--local", "filter.evil.clean", "cat"]);
+        assert!(git_continuation(&folder, 0.0).contains("configures a Git filter"));
     }
 
     #[test]

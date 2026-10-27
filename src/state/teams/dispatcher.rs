@@ -4067,6 +4067,50 @@ mod tests {
     }
 
     #[test]
+    fn malformed_outbox_files_never_hold_a_valid_report_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        let attempt = Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+        task.attempts.push(attempt);
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let folder = dir.path().join("work");
+        // 25 malformed requests, older than the valid one: more than one
+        // tick's budget of PER_TICK.
+        let outbox = super::super::outbox::dir(&folder);
+        std::fs::create_dir_all(&outbox).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        for n in 0..25 {
+            let path = outbox.join(format!("{:08x}-0000-4000-8000-000000000000.json", n));
+            std::fs::write(&path, b"{ not json").unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        }
+        let request = json!({"op":"report","request_id":"33333333-3333-4333-8333-333333333333",
+            "team":t.id,"member":"dev","attempt":"A1",
+            "input":{"request_id":"33333333-3333-4333-8333-333333333333","team":t.id,"task":id,"attempt":"A1","text":"Done after the junk"}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        for _ in 0..2 {
+            let current = store.load(&t.id).unwrap().unwrap();
+            take_outbox(&mut store, &current, std::slice::from_ref(&member)).unwrap();
+        }
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        assert_eq!(attempt.report.as_ref().map(|r| r.text.as_str()), Some("Done after the junk"));
+        // Each malformed file was answered and moved out of the queue.
+        let refused = super::super::outbox::result(&folder, "00000000-0000-4000-8000-000000000000").unwrap();
+        assert_eq!(refused["status"], "refused");
+        assert!(refused["error"].as_str().unwrap().contains("not valid JSON"), "{refused}");
+        assert!(!outbox.join("00000000-0000-4000-8000-000000000000.json").exists());
+        assert_eq!(std::fs::read_dir(super::super::outbox::rejected_dir(&folder)).unwrap().count(), 25);
+    }
+
+    #[test]
     fn a_queued_request_naming_another_member_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();

@@ -43,28 +43,160 @@ pub(crate) fn push(folder: &Path, request: &Value) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// The requests waiting for the worker, oldest first, at most `limit`. A result
-/// file and a half-written request are not requests.
+/// The largest request file the worker reads: the CLI's own request limit.
+pub(crate) const REQUEST_BYTES: u64 = 256 * 1024;
+
+/// How many outbox entries one tick looks at (U20): a folder flooded with
+/// files costs a bounded scan, never a walk of all of them.
+pub(crate) const SCAN_LIMIT: usize = 1000;
+
+/// How many outcomes stay for a member's late poll, and for how long; the
+/// rejected requests kept for a look are bounded the same way.
+pub(crate) const RESULTS_KEPT: usize = 100;
+pub(crate) const RESULTS_AGE: Duration = Duration::from_secs(24 * 3600);
+
+/// How many request files one tick opens, usable or not.
+pub(crate) const READS_PER_TICK: usize = 100;
+
+/// A half-written request older than this was abandoned by its writer.
+const TEMP_AGE: Duration = Duration::from_secs(3600);
+
+/// Where the worker moves a file it cannot use, so it never comes back.
+pub(crate) fn rejected_dir(folder: &Path) -> PathBuf {
+    dir(folder).join("rejected")
+}
+
+/// The requests waiting for the worker, oldest first, at most `limit`, from at
+/// most `SCAN_LIMIT` entries. Every file the worker cannot use - not a regular
+/// file, over `REQUEST_BYTES`, unreadable, not JSON, or not named by its own
+/// canonical request_id - is answered with an error result when its id is
+/// known and moved to `rejected/`, so it never holds the queue. Old outcomes
+/// and abandoned half-written requests are pruned on the way.
 pub(crate) fn pending(folder: &Path, limit: usize) -> anyhow::Result<Vec<(PathBuf, Value)>> {
-    let Ok(entries) = fs::read_dir(dir(folder)) else { return Ok(Vec::new()) };
-    let mut found: Vec<(SystemTime, PathBuf)> = Vec::new();
-    for entry in entries.flatten() {
+    let outbox = dir(folder);
+    let Ok(entries) = fs::read_dir(&outbox) else { return Ok(Vec::new()) };
+    let now = SystemTime::now();
+    let age = |modified: SystemTime| now.duration_since(modified).unwrap_or_default();
+    let mut candidates: Vec<(SystemTime, PathBuf)> = Vec::new();
+    let mut results: Vec<(SystemTime, PathBuf)> = Vec::new();
+    let mut rejected_any = false;
+    for entry in entries.take(SCAN_LIMIT).flatten() {
         let path = entry.path();
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        if !name.ends_with(".json") || name.ends_with(".result.json") {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // The metadata of the entry itself: a link is never followed.
+        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        let modified = meta.modified().unwrap_or(now);
+        if name == "rejected" && meta.is_dir() {
             continue;
         }
-        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else { continue };
-        found.push((modified, path));
+        if !meta.is_file() {
+            reject(folder, &path, &name, "An outbox request is a regular file");
+            rejected_any = true;
+        } else if name.ends_with(".result.json") {
+            results.push((modified, path));
+        } else if name.ends_with(".tmp") {
+            if age(modified) > TEMP_AGE {
+                let _ = fs::remove_file(&path);
+            }
+        } else if name.ends_with(".json") {
+            candidates.push((modified, path));
+        } else {
+            reject(folder, &path, &name, "Not an outbox request");
+            rejected_any = true;
+        }
     }
-    found.sort();
+    prune(&mut results, age);
+    candidates.sort();
     let mut requests = Vec::new();
-    for (_, path) in found.into_iter().take(limit) {
-        let Ok(bytes) = fs::read(&path) else { continue };
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
-        requests.push((path, value));
+    // At most READS_PER_TICK files are opened: unusable ones are answered and
+    // moved away, so the next tick reaches the requests behind them.
+    for (_, path) in candidates.into_iter().take(READS_PER_TICK) {
+        if requests.len() >= limit {
+            break;
+        }
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        match read_request(&path, &name) {
+            Ok(value) => requests.push((path, value)),
+            Err(error) => {
+                reject(folder, &path, &name, &format!("{error:#}"));
+                rejected_any = true;
+            }
+        }
+    }
+    if rejected_any {
+        prune_rejected(folder, age);
     }
     Ok(requests)
+}
+
+/// One request file, read only when it is a regular file of at most
+/// `REQUEST_BYTES`, and only that much of it.
+fn read_request(path: &Path, name: &str) -> anyhow::Result<Value> {
+    use std::io::Read;
+    let file = fs::File::open(path).context("The request cannot be read")?;
+    let meta = file.metadata().context("The request cannot be read")?;
+    ensure!(meta.is_file(), "An outbox request is a regular file");
+    ensure!(meta.len() <= REQUEST_BYTES, "An outbox request is at most {} KiB", REQUEST_BYTES / 1024);
+    let mut bytes = Vec::new();
+    file.take(REQUEST_BYTES + 1).read_to_end(&mut bytes).context("The request cannot be read")?;
+    ensure!(bytes.len() as u64 <= REQUEST_BYTES, "An outbox request is at most {} KiB", REQUEST_BYTES / 1024);
+    let value: Value = serde_json::from_slice(&bytes).context("The request is not valid JSON")?;
+    ensure!(value.is_object(), "An outbox request is a JSON object");
+    // The worker settles a request by its id, so the file must carry it.
+    let id = value["request_id"].as_str().unwrap_or_default();
+    ensure!(
+        super::store::canonical_uuid(id) && name == format!("{id}.json"),
+        "An outbox request is named by its canonical request_id"
+    );
+    Ok(value)
+}
+
+/// The request id a file name carries, when it is one.
+fn named_id(name: &str) -> Option<&str> {
+    let id = name.strip_suffix(".json")?;
+    super::store::canonical_uuid(id).then_some(id)
+}
+
+/// Answers a file the worker cannot use and moves it out of the queue: to
+/// `rejected/`, or away when even that fails.
+fn reject(folder: &Path, path: &Path, name: &str, error: &str) {
+    if let Some(id) = named_id(name) {
+        let outcome = json!({"status":"refused","request_id":id,"error":error});
+        if let Ok(bytes) = serde_json::to_vec(&outcome) {
+            let _ = fs::write(result_path(folder, id), bytes);
+        }
+    }
+    let rejected = rejected_dir(folder);
+    let moved = fs::create_dir_all(&rejected).is_ok() && fs::rename(path, rejected.join(name)).is_ok();
+    if !moved {
+        // A directory is removed only when empty; anything else goes.
+        let _ = fs::remove_file(path).or_else(|_| fs::remove_dir(path));
+    }
+}
+
+/// Keeps the `RESULTS_KEPT` newest files of a list, none older than
+/// `RESULTS_AGE`.
+fn prune(files: &mut [(SystemTime, PathBuf)], age: impl Fn(SystemTime) -> Duration) {
+    files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (index, (modified, path)) in files.iter().enumerate() {
+        if index >= RESULTS_KEPT || age(*modified) > RESULTS_AGE {
+            let _ = fs::remove_file(path).or_else(|_| fs::remove_dir_all(path));
+        }
+    }
+}
+
+/// Bounds `rejected/` like the outcomes, from at most `SCAN_LIMIT` entries.
+fn prune_rejected(folder: &Path, age: impl Fn(SystemTime) -> Duration) {
+    let Ok(entries) = fs::read_dir(rejected_dir(folder)) else { return };
+    let mut files: Vec<(SystemTime, PathBuf)> = entries
+        .take(SCAN_LIMIT)
+        .flatten()
+        .filter_map(|entry| {
+            let meta = fs::symlink_metadata(entry.path()).ok()?;
+            Some((meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), entry.path()))
+        })
+        .collect();
+    prune(&mut files, age);
 }
 
 /// The outcome the worker wrote, when it has.
@@ -133,5 +265,111 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(push(dir.path(), &json!({"op":"report","request_id":"not-a-uuid"})).is_err());
         assert!(pending(dir.path(), PER_TICK).unwrap().is_empty());
+    }
+
+    fn aged(path: &Path, seconds: u64) {
+        let at = SystemTime::now() - Duration::from_secs(seconds);
+        fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn an_oversized_misnamed_or_non_file_request_is_answered_and_moved_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path();
+        let outbox = super::dir(folder);
+        fs::create_dir_all(&outbox).unwrap();
+        // Over the CLI's 256 KiB request limit: refused by its size.
+        let big = "55555555-5555-4555-8555-555555555555";
+        fs::write(outbox.join(format!("{big}.json")), vec![b' '; REQUEST_BYTES as usize + 1]).unwrap();
+        // Valid JSON under another request's name: it could never be settled.
+        let misnamed = "66666666-6666-4666-8666-666666666666";
+        fs::write(outbox.join(format!("{misnamed}.json")), serde_json::to_vec(&request("77777777-7777-4777-8777-777777777777", "report")).unwrap()).unwrap();
+        // A directory is not a request, and neither is a stray file.
+        let folder_id = "88888888-8888-4888-8888-888888888888";
+        fs::create_dir_all(outbox.join(format!("{folder_id}.json")).join("inside")).unwrap();
+        fs::write(outbox.join("notes.txt"), b"hello").unwrap();
+        // A link is never followed: the worker runs unsandboxed.
+        let target = folder.join("secret.json");
+        fs::write(&target, serde_json::to_vec(&request("99999999-9999-4999-8999-999999999999", "report")).unwrap()).unwrap();
+        let link = outbox.join("99999999-9999-4999-8999-999999999999.json");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        let valid = request("11111111-1111-4111-8111-111111111111", "report");
+        push(folder, &valid).unwrap();
+        let queued = pending(folder, PER_TICK).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].1["request_id"], "11111111-1111-4111-8111-111111111111");
+        let error = |id: &str| result(folder, id).unwrap()["error"].as_str().unwrap_or_default().to_owned();
+        assert!(error(big).contains("at most 256 KiB"), "{}", error(big));
+        assert!(error(misnamed).contains("named by its canonical request_id"), "{}", error(misnamed));
+        assert!(error(folder_id).contains("regular file"), "{}", error(folder_id));
+        let rejected = rejected_dir(folder);
+        for name in [format!("{big}.json"), format!("{misnamed}.json"), format!("{folder_id}.json"), "notes.txt".into()] {
+            assert!(!outbox.join(&name).exists() && rejected.join(&name).exists(), "{name}");
+        }
+        if linked {
+            // The link itself moved; its target was never read or touched.
+            assert!(!link.exists() && fs::symlink_metadata(rejected.join("99999999-9999-4999-8999-999999999999.json")).is_ok());
+            assert!(target.exists());
+        }
+        // Nothing comes back on the next tick.
+        assert_eq!(pending(folder, PER_TICK).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_flooded_outbox_is_scanned_in_bounded_slices() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path();
+        let outbox = super::dir(folder);
+        fs::create_dir_all(&outbox).unwrap();
+        for n in 0..1500 {
+            fs::write(outbox.join(format!("junk-{n}.txt")), b"x").unwrap();
+        }
+        let valid = request("11111111-1111-4111-8111-111111111111", "report");
+        push(folder, &valid).unwrap();
+        let live = || fs::read_dir(&outbox).unwrap().filter(|entry| entry.as_ref().unwrap().file_name() != "rejected").count();
+        // One tick looks at SCAN_LIMIT entries at most.
+        let first = pending(folder, PER_TICK).unwrap();
+        assert!(live() >= 1501 - SCAN_LIMIT, "{}", live());
+        let mut found = !first.is_empty();
+        for _ in 0..2 {
+            found |= !pending(folder, PER_TICK).unwrap().is_empty();
+        }
+        assert!(found, "the valid request was reached");
+        assert_eq!(live(), 1, "only the valid request is left");
+        // The rejected files are bounded too.
+        assert!(fs::read_dir(rejected_dir(folder)).unwrap().count() <= RESULTS_KEPT);
+    }
+
+    #[test]
+    fn outcomes_are_kept_for_a_bounded_time_and_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path();
+        fs::create_dir_all(super::dir(folder)).unwrap();
+        for n in 0..120u32 {
+            let id = format!("{n:08x}-1111-4111-8111-111111111111");
+            settle(folder, &json!({"request_id":id}), &json!({"status":"applied"})).unwrap();
+            // The first ones are the oldest.
+            aged(&result_path(folder, &id), 1000 - n as u64);
+        }
+        let stale = "aaaaaaaa-1111-4111-8111-111111111111";
+        settle(folder, &json!({"request_id":stale}), &json!({"status":"applied"})).unwrap();
+        aged(&result_path(folder, stale), 25 * 3600);
+        // A half-written request is dropped only once it is abandoned.
+        let fresh = super::dir(folder).join("bbbbbbbb-1111-4111-8111-111111111111.tmp");
+        let abandoned = super::dir(folder).join("cccccccc-1111-4111-8111-111111111111.tmp");
+        fs::write(&fresh, b"{").unwrap();
+        fs::write(&abandoned, b"{").unwrap();
+        aged(&abandoned, 2 * 3600);
+        assert!(pending(folder, PER_TICK).unwrap().is_empty());
+        let results = fs::read_dir(super::dir(folder)).unwrap().filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".result.json")).count();
+        assert_eq!(results, RESULTS_KEPT);
+        assert!(result(folder, stale).is_none());
+        // The newest stay, the oldest went.
+        assert!(result(folder, "00000077-1111-4111-8111-111111111111").is_some());
+        assert!(result(folder, "00000000-1111-4111-8111-111111111111").is_none());
+        assert!(fresh.exists() && !abandoned.exists());
     }
 }

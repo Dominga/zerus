@@ -770,6 +770,19 @@ answered; a denial cannot carry an explanation.
   only its direct reports. Sub-teams (Hierarchy, Prompt 2) stay for whole
   delegated tasks. In phase 36 with the review fixes. Owner: yes.
 
+- **U26. Team roster changes only on the owner's explicit word (owner,
+  2026-10-27).** The owner asked the lead to put frontend on Opus and add a
+  backend and an Expert; swap-member, remove-member and max_members are
+  owner-only, so the lead had to hand the owner a script. As F13 and U14 do:
+  `add-member`, `swap-member`, `remove-member` and a `settings` change of
+  `max_members` from the lead's own session are accepted only with
+  `"owner_word": {"text"}` when the owner typed that request in the lead's
+  session within 30 minutes, and only for what the sentence names (one
+  verified word covers the changes of that one request). Without the word the
+  lead proposes (F8) and changes nothing; add-member, which the lead may run
+  today, needs the word too. The event and status say "Changed by Lead on your
+  word" with the quote. Owner: yes.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

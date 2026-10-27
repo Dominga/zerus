@@ -32,6 +32,16 @@ The About page uses the [GitHub mark from Primer Octicons](
 https://github.com/primer/octicons/blob/97825f832c98f817867f770d084c08e3edc6f78c/icons/mark-github-16.svg). Its complete MIT license and GitHub copyright notice are retained
 in `tray/resources/icons/github-mark.svg`, including the embedded Qt resource.
 
+## Web client design mockup
+
+The design mockup in `design/webui` is not shipped with Zerus packages. It
+embeds the outline paths of two [Tabler Icons](https://github.com/tabler/tabler-icons)
+3.50.0 glyphs (`brand-apple`, `brand-windows`) as operating system marks in
+`design/webui/src/lib/os-icons.ts`, under MIT; the complete license and copyright
+notice are retained in `design/webui/licenses/tabler-icons-LICENSE.txt`. Its
+Linux mark is original Zerus artwork. `design/webui/src/lib/icons.generated.ts`
+contains static markup generated from the installed `lucide-solid` package (ISC).
+
 ## Dependencies obtained during build
 
 Rust dependencies and versions are locked in `Cargo.lock` and, for the mobile

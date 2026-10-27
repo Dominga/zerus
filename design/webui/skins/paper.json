@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "id": "paper",
+  "name": "Paper",
+  "appearance": "light",
+  "extends": "zerus-light",
+  "tokens": {
+    "color": {
+      "page": "#ebe5da",
+      "pane": "#f6f1e8",
+      "surface": "#fcf9f3",
+      "raised": "#fffdf8",
+      "card": "#fffdf8",
+      "card-border": "#e3dccf",
+      "card-hover": "#f3ede2",
+      "card-selected": "#f1ead9",
+      "card-selected-border": "#cdb98c",
+      "field": "#fffdf8",
+      "border": "#dcd3c3",
+      "divider": "#e3dccf",
+      "hover": "#f1ebdf",
+      "segment-on": "#ece2cb",
+      "tile": "#f3ede2",
+      "bubble": "#f1ead9",
+      "bubble-border": "#cdb98c",
+      "text": "#2b2620",
+      "text-2": "#3d362d",
+      "text-3": "#54493c",
+      "muted": "#6e6252",
+      "label": "#776b5b",
+      "dim": "#857867",
+      "accent": "#8a5a12",
+      "accent-text": "#ffffff",
+      "accent-hover": "#6f480d",
+      "accent-muted": "#a07a3f",
+      "accent-bg": "rgba(138,90,18,.08)",
+      "status-working": "#2f7d4a",
+      "entity-base": "#fffdf8",
+      "entity-ink-base": "#221c14",
+      "tree-line": "#d8cdb9",
+      "terminal-bg": "#fffdf8",
+      "code-bg": "#f3ede2",
+      "selection": "rgba(138,90,18,.16)",
+      "row": "transparent",
+      "row-border": "transparent",
+      "row-hover": "#f1ebdf",
+      "row-selected": "#ece2cb",
+      "row-selected-border": "#b9a272",
+      "status-attention": "#d9a43a"
+    },
+    "font": {
+      "ui": [
+        "Iowan Old Style",
+        "Charter",
+        "Georgia",
+        "serif"
+      ],
+      "base": 13.5
+    },
+    "radius": {
+      "card": 4,
+      "lg": 5,
+      "md": 4,
+      "xl": 6,
+      "dialog": 8
+    },
+    "density": {
+      "scale": 1.08
+    }
+  },
+  "components": {
+    "status-badge": "pill",
+    "agent-mark": "chip",
+    "tree-lines": "indent",
+    "attention-edge": "bar"
+  },
+  "layout": {
+    "rail": "icons",
+    "sessions-pane": "right",
+    "inspector": "collapsed",
+    "activity-column": "centered"
+  }
+}

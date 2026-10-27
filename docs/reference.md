@@ -52,9 +52,29 @@ When it is on, Claude's `PreToolUse` hook answers an `Agent`/`Task` call with
 `permissionDecision: "ask"` and a reason naming the subagent type, its model
 (the tool input, else the definition in `.claude/agents/<type>.md`, else
 "inherits <session model>"), its effort when known and the description.
-Subagent calls of one turn are grouped as "Start N subagents: ...". Automatic
-tool approvals never answer this request; a team member's request reaches its
-lead like any other permission request. Agents without a pre-tool subagent
+Subagent calls of one turn are grouped as "Start N subagents: ...".
+
+The ask becomes Claude's permission request, and the approval channel (the
+waiting `PermissionRequest` hook) turns it into a card for that exact tool use:
+"Subagents" with every open call of the group, a one-time Yes or No and a
+denial with your message. Claude's broader choices stay in Terminal. The
+answer goes back to that tool use through the hook, and it decides every call
+the card showed: the other calls' waiting hooks, and later `PreToolUse` calls
+of the group, take the same allow or deny without a card of their own. A new
+call joining the group changes the card, so an answer never covers a call it
+did not show. Without the waiting hook (an older Claude Code, or the shell
+hook form on Windows), the card is answered with the panel's keys and only its
+own call is decided.
+
+Automatic tool approvals never answer a subagent card: the approval journal
+refuses any card marked `subagent_confirmation` or for the `Agent`/`Task`
+tool. A team member's card reaches its lead like any other permission
+request: the lead's inbox item names the member, each subagent's type, model
+and task, and the lead answers it with `hgs team answer` (rating it as any
+permission: what the task needs, or ask the owner). The owner's own session
+still asks the owner; with the setting off nothing is asked, recorded or
+grouped. In Claude's print mode nobody can answer, so the call goes ahead and
+the session note says the ask was skipped. Agents without a pre-tool subagent
 approval are not blocked; their status says the confirmation is not supported.
 
 ## CLI sessions

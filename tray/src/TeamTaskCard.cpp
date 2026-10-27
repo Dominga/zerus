@@ -96,6 +96,7 @@ void TeamTaskCard::rebuild()
     head->addWidget(backButton);
     auto *idLabel = label(QStringLiteral("#%1").arg(task->id), c.dim, 13); idLabel->setFont(NewSessionDense::mono(13));
     head->addWidget(idLabel);
+    if (task->addedLate.known) head->addWidget(outOfScopeMark(*task, c, 16));
     auto *title = elided(task->title, c.fg, 14); QFont tf = title->font(); tf.setWeight(QFont::DemiBold); title->setFont(tf);
     title->setObjectName("teamTaskTitle");
     head->addWidget(title, 1);

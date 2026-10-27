@@ -81,6 +81,9 @@ private:
     // F7: a Done team starts the next goal with the same folder, settings,
     // lead and members (their live sessions adopted).
     void nextGoalDialog(const Teams::Team &team);
+    // U29: the owner adds a task to a running phase: the warning first, then
+    // the typed confirmation ("add" or the phase number).
+    void addLateDialog(const Teams::Team &team, int phase);
     // H6: swap a member's session, agent, model or account (the lead too),
     // confirmed; the old session keeps running and is listed for you to stop.
     void swapDialog(const Teams::Team &team, const Teams::Member &member);

@@ -211,6 +211,10 @@ struct Task {
     CheckResult checkResult;
     // G1: the sub-team delegated from this task.
     Subteam subteam;
+    // U29: joined its phase after the phase started, on the owner's word
+    // twice: who added it, when, and the owner's two sentences.
+    struct AddedLate { QString by, request, confirm; double at = 0; bool known = false; };
+    AddedLate addedLate;
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }

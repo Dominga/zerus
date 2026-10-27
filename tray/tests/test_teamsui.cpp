@@ -650,6 +650,7 @@ private slots:
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void designerPageStartsOrOpensTheDesigner();
+    void addedLateTaskIsOutOfScopeEverywhere();
     void draftIsDecidedWithoutADesignerSession();
     void catalogEditorMarksManualEdits();
     void boardColumnsKeepTheirScroll();
@@ -700,6 +701,11 @@ elif a[:2]==['team','status']:
  sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
+elif a[:2]==['team','add-to-phase']:
+ # U29: the first call warns and keeps the addition pending; the second adds it.
+ if body.get('confirm'):print(json.dumps({'status':'added','phase':body.get('phase'),'tasks':[7]}))
+ else:print(json.dumps({'status':'warning','phase':body.get('phase'),'pending':'pending-1','tasks':[7],
+  'warning':'Adding tasks to running phase %d changes its scope after you approved it. The load balance of the lanes shifts and members may sit idle: members do not work ahead and later phases are not approved.'%body.get('phase')}))
 elif a[:3]==['team','catalog','decide'] or a[:3]==['team','catalog','apply']:
  # U15: decisions and Apply change the draft as hgs does; `.refuse` refuses one.
  import os
@@ -4195,6 +4201,132 @@ void TestTeamsUi::draftIsDecidedWithoutADesignerSession()
     QVERIFY(!page.findChild<QScrollArea *>("teamDesignerProposals")->isVisible());
     QVERIFY(controller.catalog().role("security"));
     QCOMPARE(controller.catalog().role("tester")->agent, QStringLiteral("claude"));
+}
+
+// U29: a task added to its running phase carries the "out of the phase's
+// original scope" icon in Graph, Board, Layers and the task card, light and
+// dark; the owner adds one through the warning and a typed confirmation.
+void TestTeamsUi::addedLateTaskIsOutOfScopeEverywhere()
+{
+    auto t = phasedTeam();
+    auto tasks = t["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 6}, {"phase", 2}, {"title", "Fix the login crash"}, {"assignee", "tester"}, {"status", "pending"},
+                             {"added_late", QJsonObject{{"by", "Lead"}, {"at", 1750.0}, {"request", "Please add a task to the current phase: the login crash"},
+                                                        {"confirm", "Yes, add it"}}}});
+    t["tasks"] = tasks;
+    auto phases = t["phases"].toArray();
+    auto second = phases[0].toObject(); second["tasks"] = QJsonArray{3, 4, 6}; phases[0] = second;
+    t["phases"] = phases;
+    auto layers = t["layers"].toObject(); layers["6"] = 1; t["layers"] = layers;
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 900); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(phaseGraphOf(&workspace, 2));
+    const auto lateNode = [&] {
+        for (const auto &n : phaseGraphOf(&workspace, 2)->nodes) if (n.id == 6) return n;
+        return TeamUi::TaskView::Node{};
+    };
+    QTRY_VERIFY(lateNode().late);
+    QVERIFY(lateNode().tooltip.contains("Out of the phase's original scope: added by Lead"));
+    for (const auto &n : phaseGraphOf(&workspace, 2)->nodes) if (n.id != 6) QVERIFY(!n.late);
+    const auto view = [&](const char *segment) {
+        for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+            if (b->property("segment") == segment) { b->click(); break; }
+    };
+    const auto marks = [&] {
+        QList<QLabel *> found;
+        for (auto *mark : workspace.findChildren<QLabel *>("teamOutOfScope")) if (mark->isVisible()) found << mark;
+        return found;
+    };
+    const auto shoot = [&](const QString &name) {
+        shot(&workspace, name + "-dark");
+        lightPalette(); workspace.setTheme(false); workspace.render(); QTest::qWait(200);
+        lightShot(&workspace, name + "-light");
+        darkPalette(); workspace.setTheme(true); workspace.render(); QTest::qWait(150);
+    };
+    shoot("ux-u29-graph");
+    view("board");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    QTRY_COMPARE(marks().size(), 1);
+    QCOMPARE(marks().first()->property("task").toInt(), 6);
+    QVERIFY(marks().first()->toolTip().contains("Asked: “Please add a task to the current phase: the login crash”"));
+    QVERIFY(marks().first()->toolTip().contains("Confirmed: “Yes, add it”"));
+    shoot("ux-u29-board");
+    view("layers");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceLayers"));
+    QTRY_COMPARE(marks().size(), 1);
+    QCOMPARE(marks().first()->property("task").toInt(), 6);
+    shoot("ux-u29-layers");
+    // The task card.
+    TeamTaskCard card;
+    card.resize(420, 640); card.show();
+    card.setTask(parse(t), 6, live, true);
+    QVERIFY(card.findChild<QLabel *>("teamOutOfScope"));
+    QVERIFY(card.findChild<QLabel *>("teamOutOfScope")->toolTip().contains("added by Lead"));
+    card.setTask(parse(t), 4, live, true);
+    QVERIFY(!card.findChild<QLabel *>("teamOutOfScope"));
+    card.setTask(parse(t), 6, live, true);
+    shot(&card, "ux-u29-task-card-dark");
+    lightPalette(); card.setTask(parse(t), 6, live, false); QTest::qWait(150);
+    lightShot(&card, "ux-u29-task-card-light");
+    darkPalette();
+    // The owner adds a task: the warning first, then the typed confirmation.
+    view("graph");
+    QTRY_VERIFY(phaseAction(&workspace, 2, "teamPhaseAddLate"));
+    QVERIFY(!phaseAction(&workspace, 3, "teamPhaseAddLate"));   // a draft keeps edit-draft
+    phaseAction(&workspace, 2, "teamPhaseAddLate")->click();
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamAddLateDialog")));
+    auto *next = dialog->findChild<QPushButton *>("teamAddLateContinue");
+    QVERIFY(!next->isEnabled());
+    dialog->findChild<QLineEdit *>("teamAddLateTitle")->setText("Retry the payment webhook");
+    dialog->findChild<QPlainTextEdit *>("teamAddLateDescription")->setPlainText("Retry with backoff");
+    QVERIFY(next->isEnabled());
+    next->click();
+    QTRY_COMPARE(calls(script(), "add-to-phase").size(), 1);
+    const auto first = calls(script(), "add-to-phase").first();
+    QCOMPARE(first["phase"].toInt(), 2);
+    QCOMPARE(first["tasks"].toArray().first().toObject()["id"].toInt(), 7);
+    QCOMPARE(first["tasks"].toArray().first().toObject()["title"].toString(), QStringLiteral("Retry the payment webhook"));
+    QCOMPARE(first["by"].toString(), QStringLiteral("human"));
+    QVERIFY(!first.contains("confirm"));
+    auto *warning = dialog->findChild<QLabel *>("teamAddLateWarning");
+    QTRY_VERIFY(warning->isVisible());
+    QVERIFY(warning->text().contains("load balance of the lanes"));
+    auto *confirm = dialog->findChild<QLineEdit *>("teamAddLateConfirm");
+    auto *add = dialog->findChild<QPushButton *>("teamAddLateAdd");
+    QVERIFY(confirm->isVisible() && add->isVisible() && !add->isEnabled());
+    confirm->setText("sure"); QVERIFY(!add->isEnabled());
+    confirm->setText("3"); QVERIFY(!add->isEnabled());   // another phase
+    confirm->setText("2"); QVERIFY(add->isEnabled());
+    confirm->setText("Add"); QVERIFY(add->isEnabled());
+    shot(dialog, "ux-u29-dialog-dark");
+    lightPalette(); QTest::qWait(150);
+    shot(dialog, "ux-u29-dialog-light");
+    darkPalette();
+    add->click();
+    QTRY_COMPARE(calls(script(), "add-to-phase").size(), 2);
+    const auto second2 = calls(script(), "add-to-phase").last();
+    QCOMPARE(second2["confirm"].toString(), QStringLiteral("pending-1"));
+    QCOMPARE(second2["confirmation"].toString(), QStringLiteral("Add"));
+    QCOMPARE(second2["phase"].toInt(), 2);
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamAddLateDialog"));
+    // The feed says so.
+    const auto team = parse(t);
+    const auto line = [&team](const QString &kind, const QJsonObject &detail) {
+        return feedLine(team, QJsonObject{{"at", 1}, {"seq", 1}, {"kind", kind}, {"detail", detail}}).text;
+    };
+    QCOMPARE(line("phase_addition_warned", {{"phase", 2}, {"tasks", QJsonArray{7}}}),
+             QStringLiteral("Asked to add 1 task to running phase 2 · waits for your confirmation"));
+    QCOMPARE(line("phase_tasks_added", {{"phase", 2}, {"tasks", QJsonArray{7, 8}}}),
+             QStringLiteral("Added #7, #8 to running phase 2 · outside its original scope"));
 }
 
 void TestTeamsUi::catalogEditorMarksManualEdits()

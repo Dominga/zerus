@@ -10,10 +10,10 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|add-to-phase|approve-phase|discard-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
-    "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
+    "plan", "extend", "edit-draft", "move-phase", "add-to-phase", "approve-phase", "discard-phase", "reject-phase", "undo-reject-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "pause-member", "resume-member", "remove-member", "settings", "finding",
@@ -2041,6 +2041,41 @@ fn check_roster_word(
     Ok(())
 }
 
+/// U29: fills the verified owner word of an addition to a running phase for
+/// a lead caller: the request, or the confirmation newer than the warning of
+/// the pending addition it names. The verifier is a parameter for tests.
+fn check_phase_word(
+    team: &Team,
+    input: &Value,
+    filled: &mut Value,
+    caller: &Actor,
+    verify: impl Fn(&Team, &Value, u32, super::owner_word::PhaseWord, f64, f64) -> anyhow::Result<super::model::OwnerWord>,
+) -> anyhow::Result<()> {
+    if !matches!(caller, Actor::Member(id) if *id == team.lead) {
+        return Ok(());
+    }
+    let phase = input["phase"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("A phase number is required")?;
+    let word = input
+        .get("owner_word")
+        .filter(|word| word.is_object())
+        .context("The lead adds a task to a running phase only on your word: pass \"owner_word\" with the owner's sentence")?;
+    let (kind, after, change) = match input["confirm"].as_str().filter(|id| !id.is_empty()) {
+        None => (super::owner_word::PhaseWord::Request, 0.0, "the request to add to a running phase"),
+        Some(id) => {
+            let pending = team.pending_additions.iter().find(|pending| pending.id == id).context("That addition is unknown or expired; ask again")?;
+            (super::owner_word::PhaseWord::Confirm, pending.warned_at, "the confirmation of an addition to a running phase")
+        }
+    };
+    let verified = verify(team, word, phase, kind, after, super::super::now())?;
+    if let Some(used) = team.owner_word_used(verified.event) {
+        bail!("That word was already used for {used}; ask the owner again");
+    }
+    filled["owner_word_checked"] = serde_json::to_value(&verified)?;
+    filled["owner_word_event"] = json!(verified.event);
+    filled["owner_word_change"] = json!(change);
+    Ok(())
+}
+
 /// 9.7: a task with a sub-team cannot be cancelled or reassigned without
 /// saying whether the sub-team stops or keeps running.
 fn choose_subteam(store: &mut Store, team: &Team, input: &Value) -> anyhow::Result<()> {
@@ -2554,6 +2589,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 check_roster_word(&team, op, input, &mut filled, &caller, |team, input, needed, now| {
                     super::owner_word::verify_roster(team, input, needed, now)
                 })?;
+            }
+            // U29: a task joins a running phase on the owner's word twice.
+            if op == "add-to-phase" {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let caller = actor(&team, op, &filled)?;
+                check_phase_word(&team, input, &mut filled, &caller, super::owner_word::verify_phase)?;
             }
             // N7: a replayed discard does not stop the lead's session twice.
             let replayed = op == "draft"
@@ -3794,6 +3835,116 @@ mod tests {
         third["owner_word"] = json!({"text":"Please remove dev from the roster again"});
         let input = third.clone();
         super::check_roster_word(&team, "remove-member", &input, &mut third, &caller, verify).unwrap();
+    }
+
+    /// U29 through `run`: a task joins a running phase only on the owner's
+    /// word twice, with the warning between the two words.
+    #[test]
+    fn a_task_joins_a_running_phase_on_the_owners_word_twice() {
+        let _env = crate::state::ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            {
+                let lead = team.members.iter_mut().find(|member| member.id == "lead").unwrap();
+                lead.agent = "dsh".into();
+                lead.session = Some(SessionRef { name: "dsh/x/lead".into(), run_id: "r1".into(), conversation_id: "conv-lead".into(), ..Default::default() });
+            }
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let db = super::super::super::journal::event_db().unwrap();
+            let say = |at: f64, text: &str| {
+                db.execute(
+                    "INSERT INTO events(name, conversation, payload) VALUES ('dsh/x/lead','conv-lead',?1)",
+                    rusqlite::params![json!({"type":"UserPromptSubmit","at":at,"agent_id":"","detail":text}).to_string()],
+                ).unwrap();
+            };
+            let mut n = 0u8;
+            let mut request = |input: Value| {
+                n += 1;
+                let mut input = input;
+                input["team"] = json!(id);
+                input["request_id"] = json!(format!("00000000-0000-4000-8000-0000000005{n:02}"));
+                run("add-to-phase", &input, false)
+            };
+            let task = json!([{"id":2,"title":"Fix the login crash","assignee":"dev"}]);
+            let stored = || Store::open(false).unwrap().load("t").unwrap().unwrap();
+            let lead = || super::set_test_caller_identities(Some((Some("conv-lead".into()), None, None)));
+            let now = crate::state::now();
+            say(now - 300.0, "Yes, add it");   // older than any warning
+            say(now - 200.0, "please continue with the plan");
+            say(now - 100.0, "Please add a task to the current phase: fix the login crash");
+            lead();
+            // 1. No word: refused, nothing changes.
+            let error = request(json!({"phase":1,"tasks":task})).unwrap_err().to_string();
+            assert!(error.contains("your word"), "{error}");
+            // A sentence that does not ask to add a task is not the word.
+            let error = request(json!({"phase":1,"tasks":task,"owner_word":{"text":"please continue with the plan"}})).unwrap_err().to_string();
+            assert!(error.contains("has not asked to add a task to phase 1"), "{error}");
+            // 2. The request word alone changes nothing and returns the warning.
+            let warned = request(json!({"phase":1,"tasks":task,"owner_word":{"text":"Please add a task to the current phase"}})).unwrap();
+            assert_eq!(warned["status"], "warning", "{warned}");
+            assert!(warned["warning"].as_str().unwrap().contains("load balance of the lanes"), "{warned}");
+            let pending = warned["pending"].as_str().unwrap().to_owned();
+            let team = stored();
+            assert_eq!(team.tasks.len(), 1);
+            assert_eq!(team.pending_additions.len(), 1);
+            // 3. A confirmation older than the warning is refused.
+            let confirm = |text: &str, phase: u32| json!({"phase":phase,"confirm":pending,"owner_word":{"text":text}});
+            let error = request(confirm("Yes, add it", 1)).unwrap_err().to_string();
+            assert!(error.contains("has not confirmed the addition to phase 1"), "{error}");
+            // 4. A confirmation for another phase is refused: by its words and by its number.
+            say(crate::state::now() + 0.2, "Yes, add it to phase 2");
+            let error = request(confirm("Yes, add it to phase 2", 1)).unwrap_err().to_string();
+            assert!(error.contains("has not confirmed"), "{error}");
+            say(crate::state::now() + 0.2, "Confirmed, add it now");
+            let error = request(confirm("Confirmed, add it now", 2)).unwrap_err().to_string();
+            assert!(error.contains("for phase 1, not phase 2") || error.contains("not running"), "{error}");
+            assert_eq!(stored().tasks.len(), 1);
+            // 5. The confirmed addition adds the task with added_late.
+            let added = request(confirm("Confirmed, add it now", 1)).unwrap();
+            assert_eq!(added["status"], "added", "{added}");
+            let team = stored();
+            let task = team.task(2).unwrap();
+            assert_eq!((task.phase, task.status), (1, TaskStatus::Pending));
+            let late = task.added_late.as_ref().unwrap();
+            assert_eq!(late.by, "Lead");
+            assert_eq!(late.request, "Please add a task to the current phase: fix the login crash");
+            assert_eq!(late.confirm, "Confirmed, add it now");
+            assert!(team.pending_additions.is_empty());
+            let feed = run("events", &json!({"team":"t"}), false).unwrap().to_string();
+            assert!(feed.contains("phase_tasks_added") && feed.contains("phase_addition_warned"), "{feed}");
+            // The same words are spent.
+            let error = request(json!({"phase":1,"tasks":[{"id":3,"title":"Again","assignee":"dev"}],
+                "owner_word":{"text":"Please add a task to the current phase"}})).unwrap_err().to_string();
+            assert!(error.contains("already used"), "{error}");
+            // 6. The owner on the desktop: the warning, then "add" or the phase number.
+            super::set_test_caller_identities(Some((None, None, None)));
+            let human = |value: Value| { let mut value = value; value["by"] = json!("human"); value };
+            let warned = request(human(json!({"phase":1,"tasks":[{"id":3,"title":"Docs","assignee":"dev"}]}))).unwrap();
+            let pending = warned["pending"].as_str().unwrap().to_owned();
+            let error = request(human(json!({"phase":1,"confirm":pending,"confirmation":"sure"}))).unwrap_err().to_string();
+            assert!(error.contains("Type \"add\" or \"1\""), "{error}");
+            let added = request(human(json!({"phase":1,"confirm":pending,"confirmation":"1"}))).unwrap();
+            assert_eq!(added["status"], "added", "{added}");
+            assert_eq!(stored().task(3).unwrap().added_late.as_ref().unwrap().by, "You");
+            // A draft phase keeps edit-draft.
+            let mut draft = stored();
+            let mut events = Vec::new();
+            ops::apply(&mut draft, "extend", &json!({"phase_title":"Next","tasks":[{"id":4,"title":"Later","assignee":"dev"}]}),
+                &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+            let error = ops::apply(&mut draft, "add-to-phase", &json!({"phase":2,"tasks":[{"id":5,"title":"Late","assignee":"dev"}]}),
+                &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
+            assert!(error.contains("edit-draft") || error.contains("not running"), "{error}");
+            // 7. A member never adds.
+            super::set_test_caller_identities(Some((None, Some("codex/x/dev".into()), Some("r1".into()))));
+            let error = request(json!({"phase":1,"tasks":[{"id":4,"title":"Mine","assignee":"dev"}],"by":"human"})).unwrap_err().to_string();
+            assert!(!error.is_empty());
+            assert!(stored().task(4).is_none());
+            super::set_test_caller_identities(None);
+        });
     }
 
     #[test]

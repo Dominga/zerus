@@ -406,6 +406,10 @@ Team parse(const QJsonObject &v)
             task.held = true;
             task.hold.by = str(h, "by"); task.hold.reason = str(h, "reason"); task.hold.at = h.value("at").toDouble();
         }
+        if (t.value("added_late").isObject()) {
+            const auto a = t.value("added_late").toObject();
+            task.addedLate = {str(a, "by"), str(a, "request"), str(a, "confirm"), a.value("at").toDouble(), true};
+        }
         // G1: the sub-team this task delegated to, with its rolled-up counts.
         if (t.value("subteam").isObject()) {
             const auto s = t.value("subteam").toObject();
@@ -1337,6 +1341,19 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
                             : tr("Added phase %1 · %2 · %3 tasks").arg(n).arg(title).arg(d.value("tasks").toInt());
     }
     else if (k == "phase_approved") t = tr("Approved phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt());
+    // U29: a task joins a running phase only after the warning is confirmed.
+    else if (k == "phase_addition_warned") {
+        const int count = d.value("tasks").toArray().size();
+        const int phase = d.value("phase").toInt();
+        t = count == 1 ? tr("Asked to add 1 task to running phase %1 · waits for your confirmation").arg(phase)
+                       : tr("Asked to add %1 tasks to running phase %2 · waits for your confirmation").arg(count).arg(phase);
+        line.tone = Tone::Warn;
+    }
+    else if (k == "phase_tasks_added") {
+        QStringList ids; for (const auto &id : d.value("tasks").toArray()) ids << QStringLiteral("#%1").arg(id.toInt());
+        t = tr("Added %1 to running phase %2 · outside its original scope").arg(ids.join(QStringLiteral(", "))).arg(d.value("phase").toInt());
+        line.tone = Tone::Warn;
+    }
     else if (k == "phase_moved") {
         // F10: the drafts are numbered live; a move renumbers them, and the
         // feed says where the phase went.

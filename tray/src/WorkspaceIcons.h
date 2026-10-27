@@ -209,6 +209,12 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
             QPainterPath check; check.moveTo(3, 12); check.lineTo(7, 16); check.lineTo(16, 7); p.drawPath(check);
             QPainterPath second; second.moveTo(11, 15); second.lineTo(13, 17); second.lineTo(22, 8); p.drawPath(second);
         } else if (name == "add") { p.drawLine(12, 5, 12, 19); p.drawLine(5, 12, 19, 12); }
+        // U29: out of the phase's original scope - a plus outside a dashed frame.
+        else if (name == "out-of-scope") {
+            QPen dashed = p.pen(); dashed.setDashPattern({2.0, 1.6}); p.save(); p.setPen(dashed);
+            p.drawRoundedRect(QRectF(3, 3, 14, 14), 3, 3); p.restore();
+            p.drawLine(QPointF(18, 13), QPointF(18, 22)); p.drawLine(QPointF(13.5, 17.5), QPointF(22.5, 17.5));
+        }
         else if (name == "refresh") {
             p.drawArc(QRectF(5, 5, 14, 14), 40*16, 290*16); p.drawLine(19, 4, 19, 9); p.drawLine(14, 9, 19, 9);
         } else if (name == "reset") {

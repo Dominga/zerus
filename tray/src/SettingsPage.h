@@ -31,6 +31,7 @@
 #include <QUrl>
 #include <QToolButton>
 #include "ProcessSettings.h"
+#include "ForkUpdater.h"
 #include "QuestionNotificationSettings.h"
 #include "UiLanguage.h"
 #include "WorkspaceSkin.h"
@@ -259,9 +260,37 @@ public:
         repository->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));repository->setIconSize(QSize(20,20));repository->setAutoDefault(false);
         repository->setCursor(Qt::PointingHandCursor);repository->setToolTip(QStringLiteral("https://github.com/ufna/zerus"));repository->setAccessibleName(tr("Open Zerus repository on GitHub"));
         connect(repository,&QPushButton::clicked,this,[]{QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/ufna/zerus")));});
-        about->addWidget(repository,0,Qt::AlignLeft);about->addStretch();
+        // WhiteWh fork: this build is the fork; its repository is the active
+        // one, and its releases are where this build updates from.
+        auto *fork=new QPushButton(QStringLiteral("WhiteWh/zerus"));fork->setObjectName("aboutForkRepository");fork->setProperty("glyph","github");
+        fork->setIcon(workspaceIcon("github",palette().color(QPalette::WindowText)));fork->setIconSize(QSize(20,20));fork->setAutoDefault(false);fork->setCheckable(true);fork->setChecked(true);
+        fork->setCursor(Qt::PointingHandCursor);fork->setToolTip(tr("Active: this build is the WhiteWh fork · https://github.com/WhiteWh/zerus"));fork->setAccessibleName(tr("Open the WhiteWh fork on GitHub (the active repository)"));
+        connect(fork,&QPushButton::clicked,this,[fork]{fork->setChecked(true);QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/WhiteWh/zerus")));});
+        auto *repositories=new QHBoxLayout;repositories->setSpacing(8);repositories->addWidget(repository);repositories->addWidget(fork);repositories->addStretch();
+        about->addLayout(repositories);
+        auto *updater=ForkUpdater::instance();
+        forkStatus=new QLabel;forkStatus->setObjectName("aboutForkStatus");forkStatus->setWordWrap(true);
+        forkUpdate=new QPushButton;forkUpdate->setObjectName("aboutForkUpdate");forkUpdate->setAutoDefault(false);
+        connect(forkUpdate,&QPushButton::clicked,this,[updater]{
+            if(updater->ready()){if(updater->startInstall())QCoreApplication::quit();return;}
+            updater->checkNow();
+        });
+        auto *updateRow=new QHBoxLayout;updateRow->setSpacing(10);updateRow->addWidget(forkUpdate);updateRow->addWidget(forkStatus,1);
+        about->addLayout(updateRow);
+        connect(updater,&ForkUpdater::changed,this,[this]{refreshForkUpdate();});
+        refreshForkUpdate();
+        about->addStretch();
         connect(nav,&QListWidget::currentRowChanged,pages,&QStackedWidget::setCurrentIndex);nav->setCurrentRow(0);
         connect(nav,&QListWidget::currentRowChanged,this,[this](int row){if(row==aboutSection)refreshCliVersion();if(row==speechSection)speech->refresh();if(row==6)files->refresh();if(row==approvalSection)approvals->refresh();if(row==analyticsSection)analytics->refresh();});
+    }
+    // WhiteWh fork: the About page's update from the fork's releases.
+    void refreshForkUpdate(){
+        auto *updater=ForkUpdater::instance();
+        const bool ready=updater->ready();
+        forkUpdate->setText(ready?tr("Restart to install fork build %1").arg(updater->readyBuild()):tr("Check for updates from WhiteWh/zerus"));
+        forkUpdate->setEnabled(updater->manualAvailable());
+        forkUpdate->setToolTip(updater->manualAvailable()?QString():tr("Updates from the fork run in its portable Windows build"));
+        forkStatus->setText(updater->status());
     }
     void setPeers(const QStringList &peers){sync->setPeers(peers);speech->setPeers(peers);analytics->setPeers(peers);}
     // A control-only computer keeps no recovery policy of its own.
@@ -306,6 +335,7 @@ public:
 private:
     void refreshCliVersion(){cliVersion->setText(tr("hgs CLI: checking…"));versionClient->requestVersion();}
     HgsClient *versionClient;QLabel *cliVersion;MobileDeliverySettings *mobileDelivery;
+    QLabel *forkStatus=nullptr;QPushButton *forkUpdate=nullptr;   // WhiteWh fork: About
     WorkspaceSettings::Panel *workspaceConnection;
     SpeechSettings *speech;
     DownloadCacheSettings *files;

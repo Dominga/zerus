@@ -42,6 +42,7 @@
 #include "CollapsibleBlock.h"
 #include "HgsClient.h"
 #include "SettingsPage.h"
+#include "ForkUpdater.h"
 #include "TeamCatalogEditor.h"
 #include "TeamAttentionNotices.h"
 #include <QClipboard>
@@ -696,6 +697,7 @@ private slots:
     void planningBoardScrollsInsteadOfSqueezingColumns();
     void catalogRoleEditorEditsEveryField();
     void catalogRoleListGrowsToItsRows();
+    void aboutNamesTheForkAndItsUpdate();
     void catalogTemplateEditorRosterSkeletonAndChecks();
     void catalogRoutingEditsAndTriesAGoal();
     void catalogHeaderRevertDraftAndBanners();
@@ -4643,6 +4645,27 @@ void TestTeamsUi::designerPageStartsOrOpensTheDesigner()
 // Owner, 2026-10-28: the role list runs down the whole column; it scrolled
 // after five rows (a Maximum policy held it at the default size hint) with
 // the column empty below "+ Role".
+// Owner, 2026-10-28: Settings > About names the fork as the active repository
+// beside upstream, and offers the update from the fork's releases. Outside a
+// portable Windows folder (this test) the button stays off and says why.
+void TestTeamsUi::aboutNamesTheForkAndItsUpdate()
+{
+    SettingsPage page(FakeCli::program(script()));
+    auto *upstream = page.findChild<QPushButton *>("aboutRepository");
+    auto *fork = page.findChild<QPushButton *>("aboutForkRepository");
+    QVERIFY(upstream && fork);
+    QCOMPARE(upstream->text(), QStringLiteral("ufna/zerus"));
+    QCOMPARE(fork->text(), QStringLiteral("WhiteWh/zerus"));
+    QVERIFY(fork->isChecked());
+    QVERIFY(fork->toolTip().contains(QStringLiteral("https://github.com/WhiteWh/zerus")));
+    auto *update = page.findChild<QPushButton *>("aboutForkUpdate");
+    QVERIFY(update);
+    QCOMPARE(update->text(), QStringLiteral("Check for updates from WhiteWh/zerus"));
+    QCOMPARE(update->isEnabled(), ForkUpdater::instance()->manualAvailable());
+    if (!update->isEnabled()) QVERIFY(update->toolTip().contains(QStringLiteral("portable Windows build")));
+    QVERIFY(page.findChild<QLabel *>("aboutForkStatus"));
+}
+
 void TestTeamsUi::catalogRoleListGrowsToItsRows()
 {
     QSettings().setValue("workspace/skin", "whitewh");

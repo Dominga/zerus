@@ -51,6 +51,19 @@ while a build waits for the restart: a newer build downloads into
 restart always installs the newest build found.
 **Settings -> Updates -> Check now** reads the feed at once.
 
+**Settings -> About** names `WhiteWh/zerus` as the active repository beside
+upstream `ufna/zerus`, with **Check for updates from WhiteWh/zerus** (then
+**Restart to install fork build N** once a build is verified). In a portable
+folder of a build made locally, without an embedded feed, this button is the
+only check: it reads the feed of the fork's latest release,
+`https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json`,
+with the same rules, and never checks by itself. Outside a portable folder the
+button stays off.
+
+A portable Windows build of the fork never takes an upstream zip: the upstream
+catalog check (`UpdateController`) does not offer the Windows portable build of
+`ufna/zerus` over it, since installing that would replace the fork.
+
 A verified build shows **Restart to finish update** in the tray menu and the
 sidebar, and posts one notification. Restarting quits Zerus as Quit does, so
 drafts are saved. A PowerShell helper without a console window then shows a small

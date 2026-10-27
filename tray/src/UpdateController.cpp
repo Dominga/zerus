@@ -616,7 +616,10 @@ void UpdateController::compare(){
     }
     if(m_installation.kind!="package"){
         const auto version=QCoreApplication::applicationVersion();
-        bool newer=windowsBuild(m_installation)?portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);
+        // WhiteWh fork: a portable Windows build of the fork updates only from
+        // the fork's releases (ForkUpdater); an upstream zip would replace it.
+        const bool fork=windowsBuild(m_installation)&&ForkUpdater::instance()->manualAvailable();
+        bool newer=windowsBuild(m_installation)?!fork&&portableUpdateAvailable(version,m_feed):channel()=="stable"&&plainStableIsNewer(version,m_feed.version);
         completeComparison(newer,comparisonMessage(m_installation,m_feed,version,0,false));return;
     }
     if(m_installation.package=="zerus-git"||m_installation.version.isEmpty()||!m_feed.packages.contains(m_installation.package)){completeComparison(false,comparisonMessage(m_installation,m_feed,QCoreApplication::applicationVersion(),0,false));return;}

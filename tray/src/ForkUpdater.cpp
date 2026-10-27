@@ -25,6 +25,9 @@ const char *feedUrl = "";
 #endif
 // Every build comes from this fork's own releases.
 const char *releasePrefix = "https://github.com/WhiteWh/zerus/releases/";
+// The feed of the fork's latest release (docs/fork-updates.md), for a check by
+// hand from a build that was made without one.
+const char *latestFeed = "https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json";
 // The folder at the top of the portable zip (scripts/windows_portable.py).
 const char *top = "zerus-windows-x86_64";
 constexpr qint64 feedLimit = 64 * 1024;
@@ -301,11 +304,11 @@ ForkUpdater::ForkUpdater(QObject *parent) : QObject(parent)
     m_stage = m_layout.stage;
 #ifdef Q_OS_WIN
     // Only the portable zip carries build-info.json next to hgs-tray.exe.
-    m_enabled = *feedUrl && QString::fromLatin1(feedUrl).startsWith(QLatin1String(releasePrefix))
-        && !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json"))
-        && !m_layout.superseded;
+    m_portable = !m_install.isEmpty() && QFileInfo::exists(m_install + QStringLiteral("/build-info.json")) && !m_layout.superseded;
+    m_enabled = m_portable && *feedUrl && QString::fromLatin1(feedUrl).startsWith(QLatin1String(releasePrefix));
 #endif
-    m_status = m_enabled ? tr("Fork updates have not been checked.") : QString();
+    m_status = m_enabled ? tr("Fork updates have not been checked.")
+             : m_portable ? tr("This build was made locally: it checks the fork's releases only when you ask.") : QString();
     if (!m_enabled) return;
     m_network = new QNetworkAccessManager(this);
     QTimer::singleShot(firstCheckMs, this, &ForkUpdater::check);
@@ -329,9 +332,25 @@ QString ForkUpdater::unpacked() const
 
 void ForkUpdater::check()
 {
-    if (!m_enabled || m_busy) return;
+    if (!m_enabled) return;
+    fetch();
+}
+
+void ForkUpdater::checkNow()
+{
+    if (!m_portable) return;
+    if (!m_network) m_network = new QNetworkAccessManager(this);
+    fetch();
+}
+
+void ForkUpdater::fetch()
+{
+    if (m_busy) return;
     m_busy = true;
-    QNetworkRequest request{QUrl(QString::fromLatin1(feedUrl))};
+    m_status = tr("Checking the fork's releases…");
+    emit changed();
+    const QString feed = m_enabled ? QString::fromLatin1(feedUrl) : QString::fromLatin1(latestFeed);
+    QNetworkRequest request{QUrl(feed)};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setTransferTimeout(30000);
     auto *reply = m_network->get(request);

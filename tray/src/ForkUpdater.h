@@ -43,6 +43,13 @@ public:
     static qint64 installedBuild();
     // Built with a feed and running from a portable folder.
     bool enabled() const { return m_enabled; }
+    // A portable Windows folder of this fork: the owner can check the fork's
+    // releases by hand (Settings > About), also from a build made locally,
+    // which has no feed of its own and never checks by itself.
+    bool manualAvailable() const { return m_portable; }
+    // Checks the fork's latest release now; a newer build downloads and waits
+    // for Restart to finish update, as an automatic check does.
+    void checkNow();
     // A verified newer build waits next to the installation.
     bool ready() const { return m_readyBuild > 0; }
     qint64 readyBuild() const { return m_readyBuild; }
@@ -57,6 +64,7 @@ signals:
 
 private:
     explicit ForkUpdater(QObject *parent);
+    void fetch();
     void feedFinished(QNetworkReply *reply);
     void download();
     void downloadFinished(QNetworkReply *reply);
@@ -65,7 +73,7 @@ private:
     QString unpacked() const;
     QString readyStatus() const;
 
-    bool m_enabled = false, m_busy = false;
+    bool m_enabled = false, m_portable = false, m_busy = false;
     Layout m_layout;
     QString m_install, m_stage, m_status;
     // Where a download goes: the stage, or beside it while a ready build waits

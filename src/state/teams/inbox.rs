@@ -35,6 +35,9 @@ impl Item {
     pub(crate) fn value(&self) -> Value {
         let mut value = json!({"kind":self.kind,"task":self.task,"member":self.member,"since":self.since,
             "summary":self.summary,"command":self.command});
+        // U18: every item says how long it has waited, so the desktop and the
+        // lead see the stuck ones without reading timestamps.
+        value["age"] = json!(age(crate::state::now(), self.since));
         if !self.detail.is_empty() {
             value["detail"] = json!(self.detail);
         }
@@ -536,6 +539,23 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
         out.push(json!({"kind":"findings","count":deferred.len(),"since":latest,
             "summary":format!("{} findings deferred", deferred.len())}));
     }
+    // U18: a member's permission request the lead has not answered for
+    // `remind_owner_minutes` goes to the owner, with the member, the command
+    // and its age; the owner may answer it from here.
+    for member in &team.members {
+        let Some(pending) = &member.pending else { continue };
+        let waited = (now - pending.at).max(0.0);
+        if waited < minutes as f64 * 60.0 {
+            continue;
+        }
+        let role = team.role_of(&member.id);
+        let asked = pending.card_question();
+        out.push(json!({"kind":"permission","member":role,"since":pending.at,
+            "minutes":(waited / 60.0).round() as u64,
+            "summary":format!("{role} waits for your answer: {}",
+                if asked.is_empty() { "a permission request".to_owned() } else { asked }),
+            "command":pending.answer_command(team, &member.id)}));
+    }
     out.extend(phase_items);
     out.sort_by(|a, b| a["since"].as_f64().unwrap_or_default().total_cmp(&b["since"].as_f64().unwrap_or_default()));
     out
@@ -738,6 +758,45 @@ mod tests {
     }
 
     #[test]
+    fn an_unanswered_permission_reaches_the_owner_after_the_reminder() {
+        // U18: a member permission the lead has not answered for
+        // remind_owner_minutes goes to the owner's attention list, with the
+        // member, the command and its age; the oldest one comes first.
+        let mut team = team();
+        let minutes = team.settings.remind_owner_minutes;
+        assert_eq!(minutes, 10);
+        let now = 5_000.0;
+        team.members.push(Member { id: "qa".into(), role: "Tester".into(), ..Default::default() });
+        let card = json!({"questions":[{"id":"decision","header":"Bash","question":"Run the build?",
+            "options":[{"id":"allow","label":"Allow"},{"id":"deny","label":"Deny"}]}]});
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().pending = Some(PendingQuestion {
+            question_id: "q9".into(),
+            question_hash: "h9".into(),
+            approval: true,
+            at: now - 12.0 * 60.0,
+            card: card.clone(),
+        });
+        team.members.iter_mut().find(|member| member.id == "qa").unwrap().pending =
+            Some(PendingQuestion { question_id: "q8".into(), question_hash: "h8".into(), approval: true, at: now - 30.0 * 60.0, card });
+        let attention = super::attention(&team, now);
+        let permissions: Vec<&Value> = attention.iter().filter(|item| item["kind"] == "permission").collect();
+        assert_eq!(permissions.len(), 2, "{attention:?}");
+        // The longest wait is first.
+        assert_eq!(permissions[0]["member"], "Tester");
+        assert_eq!(permissions[0]["minutes"], 30);
+        assert_eq!(permissions[1]["member"], "Backend");
+        assert!(permissions[1]["summary"].as_str().unwrap().contains("waits for your answer"), "{}", permissions[1]);
+        // The owner may answer it from the attention list.
+        assert!(permissions[1]["command"].as_str().unwrap().contains("hgs team answer --json"), "{}", permissions[1]);
+        // Before the reminder the permission is only the lead's inbox item.
+        let early = super::attention(&team, now - 40.0 * 60.0);
+        assert!(!early.iter().any(|item| item["kind"] == "permission"), "{early:?}");
+        // 0 turns it off.
+        team.settings.remind_owner_minutes = 0;
+        assert!(!super::attention(&team, now).iter().any(|item| item["kind"] == "permission"));
+    }
+
+    #[test]
     fn a_permission_request_is_answerable_from_the_inbox() {
         let mut team = team();
         let member = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
@@ -912,11 +971,11 @@ mod tests {
     fn an_owner_attention_item_appears_after_the_owner_reminder_time() {
         let mut team = team();
         submitted(&mut team, 1, 1000.0);
-        // Before the default 60 minutes: nothing for the owner.
-        assert!(attention(&team, 1000.0 + 59.0 * 60.0).is_empty());
-        let listed = attention(&team, 1000.0 + 60.0 * 60.0);
+        // Before the default 10 minutes: nothing for the owner.
+        assert!(attention(&team, 1000.0 + 9.0 * 60.0).is_empty());
+        let listed = attention(&team, 1000.0 + 10.0 * 60.0);
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0], json!({"kind":"report","task":1,"member":"Backend","since":1000.0,"minutes":60}));
+        assert_eq!(listed[0], json!({"kind":"report","task":1,"member":"Backend","since":1000.0,"minutes":10}));
         // 0 turns the owner's list off.
         team.settings.remind_owner_minutes = 0;
         assert!(attention(&team, 100_000.0).is_empty());

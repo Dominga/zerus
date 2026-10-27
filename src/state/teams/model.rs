@@ -155,7 +155,7 @@ fn default_remind_lead() -> u64 {
     15
 }
 fn default_remind_owner() -> u64 {
-    60
+    10
 }
 fn default_background_red() -> u64 {
     30
@@ -1311,7 +1311,7 @@ mod tests {
         // The lead's load settings (C2, C4, C12) default; an old team has no inbox.
         assert_eq!(
             (team.settings.inbox_interval_seconds, team.settings.remind_lead_minutes, team.settings.remind_owner_minutes),
-            (120, 15, 60)
+            (120, 15, 10)
         );
         assert_eq!(team.settings.background_red_minutes, 30);
         assert!(team.inbox.told.is_empty() && team.inbox.told_at == 0.0);

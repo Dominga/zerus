@@ -285,6 +285,21 @@ pub(crate) enum Step {
     Quiet { member: String, session: SessionRef, muted: bool, revision: u64 },
 }
 
+/// U18: the lead's turn has ended and it can take a message, also while its own
+/// subagents or Background jobs run (an idle agent with Background work accepts
+/// new messages); never during a turn, a question, an approval or a sign-in.
+fn can_take_a_message(found: &Seen) -> bool {
+    if found.free {
+        return true;
+    }
+    found.live
+        && !found.asking
+        && matches!(found.phase.as_str(), "" | "idle" | "ready")
+        // A turn (`busy`) or a question/approval (`attention`) is not a turn
+        // that ended; an idle session with Background work is (U18).
+        && matches!(found.activity.as_str(), "idle" | "background")
+}
+
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
     let session = member.session.as_ref()?;
     seen.iter().find(|s| s.host == session.host && s.name == session.name)
@@ -595,10 +610,15 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
             }
         }
     }
-    // C4: a report undecided for `remind_lead_minutes` reminds the free lead
-    // once; the owner sees it in status after `remind_owner_minutes`.
-    let lead_free = team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free);
-    if lead_free && team.settings.remind_lead_minutes > 0 {
+    // C4: a report undecided for `remind_lead_minutes` reminds the lead once;
+    // the owner sees it in status after `remind_owner_minutes`.
+    let lead = team.member(&team.lead).and_then(|m| session_of(m, seen));
+    let lead_free = lead.is_some_and(|s| s.free);
+    // U18: the inbox and the report reminder also reach a lead whose own
+    // Background work or subagents keep it from being `free`, as long as its
+    // turn has ended and it can take a message.
+    let lead_ready = lead.is_some_and(can_take_a_message);
+    if lead_ready && team.settings.remind_lead_minutes > 0 {
         let after = team.settings.remind_lead_minutes as f64 * 60.0;
         for task in &team.tasks {
             if task.status != TaskStatus::Submitted {
@@ -613,7 +633,7 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
         }
     }
     // C2: one message lists the new items, at most once per interval.
-    if lead_free {
+    if lead_ready {
         let new = inbox::items(team).into_iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
         let interval = team.settings.inbox_interval_seconds as f64;
         if new > 0 && (team.inbox.told_at == 0.0 || now - team.inbox.told_at >= interval) {
@@ -3982,6 +4002,60 @@ mod tests {
         busy.idle = false;
         busy.free = false;
         assert!(steps(&team, &[lead, busy], 70.0).contains(&Step::WorkResumed { task: 1 }));
+    }
+
+    #[test]
+    fn a_lead_with_its_own_background_work_still_gets_the_inbox_and_the_reminder() {
+        // U18: a lead whose turn ended but whose own subagent or Background job
+        // runs takes messages (CLAUDE.md): its inbox and the report reminder
+        // must not wait for the job; a lead in its own turn gets neither.
+        let mut lead = session("claude/x/lead", "r0", true);
+        lead.free = false;
+        lead.idle = false;
+        lead.activity = "background".into();
+        lead.background = true;
+        // An open question waits for the lead while its own Background job runs.
+        let mut question_team = team();
+        {
+            let task = question_team.task_mut(2).unwrap();
+            task.attempts.push(Attempt {
+                n: 1,
+                id: "A2".into(),
+                member: "dev".into(),
+                state: AttemptState::Delivered,
+                sent_at: 10.0,
+                delivered_at: Some(10.0),
+                questions: vec![Question { id: "q1".into(), text: "Which?".into(), at: 15.0, ..Default::default() }],
+                ..Default::default()
+            });
+            task.status = TaskStatus::InProgress;
+        }
+        let found = steps(&question_team, &[lead.clone()], 20.0);
+        assert!(found.iter().any(|step| matches!(step, Step::Inbox)), "{found:?}");
+        // An old report reminds the lead even with its Background job running.
+        let mut report_team = team();
+        {
+            let task = report_team.task_mut(1).unwrap();
+            task.attempts.push(Attempt {
+                n: 1,
+                id: "A1".into(),
+                member: "dev".into(),
+                state: AttemptState::Reported,
+                report: Some(Report { text: "Done".into(), at: 5.0, ..Default::default() }),
+                ..Default::default()
+            });
+            task.status = TaskStatus::Submitted;
+        }
+        let late = 5.0 + report_team.settings.remind_lead_minutes as f64 * 60.0 + 60.0;
+        let found = steps(&report_team, &[lead.clone()], late);
+        assert!(found.iter().any(|step| matches!(step, Step::RemindReport { task: 1 })), "{found:?}");
+        // A lead in its own turn gets neither.
+        let mut busy = lead;
+        busy.background = false;
+        busy.activity = "busy".into();
+        busy.phase = "working".into();
+        let found = steps(&report_team, &[busy], late);
+        assert!(!found.iter().any(|step| matches!(step, Step::Inbox | Step::RemindReport { .. })), "{found:?}");
     }
 
     #[test]

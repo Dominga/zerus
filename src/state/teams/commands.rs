@@ -3320,7 +3320,7 @@ mod tests {
         // The settings are optional with the spec's defaults (C2, C4).
         assert_eq!(
             (team.settings.inbox_interval_seconds, team.settings.remind_lead_minutes, team.settings.remind_owner_minutes),
-            (120, 15, 60)
+            (120, 15, 10)
         );
         // The inbox is a read, named in the usage.
         assert!(USAGE.contains("inbox"));

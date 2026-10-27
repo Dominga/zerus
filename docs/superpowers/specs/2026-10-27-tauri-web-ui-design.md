@@ -21,7 +21,7 @@ design work reaches the product.
 
 | Topic | Decision |
 | --- | --- |
-| Visual base | The WhiteWh fork prototype's *base style* only: palette, fonts, radii, density, motion. None of its specific solutions or runtime |
+| Visual base | The WhiteWh fork prototype's *base style* only: fonts, radii, density, motion. None of its specific solutions or runtime. Since round 4 the palette is Qt's (below) |
 | Session list | Today's Zerus structure, sizes and cards. Only the prototype's nested tree lines are borrowed, for the existing one-level subagent nesting |
 | Parity | Every function of the current Qt GUI, including those the prototype lacks |
 | Orchestration | No fork orchestrator (teams, phases, task graph, iron rules, cache hold, designer). Zerus Tasks are redesigned in the new style |
@@ -36,6 +36,13 @@ design work reaches the product.
 | macOS refresh fix (round 3) | Decided: disable WebKit's near-60 fps page rendering preference before each UI webview is created; if the measurement fails the criteria or the preference disappears, evaluate Chromium on macOS |
 | Account type (round 3) | Every usage limit in the status bar names its account type: the provider badge and the plan when known, next to the numbers |
 | Resizing (round 3) | The composer height (76-720 px) has a visible grip; the side panel width is draggable (default 400, at least 240) and remembered |
+| Palette (round 4) | Zerus Dark and Light take Qt's colours: `SessionsWindow::applyTheme` (background, surface, border, accent, muted, hover, selected, field), `IdentityBadges::paintRow` (row hover and selection), `ActivityView` (message, notice and code surfaces) and `MessageComposer` (editor). Project header bands use the project's own colour, as in Qt |
+| Panel edges (round 4) | The session list and side panel edges show only a centred grip (4×52) under the pointer and while dragging; no line, no tooltip. The composer grip has no tooltip |
+| Goal (round 4) | "Pursuing goal" is a floating pill over the top of Activity that never shifts the header or the conversation |
+| Usage limits (round 4) | Account name, then its type (provider badge), then the 5 h and 7 d meters; no plan. Account filters and chips start with the provider glyph, then the name |
+| List organisation (round 4) | Ctrl/Cmd-click, Shift-click and Esc select as in `SessionList.cpp`, with the batch action bar; drag and drop reorders sessions, moves them between projects and reorders projects, with Qt's line and header-frame indicators |
+| Filters (round 4) | Counts in the text colour, glyphs muted, the checked filter in the accent; the bell turns yellow while sessions need attention (Qt) and the bolt violet while sessions are active (owner request) |
+| Decisions (round 4) | Zerus mark: the two-turn spin-up. Linux: system WebKitGTK first, CEF as the fallback. User-imported JSON skins (tokens and enumerated variants, validated) are in v1 |
 
 Non-goals: replacing the Qt client in one step; changing `hgs` CLI, API v1,
 state paths or status semantics; plugins (a separate design, see the 2026-10-27
@@ -184,9 +191,8 @@ adds no new action semantics.
   needs attention, as `SwarmButton` does. The mark is one layer promoted ahead
   of time and animated by transform only, with no glow; it is paused while the
   window is hidden and static under Reduce motion. When attention clears, the
-  current cycle finishes and the mark settles. The default motion spins up from
-  rest to two turns and settles with a 6° overshoot; the owner chooses between
-  it, a stronger three-turn spin-up and the Qt turn.
+  current cycle finishes and the mark settles. The owner chose the spin-up
+  (2026-10-27): from rest to two turns, settling with a 6° overshoot.
 - **Session rows**: the emphasis edge is 4 px, 6 px from the card's top and
   bottom and 4 px in the compact row. Switching a card and its compact row
   morphs in 220 ms: the card's height eases, the title and badges move from
@@ -255,8 +261,10 @@ One JSON document per skin, independent of the UI stack.
   custom properties (`--z-<group>-<token>`) and sets variant attributes on the
   root element; components carry the variant styles. Generators for Qt tokens,
   Compose and SwiftUI can read the same JSON later.
-- **User skins** live in a skins folder in the client's configuration directory
-  and can be imported from Settings → Appearance; an invalid file is refused
+- **User skins are in v1** (owner decision, 2026-10-27). They live in a skins
+  folder in the client's configuration directory and can be imported from
+  Settings → Appearance; only tokens and enumerated variants are accepted, and an
+  invalid file is refused
   with the validator's message. The fork's `WorkspaceSkin.h` schema 1 (11 tokens
   per theme) is to be read as a subset once its key list is mapped; its free QSS
   is ignored.
@@ -299,7 +307,8 @@ One JSON document per skin, independent of the UI stack.
 
 ## Risks and measurement plan
 
-- **Linux (main risk).** Tauri 2 uses WebKitGTK through webkit2gtk-4.1 (GTK 3).
+- **Linux (main risk; the owner chose WebKitGTK first on 2026-10-27).** Tauri 2
+  uses WebKitGTK through webkit2gtk-4.1 (GTK 3).
   WebKitGTK 2.54 moved to a Skia compositor with damage tracking, but NVIDIA
   blank windows and crashes, silent software WebGL and GTK 3's integer scaling on
   KDE fractional scales remain. Fallbacks in order: the Tauri 3 CEF runtime
@@ -372,9 +381,9 @@ installing Qt until the owner switches the default.
 
 ## Open questions for the owner
 
-1. Approve the round 3 design, or what to change; which Zerus mark motion to keep.
-2. Decided 2026-10-27: the WebKit preference fix with the criteria above,
-   falling back to Chromium on macOS (CEF once beta, otherwise Electron).
-3. Linux runtime: start on WebKitGTK and measure, with CEF as the fallback
-   (pending since round 1).
-4. User-imported skins in v1, or built-in skins first (pending since round 1).
+1. Approve the round 4 design, or what to change. This is the only open question.
+
+Decided on 2026-10-27: the WebKit preference fix on macOS with the criteria
+above, falling back to Chromium on macOS (CEF once beta, otherwise Electron);
+WebKitGTK first on Linux with CEF as the fallback; user-imported skins in v1;
+the two-turn spin-up for the Zerus mark.

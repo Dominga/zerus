@@ -329,6 +329,9 @@ pub struct Flags {
     pub task_exchange: bool,
     /// The phone's Send now, Cancel and Done list, which it never offers either.
     pub task_actions: bool,
+    /// `hgs watch --json` (watch-v1): the heartbeat follows the local listing
+    /// as a stream instead of running `ls` (`watch_listing`). Not an operation.
+    pub watch: bool,
 }
 
 impl Flags {
@@ -375,6 +378,9 @@ impl Flags {
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
             task_exchange: has("hgs task exchange|digests --json"),
             task_actions: has("hgs task mobile-send|mobile-cancel|mobile-done --json"),
+            watch: help
+                .lines()
+                .any(|line| line.trim() == zerus_watch_protocol::HELP_MARKER),
         };
         if flags.windows_gateway {
             return flags.windows_local();
@@ -405,6 +411,7 @@ impl Flags {
         self.git_status = false;
         self.repository = false;
         self.analytics = false;
+        self.watch = false;
         self
     }
 

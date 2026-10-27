@@ -810,9 +810,8 @@ answered; a denial cannot carry an explanation.
   (7) No dependencies on tasks of an earlier phase: the barrier waits for it.
   (8) Shared foundations first (the skin, a server model), at the start of
   the first lane, for a strong member.
-  Load and models: (9) balance every lane, not only the phase, by size as
-  well as count. (10) GUI, hard logic and debugging go to strong models
-  (Opus, Codex); well-specified server work and small fixes to DeepSeek.
+  Load and models: (9) balance every lane, not only the phase, by the task's volume and its cost (complexity plus the cost of checking it: a Qt task with clean builds and the window suite weighs about three server tasks), never by the number of tasks. (10) GUI, hard logic and debugging go to strong models
+  (Opus, Codex); well-specified server work, small fixes and well-specified GUI pages to DeepSeek.
   (11) Split a heavy task into its server and desktop parts. (12) QA never
   implements tasks; the reviewer never writes code it will review. (13) The
   Expert and ProExpert stay in reserve with no tasks: the Expert takes a task
@@ -826,7 +825,7 @@ answered; a denial cannot carry an explanation.
   prototype and screenshots, what to change and the acceptance criteria.
   (17) Tests through the real entry point (the CLI or the dispatcher) that
   fail before the fix. (18) The checks named, with totals in the report,
-  against the Rust baseline and the known flaky tests. (19) Folders follow the
+  against the Rust baseline and the known flaky tests; a member runs each suite once and reruns only what failed, the repeated stability runs happen once, at the lead's integration. (19) Folders follow the
   agent and the need: DeepSeek members work best in a clone; sometimes all
   members share one folder or one memory. The lead plans it first, then asks
   the owner explicitly how it should work and explains why it chose that.
@@ -887,6 +886,42 @@ answered; a denial cannot carry an explanation.
   precedence, a native Stop does not prove the jobs finished, and historical,
   unknown or offline jobs never make a session wait. Desktop, Android, the shared fixtures and
   the docs (CLAUDE.md and AGENTS.md included) change together. Owner: yes.
+
+- **U31. Work ahead (owner, 2026-10-27).** In phase 37 the DeepSeek
+  backends finished while the Claude members still worked the heavy GUI
+  fixes, and they had nothing to take: the next phase was not approved. A
+  team setting work_ahead (off by default, only the owner sets it) lets an
+  idle member take a ready task of its own role from the next draft phase
+  when that task depends on nothing in the running phase and its files are
+  not being changed there; the task is marked as worked ahead, its result
+  waits as a report until the owner approves that phase (a rejected or
+  discarded phase discards it), and the lead's inbox says so. The desktop
+  shows the setting in the team settings and the mark on the task. Owner:
+  yes.
+
+## Phases 37-40 (replanned 2026-10-27)
+
+Phase 36 closed without its own build: its review findings and the build go to
+phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
+
+- **37 Fixes of phase 36 and the build** (running): the checkpoint and final
+  review fixes of phase 36 (two critical: templates off the worker's tick, a
+  dialog from a member menu keeping its hold), then integration, review, QA and
+  one build for phases 36-37.
+- **38 Server fixes and the Sessions settings (DeepSeek members)** (no
+  barrier, runs alongside 37): the server review fixes of phase 35 (C1/C3/C8/C9,
+  C7, C14 groups), the draft follow-ups (F5), MCP servers as services (U11),
+  the designer's narrow rules (U16), confirm subagents (U19) and the Sessions
+  settings for it and for the DeepSeek session-log lock (U22); integration,
+  review, QA, build.
+- **39 New UI, the rest** (Claude members): New session dialog, Team designer
+  and catalog editor, the session list, the inspector, the designer window's
+  questions, permission answers in one line, the light theme fix and the
+  graph nodes' activity label; a checkpoint after the first lane; build.
+- **40 Planning rules, lanes, scope additions and session states**: U28 rules
+  and their weight-based health warnings, U27 visual lanes, U29 adding a task
+  to a running phase, U30 six session states (server, desktop, Android), U31
+  work ahead; build.
 
 ## Order of work (proposal)
 

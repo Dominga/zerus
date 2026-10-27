@@ -511,6 +511,11 @@ Team parse(const QJsonObject &v)
         // F13: the owner's sentence the lead approved on.
         const auto word = p.value("owner_word");
         phase.ownerWord = word.isObject() ? str(word.toObject(), "text") : word.toString();
+        phase.note = str(p, "note");
+        if (p.value("rejection").isObject()) {
+            const auto r = p.value("rejection").toObject();
+            phase.rejection = {str(r, "comment"), str(r, "by"), r.value("at").toDouble(), r.value("reworked_at").toDouble()};
+        }
         if (phase.n < 1) continue;   // phase 0 and negative numbers collide with task ids
         team.phases.append(phase);
     }
@@ -552,8 +557,14 @@ Team parse(const QJsonObject &v)
         for (const auto &id : v.value("cycle").toArray()) team.cycle.insert(id.toInt());
         for (const auto &id : v.value("ready").toArray()) team.ready.append(id.toInt());
         const auto validation = v.value("validation").toObject();
-        for (const auto &f : validation.value("errors").toArray()) team.errors.append(str(f.toObject(), "text"));
-        for (const auto &f : validation.value("warnings").toArray()) team.warnings.append(str(f.toObject(), "text"));
+        for (const auto &f : validation.value("errors").toArray()) {
+            team.errors.append(str(f.toObject(), "text"));
+            team.errorItems.append({f.toObject().value("task").toInt(), str(f.toObject(), "text")});
+        }
+        for (const auto &f : validation.value("warnings").toArray()) {
+            team.warnings.append(str(f.toObject(), "text"));
+            team.warningItems.append({f.toObject().value("task").toInt(), str(f.toObject(), "text")});
+        }
         // C7: the plan-health numbers, with the starving members while running.
         // hgs puts them in validation.health; a bare health is accepted too.
         const auto h = validation.value("health").isObject() ? validation.value("health").toObject() : v.value("health").toObject();
@@ -592,6 +603,7 @@ Team parse(const QJsonObject &v)
             summary.n = entry.value("n").toInt();
             summary.title = str(entry, "title");
             summary.status = str(entry, "status");
+            summary.state = str(entry, "state");
             summary.healthLine = str(entry, "health_line");
             summary.done = entry.value("done").toInt();
             summary.total = entry.value("total").toInt();
@@ -630,6 +642,8 @@ Team parse(const QJsonObject &v)
     team.maxMembers = settings.value("max_members").toInt();
     team.settingsJson = settings;
     team.resumeAfterLimits = settings.value("resume_after_limits").toBool();
+    team.autoAccept = settings.value("auto_accept").toBool() || v.value("auto_accept").toBool();
+    for (const auto &id : v.value("stuck_scope").toArray()) team.stuckScope.append(id.toInt());
     team.previous = str(v, "previous"); team.next = str(v, "next");
     for (const auto &value : v.value("proposals").toArray()) {
         const auto p = value.toObject();
@@ -841,8 +855,12 @@ QString displayStatus(const Team &team, const LiveLookup &live)
 {
     if (team.status != "running") return team.status;
     bool open = false;
+    // U25: only the open tasks of running phases can make a team Stuck; a
+    // draft, a send-back or a queued phase never does (status.stuck_scope).
+    const QSet<int> scope(team.stuckScope.cbegin(), team.stuckScope.cend());
     for (const auto &task : team.tasks) {
         if (task.finished() || task.status == "draft") continue;
+        if (!scope.isEmpty() && !scope.contains(task.id)) continue;
         open = true;
         if (task.status == "submitted") return team.status;   // the lead decides
         const Member *assignee = team.member(task.assignee);
@@ -1031,6 +1049,25 @@ QList<PhaseGroup> phaseGroups(const Team &team)
     return groups;
 }
 
+QString ownerPhaseState(const Team &team, const PhaseGroup &group)
+{
+    const auto *summary = team.phaseSummaryOf(group.n);
+    if (summary && !summary->state.isEmpty()) return summary->state;
+    // An hgs before U25 sends only the G9 status: approved and not started waits.
+    if (summary && team.status != "planning") {
+        if (summary->status == "done") return QStringLiteral("done");
+        if (summary->status == "in_work") return QStringLiteral("running");
+        if (summary->status == "approved") return QStringLiteral("queued");
+        if (summary->status == "paused") return QStringLiteral("paused");
+    }
+    if (team.status == "planning" || team.status == "draft") return QStringLiteral("planned");
+    const auto *record = team.phase(group.n);
+    if (record && record->rejected()) return QStringLiteral("rejected");
+    if (record && record->draft()) return QStringLiteral("draft");
+    if (record && record->queued()) return QStringLiteral("queued");
+    return group.finished() ? QStringLiteral("done") : QStringLiteral("running");
+}
+
 QString PhaseProgress::tooltip() const
 {
     if (!valid()) return {};
@@ -1123,7 +1160,8 @@ PhaseBlocker nearestBlocker(const Team &team, int phase)
         // A discarded phase is out of the plan, and phase 1 has no record: the
         // approved initial plan is approved by definition.
         if (previous && previous->state == "discarded") continue;
-        if (previous && (previous->draft() || previous->state != "approved"))
+        // U25: a queued phase is accepted; it only waits for its turn.
+        if (previous && previous->state != "approved" && !previous->queued())
             return {lower, false, 0};
         int open = 0;
         for (const auto &task : team.tasks) if (task.phase == lower && !task.finished()) ++open;
@@ -1144,6 +1182,15 @@ QString approveBlocked(const Team &team, int phase)
     if (!blocker.approved) return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(blocker.phase);
     return QCoreApplication::translate("Teams", "Phase %1 opens after phase %2 ends: %n task(s) still open", nullptr, blocker.open)
         .arg(phase).arg(blocker.phase);
+}
+
+QString acceptBlocked(const Team &team, int phase)
+{
+    const auto *record = team.phase(phase);
+    if (!record || !record->draft()) return tr("Phase %1 is not a draft").arg(phase);
+    const auto blocker = nearestBlocker(team, phase);
+    if (blocker.phase && !blocker.approved) return tr("Phase %1 opens after phase %2 is approved").arg(phase).arg(blocker.phase);
+    return {};
 }
 
 // The same reason, short enough for the compact draft row; the full sentence

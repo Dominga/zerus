@@ -91,10 +91,28 @@ private:
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).
     const Teams::Team *currentTeam(const QString &id) const;
-    QWidget *answers(const Teams::Team &team);
     QWidget *toolbar(const Teams::Team &team);
     QWidget *canvas(const Teams::Team &team);
     QWidget *board(const Teams::Team &team);
+    // U25 (spec 5.3, 5.5): every phase a collapsible scroll in Graph, Board and
+    // Layers: header (number, status, accepted/tasks, proposed by or health,
+    // the collapsed summary, the owner's actions), the lead's note, the
+    // send-back form and the phase's body in the chosen view.
+    QWidget *phaseColumn(const Teams::Team &team);
+    QWidget *phaseScroll(const Teams::Team &team, const Teams::PhaseGroup &group);
+    QWidget *phaseGraph(const Teams::Team &team, const Teams::PhaseGroup &group);
+    QWidget *boardColumns(const Teams::Team &team, const QList<int> &ids, int phase);
+    QWidget *layerRows(const Teams::Team &team, const QList<int> &ids);
+    // The tasks with a problem and the tone each shows.
+    QMap<int, Teams::Tone> problemTasks(const Teams::Team &team) const;
+    // The text that names a task's problem on its card ("Needs your answer").
+    QString problemText(const Teams::Team &team, int task) const;
+    QSet<int> blockers(const Teams::Team &team) const;
+    void setAutoAccept(const Teams::Team &team, bool on);
+    void rejectPhase(const QString &team, int phase);
+    // U25 (spec 5.7): the right column's collapsed lists above the members:
+    // Needs your answer, Team stuck (with Show on graph) and Plan problems.
+    QWidget *sideLists(const Teams::Team &team, const QString &status);
     QWidget *members(const Teams::Team &team);
     QWidget *feed(const Teams::Team &team);
     void renderCoordinator(const Teams::Team &team, const QString &status);
@@ -124,6 +142,11 @@ private:
     // G5: the members block folds, and the owner's choice survives a restart.
     // (G9 moved the draft phases into the graph's band headers.)
     bool m_membersOpen = true;
+    // U25: the draft whose send-back form is open, its text kept across
+    // renders, and Team stuck's Show on graph.
+    int m_rejectPhase = 0;
+    QString m_rejectText;
+    bool m_showBlockers = false, m_rejectFocus = false, m_zoomManual = false;
     double m_zoom = 1.0;
     int m_drawerTask = 0;
     QHash<QString, QPoint> m_scroll;

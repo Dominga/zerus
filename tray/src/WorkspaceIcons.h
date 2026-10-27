@@ -46,7 +46,12 @@ inline const char *prototypeIconPath(const QString &name)
         {"check-circle", "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0ZM8 12.5l2.8 2.8L16.5 9"},
         {"archive", "M4 4h16a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1ZM5 9v10h14V9M10 13h4"},
         {"link", "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"},
-        {"shield", "M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"}};
+        {"shield", "M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"},
+        // The Team tab (spec 5): a phase's note, Show on graph, a draft's pencil.
+        {"message", "M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-4 3.5V6a1 1 0 0 1 1-1z"},
+        {"eye", "M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"},
+        {"pencil", "M4 20l1-4L16 5l3 3L8 19zM14 7l3 3"},
+        {"warning", "M12 4l9 16H3zM12 10v4M12 17v.5"}};
     return paths.value(name);
 }
 

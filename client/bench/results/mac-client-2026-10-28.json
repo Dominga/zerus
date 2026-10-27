@@ -1,0 +1,750 @@
+{
+  "schema": "zerus-perf-v1",
+  "client": "tauri",
+  "created_at": "2026-10-27T22:21:21.438Z",
+  "platform": {
+    "os": "macos",
+    "label": "mac-promotion-live",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    "hz": 120,
+    "hz_source": "estimated",
+    "T_ms": 8.333333333333334,
+    "dpr": 2,
+    "cross_origin_isolated": false,
+    "timer_resolution_ms": null,
+    "reduced_motion": false,
+    "representative": true
+  },
+  "settings": {
+    "warmupMs": 2000,
+    "runMs": 10000,
+    "runs": 3,
+    "stepPx": 16,
+    "opens": 20,
+    "openIndices": [
+      0,
+      1
+    ],
+    "syntheticInput": true
+  },
+  "scenarios": [
+    {
+      "id": "raf-light",
+      "label": "rAF on a light page",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 1199,
+          "interval_ms": {
+            "count": 1199,
+            "mean": 8.340283569641368,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.006672226855713094,
+            "over2_5T": 0.0008340283569641367,
+            "band60": 0.0016680567139282735,
+            "max": 21
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        },
+        {
+          "frames": 1200,
+          "interval_ms": {
+            "count": 1200,
+            "mean": 8.335,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.005833333333333334,
+            "over2_5T": 0,
+            "band60": 0.0016666666666666668,
+            "max": 15
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        },
+        {
+          "frames": 1200,
+          "interval_ms": {
+            "count": 1200,
+            "mean": 8.333333333333334,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.005,
+            "over2_5T": 0,
+            "band60": 0.0016666666666666668,
+            "max": 17
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "frames": 1199,
+        "interval_ms": {
+          "count": 1199,
+          "mean": 8.340283569641368,
+          "median": 8,
+          "p95": 10,
+          "p99": 11,
+          "over1_5T": 0.006672226855713094,
+          "over2_5T": 0.0008340283569641367,
+          "band60": 0.0016680567139282735,
+          "max": 21
+        },
+        "verdict": {
+          "mean": true,
+          "median": true,
+          "within1_5T": true,
+          "over2_5T": true,
+          "band60": true,
+          "all": true
+        }
+      },
+      "verdict": {
+        "mean": true,
+        "median": true,
+        "within1_5T": true,
+        "over2_5T": true,
+        "band60": true,
+        "all": true
+      }
+    },
+    {
+      "id": "transform-animation",
+      "label": "rAF during a CSS transform animation",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 1199,
+          "interval_ms": {
+            "count": 1199,
+            "mean": 8.346121768140117,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.003336113427856547,
+            "over2_5T": 0.0008340283569641367,
+            "band60": 0.0025020850708924102,
+            "max": 21
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        },
+        {
+          "frames": 1201,
+          "interval_ms": {
+            "count": 1201,
+            "mean": 8.333888426311407,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.0016652789342214821,
+            "over2_5T": 0,
+            "band60": 0.0008326394671107411,
+            "max": 18
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        },
+        {
+          "frames": 1199,
+          "interval_ms": {
+            "count": 1199,
+            "mean": 8.340283569641368,
+            "median": 8,
+            "p95": 10,
+            "p99": 12,
+            "over1_5T": 0.005838198498748957,
+            "over2_5T": 0.0008340283569641367,
+            "band60": 0.0008340283569641367,
+            "max": 24
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        }
+      ],
+      "worst_index": 2,
+      "worst": {
+        "frames": 1199,
+        "interval_ms": {
+          "count": 1199,
+          "mean": 8.340283569641368,
+          "median": 8,
+          "p95": 10,
+          "p99": 12,
+          "over1_5T": 0.005838198498748957,
+          "over2_5T": 0.0008340283569641367,
+          "band60": 0.0008340283569641367,
+          "max": 24
+        },
+        "verdict": {
+          "mean": true,
+          "median": true,
+          "within1_5T": true,
+          "over2_5T": true,
+          "band60": true,
+          "all": true
+        }
+      },
+      "verdict": {
+        "mean": true,
+        "median": true,
+        "within1_5T": true,
+        "over2_5T": true,
+        "band60": true,
+        "all": true
+      }
+    },
+    {
+      "id": "left-animation",
+      "label": "rAF during a non-accelerated animation (left)",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 1201,
+          "interval_ms": {
+            "count": 1201,
+            "mean": 8.333055786844296,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.005828476269775187,
+            "over2_5T": 0,
+            "band60": 0.0008326394671107411,
+            "max": 19
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        },
+        {
+          "frames": 1201,
+          "interval_ms": {
+            "count": 1201,
+            "mean": 8.333055786844296,
+            "median": 8,
+            "p95": 10,
+            "p99": 10,
+            "over1_5T": 0.0033305578684429643,
+            "over2_5T": 0,
+            "band60": 0.0016652789342214821,
+            "max": 17
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        },
+        {
+          "frames": 1200,
+          "interval_ms": {
+            "count": 1200,
+            "mean": 8.333333333333334,
+            "median": 8,
+            "p95": 10,
+            "p99": 10,
+            "over1_5T": 0.0016666666666666668,
+            "over2_5T": 0,
+            "band60": 0.0008333333333333334,
+            "max": 16
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "frames": 1201,
+        "interval_ms": {
+          "count": 1201,
+          "mean": 8.333055786844296,
+          "median": 8,
+          "p95": 10,
+          "p99": 11,
+          "over1_5T": 0.005828476269775187,
+          "over2_5T": 0,
+          "band60": 0.0008326394671107411,
+          "max": 19
+        },
+        "verdict": {
+          "mean": true,
+          "median": true,
+          "within1_5T": true,
+          "over2_5T": true,
+          "band60": true,
+          "all": true
+        }
+      },
+      "verdict": {
+        "mean": true,
+        "median": true,
+        "within1_5T": true,
+        "over2_5T": true,
+        "band60": true,
+        "all": true
+      }
+    },
+    {
+      "id": "list-scroll",
+      "label": "Session list scroll",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [
+        {
+          "frames": 1201,
+          "interval_ms": {
+            "count": 1201,
+            "mean": 8.328059950041633,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.0033305578684429643,
+            "over2_5T": 0,
+            "band60": 0,
+            "max": 14
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          },
+          "scroll_event_ms": {
+            "count": 1201,
+            "mean": 8.328059950041633,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "max": 14
+          }
+        },
+        {
+          "frames": 1200,
+          "interval_ms": {
+            "count": 1200,
+            "mean": 8.334166666666667,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.0033333333333333335,
+            "over2_5T": 0,
+            "band60": 0.0008333333333333334,
+            "max": 15
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          },
+          "scroll_event_ms": {
+            "count": 1200,
+            "mean": 8.334166666666667,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "max": 15
+          }
+        },
+        {
+          "frames": 1201,
+          "interval_ms": {
+            "count": 1201,
+            "mean": 8.329725228975853,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "over1_5T": 0.005828476269775187,
+            "over2_5T": 0,
+            "band60": 0.0016652789342214821,
+            "max": 16
+          },
+          "verdict": {
+            "mean": true,
+            "median": true,
+            "within1_5T": true,
+            "over2_5T": true,
+            "band60": true,
+            "all": true
+          },
+          "scroll_event_ms": {
+            "count": 1201,
+            "mean": 8.329725228975853,
+            "median": 8,
+            "p95": 10,
+            "p99": 11,
+            "max": 16
+          }
+        }
+      ],
+      "worst_index": 2,
+      "worst": {
+        "frames": 1201,
+        "interval_ms": {
+          "count": 1201,
+          "mean": 8.329725228975853,
+          "median": 8,
+          "p95": 10,
+          "p99": 11,
+          "over1_5T": 0.005828476269775187,
+          "over2_5T": 0,
+          "band60": 0.0016652789342214821,
+          "max": 16
+        },
+        "verdict": {
+          "mean": true,
+          "median": true,
+          "within1_5T": true,
+          "over2_5T": true,
+          "band60": true,
+          "all": true
+        },
+        "scroll_event_ms": {
+          "count": 1201,
+          "mean": 8.329725228975853,
+          "median": 8,
+          "p95": 10,
+          "p99": 11,
+          "max": 16
+        }
+      },
+      "verdict": {
+        "mean": true,
+        "median": true,
+        "within1_5T": true,
+        "over2_5T": true,
+        "band60": true,
+        "all": true
+      }
+    },
+    {
+      "id": "activity-scroll",
+      "label": "Activity scroll",
+      "kind": "pacing",
+      "metric": "interval_ms",
+      "runs": [],
+      "worst_index": -1,
+      "worst": null,
+      "skipped": "nothing to scroll"
+    },
+    {
+      "id": "session-open",
+      "label": "Session open to first Activity paint",
+      "kind": "timing",
+      "metric": "wall_ms",
+      "runs": [
+        {
+          "count": 20,
+          "wall_ms": {
+            "count": 20,
+            "mean": 88.2,
+            "median": 85,
+            "p95": 113,
+            "p99": 113,
+            "max": 113
+          }
+        },
+        {
+          "count": 20,
+          "wall_ms": {
+            "count": 20,
+            "mean": 111.4,
+            "median": 98,
+            "p95": 122,
+            "p99": 495,
+            "max": 495
+          }
+        },
+        {
+          "count": 20,
+          "wall_ms": {
+            "count": 20,
+            "mean": 91.2,
+            "median": 95.5,
+            "p95": 114,
+            "p99": 120,
+            "max": 120
+          }
+        }
+      ],
+      "worst_index": 1,
+      "worst": {
+        "count": 20,
+        "wall_ms": {
+          "count": 20,
+          "mean": 111.4,
+          "median": 98,
+          "p95": 122,
+          "p99": 495,
+          "max": 495
+        }
+      }
+    },
+    {
+      "id": "input-latency",
+      "label": "Input to frame latency",
+      "kind": "latency",
+      "metric": "latency_ms",
+      "runs": [
+        {
+          "count": 131,
+          "latency_ms": {
+            "count": 131,
+            "mean": 1.381679389312977,
+            "median": 1,
+            "p95": 2,
+            "p99": 6,
+            "max": 8
+          },
+          "to_paint_ms": {
+            "count": 131,
+            "mean": 3.1603053435114505,
+            "median": 3,
+            "p95": 5,
+            "p99": 8,
+            "max": 9
+          }
+        },
+        {
+          "count": 125,
+          "latency_ms": {
+            "count": 125,
+            "mean": 1.2,
+            "median": 1,
+            "p95": 2,
+            "p99": 4,
+            "max": 6
+          },
+          "to_paint_ms": {
+            "count": 125,
+            "mean": 2.936,
+            "median": 3,
+            "p95": 4,
+            "p99": 5,
+            "max": 9
+          }
+        },
+        {
+          "count": 130,
+          "latency_ms": {
+            "count": 130,
+            "mean": 0.8769230769230769,
+            "median": 1,
+            "p95": 2,
+            "p99": 5,
+            "max": 6
+          },
+          "to_paint_ms": {
+            "count": 130,
+            "mean": 2.0538461538461537,
+            "median": 2,
+            "p95": 4,
+            "p99": 7,
+            "max": 8
+          }
+        }
+      ],
+      "worst_index": 0,
+      "worst": {
+        "count": 131,
+        "latency_ms": {
+          "count": 131,
+          "mean": 1.381679389312977,
+          "median": 1,
+          "p95": 2,
+          "p99": 6,
+          "max": 8
+        },
+        "to_paint_ms": {
+          "count": 131,
+          "mean": 3.1603053435114505,
+          "median": 3,
+          "p95": 5,
+          "p99": 8,
+          "max": 9
+        }
+      }
+    }
+  ],
+  "resources": {
+    "idle": {
+      "pid": 58012,
+      "processes": [
+        {
+          "cpu_percent": 1.702,
+          "cpu_seconds": 12.74,
+          "footprint_bytes": 39683248,
+          "name": "zerus-client",
+          "pid": 58012,
+          "ppid": 1,
+          "role": "app",
+          "rss_bytes": 102416384
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.028,
+          "footprint_bytes": 2949480,
+          "name": "SetStoreUpdateService",
+          "pid": 58030,
+          "ppid": 1,
+          "role": "child",
+          "rss_bytes": 6717440
+        },
+        {
+          "cpu_percent": 0.094,
+          "cpu_seconds": 10.508,
+          "footprint_bytes": 20038736,
+          "name": "com.apple.WebKit.GPU",
+          "pid": 58032,
+          "ppid": 1,
+          "role": "gpu",
+          "rss_bytes": 35045376
+        },
+        {
+          "cpu_percent": 0.669,
+          "cpu_seconds": 32.26,
+          "footprint_bytes": 179094464,
+          "name": "com.apple.WebKit.WebContent",
+          "pid": 58034,
+          "ppid": 1,
+          "role": "web",
+          "rss_bytes": 143933440
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.193,
+          "footprint_bytes": 7815648,
+          "name": "com.apple.WebKit.Networking",
+          "pid": 58035,
+          "ppid": 1,
+          "role": "network",
+          "rss_bytes": 10174464
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.026,
+          "footprint_bytes": 5636624,
+          "name": "com.apple.audio.SandboxHelper",
+          "pid": 58039,
+          "ppid": 1,
+          "role": "child",
+          "rss_bytes": 7438336
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.057,
+          "footprint_bytes": 19022256,
+          "name": "MTLCompilerService",
+          "pid": 58046,
+          "ppid": 1,
+          "role": "child",
+          "rss_bytes": 12091392
+        },
+        {
+          "cpu_percent": 0.488,
+          "cpu_seconds": 1.351,
+          "footprint_bytes": 8405520,
+          "name": "hgs",
+          "pid": 58062,
+          "ppid": 58012,
+          "role": "child",
+          "rss_bytes": 12320768
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.005,
+          "footprint_bytes": 3211744,
+          "name": "hgs",
+          "pid": 58091,
+          "ppid": 58012,
+          "role": "child",
+          "rss_bytes": 5111808
+        },
+        {
+          "cpu_percent": 0,
+          "cpu_seconds": 0.161,
+          "footprint_bytes": 4768080,
+          "name": "ssh",
+          "pid": 58096,
+          "ppid": 58091,
+          "role": "child",
+          "rss_bytes": 3358720
+        }
+      ],
+      "sampled_at_ms": 1793139691964,
+      "source": "proc_pidinfo",
+      "total": {
+        "cpu_percent": 2.953,
+        "cpu_seconds": 57.331,
+        "footprint_bytes": 290625800,
+        "processes": 10,
+        "rss_bytes": 338608128
+      },
+      "window_ms": 507
+    }
+  },
+  "preference": "display-rate"
+}

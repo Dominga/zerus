@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createRoot, createSignal, on, onCleanup, onMount } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { accounts, machines } from "../mock/data";
@@ -33,14 +33,21 @@ const freshness = (m: Machine): Freshness => {
 /** Peers whose hgs predates metrics report none (build-02 runs 0.47.2). */
 const hasMetrics = (m: Machine) => !m.hgsVersion.startsWith("0.47");
 
-function sampleAge(m: Machine, refreshedAt: number): string {
-  if (demoState() === "loading") return "No sample yet";
+/** The sample time shows only when it is not current: hidden while the
+ *  machine answers within the normal sampling interval, otherwise the date and
+ *  time of the last sample (DashboardPage.cpp keeps the same facts). */
+function sampleNote(m: Machine): string {
+  if (demoState() === "loading") return "Waiting for the first sample";
   const f = freshness(m);
-  if (f === "offline") return m.alias === "win-lab" ? "Sampled 4m ago" : "Last sample 27 Oct 11:24";
-  if (f === "stale") return "Sampled 40s ago";
-  const s = Math.floor((Date.now() - refreshedAt) / 1000);
-  return s < 10 ? "Sampled just now" : s < 60 ? `Sampled ${s}s ago` : `Sampled ${Math.floor(s / 60)}m ago`;
+  if (f === "fresh") return "";
+  return f === "stale" ? "Last sample 27 Oct 11:58" : m.alias === "win-lab" ? "Last sample 27 Oct 11:54" : "Last sample 27 Oct 11:24";
 }
+
+// Synthetic system details for the cards (Qt shows the OS name and architecture).
+const OS_DETAIL: Record<string, string> = {
+  workstation: "Arch Linux · x86_64", macbook: "macOS 26.1 · arm64", "build-01": "Ubuntu 24.04 · x86_64",
+  "build-02": "Ubuntu 22.04 · x86_64", "win-lab": "Windows 11 · x86_64",
+};
 
 const level = (pct: number, fresh: boolean) => (!fresh ? "unknown" : pct >= 90 ? "critical" : pct >= 70 ? "warning" : "normal");
 
@@ -54,7 +61,7 @@ function LoadBar(props: { pct?: number; fresh: boolean }) {
   );
 }
 
-function MachineCard(props: { m: Machine; refreshedAt: number }) {
+function MachineCard(props: { m: Machine }) {
   const f = () => freshness(props.m);
   const fresh = () => f() === "fresh";
   const waiting = () => demoState() === "loading";
@@ -65,26 +72,27 @@ function MachineCard(props: { m: Machine; refreshedAt: number }) {
   const label = () => `${rows().length === 1 ? "1 session" : `${rows().length} sessions`}${needs() ? `, ${needs()} need attention` : ""}`;
   return (
     <article class="ov-mcard box" classList={{ stale: !fresh() }} aria-label={props.m.thisComputer ? "This machine" : props.m.alias}>
+      {/* Compact card: identity and state, both meters with their numbers inline, then sessions. */}
       <header class="ov-mtop">
-        <MachineTile os={props.m.platform} state={fresh() ? "online" : f() === "stale" ? "connecting" : "offline"} size={28} />
+        <MachineTile os={props.m.platform} state={fresh() ? "online" : f() === "stale" ? "connecting" : "offline"} size={26} />
         <MachineBadge alias={props.m.alias} />
-        <span class="ov-mtitle ell" title={props.m.alias}>{props.m.thisComputer ? "This machine" : ""}</span>
+        <span class="ov-mos ell" title={OS_DETAIL[props.m.alias]}>{props.m.thisComputer ? <><b>This machine</b> · </> : ""}{OS_DETAIL[props.m.alias] ?? ""}</span>
         <span class="ov-mstatus" classList={{ online: fresh() }}>{fresh() ? "Connected" : f() === "stale" ? "Stale" : "Offline"}</span>
         <button class="icon-btn small" data-tip="Machine settings" aria-label="Machine settings" onClick={() => setPage("machines")}><Icon name="settings" size={14} /></button>
       </header>
-      <div class="ov-mgrid2">
-        <span class="ov-mlabel">CPU</span>
-        <span class="ov-mlabel">Memory</span>
-        <span class="ov-mmetric tabular" title={metrics() ? "Average CPU use over the last 2.0 seconds, across all logical cores." : "CPU use needs two samples. Refresh again after a moment."}>
-          {metrics() ? `${props.m.cpu}%` : "—"}
-        </span>
-        <span class="ov-mmetric tabular" title={props.m.platform === "macos" ? "App, wired and compressed memory. Reclaimable file cache is excluded." : "Total memory minus available memory, including reclaimable cache."}>
-          {metrics() ? `${props.m.memUsedGiB.toFixed(1)} GiB` : "—"}
-        </span>
-        <LoadBar pct={metrics() ? props.m.cpu : undefined} fresh={fresh()} />
-        <LoadBar pct={metrics() ? memPct() : undefined} fresh={fresh()} />
-        <span class="ov-mdetail">{waiting() ? "Waiting for second sample" : metrics() ? `${props.m.cores} cores, load ${props.m.load.toFixed(2)}` : "Update hgs for metrics"}</span>
-        <span class="ov-mdetail">{metrics() ? `of ${props.m.memTotalGiB.toFixed(1)} GiB (${Math.round(memPct())}%)` : "Memory unavailable"}</span>
+      <div class="ov-mmeters">
+        <div class="ov-mm" title={metrics() ? "Average CPU use over the last 2.0 seconds, across all logical cores." : "CPU use needs two samples. Refresh again after a moment."}>
+          <span class="ov-mlabel">CPU</span>
+          <LoadBar pct={metrics() ? props.m.cpu : undefined} fresh={fresh()} />
+          <b class="ov-mval tabular">{metrics() ? `${props.m.cpu}%` : "—"}</b>
+          <span class="ov-mdetail">{waiting() ? "Waiting for second sample" : metrics() ? `${props.m.cores} cores, load ${props.m.load.toFixed(2)}` : "Update hgs for metrics"}</span>
+        </div>
+        <div class="ov-mm" title={props.m.platform === "macos" ? "App, wired and compressed memory. Reclaimable file cache is excluded." : "Total memory minus available memory, including reclaimable cache."}>
+          <span class="ov-mlabel">Memory</span>
+          <LoadBar pct={metrics() ? memPct() : undefined} fresh={fresh()} />
+          <b class="ov-mval tabular">{metrics() ? `${props.m.memUsedGiB.toFixed(1)} GiB` : "—"}</b>
+          <span class="ov-mdetail">{metrics() ? `of ${props.m.memTotalGiB.toFixed(1)} GiB (${Math.round(memPct())}%)` : "Memory unavailable"}</span>
+        </div>
       </div>
       <footer class="ov-mfoot">
         <button class="su-link" title={fresh() ? `View sessions on ${props.m.alias}` : `View last known sessions on ${props.m.alias}`}
@@ -92,9 +100,9 @@ function MachineCard(props: { m: Machine; refreshedAt: number }) {
           {label()}
         </button>
         <span class="grow" />
-        <span class="ov-mdetail" title={fresh() ? "Metrics update with the normal machine poll. Use Refresh for a new sample." : "Last known values. This machine is unavailable or has not replied recently."}>
-          {sampleAge(props.m, props.refreshedAt)}
-        </span>
+        <Show when={sampleNote(props.m)}>
+          <span class="ov-mdetail" title="Last known values. This machine is unavailable or has not replied recently.">{sampleNote(props.m)}</span>
+        </Show>
       </footer>
     </article>
   );
@@ -198,6 +206,49 @@ function LiveSessions(props: { scroller: () => HTMLElement | undefined }) {
   );
 }
 
+// The Overview is a centred column like Activity: both edges drag together,
+// double-click returns to the default width from Settings → Appearance, and the
+// width is remembered. Wide windows no longer stretch the cards edge to edge.
+const OVERVIEW = { min: 720, max: 2400, edge: 12 } as const;
+const savedOverview = (() => { try { return Number(localStorage.getItem("zerus-mock-overview-width")) || 0; } catch { return 0; } })();
+const [overviewWidth, setOverviewWidthRaw] = createSignal(savedOverview ? Math.max(OVERVIEW.min, Math.min(OVERVIEW.max, savedOverview)) : prefs.overviewWidth);
+function setOverviewWidth(width: number) {
+  setOverviewWidthRaw(Math.round(Math.max(OVERVIEW.min, Math.min(OVERVIEW.max, width))));
+  try { localStorage.setItem("zerus-mock-overview-width", String(overviewWidth())); } catch { /* storage may be unavailable */ }
+}
+// Changing the default in Settings applies it at once.
+createRoot(() => createEffect(on(() => prefs.overviewWidth, (w) => setOverviewWidth(w), { defer: true })));
+
+function OverviewEdge(props: { right?: boolean }) {
+  const [dragging, setDragging] = createSignal(false);
+  let origin = 0, start = 0, widest = 0;
+  return (
+    <div class="col-edge ov-edge" classList={{ right: props.right, dragging: dragging() }} role="separator" aria-orientation="vertical" tabindex="0"
+      aria-label="Overview width" aria-valuemin={OVERVIEW.min} aria-valuemax={OVERVIEW.max} aria-valuenow={overviewWidth()}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const el = e.currentTarget;
+        el.setPointerCapture(e.pointerId);
+        origin = e.clientX;
+        start = el.parentElement!.getBoundingClientRect().width;
+        widest = (el.closest(".ov-page") as HTMLElement).clientWidth - 2 * OVERVIEW.edge;
+        setDragging(true);
+      }}
+      onPointerMove={(e) => {
+        if (!dragging()) return;
+        const distance = (e.clientX - origin) * (props.right ? 1 : -1);
+        setOverviewWidth(Math.min(widest, start + 2 * distance));
+      }}
+      onPointerUp={() => setDragging(false)} onPointerCancel={() => setDragging(false)}
+      onDblClick={() => setOverviewWidth(prefs.overviewWidth)}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); setOverviewWidth(overviewWidth() + ((e.key === "ArrowRight") === !!props.right ? 40 : -40)); }
+        else if (e.key === "Home") { e.preventDefault(); setOverviewWidth(prefs.overviewWidth); }
+      }} />
+  );
+}
+
 export function DashboardScreen() {
   let scroller: HTMLDivElement | undefined;
   const [refreshedAt, setRefreshedAt] = createSignal(Date.now());
@@ -222,7 +273,8 @@ export function DashboardScreen() {
 
   return (
     <div class="su-page ov-page" ref={scroller}>
-      <div class="ov-content">
+      <div class="ov-content" classList={{ full: prefs.overviewFullWidth }} style={{ "--ovw": `${overviewWidth()}px` }}>
+        <Show when={!prefs.overviewFullWidth}><OverviewEdge /><OverviewEdge right /></Show>
         <header class="su-head">
           <h1>Overview</h1>
           <span class="grow" />
@@ -242,7 +294,7 @@ export function DashboardScreen() {
 
         <h2 class="section-title ov-h">Machines</h2>
         <div class="ov-mgrid">
-          <For each={fleet()}>{(m) => <MachineCard m={m} refreshedAt={refreshedAt()} />}</For>
+          <For each={fleet()}>{(m) => <MachineCard m={m} />}</For>
         </div>
 
         <div class="ov-h row">

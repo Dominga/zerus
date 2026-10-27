@@ -7,6 +7,12 @@
     scrollbar-gutter: stable;
   }
   .ov-content, .proj-content { padding: 18px 24px 22px; container-type: inline-size; }
+  /* Centred Overview column (--ovw); the edges sit just outside it. */
+  .ov-content { position: relative; box-sizing: border-box; width: min(var(--ovw, 1200px), calc(100% - 24px)); margin: 0 auto; }
+  .ov-content.full { width: 100%; }
+  .ov-edge { left: -12px; width: 12px; }
+  .ov-edge.right { left: auto; right: -12px; }
+  .ov-edge::before { left: 5px; }
   .su-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
   .su-head h1 { font-size: var(--fs-xl); font-weight: 600; }
   .su-link { display: inline-flex; align-items: center; gap: 4px; color: var(--z-color-muted); font-size: var(--fs-sm); border-radius: var(--z-radius-sm); padding: 2px 4px; }
@@ -34,17 +40,21 @@
   .ov-empty { color: var(--z-color-muted); font-size: var(--fs-sm); padding: 6px 0; }
   .ov-note { margin-bottom: 8px; }
 
-  .ov-mgrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
-  @container (min-width: 880px) { .ov-mgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  .ov-mcard { padding: 14px 18px 12px; display: flex; flex-direction: column; gap: 10px; border-radius: var(--z-radius-xl); }
+  /* Compact machine cards: three short rows, as many per line as fit. */
+  .ov-mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 10px; }
+  .ov-mcard { padding: 10px 12px 9px; display: flex; flex-direction: column; gap: 8px; border-radius: var(--z-radius-xl); }
+  .ov-mcard .mtile { --mt-ring: var(--z-color-card); }
+  .ov-mos { flex: 1; min-width: 0; font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .ov-mos b { color: var(--z-color-text); font-weight: 600; }
+  .ov-mmeters { display: grid; grid-template-columns: 1fr 1fr; column-gap: 16px; }
+  .ov-mm { display: grid; grid-template-columns: auto minmax(24px, 1fr) auto; align-items: center; column-gap: 8px; row-gap: 2px; min-width: 0; }
+  .ov-mm .ov-mdetail { grid-column: 1 / -1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ov-mval { font-size: var(--fs-sm); font-weight: 600; }
+  .ov-mcard.stale .ov-mval { color: var(--z-color-text-3); }
   .ov-mtop { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .ov-mtitle { flex: 1; font-weight: 600; }
   .ov-mstatus { font-size: var(--fs-xs); color: var(--z-color-dim); }
   .ov-mstatus.online { color: var(--z-color-accent); }
-  .ov-mgrid2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; row-gap: 5px; align-items: end; }
   .ov-mlabel { font-size: var(--fs-xs); color: var(--z-color-muted); }
-  .ov-mmetric { font-size: var(--fs-2xl); font-weight: 400; line-height: 1.15; }
-  .ov-mcard.stale .ov-mmetric { color: var(--z-color-text-3); }
   .ov-mdetail { font-size: var(--fs-xs); color: var(--z-color-muted); }
   .ov-mfoot { display: flex; align-items: center; gap: 8px; }
   .ov-mfoot .su-link { padding-left: 0; font-size: var(--fs-xs); }

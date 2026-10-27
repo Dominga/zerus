@@ -67,6 +67,9 @@ export const [prefs, setPrefs] = createStore({
   usageIndicator: "rails",
   activityWidth: 900,
   fullWidth: false,
+  // Overview: the default width of its centred column (720-2400) and full width.
+  overviewWidth: 1200,
+  overviewFullWidth: false,
   onTop: false,
   // Sessions
   expandOnHover: true,

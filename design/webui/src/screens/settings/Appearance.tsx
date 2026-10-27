@@ -156,6 +156,13 @@ export function AppearanceSection() {
             <Check label="Full-width Activity" checked={prefs.fullWidth} onChange={(v) => setPrefs("fullWidth", v)} />
           </div>
         </Row>
+        <Row label="Overview width" wide hint="In a wide window, Overview stays centered at this width. Drag its edges to adjust it; double-click an edge to return to this width. Full-width Overview fills the whole page.">
+          <div class="col" style={{ gap: "8px", "align-items": "stretch" }}>
+            <Slider label="Default Overview width" resetLabel="Reset to 1200 px" value={prefs.overviewWidth} min={720} max={2400} step={20} defaultValue={1200} format={(v) => `${v} px`}
+              disabled={prefs.overviewFullWidth} onChange={(v) => setPrefs("overviewWidth", v)} />
+            <Check label="Full-width Overview" checked={prefs.overviewFullWidth} onChange={(v) => setPrefs("overviewFullWidth", v)} />
+          </div>
+        </Row>
         <Row label="Window" hint={onTopSupported()
           ? "Files and terminals opened from Zerus may appear behind it while this is on."
           : "Keep Above is unavailable in this Zerus session. On Wayland, KDE Plasma 6 with KWin scripting is required. You can use your desktop's window menu or rules."}>

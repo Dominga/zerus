@@ -2,6 +2,7 @@
 #include <QtMath>
 #include "DownloadCache.h"
 #include "ChildProcess.h"
+#include "EventStream.h"
 #include "JsonParse.h"
 #include "ProcessRunner.h"
 #include "LocalFile.h"
@@ -31,6 +32,7 @@
 #include <memory>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -1403,6 +1405,13 @@ QJsonObject HgsClient::worktreeSnapshot(const QString &host,const QString &path)
 {
     return SettingsJson::object(WorktreeSnapshotsKey,WorktreeSnapshotsLimit).value(worktreeCacheKey(m_hgs,host,path)).toObject();
 }
+namespace {
+// A folder's git-status poll interval, and how often a streamed value is dated anew.
+std::atomic<int> GitStatusIntervalMs{15000};
+}
+
+void HgsClient::setGitStatusIntervalForTests(int ms) { GitStatusIntervalMs = ms; }
+
 QJsonObject HgsClient::gitStatusSnapshot(const QString &host, const QString &path) const
 {
     return m_gitStatusCache.value(host + '\n' + path);
@@ -1412,12 +1421,52 @@ void HgsClient::requestGitStatus(const QString &host, const QString &path)
 {
     if (path.isEmpty()) return;
     const auto key = host + '\n' + path;
+    // A live event stream sends this folder's changes and checks it at least
+    // every 30 s: no child. Its last value stays current, so it is dated anew
+    // every 15 s like a poll; the remote's age keeps counting, so verification
+    // still expires 60 s after the remote check.
+    if (const auto *streams = EventStreams::instance(); streams && streams->coversGit(host, path)) {
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        auto it = m_gitStatusCache.find(key);
+        if (it == m_gitStatusCache.end() || !m_gitStatusStreamed.contains(key)) return;
+        const auto age = now - qint64(it->value("received_at_ms").toDouble());
+        if (age >= 0 && age < GitStatusIntervalMs.load()) return;
+        if (it->value("remote_age_seconds").isDouble())
+            (*it)["remote_age_seconds"] = it->value("remote_age_seconds").toDouble() + qMax<qint64>(0, age) / 1000.;
+        (*it)["received_at_ms"] = now; m_gitStatusRequestedAt.insert(key, now);
+        emit gitStatusChanged(host, path);
+        return;
+    }
     const auto age = QDateTime::currentMSecsSinceEpoch() - m_gitStatusRequestedAt.value(key);
-    if (m_gitStatusRequestedAt.contains(key) && age >= 0 && age < 15000) return;
+    if (m_gitStatusRequestedAt.contains(key) && age >= 0 && age < GitStatusIntervalMs.load()) return;
     if (m_gitStatusInFlight.contains(key) || m_gitStatusQueue.contains({host, path})) return;
     // Bound both subprocess concurrency and old folder snapshots.
     if (m_gitStatusQueue.size() >= 64) return;
     m_gitStatusQueue.append({host, path}); pumpGitStatus();
+}
+
+void HgsClient::acceptGitStatus(const QString &host, const QString &path, const QJsonObject &status)
+{
+    if (path.isEmpty()) return;
+    m_gitStatusStreamed.insert(host + '\n' + path);
+    storeGitStatus(host, path, status);
+}
+
+void HgsClient::storeGitStatus(const QString &host, const QString &path, QJsonObject data)
+{
+    const auto key = host + '\n' + path;
+    const auto received = QDateTime::currentMSecsSinceEpoch();
+    if (!data.value("state").isString()) data = {{"state", "unavailable"}};
+    data["received_at_ms"] = received;
+    m_gitStatusCache.insert(key, data); m_gitStatusRequestedAt.insert(key, received);
+    while (m_gitStatusCache.size() > 128) {
+        QString oldest; qint64 at = std::numeric_limits<qint64>::max();
+        for (auto i = m_gitStatusRequestedAt.cbegin(); i != m_gitStatusRequestedAt.cend(); ++i)
+            if (!m_gitStatusInFlight.contains(i.key()) && i.value() < at) { oldest = i.key(); at = i.value(); }
+        if (oldest.isEmpty()) break;
+        m_gitStatusCache.remove(oldest); m_gitStatusRequestedAt.remove(oldest); m_gitStatusStreamed.remove(oldest);
+    }
+    emit gitStatusChanged(host, path);
 }
 
 void HgsClient::pumpGitStatus()
@@ -1427,18 +1476,8 @@ void HgsClient::pumpGitStatus()
         const auto host = folder.first, path = folder.second, key = host + '\n' + path;
         m_gitStatusInFlight.insert(key);
         const auto finish = [this, host, path, key](QJsonObject data) {
-            const auto received = QDateTime::currentMSecsSinceEpoch();
-            if (!data.value("state").isString()) data = {{"state", "unavailable"}};
-            data["received_at_ms"] = received;
-            m_gitStatusCache.insert(key, data); m_gitStatusRequestedAt.insert(key, received);
-            m_gitStatusInFlight.remove(key);
-            while (m_gitStatusCache.size() > 128) {
-                QString oldest; qint64 at = std::numeric_limits<qint64>::max();
-                for (auto i = m_gitStatusRequestedAt.cbegin(); i != m_gitStatusRequestedAt.cend(); ++i)
-                    if (!m_gitStatusInFlight.contains(i.key()) && i.value() < at) { oldest = i.key(); at = i.value(); }
-                m_gitStatusCache.remove(oldest); m_gitStatusRequestedAt.remove(oldest);
-            }
-            emit gitStatusChanged(host, path); pumpGitStatus();
+            m_gitStatusInFlight.remove(key); m_gitStatusStreamed.remove(key);
+            storeGitStatus(host, path, std::move(data)); pumpGitStatus();
         };
         QStringList args{"git-status", "--path", path, "--json"};
         if (!host.isEmpty()) args.prepend('@' + host);

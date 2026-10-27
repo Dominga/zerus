@@ -60,6 +60,7 @@
 #include <QWindow>
 #include <utility>
 #include "SessionsWindow.h"
+#include "EventStream.h"
 #include "DownloadCache.h"
 #include "ProcessView.h"
 #include "TasksView.h"
@@ -246,6 +247,7 @@ private slots:
     void independentWaitRemainsVisibleWithoutExpandingHeader_data();
     void independentWaitRemainsVisibleWithoutExpandingHeader();
     void gitPublicationChecksKeepDraftFocusAndSharedCards();
+    void liveStreamFollowsGitFoldersInsteadOfPolling();
     void groupsPersistFilterAndRevealAttention();
     void rebuildKeepsProjectOrderAtScale_data();
     void rebuildKeepsProjectOrderAtScale();
@@ -732,6 +734,72 @@ void TestSessionsWindow::gitPublicationChecksKeepDraftFocusAndSharedCards()
     QVERIFY(list->currentItem()->data(Qt::AccessibleDescriptionRole).toString().contains("4 changed or new files"));
     const auto directory = qEnvironmentVariable("HGS_GIT_STATUS_PREVIEW");
     if (!directory.isEmpty()) { QDir().mkpath(directory); QVERIFY(window.grab().save(directory + "/integrated.png")); }
+}
+
+void TestSessionsWindow::liveStreamFollowsGitFoldersInsteadOfPolling()
+{
+    // While the computer's event stream is live, its sessions' checkout folders
+    // follow the stream (git topic) and no git-status child runs; without it
+    // the window polls them again.
+    QTemporaryDir fixture; QVERIFY(fixture.isValid());
+    const auto program = fixture.filePath("hgs"); QFile file(program); QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(R"PY(#!/usr/bin/env python3
+import json, runpy, sys
+args = sys.argv[1:]
+if args[:1] == ['git-status']:
+    open(__file__ + '.calls', 'a').write(' '.join(args) + '\n')
+    print(json.dumps({'state': 'ok', 'root': '/repo', 'branch': 'main', 'changed_files': 9, 'ahead': 0, 'behind': 0,
+                      'remote_state': 'verified', 'remote_age_seconds': 0}))
+    sys.exit(0)
+if args == ['--help']:
+    print('usage: hgs ...\n       Event stream ABI: watch-v1')
+    sys.exit(0)
+if args == ['watch', '--json']:
+    seq = 0
+    def send(t, **fields):
+        global seq
+        seq += 1
+        print(json.dumps(dict(v=1, seq=seq, t=t, **fields)), flush=True)
+    send('hello', host='fixture', topics=['catalog', 'catalog.meta', 'activity', 'git'])
+    send('snapshot', topic='catalog', items=[], page=0, last=True, cursor=1)
+    send('snapshot', topic='catalog.meta', value={'host': 'fixture', 'ok': True}, page=0, last=True, cursor=1)
+    for line in sys.stdin:
+        op = json.loads(line)
+        if op.get('topic') == 'git' and op.get('op') == 'subscribe':
+            open(__file__ + '.subscribed', 'a').write(op['path'] + '\n')
+            send('state', topic='git', key=op['path'], rev=seq, value={'state': 'ok', 'path': op['path'], 'root': op['path'],
+                 'branch': 'main', 'changed_files': 4, 'ahead': 0, 'behind': 0, 'remote_state': 'verified',
+                 'remote_checked_at': 100.0, 'remote_age_seconds': 0.0})
+    sys.exit(0)
+)PY" "sys.argv[0] = " + FakeCli::pythonString(script()) + "\nrunpy.run_path(sys.argv[0], run_name='__main__')\n"); file.close();
+    QVERIFY(FakeCli::makeRunnable(file.fileName()));
+    HgsClient::setGitStatusIntervalForTests(300);
+    EventStreams streams(FakeCli::program(program)); streams.setHosts({QString()});
+    QTRY_VERIFY(streams.live({}));
+    auto state = fleet(); auto box = state.local();
+    for (int i = 0; i < 2; ++i) { box.sessions[i].cwd = "/repo"; box.sessions[i].gitRoot = "/repo"; box.sessions[i].gitBranch = "main"; box.sessions[i].gitMetadataState = "ok"; }
+    state.setLocal(box, QDateTime::currentMSecsSinceEpoch());
+    SessionsWindow window(FakeCli::program(program)); window.resize(1120, 680); window.setFleet(state); window.show();
+    auto *list = window.findChild<SessionList *>("sessionList"); QVERIFY(list);
+    auto count = [&](int changed) { int result = 0; for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->data(SessionRoles::GitStatus).toJsonObject().value("changed_files").toInt() == changed) ++result;
+        return result; };
+    QTRY_COMPARE(count(4), 2);
+    QVERIFY(streams.coversGit({}, "/repo"));
+    QFile subscribed(program + ".subscribed"); QVERIFY(subscribed.open(QIODevice::ReadOnly));
+    QCOMPARE(subscribed.readAll(), QByteArray("/repo\n"));
+    // Rebuilds past the poll interval start no child for a followed folder.
+    QTest::qWait(400); window.setFleet(state); QTest::qWait(300);
+    QVERIFY(!QFile::exists(program + ".calls"));
+    QCOMPARE(count(4), 2);
+    // The stream stops: the next rebuild polls the folder again.
+    streams.stream({})->stop();
+    QVERIFY(!streams.coversGit({}, "/repo"));
+    QTest::qWait(400); window.setFleet(state);
+    QTRY_COMPARE(count(9), 2);
+    QFile calls(program + ".calls"); QVERIFY(calls.open(QIODevice::ReadOnly));
+    QCOMPARE(calls.readAll(), QByteArray("git-status --path /repo --json\n"));
+    HgsClient::setGitStatusIntervalForTests(15000);
 }
 
 void TestSessionsWindow::workspaceRestoresDraftAcrossRestartAndSessionRemoval()

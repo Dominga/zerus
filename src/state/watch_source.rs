@@ -76,6 +76,30 @@ pub(crate) fn changed_names(db: &Connection, after: i64, limit: usize) -> Result
     Ok(names)
 }
 
+/// The journal names whose rows after `after`, from at most `limit` rows,
+/// record a finished call of a tool that can change a checkout's files. A
+/// session that ran one makes the git topic check its folders again.
+pub(crate) fn writing_names(db: &Connection, after: i64, limit: usize) -> Result<Vec<String>> {
+    const QUERY: &str = "SELECT DISTINCT name FROM (SELECT name, payload FROM events WHERE seq>?1 ORDER BY seq LIMIT ?2) \
+        WHERE CASE WHEN json_valid(payload) THEN json_extract(payload, '$.type') END IN ('PostToolUse','PostToolUseFailure') \
+        AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.tool') END \
+        IN ('Edit','Write','MultiEdit','NotebookEdit','apply_patch','Bash')";
+    let mut statement = db.prepare(QUERY).map_err(|e| e.to_string())?;
+    let names = statement
+        .query_map(rusqlite::params![after, limit as i64], |row| row.get::<_, Option<String>>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|row| row.ok().flatten())
+        .collect();
+    Ok(names)
+}
+
+/// `hgs git-status --path PATH --json` as a value: the same read-only checks,
+/// remote cache and Git options, without a child `hgs`.
+pub(crate) fn git_status(path: &Path) -> Result<Value> {
+    session_operations()?;
+    Ok(git_status::inspect(path))
+}
+
 /// The rows a tracked session's Activity shows: its journal name and the
 /// conversations its timeline spans, taken from its saved binding.
 pub(crate) struct Timeline {

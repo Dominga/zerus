@@ -194,7 +194,7 @@ topic is always on.
 | `catalog.meta` | — | the non-row fields of the listing (`projects`, `peers`, `preferences`, `desktop_presence`, `archive_revision`, `hgs_version`, `metrics`) | snapshot |
 | `activity` | session key | `events`: the same event objects as `inspect`, cursor = journal `seq`. `state`: the inspection summary without `events` and `processes`. `event`: open-event updates such as provider messages between tools | `after` = the last `seq`. Below retention the server sends `gap` and a tail snapshot |
 | `processes` | session key | `state`: the `processes` section of `inspect` | snapshot |
-| `git` | checkout path | `state`: the `git-status --json` object | snapshot |
+| `git` | checkout path, as subscribed | `state`: the `git-status --json` object, sent when it changed apart from `sampled_at` and `remote_age_seconds` | `state` on subscribe |
 | `tasks` | project | `delta` of task rows, as `task list` | snapshot |
 
 Archives stay outside the stream. They remain a keyset-paged read (`archives
@@ -234,8 +234,9 @@ on a 250 ms pulse:
   detached, exited agent processes, ended background work, sessions without a
   hook event yet, and DeepSeek and OpenCode hosts. All rows are listed again
   every 5 s for terminal choosers and status lines of sessions that already
-  reported hooks; 15 s would roughly halve the watcher's CPU but delay such a
-  chooser, and waits for the owner. Within one status observation the effort
+  reported hooks. 15 s would cut the watcher's CPU from about 6 % to 4 % of a
+  core on arch but show such a chooser up to 15 s late; owner decision,
+  2026-10-27: «делай а вариант как рекомендуешь» (keep 5 s). Within one status observation the effort
   footer and every terminal chooser share one capture per pane (35 instead of
   62 `capture-pane` per listing on arch). Bindings are replaced by rename;
   temporary `.hgs-*` files are ignored. Measured on arch: the watcher used
@@ -243,11 +244,20 @@ on a 250 ms pulse:
 - **Processes**: hook-recorded shell jobs (the binding stamp) plus one `ps`
   work sample every 2 s per subscribed session. The full snapshot, which
   re-reads the transcript tail, runs at most every 10 s.
-- **Git**: stats of `HEAD`, `index`, the current branch ref, `packed-refs` and
-  `FETCH_HEAD` in the git directory and common directory of each subscribed
-  path. Activity events from file-changing tools in sessions under that path
-  also trigger a check. There is a 30 s safety tick, and the existing
-  `git-status` command (with its 60 s remote cache) runs on change.
+- **Git**: stats of `HEAD`, `index`, the current branch ref, its upstream's
+  tracking ref, `packed-refs`, `FETCH_HEAD` and the reftable list in the git
+  directory and common directory of each subscribed path, on the pulse.
+  Journal rows of finished `Edit`, `Write`, `MultiEdit`, `NotebookEdit`,
+  `apply_patch` and `Bash` calls in sessions whose `cwd`, `cwd_canonical` or
+  `git_root` lies under that path also trigger a check, and so does the expiry
+  of its 60 s remote check, which keeps a verified remote verified. There is a
+  30 s safety tick, and checks of one path start at least 1 s apart. The
+  `git-status` code (with its 60 s remote cache) runs in-process on two worker
+  threads, the concurrency the desktop's polls had, so no check delays the
+  stream's other frames. The desktop gives each live stream the folders of its
+  computer's sessions (selected first, then shown rows) and polls only folders
+  the stream does not follow; a followed value is dated anew every 15 s, with
+  its remote age carried forward.
 - **Tasks**: stats of `replica/<project>/project.loro` and its `tasks/`
   directory, then the existing task listing. Loro stays inside `crates/replica`.
 

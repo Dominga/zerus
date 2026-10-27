@@ -2,6 +2,7 @@
 
 A private tmux socket, a scripted agent and a synthetic state folder only.
 """
+import hashlib
 import json
 import os
 import queue
@@ -113,7 +114,7 @@ class WatchStream(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
 
-    def journal(self, kind, **fields):
+    def journal(self, kind, name=None, **fields):
         """Appends one Activity row as a hook would; returns its seq."""
         payload = dict(type=kind, at=time.time(), agent_id='', tool='', detail='')
         payload.update(fields)
@@ -121,7 +122,7 @@ class WatchStream(unittest.TestCase):
         with db:
             db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT)')
             cursor = db.execute('INSERT INTO events(name, conversation, payload) VALUES (?, ?, ?)',
-                                (self.name, self.conversation_id, json.dumps(payload)))
+                                (name or self.name, self.conversation_id, json.dumps(payload)))
             seq = cursor.lastrowid
         db.close()
         return seq
@@ -144,8 +145,9 @@ class WatchStream(unittest.TestCase):
         self.assertEqual((hello['v'], hello['t'], hello['seq']), (1, 'hello', 1))
         self.assertEqual(hello['host'], 'test')
         self.assertEqual((hello['heartbeat_ms'], hello['max_frame_bytes']), (10000, 1048576))
-        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity'])
+        self.assertEqual(hello['topics'], ['catalog', 'catalog.meta', 'activity', 'git'])
         self.assertEqual(hello['limits']['activity_subscriptions'], 16)
+        self.assertEqual(hello['limits']['git_subscriptions'], 64)
         uuid.UUID(hello['stream'])
         self.assertEqual([frame['seq'] for frame in stream.seen], list(range(1, len(stream.seen) + 1)))
         self.assertTrue(all(frame['v'] == 1 for frame in stream.seen))
@@ -295,6 +297,125 @@ class WatchStream(unittest.TestCase):
         self.assertEqual(stream.next(lambda f: f['t'] == 'error')['code'], 'bad_request')
         stream.send(op='subscribe', topic='activity')
         self.assertEqual(stream.next(lambda f: f['t'] == 'error')['code'], 'bad_request')
+        self.assertEqual(stream.close(), 0)
+
+    # ---- git ----------------------------------------------------------------
+
+    def git(self, *args):
+        env = {key: value for key, value in self.env.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        return subprocess.check_output(['git', *args], env=env, stderr=subprocess.PIPE, text=True).strip()
+
+    def commit(self, repo, message):
+        self.git('-C', str(repo), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+                 'commit', '-qam', message)
+
+    def repository(self):
+        """A temporary checkout with one commit; Git reads no user configuration."""
+        self.env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        repo = (self.root / 'checkout').resolve()
+        self.git('init', '-q', '-b', 'main', str(repo))
+        (repo / 'tracked').write_text('initial\n')
+        self.git('-C', str(repo), 'add', '.')
+        self.commit(repo, 'initial')
+        return repo
+
+    def git_status(self, path):
+        result = subprocess.run([str(HGS), 'git-status', '--path', str(path), '--json'], env=self.env,
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    @staticmethod
+    def git_state(path, predicate=lambda value: True):
+        return lambda f: f['t'] == 'state' and f['topic'] == 'git' and f['key'] == str(path) and predicate(f['value'])
+
+    @staticmethod
+    def git_states(stream, count, timeout):
+        """The latest git state of each folder once `count` folders answered;
+        checks finish in any order."""
+        deadline = time.monotonic() + timeout
+        while True:
+            states = {f['key']: f['value'] for f in stream.seen if f['t'] == 'state' and f['topic'] == 'git'}
+            if len(states) >= count:
+                return states
+            stream.next(lambda f: f['t'] == 'state' and f['topic'] == 'git',
+                        timeout=max(0.1, deadline - time.monotonic()))
+
+    def test_git_follows_commits_checkouts_and_session_edits_until_unsubscribed(self):
+        repo = self.repository()
+        stream, *_ = self.start()
+        stream.send(op='subscribe', topic='git', path=str(repo))
+        first = stream.next(self.git_state(repo), timeout=10)
+        volatile = ('sampled_at', 'remote_age_seconds')
+        self.assertEqual({k: v for k, v in first['value'].items() if k not in volatile},
+                         {k: v for k, v in self.git_status(repo).items() if k not in volatile})
+        self.assertEqual((first['value']['state'], first['value']['branch'], first['value']['changed_files']), ('ok', 'main', 0))
+        # A commit changes HEAD's branch ref and the index; a stat sees it.
+        (repo / 'tracked').write_text('second\n')
+        started = time.monotonic()
+        self.commit(repo, 'second')
+        committed = stream.next(self.git_state(repo, lambda v: v['head'] != first['value']['head']), timeout=5)
+        self.assertEqual(committed['value']['head'], self.git('-C', str(repo), 'rev-parse', 'HEAD'))
+        self.assertGreater(committed['rev'], first['rev'])
+        self.git('-C', str(repo), 'checkout', '-qb', 'feature')
+        stream.next(self.git_state(repo, lambda v: v['branch'] == 'feature'), timeout=5)
+        # A check that a late metadata write asked for runs within a second.
+        stream.quiet(lambda f: False, 1.5)
+        # An edit in the working tree changes no Git metadata. A session working
+        # in the checkout that finishes a file-changing tool makes the stream
+        # check it, long before the 30 s safety tick. A saved session keeps
+        # the folder its hooks reported (a live one shows its pane's folder).
+        name = 'codex/git-fixture'
+        saved = dict(version=1, name=name, agent='codex', run_id=str(uuid.uuid4()),
+                     conversation_id=str(uuid.uuid4()), cwd=str(repo), activity='idle', phase='idle',
+                     active_tools={}, subagents={}, last_event_at=time.time(), created=time.time())
+        (self.state / (hashlib.sha256(name.encode()).hexdigest() + '.json')).write_text(json.dumps(saved))
+        stream.next(lambda f: f['t'] == 'delta' and any(
+            item['row'].get('name') == name and item['row'].get('cwd') == str(repo) for item in f['upsert']), timeout=8)
+        (repo / 'tracked').write_text('edited by the agent\n')
+        stream.quiet(self.git_state(repo, lambda v: v['changed_files'] == 1), 1.5)
+        self.journal('PostToolUse', name=name, tool='Edit', detail=str(repo / 'tracked'))
+        edited = stream.next(self.git_state(repo, lambda v: v['changed_files'] == 1), timeout=5)
+        self.assertEqual(edited['value']['branch'], 'feature')
+        self.assertLess(time.monotonic() - started, 25)
+        # An unchanged checkout sends nothing more, and unsubscribed nothing at all.
+        stream.quiet(self.git_state(repo), 2)
+        stream.send(op='unsubscribe', topic='git', path=str(repo))
+        stream.send(op='ping', id='unsubscribed')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'unsubscribed')
+        self.git('-C', str(repo), 'checkout', '-q', 'main')
+        stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'git', 2.5)
+        self.assertTrue(all(len(line.encode()) <= 1 << 20 for line in stream.raw))
+        self.assertEqual(stream.close(), 0)
+
+    def test_git_folders_answer_like_git_status_and_are_limited(self):
+        self.env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        plain = self.root / 'plain'
+        plain.mkdir()
+        missing = self.root / 'missing'
+        stream, *_ = self.start()
+        stream.send(op='subscribe', topic='git', path=str(plain))
+        stream.send(op='subscribe', topic='git', path=str(missing))
+        states = self.git_states(stream, 2, timeout=10)
+        self.assertEqual((states[str(plain)]['state'], states[str(missing)]['state']), ('not_repo', 'folder_unavailable'))
+        for path in ('relative/folder', ''):
+            stream.send(op='subscribe', topic='git', path=path)
+            error = stream.next(lambda f: f['t'] == 'error')
+            self.assertEqual((error['code'], error['topic'], error['fatal']), ('bad_request', 'git', False))
+        stream.send(op='subscribe', topic='git')
+        self.assertEqual(stream.next(lambda f: f['t'] == 'error')['code'], 'bad_request')
+        for index in range(62):
+            stream.send(op='subscribe', topic='git', path=str(self.root / f'limit-{index}'))
+        stream.send(op='subscribe', topic='git', path=str(self.root / 'limit-62'))
+        error = stream.next(lambda f: f['t'] == 'error', timeout=30)
+        self.assertEqual((error['code'], error['topic'], error['key'], error['fatal']),
+                         ('too_many_subscriptions', 'git', str(self.root / 'limit-62'), False))
+        # Every accepted folder answers, and the stream stays up.
+        states = self.git_states(stream, 64, timeout=30)
+        self.assertNotIn(str(self.root / 'limit-62'), states)
+        stream.send(op='ping', id='alive')
+        self.assertEqual(stream.next(lambda f: f['t'] == 'pong')['id'], 'alive')
         self.assertEqual(stream.close(), 0)
 
     def test_closed_output_ends_the_stream_quietly(self):

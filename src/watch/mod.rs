@@ -1,13 +1,15 @@
 //! `hgs [@host] watch --json`: one long-lived NDJSON event stream per computer
 //! (ABI `watch-v1`, frames in `crates/watch-protocol`). The catalog topic
 //! carries the rows of `hgs ls --json --local --no-archives`; Activity carries
-//! what `hgs inspect` returns for subscribed sessions. Change detection is a
-//! 250 ms pulse over cheap stamps and the journal's data version, on
+//! what `hgs inspect` returns for subscribed sessions, and git what `hgs
+//! git-status --json` returns for subscribed checkout folders. Change detection
+//! is a 250 ms pulse over cheap stamps and the journal's data version, on
 //! `std::thread` only. A changed binding or journal row derives only its
 //! session's row again; a 5 s probe watches what no file shows and the whole
 //! listing runs every 5 s. See "Event stream" in docs/reference.md.
 mod activity;
 mod catalog;
+mod git;
 mod stamps;
 mod writer;
 
@@ -42,8 +44,8 @@ const PROBE: Duration = Duration::from_secs(5);
 /// The whole listing runs at least this often, for what neither a file nor
 /// the probe shows: terminal choosers and status lines of sessions that have
 /// reported hooks, and native transcripts between hook events. 15 s would
-/// halve the watcher's CPU on a busy computer but show such a chooser up to
-/// 15 s late; that tradeoff waits for the owner (zerus-604d.6).
+/// cut the watcher's CPU on a busy computer but show such a chooser up to 15 s
+/// late; the owner chose 5 s (2026-10-27, zerus-604d).
 const FULL: Duration = Duration::from_secs(5);
 /// `catalog.meta` with only fresh metrics or presence goes out this rarely.
 const META_INTERVAL: Duration = Duration::from_secs(10);
@@ -67,6 +69,8 @@ enum Input {
     TooLong,
     /// Control lines arrived faster than they were handled; some were dropped.
     Dropped,
+    /// A git status check finished on a worker.
+    Git(git::Done),
     End,
 }
 
@@ -80,6 +84,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     }
     let (inputs, received) = mpsc::channel();
     let closed = inputs.clone();
+    let checks = inputs.clone();
     let writer = Writer::spawn(
         std::io::stdout(),
         protocol::QUEUE_BYTES,
@@ -96,7 +101,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         // EOF stops the writer at once, so a wait for queue room ends too.
         .spawn(move || read_controls(std::io::stdin().lock(), inputs, &counted, move || halt.halt()))
         .map_err(|error| Error::new(1, format!("cannot read control operations: {error}")))?;
-    let mut watch = Watch::new(config, writer);
+    let mut watch = Watch::new(config, writer, checks);
     watch.hello();
     watch.list(Instant::now());
     watch.emit_catalog();
@@ -125,6 +130,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                 None,
                 None,
             ),
+            Ok(Input::Git(done)) => watch.git_done(done),
             Ok(Input::End) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -144,6 +150,7 @@ pub(crate) fn run(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         }
         watch.emit_catalog();
         watch.resync_activity();
+        watch.flush_git();
     }
 }
 
@@ -202,6 +209,17 @@ fn read_controls<R: BufRead>(mut input: R, inputs: mpsc::Sender<Input>, pending:
     }
     ended();
     let _ = inputs.send(Input::End);
+}
+
+/// Sessions whose new journal rows record a finished file-changing tool.
+#[derive(Default)]
+enum Writers {
+    #[default]
+    None,
+    /// Rows of these journal names.
+    Names(Vec<String>),
+    /// Too many rows to tell.
+    All,
 }
 
 /// What changed in the Activity journal since the previous pulse.
@@ -300,10 +318,16 @@ struct Watch<'a> {
     data_version: Option<i64>,
     journal_max: i64,
     subs: Vec<Subscription>,
+    // Git.
+    git: git::Git,
+    /// Started with the first check; its results return as `Input::Git`.
+    git_pool: Option<git::Pool>,
+    git_results: mpsc::Sender<Input>,
+    writers: Writers,
 }
 
 impl<'a> Watch<'a> {
-    fn new(config: &'a Config, writer: Writer) -> Self {
+    fn new(config: &'a Config, writer: Writer, git_results: mpsc::Sender<Input>) -> Self {
         let root = source::state_root();
         // Stamps are taken before the first listing: a change during it lists again.
         let scan = stamps::scan(&root);
@@ -338,6 +362,10 @@ impl<'a> Watch<'a> {
             data_version: None,
             journal_max: 0,
             subs: Vec::new(),
+            git: git::Git::new(),
+            git_pool: None,
+            git_results,
+            writers: Writers::None,
         }
     }
 
@@ -349,7 +377,7 @@ impl<'a> Watch<'a> {
             stream: uuid::Uuid::new_v4().to_string(),
             heartbeat_ms: protocol::HEARTBEAT_MS,
             max_frame_bytes: protocol::MAX_FRAME_BYTES,
-            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY].map(str::to_owned).to_vec(),
+            topics: [topic::CATALOG, topic::CATALOG_META, topic::ACTIVITY, topic::GIT].map(str::to_owned).to_vec(),
             limits: protocol::Limits::default(),
         };
         self.out.put(&Body::Hello(hello));
@@ -763,6 +791,7 @@ impl<'a> Watch<'a> {
             self.schedule(now);
         }
         self.activity(now);
+        self.pulse_git(now);
     }
 
     fn open_journal(&mut self) {
@@ -813,6 +842,13 @@ impl<'a> Watch<'a> {
         } else {
             source::changed_names(db, self.journal_max, SCAN).ok().map(|names| names.into_iter().collect())
         };
+        if !self.git.is_empty() {
+            self.writers = match names.is_some().then(|| source::writing_names(db, self.journal_max, SCAN)) {
+                Some(Ok(writers)) if writers.is_empty() => Writers::None,
+                Some(Ok(writers)) => Writers::Names(writers),
+                _ => Writers::All,
+            };
+        }
         for sub in self.subs.iter_mut().filter(|sub| !sub.native) {
             let touched = match (&names, &sub.journal) {
                 (Some(names), Some(journal)) => names.contains(journal),
@@ -947,6 +983,97 @@ impl<'a> Watch<'a> {
         }
     }
 
+    // ---- Git ---------------------------------------------------------------
+
+    fn subscribe_git(&mut self, path: Option<&str>) {
+        let Some(path) = path else {
+            self.out.error("bad_request", "a git subscription names its folder as path", Some(topic::GIT), None);
+            return;
+        };
+        match self.git.subscribe(path, Instant::now()) {
+            Ok(job) => self.run_git(job),
+            Err(git::Refusal::BadRequest(message)) => self.out.error("bad_request", message, Some(topic::GIT), Some(path)),
+            Err(git::Refusal::TooMany) => self.out.error(
+                "too_many_subscriptions",
+                &format!("a stream follows at most {} git folders", protocol::GIT_SUBSCRIPTIONS),
+                Some(topic::GIT),
+                Some(path),
+            ),
+        }
+    }
+
+    /// Hands checks to the git workers, started with the first one.
+    fn run_git(&mut self, jobs: impl IntoIterator<Item = git::Job>) {
+        for job in jobs {
+            let pool = self.git_pool.get_or_insert_with(|| {
+                let results = self.git_results.clone();
+                git::Pool::spawn(git::WORKERS, move |done| {
+                    let _ = results.send(Input::Git(done));
+                })
+            });
+            pool.run(job);
+        }
+    }
+
+    /// Sessions that finished a file-changing tool, then stat changes and
+    /// checks whose time came.
+    fn pulse_git(&mut self, now: Instant) {
+        match std::mem::take(&mut self.writers) {
+            Writers::None => {}
+            Writers::All => self.git.touch_all(now),
+            Writers::Names(journals) => {
+                let names: BTreeSet<&str> = self
+                    .identities
+                    .values()
+                    .flatten()
+                    .filter(|(_, journal)| journals.contains(journal))
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                let dirs: Vec<PathBuf> = self
+                    .rows
+                    .iter()
+                    .filter(|(_, row)| row["name"].as_str().is_some_and(|name| names.contains(name)))
+                    .flat_map(|(_, row)| ["cwd", "cwd_canonical", "git_root"].map(|field| row[field].as_str().unwrap_or("")))
+                    .filter(|dir| !dir.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+                self.git.touch(&dirs, now);
+            }
+        }
+        if self.git.is_empty() {
+            return;
+        }
+        let jobs = self.git.pulse(now, stamps::files);
+        self.run_git(jobs);
+    }
+
+    fn git_done(&mut self, done: git::Done) {
+        let key = done.path.clone();
+        if let Some(error) = self.git.done(done, Instant::now()) {
+            self.out.failure("git_status_failed", &error, Some(topic::GIT), Some(&key));
+        }
+    }
+
+    /// Sends changed git states unless the client is behind; they wait and
+    /// the latest of each folder goes out once it catches up.
+    fn flush_git(&mut self) {
+        if !self.git.pending() || self.out.writer.backlog() > DEFER_BYTES {
+            return;
+        }
+        let out = &mut self.out;
+        self.git.flush(|key, value, rev| {
+            let body = Body::State(protocol::State { topic: topic::GIT.into(), key: key.into(), value: value.clone(), rev });
+            match Out::encode(&body) {
+                Some(body) => out.writer.offer(Item { coalesce: Some(format!("state|{}|{key}", topic::GIT)), body }),
+                None => {
+                    // Never expected: a git-status object is a few hundred bytes.
+                    out.failure("state_too_large", "git status exceeds the frame limit; read it with hgs git-status", Some(topic::GIT), Some(key));
+                    true
+                }
+            }
+        });
+    }
+
     // ---- Control -----------------------------------------------------------
 
     fn control(&mut self, text: &str) {
@@ -966,7 +1093,11 @@ impl<'a> Watch<'a> {
             }
             Control::Subscribe(subscription) => self.subscribe(subscription),
             Control::Unsubscribe(subscription) => {
-                if let Some(session) = subscription.session.filter(|_| subscription.topic == topic::ACTIVITY) {
+                if subscription.topic == topic::GIT {
+                    if let Some(path) = &subscription.path {
+                        self.git.unsubscribe(path);
+                    }
+                } else if let Some(session) = subscription.session.filter(|_| subscription.topic == topic::ACTIVITY) {
                     let key = session.key();
                     self.subs.retain(|sub| sub.key != key);
                 }
@@ -977,6 +1108,7 @@ impl<'a> Watch<'a> {
     fn subscribe(&mut self, request: protocol::Subscription) {
         match request.topic.as_str() {
             topic::CATALOG | topic::CATALOG_META => return,
+            topic::GIT => return self.subscribe_git(request.path.as_deref()),
             topic::ACTIVITY => {}
             other => {
                 self.out.error(
@@ -1156,6 +1288,7 @@ mod tests {
                 Input::Line(text) => text,
                 Input::TooLong => "<too long>".into(),
                 Input::Dropped => "<dropped>".into(),
+                Input::Git(done) => format!("<git {}>", done.path),
                 Input::End => "<end>".into(),
             })
             .collect()

@@ -1121,13 +1121,21 @@ pub(crate) fn hand_off_text_with(
     let mut task_in_prompt = false;
     if let Some(prompt) = team.member(&attempt.member).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
         // U25: the role's prompt blocks in its order, when the catalog has one.
-        let (ordered, has_task) = super::catalog::load().ok().and_then(|catalog| {
-            let role_name = team.role_of(&attempt.member);
-            let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-            let has_task = role.prompt_order.iter().any(|key| key == "task")
-                && !role.prompt_off.iter().any(|key| key == "task");
-            Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
-        }).unwrap_or((None, false));
+        // N3: a member's own snapshot wins; an old member keeps today's live text.
+        let snapshot = team.member(&attempt.member).and_then(|member| member.prompt_snapshot.clone());
+        let (ordered, has_task) = if let Some(snapshot) = snapshot {
+            let has_task = snapshot.prompt_order.iter().any(|key| key == "task")
+                && !snapshot.prompt_off.iter().any(|key| key == "task");
+            (super::catalog::prompt_order_text_snapshot(&snapshot, prompt, Some(task)), has_task)
+        } else {
+            super::catalog::load().ok().and_then(|catalog| {
+                let role_name = team.role_of(&attempt.member);
+                let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
+                let has_task = role.prompt_order.iter().any(|key| key == "task")
+                    && !role.prompt_off.iter().any(|key| key == "task");
+                Some((super::catalog::prompt_order_text(role, prompt, Some(task), ""), has_task))
+            }).unwrap_or((None, false))
+        };
         task_in_prompt = has_task;
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
             text += &ordered;
@@ -1342,11 +1350,15 @@ pub(crate) fn brief_text(team: &Team) -> String {
         text += &format!("Folder: {}\n", team.folder);
     }
     if let Some(prompt) = team.member(&team.lead).map(|m| m.prompt.trim()).filter(|p| !p.is_empty()) {
-        let ordered = super::catalog::load().ok().and_then(|catalog| {
-            let role_name = team.role_of(&team.lead);
-            let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
-            super::catalog::prompt_order_text(role, prompt, None, "")
-        });
+        let ordered = if let Some(snapshot) = team.member(&team.lead).and_then(|member| member.prompt_snapshot.clone()) {
+            super::catalog::prompt_order_text_snapshot(&snapshot, prompt, None)
+        } else {
+            super::catalog::load().ok().and_then(|catalog| {
+                let role_name = team.role_of(&team.lead);
+                let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
+                super::catalog::prompt_order_text(role, prompt, None, "")
+            })
+        };
         if let Some(ordered) = ordered.filter(|text| !text.trim().is_empty()) {
             text += &ordered;
         } else {
@@ -4277,6 +4289,25 @@ mod tests {
     }
     fn session(name: &str, run: &str, free: bool) -> Seen {
         Seen { name: name.into(), run_id: run.into(), conversation_id: "c".into(), free, idle: free, live: true, ..Default::default() }
+    }
+
+    #[test]
+    fn a_member_prompt_snapshot_wins_over_the_live_catalog() {
+        let mut t = team();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt = "Backend prompt".into();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = Some(crate::state::teams::model::PromptSnapshot {
+            prompt_order: vec!["protocol".into()],
+            protocol_extra: "SNAPSHOT EXTRA".into(),
+            ..Default::default()
+        });
+        let task = t.task(1).unwrap().clone();
+        let attempt = Attempt { n: 1, id: "a1".into(), member: "dev".into(), ..Default::default() };
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(text.contains("SNAPSHOT EXTRA"), "{text}");
+        // An old member without a snapshot keeps today's live catalog text.
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().prompt_snapshot = None;
+        let text = hand_off_text(&t, &task, &attempt, "", "");
+        assert!(!text.contains("SNAPSHOT EXTRA"), "{text}");
     }
 
     #[test]

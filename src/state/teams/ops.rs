@@ -179,6 +179,11 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
         member.parent = member_id(&member.parent)?;
     }
     member.prompt = clean(&member.prompt, 8000, "A role prompt")?;
+    // N3: copy the role's prompt blocks now; a later catalog edit changes no
+    // running team mid-phase. An old member loaded from the store keeps None.
+    if member.prompt_snapshot.is_none() {
+        member.prompt_snapshot = super::catalog::snapshot_for(&member.role);
+    }
     member.state = match member.session {
         Some(_) => MemberState::Active,
         None => MemberState::NotCreated,

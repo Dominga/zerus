@@ -245,11 +245,29 @@ pub(crate) enum MemberFolder {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PromptSnapshot {
+    #[serde(default)]
+    pub prompt_order: Vec<String>,
+    #[serde(default)]
+    pub prompt_off: Vec<String>,
+    #[serde(default)]
+    pub protocol_extra: String,
+    #[serde(default)]
+    pub task_template: String,
+    #[serde(default)]
+    pub notes: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Member {
     /// Stable within the team, such as `backend`.
     pub id: String,
     #[serde(default)]
     pub role: String,
+    /// N3: the role's prompt blocks copied when the member joined, so a later
+    /// catalog edit never changes a running team mid-phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_snapshot: Option<PromptSnapshot>,
     pub agent: String,
     #[serde(default)]
     pub account: String,

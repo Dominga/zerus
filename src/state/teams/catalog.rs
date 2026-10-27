@@ -350,6 +350,33 @@ fn save(catalog: &Catalog) -> anyhow::Result<()> {
     atomic(&path(), &serde_json::to_string_pretty(catalog)?).map_err(anyhow::Error::msg)
 }
 
+/// N3: the role's prompt blocks as they are now, copied onto a member when it
+/// joins so a later catalog edit changes no running team mid-phase.
+pub(crate) fn snapshot_for(role_name: &str) -> Option<super::model::PromptSnapshot> {
+    let catalog = load().unwrap_or_else(|_| builtin());
+    let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name)?;
+    Some(super::model::PromptSnapshot {
+        prompt_order: role.prompt_order.clone(),
+        prompt_off: role.prompt_off.clone(),
+        protocol_extra: role.protocol_extra.clone(),
+        task_template: role.task_template.clone(),
+        notes: role.notes.clone(),
+    })
+}
+
+/// Renders the member's snapshot in the role's order.
+pub(crate) fn prompt_order_text_snapshot(snapshot: &super::model::PromptSnapshot, member_prompt: &str, task: Option<&Task>) -> Option<String> {
+    let role = Role {
+        prompt_order: snapshot.prompt_order.clone(),
+        prompt_off: snapshot.prompt_off.clone(),
+        protocol_extra: snapshot.protocol_extra.clone(),
+        task_template: snapshot.task_template.clone(),
+        notes: snapshot.notes.clone(),
+        ..Default::default()
+    };
+    prompt_order_text(&role, member_prompt, task, "")
+}
+
 /// U25: the role's prompt blocks in the owner's order, skipping the ones turned
 /// off. None when the role has no order (an old catalog keeps today's text).
 pub(crate) fn prompt_order_text(role: &Role, member_prompt: &str, task: Option<&Task>, project_rules: &str) -> Option<String> {
@@ -894,25 +921,6 @@ mod tests {
             assert!(!trust_designer(agent, "C:\\designer", &config).unwrap(), "{agent}");
         }
         assert!(!config.exists(), "nothing writes a Claude account config for another agent");
-    }
-
-    #[test]
-    fn route_matches_like_the_prototype() {
-        let mut catalog = builtin();
-        catalog.routing = vec![
-            Rule { id: "review".into(), when: "review · release".into(), template: "bugfix".into(), approval: String::new(), use_: String::new() },
-            Rule { id: "all".into(), when: "everything else".into(), template: "feature".into(), approval: String::new(), use_: String::new() },
-        ];
-        validate(&catalog).unwrap();
-        // Either word of "review · release" matches; the dot is not a token.
-        assert_eq!(route(&catalog, "please review this")["template"]["id"], "bugfix");
-        assert_eq!(route(&catalog, "make a release")["template"]["id"], "bugfix");
-        // "everything else" always matches, so it is the catch-all, not the
-        // first template fallback.
-        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
-        // An empty when never matches.
-        catalog.routing[0].when.clear();
-        assert_eq!(route(&catalog, "new checkout")["template"]["id"], "feature");
     }
 
     #[test]

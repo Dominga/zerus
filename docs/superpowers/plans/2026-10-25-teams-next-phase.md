@@ -899,6 +899,24 @@ answered; a denial cannot carry an explanation.
   shows the setting in the team settings and the mark on the task. Owner:
   yes.
 
+- **U32. Adding a member on the owner's plain request (owner, 2026-10-27).**
+  The owner asked "maybe add one more DeepSeek backend?" and still had to run
+  a script: the installed build lets only the owner add members and raise
+  max_members, and U26's check would also refuse that sentence, because it
+  must name the new member's id ("backend4") and the new cap ("10"), which the
+  owner never types. On the owner's explicit request in the lead's session
+  (U26 rules: typed by the owner, at most 30 minutes old), the lead's
+  `add-member` is accepted when the sentence names what is added: its role or
+  its agent/model, in English or Russian ("backend"/"бэкенд",
+  "frontend"/"фронт", "DeepSeek"/"дипсик", "Claude"/"клод", "Opus"/"опус",
+  "Codex"/"кодекс"; the generated id is not needed), and the request says
+  how many ("one more"/"еще одного" is one, otherwise one). When the add
+  would exceed max_members, the same word raises the cap by exactly that
+  many, within the tree session budget, and the event says so. One word
+  covers only the members it names; a second add needs a new sentence.
+  Remove and swap keep U26's rule of naming the member. The feed and status
+  say "Added by Lead on your word" with the quote. Owner: yes.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

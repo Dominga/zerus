@@ -3317,10 +3317,15 @@ mod tests {
         assert_eq!(summary(&old)["attention"][0]["task"], 1);
         old.settings.remind_owner_minutes = 0;
         assert_eq!(view_with(&old, &[], None)["attention"], json!([]));
-        // The settings are optional with the spec's defaults (C2, C4).
+        // The settings are optional with the spec's defaults (C2, C4, U18).
         assert_eq!(
-            (team.settings.inbox_interval_seconds, team.settings.remind_lead_minutes, team.settings.remind_owner_minutes),
-            (120, 15, 10)
+            (
+                team.settings.inbox_interval_seconds,
+                team.settings.remind_lead_minutes,
+                team.settings.remind_owner_minutes,
+                team.settings.remind_owner_permission_minutes
+            ),
+            (120, 15, 60, 10)
         );
         // The inbox is a read, named in the usage.
         assert!(USAGE.contains("inbox"));

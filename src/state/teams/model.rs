@@ -88,10 +88,14 @@ pub(crate) struct Settings {
     /// 0 turns the reminder off (C4).
     #[serde(default = "default_remind_lead")]
     pub remind_lead_minutes: u64,
-    /// Minutes before that report shows on the owner's attention list in the
-    /// desktop; 0 turns it off (C4).
+    /// Minutes before an undecided report shows on the owner's attention list in
+    /// the desktop; 0 turns it off (C4).
     #[serde(default = "default_remind_owner")]
     pub remind_owner_minutes: u64,
+    /// U18: minutes a member's unanswered permission request waits before it
+    /// reaches the owner's attention list; 0 turns only that off.
+    #[serde(default = "default_remind_owner_permission")]
+    pub remind_owner_permission_minutes: u64,
     /// Minutes a Background job without a declared budget may run before the
     /// lead hears it is red (C12).
     #[serde(default = "default_background_red")]
@@ -155,6 +159,11 @@ fn default_remind_lead() -> u64 {
     15
 }
 fn default_remind_owner() -> u64 {
+    60
+}
+/// U18: a permission request reaches the owner sooner than an undecided report:
+/// the member is blocked meanwhile.
+fn default_remind_owner_permission() -> u64 {
     10
 }
 fn default_background_red() -> u64 {
@@ -178,6 +187,7 @@ impl Default for Settings {
             inbox_interval_seconds: default_inbox_interval(),
             remind_lead_minutes: default_remind_lead(),
             remind_owner_minutes: default_remind_owner(),
+            remind_owner_permission_minutes: default_remind_owner_permission(),
             background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
             resume_after_limits: false,
@@ -1308,10 +1318,16 @@ mod tests {
     fn an_old_attempt_loads_with_the_new_fields_at_their_defaults() {
         let team: Team = serde_json::from_value(old_attempt_team()).unwrap();
         assert_eq!(team.settings.start_timeout_seconds, 180);
-        // The lead's load settings (C2, C4, C12) default; an old team has no inbox.
+        // The lead's load settings (C2, C4, C12, U18) default; an old team has
+        // no inbox.
         assert_eq!(
-            (team.settings.inbox_interval_seconds, team.settings.remind_lead_minutes, team.settings.remind_owner_minutes),
-            (120, 15, 10)
+            (
+                team.settings.inbox_interval_seconds,
+                team.settings.remind_lead_minutes,
+                team.settings.remind_owner_minutes,
+                team.settings.remind_owner_permission_minutes
+            ),
+            (120, 15, 60, 10)
         );
         assert_eq!(team.settings.background_red_minutes, 30);
         assert!(team.inbox.told.is_empty() && team.inbox.told_at == 0.0);

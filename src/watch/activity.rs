@@ -1,9 +1,15 @@
 //! Activity subscriptions: the inspection summary as `state`, journal events
 //! as `events`, and bounds that keep every frame under the frame limit.
 use super::catalog::{self, Digest32};
+use crate::state::watch_source::TranscriptTail;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::time::Instant;
 use zerus_watch_protocol as protocol;
+
+/// Message IDs whose `event` revision a subscription remembers.
+const MESSAGE_IDS: usize = 256;
 
 /// Sections of an inspection that `state` leaves out: Activity rows travel as
 /// `events`, and process sets belong to a later topic.
@@ -38,6 +44,12 @@ pub(super) struct Subscription {
     pub row: Option<Digest32>,
     /// The journal name its rows carry; a rename keeps it.
     pub journal: Option<String>,
+    /// The Codex or Claude transcript followed for messages between tools.
+    pub transcript: Option<TranscriptTail>,
+    /// When to look for the transcript again after none was found.
+    pub transcript_at: Instant,
+    /// The `event` revision and digest of each message ID sent, oldest first.
+    pub messages: VecDeque<(String, u64, Digest32)>,
 }
 
 impl Subscription {
@@ -60,6 +72,41 @@ impl Subscription {
             listed: false,
             row: None,
             journal: None,
+            transcript: None,
+            transcript_at: Instant::now(),
+            messages: VecDeque::new(),
+        }
+    }
+
+    /// The `event` revision for a message, or None when that revision was
+    /// already sent with the same content.
+    pub(super) fn message_rev(&mut self, id: &str, message: &Value) -> Option<u64> {
+        let digest = catalog::digest(message);
+        let sent = self.messages.iter().position(|(sent, _, _)| sent == id).and_then(|index| self.messages.remove(index));
+        let (rev, changed) = match sent {
+            Some((_, rev, previous)) if previous == digest => (rev, false),
+            Some((_, rev, _)) => (rev + 1, true),
+            None => (1, true),
+        };
+        // The newest entry: the oldest ID is forgotten first.
+        self.messages.push_back((id.to_owned(), rev, digest));
+        if self.messages.len() > MESSAGE_IDS {
+            self.messages.pop_front();
+        }
+        changed.then_some(rev)
+    }
+}
+
+/// The stable ID of a provider message in `event` frames: its `message_id`,
+/// or `{type}@{at}#{hash}` of its text when it has none.
+pub(super) fn message_id(message: &Value) -> String {
+    match message["message_id"].as_str().filter(|id| !id.is_empty()) {
+        Some(id) => id.to_owned(),
+        None => {
+            let detail = message["detail"].as_str().unwrap_or_default();
+            let hash = Sha256::digest(detail.as_bytes());
+            let hex: String = hash[..8].iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{}@{}#{hex}", message["type"].as_str().unwrap_or_default(), message["at"])
         }
     }
 }
@@ -189,6 +236,31 @@ mod tests {
         assert_ne!(state_digest(&value), state_digest(&later));
         assert!(!busy(&value));
         assert!(busy(&json!({"activity":"busy"})));
+    }
+
+    #[test]
+    fn messages_are_identified_by_message_id_or_type_time_and_text_and_revised_when_changed() {
+        let message = json!({"type":"AgentMessage","at":1.5,"message_id":"m-1","detail":"Checking."});
+        assert_eq!(message_id(&message), "m-1");
+        let anonymous = json!({"type":"AgentMessage","at":1.5,"message_id":"","detail":"Checking."});
+        let id = message_id(&anonymous);
+        assert!(id.starts_with("AgentMessage@1.5#"), "{id}");
+        assert_eq!(id.len(), "AgentMessage@1.5#".len() + 16);
+        assert_eq!(id, message_id(&json!({"type":"AgentMessage","at":1.5,"detail":"Checking."})));
+        assert_ne!(id, message_id(&json!({"type":"AgentMessage","at":1.5,"detail":"Other."})));
+        let mut sub = Subscription::new("run:r".into(), "codex/p/t".into(), None, false, 100);
+        assert_eq!(sub.message_rev("m-1", &message), Some(1));
+        assert_eq!(sub.message_rev("m-1", &message), None);
+        let mut changed = message.clone();
+        changed["detail"] = json!("Checked.");
+        assert_eq!(sub.message_rev("m-1", &changed), Some(2));
+        assert_eq!(sub.message_rev("m-1", &changed), None);
+        for n in 0..MESSAGE_IDS {
+            assert_eq!(sub.message_rev(&format!("other-{n}"), &message), Some(1));
+        }
+        // The oldest ID is forgotten first: it starts again at revision 1.
+        assert_eq!(sub.messages.len(), MESSAGE_IDS);
+        assert_eq!(sub.message_rev("m-1", &changed), Some(1));
     }
 
     #[test]

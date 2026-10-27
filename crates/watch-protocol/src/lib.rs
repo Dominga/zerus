@@ -194,6 +194,9 @@ pub struct Events {
 }
 
 /// A replacement of one open event by its stable ID; a higher `rev` wins.
+/// Activity sends a provider message between tools as `inspect` lists it in
+/// `provider_messages`; `id` is its `message_id`, or `{type}@{at}#{hash}`
+/// when that is empty (see "Event stream" in docs/reference.md).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventUpdate {
     pub topic: String,

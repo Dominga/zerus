@@ -1,0 +1,57 @@
+/* Application shell: side rail, pages, status bar. */
+@layer components {
+  .app { display: grid; grid-template-columns: var(--rail-w) 1fr; grid-template-rows: 1fr auto; height: 100vh; background: var(--z-color-page); }
+  .app.rail-labeled { --rail-w: 84px; }
+
+  .rail { grid-row: 1 / 3; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 0 8px; background: var(--z-color-surface); border-right: 1px solid var(--z-color-divider); }
+  .rail button { position: relative; display: grid; place-items: center; width: 40px; height: 40px; border-radius: var(--z-radius-lg); color: var(--z-color-muted); transition: background var(--z-motion-fast), color var(--z-motion-fast); }
+  .rail button:hover { background: var(--z-color-hover); color: var(--z-color-text); }
+  .rail .rail-brand { margin-bottom: 6px; }
+  .rail .rail-brand.on { background: var(--z-color-segment-on); }
+  .rail .rail-new { height: 28px; background: var(--z-color-segment-on); color: var(--z-color-accent); margin-bottom: 6px; }
+  .rail .rail-new:hover { background: color-mix(in srgb, var(--z-color-segment-on) 70%, var(--z-color-accent)); color: var(--z-color-accent-text); }
+  .rail .rail-btn.on { background: var(--z-color-segment-on); color: var(--z-color-accent); }
+  .rail .rail-btn.on::before { content: ""; position: absolute; left: -8px; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: var(--z-color-accent); animation: grow var(--z-motion-base) var(--ease); }
+  .rail .rail-btn.pin.pinned { color: var(--z-color-status-attention); }
+  .rail-badge { position: absolute; top: 2px; right: 1px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--z-color-warn); color: var(--z-color-accent-text); font-size: 10px; font-weight: 700; display: grid; place-items: center; box-shadow: 0 0 0 2px var(--z-color-pane); }
+  .rail .rail-version { width: auto; height: 22px; padding: 0 4px; font-size: 10px; color: var(--z-color-dim); }
+  .rail.labeled button { width: 72px; height: 48px; grid-template-rows: auto auto; gap: 2px; align-content: center; font-size: var(--fs-2xs); }
+  .rail.labeled .rail-new { height: 40px; }
+  .rail.labeled .rail-btn.on::before { left: -6px; }
+
+  .page { min-width: 0; min-height: 0; overflow: hidden; display: flex; }
+  .statusbar { grid-column: 2; display: flex; align-items: center; gap: 14px; height: 28px; white-space: nowrap; overflow: hidden; padding: 0 12px; border-top: 1px solid var(--z-color-divider); background: var(--z-color-pane); font-size: var(--fs-xs); color: var(--z-color-muted); }
+  .statusbar .sb-usage { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 6px; border-radius: var(--z-radius-sm); color: var(--z-color-muted); }
+  .statusbar .sb-usage:hover, .statusbar .sb-usage:focus-visible { background: var(--z-list-usage-hover); color: var(--z-color-text); }
+  /* Limit meters (AccountUsage::Button): 11 px text in the pace colour; see UsageMeter.tsx. */
+  .usage-meters { display: inline-flex; align-items: center; height: 22px; font-size: 11px; color: var(--z-list-muted); white-space: nowrap; }
+  .um-window { display: inline-flex; align-items: center; height: 22px; }
+  .um-window + .um-window { margin-left: 16px; }
+  .usage-meters.compact .um-window + .um-window { margin-left: 10px; }
+  .um-bar { flex: none; display: block; }
+  .um-bar .um-track { fill: var(--z-list-usage-track); }
+  .um-bar .um-elapsed { fill: var(--z-list-usage-elapsed); }
+  .um-bar .um-marker { fill: var(--z-list-usage-marker); }
+  .um-text { margin-left: 6px; color: var(--z-list-muted); }
+  .um-skeleton { display: inline-block; margin-left: 6px; width: 48px; height: 8px; border-radius: 3px; background: var(--z-list-usage-skeleton); }
+  .usage-meters.compact .um-skeleton { width: 40px; }
+  .um-countdown { display: inline-flex; align-items: center; gap: 2px; margin-left: 5px; min-width: 34px; color: var(--z-list-muted); }
+  .um-countdown svg { fill: none; stroke: currentColor; stroke-linejoin: round; }
+  .um-summary { color: var(--z-list-muted); }
+  .meter { position: relative; width: 34px; height: 4px; border-radius: 2px; background: var(--z-color-border); overflow: hidden; }
+  .meter > i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--z-color-accent); transition: width var(--z-motion-slow) var(--ease); }
+  .meter.warn > i { background: var(--z-color-warn); }
+  .meter.danger > i { background: var(--z-color-danger); }
+
+  /* Mockup-only review tools (not part of the product UI): a dashed launcher in
+     the rail's empty middle and a popover with the review switches. */
+  .review-launch { position: fixed; z-index: 80; left: 8px; bottom: 196px; width: 40px; height: 40px; border-radius: 10px; border: 1px dashed var(--z-color-accent-muted); background: color-mix(in srgb, var(--z-color-raised) 80%, transparent); color: var(--z-color-accent); font-size: 9px; font-weight: 700; letter-spacing: .4px; display: grid; place-items: center; line-height: 1.05; text-align: center; }
+  .review-launch:hover, .review-launch.on { background: var(--z-color-segment-on); }
+  .review-pop { position: fixed; z-index: 81; left: 56px; bottom: 160px; width: 260px; padding: 10px 12px 12px; border-radius: 12px; border: 1px dashed var(--z-color-accent-muted); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); font-size: var(--fs-xs); color: var(--z-color-muted); display: grid; gap: 8px; animation: rise var(--z-motion-base) var(--ease) both; }
+  .review-pop .tag { font-weight: 700; color: var(--z-color-accent); letter-spacing: .3px; }
+  .review-pop label { display: grid; gap: 4px; }
+  .review-pop select, .review-pop .rp-btn { height: 26px; border-radius: 7px; border: 1px solid var(--z-color-border); background: var(--z-color-field); color: var(--z-color-text-2); padding: 0 8px; font-size: var(--fs-xs); }
+  .review-pop .rp-btn.on { background: var(--z-color-segment-on); color: var(--z-color-accent); border-color: var(--z-color-accent-muted); }
+  .review-pop .rp-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .review-pop a { color: var(--z-color-accent); }
+}

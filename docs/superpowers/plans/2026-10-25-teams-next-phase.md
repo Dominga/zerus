@@ -929,6 +929,24 @@ answered; a denial cannot carry an explanation.
   horizontal position is kept across renders and polls like the vertical
   one. Graph and Layers keep their behaviour. Owner: yes.
 
+- **U34. A DeepSeek member's new worktree is ready for its sandbox (owner,
+  2026-10-27).** backend, backend2, qa and backend4 each started with every
+  command failing: `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<worktree>)`.
+  The DeepSeek sandbox needs WRITE_DAC and WRITE_OWNER on the folder it
+  confines. A folder on a second drive (D:\Tools) inherits the drive's
+  default ACL: Authenticated Users Modify, no explicit right for the user, so
+  the owner has WRITE_DAC but not WRITE_OWNER and the provisioning fails;
+  under C:\Users\<user> the profile's explicit FullControl hides it. Each
+  time the member asked to run its ACL repair script and the owner fixed the
+  folder by hand. Zerus creates these worktrees itself (dispatcher.rs
+  `git worktree add`), so on Windows it grants the signed-in user an
+  explicit inheritable FullControl ACE on the folder it just created, before
+  the member starts; for a folder it did not create (a direct folder, an
+  existing worktree) a DeepSeek session start checks the effective rights
+  and, when they are missing, the session and the lead's inbox say so with
+  the one-line `icacls` fix for the owner instead of a failing sandbox. The
+  member never repairs ACLs itself. Owner: yes.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to

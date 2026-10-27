@@ -1162,7 +1162,7 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     // L1: a repeated request returns the stored receipt, never a second commit.
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
-    let mut store = Store::open(false)?;
+    let store = Store::open(false)?;
     if let Some(receipt) = store.receipt(request, input)? {
         return Ok(receipt);
     }
@@ -1170,10 +1170,27 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     let by = actor(&team, "commit", input)?;
     let Actor::Member(member_id) = by else { bail!("Only a member commits its work") };
     ensure!(member_id != team.lead, "The lead does not commit a member's task");
-    let member = team.member(&member_id).context("Unknown member")?;
+    drop(store);
+    // U20: prove the store is writable before git runs. A member whose sandbox
+    // blocks it queues the whole commit instead (the worker runs it), so no
+    // commit exists without its attempt recording it.
+    Store::open(true)?;
+    commit_in_team(&team, &member_id, input)
+}
+
+/// The commit itself, as the member's own (B4): the worker applies a queued
+/// commit with the same code and checks.
+pub(crate) fn commit_in_team(team: &Team, member_id: &str, input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id");
+    ensure!(canonical_uuid(request), "A canonical request_id is required");
+    if let Some(receipt) = Store::open(false)?.receipt(request, input)? {
+        return Ok(receipt);
+    }
+    ensure!(member_id != team.lead, "The lead does not commit a member's task");
+    let member = team.member(member_id).context("Unknown member")?;
     let message = text(input, "message").trim().to_owned();
     ensure!(!message.is_empty() && message.chars().count() <= 4000, "A commit message is required (at most 4000 characters)");
-    let folder = super::dispatcher::member_folder_path(&team, member)?;
+    let folder = super::dispatcher::member_folder_path(team, member)?;
     ensure!(!folder.is_empty() && folder != team.folder, "Zerus commits in the member's own folder, not the team's");
     let branch = format!("team/{}/{}", &team.id[..8.min(team.id.len())], super::dispatcher::tag(&member.id));
     let paths: Vec<String> = input["paths"].as_array().into_iter().flatten().filter_map(|path| path.as_str()).map(str::to_owned).collect();
@@ -1183,7 +1200,7 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     let result = super::dispatcher::commit_in(&folder, &branch, &message, &paths)?;
     if result["status"] != "committed" {
         // Nothing changed: the receipt still records this request as done.
-        store.mutate(Some((request, input)), &team.id, None, |_, _| Ok(result.clone()))?;
+        Store::open(true)?.mutate(Some((request, input)), &team.id, None, |_, _| Ok(result.clone()))?;
         return Ok(result);
     }
     let sha = result["sha"].as_str().unwrap_or_default().to_owned();
@@ -1191,7 +1208,7 @@ fn commit(input: &Value) -> anyhow::Result<Value> {
     let attempt_id = text(input, "attempt").to_owned();
     let mut store = Store::open(true)?;
     store.mutate(Some((request, input)), &team.id, None, |team, events| {
-        let role = team.role_of(&member_id);
+        let role = team.role_of(member_id);
         let task = team.tasks.iter_mut().find(|task| {
             task.open_attempt().is_some_and(|attempt| {
                 (!attempt_id.is_empty() && attempt.id == attempt_id) || (attempt_id.is_empty() && attempt.member == member_id)
@@ -1551,14 +1568,32 @@ fn read_only(error: &anyhow::Error) -> bool {
         .any(|sign| text.contains(sign))
 }
 
-fn drop_report(input: &Value) -> anyhow::Result<Value> {
-    ensure!(!text(input, "attempt").is_empty() && !text(input, "team").is_empty(), "A report names its team and attempt");
-    ensure!(!text(input, "text").trim().is_empty(), "A report needs text");
-    let path = super::dispatcher::dropped_report(&std::env::current_dir()?, text(input, "attempt"));
-    std::fs::create_dir_all(path.parent().context("no report folder")?)?;
-    std::fs::write(&path, serde_json::to_vec(input)?)?;
-    Ok(json!({"status":"queued","request_id":input["request_id"],"task":input["task"],
-        "note":"The team's files are read-only here; Zerus records this report from your folder."}))
+/// U20: a member in a sandbox may not write the team store, but it writes its
+/// own folder. The report, ask or commit waits there as `<request_id>.json` for
+/// the worker, which applies it with the same identity checks (folder + attempt
+/// id); `--wait` polls for the outcome (up to 30 s).
+fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let Actor::Member(member_id) = actor(&team, op, input)? else {
+        bail!("Only a member queues this request; a sandbox does not block the lead");
+    };
+    let request_id = text(input, "request_id").to_owned();
+    let folder = std::env::current_dir().context("The member has no folder to queue in")?;
+    let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id,
+        "attempt":text(input, "attempt"), "input":input});
+    let path = super::outbox::push(&folder, &request)?;
+    let queued = json!({
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
+        "note":"The sandbox blocks the team store: the request waits in the member's folder and the team worker applies it. Run it again with --wait to read the outcome."
+    });
+    if !wait {
+        return Ok(queued);
+    }
+    Ok(super::outbox::wait(&folder, &request_id, 30.0).unwrap_or_else(|| json!({
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
+        "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder."
+    })))
 }
 
 /// The teams a finished team's `left_running` looks at: only the ones that
@@ -1821,7 +1856,7 @@ fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow
     .map(|_| ())
 }
 
-fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
+fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     // F5: the draft's read and its start are not mutations.
     if op == "draft" {
         match text(input, "action") {
@@ -1837,7 +1872,12 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
     match op {
         "create" => create(input),
         "answer" => answer(input),
-        "commit" => commit(input),
+        // U20: a sandbox that cannot write the store queues the whole commit, so
+        // no commit exists without the attempt recording it.
+        "commit" => match commit(input) {
+            Err(error) if read_only(&error) => queue_write("commit", input, wait),
+            result => result,
+        },
         "next-goal" => next_goal(input),
         "leftovers" => {
             let store = Store::open(false)?;
@@ -1915,8 +1955,12 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
             // refusal can come with the write as well as with the open.
             let mut store = match Store::open(true) {
                 Ok(store) => store,
-                Err(_) if op == "report" => return drop_report(input),
-                Err(error) => return Err(error),
+                Err(error) if matches!(op, "report" | "ask" | "commit") && read_only(&error) => {
+                    return queue_write(op, input, wait)
+                }
+                // U20: a write the sandbox blocked says what to do, not a bare
+                // SQLite error.
+                Err(error) => return Err(super::store::write_error(error)),
             };
             let mut filled = input.clone();
             // C1: a caller can never hand in a verified owner word; only the
@@ -1986,7 +2030,9 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                 ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)
             }) {
                 Ok(receipt) => receipt,
-                Err(error) if op == "report" && read_only(&error) => return drop_report(input),
+                Err(error) if matches!(op, "report" | "ask" | "commit") && read_only(&error) => {
+                    return queue_write(op, input, wait)
+                }
                 Err(error) => return Err(super::store::write_error(error)),
             };
             if starts_worker(op) {
@@ -2050,6 +2096,12 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if catalog {
         args.remove(0);
     }
+    // U20: `--wait` asks for the worker's outcome of a queued request.
+    let mut wait = false;
+    if let Some(index) = args.iter().position(|arg| arg == "--wait") {
+        args.remove(index);
+        wait = true;
+    }
     if args.len() != 2 || (args[1] != "--json" && file.is_none()) {
         return Err(USAGE.into());
     }
@@ -2073,7 +2125,7 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         let human = caller_record().is_none() && nonempty_env("HGS_SESSION").is_none() && text(&input, "by") == "human";
         super::catalog::run(&operation, &input, human)
     } else {
-        run(&operation, &input)
+        run(&operation, &input, wait)
     }
     .map_err(|e| e.to_string())?;
     println!("{result}");

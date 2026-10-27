@@ -459,6 +459,14 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                     if capture_open(found) && attempt.open_question().is_none() {
                         if let Some(at) = replied {
                             steps.push(Step::TurnEnded { task: task.id, at, reply: found.reply_id.clone() });
+                        } else if attempt.started_at.is_some() && now - delivered >= team.settings.report_timeout_seconds as f64 {
+                            // A2: the session is quiet but the listing carries no
+                            // reply mark for the turn (its replies were never read),
+                            // so no turn end could be recorded. After the timeout the
+                            // attempt is decided all the same: No report captures the
+                            // quiet session's last reply instead of leaving the task
+                            // in progress for hours (U20, #343 attempt 2).
+                            steps.push(Step::NoReport { task: task.id });
                         }
                     } else if found.live && found.idle && replied.is_some() && attempt.blocked_since.is_none() {
                         // The usual order: the member asks (or leaves Background
@@ -497,7 +505,16 @@ pub(crate) fn steps(team: &Team, seen: &[Seen], now: f64) -> Vec<Step> {
                         steps.push(Step::GateClosed { task: task.id });
                     }
                 }
-                (None, None) => {}
+                (None, None) => {
+                    // A2: the member's session is not in the listing at all (it
+                    // stopped or was renamed) and no turn end was recorded. After
+                    // the timeout the attempt is decided as for a session that went
+                    // away: its last reply is captured from the session's record,
+                    // or it shows No report (U20).
+                    if attempt.started_at.is_some() && now - delivered >= team.settings.report_timeout_seconds as f64 {
+                        steps.push(Step::NoReport { task: task.id });
+                    }
+                }
             }
         }
     }
@@ -2612,6 +2629,33 @@ fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, e
     })
 }
 
+/// A2/U20: an attempt whose turn end never reached the listing (a quiet session
+/// the listing carried no reply mark for): records the turn end and the member's
+/// last reply as its report in one change, so the next tick cannot read it as a
+/// resumed turn and clear it.
+fn capture_quiet(store: &mut Store, team_id: &str, task_id: u32, reply: &str) -> anyhow::Result<()> {
+    change(store, team_id, |team, events| {
+        let task = team.task(task_id).context("unknown task")?;
+        anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
+        let attempt = task.attempts.last().context("the task has no attempt")?;
+        anyhow::ensure!(
+            attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none() && attempt.open_question().is_none(),
+            "the attempt changed before its report was captured"
+        );
+        let at = now();
+        let role = team.role_of(&attempt.member);
+        let (attempt_id, member) = (attempt.id.clone(), attempt.member.clone());
+        let input = json!({"task":task_id,"attempt":attempt_id,
+            "text":format!("(From {role}'s last reply; it ran no hgs team report.)\n\n{reply}")});
+        ops::apply(team, "report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
+        let found = team.task_mut(task_id).and_then(|task| task.attempts.last_mut()).context("the captured attempt")?;
+        found.report.as_mut().context("the captured report")?.captured = true;
+        found.turn_ended_at = Some(at);
+        found.turn_reply.clear();
+        Ok(())
+    })
+}
+
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
     match step {
         Step::Brief => send_brief(store, &team.id),
@@ -2905,6 +2949,17 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             let attempt = team.task(*task).and_then(|t| t.attempts.last()).cloned();
             let session = attempt.as_ref().and_then(|a| team.member(&a.member)).and_then(|m| m.session.clone());
             if let (Some(attempt), Some(session)) = (attempt, session) {
+                if attempt.turn_ended_at.is_none() {
+                    // A2/U20: no turn end reached the listing (a quiet session whose
+                    // replies were never marked), so there is no recorded reply to
+                    // compare with; the session's last reply is the outcome of the
+                    // attempt all the same, and no earlier gate saw it.
+                    if let Ok(Some(reply)) = last_reply_of(&session, "") {
+                        if capture_quiet(store, &team.id, *task, &reply).is_ok() {
+                            return Ok(());
+                        }
+                    }
+                }
                 match last_reply_of(&session, &attempt.turn_reply) {
                     Ok(Some(reply)) => {
                         if capture_report(store, &team.id, *task, &reply, &attempt.turn_reply).is_ok() {
@@ -3003,8 +3058,8 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     anyhow::ensure!(output.status.success(), "hgs ls failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     let sessions = seen(&serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?);
     for team in &teams {
-        if let Err(error) = take_dropped_reports(store, team, &sessions) {
-            eprintln!("hgs team worker: {}: dropped report: {error}", team.name);
+        if let Err(error) = take_outbox(store, team, &sessions) {
+            eprintln!("hgs team worker: {}: outbox: {error}", team.name);
         }
     }
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
@@ -3018,33 +3073,65 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Where `hgs team report` leaves a report it could not record (a member in a
-/// sandbox may not write the team's files): in the member's own folder.
-pub(crate) fn dropped_report(folder: &Path, attempt: &str) -> PathBuf {
-    folder.join(".zerus-team").join(format!("report-{attempt}.json"))
-}
-
-/// Records the reports members left in their folders, as their own reports.
-fn take_dropped_reports(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<()> {
+/// Applies the requests members left in their folders: a sandbox may not write
+/// the team store, but it can write its own folder (U20). The folder proves the
+/// member; the request must name that member and one of its running attempts.
+fn take_outbox(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<()> {
     if team.status != TeamStatus::Running && team.status != TeamStatus::Paused {
         return Ok(());
     }
-    for task in &team.tasks {
-        let Some(attempt) = task.open_attempt() else { continue };
-        let Some(member) = team.member(&attempt.member) else { continue };
-        let Some(found) = session_of(member, seen).filter(|s| !s.cwd.is_empty() && s.host.is_empty()) else { continue };
-        let path = dropped_report(Path::new(&found.cwd), &attempt.id);
-        let Ok(bytes) = fs::read(&path) else { continue };
-        let _ = fs::remove_file(&path);
-        let input: Value = serde_json::from_slice(&bytes).context("invalid dropped report")?;
-        anyhow::ensure!(input["team"] == team.id.as_str() && input["attempt"] == attempt.id.as_str(), "a dropped report for another attempt");
-        let request = json!({"task":task.id,"attempt":attempt.id,"text":input["text"]});
-        let member_id = attempt.member.clone();
-        change(store, &team.id, |team, events| {
-            ops::apply(team, "report", &request, &ops::Actor::Member(member_id), &BTreeSet::new(), events).map(|_| ())
-        })?;
+    for member in team.members.iter().filter(|member| member.id != team.lead && member.state != MemberState::Removed) {
+        let Some(found) = session_of(member, seen).filter(|found| !found.cwd.is_empty() && found.host.is_empty()) else { continue };
+        let folder = Path::new(&found.cwd);
+        let Ok(requests) = super::outbox::pending(folder, super::outbox::PER_TICK) else { continue };
+        for (path, request) in requests {
+            let outcome = match apply_outbox(store, team, member, &request) {
+                Ok(value) => value,
+                // A refusal is final: the request leaves the outbox as well, or
+                // the worker would try it again every tick.
+                Err(error) => json!({"status":"refused","request_id":request["request_id"],"error":format!("{error:#}")}),
+            };
+            if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
+                eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
+            }
+        }
     }
     Ok(())
+}
+
+/// One queued request, applied as the member's own write (U20). The member's
+/// input keys the store receipt, so a request applied twice (a worker that died
+/// before it removed the file) is a replay, not a second report.
+fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
+    let op = request["op"].as_str().unwrap_or_default();
+    anyhow::ensure!(matches!(op, "report" | "ask" | "commit"), "Unknown outbox request {op}");
+    anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
+    anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.role_of(&member.id));
+    // The member's own request, unchanged: a replay keys the same store receipt.
+    let input = request["input"].clone();
+    let request_id = request["request_id"].as_str().unwrap_or_default().to_owned();
+    // A request applied before the worker removed its file replays its receipt,
+    // even after the attempt closed (the store's own idempotence, U20).
+    if let Some(receipt) = store.receipt(&request_id, &input)? {
+        return Ok(receipt);
+    }
+    let attempt_id = request["attempt"].as_str().unwrap_or_default();
+    anyhow::ensure!(attempt_id == input["attempt"].as_str().unwrap_or_default(), "the request names another attempt");
+    let task = team
+        .tasks
+        .iter()
+        .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member.id));
+    let Some(task) = task else { anyhow::bail!("attempt {attempt_id} does not run for this member") };
+    if input["task"].as_u64().is_some() {
+        anyhow::ensure!(input["task"] == json!(task.id), "the request names another task");
+    }
+    if op == "commit" {
+        return super::commands::commit_in_team(team, &member.id, &input);
+    }
+    let member_id = member.id.clone();
+    store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {
+        ops::apply(team, op, &input, &ops::Actor::Member(member_id.clone()), &BTreeSet::new(), events)
+    })
 }
 
 /// The worker's own files: a pid, a heartbeat, a stop request and a log (U2).
@@ -3877,7 +3964,38 @@ mod tests {
     }
 
     #[test]
-    fn a_report_left_in_the_members_folder_is_recorded() {
+    fn a_queued_report_from_the_members_folder_is_applied_and_the_request_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        let attempt = Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+        task.attempts.push(attempt);
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let folder = dir.path().join("work");
+        let request = json!({"op":"report","request_id":"33333333-3333-4333-8333-333333333333",
+            "team":t.id,"member":"dev","attempt":"A1",
+            "input":{"request_id":"33333333-3333-4333-8333-333333333333","team":t.id,"task":id,"attempt":"A1","text":"Done and checked"}});
+        let path = super::super::outbox::push(&folder, &request).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox(&mut store, &current, &[member]).unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        assert_eq!((attempt.state, attempt.report.as_ref().map(|r| r.text.as_str())), (AttemptState::Reported, Some("Done and checked")));
+        // The member's request is gone and its outcome waits in the same folder.
+        assert!(!path.exists());
+        let result = super::super::outbox::result(&folder, "33333333-3333-4333-8333-333333333333").unwrap();
+        assert_eq!(result["status"], "submitted");
+        assert_eq!(result["request_id"], "33333333-3333-4333-8333-333333333333");
+    }
+
+    #[test]
+    fn a_queued_request_naming_another_member_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
         let mut t = team();
@@ -3888,17 +4006,140 @@ mod tests {
         let id = task.id;
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
         let folder = dir.path().join("work");
-        let path = dropped_report(&folder, "A1");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, json!({"team":t.id,"task":id,"attempt":"A1","text":"Done and checked"}).to_string()).unwrap();
+        // A file in dev's folder that claims to be qa's report: the folder is the
+        // proof of who wrote it, so this is refused and nothing is recorded.
+        let request = json!({"op":"report","request_id":"44444444-4444-4444-8444-444444444444",
+            "team":t.id,"member":"qa","attempt":"A1",
+            "input":{"request_id":"44444444-4444-4444-8444-444444444444","team":t.id,"task":id,"attempt":"A1","text":"Not mine"}});
+        super::super::outbox::push(&folder, &request).unwrap();
         let mut member = session("codex/x/dev", "r1", true);
         member.cwd = folder.to_string_lossy().into_owned();
         let current = store.load(&t.id).unwrap().unwrap();
-        take_dropped_reports(&mut store, &current, &[member]).unwrap();
+        take_outbox(&mut store, &current, &[member]).unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.task(id).unwrap().attempts.last().unwrap().report.is_none());
+        let result = super::super::outbox::result(&folder, "44444444-4444-4444-8444-444444444444").unwrap();
+        assert_eq!(result["status"], "refused");
+        assert!(result["error"].as_str().unwrap_or_default().contains("folder belongs to Backend"), "{result}");
+    }
+
+    #[test]
+    fn a_queued_ask_from_the_members_folder_reaches_the_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let folder = dir.path().join("work");
+        let request = json!({"op":"ask","request_id":"66666666-6666-4666-8666-666666666666",
+            "team":t.id,"member":"dev","attempt":"A1",
+            "input":{"request_id":"66666666-6666-4666-8666-666666666666","team":t.id,"task":id,"attempt":"A1","text":"Which test suite first?"}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox(&mut store, &current, &[member]).unwrap();
         let saved = store.load(&t.id).unwrap().unwrap();
         let attempt = saved.task(id).unwrap().attempts.last().unwrap();
-        assert_eq!((attempt.state, attempt.report.as_ref().map(|r| r.text.as_str())), (AttemptState::Reported, Some("Done and checked")));
-        assert!(!path.exists());
+        assert_eq!(attempt.questions.iter().filter(|question| question.open()).count(), 1, "{:?}", attempt.questions);
+        let result = super::super::outbox::result(&folder, "66666666-6666-4666-8666-666666666666").unwrap();
+        assert!(result.get("error").is_none() || result["status"] != "refused", "{result}");
+    }
+
+    #[test]
+    fn a_queued_report_applied_twice_is_one_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let folder = dir.path().join("work");
+        let request = json!({"op":"report","request_id":"55555555-5555-4555-8555-555555555555",
+            "team":t.id,"member":"dev","attempt":"A1",
+            "input":{"request_id":"55555555-5555-4555-8555-555555555555","team":t.id,"task":id,"attempt":"A1","text":"Done"}});
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox(&mut store, &current, &[member.clone()]).unwrap();
+        // The worker died before it removed the file: the same request again.
+        super::super::outbox::push(&folder, &request).unwrap();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox(&mut store, &current, &[member]).unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let task = saved.task(id).unwrap();
+        assert_eq!(task.attempts.len(), 1);
+        assert_eq!(task.attempts[0].state, AttemptState::Reported);
+        let result = super::super::outbox::result(&folder, "55555555-5555-4555-8555-555555555555").unwrap();
+        assert_eq!(result["status"], "submitted");
+    }
+
+    #[test]
+    fn a_quiet_session_without_a_reply_mark_is_captured_after_the_timeout() {
+        // U20/#343 attempt 2: the member finished its turn and stopped, but the
+        // listing carried no reply_at (its replies were never read), so no turn
+        // end could be recorded. After the report timeout the attempt must be
+        // decided, not left in progress.
+        let mut t = team();
+        delivered(&mut t);
+        t.task_mut(1).unwrap().attempts[0].started_at = Some(20.0);
+        let mut seen = session("codex/x/dev", "r1", true);
+        seen.phase = "idle".into();
+        assert!(seen.reply_at.is_none());
+        let timeout = t.settings.report_timeout_seconds as f64;
+        let waiting = steps(&t, &[seen.clone()], 10.0 + timeout - 1.0);
+        assert!(!waiting.iter().any(|step| matches!(step, Step::NoReport { .. })), "{waiting:?}");
+        let late = steps(&t, &[seen], 10.0 + timeout + 1.0);
+        assert!(late.contains(&Step::NoReport { task: 1 }), "{late:?}");
+    }
+
+    #[test]
+    fn a_started_attempt_whose_session_is_gone_is_captured_after_the_timeout() {
+        // The session left the listing entirely (stopped or renamed): the attempt
+        // still ends, with the last reply read from its own record.
+        let mut t = team();
+        delivered(&mut t);
+        t.task_mut(1).unwrap().attempts[0].started_at = Some(20.0);
+        let timeout = t.settings.report_timeout_seconds as f64;
+        let seen = vec![session("claude/x/lead", "r0", true)];
+        let late = steps(&t, &seen, 10.0 + timeout + 1.0);
+        assert!(late.contains(&Step::NoReport { task: 1 }), "{late:?}");
+    }
+
+    #[test]
+    fn a_quiet_turn_end_that_never_reached_the_listing_is_captured_as_the_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Delivered,
+            sent_at: 10.0,
+            delivered_at: Some(10.0),
+            started_at: Some(20.0),
+            ..Default::default()
+        });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        capture_quiet(&mut store, &t.id, id, "Done: everything checked").unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        let report = attempt.report.as_ref().unwrap();
+        assert!(report.captured);
+        assert!(report.text.contains("Done: everything checked"));
+        assert_eq!((attempt.state, attempt.turn_ended_at.is_some()), (AttemptState::Reported, true));
     }
 
     #[test]

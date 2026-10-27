@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QPlainTextEdit>
+#include <QRadioButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -206,6 +207,8 @@ void TeamWorkspace::render()
         // B5: a plan that widens a role's permissions waits for the owner's
         // explicit confirmation; the strip names what widens.
         if (!team->widenings.isEmpty()) tv->addWidget(wideningStrip(*team));
+        // F8: the lead's open membership proposals.
+        if (auto *proposals = proposalsStrip(*team)) tv->addWidget(proposals);
         // C2/C4: the lead's inbox and the owner's attention list.
         if (const auto &items = m_teams->inbox(); !items.isEmpty()) tv->addWidget(inboxStrip(*team, items));
         if (!team->attention.isEmpty()) tv->addWidget(attentionStrip(*team));
@@ -269,6 +272,16 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
         h->addWidget(crumb);
     }
     h->addWidget(new Pill(statusLabel(status), toneColor(c, statusTone(status)), status, false));
+    // F7: the team a next goal came from, and the one it led to.
+    for (const auto &[id, text, objectName] : {std::tuple{team.previous, tr("← Previous"), "teamBarPrevious"},
+                                               std::tuple{team.next, tr("Next goal →"), "teamBarNext"}}) {
+        if (id.isEmpty()) continue;
+        auto *link = button(text, objectName); link->setProperty("ghost", true);
+        const auto *other = m_teams->team(id);
+        link->setToolTip(other ? other->name : id);
+        QObject::connect(link, &QPushButton::clicked, this, [this, id = id] { openOtherTeam(id); });
+        h->addWidget(link);
+    }
     if (team.pendingPhase > 0) {
         const auto drafts = team.draftPhases();
         QStringList ids; for (int n : drafts) ids << QString::number(n);
@@ -364,6 +377,25 @@ QWidget *TeamWorkspace::teamBar(const Team &team, const QString &status)
     const auto add = [&](const QString &text, const char *objectName, bool primary, const std::function<void()> &run) {
         auto *b = button(text, objectName, primary); QObject::connect(b, &QPushButton::clicked, this, run); h->addWidget(b); return b;
     };
+    // H1: members stopped at a usage limit wait for their reset and go on.
+    if (team.status == "planning" || team.status == "running" || team.status == "paused") {
+        auto *limits = button(tr("Resume after limits"), "teamWorkspaceResumeLimits");
+        limits->setCheckable(true); limits->setChecked(team.resumeAfterLimits);
+        limits->setToolTip(team.resumeAfterLimits
+            ? tr("On: a member stopped by a usage limit with a known reset time continues after the reset")
+            : tr("Off: a member stopped by a usage limit waits for you or the lead"));
+        QObject::connect(limits, &QPushButton::clicked, this, [this, settings = team.settingsJson](bool on) {
+            QJsonObject changed = settings;
+            changed.insert("resume_after_limits", on);
+            m_panel->act("settings", {{"settings", changed}});
+        });
+        h->addWidget(limits);
+    }
+    // F7: a Done team takes the next goal with the same people.
+    if (team.status == "done" && team.next.isEmpty())
+        add(tr("Next goal…"), "teamWorkspaceNextGoal", true, [this, id = team.id] {
+            if (const auto *current = currentTeam(id)) nextGoalDialog(*current);
+        });
     if (allDecided(team) && (team.status == "running" || team.status == "paused"))
         add(tr("Finish…"), "teamWorkspaceFinish", true, [this, id = team.id] {
             if (const auto *current = currentTeam(id)) m_panel->finishTeam(*current);
@@ -1058,8 +1090,35 @@ QWidget *TeamWorkspace::members(const Team &team)
         // G7: the MCP servers and services its session runs, as an icon with a
         // tooltip - they outlive the session and are not Background work.
         // C12: the declared time budget of its background job.
-        if (!m.services.isEmpty() || m.budget.known) {
+        if (!m.services.isEmpty() || m.budget.known || m.limited.known || m.hostShared) {
             auto *extra = row(6);
+            // H1: stopped at a usage limit, with the reset time when known.
+            if (m.limited.known) {
+                const QString reset = resetText(m.limited.resetsAt);
+                QString text = reset.isEmpty() ? tr("Usage limit · reset unknown") : tr("Usage limit · %1").arg(reset);
+                if (m.limitResume && !reset.isEmpty()) text = tr("Usage limit · continues after the reset (%1)").arg(reset);
+                QStringList lines;
+                if (!m.limited.detail.isEmpty()) lines << m.limited.detail;
+                if (reset.isEmpty()) lines << tr("The session named no reset time; the lead's inbox has it.");
+                else lines << (team.resumeAfterLimits ? tr("Resume after limits is on: Zerus continues it after the reset.")
+                                                      : tr("Resume after limits is off: continue it yourself, or turn it on in the team bar."));
+                auto *limited = new StatusMark(text, c.warn, "paused", 0, Qt::AlignLeft, nullptr, lines.join(QLatin1Char('\n')));
+                limited->setObjectName("teamWorkspaceMemberLimited");
+                limited->setProperty("resetsAt", m.limited.resetsAt);
+                extra->addWidget(limited);
+            }
+            // H3: its DeepSeek host serves other members of the team too.
+            if (m.hostShared) {
+                QString tip = tr("Its DeepSeek host serves other members too.");
+                if (const auto *host = team.hostOf(m.id)) {
+                    QStringList roles; for (const auto &id : host->members) roles << team.roleOf(id);
+                    tip = tr("DeepSeek host %1 serves %2.").arg(host->pid).arg(roles.join(QStringLiteral(", ")));
+                    if (host->started > 0) tip += QLatin1Char('\n') + tr("Started %1").arg(QDateTime::fromSecsSinceEpoch(qint64(host->started)).toString(QStringLiteral("d MMM HH:mm")));
+                }
+                auto *shared = new StatusMark(tr("Shared host"), c.muted, "services", 0, Qt::AlignLeft, nullptr, tip);
+                shared->setObjectName("teamWorkspaceMemberSharedHost");
+                extra->addWidget(shared);
+            }
             if (!m.services.isEmpty()) {
                 QStringList lines;
                 for (const auto &service : m.services) {
@@ -1178,6 +1237,8 @@ QWidget *TeamWorkspace::members(const Team &team)
     }
     // F7: the sessions a Done/Stopped team left running, apart from the members.
     if (finished && !team.leftRunning.isEmpty()) v->addWidget(m_panel->leftoverMembers(team, false));
+    // H6: the sessions a swap left running.
+    if (!team.swapped.isEmpty()) v->addWidget(swappedList(team));
     }
     v->addStretch();
     return w;
@@ -1211,11 +1272,245 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         });
         remove->setEnabled(open.isEmpty());
         if (!open.isEmpty()) remove->setToolTip(tr("Has open tasks %1 — reassign or cancel them first").arg(open.join(QStringLiteral(", "))));
-        auto *replace = menu.addAction(tr("Replace model… (future)"));
-        replace->setEnabled(false); replace->setToolTip(tr("Not supported yet: use Remove + Add member"));
+    }
+    // H6: swap the session, agent, model or account of any member, the lead too.
+    if (team.status == "planning" || team.status == "running" || team.status == "paused") {
+        auto *swap = menu.addAction(tr("Swap session, agent or model…"), this, [this, teamId = team.id, id = member.id] {
+            const auto *current = currentTeam(teamId);
+            if (const auto *found = current ? current->member(id) : nullptr) swapDialog(*current, *found);
+        });
+        swap->setObjectName("teamWorkspaceMemberSwap");
+        swap->setToolTip(tr("Keeps its role, tasks, folder and branch; an open task goes to the new session with what was done so far"));
     }
     menu.setToolTipsVisible(true);
     menu.exec(global);
+}
+
+void TeamWorkspace::openOtherTeam(const QString &team)
+{
+    if (team.isEmpty()) return;
+    m_teams->refresh();
+    m_teams->watch(team);
+    showTeam(team);
+}
+
+QWidget *TeamWorkspace::proposalsStrip(const Team &team)
+{
+    QList<Team::Proposal> open;
+    QSet<QString> openIds;
+    for (const auto &proposal : team.proposals) if (proposal.open()) { open << proposal; openIds << proposal.id; }
+    m_decidedProposals.intersect(openIds);   // decided ones the store has taken
+    if (open.isEmpty()) return nullptr;
+    const Colors c = colorsFor(m_dark);
+    auto *strip = new QFrame; strip->setObjectName("teamWorkspaceProposals");
+    strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceProposals{background:%1;border-bottom:1px solid %2;}")
+                             .arg(alpha(c.accent, .07).name(QColor::HexArgb), alpha(c.accent, .35).name(QColor::HexArgb)));
+    auto *v = new QVBoxLayout(strip); v->setContentsMargins(12, 6, 12, 6); v->setSpacing(4);
+    for (const auto &proposal : open) {
+        auto *line = new QWidget; line->setObjectName("teamProposal"); line->setProperty("proposal", proposal.id);
+        line->setProperty("kind", proposal.kind);
+        auto *h = new QHBoxLayout(line); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(8);
+        const QString what = proposalText(team, proposal);
+        h->addWidget(label(tr("%1 proposes").arg(proposal.by.isEmpty() ? tr("The lead") : proposal.by), c.muted, 11));
+        h->addWidget(label(what, c.fg, 12, true, "teamProposalText"));
+        auto *reason = elided(proposal.reason, c.text2, 11); reason->setToolTip(proposal.reason); h->addWidget(reason, 1);
+        const bool sent = m_decidedProposals.contains(proposal.id);
+        auto *reject = button(tr("Reject"), "teamProposalReject");
+        auto *accept = button(tr("Accept"), "teamProposalAccept", true);
+        reject->setEnabled(!sent); accept->setEnabled(!sent);
+        // Remove and swap change who works: they ask first.
+        const bool ask = proposal.kind == "remove-member" || proposal.kind == "swap-member";
+        const auto decide = [this, id = proposal.id](bool yes) {
+            if (m_decidedProposals.contains(id)) return;
+            m_decidedProposals.insert(id);
+            m_panel->act("decide-proposal", {{"proposal", id}, {"accept", yes}},
+                         [this, id](bool ok, const QString &message) {
+                             if (!ok) { m_decidedProposals.remove(id); m_error = message; }
+                             scheduleRender();
+                         });
+            scheduleRender();
+        };
+        QObject::connect(accept, &QPushButton::clicked, this, [this, decide, ask, what, kind = proposal.kind] {
+            if (ask && !m_panel->confirm("teamProposalConfirm", kind == "swap-member" ? tr("Swap member?") : tr("Remove member?"),
+                                         kind == "swap-member"
+                                             ? tr("%1? Its open task goes to the new session with what was done so far; the old session keeps running for you to stop.").arg(what)
+                                             : tr("%1? Its session keeps running; it gets no more tasks.").arg(what),
+                                         kind == "swap-member" ? tr("Swap") : tr("Remove")))
+                return;
+            decide(true);
+        });
+        QObject::connect(reject, &QPushButton::clicked, this, [decide] { decide(false); });
+        h->addWidget(reject); h->addWidget(accept);
+        v->addWidget(line);
+    }
+    return strip;
+}
+
+void TeamWorkspace::nextGoalDialog(const Team &team)
+{
+    if (auto *open = findChild<QDialog *>("teamNextGoalDialog")) { open->raise(); open->activateWindow(); return; }
+    const Colors c = colorsFor(m_dark);
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName("teamNextGoalDialog");
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Next goal \u00b7 %1").arg(team.name));
+    dialog->resize(560, 380);
+    auto *v = new QVBoxLayout(dialog);
+    int running = 0;
+    for (const auto &member : team.members) running += leftMember(team, member.id) || (member.lead && !member.session.isEmpty());
+    auto *intro = label(tr("A new team takes the next goal with this folder, its settings, the lead and the members. "
+                           "%1 of %2 sessions are still running and keep their context; the others start with their first task. "
+                           "This team stays Done.").arg(running).arg(team.members.size()), c.text2, 12);
+    intro->setWordWrap(true);
+    v->addWidget(intro);
+    v->addWidget(label(tr("Goal"), c.muted, 11));
+    auto *goal = new QPlainTextEdit; goal->setObjectName("teamNextGoalText");
+    goal->setPlaceholderText(tr("What the team delivers next, and what done means"));
+    v->addWidget(goal, 1);
+    v->addWidget(label(tr("Name"), c.muted, 11));
+    auto *name = new QLineEdit(team.name); name->setObjectName("teamNextGoalName"); name->setMaxLength(80);
+    v->addWidget(name);
+    auto *error = label(QString(), c.danger, 11, false, "teamNextGoalError"); error->setWordWrap(true); error->hide();
+    v->addWidget(error);
+    auto *buttons = new QDialogButtonBox;
+    auto *start = buttons->addButton(tr("Start next goal"), QDialogButtonBox::AcceptRole); start->setObjectName("teamNextGoalStart");
+    buttons->addButton(QDialogButtonBox::Cancel);
+    v->addWidget(buttons);
+    const auto validate = [goal, start] {
+        const QString text = goal->toPlainText().trimmed();
+        start->setEnabled(!text.isEmpty() && text.toUcs4().size() <= 4000);
+    };
+    validate();
+    QObject::connect(goal, &QPlainTextEdit::textChanged, dialog, validate);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    QObject::connect(start, &QPushButton::clicked, dialog, [this, dialog, goal, name, error, start, id = team.id] {
+        start->setEnabled(false);
+        QJsonObject input{{"team", id}, {"goal", goal->toPlainText().trimmed()}};
+        if (!name->text().trimmed().isEmpty()) input.insert("name", name->text().trimmed());
+        m_teams->call(QStringLiteral("next-goal"), input,
+            [this, guard = QPointer<QDialog>(dialog), error, start](bool ok, const QJsonObject &result, const QString &message) {
+                if (!ok) {
+                    if (guard) { error->setText(message); error->show(); start->setEnabled(true); }
+                    return;
+                }
+                if (guard) guard->accept();
+                openOtherTeam(result.value("team").toString());
+            });
+    });
+    dialog->show();
+}
+
+void TeamWorkspace::swapDialog(const Team &team, const Member &member)
+{
+    if (auto *open = findChild<QDialog *>("teamSwapDialog")) open->close();
+    const Colors c = colorsFor(m_dark);
+    const QString role = team.roleOf(member.id);
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName("teamSwapDialog");
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Swap %1").arg(role));
+    dialog->resize(520, 300);
+    auto *v = new QVBoxLayout(dialog);
+    auto *intro = label(member.lead
+        ? tr("The lead keeps its role and the team's plan; its open items stay in the inbox and the new session gets one brief.")
+        : tr("%1 keeps its id, role, tasks, folder and branch. An open task goes to the new session with what was done so far.").arg(role),
+        c.text2, 12);
+    intro->setWordWrap(true);
+    v->addWidget(intro);
+    auto *fresh = new QRadioButton(tr("A new session")); fresh->setObjectName("teamSwapNew"); fresh->setChecked(true);
+    v->addWidget(fresh);
+    auto *grid = new QGridLayout; grid->setContentsMargins(22, 0, 0, 0); grid->setHorizontalSpacing(6); grid->setVerticalSpacing(6);
+    auto *agent = new QComboBox; agent->setObjectName("teamSwapAgent");
+    for (const auto &a : agentNames.keys()) agent->addItem(workspaceIcon(a, c.fg), agentNames.value(a), a);
+    agent->setCurrentIndex(qMax(0, agent->findData(member.agent)));
+    auto *model = new QComboBox; model->setObjectName("teamSwapModel"); model->setEditable(true); model->setCurrentText(member.model);
+    model->lineEdit()->setPlaceholderText(tr("default model"));
+    auto *effort = new QComboBox; effort->setObjectName("teamSwapEffort"); effort->addItem(QStringLiteral("\u2014"), QString());
+    for (const auto *e : {"low", "medium", "high", "xhigh"}) effort->addItem(QString::fromLatin1(e), QString::fromLatin1(e));
+    effort->setCurrentIndex(qMax(0, effort->findData(member.effort)));
+    auto *account = new QComboBox; account->setObjectName("teamSwapAccount"); account->setEditable(true);
+    account->addItem(tr("Default account"), QString());
+    if (!member.account.isEmpty()) { account->addItem(member.account, member.account); account->setCurrentIndex(1); }
+    grid->addWidget(label(tr("Agent"), c.muted, 11), 0, 0); grid->addWidget(agent, 0, 1);
+    grid->addWidget(label(tr("Model"), c.muted, 11), 0, 2); grid->addWidget(model, 0, 3);
+    grid->addWidget(label(tr("Effort"), c.muted, 11), 1, 0); grid->addWidget(effort, 1, 1);
+    grid->addWidget(label(tr("Account"), c.muted, 11), 1, 2); grid->addWidget(account, 1, 3);
+    grid->setColumnStretch(3, 1);
+    v->addLayout(grid);
+    auto *existing = new QRadioButton(tr("An existing session")); existing->setObjectName("teamSwapExisting");
+    v->addWidget(existing);
+    auto *session = new QComboBox; session->setObjectName("teamSwapSession");
+    QList<SessionChoice> choices = m_panel->sessionChoices ? m_panel->sessionChoices() : QList<SessionChoice>();
+    for (const auto &choice : choices) {
+        if (team.memberOfSession(choice.host, choice.name)) continue;   // not one of this team's
+        session->addItem(choice.host.isEmpty() ? choice.name : choice.host + QStringLiteral(": ") + choice.name,
+                         QJsonObject{{"host", choice.host}, {"name", choice.name}, {"run_id", choice.runId}, {"conversation_id", choice.conversationId}});
+    }
+    existing->setEnabled(session->count() > 0);
+    if (!session->count()) existing->setToolTip(tr("No other live session to adopt"));
+    auto *sessionRow = new QHBoxLayout; sessionRow->setContentsMargins(22, 0, 0, 0); sessionRow->addWidget(session, 1);
+    v->addLayout(sessionRow);
+    v->addStretch();
+    auto *buttons = new QDialogButtonBox;
+    auto *apply = buttons->addButton(tr("Swap\u2026"), QDialogButtonBox::AcceptRole); apply->setObjectName("teamSwapApply");
+    buttons->addButton(QDialogButtonBox::Cancel);
+    v->addWidget(buttons);
+    const auto sync = [fresh, agent, model, effort, account, session] {
+        for (auto *w : std::initializer_list<QWidget *>{agent, model, effort, account}) w->setEnabled(fresh->isChecked());
+        session->setEnabled(!fresh->isChecked());
+    };
+    sync();
+    QObject::connect(fresh, &QRadioButton::toggled, dialog, sync);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    QObject::connect(apply, &QPushButton::clicked, dialog, [=, guard = QPointer<QDialog>(dialog), id = member.id, lead = member.lead] {
+        QJsonObject input{{"member", id}};
+        QString to;
+        if (fresh->isChecked()) {
+            input.insert("agent", agent->currentData().toString());
+            QStringList parts{agent->currentText()};
+            if (!model->currentText().trimmed().isEmpty()) { input.insert("model", model->currentText().trimmed()); parts << model->currentText().trimmed(); }
+            if (!effort->currentData().toString().isEmpty()) input.insert("effort", effort->currentData().toString());
+            const QString chosen = account->currentData().toString().isEmpty() && account->currentIndex() != 0 ? account->currentText().trimmed()
+                                                                                                               : account->currentData().toString();
+            if (!chosen.isEmpty()) input.insert("account", chosen);
+            to = tr("a new %1 session").arg(parts.join(QStringLiteral(" \u00b7 ")));
+        } else {
+            const auto picked = session->currentData().toJsonObject();
+            input.insert("session", picked);
+            to = tr("the session %1").arg(picked.value("name").toString());
+        }
+        const QString text = lead
+            ? tr("Swap the lead to %1? Its open items stay in the inbox; the old session keeps running for you to stop.").arg(to)
+            : tr("Swap %1 to %2? Its open task goes to the new session with what was done so far; the old session keeps running for you to stop.").arg(role, to);
+        if (!m_panel->confirm("teamSwapConfirm", tr("Swap member?"), text, tr("Swap"))) return;
+        m_panel->act("swap-member", input);
+        if (guard) guard->accept();
+    });
+    dialog->show();
+}
+
+QWidget *TeamWorkspace::swappedList(const Team &team)
+{
+    const Colors c = colorsFor(m_dark);
+    auto *box = new QWidget; box->setObjectName("teamWorkspaceSwapped");
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(0, 8, 0, 0); v->setSpacing(4);
+    auto *head = label(tr("Old sessions after a swap \u2014 still running; stop them when you are done"), c.muted, 11, true);
+    head->setWordWrap(true);
+    v->addWidget(head);
+    for (int i = team.swapped.size() - 1; i >= 0; --i) {
+        const auto &entry = team.swapped[i];
+        auto *line = new QWidget; line->setObjectName("teamSwappedSession"); line->setProperty("session", entry.old);
+        auto *h = new QHBoxLayout(line); h->setContentsMargins(0, 0, 0, 0); h->setSpacing(6);
+        h->addWidget(new Pill(entry.member, roleColor(entry.member, m_dark)));
+        auto *name = elided(entry.old.isEmpty() ? tr("no session") : entry.old, c.text2, 11); name->setToolTip(entry.old);
+        h->addWidget(name, 1);
+        if (entry.at > 0) h->addWidget(label(QDateTime::fromSecsSinceEpoch(qint64(entry.at)).toString(QStringLiteral("HH:mm")), c.muted, 11));
+        auto *open = button(tr("Open"), "teamSwappedOpen"); open->setProperty("ghost", true); open->setEnabled(!entry.old.isEmpty());
+        QObject::connect(open, &QPushButton::clicked, this, [this, session = entry.old] { if (openSession) openSession({}, session); });
+        h->addWidget(open);
+        v->addWidget(line);
+    }
+    return box;
 }
 
 void TeamWorkspace::assignMenu(const Team &team, const QString &member, const QPoint &global)

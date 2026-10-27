@@ -150,6 +150,7 @@ private slots:
     void finishedRevokedAndRefusedAttemptsHaveNoPhase();
     void oldStatusJsonStillParses();
     void aDraftTeamReadsItsRevisionUnseenFieldsAndGoal();
+    void proposalsSwapsLimitsAndHostsRead();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
@@ -1033,6 +1034,62 @@ void TestTeams::aDraftTeamReadsItsRevisionUnseenFieldsAndGoal()
     QVERIFY(!old.draft());
     QCOMPARE(old.draftRevision, qint64(0));
     QVERIFY(old.draftUnseen.isEmpty());
+}
+
+// #344 (spec 4, 5, 6.1, 6.3): the lead's proposals, a swap's old session, a
+// member at a usage limit, the shared DeepSeek host and the next-goal links;
+// an older status without them reads as before.
+void TestTeams::proposalsSwapsLimitsAndHostsRead()
+{
+    auto value = checkout();
+    value["previous"] = "team-0"; value["next"] = "team-2";
+    value["settings"] = QJsonObject{{"approval", "review"}, {"resume_after_limits", true}};
+    auto members = value["members"].toArray();
+    auto second = members[1].toObject();
+    second["limited"] = QJsonObject{{"at", 100.0}, {"resets_at", 4000.0}, {"detail", "Usage limit reached"}};
+    second["limit_resume"] = true;
+    second["host_shared"] = true;
+    members[1] = second;
+    value["members"] = members;
+    const QString secondId = second["id"].toString();
+    value["hosts"] = QJsonArray{QJsonObject{{"agent", "dsh"}, {"pid", 77}, {"started", 10.0}, {"members", QJsonArray{secondId}}}};
+    value["swapped"] = QJsonArray{QJsonObject{{"member", "Backend"}, {"old", "codex/x/old"}, {"at", 50.0}, {"by", "You"}}};
+    value["proposals"] = QJsonArray{
+        QJsonObject{{"id", "p1"}, {"kind", "swap-member"}, {"by", "Lead"}, {"state", "open"}, {"reason", "limit"},
+                    {"member", QJsonObject{{"member", secondId}, {"agent", "codex"}, {"model", "gpt-5.5"}}}},
+        QJsonObject{{"id", "p2"}, {"kind", "remove-member"}, {"by", "Lead"}, {"state", "accepted"}, {"member", secondId}},
+        QJsonObject{{"id", "p3"}, {"kind", "next-goal"}, {"by", "Lead"}, {"state", "open"}, {"goal", "Saved cards\nand more"}},
+        QJsonObject{{"id", "p4"}, {"kind", "add-member"}, {"by", "Lead"}, {"state", "open"},
+                    {"member", QJsonObject{{"role", "Designer"}, {"agent", "claude"}}}},
+        QJsonObject{{"id", "p5"}, {"kind", "swap-member"}, {"by", "Lead"}, {"state", "open"},
+                    {"member", QJsonObject{{"member", secondId}, {"session", QJsonObject{{"host", ""}, {"name", "claude/x/spare"}}}}}}};
+    const auto team = parse(value);
+    QCOMPARE(team.previous, QStringLiteral("team-0")); QCOMPARE(team.next, QStringLiteral("team-2"));
+    QVERIFY(team.resumeAfterLimits);
+    QCOMPARE(team.settingsJson.value("approval").toString(), QStringLiteral("review"));
+    const auto *member = team.member(secondId);
+    QVERIFY(member && member->limited.known && member->limitResume && member->hostShared);
+    QCOMPARE(member->limited.resetsAt, 4000.0);
+    QCOMPARE(member->limited.detail, QStringLiteral("Usage limit reached"));
+    QVERIFY(team.hostOf(secondId) && team.hostOf(secondId)->pid == 77);
+    QCOMPARE(team.swapped.size(), 1); QCOMPARE(team.swapped[0].old, QStringLiteral("codex/x/old"));
+    QCOMPARE(team.proposals.size(), 5);
+    QVERIFY(team.proposals[0].open() && !team.proposals[1].open());
+    QCOMPARE(team.proposals[0].memberId(), secondId);
+    QCOMPARE(team.proposals[1].memberId(), secondId);
+    const QString role = team.roleOf(secondId);
+    QCOMPARE(proposalText(team, team.proposals[0]), QStringLiteral("Swap %1 to codex \u00b7 gpt-5.5").arg(role));
+    QCOMPARE(proposalText(team, team.proposals[1]), QStringLiteral("Remove %1").arg(role));
+    QCOMPARE(proposalText(team, team.proposals[2]), QStringLiteral("Next goal: Saved cards"));
+    QCOMPARE(proposalText(team, team.proposals[3]), QStringLiteral("Add Designer (claude)"));
+    QCOMPARE(proposalText(team, team.proposals[4]), QStringLiteral("Swap %1 to the session claude/x/spare").arg(role));
+    QVERIFY(resetText(0).isEmpty());
+    QVERIFY(resetText(4000).startsWith(QStringLiteral("resets ")));
+    // An older status has none of it.
+    const auto old = parse(checkout());
+    QVERIFY(old.proposals.isEmpty() && old.swapped.isEmpty() && old.hosts.isEmpty() && !old.resumeAfterLimits);
+    QVERIFY(old.previous.isEmpty() && old.next.isEmpty());
+    for (const auto &m : old.members) QVERIFY(!m.limited.known && !m.hostShared);
 }
 
 void TestTeams::oldStatusJsonStillParses()

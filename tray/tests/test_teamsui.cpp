@@ -278,6 +278,51 @@ bool clickAsks(QWidget *view, const QPoint &point)
     return asked;
 }
 
+// Picks the action named `name` from the next popup menu (QMenu::exec blocks).
+void chooseMenuAction(const QString &name, int tries = 300)
+{
+    QTimer::singleShot(10, qApp, [name, tries] {
+        auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+        if (!menu) { if (tries > 0) chooseMenuAction(name, tries - 1); return; }
+        QAction *found = nullptr;
+        for (auto *action : menu->actions()) if (action->objectName() == name) found = action;
+        menu->hide();
+        if (found && found->isEnabled()) found->trigger();
+    });
+}
+
+// #344: a running team with what the lead proposes (F8), a swap's old session
+// (H6), a member at a usage limit (H1) and two members on one DeepSeek host (H3),
+// shaped like `hgs team status` (spec 4, 5, 6.1, 6.3).
+QJsonObject proposalsTeam(double resetsAt)
+{
+    auto t = team();
+    t["settings"] = QJsonObject{{"approval", "review"}, {"report_timeout_seconds", 120}, {"resume_after_limits", false}};
+    auto members = t["members"].toArray();
+    auto backend = members[1].toObject();
+    backend["agent"] = "dsh";
+    backend["limited"] = QJsonObject{{"at", resetsAt - 3600}, {"resets_at", resetsAt}, {"detail", "Usage limit reached \u00b7 resets 5pm"}};
+    backend["host_shared"] = true;
+    members[1] = backend;
+    auto tester = members[2].toObject();
+    tester["agent"] = "dsh";
+    tester["host_shared"] = true;
+    members[2] = tester;
+    t["members"] = members;
+    t["hosts"] = QJsonArray{QJsonObject{{"agent", "dsh"}, {"pid", 4242}, {"started", 1000.0}, {"members", QJsonArray{"backend", "tester"}}}};
+    t["proposals"] = QJsonArray{
+        QJsonObject{{"id", "p1"}, {"kind", "add-member"}, {"by", "Lead"}, {"at", 2000.0}, {"state", "open"}, {"reason", "The UI needs a designer"},
+                    {"member", QJsonObject{{"role", "Designer"}, {"agent", "claude"}, {"model", "sonnet"}}}},
+        QJsonObject{{"id", "p2"}, {"kind", "swap-member"}, {"by", "Lead"}, {"at", 2100.0}, {"state", "open"}, {"reason", "Backend hit its limit"},
+                    {"member", QJsonObject{{"member", "backend"}, {"agent", "codex"}, {"model", "gpt-5.5"}}}},
+        QJsonObject{{"id", "p3"}, {"kind", "remove-member"}, {"by", "Lead"}, {"at", 2200.0}, {"state", "open"}, {"reason", "Testing is done"},
+                    {"member", "tester"}},
+        QJsonObject{{"id", "p4"}, {"kind", "next-goal"}, {"by", "Lead"}, {"at", 1900.0}, {"state", "rejected"}, {"reason", "Later"},
+                    {"goal", "Saved cards"}}};
+    t["swapped"] = QJsonArray{QJsonObject{{"member", "Backend"}, {"old", "dsh/checkout/backend-old"}, {"at", 1800.0}, {"by", "You"}}};
+    return t;
+}
+
 void armConfirm(TeamPanel *panel, bool cancel, int tries = 300)
 {
     QTimer::singleShot(0, panel, [panel, cancel, tries] {
@@ -420,6 +465,10 @@ private slots:
     void templatesAreCompactWithSearchAndFavourites();
     void dialogTemplateListAppliesOnlyWhenChosen();
     void designerSessionKeepsItsNameAndLeadsNoTeam();
+    void nextGoalFromADoneTeam();
+    void proposalsAreAcceptedOrRejectedOnce();
+    void swapMemberAsksFirstAndListsTheOldSession();
+    void limitedAndSharedHostMembersAreMarked();
     void reportPreviewsAndFindings();
     void hierarchyInTeamViewsAndMemberCards();
     void workspaceAddsAMember();
@@ -456,6 +505,7 @@ elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').
 elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
  print('hgs: Phase 9 is not waiting for approval',file=sys.stderr);sys.exit(1)
 elif a[:2]==['team','create']:print(json.dumps({'status':'created','team':'team-new','request_id':body.get('request_id')}))
+elif a[:2]==['team','next-goal']:print(json.dumps({'status':'planned','team':'team-2','previous':body.get('team')}))
 elif a[:2]==['team','draft']:
  import os
  act=body.get('action')
@@ -3454,6 +3504,263 @@ void TestTeamsUi::hierarchyInTeamViewsAndMemberCards()
     QTest::qWait(50);
     lightShot(&workspace, "hierarchy-team-view-light");
     lightShot(&card, "hierarchy-subteam-light");
+}
+
+
+// F7: a Done team starts the next goal with the same people; the new team
+// opens, and the old one links to it.
+void TestTeamsUi::nextGoalFromADoneTeam()
+{
+    auto done = team();
+    done["status"] = "done";
+    auto tasks = done["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) { auto task = tasks[i].toObject(); task["status"] = "accepted"; tasks[i] = task; }
+    done["tasks"] = tasks;
+    done["previous"] = "team-0";
+    setTeam(done);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceNextGoal"));
+    QVERIFY(workspace.findChild<QPushButton *>("teamBarPrevious"));
+    QVERIFY(!workspace.findChild<QPushButton *>("teamBarNext"));
+    workspace.findChild<QPushButton *>("teamWorkspaceNextGoal")->click();
+    auto *dialog = workspace.findChild<QDialog *>("teamNextGoalDialog");
+    QTRY_VERIFY(dialog && dialog->isVisible());
+    auto *start = dialog->findChild<QPushButton *>("teamNextGoalStart");
+    QVERIFY(!start->isEnabled());   // a goal first
+    QCOMPARE(dialog->findChild<QLineEdit *>("teamNextGoalName")->text(), QStringLiteral("Checkout redesign"));
+    dialog->findChild<QPlainTextEdit *>("teamNextGoalText")->setPlainText("Saved cards: store, list and delete them");
+    dialog->findChild<QLineEdit *>("teamNextGoalName")->setText("Saved cards");
+    QVERIFY(start->isEnabled());
+    shot(dialog, "f7-next-goal-dialog");
+    start->click();
+    QTRY_COMPARE(calls(script(), "next-goal").size(), 1);
+    const auto input = calls(script(), "next-goal").first();
+    QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(input["goal"].toString(), QStringLiteral("Saved cards: store, list and delete them"));
+    QCOMPARE(input["name"].toString(), QStringLiteral("Saved cards"));
+    QCOMPARE(input["by"].toString(), QStringLiteral("human"));
+    // The new team opens in the workspace.
+    QTRY_COMPARE(controller.watchedId(), QStringLiteral("team-2"));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamNextGoalDialog"));
+    // The old team links to it and offers no second next goal.
+    done["next"] = "team-2";
+    setTeam(done);
+    workspace.showTeam("team-1");
+    controller.watch("team-1");
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QPushButton *>("teamBarNext") != nullptr; })());
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceNextGoal"));
+    shot(&workspace, "f7-next-goal-links");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "f7-next-goal-links-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+}
+
+// F8: the lead's open proposals show with Accept and Reject; remove and swap
+// ask first, a cancel sends nothing, and a decision goes out once.
+void TestTeamsUi::proposalsAreAcceptedOrRejectedOnce()
+{
+    setTeam(proposalsTeam(QDateTime::currentSecsSinceEpoch() + 3600));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QFrame *>("teamWorkspaceProposals"));
+    const auto rowOf = [&](const QString &id) -> QWidget * {
+        for (auto *row : workspace.findChildren<QWidget *>("teamProposal")) if (row->property("proposal") == id) return row;
+        return nullptr;
+    };
+    QTRY_VERIFY(rowOf("p1") && rowOf("p2") && rowOf("p3"));
+    QVERIFY(!rowOf("p4"));   // decided ones are gone
+    QCOMPARE(rowOf("p1")->findChild<QLabel *>("teamProposalText")->text(), QStringLiteral("Add Designer (claude \u00b7 sonnet)"));
+    QCOMPARE(rowOf("p2")->findChild<QLabel *>("teamProposalText")->text(), QStringLiteral("Swap Backend to codex \u00b7 gpt-5.5"));
+    QCOMPARE(rowOf("p3")->findChild<QLabel *>("teamProposalText")->text(), QStringLiteral("Remove Tester"));
+    shot(&workspace, "f8-proposals");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "f8-proposals-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    workspace.render();
+    // Reject sends at once.
+    QTRY_VERIFY(rowOf("p1"));
+    rowOf("p1")->findChild<QPushButton *>("teamProposalReject")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
+    QCOMPARE(calls(script(), "decide-proposal").first()["proposal"].toString(), QStringLiteral("p1"));
+    QVERIFY(!calls(script(), "decide-proposal").first()["accept"].toBool());
+    // A swap asks first: Cancel sends nothing; the confirmation sends once.
+    QTRY_VERIFY(rowOf("p2"));
+    armConfirm(&panel, true);
+    rowOf("p2")->findChild<QPushButton *>("teamProposalAccept")->click();
+    QTest::qWait(100);
+    QCOMPARE(calls(script(), "decide-proposal").size(), 1);
+    QTRY_VERIFY(rowOf("p2") && rowOf("p2")->findChild<QPushButton *>("teamProposalAccept")->isEnabled());
+    armConfirm(&panel, false);
+    rowOf("p2")->findChild<QPushButton *>("teamProposalAccept")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 2);
+    QCOMPARE(calls(script(), "decide-proposal").last()["proposal"].toString(), QStringLiteral("p2"));
+    QVERIFY(calls(script(), "decide-proposal").last()["accept"].toBool());
+    // Until the store has taken it, the row's buttons stay off.
+    QTRY_VERIFY(rowOf("p2") && !rowOf("p2")->findChild<QPushButton *>("teamProposalAccept")->isEnabled());
+    // A remove asks too.
+    armConfirm(&panel, false);
+    rowOf("p3")->findChild<QPushButton *>("teamProposalAccept")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 3);
+    QCOMPARE(calls(script(), "decide-proposal").last()["proposal"].toString(), QStringLiteral("p3"));
+}
+
+// H6: Swap from the member menu, a new session or an existing one, confirmed;
+// the old session stays listed for the owner to stop.
+void TestTeamsUi::swapMemberAsksFirstAndListsTheOldSession()
+{
+    setTeam(proposalsTeam(QDateTime::currentSecsSinceEpoch() + 3600));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.sessionChoices = [] { return QList<SessionChoice>{{QString(), "claude/checkout/spare", "run-9", "conv-9", "claude", "/work/checkout"},
+                                                            {QString(), "claude/checkout/lead", "run-1", "conv-1", "claude", "/work/checkout"}}; };
+    QString opened;
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.openSession = [&](const QString &, const QString &session) { opened = session; };
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    // The old session after an earlier swap, with Open.
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceSwapped"));
+    auto *old = workspace.findChild<QWidget *>("teamSwappedSession");
+    QVERIFY(old);
+    QCOMPARE(old->property("session").toString(), QStringLiteral("dsh/checkout/backend-old"));
+    old->findChild<QPushButton *>("teamSwappedOpen")->click();
+    QCOMPARE(opened, QStringLiteral("dsh/checkout/backend-old"));
+    shot(&workspace, "h6-swapped-sessions");
+    // The member menu opens the swap dialog.
+    const auto openSwap = [&](const QString &member) {
+        QToolButton *more = nullptr;
+        for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+            if (card->property("teamMember") == member) more = card->findChild<QToolButton *>("teamWorkspaceMemberMenu");
+        QVERIFY(more);
+        chooseMenuAction("teamWorkspaceMemberSwap");
+        more->click();
+    };
+    openSwap("backend");
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamSwapDialog")) && dialog->isVisible());
+    // This team's own sessions are not offered.
+    auto *session = dialog->findChild<QComboBox *>("teamSwapSession");
+    QCOMPARE(session->count(), 1);
+    QCOMPARE(session->itemData(0).toJsonObject()["name"].toString(), QStringLiteral("claude/checkout/spare"));
+    auto *agent = dialog->findChild<QComboBox *>("teamSwapAgent");
+    agent->setCurrentIndex(agent->findData("codex"));
+    dialog->findChild<QComboBox *>("teamSwapModel")->setCurrentText("gpt-5.5");
+    shot(dialog, "h6-swap-dialog");
+    // Cancel at the confirmation sends nothing and keeps the dialog.
+    armConfirm(&panel, true);
+    dialog->findChild<QPushButton *>("teamSwapApply")->click();
+    QTest::qWait(100);
+    QVERIFY(calls(script(), "swap-member").isEmpty());
+    QVERIFY(workspace.findChild<QDialog *>("teamSwapDialog"));
+    armConfirm(&panel, false);
+    dialog->findChild<QPushButton *>("teamSwapApply")->click();
+    QTRY_COMPARE(calls(script(), "swap-member").size(), 1);
+    auto input = calls(script(), "swap-member").first();
+    QCOMPARE(input["member"].toString(), QStringLiteral("backend"));
+    QCOMPARE(input["agent"].toString(), QStringLiteral("codex"));
+    QCOMPARE(input["model"].toString(), QStringLiteral("gpt-5.5"));
+    QVERIFY(!input.contains("session"));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamSwapDialog"));
+    // The lead too, to an existing session.
+    openSwap("lead");
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamSwapDialog")) && dialog->isVisible());
+    dialog->findChild<QRadioButton *>("teamSwapExisting")->setChecked(true);
+    armConfirm(&panel, false);
+    dialog->findChild<QPushButton *>("teamSwapApply")->click();
+    QTRY_COMPARE(calls(script(), "swap-member").size(), 2);
+    input = calls(script(), "swap-member").last();
+    QCOMPARE(input["member"].toString(), QStringLiteral("lead"));
+    QCOMPARE(input["session"].toObject()["name"].toString(), QStringLiteral("claude/checkout/spare"));
+    QCOMPARE(input["session"].toObject()["run_id"].toString(), QStringLiteral("run-9"));
+    QVERIFY(!input.contains("agent"));
+}
+
+// H1 and H3: a member at a usage limit shows its reset time, the team toggles
+// resume after limits (the settings go back whole); members on one DeepSeek host
+// say so with the host in the tooltip.
+void TestTeamsUi::limitedAndSharedHostMembersAreMarked()
+{
+    const double resetsAt = QDateTime::currentSecsSinceEpoch() + 3600;
+    setTeam(proposalsTeam(resetsAt));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceMemberLimited"));
+    auto *limited = workspace.findChild<QWidget *>("teamWorkspaceMemberLimited");
+    const QString reset = QDateTime::fromSecsSinceEpoch(qint64(resetsAt)).toString(QStringLiteral("HH:mm"));
+    QCOMPARE(limited->property("resetsAt").toDouble(), resetsAt);
+    QVERIFY(limited->toolTip().contains("Usage limit reached"));
+    QVERIFY(limited->toolTip().contains("Resume after limits is off"));
+    QVERIFY(resetText(resetsAt).contains(reset) || resetText(resetsAt).contains(QStringLiteral("resets")));
+    // Two members share the DeepSeek host; the tooltip names the host and both.
+    const auto shared = workspace.findChildren<QWidget *>("teamWorkspaceMemberSharedHost");
+    QCOMPARE(shared.size(), 2);
+    QVERIFY(shared.first()->toolTip().contains("4242"));
+    QVERIFY(shared.first()->toolTip().contains("Backend") && shared.first()->toolTip().contains("Tester"));
+    shot(&workspace, "h1-h3-member-marks");
+    workspace.setTheme(false); workspace.render();
+    lightShot(&workspace, "h1-h3-member-marks-light");
+    darkPalette();
+    workspace.setTheme(true); workspace.render();
+    workspace.render();
+    // Resume after limits: the team setting, sent with the other settings.
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceResumeLimits"));
+    auto *toggle = workspace.findChild<QPushButton *>("teamWorkspaceResumeLimits");
+    QVERIFY(toggle->isCheckable() && !toggle->isChecked());
+    toggle->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    const auto settings = calls(script(), "settings").first()["settings"].toObject();
+    QVERIFY(settings["resume_after_limits"].toBool());
+    QCOMPARE(settings["approval"].toString(), QStringLiteral("review"));
+    QCOMPARE(settings["report_timeout_seconds"].toInt(), 120);
+    // With it on and the member waiting for its reset, the mark says so.
+    auto on = proposalsTeam(resetsAt);
+    auto onSettings = on["settings"].toObject(); onSettings["resume_after_limits"] = true; on["settings"] = onSettings;
+    auto members = on["members"].toArray(); auto backend = members[1].toObject(); backend["limit_resume"] = true; members[1] = backend; on["members"] = members;
+    setTeam(on);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        auto *mark = workspace.findChild<QWidget *>("teamWorkspaceMemberLimited");
+        return mark && mark->toolTip().contains("Resume after limits is on");
+    })());
+    QVERIFY(workspace.findChild<QPushButton *>("teamWorkspaceResumeLimits")->isChecked());
+    // Without a reset time the mark says so and the inbox has it.
+    auto unknown = proposalsTeam(resetsAt);
+    members = unknown["members"].toArray(); backend = members[1].toObject();
+    backend["limited"] = QJsonObject{{"at", 100.0}, {"detail", "Usage limit reached"}}; members[1] = backend; unknown["members"] = members;
+    setTeam(unknown);
+    QTRY_VERIFY(([&] {
+        controller.refresh();
+        auto *mark = workspace.findChild<QWidget *>("teamWorkspaceMemberLimited");
+        return mark && mark->toolTip().contains("no reset time");
+    })());
 }
 
 #include "test_teamsui.moc"

@@ -58,6 +58,13 @@ struct Member {
     // (F8); empty for a member Zerus launches itself.
     QString runId, conversationId;
     bool lead = false;
+    // H1: the session stopped at a usage limit; the reset time when the
+    // session reported one, and whether Zerus waits for it (resume after limits).
+    struct Limit { bool known = false; double at = 0, resetsAt = 0; QString detail; };
+    Limit limited;
+    bool limitResume = false;
+    // H3: its DeepSeek host serves other members too.
+    bool hostShared = false;
     // The member queue (A5): its open task first, then the tasks returned to it
     // (pending, with attempts). From `team status` when hgs sends it; an older
     // hgs gets the same list derived from the tasks.
@@ -332,6 +339,29 @@ struct Team {
     qint64 draftRevision = 0;
     QStringList draftUnseen;
     bool draft() const { return status == QLatin1String("draft"); }
+    // F7: the team a next goal came from, and the one it led to.
+    QString previous, next;
+    // H1: members limited by usage wait for their reset (settings).
+    bool resumeAfterLimits = false;
+    // The settings as stored, so a change sends them back whole.
+    QJsonObject settingsJson;
+    // F8: the lead's membership proposals, decided by the owner. `member` is
+    // the proposed member (add), its id (remove) or the swap fields (swap).
+    struct Proposal {
+        QString id, kind, by, state, reason, goal, note;
+        double at = 0;
+        QJsonValue member;
+        bool open() const { return state == QLatin1String("open"); }
+        QString memberId() const;
+    };
+    QList<Proposal> proposals;
+    // H6: the sessions a swap left running for the owner to stop (last 20).
+    struct Swapped { QString member, old, by; double at = 0; };
+    QList<Swapped> swapped;
+    // H3: the DeepSeek hosts that serve members.
+    struct Host { QString agent; qint64 pid = 0; double started = 0; QStringList members; };
+    QList<Host> hosts;
+    const Host *hostOf(const QString &member) const;
     const Member *member(const QString &id) const;
     const Member *memberOfSession(const QString &host, const QString &session) const;
     const Task *task(int id) const;
@@ -442,6 +472,10 @@ QList<Problem> problems(const Team &team, const LiveLookup &live);
 QString displayStatus(const Team &team, const LiveLookup &live);
 QString statusLabel(const QString &status);
 Tone statusTone(const QString &status);
+// F8: what a proposal would do, in one line ("Swap Backend to Codex · gpt-5.5").
+QString proposalText(const Team &team, const Team::Proposal &proposal);
+// H1: "resets 14:30" (today) or "resets 3 Nov 14:30"; empty when unknown.
+QString resetText(double resetsAt);
 // F4: the one Team designer conversation hgs starts (`catalog designer`). It
 // keeps its fixed name and colour, and the desktop files no other work in it:
 // it never leads or joins a team.

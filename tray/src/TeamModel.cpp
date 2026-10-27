@@ -247,6 +247,15 @@ Team parse(const QJsonObject &v)
         const auto session = m.value("session").toObject();
         member.host = str(session, "host"); member.session = str(session, "name");
         member.runId = str(session, "run_id"); member.conversationId = str(session, "conversation_id");
+        if (m.value("limited").isObject()) {
+            const auto limit = m.value("limited").toObject();
+            member.limited.known = true;
+            member.limited.at = limit.value("at").toDouble();
+            member.limited.resetsAt = limit.value("resets_at").toDouble();
+            member.limited.detail = str(limit, "detail");
+        }
+        member.limitResume = m.value("limit_resume").toBool();
+        member.hostShared = m.value("host_shared").toBool();
         if (m.value("queue").isArray()) {
             member.queueKnown = true;
             for (const auto &item : m.value("queue").toArray()) {
@@ -619,6 +628,30 @@ Team parse(const QJsonObject &v)
     team.goal = str(v, "goal"); team.leadProtocol = str(v, "lead_protocol");
     team.folderPolicy = str(settings, "folder_policy");
     team.maxMembers = settings.value("max_members").toInt();
+    team.settingsJson = settings;
+    team.resumeAfterLimits = settings.value("resume_after_limits").toBool();
+    team.previous = str(v, "previous"); team.next = str(v, "next");
+    for (const auto &value : v.value("proposals").toArray()) {
+        const auto p = value.toObject();
+        Team::Proposal proposal;
+        proposal.id = str(p, "id"); proposal.kind = str(p, "kind"); proposal.by = str(p, "by");
+        proposal.state = str(p, "state"); proposal.reason = str(p, "reason"); proposal.note = str(p, "note");
+        proposal.goal = p.value("goal").toString();
+        proposal.at = p.value("at").toDouble();
+        proposal.member = p.value("member");
+        if (!proposal.id.isEmpty()) team.proposals.append(proposal);
+    }
+    for (const auto &value : v.value("swapped").toArray()) {
+        const auto entry = value.toObject();
+        team.swapped.append({str(entry, "member"), str(entry, "old"), str(entry, "by"), entry.value("at").toDouble()});
+    }
+    for (const auto &value : v.value("hosts").toArray()) {
+        const auto entry = value.toObject();
+        Team::Host host;
+        host.agent = str(entry, "agent"); host.pid = entry.value("pid").toInteger(); host.started = entry.value("started").toDouble();
+        for (const auto &id : entry.value("members").toArray()) host.members << id.toString();
+        team.hosts.append(host);
+    }
     const auto draft = v.value("draft").toObject();
     team.draftRevision = draft.value("revision").toInteger();
     for (const auto &field : draft.value("unseen").toArray()) team.draftUnseen << field.toString();
@@ -824,6 +857,47 @@ QString displayStatus(const Team &team, const LiveLookup &live)
             return team.status;
     }
     return open ? QStringLiteral("stuck") : team.status;
+}
+
+QString Team::Proposal::memberId() const
+{
+    if (member.isString()) return member.toString();
+    const auto object = member.toObject();
+    // A swap names the member it swaps; an add or remove carries the member.
+    return object.value("member").isString() ? object.value("member").toString() : object.value("id").toString();
+}
+
+const Team::Host *Team::hostOf(const QString &member) const
+{
+    for (const auto &host : hosts) if (host.members.contains(member)) return &host;
+    return nullptr;
+}
+
+QString resetText(double resetsAt)
+{
+    if (resetsAt <= 0) return {};
+    const auto at = QDateTime::fromSecsSinceEpoch(qint64(resetsAt));
+    return at.date() == QDate::currentDate() ? tr("resets %1").arg(at.toString(QStringLiteral("HH:mm")))
+                                             : tr("resets %1").arg(at.toString(QStringLiteral("d MMM HH:mm")));
+}
+
+QString proposalText(const Team &team, const Team::Proposal &proposal)
+{
+    const auto object = proposal.member.toObject();
+    const QString id = proposal.memberId();
+    const QString role = team.member(id) ? team.roleOf(id) : object.value("role").toString(id);
+    QStringList how;
+    for (const auto *key : {"agent", "model", "effort", "account"})
+        if (const auto value = object.value(QLatin1String(key)).toString(); !value.isEmpty()) how << value;
+    if (proposal.kind == "add-member") return how.isEmpty() ? tr("Add %1").arg(role) : tr("Add %1 (%2)").arg(role, how.join(QStringLiteral(" · ")));
+    if (proposal.kind == "remove-member") return tr("Remove %1").arg(role);
+    if (proposal.kind == "swap-member") {
+        const auto session = object.value("session").toObject().value("name").toString();
+        if (!session.isEmpty()) return tr("Swap %1 to the session %2").arg(role, session);
+        return how.isEmpty() ? tr("Swap %1 to a new session").arg(role) : tr("Swap %1 to %2").arg(role, how.join(QStringLiteral(" · ")));
+    }
+    if (proposal.kind == "next-goal") return tr("Next goal: %1").arg(proposal.goal.section('\n', 0, 0).left(120));
+    return proposal.kind;
 }
 
 QString statusLabel(const QString &status)

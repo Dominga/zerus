@@ -55,6 +55,19 @@ private:
     bool discardPhase(const Teams::Team &team, int phase);
     void movePhase(const Teams::Team &team, int phase, int to, const QString &position);
     QWidget *inboxStrip(const Teams::Team &team, const QList<Teams::InboxItem> &items);
+    // F8: the lead's open membership proposals with Accept and Reject; remove
+    // and swap ask for confirmation. A decision goes out once.
+    QWidget *proposalsStrip(const Teams::Team &team);
+    QSet<QString> m_decidedProposals;
+    // F7: a Done team starts the next goal with the same folder, settings,
+    // lead and members (their live sessions adopted).
+    void nextGoalDialog(const Teams::Team &team);
+    // H6: swap a member's session, agent, model or account (the lead too),
+    // confirmed; the old session keeps running and is listed for you to stop.
+    void swapDialog(const Teams::Team &team, const Teams::Member &member);
+    QWidget *swappedList(const Teams::Team &team);
+    // F7/F8: opens another team in this workspace (previous, next, a new one).
+    void openOtherTeam(const QString &team);
     QWidget *attentionStrip(const Teams::Team &team);
     QWidget *errorStrip();
     // The team as the controller currently has it, by id (a poll may have

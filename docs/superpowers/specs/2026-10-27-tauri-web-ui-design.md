@@ -71,14 +71,23 @@ Tauri process (Rust)
 
 ### Stream consumption (agreed with the events session, 2026-10-27)
 
-The server side is PR #368 (branch `work-ba0ed9fd-watch`); frame types live in
-`crates/watch-protocol` (`Frame { v, seq, body }` with the body tagged by `t`;
-`Control` tagged by `op`), documented in `docs/reference.md`, "Event stream".
+The server and the Qt consumer are on main (PRs #368, #369 and #370); frame
+types live in `crates/watch-protocol` (`Frame { v, seq, body }` with the body
+tagged by `t`; `Control` tagged by `op`), documented in `docs/reference.md`,
+"Event stream". The web client follows the same rules as the Qt consumer.
 
 - Capability: `Event stream ABI: watch-v1` in `hgs -h`. Older peers fall back to
   today's polling (`hgs @alias ls --json`, `inspect --after`) on the same cadence
   as the Qt client. The client keeps stdin open (EOF ends the stream) and uses
   `{"op":"ping","id":N}` / `pong` for liveness checks.
+- One stream per computer whose CLI prints the marker. While it is live the
+  client stops polling that computer's listing and follows the selected
+  session's Activity through it. A stream that fails or stays silent for 30 s
+  restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the client polls
+  meanwhile. The existing `ZERUS_EVENT_STREAM=0` and `dataPlane/eventStream=false`
+  switches keep it on polling.
+- The server re-lists all rows every 5 s as a safety net (owner decision,
+  2026-10-27), so the client needs no listing poll of its own while live.
 - Frames are at most 1 MiB with one `seq` per stream; a `gap` is per topic and
   key and is followed by a bounded snapshot.
 - `catalog`: whole-row upserts keyed `run:<run_id>` (`name:<name>` without a
@@ -102,10 +111,25 @@ The server side is PR #368 (branch `work-ba0ed9fd-watch`); frame types live in
 - Errors: `subscription_ended` (the session left the catalog), `session_changed`,
   `too_many_subscriptions` (at most 16), `unsupported_topic`, `bad_request`,
   `row_too_large`, `meta_too_large`.
-- v1 topics are `catalog`, `catalog.meta` and `activity`. `processes:<session>`,
-  `git:<path>` and `tasks:<project>` answer `unsupported_topic` until the next
-  milestone; until then the client keeps today's bounded polled reads for them,
-  and account usage stays polled.
+- `git` (PR #372, in review): `{"op":"subscribe","topic":"git","path":"/abs/folder"}`
+  and the matching `unsubscribe`. The reply is a `state` frame keyed by the path
+  as subscribed whose `value` is exactly the `hgs git-status --json` object. It
+  is sent at once, then only when the object changes (ignoring `sampled_at` and
+  `remote_age_seconds`). The server re-checks a folder after Git metadata changes
+  (HEAD, index, refs, packed-refs, FETCH_HEAD), after file-changing tool calls in
+  sessions under it, when its 60 s remote check expires, and at least every
+  30 s. `hello.limits.git_subscriptions` is 64; an older server's hello decodes
+  as 0, and the client then keeps polling `git-status`. Non-fatal errors:
+  `bad_request` (missing, relative or oversized path), `too_many_subscriptions`
+  (65th folder), `git_status_failed` (at most once a minute per folder). The
+  client subscribes only to folders on screen (the selected session's checkout
+  and the Worktrees panel). Like the Qt client in PR #372, it re-dates a
+  streamed value every 15 s while subscribed (adds the elapsed time to
+  `remote_age_seconds`), so freshness badges do not lapse while the stream
+  vouches for them.
+- `processes:<session>` and `tasks:<project>` answer `unsupported_topic`; the
+  client keeps today's bounded polled reads for them (Processes keeps its own
+  interval), and account usage stays polled.
 - Connection state per computer comes from hello, the 10 s heartbeat, 30 s of
   silence and gaps.
 - Volatile fields (`goal_observed_at`, `process_work.sampled_at`) are masked by

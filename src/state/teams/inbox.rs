@@ -28,6 +28,9 @@ pub(crate) struct Item {
     /// Extra lines the message shows under the item: B1 puts the exact
     /// permission command and its source here (4000 characters cut).
     pub detail: String,
+    /// U19 (#520): a subagent permission's rows ({id,type,model,effort?,
+    /// description}); null for every other item.
+    pub subagents: Value,
 }
 
 impl Item {
@@ -40,6 +43,9 @@ impl Item {
         value["age"] = json!(age(crate::state::now(), self.since));
         if !self.detail.is_empty() {
             value["detail"] = json!(self.detail);
+        }
+        if self.subagents.is_array() {
+            value["subagents"] = self.subagents.clone();
         }
         value
     }
@@ -128,6 +134,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     {
         let role = team.role_of(&member.id);
         items.push(Item {
+            subagents: Value::Null,
             kind: "member_error",
             key: format!("member_error:{}", member.id),
             task: None,
@@ -157,6 +164,7 @@ fn all_items(team: &Team) -> Vec<Item> {
         let note = proposal["note"].as_str().unwrap_or_default();
         let why = if note.is_empty() { String::new() } else { format!(": {note}") };
         items.push(Item {
+            subagents: Value::Null,
             kind: "proposal_decided",
             key: format!("proposal:{id}"),
             task: None,
@@ -176,6 +184,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     for phase in team.phases.iter().filter(|phase| phase.state == PhaseState::Rejected) {
         let Some(rejection) = &phase.rejection else { continue };
         items.push(Item {
+            subagents: Value::Null,
             kind: "phase_rejected",
             key: format!("phase_rejected:{}:{}", phase.n, rejection.at),
             task: None,
@@ -198,6 +207,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             if let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported) {
                 if let Some(report) = &attempt.report {
                     items.push(Item {
+                        subagents: Value::Null,
                         kind: "report",
                         key: format!("report:{}:{}", task.id, attempt.id),
                         task: Some(task.id),
@@ -214,6 +224,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             // A member's question the lead answers with `reply` (C2).
             for question in attempt.questions.iter().filter(|question| question.open()) {
                 items.push(Item {
+                    subagents: Value::Null,
                     kind: "question",
                     key: format!("question:{}", question.id),
                     task: Some(task.id),
@@ -233,6 +244,7 @@ fn all_items(team: &Team) -> Vec<Item> {
         if task.status == TaskStatus::InProgress {
             if let Some(attempt) = task.open_attempt().filter(|attempt| attempt.member == team.lead) {
                 items.push(Item {
+                    subagents: Value::Null,
                     kind: "lead_task",
                     key: format!("lead_task:{}:{}", task.id, attempt.id),
                     task: Some(task.id),
@@ -266,6 +278,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                 format!("{role}'s session stopped on #{}", task.id)
             };
             items.push(Item {
+                subagents: Value::Null,
                 kind: "stalled",
                 key: format!("stalled:{}:{}:{kind}", task.id, attempt.id),
                 task: Some(task.id),
@@ -295,6 +308,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             command: pending.answer_command(team, &member.id),
             // B1: the exact command the permission asks about and its source.
             detail: super::dispatcher::permission_command_line(&pending.card).trim_end().to_owned(),
+            subagents: if pending.card["subagents"].is_array() { pending.card["subagents"].clone() } else { Value::Null },
         });
     }
     // U20: a delivered attempt whose turn ended long ago and still has no
@@ -312,6 +326,7 @@ fn all_items(team: &Team) -> Vec<Item> {
         let role = team.role_of(&attempt.member);
         let minutes = ((now - ended) / 60.0).round() as u64;
         items.push(Item {
+            subagents: Value::Null,
             kind: "no_report",
             key: format!("no_report:{}:{}", task.id, attempt.id),
             task: Some(task.id),
@@ -335,6 +350,7 @@ fn all_items(team: &Team) -> Vec<Item> {
             None => "; reset time unknown".to_owned(),
         };
         items.push(Item {
+            subagents: Value::Null,
             kind: "member_limited",
             key: format!("member_limited:{}:{}", member.id, limit.at),
             task: None,
@@ -595,11 +611,15 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
             }
             let role = team.role_of(&member.id);
             let asked = pending.card_question();
-            out.push(json!({"kind":"permission","member":role,"since":pending.at,
+            let mut item = json!({"kind":"permission","member":role,"since":pending.at,
                 "minutes":(waited / 60.0).round() as u64,
                 "summary":format!("{role} waits for your answer: {}",
                     if asked.is_empty() { "a permission request".to_owned() } else { asked }),
-                "command":pending.answer_command(team, &member.id)}));
+                "command":pending.answer_command(team, &member.id)});
+            if pending.card["subagents"].is_array() {
+                item["subagents"] = pending.card["subagents"].clone();
+            }
+            out.push(item);
         }
     }
     out.extend(phase_items);

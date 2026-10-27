@@ -37,6 +37,10 @@ struct Question {
     // option ids for allow and deny, as status sends them in question.answer.
     struct NativeAnswer { QString questionId, allow, deny; bool known = false; };
     NativeAnswer native;
+    // U19 (#520): a subagent card ("Start N subagents"); `record` keeps the
+    // status record, whose `subagents` list (or reason text) gives the rows.
+    bool subagents = false;
+    QJsonObject record;
     bool answered() const { return answeredAt > 0 || !answer.isEmpty(); }
     bool permission() const { return !tool.isEmpty() || !command.isEmpty() || !reason.isEmpty(); }
 };

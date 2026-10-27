@@ -601,6 +601,7 @@ private slots:
     void catalogEditorKeepsTheFieldsItDoesNotEdit();
     void ownerActionsCarryNoAgentMarkers();
     void permissionAttentionNamesTheMemberAndAnswers();
+    void leadAnswersAMembersSubagentRequest();
     void sendBackFormBelongsToItsTeamAndPhase();
     void catalogRoleChoosesAccountModelAndComputer();
     void designerDraftIsKeptThenApplied();
@@ -6413,6 +6414,89 @@ void TestTeamsUi::planningBoardScrollsInsteadOfSqueezingColumns()
     workspace.resize(1600, 800);
     QTRY_VERIFY(!area()->horizontalScrollBar()->isVisible());
     QVERIFY(readable());
+}
+
+// U19 (#520): a team member's subagent request reaches the lead's permission
+// box the same way: "Start N subagents", one row per subagent (type, model,
+// effort when known, task), Allow all and Deny answering that card with its
+// own ids through hgs team answer. Three from the record's list, one from the
+// reason text an older hgs sends.
+void TestTeamsUi::leadAnswersAMembersSubagentRequest()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { QSettings().remove("workspace/skin"); darkPalette(); });
+    const auto record = [](const QString &reason, const QJsonArray &list, int count) {
+        QJsonArray ids; for (int i = 0; i < count; ++i) ids << QStringLiteral("toolu_%1").arg(i + 1);
+        QJsonObject q{{"question_id", "claude-approval:subagents"}, {"question_hash", QString(64, QLatin1Char('h'))}, {"tool", "Subagents"},
+                      {"command", QJsonValue()}, {"command_source", "unknown"}, {"reason", reason + "\n\nAgent\n\n{\"subagent_type\":\"Explore\"}"},
+                      {"asked_at", 1792866600.0}, {"answer", QJsonObject{{"question_id", "approval"}, {"allow", "1"}, {"deny", "2"}}},
+                      {"subagent_confirmation", true}, {"subagent_calls", ids}};
+        if (!list.isEmpty()) q["subagents"] = list;
+        return q;
+    };
+    auto team = phasedTeam();
+    auto members = team["members"].toArray(); auto backend = members[1].toObject();
+    backend["question"] = record("Start 3 subagents: Explore (model haiku, effort low): Find the callers; reviewer (model sonnet, effort high): Review the diff; "
+                                 "general (model inherits claude-opus-4-6): Write the fix",
+                                 QJsonArray{QJsonObject{{"id", "toolu_1"}, {"type", "Explore"}, {"model", "haiku"}, {"effort", "low"}, {"description", "Find the callers"}},
+                                            QJsonObject{{"id", "toolu_2"}, {"type", "reviewer"}, {"model", "sonnet"}, {"effort", "high"}, {"description", "Review the diff"}},
+                                            QJsonObject{{"id", "toolu_3"}, {"type", "general"}, {"model", "inherits claude-opus-4-6"}, {"description", "Write the fix"}}}, 3);
+    members[1] = backend; team["members"] = members;
+    team["attention"] = QJsonArray{QJsonObject{{"kind", "permission"}, {"member", "Backend"}, {"since", 1792866600.0}, {"minutes", 3},
+                                               {"summary", "Backend waits for your answer: Subagents: Start 3 subagents"}, {"command", "hgs team answer"}}};
+    setTeam(team);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QLabel *>("teamMemberSubagentsTitle"));
+    QCOMPARE(workspace.findChild<QLabel *>("teamMemberSubagentsTitle")->text(), QStringLiteral("Start 3 subagents"));
+    QStringList types, tasks;
+    for (auto *row : workspace.findChildren<QWidget *>("teamMemberSubagent")) {
+        types << row->findChild<QLabel *>("teamMemberSubagentType")->text();
+        tasks << row->findChild<QLabel *>("teamMemberSubagentTask")->text();
+    }
+    QCOMPARE(types, (QStringList{"Explore", "reviewer", "general"}));
+    QCOMPARE(tasks, (QStringList{"Find the callers", "Review the diff", "Write the fix"}));
+    // Not a command: no command or agent-reason lines.
+    QVERIFY(!workspace.findChild<QLabel *>("teamMemberPermissionCommand"));
+    QVERIFY(!workspace.findChild<QLabel *>("teamMemberPermissionReason"));
+    auto *allow = workspace.findChild<QPushButton *>("teamMemberPermissionAllow");
+    QCOMPARE(allow->text(), QStringLiteral("Allow all"));
+    QVERIFY(allow->isEnabled());
+    // The attention strip's Answer brings the lead to the same box.
+    workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
+    workspace.findChild<QPushButton *>("teamAttentionAnswer")->click();
+    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(workspace.findChild<QPushButton *>("teamMemberPermissionAllow")));
+    shot(&workspace, "u19-lead-subagents-three-dark");
+    workspace.setTheme(false); lightShot(&workspace, "u19-lead-subagents-three-light"); darkPalette(); workspace.setTheme(true);
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamMemberPermissionAllow"));
+    workspace.findChild<QPushButton *>("teamMemberPermissionAllow")->click();
+    QTRY_COMPARE(calls(script(), "answer").size(), 1);
+    auto answer = calls(script(), "answer").first();
+    QCOMPARE(answer["member"].toString(), QStringLiteral("backend"));
+    QCOMPARE(answer["question_id"].toString(), QStringLiteral("claude-approval:subagents"));
+    QCOMPARE(answer["expected_question_hash"].toString(), QString(64, QLatin1Char('h')));
+    QCOMPARE(answer["answers"].toArray(), (QJsonArray{QJsonObject{{"question_id", "approval"}, {"selected_option_ids", QJsonArray{"1"}}, {"text", ""}}}));
+    // One subagent, from the reason text alone: Deny with the lead's words.
+    backend["question"] = record("Start 1 subagent: Explore (model haiku): Find the callers", {}, 1);
+    members[1] = backend; team["members"] = members; team["revision"] = team["revision"].toInt() + 1;
+    setTeam(team);
+    QTRY_VERIFY(([&] { controller.refresh(); auto *title = workspace.findChild<QLabel *>("teamMemberSubagentsTitle");
+                       return title && title->text() == QStringLiteral("Start 1 subagent"); })());
+    QCOMPARE(workspace.findChildren<QWidget *>("teamMemberSubagent").size(), 1);
+    QCOMPARE(workspace.findChild<QLabel *>("teamMemberSubagentType")->text(), QStringLiteral("Explore"));
+    shot(&workspace, "u19-lead-subagents-one-dark");
+    workspace.setTheme(false); lightShot(&workspace, "u19-lead-subagents-one-light"); darkPalette(); workspace.setTheme(true);
+    QTRY_VERIFY(workspace.findChild<QLineEdit *>("teamMemberPermissionDenyReason"));
+    workspace.findChild<QLineEdit *>("teamMemberPermissionDenyReason")->setText("Not in this phase");
+    workspace.findChild<QPushButton *>("teamMemberPermissionDeny")->click();
+    QTRY_COMPARE(calls(script(), "answer").size(), 2);
+    answer = calls(script(), "answer").last();
+    QCOMPARE(answer["answers"].toArray(), (QJsonArray{QJsonObject{{"question_id", "approval"}, {"selected_option_ids", QJsonArray{"2"}}, {"text", "Not in this phase"}}}));
 }
 
 #include "test_teamsui.moc"

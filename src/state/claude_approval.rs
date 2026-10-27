@@ -191,17 +191,26 @@ fn summary(request:&Value)->String {
 /// U19: the subagent confirmation a pending main-agent Agent/Task request is,
 /// for its tool use: the calls of its group the answer decides and the text
 /// that names them. None for any other request.
-fn subagents(record:&Value,request:&Value,tool_use:&str)->Option<(Vec<String>,String)> {
+fn subagents(record:&Value,request:&Value,tool_use:&str)->Option<(Vec<String>,String,Vec<Value>)> {
     if !matches!(string(request,"tool_name"),"Agent"|"Task")||!string(request,"agent_id").is_empty()||tool_use.is_empty() {return None;}
     let model=string(record,"model");
-    subagents_confirm::card(string(record,"conversation_id"),tool_use,string(record,"cwd"),if model.is_empty(){"the session model"}else{model})
+    let model=if model.is_empty(){"the session model"}else{model};
+    let (session,folder)=(string(record,"conversation_id"),string(record,"cwd"));
+    // #520: the same calls as structured rows for the desktop's card.
+    subagents_confirm::card(session,tool_use,folder,model).map(|(calls,text)|{
+        let details=subagents_confirm::details(session,&calls,folder,model);
+        (calls,text,details)
+    })
 }
 
 /// U19: a subagent card says what starts, offers a one-time Yes or No (or a
 /// denial with a message) and is marked so automatic approvals never answer it.
-fn subagent_card(card:&mut Value,calls:&[String],text:&str) {
+/// #520: `subagents` lists each call ({id,type,model,effort?,description}) for
+/// the desktop's rows; the question text stays for older readers.
+fn subagent_card(card:&mut Value,calls:&[String],text:&str,details:&[Value]) {
     card["subagent_confirmation"]=json!(true);
     card["subagent_calls"]=json!(calls);
+    card["subagents"]=json!(details);
     card["questions"][0]["question"]=json!(text);
     card["questions"][0]["header"]=json!("Subagents");
 }
@@ -278,7 +287,7 @@ fn build_request(record:&Value,screen:Option<&str>,request:&Value,at:&Value,chil
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":false,"options":options}]}),panel));
     // U19: without the waiting hook the subagent request is still marked, so
     // no automatic approval takes it through the keys either.
-    built.map(|(mut card,panel)|{if let Some((calls,text))=&group {subagent_card(&mut card,calls,text);}(card,panel)})
+    built.map(|(mut card,panel)|{if let Some((calls,text,details))=&group {subagent_card(&mut card,calls,text,details);}(card,panel)})
 }
 
 fn native_body(panel:&Panel)->String {
@@ -400,9 +409,9 @@ fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value
     // The calls a subagent answer decides are part of what was reviewed.
     let hash=format!("{:x}",Sha256::digest(json!([identity["question_hash"],
         native.as_ref().map(|p|json!([p.title,identity_body(p),p.question,p.labels])),
-        warning.as_ref().map(identity_body),group.as_ref().map(|(calls,_)|calls)]).to_string()));
+        warning.as_ref().map(identity_body),group.as_ref().map(|(calls,_,_)|calls)]).to_string()));
     let created=record["pending_approval_at"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
-    let body=match &group {Some((_,text)) => format!("{text}\n\n{body}"),None => body};
+    let body=match &group {Some((_,text,_)) => format!("{text}\n\n{body}"),None => body};
     let mut card=json!({"question_id":identity["question_id"],"question_hash":hash,"tool_call_id":identity["tool_call_id"],
         "agent_id":request["agent_id"],"child_request_id":"","run_id":record["run_id"],"conversation_id":record["conversation_id"],
         "source":"claude_tool_approval","can_answer":true,"answer_unavailable_reason":"","approval":true,"approval_choices":true,
@@ -410,7 +419,7 @@ fn channel_card(record:&Value,screen:Option<&str>,identity:&Value)->Option<Value
         "questions":[{"id":"approval","question":question,"header":tool,"body":body,"allow_other":true,
             "other_label":FEEDBACK,"other_description":"Deny this request with your message; Claude continues without it",
             "options":options}]});
-    if let Some((calls,text))=&group {subagent_card(&mut card,calls,text);}
+    if let Some((calls,text,details))=&group {subagent_card(&mut card,calls,text,details);}
     Some(card)
 }
 
@@ -1087,6 +1096,34 @@ pub(super) fn reconcile(record:Value)->Value {
             // Another tool's card is not a subagent card.
             let bash=hooked("Bash",json!({"command":"printf hi > out.txt"}));
             assert!(channel_card(&bash,Some(BASH),&channel::identity(&bash).unwrap()).unwrap().get("subagent_confirmation").is_none());
+        });
+    }
+
+    /// U19 (#520): the card lists its calls for the desktop's rows next to
+    /// subagent_calls: type, model, the task, and effort only when the tool
+    /// input or the agent definition gives it.
+    #[test] fn a_subagent_card_lists_its_calls_for_the_desktop() {
+        let dir=tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(),||{
+            let folder=dir.path().join("work");
+            std::fs::create_dir_all(folder.join(".claude/agents")).unwrap();
+            std::fs::write(folder.join(".claude/agents/reviewer.md"),"---\nname: reviewer\nmodel: sonnet\neffort: high\n---\nReview.\n").unwrap();
+            let input=json!({"subagent_type":"Explore","model":"haiku","effort":"low","description":"Find the callers"});
+            let mut r=hooked("Agent",input.clone());r["cwd"]=json!(folder.display().to_string());r["model"]=json!("claude-opus-4-6");
+            subagents_confirm::group_add("conversation","toolu_one",&input);
+            subagents_confirm::group_add("conversation","toolu_two",&json!({"subagent_type":"reviewer","description":"Review the diff"}));
+            subagents_confirm::group_add("conversation","toolu_three",&json!({"subagent_type":"general","description":"Write the fix"}));
+            let q=channel_card(&r,Some(AGENT_PANEL),&channel::identity(&r).unwrap()).unwrap();
+            assert_eq!(q["subagents"],json!([
+                {"id":"toolu_one","type":"Explore","model":"haiku","effort":"low","description":"Find the callers"},
+                {"id":"toolu_two","type":"reviewer","model":"sonnet","effort":"high","description":"Review the diff"},
+                {"id":"toolu_three","type":"general","model":"inherits claude-opus-4-6","description":"Write the fix"}]));
+            assert_eq!(q["subagent_calls"],json!(["toolu_one","toolu_two","toolu_three"]));
+            // The text stays for older readers, now with the definition's effort.
+            assert_eq!(q["questions"][0]["question"],"Start 3 subagents: Explore (model haiku, effort low): Find the callers; \
+                reviewer (model sonnet, effort high): Review the diff; general (model inherits claude-opus-4-6): Write the fix");
+            // The screen card without the waiting hook lists them too.
+            assert_eq!(card(&r,AGENT_PANEL)["subagents"].as_array().map(Vec::len),Some(3));
         });
     }
 

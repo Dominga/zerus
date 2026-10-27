@@ -66,6 +66,12 @@ did not show. Without the waiting hook (an older Claude Code, or the shell
 hook form on Windows), the card is answered with the panel's keys and only its
 own call is decided.
 
+The card also lists its calls in `subagents` (`id`, `type`, `model`, `effort`
+when the tool input or the agent definition gives it, and `description`); the
+desktop shows one row per subagent with Allow all and Deny, and the question
+text stays for older readers. A member's permission record and the lead's
+inbox item carry the same list.
+
 Automatic tool approvals never answer a subagent card: the approval journal
 refuses any card marked `subagent_confirmation` or for the `Agent`/`Task`
 tool. A team member's card reaches its lead like any other permission

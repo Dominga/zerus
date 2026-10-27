@@ -887,6 +887,7 @@ answered; a denial cannot carry an explanation.
   unknown or offline jobs never make a session wait. Desktop, Android, the shared fixtures and
   the docs (CLAUDE.md and AGENTS.md included) change together. Owner: yes.
 
+  Addition (owner, 2026-10-27): a seventh state, Build. A build or long test a session starts through Zerus (hgs team run templates, or hgs run for any session) is tracked by Zerus and shows Build with its label, command and time, right after Working; an idle agent with a Zerus build running is never Cooling or Cold, and its reply badge waits. Other unbudgeted background jobs stay services (dev servers, watchers, MCP). Agents start builds through Zerus so the owner does not ping a session that is still working. While a session is in Build, the desktop keeps its context warm with a keepalive every 30 minutes until the build ends.
 - **U31. Work ahead (owner, 2026-10-27).** In phase 37 the DeepSeek
   backends finished while the Claude members still worked the heavy GUI
   fixes, and they had nothing to take: the next phase was not approved. A
@@ -963,6 +964,108 @@ answered; a denial cannot carry an explanation.
   chips ("Summarize status", "Re-plan remaining work" and the planning and
   stuck pairs) are removed. Owner: yes.
 
+- **U36. Review and test inside each task's pipeline (owner, 2026-10-28).**
+  Today a task goes InProgress, Submitted, then the lead (or the member's
+  sub-lead, `reviewer_of`) accepts or rejects it; review and QA are separate
+  tasks at the end of a phase that read the whole integration, so findings
+  arrive late, in one batch, and the lead relays each of them. A task now
+  carries a pipeline: an ordered list of stages after the implementer's
+  report, each with its kind and who does it.
+  - **Stages.** `review` (a member reads the attempt's change against the
+    task's criteria), `test` (a member runs the task's suites and scenarios,
+    takes the criteria's shots) and `accept` (the lead, the sub-lead of
+    spec 5.6, or `auto`). A stage names a role (the first free member with
+    it takes the stage, rebalancing like tasks) or a pinned member; the
+    implementer never takes its own task's stage. New task statuses
+    `in_review` and `in_test` sit between Submitted and Accepted; the Board
+    shows them as columns (with U33's widths), Android and the shared
+    fixtures follow. Owner direction for this status change: yes.
+  - **Verdicts.** A stage member reports with `hgs team report` and a
+    verdict: `pass` moves the task to its next stage, `return` sends the
+    findings to the implementer as a new attempt with them attached,
+    without the lead. After a preset's maximum rounds (default 3) the task
+    goes to the lead with every round's findings. The lead and the owner
+    can still accept, reject, skip a stage or send the task back at any
+    stage, each with a reason; the feed records who did it.
+  - **Where a stage works.** The stage works in the task's own folder: the
+    implementer's worktree or clone, or the shared folder when the members
+    work in one folder without worktrees (a common case, not an exception).
+    Zerus gives the stage member that path and the permissions its stage
+    needs there: review reads, test also builds and writes only build
+    output and its own temporary folder; nothing else outside its own
+    folder. What changed comes from the attempt: its commits (B4) when the
+    folder is a Git checkout, otherwise the report's changed-file list and
+    the files' state at the report. While a task is in a stage that needs
+    its files on disk (test), its folder is held: the implementer's next
+    task in that folder waits and its card says "folder held by the test
+    of #N". A preset may instead test on a detached checkout of the
+    attempt's commits, which frees the implementer and costs one build.
+    In a shared folder other members keep working; the stage hand-off says
+    which files are the task's.
+  - **Presets.** The team catalog gains pipelines: named presets ("Code:
+    review, test, lead", "Docs: review, auto", "Check: lead", "None") with
+    their stages, maximum rounds and folder rule. A template names its
+    default pipeline and a role may name its own (a docs role uses Docs);
+    the plan and `edit-draft` can set a task's pipeline; the task keeps a
+    snapshot of it when it is assigned, so a later catalog edit does not
+    change a running task.
+  - **Team designer.** The catalog editor (Team designer page and Settings >
+    Teams) gets a Pipelines tab next to Roles, Templates and Routing:
+    the presets list, a stage editor (kind, role or member, folder rule,
+    rounds, final acceptance), the default per template and per role, the
+    designer's proposals with their keep or reject plates, and Try it on a
+    sample task. Manual edits stay local until Save, like the other tabs.
+  - **Load.** A stage queue per member is visible on the Board and in the
+    member's card; a second member with the stage's role takes waiting
+    stages. Test stages run only the suites of the files the task changed
+    (U28 rule 18); the full suites stay one pass in the lead's integration,
+    and a phase's own review and QA tasks become a short smoke check of
+    the integrated build.
+  Owner: yes, with the Pipelines tab and the task's folder for stages.
+
+- **U37. How long a task has worked, on its node (owner, 2026-10-28).**
+  A graph node, a Board card and a Layers row show the task's working time
+  in small text right after its activity label (U25 part 5), in the same
+  color and size: while it works, the time since the current attempt
+  started, ticking once a minute ("12m", "1h 05m"); once it is done, the
+  sum of its attempts' working spans and, with U36, its stage spans. Time
+  waiting for dependencies, a free member or the lead is not counted. The
+  tooltip breaks it down per attempt and stage, with the waits named
+  separately. Status gives every task a `timing` object computed on the
+  server (worked seconds, running since, waits), so the desktop, Android
+  and the profile of U38 read one number. One timer for the whole view,
+  no render per node. Owner: yes.
+
+- **U38. A pipeline profile after the work (owner, 2026-10-28).** When a
+  task, a phase or the plan is done, the owner and the lead see where the
+  time and the tokens went and what was lost.
+  - **Spans.** Each task's timeline is a list of spans computed from its
+    attempts and events: waiting for dependencies, waiting for a free
+    member, delivery and the start delay (A1), work, blocked on a question
+    or a permission (who answered, how long), Background and Build (U30),
+    waiting for the lead's decision, each U36 stage and round, rework
+    (rejected attempts and returned rounds), a held folder, no report or a
+    stop. Past phases get the same spans from the timestamps attempts
+    already keep; what was never recorded shows as unknown, never guessed.
+  - **Tokens.** Each attempt and stage gets the tokens and cost its member's
+    session spent inside the span (the native accounting of usage.rs and
+    the analytics measures `tokens`, `cost`, `work_ms`), per provider and
+    model; a provider without counters shows unknown.
+  - **Losses.** `hgs team profile` (a phase, a task or the plan; JSON,
+    bounded pages) ranks the losses by time and by tokens: rework and its
+    share of the task's tokens, waits on the lead, permission waits, idle
+    members while tasks were open, blocked chains, long test runs, merges
+    and conflicts; the planned critical path against the real one; per
+    member, role and model the utilization and tokens per accepted task.
+  - **Profile view.** The team workspace gains Profile beside Graph, Board
+    and Layers: a timeline per member lane with the spans colored by kind,
+    the real critical path marked, the top losses as a list linked to
+    their tasks and spans, a tokens bar per task, and a compare of two
+    phases. The Graph and Board can overlay the profile as a heat tint.
+  - **Use.** The lead's phase report names the phase's top three losses,
+    and planning (U28) reads the per-role numbers when it weighs lanes.
+  Owner: yes.
+
 ## Phases 37-40 (replanned 2026-10-27)
 
 Phase 36 closed without its own build: its review findings and the build go to
@@ -986,6 +1089,24 @@ phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
   and their weight-based health warnings, U27 visual lanes, U29 adding a task
   to a running phase, U30 six session states (server, desktop, Android), U31
   work ahead; build.
+
+## Phases 41-43 (planned 2026-10-28)
+
+- **41 Test stability, upstream merge and the PR draft**: the five recurring
+  test failure groups fixed at their cause, a new baseline, the upstream
+  ufna/zerus main merged into the fork, and the pull request prepared (no
+  push without the owner's word).
+- **42 Task pipelines: review and test inside each task (U36)**: a mock-up
+  first (the Pipelines tab, the new Board columns, the stage chips), then the
+  server model and CLI, stage delivery in the task's folder, the Pipelines
+  tab, the Board and task views, Android, the lead protocol and docs;
+  integration, review, QA and the build. It starts after the upstream merge
+  (#528) so the merge does not also carry this work. With it, each task's
+  working time on its node (U37).
+- **43 The pipeline profile (U38)**: a mock-up first, then the spans and
+  their tokens on the server, `hgs team profile` with the ranked losses,
+  the Profile view and the heat overlay, the lead protocol and docs;
+  integration, review, QA and the build.
 
 ## Order of work (proposal)
 

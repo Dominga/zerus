@@ -5,6 +5,9 @@
 #include <QPointer>
 #include <QScrollBar>
 #include <QtTest>
+#include <QPainter>
+#include <memory>
+#include <tuple>
 #include <QStandardItemModel>
 #include <algorithm>
 #include <QStyle>
@@ -34,6 +37,8 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include "AgentWorking.h"
+#include "CollapsibleBlock.h"
 #include "HgsClient.h"
 #include "TeamCatalogEditor.h"
 #include "TeamController.h"
@@ -47,6 +52,7 @@
 #include "TeamTemplateList.h"
 #include "TeamWidgets.h"
 #include "TeamWorkspace.h"
+#include "WorkspaceStyle.h"
 #include "support/FakeCli.h"
 
 using namespace Teams;
@@ -492,6 +498,13 @@ private slots:
     void designerPageStartsOrOpensTheDesigner();
     void catalogEditorMarksManualEdits();
     void boardColumnsKeepTheirScroll();
+    void skinTokensMatchThePrototype();
+    void rolePaletteReadsTheCatalog();
+    void scrollBarsAreThin();
+    void gearAndBellOffIcons();
+    void collapsibleBlockKeepsItsState();
+    void agentWorkingIndicatorFollowsTheSetting();
+    void foundationShots();
 private:
     QString script() const { return m_dir.filePath("hgs"); }
     void setTeam(const QJsonObject &value) { QVERIFY(FakeCli::replace(script() + ".status", QJsonDocument(value).toJson(QJsonDocument::Compact))); }
@@ -3830,6 +3843,271 @@ void TestTeamsUi::limitedAndSharedHostMembersAreMarked()
         auto *mark = workspace.findChild<QWidget *>("teamWorkspaceMemberLimited");
         return mark && mark->toolTip().contains("no reset time");
     })());
+}
+
+// U25 part 1: the Compact skin carries every prototype token for both themes,
+// and any skin answers a token it does not name with the prototype's value.
+void TestTeamsUi::skinTokensMatchThePrototype()
+{
+    const auto skins = WorkspaceSkin::builtins();
+    QCOMPARE(skins[1].id, QString("whitewh"));
+    for (const bool dark : {true, false})
+        for (const auto &[name, d, l] : WorkspaceSkin::designTokens())
+            QVERIFY2(WorkspaceSkin::color(skins[1], dark, QString::fromLatin1(name)) == QColor(QString::fromLatin1(dark ? d : l)),
+                     qPrintable(QStringLiteral("%1 (%2)").arg(QString::fromLatin1(name), dark ? "dark" : "light")));
+    QCOMPARE(WorkspaceSkin::color(skins[1], true, "cardBorder"), QColor("#232932"));
+    QCOMPARE(WorkspaceSkin::color(skins[1], false, "text3"), QColor("#415060"));
+    // The plain Zerus skin keeps its own workspace colors and takes the rest.
+    QCOMPARE(WorkspaceSkin::color(skins[0], true, "bg"), QColor(skins[0].dark.background));
+    QCOMPARE(WorkspaceSkin::color(skins[0], true, "label"), QColor("#8f97a2"));
+    // A skin's view colors override a token, roles included.
+    auto own = skins[1];
+    own.darkViewColors.insert("roleCoder", "#123456");
+    QCOMPARE(WorkspaceSkin::color(own, true, "roleCoder"), QColor("#123456"));
+    // The team surfaces read the tokens of the selected skin.
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto c = TeamUi::colorsFor(false);
+    QCOMPARE(c.text3, QColor("#415060")); QCOMPARE(c.accentMuted, QColor("#4f8f78")); QCOMPARE(c.label, QColor("#647181"));
+    QCOMPARE(c.cardBorder, QColor("#e1e6eb")); QCOMPARE(c.segOn, QColor("#e0f0e9")); QCOMPARE(c.tile, QColor("#eef2f5"));
+    QSettings().remove("workspace/skin");
+}
+
+// U25 part 1: the new roles have the prototype's colors; a color the catalog
+// gives a role wins over the palette.
+void TestTeamsUi::rolePaletteReadsTheCatalog()
+{
+    const auto saved = Teams::catalogRoleColors();
+    Teams::catalogRoleColors().clear();
+    QSettings().setValue("workspace/skin", "whitewh");
+    const QList<std::tuple<QString, QString, QString>> roles{
+        {"secretary", "#7fcf9a", "#2f7d4a"}, {"coder", "#e8a75a", "#a35f10"}, {"qa", "#4fd1c5", "#0f7a72"},
+        {"designer", "#ef7d8d", "#b8384b"}, {"leadgpt", "#9aa5ff", "#4652c4"}, {"expert", "#e0b070", "#8a5d16"},
+        {"proexpert", "#ef7d6d", "#b8402f"}, {"lead", "#b79cff", "#6f4fd8"}, {"backend", "#6fa8ff", "#2f66c9"}};
+    for (const auto &[role, dark, light] : roles) {
+        QCOMPARE(TeamUi::roleColor(role, true), QColor(dark));
+        QCOMPARE(TeamUi::roleColor(role, false), QColor(light));
+    }
+    // Names as the catalog writes them: the longest palette role they contain.
+    QCOMPARE(TeamUi::roleColor("Lead (GPT)", true), QColor("#9aa5ff"));
+    QCOMPARE(TeamUi::roleColor("ProExpert", true), QColor("#ef7d6d"));
+    QCOMPARE(TeamUi::roleColor("backend-2", true), QColor("#6fa8ff"));
+    // Any other role gets a stable palette color, never a lead's.
+    const QColor other = TeamUi::roleColor("cartographer", true);
+    QCOMPARE(TeamUi::roleColor("cartographer", true), other);
+    QVERIFY(other != QColor("#b79cff") && other != QColor("#9aa5ff"));
+    // The Team designer recolors a role: the catalog's color wins, by id and name.
+    Catalog recolored;
+    Role coder; coder.id = "coder"; coder.name = "Coder"; coder.color = "#22aa55"; recolored.roles << coder;
+    Role broken; broken.id = "qa"; broken.color = "url(x)"; recolored.roles << broken;
+    Teams::rememberRoleColors(recolored);
+    QCOMPARE(TeamUi::roleColor("coder", true), QColor("#22aa55"));
+    QCOMPARE(TeamUi::roleColor("Coder", false), QColor("#22aa55"));
+    QCOMPARE(TeamUi::roleColor("qa", true), QColor("#4fd1c5"));
+    Teams::catalogRoleColors() = saved;
+    QSettings().remove("workspace/skin");
+}
+
+// U25 part 1: thin 8 px scroll bars without arrows, the thumb text3 at 24 %.
+void TestTeamsUi::scrollBarsAreThin()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const QString sheet = workspaceScrollbars(true);
+    QVERIFY(sheet.contains("QScrollBar:vertical { width:8px;"));
+    QColor thumb("#aab1ba"); thumb.setAlphaF(.24);
+    QVERIFY(sheet.contains(thumb.name(QColor::HexArgb)));
+    QColor hover("#aab1ba"); hover.setAlphaF(.45);
+    QVERIFY(sheet.contains(hover.name(QColor::HexArgb)));
+    QWidget box; box.setStyleSheet(sheet); box.resize(240, 160);
+    auto *list = new QListWidget(&box); list->resize(240, 160);
+    for (int i = 0; i < 60; ++i) list->addItem(QStringLiteral("Row %1").arg(i));
+    box.show(); QTest::qWait(20);
+    QTRY_VERIFY(list->verticalScrollBar()->isVisible());
+    QCOMPARE(list->verticalScrollBar()->width(), 8);
+    QSettings().remove("workspace/skin");
+}
+
+// U25 part 1: the toothed gear of the prototype (the title bar's 19 px and the
+// services chip) and the crossed-out bell of mute.
+void TestTeamsUi::gearAndBellOffIcons()
+{
+    const auto painted = [](const QString &name) {
+        const QImage image = workspaceIcon(name, QColor("#ffffff")).pixmap(48, 48).toImage();
+        int count = 0;
+        for (int y = 0; y < image.height(); ++y) for (int x = 0; x < image.width(); ++x) count += image.pixelColor(x, y).alpha() > 128;
+        return std::pair{image, count};
+    };
+    QVERIFY(prototypeIconPath("settings")); QVERIFY(prototypeIconPath("bell-off"));
+    QPixmap probe(24, 24); probe.fill(Qt::transparent);
+    { QPainter p(&probe); QVERIFY2(paintPrototypeIcon(p, 24, prototypeIconPath("settings"), Qt::white), "the SVG image plugin is missing"); }
+    const auto [gear, gearInk] = painted("settings");
+    const auto [bell, bellInk] = painted("bell");
+    const auto [off, offInk] = painted("bell-off");
+    QVERIFY(gearInk > 100); QVERIFY(bellInk > 60); QVERIFY(offInk > 60);
+    QVERIFY(bell != off);
+    // Mute is the crossed-out bell now.
+    QCOMPARE(painted("mute").first, off);
+    // The gear's teeth: its outline reaches the corners' diagonals, which the old
+    // sun of spokes never did, and its centre hole is clear.
+    QVERIFY(gear.pixelColor(24, 24).alpha() < 60);
+    QVERIFY(!workspaceIcon("settings", QColor("#9aa3ad")).pixmap(19, 19).isNull());
+}
+
+// U25 part 1: the one collapsible block: chevron header, aria-expanded, the
+// collapsed summary and its state in QSettings under its key.
+void TestTeamsUi::collapsibleBlockKeepsItsState()
+{
+    QSettings().remove(CollapsibleBlock::settingsKey("test/folders"));
+    QList<bool> changes;
+    {
+        CollapsibleBlock block("test/folders", "Folders", false);
+        block.setNote("3"); block.setSummary("zerus, docs, mobile");
+        auto *add = new QPushButton("Folder"); block.trailing()->addWidget(add);
+        auto *row = new QLabel("D:/Work/zerus"); block.body()->addWidget(row);
+        block.expandedChanged = [&](bool open) { changes << open; };
+        block.resize(360, 120); block.show(); QTest::qWait(20);
+        QVERIFY(!block.isExpanded());
+        QVERIFY(!row->isVisible()); QVERIFY(add->isVisible());
+        auto *header = block.findChild<QPushButton *>("collapsibleHeader");
+        auto *summary = block.findChild<QPushButton *>("collapsibleSummary");
+        QVERIFY(header && summary);
+        QVERIFY(!header->isChecked()); QCOMPARE(header->property("expanded").toBool(), false);
+        QCOMPARE(header->accessibleDescription(), QString("Collapsed")); QCOMPARE(header->accessibleName(), QString("Folders"));
+        QVERIFY(summary->isVisible()); QCOMPARE(summary->text(), QString("zerus, docs, mobile"));
+        QCOMPARE(block.findChild<QLabel *>("collapsibleNote")->text(), QString("3"));
+        header->click();
+        QVERIFY(block.isExpanded()); QVERIFY(row->isVisible()); QVERIFY(!summary->isVisible()); QVERIFY(add->isVisible());
+        QVERIFY(header->isChecked()); QCOMPARE(header->accessibleDescription(), QString("Expanded"));
+        QCOMPARE(QSettings().value(CollapsibleBlock::settingsKey("test/folders")).toBool(), true);
+        // The keyboard toggles it as well.
+        header->setFocus(); QTest::keyClick(header, Qt::Key_Space);
+        QVERIFY(!block.isExpanded());
+        summary->click();   // the summary expands the block
+        QVERIFY(block.isExpanded());
+    }
+    QCOMPARE(changes, (QList<bool>{true, false, true}));
+    // A new block under the same key starts as it was left.
+    CollapsibleBlock again("test/folders", "Folders", false);
+    QVERIFY(again.isExpanded());
+    // No key keeps no state.
+    CollapsibleBlock loose({}, "Loose", false);
+    loose.setExpanded(true);
+    QVERIFY(!QSettings().contains(CollapsibleBlock::settingsKey({})));
+    QSettings().remove(CollapsibleBlock::settingsKey("test/folders"));
+}
+
+// U25 part 1: the agent-works indicator: an accent ring and three dots in a
+// wave under the model tile; static when animations are off.
+void TestTeamsUi::agentWorkingIndicatorFollowsTheSetting()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    const auto frame = [](bool working, double phase) {
+        QImage image(17, 17 + AgentWorking::Below, QImage::Format_ARGB32_Premultiplied); image.fill(Qt::transparent);
+        QPainter p(&image);
+        AgentWorking::paintTile(p, QRectF(0, 0, 17, 17), workspaceIcon("terminal", QColor("#c4cad1")), true, working, phase);
+        return image;
+    };
+    AgentWorking::setAnimated(true);
+    // The risen dot walks left, middle, right in one period.
+    QCOMPARE(AgentWorking::rise(0, 0), 1.0); QCOMPARE(AgentWorking::rise(1, 1 / 3.0), 1.0); QCOMPARE(AgentWorking::rise(2, 2 / 3.0), 1.0);
+    QCOMPARE(AgentWorking::rise(1, 0), 0.0);
+    QVERIFY(frame(true, 0) != frame(true, 1 / 3.0));
+    // Idle: no ring, no dots under the tile.
+    const QImage idle = frame(false, 0), busy = frame(true, 0);
+    bool dotsIdle = false, dotsBusy = false;
+    for (int y = 18; y < idle.height(); ++y) for (int x = 0; x < 17; ++x) {
+        dotsIdle = dotsIdle || idle.pixelColor(x, y).alpha() > 0;
+        dotsBusy = dotsBusy || busy.pixelColor(x, y).alpha() > 0;
+    }
+    QVERIFY(!dotsIdle); QVERIFY(dotsBusy);
+    // The ring: the accent mixed into the card border, on the tile's edge.
+    const QColor edgeIdle = idle.pixelColor(8, 0), edgeBusy = busy.pixelColor(8, 0);
+    QVERIFY(edgeBusy.green() > edgeIdle.green() + 40);
+    // Animations off: the dots stand still at every phase.
+    AgentWorking::setAnimated(false);
+    QCOMPARE(frame(true, 0), frame(true, 1 / 3.0));
+    AgentTile tile; tile.setAgent("claude"); tile.setWorking(true); tile.show(); QTest::qWait(20);
+    QVERIFY(!tile.isAnimating());
+    AgentWorking::setAnimated(true); tile.refreshAnimation();
+    QVERIFY(tile.isAnimating());
+    QCOMPARE(tile.size(), QSize(17, 17 + AgentWorking::Below));
+    tile.hide(); QVERIFY(!tile.isAnimating());
+    tile.show(); tile.setWorking(false); QVERIFY(!tile.isAnimating());
+    QSettings().remove("workspace/skin");
+}
+
+namespace {
+// The part-1 pieces together, as the shots show them in either theme.
+QWidget *foundationShowcase(bool dark)
+{
+    const auto &skin = WorkspaceSkin::active();
+    const auto t = [&skin, dark](const char *name) { return WorkspaceSkin::color(skin, dark, QString::fromLatin1(name)); };
+    const auto c = TeamUi::colorsFor(dark);
+    auto *page = new QWidget; page->setObjectName("uxFoundation");
+    page->setStyleSheet(QStringLiteral("QWidget#uxFoundation{background:%1;}QLabel{color:%2;background:transparent;}").arg(t("bg").name(), t("fg").name())
+                        + TeamUi::teamSheet(c) + workspaceScrollbars(dark));
+    auto *v = new QVBoxLayout(page); v->setContentsMargins(16, 14, 16, 14); v->setSpacing(12);
+    const auto caption = [&](const QString &text) { auto *l = TeamUi::label(text, t("label"), 11); v->addWidget(l); };
+    caption(QStringLiteral("Role palette"));
+    auto *roles = new TeamUi::FlowLayout(6);
+    for (const auto &role : WorkspaceSkin::paletteRoles()) roles->addWidget(new TeamUi::Pill(role, TeamUi::roleColor(role, dark)));
+    v->addLayout(roles);
+    caption(QStringLiteral("Icons"));
+    auto *icons = TeamUi::row(10);
+    auto *gear = new QPushButton; gear->setProperty("ghost", true); gear->setIcon(workspaceIcon("settings", t("muted")));
+    gear->setIconSize(QSize(19, 19)); gear->setFixedSize(30, 28); gear->setToolTip("Settings");
+    icons->addWidget(gear);
+    auto *chip = new QPushButton(QStringLiteral("2")); chip->setProperty("chip", true); chip->setIcon(workspaceIcon("settings", t("muted")));
+    chip->setIconSize(QSize(12, 12)); icons->addWidget(chip);
+    for (const char *name : {"bell", "bell-off"}) {
+        auto *icon = new QLabel; icon->setPixmap(workspaceIcon(QString::fromLatin1(name), t(name == QByteArray("bell") ? "muted" : "dim")).pixmap(16, 16));
+        icons->addWidget(icon);
+    }
+    icons->addStretch(1);
+    v->addLayout(icons);
+    caption(QStringLiteral("Agent works"));
+    auto *tiles = TeamUi::row(14);
+    for (const auto &[agent, working, size] : QList<std::tuple<QString, bool, int>>{{"claude", false, 17}, {"codex", true, 17}, {"kimi", true, 22}, {"dsh", false, 22}}) {
+        auto *tile = new AgentTile(size); tile->setAgent(agent); tile->setDark(dark); tile->setWorking(working);
+        tiles->addWidget(tile, 0, Qt::AlignTop);
+    }
+    tiles->addStretch(1);
+    v->addLayout(tiles);
+    auto *folders = new CollapsibleBlock({}, QStringLiteral("Folders"), true);
+    folders->setDark(dark); folders->setNote(QStringLiteral("3"));
+    auto *add = new QPushButton(QStringLiteral("Folder")); add->setProperty("ghost", true); add->setIcon(workspaceIcon("add", t("text2")));
+    folders->trailing()->addWidget(add);
+    for (const char *row : {"zerus  ·  D:/Work/zerus", "docs  ·  D:/Work/docs", "mobile  ·  D:/Work/mobile"})
+        folders->body()->addWidget(TeamUi::label(QString::fromUtf8(row), t("text2"), 12));
+    v->addWidget(folders);
+    auto *templates = new CollapsibleBlock({}, QStringLiteral("Templates"), false);
+    templates->setDark(dark); templates->setNote(QStringLiteral("3"));
+    templates->setSummary(QStringLiteral("Feature delivery → Bugfix → Dev Team"));
+    templates->body()->addWidget(TeamUi::label(QStringLiteral("hidden"), t("text2"), 12));
+    v->addWidget(templates);
+    caption(QStringLiteral("Scroll bars"));
+    auto *list = new QListWidget; list->setFixedHeight(96);
+    list->setStyleSheet(QStringLiteral("QListWidget{background:%1;border:1px solid %2;border-radius:8px;color:%3;}").arg(t("surface").name(), t("cardBorder").name(), t("text2").name()));
+    for (int i = 1; i <= 30; ++i) list->addItem(QStringLiteral("Session %1").arg(i));
+    v->addWidget(list);
+    v->addStretch(1);
+    return page;
+}
+}
+
+// U25 part 1: the shots of the pieces, dark and light (ux-1-*).
+void TestTeamsUi::foundationShots()
+{
+    QSettings().setValue("workspace/skin", "whitewh");
+    darkPalette();
+    std::unique_ptr<QWidget> dark(foundationShowcase(true));
+    dark->resize(460, 600); dark->show(); QTest::qWait(60);
+    shot(dark.get(), "ux-1-foundation-dark");
+    dark.reset();
+    std::unique_ptr<QWidget> light(foundationShowcase(false));
+    light->resize(460, 600); light->show(); QTest::qWait(60);
+    if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) lightShot(light.get(), "ux-1-foundation-light");
+    darkPalette();
+    QSettings().remove("workspace/skin");
 }
 
 #include "test_teamsui.moc"

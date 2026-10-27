@@ -30,6 +30,33 @@ inline QIcon agentLogoIcon(const QString &agent, const QColor &color)
     return icon;
 }
 
+// U25: icons drawn from the owner's prototype (Zerus-prototype.html, its `I`
+// table): the toothed settings gear, also on the services chip, and the bell
+// and crossed-out bell of notifications and mute. Its strokes: 1.6, round.
+inline const char *prototypeIconPath(const QString &name)
+{
+    static const QHash<QString, const char *> paths{
+        {"settings", "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"},
+        {"bell", "M6 16V11a6 6 0 0 1 12 0v5l2 2H4zM10 20a2 2 0 0 0 4 0"},
+        {"bell-off", "M8.7 4.3A6 6 0 0 1 18 11v4M6 11v5l-2 2h12M10 20a2 2 0 0 0 4 0M3 3l18 18"},
+        {"mute", "M8.7 4.3A6 6 0 0 1 18 11v4M6 11v5l-2 2h12M10 20a2 2 0 0 0 4 0M3 3l18 18"}};
+    return paths.value(name);
+}
+
+// Draws a prototype path into a square pixmap of `size`; false when the SVG
+// image plugin is missing, and the caller paints its older line icon.
+inline bool paintPrototypeIcon(QPainter &painter, int size, const char *path, const QColor &color)
+{
+    const QByteArray svg = QStringLiteral("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%1\" height=\"%1\" viewBox=\"0 0 24 24\">"
+                                          "<path d=\"%2\" fill=\"none\" stroke=\"%3\" stroke-opacity=\"%4\" stroke-width=\"1.6\" "
+                                          "stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>")
+                               .arg(size).arg(QLatin1String(path), color.name()).arg(color.alphaF()).toUtf8();
+    QPixmap drawn;
+    if (!drawn.loadFromData(svg, "SVG")) return false;
+    painter.save(); painter.resetTransform(); painter.drawPixmap(0, 0, drawn); painter.restore();
+    return true;
+}
+
 // One small stroke family, drawn at native DPR instead of platform-dependent glyphs.
 inline QIcon workspaceIcon(const QString &name, const QColor &color)
 {
@@ -46,7 +73,8 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         QPixmap pm(size, size); pm.fill(Qt::transparent);
         QPainter p(&pm); p.setRenderHint(QPainter::Antialiasing); p.scale(size / 24., size / 24.);
         p.setPen(QPen(color, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.setBrush(Qt::NoBrush);
-        if (name == "github" || name == "zerus") {
+        if (const char *path = prototypeIconPath(name); path && paintPrototypeIcon(p, size, path, color)) {
+        } else if (name == "github" || name == "zerus") {
             p.resetTransform(); p.drawPixmap(0, 0, symbol.pixmap(size, size));
             p.setCompositionMode(QPainter::CompositionMode_SourceIn); p.fillRect(pm.rect(), color);
         } else if (name == "codex") {

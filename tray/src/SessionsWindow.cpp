@@ -1,6 +1,7 @@
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "AgentWorking.h"
 #include <QStandardPaths>
 #include "WorktreeBatchCleanupDialog.h"
 #include "SessionNotifications.h"
@@ -2104,12 +2105,6 @@ void SessionsWindow::applyTheme()
         QListWidget#settingsSections::item:selected { background:%10;color:%5; }
         QListWidget#settingsSections::item:hover { background:%7; }
         QWidget#settingsPage QScrollArea, QWidget#settingsContent, QWidget#relaySettings, QWidget#speechSettings, QWidget#downloadCacheSettings, QDialog#speechProfileEditor QScrollArea, QWidget#speechEditorContent, QDialog#swarmDialog QScrollArea, QWidget#swarmConflictContent { background:transparent;border:0; }
-        QDialog#speechProfileEditor QScrollBar:vertical { background:%1; width:10px; margin:0; border:0; }
-        QDialog#speechProfileEditor QScrollBar:horizontal { background:%1; height:10px; margin:0; border:0; }
-        QDialog#speechProfileEditor QScrollBar::handle:vertical { background:%4; border-radius:4px; min-height:24px; }
-        QDialog#speechProfileEditor QScrollBar::handle:horizontal { background:%4; border-radius:4px; min-width:24px; }
-        QDialog#speechProfileEditor QScrollBar::add-line, QDialog#speechProfileEditor QScrollBar::sub-line { width:0; height:0; }
-        QDialog#speechProfileEditor QScrollBar::add-page, QDialog#speechProfileEditor QScrollBar::sub-page { background:transparent; }
         QPushButton#railButton:checked { background:%10; border-color:%4; }
         QPushButton#sessionFilter { padding:4px 2px; min-height:22px; font-size:11px; background:transparent; border-color:transparent; }
         QPushButton#sessionFilter:checked { background:%10; border-color:%4; color:%5; }
@@ -2212,6 +2207,7 @@ void SessionsWindow::applyTheme()
         m_attentionCount > 0, QSettings().value("workspace/reduceMotion", false).toBool());
     m_sessions->setProperty("hgsDark", m_dark);
     m_sessions->setActivityAnimationEnabled(QSettings().value("workspace/animateActivity", true).toBool());
+    AgentWorking::setAnimated(QSettings().value("workspace/animateActivity", true).toBool());   // U25: the working dots
     m_projectsPage->setTheme(m_dark); m_accountsPage->setTheme(m_dark); m_machinesPage->setTheme(m_dark); m_providerBadge->setTheme(m_dark); m_machineBadge->setTheme(m_dark);
     m_accountUsage->setTheme(m_dark);
     m_usageWarning->setStyleSheet(QString("QLabel{color:%1;}").arg(m_dark?"#ffabab":"#a42330"));
@@ -6435,6 +6431,8 @@ void SessionsWindow::placeRailControls(bool inTitle)
         m_titleBar->markSlot()->addWidget(m_brand); m_brand->setFixedSize(30, 30);
         for (auto *button : leading) { m_titleBar->leading()->addWidget(button); button->setFixedSize(30, 28); button->setIconSize(QSize(17, 17)); }
         for (auto *button : trailing) { m_titleBar->trailing()->addWidget(button); button->setFixedSize(30, 28); button->setIconSize(QSize(17, 17)); }
+        // U25: the prototype's title-bar gear is 19 px.
+        m_settingsNav->setIconSize(QSize(19, 19));
         m_attentionBadge->setGeometry(16, 0, 14, 13);
         m_statusLayout->addWidget(m_versionButton); m_versionButton->setFixedSize(40, 22);
     } else {

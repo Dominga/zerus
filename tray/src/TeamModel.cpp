@@ -1360,6 +1360,31 @@ QJsonObject Catalog::json() const
     return {{"version", version}, {"roles", r}, {"templates", t}, {"routing", u}};
 }
 
+QHash<QString, QString> &catalogRoleColors()
+{
+    static QHash<QString, QString> colors;
+    return colors;
+}
+
+QString roleColorKey(const QString &role)
+{
+    QString key;
+    for (const QChar c : role.toLower()) if (c.isLetterOrNumber()) key += c;
+    return key;
+}
+
+void rememberRoleColors(const Catalog &catalog)
+{
+    auto &colors = catalogRoleColors();
+    colors.clear();
+    for (const auto &role : catalog.roles) {
+        // A plain #hex or color name; the desktop checks it again as a QColor.
+        static const QRegularExpression plain(QStringLiteral("\\A(?:#[0-9A-Fa-f]{3,8}|[A-Za-z]{3,30})\\z"));
+        if (!plain.match(role.color.trimmed()).hasMatch()) continue;
+        for (const auto &name : {role.id, role.name}) if (!roleColorKey(name).isEmpty()) colors.insert(roleColorKey(name), role.color.trimmed());
+    }
+}
+
 Catalog parseCatalog(const QJsonObject &get)
 {
     Catalog c;

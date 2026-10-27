@@ -29,22 +29,25 @@ namespace TeamUi {
 QIcon agentLogo(const QString &agent, const QColor &color);   // below, with agentIcon
 using namespace Teams;
 
+// U25: the prototype's design tokens of the selected skin (WorkspaceSkin::color).
+// `card` is the field color team surfaces have always filled boxes with; the
+// prototype's card color is `cardFill`.
 struct Colors {
     QColor fg, text2, text3, muted, dim, accent, accentMuted, warn, danger, folder, surface, border, card, tile;
+    QColor bg, label, hover, segOn, selAgent, cardFill, cardBorder, violet, accentText, accentHover;
     bool dark = true;
 };
 
 inline Colors colorsFor(bool dark)
 {
-    const auto skin = WorkspaceSkin::current();
-    const auto t = NewSessionDense::tokens(skin, dark);
-    const auto &p = skin.palette(dark);
+    const auto &skin = WorkspaceSkin::active();
+    const auto t = [&skin, dark](const char *name) { return WorkspaceSkin::color(skin, dark, QString::fromLatin1(name)); };
     Colors c;
-    c.dark = dark; c.fg = t.text; c.text2 = t.text2; c.text3 = t.text3; c.muted = t.muted; c.dim = t.dim;
-    c.accent = t.accent; c.warn = t.warn; c.danger = t.danger; c.folder = t.folder;
-    c.accentMuted = QColor(dark ? "#5c9e86" : "#4f8f78");
-    c.surface = QColor(p.surface.isEmpty() ? (dark ? "#1b1f26" : "#ffffff") : p.surface);
-    c.border = t.border; c.card = t.field; c.tile = QColor(dark ? "#0f1318" : "#eef2f5");
+    c.dark = dark; c.fg = t("fg"); c.text2 = t("text2"); c.text3 = t("text3"); c.muted = t("muted"); c.dim = t("dim");
+    c.accent = t("accent"); c.accentMuted = t("accentMuted"); c.warn = t("warn"); c.danger = t("danger"); c.folder = t("folder");
+    c.surface = t("surface"); c.border = t("border"); c.card = t("field"); c.tile = t("tile");
+    c.bg = t("bg"); c.label = t("label"); c.hover = t("hover"); c.segOn = t("segOn"); c.selAgent = t("selAgent");
+    c.cardFill = t("card"); c.cardBorder = t("cardBorder"); c.violet = t("violet"); c.accentText = t("accentText"); c.accentHover = t("accentHover");
     return c;
 }
 
@@ -64,18 +67,24 @@ inline QColor toneColor(const Colors &c, Tone tone)
     return c.text2;
 }
 
-// The handoff's role palette; other roles get a stable color from it.
+// U25: a role's color. The color the catalog gives the role (Team designer)
+// wins; then the skin's palette token role<Name> for the role or the palette
+// role its name contains ("Lead (GPT)" is leadgpt, "backend-2" backend); any
+// other role gets a stable palette color.
 inline QColor roleColor(const QString &role, bool dark)
 {
-    static const QList<std::tuple<const char *, const char *, const char *>> palette{
-        {"lead", "#b79cff", "#6f4fd8"}, {"architect", "#8e9bff", "#3d4bc4"}, {"backend", "#6fa8ff", "#2f66c9"},
-        {"frontend", "#f08bb4", "#b83a72"}, {"tester", "#56c8e0", "#137f95"}, {"reviewer", "#d9b38c", "#8a5a2b"},
-        {"security", "#e48de0", "#a2349c"}, {"integrator", "#a3b1c6", "#4d5d75"}, {"researcher", "#b9d36b", "#5f7a12"}};
-    const auto key = role.toLower();
-    for (const auto &[name, d, l] : palette) if (key.contains(QLatin1String(name))) return QColor(dark ? d : l);
-    const auto &[name, d, l] = palette[1 + qHash(key) % (palette.size() - 1)];
-    Q_UNUSED(name);
-    return QColor(dark ? d : l);
+    const QString key = Teams::roleColorKey(role);
+    if (const QColor own(Teams::catalogRoleColors().value(key)); own.isValid()) return own;
+    const auto token = [dark](const QString &name) {
+        return WorkspaceSkin::color(WorkspaceSkin::active(), dark, QStringLiteral("role") + name.left(1).toUpper() + name.mid(1));
+    };
+    const QStringList roles = WorkspaceSkin::paletteRoles();
+    if (roles.contains(key)) return token(key);
+    for (const auto &name : roles) if (key.contains(name)) return token(name);
+    // Never a lead's color for a role that is not a lead.
+    QStringList others = roles;
+    others.removeAll(QStringLiteral("lead")); others.removeAll(QStringLiteral("leadgpt"));
+    return token(others.at(int(qHash(key) % uint(others.size()))));
 }
 
 inline QColor alpha(QColor color, double a) { color.setAlphaF(a); return color; }
@@ -1376,9 +1385,7 @@ inline QString duration(double seconds)
 // surface's top widget; children inherit it.
 inline QString teamSheet(const Colors &c)
 {
-    const QString accentText = c.dark ? QStringLiteral("#0f1a16") : QStringLiteral("#ffffff");
-    const QString accentHover = c.dark ? QStringLiteral("#a8e6cc") : QStringLiteral("#115d46");
-    const QString segmentOn = c.dark ? QStringLiteral("#26443a") : QStringLiteral("#e0f0e9");
+    const QString accentText = c.accentText.name(), accentHover = c.accentHover.name(), segmentOn = c.segOn.name();
     const auto a = [](const QColor &color, double value) { return alpha(color, value).name(QColor::HexArgb); };
     return QStringLiteral(
         "QPushButton{background:transparent;color:%1;border:1px solid %2;border-radius:7px;padding:4px 10px;}"

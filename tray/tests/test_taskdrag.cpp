@@ -210,11 +210,12 @@ void TestTaskDrag::everyStagePersistsOrderInBothBoardSurfaces() {
         auto *page = inspector.findChild<QWidget *>("taskInspectorCards");
         const auto card = [&](int n) { return inspector.findChild<TaskRow *>(QString("taskInspectorRow:T-%1").arg(n, 6, 10, QLatin1Char('0'))); };
         QVERIFY(drop(page, TaskDrag::of("project-1", item(3, stage)), card(1)->mapTo(page, QPoint(60, 2))));
-        QTRY_VERIFY(card(3)->y() < card(1)->y());
-        board.refresh(); QTRY_VERIFY(row(board, 3)->y() < row(board, 1)->y());
+        QTRY_VERIFY(card(3) && card(1) && card(3)->y() < card(1)->y());
+        board.refresh(); QTRY_VERIFY(row(board, 3) && row(board, 1) && row(board, 3)->y() < row(board, 1)->y());
         auto *boardPage = board.findChild<QWidget *>("taskListPage"); QVERIFY(boardPage);
+        QTRY_VERIFY(row(board, 2) && row(board, 3));
         QVERIFY(drop(boardPage, TaskDrag::of("project-1", item(2, stage)), row(board, 3)->mapTo(boardPage, QPoint(60, 2))));
-        QTRY_VERIFY(card(2)->y() < card(3)->y());
+        QTRY_VERIFY(card(2) && card(3) && card(2)->y() < card(3)->y());
         for (const auto &call : FakeTasksCli::calls(dir.path())) QVERIFY(call.value(1) == "list" || call.value(1) == "move");
     }
 }

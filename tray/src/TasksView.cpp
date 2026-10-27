@@ -193,13 +193,21 @@ void TasksView::request(const QStringList &arguments, const QString &input, std:
 
 void TasksView::refresh() {
     m_timer.stop();
-    if (m_projectId.isEmpty() || m_listing) return;
+    if (m_projectId.isEmpty()) return;
+    // A mutation may finish while an older list snapshot is in flight. One
+    // follow-up read must observe it even when periodic polling is disabled.
+    if (m_listing) { m_refreshPending = true; return; }
+    m_refreshPending = false;
     const auto generation = m_generation; m_listing = generation + 1;
     request({QStringLiteral("list"), QStringLiteral("--project"), m_projectId}, {},
-        [this, generation](const QJsonObject &listing) { m_listing = 0; received(listing, generation); },
+        [this, generation](const QJsonObject &listing) {
+            m_listing = 0;
+            if (m_refreshPending || generation != m_generation) { refresh(); return; }
+            received(listing, generation);
+        },
         [this, generation](const QString &error) {
             m_listing = 0;
-            if (generation != m_generation) return refresh();
+            if (m_refreshPending || generation != m_generation) return refresh();
             // What is not readable now is not shown as current: no rows, no counts.
             m_error = error; m_failing = true; m_board = {}; render(); emit countsChanged(0, 0); schedule();
         });

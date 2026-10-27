@@ -68,6 +68,7 @@ private slots:
     void taskTitleRenamesInPlaceAndKeepsRefusedEdits();
     void newCommentRecoversPreviousWithoutResending();
     void firstActiveFilterCombinesReviewAndWorkWithoutChangingSelection();
+    void mutationAfterCapturedListAlwaysGetsAFreshReadWithoutPolling();
     void init() { ComposerDraftStore::flushWrites(); QDir(ComposerDraftStore::directory()).removeRecursively(); QSettings().remove("tasks"); }
     void tilesCountAndChooseTheFirstStage();
     void rowsShowTheQueueAndTheOpenSessionsTasks();
@@ -184,6 +185,20 @@ void TestTasksView::newCommentRecoversPreviousWithoutResending() {
     QCOMPARE(id(messages[0]), id(messages[1])); QVERIFY(id(messages[2]) != id(messages[0])); QVERIFY(!messages[2].contains("--recover-only"));
     auto *discussion = inspector.findChild<QTextBrowser *>("taskInspectorDetail");
     QTRY_VERIFY(discussion->toPlainText().contains("Previous comment with a lost response")); QVERIFY(discussion->toPlainText().contains("A new ordinary comment"));
+}
+
+void TestTasksView::mutationAfterCapturedListAlwaysGetsAFreshReadWithoutPolling() {
+    QTemporaryDir dir; QVERIFY(FakeTasksCli::install(dir.path(), {FakeTasksCli::task(1, "todo"), FakeTasksCli::task(2, "todo")}));
+    HgsClient client(FakeCli::program(dir.filePath("hgs"))); TasksView board(&client); board.resize(760, 600); board.show(); board.setPolling(false);
+    board.setContext("project-1", "orchard", "", "codex/api", "key", sessions());
+    QTRY_VERIFY(row(board, 1) && row(board, 2)); QVERIFY(row(board, 1)->y() < row(board, 2)->y());
+    QFile delay(dir.filePath("delay-list")); QVERIFY(delay.open(QIODevice::WriteOnly)); delay.write(".5"); delay.close();
+    board.refresh(); QTRY_VERIFY(QFileInfo::exists(dir.filePath("list-snapshot")));
+    board.actOnTask(TaskBoard::item(FakeTasksCli::task(2, "todo")), TaskAction::Top);
+    QTRY_VERIFY(row(board, 1) && row(board, 2) && row(board, 2)->y() < row(board, 1)->y());
+    int reads = 0, writes = 0;
+    for (const auto &call : FakeTasksCli::calls(dir.path())) { reads += call.value(1) == "list"; writes += call.value(1) == "move"; }
+    QCOMPARE(reads, 3); QCOMPARE(writes, 1);
 }
 
 void TestTasksView::firstActiveFilterCombinesReviewAndWorkWithoutChangingSelection() {

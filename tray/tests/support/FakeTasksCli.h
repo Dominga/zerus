@@ -44,6 +44,9 @@ if cmd in ('add','edit','comment','message') and '--content-json' in a:
     content=json.loads(text); text=content['text']
 if cmd=='list':
     tasks=sorted(data['tasks'],key=lambda t: order.index(t['stage']))
+    if (here/'delay-list').exists():
+        (here/'list-snapshot').write_text('captured')
+        time.sleep(min(.5,float((here/'delay-list').read_text())))
     out({'project':project,'tasks':[{k:v for k,v in t.items() if k!='log'} for t in tasks],'damaged':data.get('damaged',[])}); sys.exit(0)
 if cmd=='settings':
     if '--set' in a: data['settings'].update(json.loads(text)); save()

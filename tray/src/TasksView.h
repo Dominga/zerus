@@ -199,5 +199,6 @@ private:
     quint64 m_generation = 0, m_listing = 0;
     int m_visibleMs = 2500, m_hiddenMs = 15000;
     bool m_polling = true, m_dark = true, m_showOlder = false, m_loaded = false, m_failing = false;
+    bool m_refreshPending = false;
     bool m_inspectorVisible = false, m_openInInspector = false;
 };

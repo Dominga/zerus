@@ -182,8 +182,10 @@ inline QIcon workspaceIcon(const QString &name, const QColor &color)
         } else if (name == "search") {
             p.drawEllipse(QPointF(10.5, 10.5), 6, 6); p.drawLine(QPointF(15, 15), QPointF(20, 20));
         } else if (name == "collapse-panel") {
-            p.drawLine(20, 4, 20, 20); p.drawLine(5, 12, 15, 12);
-            p.drawLine(10, 7, 15, 12); p.drawLine(10, 17, 15, 12);
+            // Match the centred 18px workspace glyphs: balanced side margins
+            // and a shorter arrow that does not crowd the panel edge.
+            p.drawLine(19, 5, 19, 19); p.drawLine(5, 12, 14, 12);
+            p.drawLine(10, 8, 14, 12); p.drawLine(10, 16, 14, 12);
         } else if (name == "stop") {
             p.setBrush(color);p.drawRoundedRect(QRectF(6,6,12,12),1,1);
         } else if (name == "close") {

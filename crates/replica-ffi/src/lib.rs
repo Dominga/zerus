@@ -118,7 +118,7 @@ pub enum TaskTarget {
 impl From<replica::Target> for TaskTarget {
     fn from(target: replica::Target) -> Self {
         match target {
-            replica::Target::Any => Self::AnySession,
+            replica::Target::Any | replica::Target::NewSession { .. } | replica::Target::Subagent { .. } => Self::AnySession,
             replica::Target::Session(key) => Self::Session {
                 session: key.into(),
             },
@@ -200,12 +200,16 @@ pub struct TaskInfo {
 
 impl From<replica::TaskView> for TaskInfo {
     fn from(view: replica::TaskView) -> Self {
+        let text = if view.title.is_empty() { view.text.clone() } else if view.text.is_empty() { view.title.clone() } else { format!("{}\n\n{}", view.title, view.text) };
         Self {
             uuid: view.uuid,
             id: view.id,
             project: view.project,
             schema: view.schema,
-            writable: view.writable,
+            // The current mobile ABI has no planned executors, worker binding,
+            // or comment media. Keep schema-three tasks read-only until that ABI
+            // exposes them; a fallback caption must never authorize a send.
+            writable: view.writable && view.schema <= 2,
             created_at: view.created_at,
             stage_at: view.stage_at,
             author: view.author.into(),
@@ -216,7 +220,7 @@ impl From<replica::TaskView> for TaskInfo {
             summary: view.summary,
             cancelled_at: view.cancelled_at,
             cancel_reason: view.cancel_reason,
-            text: view.text,
+            text,
             log: view.log.into_iter().map(Into::into).collect(),
         }
     }
@@ -380,6 +384,7 @@ impl TaskStore {
     ) -> Result<TaskInfo> {
         let store = self.store()?;
         let mut task = store.find(reference)?;
+        if task.schema() > 2 { return Err(ReplicaError::Refused("This task needs a newer mobile task editor.".into())); }
         change(&store, &mut task)?;
         store.save(&mut task)?;
         Ok(task.view()?.into())

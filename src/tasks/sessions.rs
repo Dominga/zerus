@@ -33,15 +33,6 @@ impl Machines {
         }
         Ok(key)
     }
-    pub(super) fn named(&self, machine: String, name: &str) -> Result<SessionKey> {
-        self.resolve(&SessionKey {
-            machine,
-            session: name.into(),
-            ..Default::default()
-        })
-        .ok_or_else(|| fail("ambiguous task session identity; choose the session again"))
-    }
-
     /// Unknown remote bindings remain hints for that computer to resolve. A
     /// known local ID with no unique binding refuses rather than using its name.
     pub(super) fn resolve(&self, key: &SessionKey) -> Option<SessionKey> {

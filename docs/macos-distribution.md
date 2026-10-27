@@ -348,6 +348,15 @@ copy cannot replace the installed application's privacy identity. Do not grant
 that copy permissions as a substitute for the installed app. Settings, native
 profiles and session identities are unchanged.
 
+For an owner-requested branch preview, keep main deployment paused in the other
+sessions and build a clean branch commit with
+`-DZERUS_DEV_BUILD_NUMBER= -DZERUS_LOCAL_PREVIEW_LABEL=task-board`. The displayed
+identity is `DEV_VERSION-preview.task-board.SHORT_COMMIT`, with no public Dev
+sequence. The same certificate signer and maintained GUI updater apply. This is
+a local evaluation build, not a public update channel or a main publication.
+Before returning the checkout to main, clear `ZERUS_LOCAL_PREVIEW_LABEL` and set
+the exact main CI sequence again. Build labels must never hide dirty sources.
+
 `tray/install.sh` copies the raw bundle to a disposable staging directory and
 signs that copy through `tray/sign-local-macos.py` before replacing or restarting
 the installed application. Only after selecting a compatible certificate does the helper promote

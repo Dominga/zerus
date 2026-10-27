@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zerus_replica::{
-    cancel_message, task_prompt, Actor, Position, ProjectStore, SessionKey, Settings,
+    cancel_message, task_dispatch_content, Actor, Position, ProjectStore, SessionKey, Settings,
     Stage, Target, TaskAttachment, TaskDoc, Tools, MAX_TEXT,
 };
 
@@ -21,6 +21,7 @@ mod answers;
 mod mobile;
 mod phone;
 mod sessions;
+mod messages;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.
@@ -33,7 +34,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--position N] | edit REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | cancel REF [--reason TEXT] | handoff REF --session SESSION [--host ALIAS] | start REF | report REF | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -42,7 +43,7 @@ const USAGE: &str = "usage: hgs task list --project P [--stage S] | get REF | ad
 const AGENT_INSTRUCTIONS: &str = concat!(
     "Zerus tasks are this project's shared task list. Run `hgs task` in your shell: it acts as your session, on your session's project; `hgs guide tasks` lists the commands. Texts go on stdin, for example hgs task report <ref> <<'EOF' ... EOF.\n\n",
     "Filing. When the person says \"поставь таск\", \"добавь задачу\", \"запиши задачу\", \"в очередь\", \"на потом\", \"file a task\", \"add to the queue\" or \"for later\", file it with `hgs task add`. Never put these into TodoWrite or your own plan. For work you are already doing, use `hgs task add --start` or `hgs task start <ref>`; this records In progress without sending a duplicate message. Plain add only queues later work. New tasks go to the end of To do unless the person names a place (--backlog, --position N).\n\n",
-    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with `hgs task report <ref>`: what you changed, how you checked it, and what is left undone or why it cannot be done.\n\n",
+    "Working. A message starting \"[Zerus task <ref>]\" is a task for you; do it like any request from the person. When the prompt says the task was sent before, read its history with `hgs task get <ref>` before you start. Acknowledge a dispatched task with `hgs task start <ref>` before working; this does not send it again. For a subagent plan, register the native worker first. If you need the person, ask in this conversation as usual. When the work is done, or you find that it cannot be done, report with `hgs task report <ref>`: what you changed, how you checked it, and what is left undone or why it cannot be done.\n\n",
     "Cancelled. \"[Zerus task <ref> cancelled]\" means stop that task now and follow the message.\n\n",
     "Managing. `hgs task list` and `hgs task get` show tasks and their history; move, stage, target, edit, send and cancel change them as the person can. Accept a task (`hgs task stage <ref> done`) only when the person asks you to.\n\n",
     "Comments. `hgs task comment <ref>` adds a note for people and agents; it is never pasted into a session."
@@ -104,6 +105,7 @@ fn agent_text(text: &str, action: &str, who: &Actor) -> Result<()> {
     let (what, example) = match action {
         "add" => ("prompt", "add"),
         "edit" => ("prompt", "edit REF"),
+        "rename" => ("title", "rename REF"),
         "comment" => ("comment", "comment REF"),
         _ => ("report", "report REF"),
     };
@@ -284,7 +286,9 @@ fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines)
         std::mem::take(&mut task_view.attachments).iter().map(TaskAttachment::metadata)
             .collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?
     };
+    let dispatch_id = task_view.execution_id();
     let mut value = serde_json::to_value(task_view).map_err(fail)?;
+    value["dispatch_id"] = json!(dispatch_id);
     value["ref"] = json!(format!("{project_name}/{}", task.id()));
     // Every session reference names its computer: the task's target, session and
     // author, and each history entry's session and actor.
@@ -302,9 +306,9 @@ fn view(task: &TaskDoc, project_name: &str, with_log: bool, machines: &Machines)
             }
         }
     };
-    for key in ["target", "session", "author"] {
-        name(&mut value[key]);
-    }
+    for key in ["target", "session", "author"] { name(&mut value[key]); }
+    if value["target"]["parent"].is_object() { name(&mut value["target"]["parent"]); }
+    if value["worker"]["parent"].is_object() { name(&mut value["worker"]["parent"]); }
     if let Some(log) = value["log"].as_array_mut() {
         for entry in log {
             name(&mut entry["session"]);
@@ -391,7 +395,8 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             Ok(json!({"project": {"id": r.project.0, "name": r.project.1}, "task": view(&task, &r.project.1, true, &machines)?}))
         }
         "add" => add(config, args),
-        "edit" | "move" | "stage" | "target" | "comment" | "report" | "start" | "send" | "handoff" | "cancel" => {
+        "message" => messages::execute(config, args),
+        "edit" | "rename" | "move" | "stage" | "target" | "comment" | "report" | "start" | "send" | "handoff" | "cancel" | "worker" => {
             change(config, action, args)
         }
         "settings" => settings(config, args),
@@ -461,7 +466,8 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
     let text = content.text;
     let machines = machines(config)?;
     let author = actor(&machines.here, args, false)?;
-    agent_text(&text, "add", &author)?;
+    let title = option(args, "--title")?;
+    if title.is_none() { agent_text(&text, "add", &author)?; }
     let (id, name) = project_arg(config, args, &author)?;
     let stage = if flag(args, "--backlog") {
         Stage::Backlog
@@ -484,12 +490,18 @@ fn add(config: &Config, args: &[String]) -> Result<Value> {
     };
     let position = position_index(args)?.map_or(Position::End, Position::Index);
     let store = store(config, &id)?;
-    let mut task = store
-        .new_task(&text, stage, target, author.clone(), &position, &name, now())
-        .map_err(fail)?;
-    if let Some(files) = content.attachments { task.set_attachments(&files, &author, now()).map_err(fail)?; }
-    if flag(args, "--start") { task.record_start(&author, now()).map_err(fail)?; }
-    store.save(&mut task).map_err(fail)?;
+    let (mut task, created) = if let Some(title) = title {
+        store.new_named_task(title, &text, content.attachments.as_deref().unwrap_or_default(), stage, target, author.clone(), &position, &name, now(), option(args, "--request-id")?, flag(args, "--start")).map_err(fail)?
+    } else {
+        if option(args, "--request-id")?.is_some() { return Err(fail("--request-id requires --title")); }
+        let mut task = store.new_task(&text, stage, target, author.clone(), &position, &name, now()).map_err(fail)?;
+        if let Some(files) = content.attachments { task.set_attachments(&files, &author, now()).map_err(fail)?; }
+        (task, true)
+    };
+    if created {
+        if title.is_none() && flag(args, "--start") { task.record_start(&author, now()).map_err(fail)?; }
+        store.save(&mut task).map_err(fail)?;
+    }
     let at = place(&store, &task)?;
     Ok(with_answer(&author, "add", json!({"task": view(&task, &name, true, &machines)?}), at, ""))
 }
@@ -501,18 +513,19 @@ fn change(config: &Config, action: &str, args: &[String]) -> Result<Value> {
 /// `change`, waiting at most `wait` for a project another command holds:
 /// the phone's Send now and Cancel are refused as busy before anything happens.
 fn change_within(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>) -> Result<Value> {
-    let content = if action == "edit" { Some(stdin_content(args)?) } else { None };
+    let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) { Some(stdin_content(args)?) } else { None };
     let text = match action {
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
-        "comment" => Some(stdin_text("comment")?),
+        "comment" => Some(match &content { Some(content) => content.text.clone(), None => stdin_text("comment")? }),
         "report" => Some(stdin_text("report")?),
+        "rename" => Some(stdin_text("title")?.trim().to_owned()),
         _ => None,
     };
     let machines = machines(config)?;
     let here = machines.here.as_str();
     let who = actor(here, args, matches!(action, "send" | "handoff" | "cancel"))?;
     if let Some(text) = &text {
-        agent_text(text, action, &who)?;
+        if action != "edit" || !text.is_empty() { agent_text(text, action, &who)?; }
     }
     let r = reference(config, args, &who)?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
@@ -531,6 +544,17 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
             error
         }
     };
+    // Explicit worker registration inspects the native roster once, before the
+    // project lock. Normal task listings never query providers for every row.
+    let worker_proof = if action == "worker" {
+        let Actor::Agent(own) = &who else { return Err(fail("worker is for the task's coordinator")); };
+        let id = option(args, "--subagent")?.ok_or_else(|| fail("worker needs --subagent ID"))?;
+        let request = option(args, "--request-id")?.ok_or_else(|| fail("worker needs the current --request-id"))?;
+        let caller = crate::state::session_graph::caller_record().ok_or_else(|| fail("the coordinator run is no longer live"))?;
+        let details = crate::state::reference_details(&own.session, "", "").map_err(fail)?;
+        let worker = observed_worker(own, &caller, &details, id, request)?;
+        Some(worker)
+    } else { None };
     let store = match wait {
         None => store(config, project_id)?,
         Some(wait) => ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
@@ -538,13 +562,19 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
             .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
     };
     let mut task = store.find(&r.task).map_err(fail)?;
+    if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
     if task.view().map_err(fail)?.writable {
         let view = task.view().map_err(fail)?;
-        let target = match view.target { Target::Session(target) => Some(target), Target::Any => None };
+        let target = match view.target { Target::Session(target) | Target::NewSession { parent: target } | Target::Subagent { parent: target } => Some(target), Target::Any => None };
         for key in target.into_iter().chain(view.session) {
             if let Some(current) = machines.resolve(&key).filter(|current| !current.session_id.is_empty()) {
                 task.bind_session_identity(&key, &current).map_err(fail)?;
             }
+        }
+    }
+    if let Some(expected) = option(args, "--expect-new-session-parent")? {
+        if action != "send" || !matches!(task.view().map_err(fail)?.target, Target::NewSession { parent } if format!("{}/{}", parent.machine, parent.session_id) == expected) {
+            return Err(fail("task assignment changed while the new executor was starting; nothing was sent"));
         }
     }
     // A send or cancel for a session another computer runs happens there.
@@ -590,14 +620,16 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
     let mut extra = json!({});
     let mut destination = String::new();
     match action {
+        "worker" => { task.record_worker(worker_proof.as_ref().expect("worker proof"), &who, now()).map_err(fail)?; task.record_start(&who, now()).map_err(fail)?; },
         "start" => task.record_start(&who, now()).map_err(fail)?,
+        "rename" => { task.set_title(&text, &who, now()).map_err(fail)?; store.check_prompt(&task, project_name).map_err(fail)?; },
         "edit" => {
             store
                 .edit_task(&mut task, &text, &who, project_name, now())
                 .map_err(fail)?;
             if let Some(files) = content.and_then(|content| content.attachments) { task.set_attachments(&files, &who, now()).map_err(fail)?; }
         }
-        "comment" => task.comment(&text, &who, now()).map_err(fail)?,
+        "comment" => task.comment_with_attachments(&text, &content.and_then(|content| content.attachments).unwrap_or_default(), &who, now()).map_err(fail)?,
         "report" => {
             let moved = task.record_report(&text, &who, now()).map_err(fail)?;
             extra = json!({"moved_to_review": moved});
@@ -625,7 +657,11 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
             if value == "any" && option(args, "--host")?.is_some() {
                 return Err(fail("--host needs a --target session"));
             }
-            let target = if value == "any" {
+            let target = if matches!(value.as_str(), "new-session" | "subagent") {
+                let parent = option(args, "--parent")?.ok_or_else(|| fail("choose --parent SESSION for a new executor"))?;
+                let parent = machines.target(machines.node(option(args, "--host")?)?, parent, args)?;
+                if value == "new-session" { Target::NewSession { parent } } else { Target::Subagent { parent } }
+            } else if value == "any" {
                 Target::Any
             } else {
                 Target::Session(machines.target(machines.node(option(args, "--host")?)?, value, args)? )
@@ -667,7 +703,7 @@ fn send_session(task: &TaskDoc, args: &[String], who: &Actor, machines: &Machine
     }
     let host = option(args, "--host")?.filter(|host| !host.is_empty());
     let named = |session: &str| -> Result<SessionKey> {
-        machines.named(machines.node(host)?, session)
+        machines.target(machines.node(host)?, session, args)
     };
     match (option(args, "--session")?, &view.target, who) {
         (None, ..) if host.is_some() => Err(fail("--host needs a --session")),
@@ -685,6 +721,10 @@ fn send_session(task: &TaskDoc, args: &[String], who: &Actor, machines: &Machine
         (None, Target::Session(pinned), _) => Ok((pinned.clone(), false)),
         (None, Target::Any, Actor::Agent(own)) => Ok((own.clone(), false)),
         (None, Target::Any, Actor::Person) => Err(fail("choose the session with --session")),
+        (None, Target::NewSession { .. }, _) => Err(fail("start this task in Zerus to configure its new session")),
+        (None, Target::Subagent { parent }, _) => {
+            Ok((machines.resolve(parent).ok_or_else(|| fail("the coordinator session no longer exists"))?, false))
+        }
     }
 }
 
@@ -719,6 +759,7 @@ fn forwarded(
         remote.extend(["--session".into(), session.session.clone()]);
         if !session.session_id.is_empty() { remote.extend(["--session-id".into(), session.session_id.clone()]); }
     }
+    if let Some(expected) = option(args, "--expect-new-session-parent")? { remote.extend(["--expect-new-session-parent".into(), expected.into()]); }
     if let Some(reason) = option(args, "--reason")?.filter(|_| action == "cancel") {
         remote.extend(["--reason".into(), reason.into()]);
     }
@@ -809,19 +850,17 @@ fn send(
         task.set_target(&Target::Session(session.clone()), who, now())
             .map_err(fail)?;
     }
-    let prompt = task_prompt(
-        &settings.task_template,
-        &task.view().map_err(fail)?,
-        project_name,
-        Tools::Cli,
-    )
-    .map_err(fail)?;
-    let attachments = task.attachments().map_err(fail)?.iter().map(serde_json::to_value).collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?;
+    let (mut prompt, files) = task_dispatch_content(&settings.task_template, &task.view().map_err(fail)?, project_name, Tools::Cli).map_err(fail)?;
+    if matches!(view.target, Target::Subagent { .. }) {
+        prompt.push_str(&format!("\n\n[Zerus executor: subagent]\nYou are the coordinator for this task. Create a native subagent only now, after this explicit start request, and give it the implementation work. Keep coordination and task reporting in this session. After the native child appears, read `hgs task get {}/{}` and register its exact live ID with `hgs task worker {}/{} --subagent CHILD_ID --request-id CURRENT_SENT_REQUEST_ID`. Do not claim that the child has started before this registration succeeds; if creation is unavailable, report that limitation. The child must not impersonate the coordinator's CLI identity.\n", project_name, task.id(), project_name, task.id()));
+    }
+    let attachments = files.iter().map(serde_json::to_value).collect::<std::result::Result<Vec<_>, _>>().map_err(fail)?;
     let receipt = crate::state::submit_task_message(&session, &prompt, &attachments).map_err(fail)?;
     let request_id = receipt["request_id"].as_str().unwrap_or_default().to_owned();
     (if handoff { task.record_handoff(&session, &request_id, who, now()) }
      else { task.record_send(&session, &request_id, who, now()) })
         .map_err(|e| fail(format!("{SENT_UNRECORDED}: {e}")))?;
+    task.record_queued_messages(&request_id, who, now()).map_err(|e| fail(format!("{SENT_UNRECORDED}: {e}")))?;
     Ok(json!({"receipt": receipt}))
 }
 
@@ -910,9 +949,41 @@ fn settings(config: &Config, args: &[String]) -> Result<Value> {
     Ok(json!({"project": {"id": id, "name": name}, "settings": doc.settings()}))
 }
 
+fn observed_worker(own: &SessionKey, caller: &Value, details: &Value, id: &str, request: &str) -> Result<zerus_replica::TaskWorker> {
+    let child = &details["subagents"][id];
+    if sessions::identity(caller) != own.session_id || caller["name"].as_str() != Some(own.session.as_str())
+        || caller["run_id"].as_str().is_none_or(str::is_empty) || details["run_id"] != caller["run_id"]
+        || caller["conversation_id"].as_str().is_none_or(str::is_empty) || details["conversation_id"] != caller["conversation_id"]
+        || child.is_null() || child["external"] == true || child["historical"] == true
+        || !matches!(child["state"].as_str(), Some("working" | "running" | "waiting")) {
+        return Err(fail("choose a confirmed live native subagent of this coordinator's current run and conversation"));
+    }
+    Ok(zerus_replica::TaskWorker { parent: own.clone(), id: id.into(),
+        conversation_id: details["conversation_id"].as_str().unwrap().into(), provider: own.session.split('/').next().unwrap_or("").into(),
+        name: child["name"].as_str().filter(|name| !name.is_empty()).unwrap_or(id).into(), request_id: request.into() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_registration_requires_the_current_native_roster() {
+        let own = SessionKey { machine: "node".into(), session: "codex/coordinator".into(), session_id: "launch_id:parent".into() };
+        let caller = json!({"name":own.session,"run_id":"run","launch_id":"parent","conversation_id":"conversation"});
+        let details = json!({"run_id":"run","conversation_id":"conversation","subagents":{"child":{"name":"Builder","state":"working"}}});
+        let worker = observed_worker(&own, &caller, &details, "child", "receipt").unwrap();
+        assert_eq!((worker.id.as_str(), worker.conversation_id.as_str(), worker.name.as_str()), ("child", "conversation", "Builder"));
+        for (field, value) in [("run_id", json!("old")), ("conversation_id", json!("old"))] {
+            let mut changed = details.clone(); changed[field] = value;
+            assert!(observed_worker(&own, &caller, &changed, "child", "receipt").is_err());
+        }
+        for (field, value) in [("external", json!(true)), ("historical", json!(true)), ("state", json!("completed"))] {
+            let mut changed = details.clone(); changed["subagents"]["child"][field] = value;
+            assert!(observed_worker(&own, &caller, &changed, "child", "receipt").is_err());
+        }
+        assert!(observed_worker(&own, &caller, &details, "missing", "receipt").is_err());
+    }
 
     #[test]
     fn a_task_pinned_to_the_same_name_elsewhere_names_that_computer() {

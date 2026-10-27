@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
@@ -431,6 +432,31 @@ class Swarm(unittest.TestCase):
             worker.terminate(); worker.communicate(timeout=5)
         self.assertEqual(self.call('a', 'get')['worker'], {'running': False, 'current': False})
         self.assertFalse((self.root / 'service-calls').exists())
+
+    def test_task_feedback_forwards_its_original_identity_and_recovers_read_only(self):
+        from tests.test_tasks import agent_record
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c'); self.converge()
+        # Native input is deliberately unavailable on these synthetic nodes.
+        # Prove forwarded persistence/refusal without addressing a real agent.
+        tmux = self.root / 'bin/tmux'; tmux.write_text('#!/bin/sh\nexit 1\n'); tmux.chmod(0o755)
+        state = self.root / 'b/state'; state.mkdir(exist_ok=True)
+        run = str(uuid.uuid4()); name = 'codex/fixture-worker'
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root/'b'), HGS_STATE_DIR=str(state), HGS_SESSION=name, HGS_RUN_ID=run)
+        agent_record(state, env, name, run)
+        task = self.task('b','add','--project','b','--target',name,text='Remote feedback contract')['task']
+        started = subprocess.run([str(HGS),'task','start',task['uuid'],'--project','b','--json'],env=env,text=True,capture_output=True)
+        self.assertEqual(started.returncode,0,started.stderr)
+        task = json.loads(started.stdout)['task']; self.converge()
+        identity = str(uuid.uuid4()); content = json.dumps(dict(text='Feedback across computers',attachments=[]))
+        args = ['message',task['uuid'],'--project','b','--request-id',identity,'--mode','send','--expect-dispatch',task['dispatch_id'],'--content-json']
+        reply = self.task('a',*args,text=content)
+        self.assertEqual(reply['message']['request_id'],identity)
+        self.assertEqual(reply['message']['delivery']['state'],'failed')
+        checked = self.task('a',*args,'--recover-only',text=content)
+        self.assertEqual(checked['message']['delivery']['state'],'failed')
+        original = self.task('b','get',task['uuid'],'--project','b')['task']
+        messages = [e for e in original['log'] if e['kind']=='message']
+        self.assertEqual(len(messages),1); self.assertEqual(messages[0]['text'],'Feedback across computers')
 
     def test_tasks_replicate_after_the_catalog(self):
         self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')

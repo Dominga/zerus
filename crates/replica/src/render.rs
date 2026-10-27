@@ -86,7 +86,7 @@ fn author(task: &TaskView) -> String {
 }
 
 /// `project` is the project's current name, shown in the reference.
-pub fn task_prompt(template: &str, task: &TaskView, project: &str, tools: Tools) -> Result<String> {
+fn render_task_prompt(template: &str, task: &TaskView, project: &str, tools: Tools) -> Result<String> {
     let reference = format!("{project}/{}", task.id);
     let sent_before = task.log.iter().any(|entry| entry.kind == "sent");
     let history = if sent_before {
@@ -97,13 +97,55 @@ pub fn task_prompt(template: &str, task: &TaskView, project: &str, tools: Tools)
     } else {
         String::new()
     };
-    checked(fill(template, tools, &reference, |key| match key {
+    let mut prompt = fill(template, tools, &reference, |key| match key {
         "ref" => Some(reference.clone()),
         "author" => Some(author(task)),
-        "prompt" => Some(task.text.clone()),
+        "prompt" => Some(if task.title.is_empty() { task.text.clone() } else if task.text.is_empty() { task.title.clone() } else { format!("{}\n\n{}", task.title, task.text) }),
         "history" => Some(history.clone()),
         _ => None,
-    }))
+    });
+    for message in task.log.iter().filter(|e| e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued")) {
+        prompt.push_str(&format!("\n\n[Task clarification {}]\n{}", message.request_id.as_deref().unwrap_or_default(), message.text));
+    }
+    checked(prompt)
+}
+
+/// Scope attachment labels to their original message, then flatten the explicit
+/// dispatch snapshot. Two queued images both named [Image #1] remain distinct.
+pub fn task_dispatch_content(template: &str, task: &TaskView, project: &str, tools: Tools) -> Result<(String, Vec<crate::TaskAttachment>)> {
+    let mut task = task.clone();
+    let queued = |e: &&mut crate::LogEntry| e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued");
+    let renumber = task.log.iter().any(|e| e.kind == "message" && e.delivery.as_ref().is_some_and(|d| d.state == "queued") && !e.attachments.is_empty());
+    let mut next = 1;
+    let rewrite = |text: &mut String, files: &mut Vec<crate::TaskAttachment>, next: &mut usize| {
+        let mut labels = std::collections::BTreeMap::new();
+        for file in files {
+            let label = format!("[{} #{}]", if file.mime.starts_with("image/") { "Image" } else { "File" }, next);
+            *next += 1;
+            if !file.reference.is_empty() { labels.insert(file.reference.clone(), label.clone()); }
+            file.reference = label;
+        }
+        let original = std::mem::take(text); let mut rest = original.as_str();
+        while let Some(start) = rest.find('[') {
+            text.push_str(&rest[..start]); rest = &rest[start..];
+            if let Some(end) = rest.find(']') {
+                let token = &rest[..=end]; text.push_str(labels.get(token).map(String::as_str).unwrap_or(token)); rest = &rest[end+1..];
+            } else { break; }
+        }
+        text.push_str(rest);
+    };
+    if renumber { rewrite(&mut task.text, &mut task.attachments, &mut next); }
+    let mut files = task.attachments.clone();
+    for message in task.log.iter_mut().filter(queued) {
+        if renumber { rewrite(&mut message.text, &mut message.attachments, &mut next); }
+        files.extend(message.attachments.clone());
+    }
+    crate::attachment::check_attachments(&files)?;
+    Ok((render_task_prompt(template, &task, project, tools)?, files))
+}
+
+pub fn task_prompt(template: &str, task: &TaskView, project: &str, tools: Tools) -> Result<String> {
+    task_dispatch_content(template, task, project, tools).map(|(prompt, _)| prompt)
 }
 
 pub fn cancel_message(
@@ -141,6 +183,15 @@ mod tests {
         .unwrap()
         .view()
         .unwrap()
+    }
+
+    #[test]
+    fn named_worker_prompts_include_both_title_and_description() {
+        let mut task = view(); task.title = "Independent {ref} title".into(); task.text = "Detailed content".into();
+        let text = task_prompt(DEFAULT_TASK_TEMPLATE, &task, "orchard", Tools::Cli).unwrap();
+        assert!(text.contains("Independent {ref} title\n\nDetailed content"));
+        task.text.clear();
+        assert!(task_prompt(DEFAULT_TASK_TEMPLATE, &task, "orchard", Tools::Cli).unwrap().contains("Independent {ref} title"));
     }
 
     #[test]

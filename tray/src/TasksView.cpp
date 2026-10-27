@@ -1,5 +1,9 @@
 #include "TasksView.h"
+#include <QUuid>
+#include "TaskStageFilter.h"
 #include "TaskContent.h"
+#include "TaskMessageOutbox.h"
+#include "AttachmentViewer.h"
 #include "AttachmentViewer.h"
 #include "HgsClient.h"
 #include "TaskDialogs.h"
@@ -24,54 +28,8 @@
 #include <QVBoxLayout>
 
 namespace {
-QColor mix(const QColor &color, double share, const QColor &base) {
-    return QColor::fromRgbF(base.redF() + (color.redF() - base.redF()) * share, base.greenF() + (color.greenF() - base.greenF()) * share,
-                            base.blueF() + (color.blueF() - base.blueF()) * share);
-}
 QColor alpha(QColor color, double a) { color.setAlphaF(a); return color; }
 }
-
-// A stage tile: its icon on a tinted circle, its name and its count.
-class TaskTile : public QAbstractButton {
-public:
-    TaskTile(const QString &stage, QWidget *parent) : QAbstractButton(parent), m_stage(stage), m_colors(TaskColors::of(true)) {
-        setObjectName(QStringLiteral("taskTile:") + stage); setCheckable(true); setFixedHeight(34); setMinimumWidth(72);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed); setCursor(Qt::PointingHandCursor); setAttribute(Qt::WA_Hover);
-        setToolTip(TaskBoard::stageLabel(stage)); setCount(0);
-    }
-    void setCount(int count) {
-        setProperty("count", count); setAccessibleName(QStringLiteral("%1, %2").arg(TaskBoard::stageLabel(m_stage)).arg(count)); update();
-    }
-    void setColors(const TaskColors &colors) { m_colors = colors; update(); }
-    // A dashed outline while a dragged task would move here.
-    void setDropTarget(bool on) { if (property("dropTarget").toBool() != on) { setProperty("dropTarget", on); update(); } }
-    QSize sizeHint() const override { return {120, 34}; }
-protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
-        const QColor color = m_colors.stage(m_stage);
-        const QColor fill = isChecked() ? mix(color, 0.17, m_colors.surface) : m_colors.surface;
-        const QColor edge = isChecked() ? alpha(color, 0.45) : underMouse() ? m_colors.border : Qt::transparent;
-        p.setPen(edge.alpha() ? QPen(edge, 1) : Qt::NoPen); p.setBrush(fill);
-        p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 9, 9);
-        if (property("dropTarget").toBool()) {
-            p.setPen(QPen(color, 2, Qt::DashLine)); p.setBrush(Qt::NoBrush); p.drawRoundedRect(QRectF(rect()).adjusted(3, 3, -3, -3), 7, 7);
-        }
-        p.setPen(Qt::NoPen); p.setBrush(alpha(color, 0.18)); p.drawEllipse(QRectF(8, 4, 26, 26));
-        workspaceIcon(TaskBoard::stageIcon(m_stage), color).paint(&p, QRect(11, 7, 20, 20));
-        QFont count = font(); count.setPixelSize(15); count.setBold(true); p.setFont(count); p.setPen(m_colors.fg);
-        const QString number = QString::number(property("count").toInt());
-        const int numberWidth = QFontMetrics(count).horizontalAdvance(number);
-        p.drawText(QRect(width() - 10 - numberWidth, 0, numberWidth, height()), Qt::AlignVCenter, number);
-        QFont label = font(); label.setPixelSize(12); label.setWeight(QFont::DemiBold); p.setFont(label);
-        p.setPen(isChecked() ? m_colors.fg : m_colors.muted);
-        const QRect text(38, 0, qMax(0, width() - 38 - numberWidth - 16), height());
-        p.drawText(text, Qt::AlignVCenter, QFontMetrics(label).elidedText(TaskBoard::stageLabel(m_stage), Qt::ElideRight, text.width()));
-    }
-private:
-    QString m_stage;
-    TaskColors m_colors;
-};
 
 TaskTabBadge::TaskTabBadge(QWidget *parent) : QWidget(parent) { setObjectName("taskTabBadge"); setCounts(0, 0); }
 
@@ -202,6 +160,13 @@ void TasksView::setInspectorVisible(bool visible) {
     if (visible) refresh(); else schedule();
 }
 
+void TasksView::moveControlsTo(QBoxLayout *toolbar) {
+    toolbar->addWidget(m_only); toolbar->addWidget(m_settings);
+}
+
+bool TasksView::onlyThisSession() const { return m_only->isChecked(); }
+void TasksView::setOnlyThisSession(bool only) { m_only->setChecked(only); }
+
 void TasksView::showEvent(QShowEvent *event) { QWidget::showEvent(event); applyComposerKey(); if (m_loaded) refresh(); }
 
 void TasksView::hideEvent(QHideEvent *event) { QWidget::hideEvent(event); applyComposerKey(); schedule(); }
@@ -228,13 +193,21 @@ void TasksView::request(const QStringList &arguments, const QString &input, std:
 
 void TasksView::refresh() {
     m_timer.stop();
-    if (m_projectId.isEmpty() || m_listing) return;
+    if (m_projectId.isEmpty()) return;
+    // A mutation may finish while an older list snapshot is in flight. One
+    // follow-up read must observe it even when periodic polling is disabled.
+    if (m_listing) { m_refreshPending = true; return; }
+    m_refreshPending = false;
     const auto generation = m_generation; m_listing = generation + 1;
     request({QStringLiteral("list"), QStringLiteral("--project"), m_projectId}, {},
-        [this, generation](const QJsonObject &listing) { m_listing = 0; received(listing, generation); },
+        [this, generation](const QJsonObject &listing) {
+            m_listing = 0;
+            if (m_refreshPending || generation != m_generation) { refresh(); return; }
+            received(listing, generation);
+        },
         [this, generation](const QString &error) {
             m_listing = 0;
-            if (generation != m_generation) return refresh();
+            if (m_refreshPending || generation != m_generation) return refresh();
             // What is not readable now is not shown as current: no rows, no counts.
             m_error = error; m_failing = true; m_board = {}; render(); emit countsChanged(0, 0); schedule();
         });
@@ -284,6 +257,11 @@ const TaskSession *TasksView::session(const QString &host, const QString &name) 
 
 // Why Send now cannot paste into the session the task would go to, as hgs would say it.
 QString TasksView::sendBlocker(const TaskItem &task) const {
+    if (task.uuid == m_descriptionDraft && !task.uuid.isEmpty()) return tr("Save the description before starting this task");
+    if (task.targetKind == QLatin1String("new_session")) {
+        if (task.targetId.isEmpty() || task.targetMachine.isEmpty()) return tr("Choose a parent with a confirmed computer and session identity");
+        return m_executorLaunchBlockers.value(task.uuid);
+    }
     const bool any = task.targetSession.isEmpty();
     const QString host = any ? m_host : task.targetHost, name = any ? m_session : task.targetSession;
     if (name.isEmpty()) return tr("Open the session to send this task to");
@@ -327,12 +305,7 @@ void TasksView::render() {
             connect(row, &TaskRow::dragStarted, this, [this, row](const QPoint &hotSpot) { startDrag(row, hotSpot); });
         }
         row->setObjectName(QStringLiteral("taskRow:") + task.id);
-        TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session, v.id); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
-        if (const auto *ran = session(task.sessionHost, task.sessionName); ran && task.sessionKnown && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
-        if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
-            if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
-        if (!task.writable)
-            for (const auto action : TaskBoard::actions(task.stage)) if (action != TaskAction::Edit) state.blocked.insert(int(action), tr("Update Zerus to edit this task"));
+        const auto state = rowState(task);
         row->setProperty("separated", index > 0);
         row->setTask(task, state, colors, v.now);
         m_list->removeWidget(row); m_list->insertWidget(index++, row); row->show(); shown.insert(task.uuid);
@@ -362,6 +335,35 @@ void TasksView::render() {
                                   Qt::QueuedConnection);
 }
 
+void TasksView::setExecutorLaunches(const QJsonObject &launches) {
+    QHash<QString, QString> blockers;
+    for (const auto &value : launches) {
+        const auto record = value.toObject(); const auto task = record.value("task").toString();
+        if (!task.isEmpty()) blockers[task] = record.value("phase") == "waiting" ? tr("The new executor is starting")
+            : tr("The previous executor launch needs review before another launch.");
+    }
+    if (blockers == m_executorLaunchBlockers) return;
+    m_executorLaunchBlockers = blockers; render();
+}
+
+void TasksView::setDescriptionDraft(const QString &uuid, bool unsaved) {
+    const auto blocked = unsaved ? uuid : QString();
+    if (m_descriptionDraft == blocked) return;
+    m_descriptionDraft = blocked; render(); emit boardChanged();
+}
+
+TaskRowState TasksView::rowState(const TaskItem &task) const {
+    const auto v = view();
+    TaskRowState state; state.mine = TaskBoard::belongsTo(task, m_host, m_session, v.id); state.anyNow = TaskBoard::sessionLabel(m_host, m_session);
+    if (const auto *ran = session(task.sessionHost, task.sessionName); task.worker.isEmpty() && ran && task.sessionKnown && task.stage == QLatin1String("active")) { state.sessionStatus = ran->status; state.statusKind = ran->kind; }
+    if (TaskBoard::actions(task.stage).contains(TaskAction::SendNow))
+        if (const auto why = sendBlocker(task); !why.isEmpty()) state.blocked.insert(int(TaskAction::SendNow), why);
+    state.blocked.insert(int(TaskAction::Pause), tr("Pausing an individual task is not available yet"));
+    if (!task.writable)
+        for (const auto action : TaskBoard::actions(task.stage)) if (action != TaskAction::Edit) state.blocked.insert(int(action), tr("Update Zerus to edit this task"));
+    return state;
+}
+
 void TasksView::updateComposer() {
     const QString target = m_stage == QLatin1String("backlog") ? tr("Backlog") : tr("To do");
     const QString session = TaskBoard::sessionLabel(m_host, m_session);
@@ -389,7 +391,7 @@ QList<TasksView::Step> TasksView::steps(const TaskItem &task, TaskAction action)
         if (task.targetSession.isEmpty() && !m_host.isEmpty()) arguments << "--host" << m_host;
         return {{withProject(arguments), {}}};
     }
-    case TaskAction::Edit: case TaskAction::Cancel: break;
+    case TaskAction::Rename: case TaskAction::Edit: case TaskAction::Cancel: case TaskAction::Pause: break;
     }
     return {};
 }
@@ -399,18 +401,21 @@ QList<TasksView::Step> TasksView::editSteps(const TaskItem &task, const TaskEdit
     if (edits.attachments) out << Step{withProject({"edit", task.uuid, "--content-json"}), TaskContent::payload(edits.text.value_or(task.text), *edits.attachments)};
     else if (edits.text) out << Step{withProject({"edit", task.uuid}), *edits.text};
     if (edits.target)
-        out << Step{withProject(targetArguments(task.uuid, edits.target->host, edits.target->any ? QString() : edits.target->session, edits.target->id)), {}};
+        out << Step{withProject(targetArguments(task.uuid, edits.target->host, edits.target->any ? QString() : edits.target->session, edits.target->id, edits.target->mode)), {}};
     return out;
 }
 
-QStringList TasksView::targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id) {
-    QStringList arguments{"target", uuid, session.isEmpty() ? QStringLiteral("any") : session};
+QStringList TasksView::targetArguments(const QString &uuid, const QString &host, const QString &session, const QString &id, const QString &mode) {
+    const bool planned = mode == QLatin1String("new_session") || mode == QLatin1String("subagent");
+    QStringList arguments{"target", uuid, planned ? (mode == QLatin1String("new_session") ? QStringLiteral("new-session") : mode) : session.isEmpty() ? QStringLiteral("any") : session};
+    if (planned) arguments << "--parent" << session;
     if (!session.isEmpty() && !host.isEmpty()) arguments << "--host" << host;
     if (!session.isEmpty() && !id.isEmpty()) arguments << "--session-id" << id;
     return arguments;
 }
 
 void TasksView::retarget(const TaskDrag &task, const QString &host, const QString &session) {
+    if (task.stage != QLatin1String("todo") && task.stage != QLatin1String("backlog")) return;
     const auto *target = this->session(host, session);
     run({{targetArguments(task.uuid, host, session, target ? target->id : QString()) << QStringLiteral("--project") << task.projectId, {}}});
 }
@@ -426,8 +431,18 @@ void TasksView::run(QList<Step> steps, std::function<void()> finished, std::func
 }
 
 void TasksView::act(const TaskItem &task, TaskAction action) {
-    if (action == TaskAction::Edit) return openTask(task);
+    if (action == TaskAction::Rename) {
+        if (!task.writable) return;
+        emit taskRenameRequested(task.uuid); return;
+    }
+    if (action == TaskAction::Pause) return; // Task-scoped execution accounting must precede pause.
+    if (action == TaskAction::Edit) {
+        if (m_openInInspector) { emit taskSelected(task.uuid); emit taskEditRequested(task.uuid); return; }
+        return openTask(task);
+    }
+    if (!task.writable || !TaskBoard::actions(task.stage).contains(action)) return;
     if (action == TaskAction::Cancel) return confirmCancel(task);
+    if (action == TaskAction::SendNow && task.targetKind == QLatin1String("new_session")) { emit newExecutorRequested(task, m_projectId); return; }
     if (action == TaskAction::SendNow && !sendBlocker(task).isEmpty()) return;
     run(steps(task, action));
 }
@@ -453,27 +468,30 @@ void TasksView::addTask(const QString &key, const QString &text, const QList<Mes
 }
 
 void TasksView::startDrag(TaskRow *row, const QPoint &hotSpot) {
-    if (m_projectId.isEmpty()) return;
+    if (m_projectId.isEmpty() || m_dragSource || !TaskDrag::draggable(row->task())) return;
     // A listing may take the row out of the list while the drag runs; the drag
     // carries the task, and the row is kept until the drag ends.
     m_dragSource = row;
     auto *drag = new QDrag(this);
+    QPointer<QDrag> dragGuard(drag);
     drag->setMimeData(TaskDrag::of(m_projectId, row->task()).mimeData());
     drag->setPixmap(row->grab()); drag->setHotSpot(hotSpot);
     row->setDragging(true);
     execDrag(drag);
+    if (dragGuard) dragGuard->deleteLater();
     const QPointer<TaskRow> source = std::exchange(m_dragSource, nullptr);
     if (source) {
         source->setDragging(false);
-        if (m_rows.value(source->task().uuid) != source) source->deleteLater();
+        if (source->property("taskRetired").toBool()) source->deleteLater();
     }
     // The drag is over wherever it ended, whether or not a leave reached the target.
     endListDrag();
     for (auto *tile : std::as_const(m_tiles)) tile->setDropTarget(false);
+    emit taskDragFinished();
 }
 
 void TasksView::retire(TaskRow *row) {
-    row->hide(); row->setObjectName({});
+    row->setProperty("taskRetired", true); row->hide(); row->setObjectName({});
     if (row != m_dragSource) row->deleteLater();
 }
 
@@ -481,11 +499,31 @@ Qt::DropAction TasksView::execDrag(QDrag *drag) { return drag->exec(Qt::MoveActi
 
 bool TasksView::takesOnTile(const TaskDrag &drag, const QString &stage) const {
     const auto list = [](const QString &s) { return s == QLatin1String("todo") || s == QLatin1String("backlog"); };
-    return drag.projectId == m_projectId && list(stage) && list(drag.stage) && drag.stage != stage;
+    return canReorderTask(drag, drag.stage) && list(stage) && list(drag.stage) && drag.stage != stage;
+}
+
+bool TasksView::canReorderTask(const TaskDrag &drag, const QString &stage) const {
+    if (m_projectId.isEmpty() || drag.projectId != m_projectId || drag.stage != stage) return false;
+    for (const auto &task : m_board.tasks)
+        if (task.uuid == drag.uuid) return TaskDrag::draggable(task) && task.stage == stage;
+    return false;
+}
+
+bool TasksView::canStageTask(const TaskDrag &drag, const QString &stage) const { return takesOnTile(drag, stage); }
+
+void TasksView::reorderTask(const TaskDrag &drag, const QString &anchor, bool before) {
+    if (!canReorderTask(drag, drag.stage) || anchor == drag.uuid) return;
+    for (const auto &task : m_board.tasks) if (task.uuid == anchor && task.stage == drag.stage && task.writable) {
+        run({{withProject({"move", drag.uuid, before ? "--before" : "--after", anchor}), {}}}); return;
+    }
+}
+
+void TasksView::stageTask(const TaskDrag &drag, const QString &stage) {
+    if (canStageTask(drag, stage)) run({{withProject({"stage", drag.uuid, stage}), {}}});
 }
 
 bool TasksView::takesInList(const TaskDrag &drag) const {
-    return drag.projectId == m_projectId && m_stage == QLatin1String("todo") && drag.stage == QLatin1String("todo") && !shownRows().isEmpty();
+    return canReorderTask(drag, m_stage) && !shownRows().isEmpty();
 }
 
 QList<TaskRow *> TasksView::shownRows() const {
@@ -522,8 +560,7 @@ void TasksView::followDrag(const TaskDrag &drag, const QPoint &point) {
 void TasksView::reorder(const TaskDrag &drag, const QPoint &point) {
     const auto rows = shownRows(); const int gap = rows.isEmpty() ? -1 : dropGap(drag.uuid, point);
     if (gap < 0) return;
-    run({{withProject(gap < rows.size() ? QStringList{"move", drag.uuid, "--before", rows[gap]->task().uuid}
-                                        : QStringList{"move", drag.uuid, "--after", rows.last()->task().uuid}), {}}});
+    reorderTask(drag, gap < rows.size() ? rows[gap]->task().uuid : rows.last()->task().uuid, gap < rows.size());
 }
 
 void TasksView::endListDrag() { m_autoScroll.stop(); m_scrollStep = 0; m_overList = false; m_dropLine->hide(); }
@@ -552,7 +589,7 @@ bool TasksView::eventFilter(QObject *watched, QEvent *event) {
         tile->setDropTarget(takes && type != QEvent::Drop);
         if (!takes) { drop->ignore(); return true; }
         drop->setDropAction(Qt::MoveAction); drop->accept();
-        if (type == QEvent::Drop) run({{withProject({"stage", drag->uuid, it.key()}), {}}});
+        if (type == QEvent::Drop) stageTask(*drag, it.key());
         return true;
     }
     return QWidget::eventFilter(watched, event);
@@ -600,14 +637,126 @@ void TasksView::openTask(const TaskItem &task) {
             if (action == TaskAction::Cancel) return run(editSteps(task, edits), [this, close, edited] { close(); confirmCancel(edited); }, refused);
             run(editSteps(task, edits) + steps(edited, action), close, refused);
         });
-        connect(dialog, &TaskDialog::commentRequested, this, [this, guard, uuid = task.uuid](const QString &text) {
-            request(withProject({"comment", uuid}), text, [guard](const QJsonObject &reply) {
+        connect(dialog, &TaskDialog::commentRequested, this, [this, guard, refused, uuid = task.uuid](const QString &text) {
+            request(withProject({"comment", uuid}), text, [this, guard](const QJsonObject &reply) {
+                refresh();
                 if (!guard) return;
                 guard->clearComment(); guard->setHistory(reply.value("task").toObject().value("log").toArray());
-            });
+            }, refused);
         });
         dialog->open();
     });
+}
+
+void TasksView::createNamedTask(const QJsonObject &intent, std::function<void(const QJsonObject &)> saved,
+                                std::function<void(const QString &)> refused) {
+    const auto project = intent.value("project").toString();
+    if (project.isEmpty() || project != m_projectId) { refused(tr("The selected project changed. The new task draft was kept.")); return; }
+    QStringList args{"add", "--project", project, "--title", intent.value("title").toString(), "--request-id", intent.value("request_id").toString(),
+                     "--target", intent.value("session").toString("any"), "--content-json"};
+    if (intent.value("stage") == QLatin1String("backlog")) args << "--backlog";
+    if (!intent.value("session_id").toString().isEmpty()) args << "--session-id" << intent.value("session_id").toString();
+    if (!intent.value("host").toString().isEmpty()) args << "--host" << intent.value("host").toString();
+    request(args, TaskContent::payload({}, {}), [this, intent, project, saved, refused](const QJsonObject &reply) {
+        const auto task = reply.value("task").toObject();
+        if (task.value("uuid") != intent.value("request_id")) { refused(tr("Task creation needs review: the reply did not match the reserved card.")); return; }
+        if (project == m_projectId) {
+            const auto uuid = task.value("uuid").toString();
+            auto found = std::find_if(m_board.tasks.begin(), m_board.tasks.end(), [uuid](const TaskItem &t) { return t.uuid == uuid; });
+            if (found == m_board.tasks.end()) m_board.tasks.prepend(TaskBoard::item(task));
+            render(); emit boardChanged();
+        }
+        saved(task); refresh();
+    }, refused);
+}
+
+void TasksView::saveTaskEdits(const TaskItem &task, const TaskEdits &edits,
+                              std::function<void()> saved, std::function<void(const QString &)> refused) {
+    run(editSteps(task, edits), saved, refused);
+}
+
+void TasksView::renameTask(const QString &uuid, const QString &title, std::function<void()> saved, std::function<void(const QString &)> refused) {
+    run({{withProject({"rename", uuid}), title}}, saved, refused);
+}
+
+void TasksView::saveTaskAssignment(const TaskItem &task, const TaskTarget &target, std::function<void()> saved, std::function<void(const QString &)> refused) {
+    run({{withProject(targetArguments(task.uuid, target.host, target.any ? QString() : target.session, target.id, target.mode)), {}}}, saved, refused);
+}
+
+void TasksView::saveTaskNote(const QString &uuid, const QString &text, const QList<MessageAttachment> &files,
+                             std::function<void()> saved, std::function<void(const QString &)> refused) {
+    if (files.isEmpty()) run({{withProject({"comment", uuid}), text}}, saved, refused);
+    else {
+        const auto project = m_projectId;
+        AttachmentFiles::runAsync<QString>(this, [text, files] { return TaskContent::payload(text, TaskContent::encode(files)); },
+            [this, project, uuid, saved, refused](const QString &payload) {
+                if (project != m_projectId) { refused(tr("The selected project changed; the comment draft was kept.")); return; }
+                run({{{"comment", uuid, "--content-json", "--project", project}, payload}}, saved, refused);
+            });
+    }
+}
+
+void TasksView::saveTaskMessage(const QString &uuid, const QString &mode, const QString &dispatch, const QString &text, const QList<MessageAttachment> &files,
+                               std::function<void()> saved, std::function<void(const QString &)> refused) {
+    const auto project = m_projectId;
+    AttachmentFiles::runAsync<TaskMessageOutbox::Request>(this, [project, uuid, mode, dispatch, text, files] {
+        return TaskMessageOutbox::reserve(project, uuid, {{"content", QJsonObject{{"text", text}, {"attachments", TaskContent::encode(files)}}}, {"mode", mode}, {"dispatch", dispatch}});
+    }, [this, project, uuid, mode, dispatch, text, files, saved, refused](const TaskMessageOutbox::Request &request) {
+        if (!request.error.isEmpty()) { refused(request.error); return; }
+        if (project != m_projectId) { refused(tr("The selected project changed; the original message was kept for recovery.")); return; }
+        if (request.differentIntent) {
+            // Retain the previous comment in the discussion using a read-only
+            // receipt check, then handle the new explicit submission separately.
+            submitTaskMessage(project, uuid, request.record, true, [this, project, uuid, mode, dispatch, text, files, saved, refused] {
+                if (project != m_projectId) { refused(tr("The selected project changed. Your new comment draft was kept.")); return; }
+                saveTaskMessage(uuid, mode, dispatch, text, files, saved, refused);
+            }, refused); return;
+        }
+        submitTaskMessage(project, uuid, request.record, request.recovering, saved, refused);
+    });
+}
+
+void TasksView::submitTaskMessage(const QString &project, const QString &uuid, const QJsonObject &record, bool recovery,
+                                std::function<void()> saved, std::function<void(const QString &)> refused) {
+    const auto intent = record.value("intent").toObject(); const auto id = record.value("id").toString();
+    QStringList args{"message", uuid, "--request-id", id, "--mode", intent.value("mode").toString(),
+        "--expect-dispatch", intent.value("dispatch").toString(), "--content-json", "--project", project};
+    if (recovery) args << "--recover-only";
+    request(args, QString::fromUtf8(QJsonDocument(intent.value("content").toObject()).toJson(QJsonDocument::Compact)),
+        [this, project, uuid, id, saved, refused](const QJsonObject &reply) {
+            if (reply.value("task").toObject().value("uuid").toString() != uuid || reply.value("message").toObject().value("request_id").toString() != id) {
+                refused(tr("The message reply did not match its original identity. Recovery data was kept.")); return;
+            }
+            refresh();
+            AttachmentFiles::runAsync<QString>(this, [project, uuid, id] { return TaskMessageOutbox::release(project, uuid, id); }, [saved, refused](const QString &error) {
+                if (error.isEmpty()) saved(); else refused(error);
+            });
+        }, refused);
+}
+
+void TasksView::recoverTaskMessage(const QString &uuid, std::function<void(const QJsonObject &)> checked, std::function<void(const QString &)> refused) {
+    const auto project = m_projectId;
+    AttachmentFiles::runAsync<TaskMessageOutbox::Request>(this, [project, uuid] { return TaskMessageOutbox::read(TaskMessageOutbox::path(project, uuid)); },
+        [this, project, uuid, checked, refused](const TaskMessageOutbox::Request &request) {
+            if (!request.error.isEmpty()) { refused(request.error); return; }
+            if (project != m_projectId) { refused(tr("Return to this project before checking delivery.")); return; }
+            const auto content = request.record.value("intent").toObject().value("content").toObject();
+            submitTaskMessage(project, uuid, request.record, true, [checked, content] { checked(content); }, refused);
+        });
+}
+
+void TasksView::releaseTaskMessage(const QString &uuid, std::function<void()> released, std::function<void(const QString &)> refused) {
+    const auto project = m_projectId; const auto id = QSettings().value(TaskMessageOutbox::key(project, uuid)).toString();
+    AttachmentFiles::runAsync<QString>(this, [project, uuid, id] { return TaskMessageOutbox::release(project, uuid, id); }, [released, refused](const QString &error) {
+        if (error.isEmpty()) released(); else refused(error);
+    });
+}
+
+QString TasksView::taskSendBlocker(const TaskItem &task, const TaskTarget &target) const {
+    auto chosen = task;
+    chosen.targetSession = target.any ? QString() : target.session;
+    chosen.targetHost = target.host; chosen.targetId = target.id; chosen.targetKnown = true;
+    return sendBlocker(chosen);
 }
 
 void TasksView::confirmCancel(const TaskItem &task) {

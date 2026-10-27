@@ -66,6 +66,16 @@ fn socket_path(config: &Config) -> Result<PathBuf> {
 pub fn request(config: &Config, input: &Value) -> Result<Value> {
     validate_request(input).map_err(|e| Error::new(1, e.to_string()))?;
     let action = input.get("action").and_then(Value::as_str).unwrap_or("");
+    if action.starts_with("draft_") {
+        #[cfg(unix)] {
+            if action == "draft_profiles" { return voice_computers(config).map_err(|e| Error::new(1, e)); }
+            let mut payload = input.clone(); let object = payload.as_object_mut().expect("validated object");
+            let machine = object.remove("machine_id").and_then(|v| v.as_str().map(str::to_owned)).expect("validated machine");
+            object.insert("action".into(), Value::String(action.trim_start_matches("draft_").into()));
+            return voice_request(config, &machine, &payload).map_err(|e| Error::new(1, e));
+        }
+        #[cfg(not(unix))] { return Err(Error::new(1, "Draft speech routing is unavailable on this computer")); }
+    }
     if profiles::is_action(action) {
         return profiles::request(config, input)
             .map_err(|_| Error::new(1, "Speech profile management failed on this computer"));
@@ -296,6 +306,17 @@ pub(crate) fn voice_computers(config: &Config) -> std::result::Result<Value, Str
 }
 
 pub(crate) fn validate_request(input: &Value) -> anyhow::Result<()> {
+    if let Some(action) = input["action"].as_str().filter(|a| a.starts_with("draft_")) {
+        let object = input.as_object().ok_or_else(|| anyhow::anyhow!("Speech request must be an object"))?;
+        if action == "draft_profiles" { anyhow::ensure!(object.len() == 1, "Invalid draft speech fields"); return Ok(()); }
+        anyhow::ensure!(matches!(action, "draft_submit" | "draft_status" | "draft_cancel"), "Unknown draft speech action");
+        let machine = input["machine_id"].as_str().unwrap_or("");
+        let uuid = uuid::Uuid::parse_str(machine)?;
+        anyhow::ensure!(!uuid.is_nil() && uuid.hyphenated().to_string() == machine, "Invalid draft speech computer identity");
+        let mut payload = input.clone(); let payload = payload.as_object_mut().unwrap();
+        payload.remove("machine_id"); payload.insert("action".into(), Value::String(action.trim_start_matches("draft_").into()));
+        return validate_request(&Value::Object(payload.clone()));
+    }
     if profiles::is_action(input["action"].as_str().unwrap_or("")) {
         return profiles::validate(input);
     }
@@ -440,6 +461,23 @@ fn exchange(_path: &std::path::Path, _bytes: &[u8]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_speech_accepts_only_verified_machine_job_payloads() {
+        let machine = "aaaaaaaa-aaaa-4aaa-baaa-aaaaaaaaaaaa";
+        assert!(validate_request(&json!({"action":"draft_profiles"})).is_ok());
+        assert!(validate_request(&json!({"action":"draft_profiles","session":"codex/other"})).is_err());
+        let mut request = json!({"action":"draft_status", "machine_id":machine, "job_id":machine});
+        assert!(validate_request(&request).is_ok());
+        request["expected_run_id"] = json!(machine);
+        assert!(validate_request(&request).is_err());
+        request.as_object_mut().unwrap().remove("expected_run_id");
+        request["machine_id"] = json!("alias");
+        assert!(validate_request(&request).is_err());
+        assert!(validate_request(&json!({"action":"draft_submit", "machine_id":machine, "request_id":machine, "profile_id":"fixture", "audio":{
+            "format":"pcm_s16le", "sample_rate":16000, "channels":1, "data_base64":"AAA="}})).is_ok());
+        assert!(validate_request(&json!({"action":"draft_send","machine_id":machine})).is_err());
+    }
 
     #[test]
     #[cfg(unix)]

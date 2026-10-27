@@ -260,7 +260,7 @@ private:
 
 MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
 {
-    setObjectName("messageComposer");
+    setObjectName("messageComposer"); setProperty("messageComposer", true);
     auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 4, 0, 0); layout->setSpacing(0);
     m_editorHeight = qBound(DefaultEditorHeight, QSettings().value(EditorHeightSetting, DefaultEditorHeight).toInt(), MaximumEditorHeight);
     auto *handle = new ComposerResizeHandle(this); m_resizeHandle = handle; layout->addWidget(handle);
@@ -277,7 +277,7 @@ MessageComposer::MessageComposer(QWidget *parent) : QWidget(parent)
     m_input = new QWidget(this); m_input->setObjectName("messageInputArea");
     auto *inputLayout = new QVBoxLayout(m_input); inputLayout->setContentsMargins(0, 0, 0, 0); inputLayout->setSpacing(7);
     layout->addWidget(m_input);
-    auto *edit = new ComposeEdit(this); m_editor = edit; m_toolbar->setFocusFallback(edit); edit->setObjectName("messageInput");
+    auto *edit = new ComposeEdit(this); m_editor = edit; m_toolbar->setFocusFallback(edit); edit->setObjectName("messageInput"); edit->setProperty("composerEditor", true);
     edit->setAccessibleName(tr("Message to selected agent")); edit->setPlaceholderText(tr("Message this agent…"));
     edit->setMinimumHeight(DefaultEditorHeight); edit->setMaximumHeight(DefaultEditorHeight); edit->setTabChangesFocus(true);
     handle->pressed = [this] { m_dragEditorHeight = m_editor->height(); };
@@ -505,16 +505,25 @@ void MessageComposer::ensureDraftLoaded(const QString &key)
                 m_loading = true; restoreDraft(); m_loading = false;
                 rebuildAttachments(); updateControls(); updatePlaceholder();
             }
-            emit draftLoaded(key);
+            emit draftLoaded(key); trimDraftCache();
         });
     }
 }
 
-bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved)
+bool MessageComposer::insertVoiceText(const VoiceTarget &target, const QString &text, std::function<void(bool)> saved, const QString &operation)
 {
     if (target.key.isEmpty() || target.key != m_key || target.revision != m_saveRevision.value(m_key)
         || target.navigation != m_navigationRevision || !canEditAttachments() || isPreparingSending(m_key)
         || !isInputVisible() || m_editor->isReadOnly() || text.isEmpty()) return false;
+    auto insertions = m_drafts[m_key].formState.value("voice_insertions").toArray();
+    if (!operation.isEmpty()) {
+        if (insertions.contains(operation)) {
+            m_draftStore.saveDurableAsync(m_key, m_drafts.value(m_key), this, [saved](bool ok, const ComposerDraft &) { saved(ok); });
+            return true;
+        }
+        if (insertions.size() >= 32) insertions.removeFirst();
+        insertions.append(operation); m_drafts[m_key].formState["voice_insertions"] = insertions;
+    }
     // Dictation appends at the captured caret without replacing a selection.
     auto cursor = m_editor->textCursor(); cursor.clearSelection();
     QString insertion = text;
@@ -569,6 +578,8 @@ void MessageComposer::setTaskMode(bool taskMode)
     updateControls();
 }
 
+void MessageComposer::addTaskControls(QWidget *controls) { m_actions->insertWidget(m_actions->indexOf(m_send), controls); }
+
 void MessageComposer::setSendLabel(const QString &label) { m_sendLabel = label; updateControls(); }
 
 void MessageComposer::setPlaceholder(const QString &placeholder) { m_placeholder = placeholder; updatePlaceholder(); }
@@ -579,15 +590,32 @@ bool MessageComposer::requestInterrupt()
     emit interruptRequested(m_key); return true;
 }
 
-bool MessageComposer::offerDraft(const QString &key, const QString &text)
+bool MessageComposer::offerDraft(const QString &key, const QString &text, const QList<MessageAttachment> &attachments)
 {
-    if (((m_recording || m_sessionStatusBlocksInput) && key==m_key) || key.isEmpty() || isDraftLoading(key) || text.trimmed().isEmpty() || isWaitingToSend(key)) return false;
+    if (((m_recording || m_sessionStatusBlocksInput) && key==m_key) || key.isEmpty() || isDraftLoading(key) || (text.trimmed().isEmpty() && attachments.isEmpty()) || isWaitingToSend(key)) return false;
     auto &draft = m_drafts[key];
     // A draft the user started, or a message on its way, always wins.
     if (!draft.text.trimmed().isEmpty() || !draft.attachments.isEmpty() || draft.sending) return false;
-    draft.text = text; draft.position = draft.anchor = int(text.size()); draft.notice.clear();
+    draft.text = text; draft.attachments = attachments; draft.position = draft.anchor = int(text.size()); draft.notice.clear();
     if (key == m_key) { m_loading = true; restoreDraft(); m_loading = false; }
+    if (key == m_key) rebuildAttachments();
     saveDraft(key); notifyDraft(key); updateControls(); return true;
+}
+
+void MessageComposer::setDraftLabel(const QString &label) {
+    if (m_key.isEmpty() || isDraftLoading(m_key) || m_drafts[m_key].label == label) return;
+    m_drafts[m_key].label = label; saveDraft(m_key);
+}
+
+void MessageComposer::trimDraftCache() {
+    if (m_draftCacheLimit <= 0) return;
+    for (const auto &key : m_drafts.keys()) {
+        if (m_drafts.size() <= m_draftCacheLimit) break;
+        if (key == m_key || isDraftLoading(key) || isSending(key) || isWaitingToSend(key)
+            || m_savingKeys.contains(key) || m_failedSaves.contains(key) || m_renamingKeys.contains(key)) continue;
+        if (hasDraft(key)) m_storedDrafts.insert(key); else m_storedDrafts.remove(key);
+        m_drafts.remove(key); m_saveRevision.remove(key);
+    }
 }
 
 void MessageComposer::setAttachmentAvailability(bool available, const QString &reason)
@@ -653,6 +681,7 @@ bool MessageComposer::saveDraft(const QString &key)
         m_savingKeys.remove(key);
         if (saved) m_failedSaves.remove(key); else m_failedSaves.insert(key);
         if (key == m_key) updateControls();
+        trimDraftCache();
     });
     return true;
 }
@@ -694,7 +723,7 @@ void MessageComposer::prepareSendingAsync(const QString &key, bool preserveDraft
     if ((m_recording && key==m_key) || key.isEmpty() || isSending(key) || m_preparingWaiting.contains(key) || isDraftLoading(key) || (m_drafts.value(key).uncertain && !preserveDraft)) { done(false); return; }
     m_waitingSends.remove(key); m_preparingKeys.insert(key);
     if (preserveDraft) m_preservedDrafts.insert(key, m_drafts.value(key));
-    auto &draft = m_drafts[key]; draft.sending = true; draft.error = false; draft.notice = tr("Saving before sending…");
+    auto &draft = m_drafts[key]; draft.sending = true; draft.error = false; draft.notice = m_taskMode ? tr("Saving…") : tr("Saving before sending…");
     // Preserve a newer draft on Activity retry, but also durably record that a
     // delivery may have begun. Recovery never repeats the older message.
     auto snapshot = m_preservedDrafts.value(key, draft); snapshot.sending = true;
@@ -708,10 +737,10 @@ void MessageComposer::prepareSendingAsync(const QString &key, bool preserveDraft
             draft.sending = false; draft.notice.clear(); m_preservedDrafts.remove(key); m_failedSaves.insert(key);
             if (key == m_key) updateControls(); done(false); return;
         }
-        m_failedSaves.remove(key); draft.notice = tr("Sending…");
+        m_failedSaves.remove(key); draft.notice = m_taskMode ? tr("Saving…") : tr("Sending…");
         if (key == m_key) {
             if (m_send->hasFocus()) m_editor->setFocus(Qt::OtherFocusReason);
-            m_loading = true; m_editor->clear(); m_loading = false;
+            if (!m_taskMode) { m_loading = true; m_editor->clear(); m_loading = false; }
             rebuildAttachments(); updateControls();
         }
         notifyDraft(key); done(true);
@@ -729,7 +758,7 @@ void MessageComposer::deliveryFinished(const QString &key, bool ok, const QStrin
     }
     auto &draft = m_drafts[key]; const bool wasSending = draft.sending;
     draft.sending = false; draft.error = !ok; draft.uncertain = uncertain;
-    draft.notice = ok ? tr("Submitted to terminal") : detail;
+    draft.notice = ok ? (m_taskMode ? tr("Saved") : tr("Submitted to terminal")) : detail;
     if (ok) { draft.text.clear(); draft.attachments.clear(); draft.attachmentHashes.clear(); draft.nextAttachmentNumber = 1; }
     saveDraft(key);
     notifyDraft(key);
@@ -1147,9 +1176,11 @@ void MessageComposer::updateControls()
     for (auto *button : m_attachmentList->findChildren<QPushButton *>("removeAttachment")) button->setEnabled(!locked);
     m_send->setEnabled(!m_key.isEmpty() && m_available && hasContent && (draft.attachments.isEmpty()||m_attachmentsAvailable) && !tooLong && !locked && !draft.uncertain);
     m_attach->setVisible(true);
-    m_send->setText(draft.sending ? (m_taskMode ? tr("Adding…") : tr("Sending…")) : waiting ? tr("Waiting to send…")
-        : m_taskMode ? m_sendLabel : tr("Send"));
-    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_taskMode ? tr("Add the task: Enter; new line: Shift+Enter")
+    m_send->setAccessibleName(m_taskMode ? m_sendLabel : tr("Send"));
+    m_send->setIconSize(property("sendIconOnly").toBool() ? QSize(20, 20) : QSize(14, 14));
+    m_send->setText(draft.sending ? (m_taskMode ? tr("Saving…") : tr("Sending…")) : waiting ? tr("Waiting to send…")
+        : property("sendIconOnly").toBool() ? QString() : m_taskMode ? m_sendLabel : tr("Send"));
+    m_send->setToolTip(waiting ? m_waitingSends.value(m_key) : m_taskMode ? tr("%1: Enter; new line: Shift+Enter").arg(m_sendLabel)
         : tr("Send: Enter; new line: Shift+Enter"));
     m_retry->setVisible(draft.uncertain && !operationLocked);
     m_refreshStatus->setVisible(!m_sessionStatus.isEmpty() && m_sessionStatusError);
@@ -1220,7 +1251,9 @@ void MessageComposer::showSavedDrafts()
             const auto summary = summaries.value(key);
             const auto owner = ComposerDraftStore::owner(key);
             QStringList title, detail;
-            if (owner.kind == ComposerDraftOwner::Kind::Unknown) {
+            if (owner.kind == ComposerDraftOwner::Kind::TaskDescription || owner.kind == ComposerDraftOwner::Kind::TaskComment) {
+                title << (summary.label.isEmpty() ? owner.task : summary.label) << owner.project;
+            } else if (owner.kind == ComposerDraftOwner::Kind::Unknown) {
                 title << (summary.label.isEmpty() ? QString(key).replace('\n', " / ") : summary.label);
             } else {
                 title << owner.session << (owner.machine.isEmpty() ? tr("this computer") : owner.machine);
@@ -1642,10 +1675,10 @@ void MessageComposer::setTheme(bool dark)
     handle->accent = QColor(dark ? "#8bdfc0" : "#167357"); handle->update();
     m_settings->setProperty("chevron", QVariant::fromValue(composerIcon("chevron-down", chevron, chevron))); m_settings->update();
     setStyleSheet(QString(R"(
-        QPlainTextEdit#messageInput { background:%1; color:%2; border:1px solid %3; border-radius:9px; padding:%8px; font-size:%9px; selection-background-color:%4; }
-        QPlainTextEdit#messageInput:focus { border-color:%5; }
-        QPlainTextEdit#messageInput[sessionBlocked="true"] { color:%7; border-color:%3; }
-        QWidget#messageComposer { background:transparent; border:0; }
+        QPlainTextEdit[composerEditor="true"] { background:%1; color:%2; border:1px solid %3; border-radius:9px; padding:%8px; font-size:%9px; selection-background-color:%4; }
+        QPlainTextEdit[composerEditor="true"]:focus { border-color:%5; }
+        QPlainTextEdit[composerEditor="true"][sessionBlocked="true"] { color:%7; border-color:%3; }
+        QWidget[messageComposer="true"] { background:transparent; border:0; }
         QWidget#attachmentRow { border-radius:6px; }
         QWidget#attachmentRow:hover, QWidget#attachmentRow:focus { background:%4; }
         QWidget#attachmentsPopover QLabel { font-size:11px; border:0; background:transparent; }

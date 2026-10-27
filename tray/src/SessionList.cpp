@@ -514,6 +514,7 @@ SessionList::Placement SessionList::placement(const QPoint &point, bool movingGr
 
 const QListWidgetItem *SessionList::taskDropItem(const TaskDrag &task, const QPoint &point) const
 {
+    if (task.stage != QLatin1String("todo") && task.stage != QLatin1String("backlog")) return nullptr;
     const auto *over = itemAt(point);
     if (!over || over->isHidden() || over->data(SessionRoles::Group).toString() != task.projectId) return nullptr;
     if (over->data(SessionRoles::Header).toBool()) return task.targetSession.isEmpty() ? nullptr : over;

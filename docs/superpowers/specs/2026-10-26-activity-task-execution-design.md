@@ -9,10 +9,25 @@ from the remaining design. Public distribution follows the normal release flow.
 
 Activity remains the primary work surface. Add a **Tasks** tab to the existing
 right inspector beside **Plan & agents**, **Details**, and **Worktrees**. It
-shows the current task, actual executor, queue, expected result and verified
-delivery milestones. Opening a task's conversation uses the central Activity
-renderer and composer, with an explicit task context. Do not put another full
+contains the task board, with the current task, actual executor, queue, expected
+result and verified delivery milestones. Owner live review, 2026-10-26: reuse the
+board's stage filters and cards; show stage labels when width permits and icons
+with counts on narrow panels. Owner layout correction, 2026-10-26: the upper pane
+contains the board and the permanent lower pane contains the selected task's
+details. Selection never inserts content into the list, moves cards, changes its
+viewport or changes the divider position. Keep the divider adjustable and saved.
+Remove the Project board shortcut; move the board's existing scope and settings
+buttons into the inspector toolbar. Detail tab captions must remain complete on
+macOS and narrow panels. Reports and comments use Activity's Markdown, author,
+timestamp and message-card presentation. Opening a task's conversation uses the
+central Activity renderer and composer, with an explicit task context. Do not put another full
 conversation inside a narrow inspector or require a modal task window to work.
+
+Owner density correction, 2026-10-26: collapsed cards must remain short regardless
+of report length. Show a two-line title and one worker/identity line, with actions
+in a compact menu. Full reports are not list previews. The selected card reveals
+Description, Result or History individually; do not concatenate them into one
+long document or tint every card broadly because one session owns them.
 
 The project-wide task list remains useful for planning and review. It becomes
 an optional overview; it must not replace Activity during execution.
@@ -26,11 +41,109 @@ when the corresponding facts are available.
 ```text
 Sessions       Activity                           Inspector
                Task T-a1b2c3 / all session work    Tasks | Plan & agents | Details
-               discussion, tools, approvals       Current work + actual executor
+               discussion, tools, approvals       Board + actual executor
                progress and results               Next tasks, in explicit order
                shared Activity composer           Result, milestones, history
                [Task T-a1b2c3 -> executor]         Open full project overview
 ```
+
+Owner inspector review, 2026-10-26: tabs form the lower pane's first row, with
+Activity/details icons at the right. Assignment is an explicit field with its
+own chooser; it must never open the whole editor. Both description editing and
+comments reuse MessageComposer, including attachments, previews and durable
+per-task drafts. Footer workflow actions carry text, and a blocked Start explains
+its reason in the pane. Switching tasks retains the presented controls until the
+replacement snapshot and comment draft are loaded; handlers retain their exact
+binding while loading, and unchanged icons are reused.
+
+Owner executor decision, 2026-10-26: selecting New session or Subagent saves the
+routing intent. Create the executor only on explicit Start. The first slice uses
+the existing NewSessionDialog and exact launch correlation for new sessions, and
+a coordinator request plus verified native-child registration for subagents.
+Unknown delivery is reserved durably and requires explicit review before another
+launch. This slice does not implement the execution/revision scheduler, true
+per-task pause, automatic native comment delivery, or verified result artifacts.
+
+
+## Central Task View after inspector preview
+
+Status: implemented on the feature branch after `815571f9`, 2026-10-26;
+qualification and signed Mac preview are in progress. The central Task View
+replaces the lower inspector discussion/editor. The owner is reviewing branch
+previews; this does not authorize a main merge.
+
+Keep the board, its filters, ordering, selection and compact task actions in the
+right inspector. A card opens one reusable central **Task View**, identified by
+project and task UUID. It appears beside ordinary Activity with a task ID/title,
+actual executor and stage. Selecting another card updates that one view instead
+of opening an unbounded set of task tabs. Ordinary session Activity retains its
+selection, scroll and draft and remains directly reachable. Opening a task must
+not implicitly switch the selected session or send input to an executor.
+
+The central body contains the description, discussion, execution evidence and
+reported result using Activity's existing presentation. Keep a result reachable
+without scrolling a long journal. Native session events enter this view only
+when their task/execution identity is known; filtering a whole conversation by
+its name, current task or timestamp cannot establish attribution.
+
+Use one shared input surface with explicit task context, attachments, speech,
+previews and durable drafts. Description editing, new-task creation and task
+comments are distinct destinations using the same input system. Recording or
+recognizing speech must not submit native session input. New-task speech fills
+a reviewable task draft; task comments retain their task UUID throughout capture,
+recognition and submission. A context change saves/ends recording safely rather
+than redirecting it. Ordinary session drafts remain separate.
+
+
+### Title-first creation from the right board
+
+Owner steering, 2026-10-26 supersedes the earlier private-card publication
+proposal: add a **New task** plus control to the right board. It opens a one-line
+name entry. Confirming the name creates a shared title-only task in To do (or
+Backlog when that column is selected) and immediately opens its central Task View.
+There is no extra publish step after naming. Creation never starts an executor.
+
+The task title is an explicit persisted field. **Rename** is a separate action;
+subsequent description text, voice recognition and comments never overwrite it.
+The existing single task text field becomes the description, which can be empty
+when a named task is created. Older text-only tasks keep their complete text and
+derive a display title until explicitly renamed. Names never establish identity.
+
+The central Task View uses the familiar full input for description content,
+attachments, reviewed speech and later comments. Its destination is explicit:
+**Description** on a new card's Description tab until the first description is saved, then **Comment**. History selects comment input. Description
+editing selects that destination explicitly. Retain unsent input privately and
+durably across navigation/restart, including a failed new-name submission. Voice
+capture/recognition must not submit native input or start an executor.
+
+Only an unconfirmed new name and unsent content are drafts. Once the name is
+confirmed, the real card remains in the shared board even if it has no description
+yet. Preserve selection and the same card UUID through content edits and rename.
+Reserve an idempotent creation identity before transport, so duplicate clicks or
+an uncertain reply cannot create another card. Stage and executor selection stay
+separate from title/content entry; only explicit Start dispatches work.
+
+Proposed submission flow:
+
+| Task state | Default input destination | Executor delivery |
+| --- | --- | --- |
+| New name | Enter creates a title-only task and opens Task View | Only explicit Start creates/dispatches an executor. |
+| Backlog / To do | Durable task comment | Included with the next explicit dispatch. |
+| In progress | Durable task comment | Also deliver to the verified current worker; show that destination before submission. |
+| In review / Done | Durable task comment | Requesting more work uses an explicit reopen-and-send action. |
+
+A comment's history identity and delivery receipt remain distinct. Show saved,
+queued, submitted or delivery-unconfirmed evidence without claiming model
+consumption. A failed or uncertain delivery keeps the comment and never permits
+a hidden retry or fallback to another executor.
+
+Put compact stage actions in the task context/input toolbar: Back to do, Accept,
+Start, and a send icon for comments. Keep text for less obvious stage transitions;
+use existing familiar attachment, microphone and send icons. Place Jump to latest
+in that toolbar, following the existing desktop Activity pattern. Avoid a floating
+control bundle that obscures the journal or another full composer in the inspector.
+The task view solves the space/input duplication; distributed execution tracking,
+real task Pause and verified artifacts still require the open execution work.
 
 ## Verified starting point
 
@@ -499,3 +612,256 @@ The proposal succeeds when the person can answer four questions from one work
 surface: **what is happening, who is doing it, what happens next, and where the
 result is**. A cosmetically updated board with the old lifecycle does not meet
 that criterion.
+
+## Task editing interaction review, 2026-10-26
+
+Reviewed the branch at `84898fc1` against the Activity-centered workflow after
+owner feedback on missing reordering, the ambiguous lower-pane ellipsis and task
+context menus. The old `TaskDialog` is a combined task console, not a focused
+editor: it mixes description/attachment changes, routing, reports, history,
+immediate notes and workflow actions. It cannot be the main work surface.
+
+| Finding | Consequence | Disposition |
+| --- | --- | --- |
+| `TaskInspector` connected card clicks and actions but not `TaskRow::dragStarted`; it had no drop targets. | The sidebar looked like the board but lost queue ordering and session/stage drops. | Restore both queue surfaces through shared drag lifetime and guarded mutations, insertion feedback and edge scrolling. Backlog ordering is project priority; neither it nor To do implies parallel execution. |
+| The lower ellipsis opened `TaskDialog` even when the task was read-only. | An apparent editing action opened a window in which description and routing could not change. | Use an explicit pencil plus Edit label for editable tasks; use Details for other stages so notes and inspection remain accessible. Explain the backend edit restriction. |
+| The dialog's Session field chose between target and recorded worker. | Routing preference appeared to be the actual executor. | Show Assigned to separately from Executor / Last executor; a send without a start remains unconfirmed. These fields do not implement an active handoff. |
+| The Review report was an unbounded wrapping label. | A long result could force the dialog beyond the screen and obscure controls. | Use a bounded Activity report view with Markdown, author and known timestamp. A report remains an agent statement, not verified delivery evidence. |
+| The note control was a single line, persisted independently, and never delivered to the session. Duplicate submits were possible, while a refusal used the board notice instead of the open dialog. | A clarification could fail silently or be saved twice, and a saved note could be mistaken for communication with the worker. | Label Save note explicitly, reserve one pending UI submission, retain the draft and show refusal locally. Return saves only the note and does not trigger the dialog default Save/Close. Task-linked delivery and rich drafts remain `zerus-cg5h.3`. |
+| Workflow buttons applied unsaved edits before changing task state. The modal also duplicated result/history and had no durable discussion draft. | Editing, workflow and discussion had different commit boundaries inside one form; closing it could discard an unsent discussion draft. | Make the explicit editor contain only description, attachments and next-send routing with Save/Cancel. Keep workflow actions in card menus, read results/history in the inspector and discuss through Activity. This separation is `zerus-cg5h.9`, after `zerus-cg5h.3`. |
+| `TaskDoc::edit_text`, attachment edits and routing require Backlog or To do; rank changes also require these stages. | Enabling an active-task editor or dragging running tasks would misrepresent the current execution model. | Keep these guards. Revision-scoped edits, executor queues, handoff and verified artifacts belong to `zerus-cg5h.4`. Legacy full-journal reads remain `zerus-cg5h.2`. |
+
+The target interaction is: select to inspect; drag to prioritize queued work;
+right-click for explicit stage actions; Edit for requirement/routing changes;
+Activity for discussion with the current executor. Saving a task note is not
+message delivery, and changing routing is not changing recorded execution
+ownership. The current UI slice improves these boundaries without claiming the
+remaining execution/composer model is implemented.
+
+
+### Owner follow-up: one fixed task work surface, 2026-10-26
+
+The owner superseded the Edit/Details text and duplicate-modal dispositions
+above: use one stable icon-only Task details action and put the form directly
+inside Description in the fixed lower pane. Description shows the assignment
+and its change control; description, attachments and routing use the shared
+form and explicit Save/Cancel. History and result remain Activity-rendered tabs.
+Task workflow commands stay in a fixed bottom bar on every tab. Task notes are
+saved to history with a local durable draft and an explicit non-delivery label;
+task-linked rich Activity communication remains `zerus-cg5h.3`.
+
+Every writable stage supports persisted board ordering, not just the two queues.
+This supersedes the old rank guard while preserving description/attachment/target
+edit guards. Reordering active work is a presentation change, never preemption,
+stop, resume or an implicit executor queue mutation. Invalid cross-stage anchors,
+foreign projects and future-schema writes remain refused.
+
+Compact cards expose their stage's primary action, with other actions in the
+context menu. The owner explicitly chose task-scoped pause and execution
+accounting first. A whole-session interrupt cannot implement this action.
+Task pause therefore remains unavailable in this UI slice until
+`zerus-cg5h.4` provides the execution identity and controller.
+
+Selection updates must be atomic from the person's perspective: retain the
+previous document while fetching the exact new task, disable commands during
+the read and keep permanent command widgets and pane geometry. Do not clear the
+pane or rebuild its buttons on each card click.
+
+### Central Task View implementation boundary (2026-10-26)
+
+The branch now has a title field (task schema 4), separately audited Rename,
+caller-reserved idempotent creation UUIDs, and title-plus-description worker
+prompts. Current mobile ABI readers remain read-only for schemas above 2 and
+show named cards through their existing text field. The right board creates a
+shared named card and opens one reusable central Task View; ordinary Activity
+keeps its own draft and selection. Task View uses MessageComposer for description
+and comments, including media, previews and draft speech. Workflow controls share
+the bottom attachment/send row, and latest navigation uses the toolbar icon.
+
+Draft speech uses verified speech-computer routing without a native session send.
+Recording is saved before transcription; job status reads never replay Submit.
+Completed text is checkpointed before insertion, bound to the original task input
+key and unchanged draft revision. An edited draft requires explicit insertion.
+Insertion UUID receipts prevent repeated transcript insertion after an uncertain
+local clear. Recordings remain recoverable across task navigation.
+
+Task comments still persist in task history only. Verified delivery to an active
+executor, execution-scoped Activity attribution, revision guards, distributed
+claims and true per-task Pause remain the execution workstream; this UI iteration
+must not imply that those contracts have shipped.
+
+
+## Task View UI/UX review after be54a544 (2026-10-26)
+
+Status: approved by the owner; implemented in the next branch iteration below. The owner supplied two screenshots
+of the live Mac preview: the oversized detached-looking composer and the dense
+header with a disabled Run in field and a description rendered as a user message.
+This review supersedes the automatic Description/Comment destination switch in
+the first central-view iteration. A shared widget alone does not establish the
+same input presentation or the same interaction contract as Activity.
+
+### Verified behavior and defects
+
+* The Task View uses MessageComposer directly in a zero-inset detail layout;
+  Activity places its input in ActivityWidth::ColumnLayout. Task-specific rules
+  style every descendant QPushButton, and the composer root is renamed while
+  its transparent-root skin still selects QWidget#messageComposer. These are
+  concrete styling/composition differences; the screenshot's entire input panel
+  cannot be treated as a correctly reused Activity input. Empty-height behavior
+  also needs comparison at the same window size, scale and saved resize setting.
+* Rename, ID, stage and a long title compete in one row. The next rows introduce
+  three content tabs, an executor link, a description-edit glyph, Last executor
+  text and a full-width Run in pseudo-field. The hierarchy does not make the
+  selected task, its current worker or the primary action immediately legible.
+* Run in is a QPushButton that opens an assignment menu. It is disabled outside
+  To do/Backlog, yet still resembles an available dropdown in a review task.
+  Planned assignment and actual/last execution are displayed simultaneously.
+* Description is rendered through the person-message TaskEntry adapter, including
+  You, a timestamp and a green message background. It reads as a chat post. For
+  legacy tasks the header derives its title from the first description line, so
+  a one-line task repeats the same text as both heading and supposed message.
+* A successful comment explicitly selects History. The default task page does
+  not show a continuing discussion, so the person loses the place they wrote in.
+* saveTaskNote invokes hgs task comment, which appends a comment record only.
+  It has no native delivery or scheduled outbox. task_prompt renders title and
+  description; it does not include comment bodies. Only a previously sent task
+  gets an instruction to read history. A saved pre-start comment is therefore
+  not guaranteed to reach the agent even at first dispatch.
+* The input destination changes according to empty description and selected tab.
+  A small Comment label and a generic send arrow do not explain that first input
+  edits a document, later input saves a journal entry, and neither means delivery
+  to an executor. State-transition buttons placed beside that arrow further
+  compete with its meaning.
+
+### Approved information architecture
+
+The right board owns task selection, ordering and filters. One central Task View
+owns the selected task's document, discussion, result and input. Remove the
+secondary Description/Result/History tab barrier from the normal conversation
+flow: the default task view must contain the description and the discussion.
+Keep result and audit access as contextual navigation rather than destinations
+where comments disappear.
+
+1. A task heading may wrap naturally, with Rename in its context menu. A quieter
+   metadata row holds the task ID, a real stage badge and a compact executor chip.
+   The chip states Planned executor, Working in, or Last executor according to
+   actual evidence. Assignment opens a focused picker, and navigation to the
+   worker's Activity has its own unambiguous affordance. Session names are labels;
+   mutations and delivery retain immutable execution/session identity.
+2. The canonical Description is a document: a clear heading, ordinary Markdown,
+   attachment previews and an Edit control. It has no You bubble or chat timestamp.
+   New cards enter an explicit Edit description state. Save/Cancel have document
+   meanings; navigating a tab must not silently repurpose the field. Later comments
+   never rewrite the description automatically.
+3. Discussion sits directly below the document and uses Activity message styling.
+   A newly submitted comment appears here immediately with its persistence and
+   delivery evidence. Agent replies appear only with verified task attribution;
+   neighboring session events cannot be guessed into the task thread.
+4. An available Result is a distinct, reachable block with reported changes and
+   actual commit/build/deployment artifacts when known. Review tasks foreground
+   that result and offer Accept or Request changes. Service history is secondary:
+   stage changes, assignment, handoff and receipts remain accessible in an audit
+   surface without being the only home for conversation.
+5. Input uses Activity's complete layout/width/skin, spacing, resize behavior,
+   attachments, voice preview and send affordance. Task metadata does not apply
+   broad styles to that subtree. Lifecycle actions occupy a separate task action
+   group, not an indistinguishable extension of the message field. The send
+   destination and its effect are readable before pressing Enter.
+
+### Approved message and document contract
+
+| Intent / task state | Person-facing action | Durable effect and executor behavior |
+| --- | --- | --- |
+| Create card | Confirm title | Create one shared card and open explicit description editing; do not launch work. |
+| Edit description | Save description | Save the canonical document; display the changed version in the same task. Active revision delivery needs its own guarded execution contract. |
+| Message in To do/Backlog | Add to task, to be sent on Start | Save discussion and include its bounded original identities in the next explicit dispatch snapshot. |
+| Message in progress | Send to the displayed worker | Persist the task message and reserve its delivery identity, then submit to the verified current execution. Keep failures/uncertain delivery visible; no fallback to another session. |
+| Feedback in review | Request changes and send | Save feedback, reopen through a deliberate action, and record new work only with the appropriate delivery/start evidence. An optional note-only mode leaves the review status intact. |
+| Message on Done | Reopen and send, or Save note | Make the distinction explicit. A thank-you or internal note must not silently start another execution. |
+
+A note-only action is available intentionally. Normal task conversation must not
+silently behave as an internal note. After submission show Saved to task, Waiting
+for Start, Submitted to worker, or Delivery unconfirmed as warranted. Native
+submission does not establish that a model read or incorporated the message.
+
+Delivery is a backend requirement, not a visual label change. Use a durable task
+message identity and guarded outbox, capture the exact target execution, and keep
+its receipt visible in both task discussion and session Activity. Handoff,
+renames, offline targets and unknown native replies must not authorize replay.
+Do not reuse hgs task send for active-task comments or infer ownership from a
+last-session name. The comment CLI remains note-only; the distinct `task message` operation below
+establishes the discussion/delivery contract.
+
+### Acceptance criteria for this iteration
+
+At the same width, theme, content scale and user resize setting, Activity and
+Task View inputs should share alignment, typography and controls. A task should
+show its document, stage and actual/planned executor without competing full-width
+routing fields. Sending must keep the new message visible in the same discussion
+and explain where it went. A first dispatch must include queued clarifications;
+active delivery and review feedback must retain exact identities and honest
+receipts. Saving a note must never look like confirmed agent delivery. Review the
+new document and delivery contract together before another cosmetic-only preview.
+
+### Implemented follow-up
+
+The next branch iteration puts the canonical description, reported result and
+recent discussion on the same central page. Description uses document Markdown,
+without a user bubble or timestamp, with explicit Edit and Save/Cancel. Task
+navigation never silently changes the input destination. A task menu owns Rename,
+Result and History. Header metadata uses a compact executor chip; lifecycle
+controls stay outside message submission. The composer uses ActivityWidth and
+its component skin, including a shared toolbar chip for delivery intent. The
+side-panel toggle uses a padded corner host and neutral checked styling.
+
+Discussion uses a distinct schema-five `task message` operation. Queued context
+and message-scoped media are included once in the next explicit dispatch; image
+labels are flattened without changing the stored document or messages. Notes
+remain note-only. Active feedback reserves an immutable owner/run/conversation
+and input UUID before guarded submission. Reopen moves Review/Done to Active only
+after a confirmed submission. A coordinator receipt never proves child delivery
+or model consumption. Native dispatch receipts refuse a changed run/conversation;
+legacy direct-work acknowledgements retain an owner and explicit start anchor.
+This does not implement distributed leases, revision scheduling, stale-report
+protection or per-task Pause (`zerus-cg5h.4`).
+
+An interrupted desktop request retains its original identity and payload in one
+private file per task, with only a small marker in settings. Content I/O runs on
+a worker. Check uses `--recover-only`: even a missing reservation cannot authorize
+an initial send. A reserved request is never automatically replayed. Releasing a
+local recovery record requires explicit confirmation and neither cancels nor
+resends native input. Existing full-journal CLI reads remain `zerus-cg5h.2`;
+Task View retains only its bounded selected-task window.
+
+## Owner review follow-up: ordinary comments and stable creation (2026-10-27)
+
+The central Task Board tab is removed; the right inspector is the board, and a
+selected task opens the central Task View. Clicking its title or choosing Rename
+on a card edits the heading in place. Enter or focus departure saves; Escape
+cancels. Refused edits retain their text, and stale detail requests cannot replace
+a newly saved title. New-card input replaces the inspector's count label inside
+a fixed-height header, preserving the filters and list position.
+
+Executor preconditions apply to delivery, not to retaining a discussion entry.
+A refused native preflight saves a comment with a failed delivery and leaves the
+workflow state unchanged. A receipt check that finds no original reservation
+retains the original content with an uncertain outcome and no submission
+authority. It never starts a send. A different new explicit comment first
+recovers the previous comment read-only, then receives its own request identity.
+This removes technical recovery prerequisites from ordinary commenting while
+preserving the rule against replaying unknown native input. Verified submissions
+still follow the existing reopen and exact execution guards.
+
+## Owner follow-up: retained inspector width and Active filter (2026-10-27)
+
+The preferred inspector width is private desktop state, saved from an explicit
+divider drag. Window constraints and temporary hiding never replace that choice.
+Restore the preference after expansion and application restart without the old
+600-pixel restoration cap. Double-clicking the divider stores the 400-logical-
+pixel default, clamped for the actual available space and header minimum.
+
+The first board filter, Active, is the union of Review and In progress. Keep
+individual stage filters and each card's own stage label, workflow actions and
+persisted order. Selecting either kind of card keeps the combined filter. Drag
+ordering in this view changes rank only within the dragged card's existing
+stage; the aggregate tile is not a workflow drop target.

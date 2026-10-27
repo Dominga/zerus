@@ -8,8 +8,13 @@ use sha2::{Digest, Sha256};
 pub const MAX_ATTACHMENTS: usize = 8;
 pub const MAX_ATTACHMENT: usize = 10 * 1024 * 1024;
 pub const MAX_ATTACHMENT_TOTAL: usize = 20 * 1024 * 1024;
-/// Schema one readers show the text but refuse to edit or send media tasks.
-pub const TASK_SCHEMA: i64 = 2;
+/// Schema two supports description media and immutable session identity.
+pub(crate) const BASE_TASK_SCHEMA: i64 = 2;
+/// Schema three adds immutable comment media. Older readers stay read-only.
+pub(crate) const DISCUSSION_TASK_SCHEMA: i64 = 3;
+/// Schema four adds independent task titles and title-only cards.
+pub const TASK_SCHEMA: i64 = 5;
+pub(crate) const NAMED_TASK_SCHEMA: i64 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -104,6 +104,8 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
+#include <QSplitterHandle>
+#include <QMouseEvent>
 #include <QStackedWidget>
 #include <QStyledItemDelegate>
 #include <QStyle>
@@ -1349,15 +1351,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     });
     m_info = browser(); m_info->setObjectName("sessionInfo"); m_info->setAccessibleName(tr("Session details"));
     tabs->addTab(m_activityStack, tr("Activity")); tabs->addTab(m_terminal, tr("Terminal"));
-    // The open session's project tasks; the label counts In review and To do.
-    m_tasks = new TasksView(&m_client); tabs->addTab(m_tasks, tr("Task board"));
+    // The right inspector owns the only board surface. Keep its shared
+    // controller hidden; a selection opens the central Task View.
+    m_tasks = new TasksView(&m_client, this); m_tasks->hide();
     m_tasks->setOpenInInspector(true);
-    m_tasksBadge = new TaskTabBadge; tabs->tabBar()->setTabButton(tabs->indexOf(m_tasks), QTabBar::RightSide, m_tasksBadge);
-    connect(m_tasks, &TasksView::countsChanged, this, [this](int review, int todo) {
-        m_tasksBadge->setCounts(review, todo);
-        // The tab bar reads a button's size when it lays the tabs out: relayout for the new width.
-        const int index = m_detailTabs->indexOf(m_tasks); m_detailTabs->tabBar()->setTabText(index, m_detailTabs->tabBar()->tabText(index));
-    });
     connect(m_tasks, &TasksView::notice, this, [this](const QString &message, bool error) { showNotice(message, error); });
     m_nativeUi = new NativeUiView(&m_client, [] { return NativeBrowserPlugin::factory(); });
     tabs->addTab(m_nativeUi, tr("Native UI")); tabs->setTabVisible(tabs->indexOf(m_nativeUi), false);
@@ -1408,9 +1405,88 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // The native plan is separate from the project's durable Zerus tasks.
     m_inspector->addTab(m_children, tr("Plan && agents")); m_inspector->addTab(detailsPage, tr("Details"));
     m_inspector->addTab(m_worktrees, tr("Worktrees"));
+    const auto taskLaunchBytes = settings.value("tasks/pendingExecutorLaunches").toByteArray();
+    const auto taskLaunchDoc = taskLaunchBytes.size() <= 65536 ? QJsonDocument::fromJson(taskLaunchBytes) : QJsonDocument();
+    m_taskLaunches = taskLaunchDoc.object();
+    bool validLaunches = taskLaunchBytes.isEmpty() || taskLaunchDoc.isObject();
+    if (m_taskLaunches.size() > 16) validLaunches = false;
+    for (auto it = m_taskLaunches.constBegin(); it != m_taskLaunches.constEnd() && validLaunches; ++it) {
+        const auto record = it.value().toObject();
+        validLaunches = !QUuid(it.key()).isNull() && !record.value("task").toString().isEmpty() && !record.value("project").toString().isEmpty()
+            && !record.value("parent").toString().isEmpty() && !record.value("cmd").toString().isEmpty()
+            && QStringList{"waiting", "reserved", "review"}.contains(record.value("phase").toString());
+    }
+    if (!validLaunches) { m_taskLaunches = {}; m_taskLaunchRecoveryBlocked = true; }
+    m_tasks->setExecutorLaunches(m_taskLaunches);
+    connect(m_tasks, &TasksView::newExecutorRequested, this, [this](const TaskItem &task, const QString &project) {
+        if (task.targetId.isEmpty() || task.targetMachine.isEmpty()) { showNotice(tr("Choose a parent with a confirmed computer and session identity."), true); return; }
+        if (m_taskLaunchRecoveryBlocked) { showNotice(tr("The saved executor launch records could not be read. Review them before creating another task executor."), true); return; }
+        if (m_taskLaunches.size() >= 16) { showNotice(tr("Finish or review the pending task executor launches first."), true); return; }
+        for (const auto &value : m_taskLaunches) if (value.toObject().value("task").toString() == task.uuid) {
+            showNotice(tr("This task already has an executor launch pending. Check its session and task history before starting it again."), true); return;
+        }
+        showNewSession(task.targetSession.section('/', 0, 0), project, task.targetHost, {}, {}, {}, {}, task.uuid, task.targetMachine + QLatin1Char('/') + task.targetId);
+    });
+    connect(m_tasks, &TasksView::executorLaunchReviewRequested, this, [this](const QString &uuid) {
+        for (auto it = m_taskLaunches.constBegin(); it != m_taskLaunches.constEnd(); ++it) {
+            const auto record = it.value().toObject(); if (record.value("task").toString() != uuid) continue;
+            const auto launch = it.key();
+            QMessageBox review(QMessageBox::Information, tr("Task executor launch"),
+                tr("Session: %1\nLaunch: %2\nState: %3\n%4\n\nCheck the task history and this executor before allowing another launch. Releasing the launch record does not stop an agent or retry delivery.")
+                    .arg(record.value("session").toString(record.value("tag").toString()), launch, record.value("phase").toString(), record.value("error").toString()),
+                QMessageBox::Close, this);
+            review.setTextFormat(Qt::PlainText); review.setObjectName("taskExecutorLaunchReviewDialog");
+            auto *release = review.addButton(tr("I reviewed it · allow another launch"), QMessageBox::ActionRole);
+            release->setEnabled(record.value("phase") != "waiting"); review.exec();
+            if (review.clickedButton() == release && m_taskLaunches.value(launch).toObject() == record) {
+                m_taskLaunches.remove(launch);
+                if (!saveTaskLaunches()) { m_taskLaunches[launch] = record; m_tasks->setExecutorLaunches(m_taskLaunches); showNotice(tr("Could not release the executor launch record."), true); }
+            }
+            return;
+        }
+    });
+    connect(&m_client, &HgsClient::taskReady, this, [this](quint64 id, const QJsonObject &reply) {
+        const auto launch = m_taskLaunchRequests.take(id); if (launch.isEmpty()) return;
+        auto record = m_taskLaunches.value(launch).toObject(); const auto task = reply.value("task").toObject();
+        const auto receipt = reply.value("receipt").toObject().value("request_id").toString();
+        QString recorded; for (const auto &value : task.value("log").toArray()) if (value.toObject().value("kind") == "sent") recorded = value.toObject().value("request_id").toString();
+        const auto owner = task.value("session").toObject();
+        if (task.value("uuid").toString() != record.value("task").toString() || task.value("stage") != "active"
+            || owner.value("session_id").toString() != QStringLiteral("launch_id:") + launch || owner.value("host") != record.value("host")
+            || receipt.isEmpty() || recorded != receipt) {
+            record["phase"] = "review"; record["error"] = tr("Task delivery reply did not confirm this exact executor and receipt");
+            m_taskLaunches[launch] = record; saveTaskLaunches();
+            showNotice(record.value("error").toString(), true); return;
+        }
+        m_taskLaunches.remove(launch); saveTaskLaunches(); m_tasks->refresh();
+    });
+    connect(&m_client, &HgsClient::taskFailed, this, [this](quint64 id, const QString &error) {
+        const auto launch = m_taskLaunchRequests.take(id); if (launch.isEmpty()) return;
+        auto record = m_taskLaunches.value(launch).toObject(); record["error"] = error.left(2048); record["phase"] = "review";
+        m_taskLaunches[launch] = record; saveTaskLaunches();
+        showNotice(tr("The executor was created, but task delivery needs review: %1. Check task history before retrying.").arg(error), true);
+    });
     m_taskInspector = new TaskInspector(&m_client, m_tasks);
     m_inspector->addTab(m_taskInspector, tr("Tasks"));
-    connect(m_taskInspector, &TaskInspector::boardRequested, this, [this] { m_detailTabs->setCurrentWidget(m_tasks); });
+    m_taskView = m_taskInspector->takeDetailsPane();
+    new SpeechComposer(m_client.executable(), m_taskInspector->composer(), [this] {
+        SpeechComposer::Target target; target.key = m_taskInspector->composer()->sessionKey(); target.draftOnly = true;
+        target.session = m_taskInspector->selectedTask(); target.available = m_taskInspector->canDictate(); return target;
+    });
+    const int taskViewIndex = m_detailTabs->addTab(m_taskView, tr("Task View"));
+    m_detailTabs->setTabVisible(taskViewIndex, false);
+    connect(m_taskInspector, &TaskInspector::taskViewRequested, this, [this] {
+        m_detailTabs->setTabVisible(m_detailTabs->indexOf(m_taskView), true); m_detailTabs->setCurrentWidget(m_taskView);
+    });
+    connect(m_taskInspector, &TaskInspector::subagentRequested, this, [this](const QString &host, const QString &name, const QString &parentId, const QString &conversation, const QString &child) {
+        for (const auto &entry : std::as_const(m_entries)) {
+            const QString retained = entry.session.launchId.isEmpty() ? QStringLiteral("run_id:") + entry.session.runId : QStringLiteral("launch_id:") + entry.session.launchId;
+            if (entry.host != host || retained != parentId || entry.session.conversationId != conversation) continue;
+            const auto task = m_taskInspector->selectedTask();
+            openRelatedSession(host, entry.session.name, {}); closeSubagent(); openSubagent(child); m_taskInspector->selectTask(task); return;
+        }
+        showNotice(tr("This worker belongs to an earlier or unavailable parent conversation. Open the coordinator's history to inspect it."), true);
+    });
     connect(m_taskInspector, &TaskInspector::executorRequested, this, [this](const QString &host, const QString &name, const QString &id) {
         // Recheck the retained identity before following a mutable display name.
         for (const auto &entry : std::as_const(m_entries)) {
@@ -1425,25 +1501,32 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         showNotice(tr("The task's session identity is no longer available."), true);
     });
     connect(m_tasks, &TasksView::taskSelected, this, [this](const QString &uuid) {
-        m_detailTabs->setCurrentWidget(m_activityStack); setInspectorVisible(true);
-        m_inspector->setCurrentWidget(m_taskInspector); m_taskInspector->selectTask(uuid);
+        setInspectorVisible(true); m_inspector->setCurrentWidget(m_taskInspector); m_taskInspector->openTask(uuid);
     });
     connect(m_inspector,&QTabWidget::currentChanged,this,[this]{updateWorktrees();});
     inspectorLayout->addWidget(m_inspector);
     m_workSplitter->addWidget(m_inspectorPanel);
+    m_workSplitter->installEventFilter(this);
+    m_workSplitter->handle(1)->installEventFilter(this);
+    m_workSplitter->handle(1)->setToolTip(tr("Drag to resize the side panel. Double-click to reset its width."));
     m_workSplitter->setStretchFactor(0, 1); m_workSplitter->setStretchFactor(1, 0);
     m_inspectorToggle = new QPushButton; m_inspectorToggle->setObjectName("toggleInspector");
     m_inspectorToggle->setProperty("glyph", "inspector"); m_inspectorToggle->setCheckable(true);
     m_inspectorToggle->setProperty("sessionHeaderAction", true);
     configureWorkspaceIconButton(m_inspectorToggle, "inspector", tr("Show tasks, plan, agents, details and worktrees"), m_dark);
-    tabs->setCornerWidget(m_inspectorToggle);
+    m_inspectorCorner = new QWidget; m_inspectorCorner->setObjectName("inspectorCorner");
+    auto *cornerLayout = new QHBoxLayout(m_inspectorCorner); cornerLayout->setContentsMargins(4, 4, 6, 4);
+    cornerLayout->addWidget(m_inspectorToggle, 0, Qt::AlignVCenter);
+    tabs->setCornerWidget(m_inspectorCorner);
     connect(m_inspectorToggle, &QPushButton::toggled, this, &SessionsWindow::setInspectorVisible);
     connect(m_inspector, &QTabWidget::currentChanged, this, [](int index) { QSettings().setValue("workspace/inspectorTab", index); });
     connect(m_workSplitter, &QSplitter::splitterMoved, this, [this] {
         if (!m_inspectorPanel->isHidden()) { m_inspectorWidth = m_inspectorPanel->width(); QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth); }
     });
     m_inspector->setCurrentIndex(qBound(0, settings.value("workspace/inspectorTab", 0).toInt(), m_inspector->count() - 1));
-    m_inspectorWidth = qBound(240, settings.value("workspace/inspectorWidth", 290).toInt(), 600);
+    bool widthValid = false;
+    const int savedWidth = settings.value("workspace/inspectorWidth", DefaultInspectorWidth).toInt(&widthValid);
+    m_inspectorWidth = widthValid && savedWidth > 0 ? qBound(240, savedWidth, QWIDGETSIZE_MAX) : DefaultInspectorWidth;
     m_inspectorPanel->hide();
     if (settings.value("workspace/inspectorVisible", false).toBool())
         QTimer::singleShot(0, this, [this] { setInspectorVisible(true); });
@@ -1541,11 +1624,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested();
     });
     m_fileDrop=new SessionFileDrop(details,[this]()->MessageComposer *{
-        // A task is text only: nothing is dropped on the Tasks tab.
+        if (m_detailTabs->currentWidget() == m_taskView) return m_taskInspector->composer();
         if(!selected()||m_detailTabs->currentWidget()==m_terminal||m_detailTabs->currentWidget()==m_tasks)return nullptr;
         if(m_detailTabs->currentIndex()==0&&!m_subagentId.isEmpty())return m_subagentComposer->isInputVisible()?m_subagentComposer:nullptr;
         return m_composer;
-    },[this](MessageComposer *composer){if(composer==m_composer)closeSubagent();m_detailTabs->setCurrentIndex(0);},
+    },[this](MessageComposer *composer){if(composer==m_taskInspector->composer()){m_detailTabs->setCurrentWidget(m_taskView);return;}if(composer==m_composer)closeSubagent();m_detailTabs->setCurrentIndex(0);},
     [this]{return terminalDropTarget();},[this](const QStringList &paths){dropTerminalFiles(paths);});
     connect(&m_client,&HgsClient::sessionActionFinished,this,[this](quint64 id,bool ok,const QJsonObject &result,const QString &error) {
         if(id!=m_terminalDropRequest)return;
@@ -1965,6 +2048,7 @@ void SessionsWindow::applyContentScale()
 {
     const double scale = ContentScale::factor();
     for (auto *view : {m_activityView, m_subagentView}) view->setContentScale(scale);
+    m_taskInspector->setContentScale(scale);
     for (auto *composer : {m_composer, m_subagentComposer}) composer->setContentScale(scale);
     m_question->setContentScale(scale); m_terminal->setContentScale(scale);
     applyActivityWidth();
@@ -1975,6 +2059,7 @@ void SessionsWindow::applyActivityWidth()
     const int column = ActivityWidth::column(ContentScale::factor());
     for (auto *view : {m_activityView, m_subagentView}) view->setColumnWidth(column);
     for (auto *layout : m_activityColumns) layout->setColumnWidth(column);
+    m_taskInspector->setColumnWidth(column);
 }
 
 void SessionsWindow::updateWindowPinAppearance()
@@ -2093,6 +2178,8 @@ void SessionsWindow::applyTheme()
         QPushButton[sessionHeaderAction="true"], QPushButton[settingReset="true"] { background:transparent; border:1px solid transparent; border-radius:6px; padding:0; }
         QPushButton[sessionHeaderAction="true"]:hover, QPushButton[settingReset="true"]:hover { background:%7; }
         QPushButton[sessionHeaderAction="true"]:checked, QPushButton[sessionHeaderAction="true"]:pressed, QPushButton[settingReset="true"]:pressed { background:%10; }
+        QPushButton#toggleInspector:checked { background:transparent; border-color:transparent; }
+        QPushButton#toggleInspector:hover { background:%7; }
         QPushButton[sessionHeaderAction="true"]:disabled { background:transparent; border-color:transparent; }
         QPushButton[sessionHeaderAction="true"]:focus[keyboardFocus="true"], QPushButton[settingReset="true"]:focus[keyboardFocus="true"] { border-color:%5; }
         QPushButton[sessionHeaderAction="true"]::menu-indicator { image:none; width:0; }
@@ -2145,6 +2232,9 @@ void SessionsWindow::applyTheme()
         QStackedWidget#detail { background:%3; border:1px solid %4; border-radius:12px; }
         QTabWidget::pane { border:0; border-top:1px solid %4; }
         QTabBar::tab { background:transparent; color:%6; padding:8px 9px; border-bottom:2px solid transparent; }
+        /* Qt sizes corner hosts from the tab size hint, ignoring a bar's
+           minimumHeight. These headers must fit the 34px control and its inset. */
+        QTabWidget#sessionDetailTabs QTabBar::tab, QTabWidget#sessionInspector QTabBar::tab { min-height:26px; }
         QTabBar::tab:selected { color:%2; border-bottom:2px solid %5; }
         QTabBar::tab:focus { color:%5; }
         QTextBrowser { background:transparent; color:%2; border:0; padding-top:12px; selection-background-color:%10; }
@@ -2192,7 +2282,7 @@ void SessionsWindow::applyTheme()
     m_machineFilter->setTheme(m_dark); m_projectFilter->setTheme(m_dark); m_accountFilter->setTheme(m_dark); m_dashboard->setTheme(m_dark); m_searchResults->setTheme(m_dark); m_activityView->setTheme(m_dark); m_composer->setTheme(m_dark); m_question->setTheme(m_dark); m_terminal->setTheme(m_dark);
     m_subagentView->setTheme(m_dark); m_subagentComposer->setTheme(m_dark);
     m_processes->setTheme(m_dark);
-    m_tasks->setTheme(m_dark); m_tasksBadge->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
+    m_tasks->setTheme(m_dark); m_taskInspector->setTheme(m_dark);
     m_childrenHtml.clear(); m_sessions->viewport()->update(); renderDetails();
 }
 
@@ -2324,19 +2414,19 @@ void SessionsWindow::updateInspectorMinimum()
             +m_detailTabs->minimumWidth()+header);
     }
     setMinimumWidth(minimum);
+    applyInspectorWidth();
 }
 
 void SessionsWindow::setInspectorVisible(bool visible)
 {
-    if (!visible && !m_inspectorPanel->isHidden()) m_inspectorWidth = m_inspectorPanel->width();
     // One control follows the right edge, rather than offering two hide actions.
     const bool restoreFocus = m_inspectorToggle->hasFocus();
     const bool keyboardFocus = m_inspectorToggle->property("keyboardFocus").toBool();
     auto *oldHeader = visible ? m_detailTabs : m_inspector;
     auto *newHeader = visible ? m_inspector : m_detailTabs;
-    if (newHeader->cornerWidget() != m_inspectorToggle) {
+    if (newHeader->cornerWidget() != m_inspectorCorner) {
         oldHeader->setCornerWidget(nullptr);
-        newHeader->setCornerWidget(m_inspectorToggle);
+        newHeader->setCornerWidget(m_inspectorCorner);
     }
     m_inspectorPanel->setVisible(visible);
     const QSignalBlocker blocker(m_inspectorToggle); m_inspectorToggle->setChecked(visible);
@@ -2344,20 +2434,28 @@ void SessionsWindow::setInspectorVisible(bool visible)
     m_inspectorToggle->setIcon(workspaceIcon(m_inspectorToggle->property("glyph").toString(), QColor(m_muted)));
     m_inspectorToggle->setAccessibleName(visible ? tr("Collapse side panel") : tr("Show tasks, plan, agents, details and worktrees"));
     m_inspectorToggle->setToolTip(ShortcutRegistry::instance().tooltip(m_inspectorToggle->accessibleName(), "panel.toggle"));
-    m_inspectorToggle->show();
+    m_inspectorCorner->show(); m_inspectorToggle->show();
     if (restoreFocus) m_inspectorToggle->setFocus(keyboardFocus ? Qt::TabFocusReason : Qt::MouseFocusReason);
     if (visible) {
         // QTabWidget's own minimum width can ignore its full header in document
         // mode. Give the splitter an explicit minimum including the corner button.
         m_inspectorPanel->setMinimumWidth(qMax(240,m_inspector->tabBar()->sizeHint().width()+m_inspectorToggle->sizeHint().width()+32));
-        const int available = m_workSplitter->width() - m_workSplitter->handleWidth();
-        const int side = qBound(240, m_inspectorWidth, qMax(240, available - 280));
-        m_workSplitter->setSizes({qMax(280, available - side), side});
+        applyInspectorWidth();
     }
     updateInspectorMinimum();
     QSettings settings; settings.setValue("workspace/inspectorVisible", visible);
     settings.setValue("workspace/inspectorWidth", m_inspectorWidth);
     updateWorktrees();
+}
+
+void SessionsWindow::applyInspectorWidth()
+{
+    if (!m_inspectorPanel || m_inspectorPanel->isHidden()) return;
+    const int available = m_workSplitter->width() - m_workSplitter->handleWidth();
+    const int minimum = m_inspectorPanel->minimumWidth();
+    const int side = qBound(minimum, m_inspectorWidth, qMax(minimum, available - m_detailTabs->minimumWidth()));
+    if (m_workSplitter->sizes().value(1) != side)
+        m_workSplitter->setSizes({qMax(m_detailTabs->minimumWidth(), available - side), side});
 }
 
 void SessionsWindow::saveSessionRowPreferences()
@@ -2764,7 +2862,7 @@ void SessionsWindow::populateBatchActions(QMenu *menu)
     menu->addAction(m_clearArchiveAction);
 }
 
-void SessionsWindow::showNewSession(const QString &agent, const QString &project, const QString &host, const QString &folder, const QString &path, const QString &account,const QJsonObject &recipe)
+void SessionsWindow::showNewSession(const QString &agent, const QString &project, const QString &host, const QString &folder, const QString &path, const QString &account, const QJsonObject &recipe, const QString &taskUuid, const QString &taskParentId)
 {
     QString group = m_organization.defaultProject();
     if (const auto *row = m_sessions->currentItem()) group = row->data(SessionRoles::Group).toString();
@@ -2777,7 +2875,9 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     const bool sessionRow=!row||(!row->data(SessionRoles::Header).toBool()&&row->data(SessionRoles::LaunchId).toString().isEmpty());
     const auto *context=sessionRow&&project.isEmpty()&&folder.isEmpty()&&path.isEmpty()&&account.isNull()?selected():nullptr;
     NewSessionDialog dialog(m_client.executable(), m_fleet, context?context->host:host, agent, launchProject, this, m_usageStore, &m_organization);
-    dialog.setBackgroundCreation(true);
+    // Task executors retain the reviewed launch/delivery reservation path.
+    // Generic creation uses the independent background controller from main.
+    dialog.setBackgroundCreation(taskUuid.isEmpty());
     connect(&dialog,&NewSessionDialog::creationRequested,this,[this,&dialog](const QJsonObject &plan){
         m_admittingCreation=true;const auto id=m_creations->submit(plan);m_admittingCreation=false;
         if(id.isEmpty()){dialog.creationAdmissionFailed(m_creations->admissionError());return;}
@@ -2799,8 +2899,14 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     if(!account.isNull())dialog.selectAccount(account);
     if(!recipe.isEmpty())dialog.restoreCreationChoices(recipe);
     connect(&dialog, &NewSessionDialog::launchRequested, this,
-        [this,&dialog](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
+        [this,&dialog,taskUuid,taskParentId,launchProject](const QString &host, const QString &cmd, const QString &target, const QString &name, const QString &account, const QString &group, bool openTerminal, const QString &addFolder, const QString &model, const QString &effort) {
             const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            if (!taskUuid.isEmpty()) {
+                if (group != launchProject || taskParentId.isEmpty()) { showNotice(tr("Choose the task's project and a confirmed parent session."), true); return; }
+                m_taskLaunches[id] = QJsonObject{{"task", taskUuid}, {"project", launchProject}, {"host", host}, {"cmd", cmd}, {"tag", name},
+                    {"parent", taskParentId}, {"phase", "waiting"}, {"created", QDateTime::currentSecsSinceEpoch()}};
+                if (!saveTaskLaunches()) { m_taskLaunches.remove(id); showNotice(tr("Could not save the task executor launch. Nothing was started."), true); return; }
+            }
             m_pendingLaunches.insert(id, QJsonObject{{"host", host}, {"cmd", cmd}, {"tag", name}, {"group", group},
                 {"target", target}, {"implicit_inbox", dialog.implicitInbox()}, {"add_folder", !addFolder.isEmpty()}, {"folder", addFolder}, {"show_pending", true}, {"created", QDateTime::currentSecsSinceEpoch()}});
             savePendingLaunches();
@@ -2824,6 +2930,33 @@ void SessionsWindow::showNewSession(const QString &agent, const QString &project
     dialog.exec();
 }
 
+bool SessionsWindow::saveTaskLaunches() {
+    QSettings settings; settings.setValue("tasks/pendingExecutorLaunches", QJsonDocument(m_taskLaunches).toJson(QJsonDocument::Compact));
+    settings.sync();
+    if (m_tasks) m_tasks->setExecutorLaunches(m_taskLaunches);
+    return settings.status() == QSettings::NoError;
+}
+
+void SessionsWindow::dispatchTaskLaunches() {
+    for (auto it = m_taskLaunches.begin(); it != m_taskLaunches.end(); ++it) {
+        auto record = it.value().toObject();
+        if (record.value("phase") != QLatin1String("waiting") || QUuid(it.key()).isNull()) continue;
+        for (const auto &entry : std::as_const(m_entries)) {
+            if (!entry.online || entry.host != record.value("host").toString() || entry.session.launchId != it.key()
+                || entry.session.cmd != record.value("cmd").toString() || entry.session.name.section('/', 2) != record.value("tag").toString()
+                || m_organization.groupFor(entry.identity) != record.value("project").toString()) continue;
+            // Reserve before transport. Restart/uncertain delivery cannot authorize a replay.
+            record["phase"] = "reserved"; record["session"] = entry.session.name; it.value() = record;
+            if (!saveTaskLaunches()) { record["phase"] = "review"; it.value() = record; showNotice(tr("Could not reserve task delivery. Check this task before retrying."), true); break; }
+            QStringList args{"send", record.value("task").toString(), "--project", record.value("project").toString(),
+                "--session", entry.session.name, "--session-id", QStringLiteral("launch_id:") + entry.session.launchId,
+                "--expect-new-session-parent", record.value("parent").toString()};
+            if (!entry.host.isEmpty()) args << "--host" << entry.host;
+            m_taskLaunchRequests.insert(m_client.requestTask(args), it.key()); break;
+        }
+    }
+}
+
 void SessionsWindow::savePendingLaunches()
 {
     auto legacy=m_pendingLaunches;
@@ -2844,6 +2977,10 @@ void SessionsWindow::newSessionLaunchFailed(const QString &launchId, const QStri
     if(!m_creations->forLaunch(launchId).isEmpty()){m_creations->launchFinished(launchId,false,error);return;}
     // A listing that reported the launch ended already showed its reason and last
     // lines. A hidden launch status showed nothing, so its failure still names it.
+    if (m_taskLaunches.contains(launchId)) {
+        auto record = m_taskLaunches.value(launchId).toObject(); record["phase"] = "review"; record["error"] = error.left(2048);
+        m_taskLaunches[launchId] = record; saveTaskLaunches();
+    }
     QJsonObject ended;
     if (takeEndedLaunch(launchId, &ended) && ended.value("show_pending").toBool()) return;
     const QString name = (ended.isEmpty() ? m_pendingLaunches.value(launchId).toObject() : ended).value("tag").toString();
@@ -2903,6 +3040,10 @@ void SessionsWindow::placeLaunchedSessions()
                     :tr("Session %1 ended before it appeared.").arg(launch["tag"].toString()))+'\n'+end["output"].toString().left(4000);
                 QTimer::singleShot(0,this,[this,id,expectedLaunch,reason]{m_creations->ended(id,expectedLaunch,reason);});++it;continue;
             }
+            if (m_taskLaunches.contains(expectedLaunch)) {
+                auto record = m_taskLaunches.value(expectedLaunch).toObject(); record["phase"] = "review"; record["error"] = tr("Session ended before task delivery");
+                m_taskLaunches[expectedLaunch] = record; saveTaskLaunches();
+            }
             consumed = true; m_endedLaunches.append({it.key(), launch});
             // Terminal launches and launches restored after a restart never
             // report a result, so only the newest ended launches are kept.
@@ -2925,6 +3066,7 @@ void SessionsWindow::placeLaunchedSessions()
         if (consumed) { it = m_pendingLaunches.erase(it); changed = true; } else ++it;
     }
     if (changed) { saveOrganization(); savePendingLaunches(); }
+    dispatchTaskLaunches();
     if (!ended.isEmpty()) showNotice(ended, true);
 }
 
@@ -3852,6 +3994,7 @@ void SessionsWindow::updateTasks(const Entry *entry)
     for (const auto &other : std::as_const(m_entries)) {
         if (other.session.state == "archived" || m_organization.groupFor(other.identity) != projectId) continue;
         TaskSession session{other.host, other.session.name, status(other.session, other.online), {}, true};
+        session.conversation = other.session.conversationId;
         session.id = other.session.launchId.isEmpty() ? (other.session.runId.isEmpty() ? QString() : QStringLiteral("run_id:") + other.session.runId)
                                                      : QStringLiteral("launch_id:") + other.session.launchId;
         session.running = other.online && other.session.state == "running" && other.session.processState != "exited";
@@ -5988,6 +6131,16 @@ void SessionsWindow::showEvent(QShowEvent *event)
 }
 bool SessionsWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (m_workSplitter && watched == m_workSplitter->handle(1) && event->type() == QEvent::MouseButtonDblClick
+        && static_cast<QMouseEvent *>(event)->button() == Qt::LeftButton) {
+        m_inspectorWidth = DefaultInspectorWidth;
+        QSettings().setValue("workspace/inspectorWidth", m_inspectorWidth);
+        applyInspectorWidth(); return true;
+    }
+    if (watched == m_workSplitter && event->type() == QEvent::Resize && !m_inspectorWidthPending) {
+        m_inspectorWidthPending = true;
+        QTimer::singleShot(0, this, [this] { m_inspectorWidthPending = false; applyInspectorWidth(); });
+    }
     if(m_inspector && watched==m_inspector->tabBar()
         && (event->type()==QEvent::FontChange || event->type()==QEvent::StyleChange || event->type()==QEvent::LayoutRequest || event->type()==QEvent::Resize)) {
         QTimer::singleShot(0,this,&SessionsWindow::updateInspectorMinimum);

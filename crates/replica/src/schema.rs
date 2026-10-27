@@ -79,6 +79,9 @@ impl Eq for SessionKey {}
 pub enum Target {
     Any,
     Session(SessionKey),
+    #[serde(rename = "new_session")]
+    NewSession { parent: SessionKey },
+    Subagent { parent: SessionKey },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +103,45 @@ pub struct LogEntry {
     /// A send's durable hgs request, for matching it to the paste receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::TaskAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<TaskDelivery>,
+}
+
+/// A task message's durable outbox reservation. Submission is not consumption.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDelivery {
+    pub mode: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stage: String,
+    #[serde(default)]
+    pub stage_at: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dispatch_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub submitted_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conversation_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+/// A coordinator's explicit binding to an observed native child. The parent
+/// conversation and dispatch receipt scope the identity; names remain captions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskWorker {
+    pub parent: SessionKey,
+    pub conversation_id: String,
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub request_id: String,
 }
 
 /// A task as callers read it.
@@ -118,13 +160,27 @@ pub struct TaskView {
     pub target: Target,
     pub rank: String,
     pub session: Option<SessionKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker: Option<TaskWorker>,
     pub summary: String,
     pub cancelled_at: Option<i64>,
     pub cancel_reason: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     pub text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::TaskAttachment>,
     pub log: Vec<LogEntry>,
+}
+
+impl TaskView {
+    /// Dispatch receipt, or an explicit direct-work acknowledgement. Names do
+    /// not identify an execution. This anchor is not a distributed claim.
+    pub fn execution_id(&self) -> Option<String> {
+        self.log.iter().rev().find(|e| e.kind == "sent").and_then(|e| e.request_id.clone())
+            .or_else(|| self.log.iter().rev().find(|e| e.kind == "started" && e.session == self.session)
+                .map(|e| format!("started:{}", e.at)))
+    }
 }
 
 pub(crate) fn check_text(text: &str, what: &str) -> Result<()> {

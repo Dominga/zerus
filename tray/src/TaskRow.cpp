@@ -10,6 +10,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QMenu>
+#include <QContextMenuEvent>
 #include <QPainter>
 #include <QTextLayout>
 #include <QTimer>
@@ -64,6 +66,7 @@ private:
 };
 
 QColor TaskColors::stage(const QString &stage) const {
+    if (stage == QLatin1String("current")) return accent;
     if (stage == QLatin1String("review")) return warn;
     if (stage == QLatin1String("active")) return accent;
     if (stage == QLatin1String("todo")) return blue;
@@ -99,9 +102,11 @@ QString clamp(const QString &text, const QFont &font, int width, int lines) {
 QString TaskRow::actionKey(TaskAction action) {
     switch (action) {
     case TaskAction::Edit: return QStringLiteral("edit");
+    case TaskAction::Rename: return QStringLiteral("rename");
     case TaskAction::ToBacklog: return QStringLiteral("toBacklog");
     case TaskAction::Top: return QStringLiteral("top");
     case TaskAction::SendNow: return QStringLiteral("sendNow");
+    case TaskAction::Pause: return QStringLiteral("pause");
     case TaskAction::ToTodo: return QStringLiteral("toTodo");
     case TaskAction::Cancel: return QStringLiteral("cancel");
     case TaskAction::BackToTodo: return QStringLiteral("backToTodo");
@@ -119,10 +124,10 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     m_glyph = new TaskGlyph; m_glyph->setObjectName("taskGlyph"); m_glyph->setFixedSize(22, 22); m_glyph->setAlignment(Qt::AlignCenter);
     auto *glyphColumn = new QVBoxLayout; glyphColumn->setContentsMargins(0, 4, 0, 0); glyphColumn->addWidget(m_glyph); glyphColumn->addStretch();
     layout->addLayout(glyphColumn);
-    auto *main = new QVBoxLayout; main->setContentsMargins(0, 0, 0, 0); main->setSpacing(0); layout->addLayout(main, 1);
+    auto *main = m_mainLayout = new QVBoxLayout; main->setContentsMargins(0, 0, 0, 0); main->setSpacing(0); layout->addLayout(main, 1);
     // The header's height is fixed, so showing the icons never moves anything.
     auto *header = new QWidget; header->setFixedHeight(34);
-    auto *headerLayout = new QHBoxLayout(header); headerLayout->setContentsMargins(0, 0, 0, 0); headerLayout->setSpacing(8);
+    auto *headerLayout = m_headerLayout = new QHBoxLayout(header); headerLayout->setContentsMargins(0, 0, 0, 0); headerLayout->setSpacing(8);
     // The rich-text labels take no mouse input: presses, drags and clicks on them are the row's.
     m_meta = new QLabel; m_meta->setObjectName("taskMeta"); m_meta->setTextFormat(Qt::RichText); m_meta->setTextInteractionFlags(Qt::NoTextInteraction);
     // The meta keeps its width, then In progress's status, then the rest, which gives way first.
@@ -132,6 +137,12 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     m_tail->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_actions = new QWidget; m_actions->setObjectName("taskActions");
     auto *actionsLayout = new QHBoxLayout(m_actions); actionsLayout->setContentsMargins(0, 0, 0, 0); actionsLayout->setSpacing(2);
+    m_more = new QToolButton(m_actions); m_more->setObjectName("taskMoreActions"); m_more->setFixedSize(34, 32);
+    m_more->setIconSize(QSize(20, 20)); m_more->setAutoRaise(true); m_more->setPopupMode(QToolButton::InstantPopup);
+    m_more->setCursor(Qt::PointingHandCursor); m_more->setToolTip(tr("Task actions")); m_more->setAccessibleName(tr("Task actions")); m_more->hide();
+    m_menu = new QMenu(m_more); m_menu->setObjectName("taskContextMenu"); m_menu->setToolTipsVisible(true); m_more->setMenu(m_menu);
+    connect(m_menu, &QMenu::aboutToShow, this, &TaskRow::rebuildMenu);
+    actionsLayout->addWidget(m_more);
     headerLayout->addWidget(m_meta); headerLayout->addWidget(m_status); headerLayout->addWidget(m_tail, 1); headerLayout->addWidget(m_actions);
     main->addWidget(header);
     m_text = new QLabel; m_text->setObjectName("taskText"); m_text->setTextFormat(Qt::PlainText);
@@ -142,16 +153,36 @@ TaskRow::TaskRow(QWidget *parent) : QWidget(parent), m_colors(TaskColors::of(tru
     main->addSpacing(2); main->addWidget(m_summary); m_summary->hide();
 }
 
+void TaskRow::setCompact(bool compact) {
+    if (property("compact").toBool() == compact) return;
+    setProperty("compact", compact);
+    if (compact) {
+        m_headerLayout->removeWidget(m_actions); m_actions->setFixedHeight(34);
+        static_cast<QHBoxLayout *>(layout())->addWidget(m_actions, 0, Qt::AlignTop);
+        m_mainLayout->removeWidget(m_text); m_mainLayout->insertWidget(0, m_text);
+        m_headerLayout->parentWidget()->setFixedHeight(22);
+    } else {
+        layout()->removeWidget(m_actions); m_headerLayout->addWidget(m_actions);
+        m_mainLayout->removeWidget(m_text); m_mainLayout->insertWidget(1, m_text);
+        m_headerLayout->parentWidget()->setFixedHeight(34);
+    }
+    m_tail->setVisible(!compact); m_summary->setVisible(!compact && !m_summary->text().isEmpty());
+    m_headerLayout->setAlignment(compact ? Qt::Alignment(Qt::AlignLeft) : Qt::Alignment{});
+    updateGeometry();
+}
+
 void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const TaskColors &colors, qint64 now) {
     const bool rebuild = task.stage != m_task.stage || m_buttons.isEmpty();
+    const bool menuChanged = rebuild || state.blocked != m_state.blocked || colors.dark != m_colors.dark;
     m_task = task; m_state = state; m_colors = colors;
+    setCursor(TaskDrag::draggable(task) ? Qt::OpenHandCursor : Qt::PointingHandCursor);
     setProperty("mine", state.mine);
     const QColor stage = colors.stage(task.stage);
     const QString glyph = task.stage == QLatin1String("todo") ? QString::number(task.queue)
         : task.stage == QLatin1String("review") || task.stage == QLatin1String("done") ? QStringLiteral("✓")
         : QString();
     m_glyph->setText(glyph); m_glyph->setSpinning(task.stage == QLatin1String("active"), stage);
-    setAccessibleName(task.id + QStringLiteral(": ") + task.text.section(QLatin1Char('\n'), 0, 0));
+    setAccessibleName(task.id + QStringLiteral(": ") + task.displayTitle());
     setWorkspaceStyle(m_glyph, QStringLiteral("border:2px solid %1;border-radius:11px;color:%1;font-size:11px;font-weight:700;").arg(stage.name()));
     // Meta: ID, the session (or the target), the session's status for In
     // progress, the time, and who filed it.
@@ -160,10 +191,16 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
                           : text.toHtmlEscaped();
     };
     QStringList meta{QStringLiteral("<span style=\"font-family:'%1';font-size:10.5px\">%2</span>").arg(monospaceFamily(), task.id.toHtmlEscaped())};
-    if (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog")) {
+    if (task.targetKind == QLatin1String("new_session") && (task.stage == "todo" || task.stage == "backlog")) meta << tr("→ new session when started");
+    else if (task.targetKind == QLatin1String("subagent") && (task.stage == "todo" || task.stage == "backlog")) meta << tr("→ new subagent");
+    else if (task.stage == QLatin1String("todo") || task.stage == QLatin1String("backlog")) {
         meta << (task.targetSession.isEmpty()
             ? QStringLiteral("→ any session") + (state.anyNow.isEmpty() ? QString() : QStringLiteral(" · now ") + state.anyNow.toHtmlEscaped())
             : who(QStringLiteral("→ ") + TaskBoard::sessionLabel(task.targetHost, task.targetSession)));
+    } else if (!task.worker.isEmpty()) {
+        meta << tr("Subagent: %1").arg(task.worker.value("name").toString()).toHtmlEscaped();
+    } else if (task.targetKind == QLatin1String("subagent") && !task.sessionName.isEmpty()) {
+        meta << tr("coordinator %1 · child unconfirmed").arg(TaskBoard::sessionLabel(task.sessionHost, task.sessionName)).toHtmlEscaped();
     } else if (!task.sessionName.isEmpty()) {
         meta << who(TaskBoard::sessionLabel(task.sessionHost, task.sessionName));
     }
@@ -176,25 +213,28 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
         tail << QStringLiteral("accepted ") + QDateTime::fromMSecsSinceEpoch(task.stageAt).toString(QStringLiteral("d MMM"));
     if (!task.author.isEmpty())
         tail << QStringLiteral("<span style='color:%1'>filed by %2</span>").arg(colors.violet.name(), TaskBoard::sessionLabel(task.authorHost, task.author).toHtmlEscaped());
+    if (state.showStage) meta.prepend(QStringLiteral("<span style='color:%1'>%2</span>").arg(stage.name(), TaskBoard::stageLabel(task.stage).toHtmlEscaped()));
     m_meta->setText(meta.join(QStringLiteral("&nbsp;&nbsp;")));
     m_tail->setText(tail.join(QStringLiteral("&nbsp;&nbsp;")));
     for (auto *label : {m_meta, m_tail}) setWorkspaceStyle(label, QStringLiteral("color:%1;font-size:11px;").arg(colors.muted.name()));
     const bool quiet = task.stage == QLatin1String("backlog") || task.stage == QLatin1String("done");
-    setWorkspaceStyle(m_text, QStringLiteral("color:%1;").arg((quiet ? colors.muted : colors.fg).name()));
+    const bool compact = property("compact").toBool();
+    setWorkspaceStyle(m_text, QStringLiteral("color:%1;%2").arg((quiet ? colors.muted : colors.fg).name(), compact ? "font-weight:600;" : ""));
     // In review: the agent's latest report, or the cancellation.
     QString summary;
-    if (task.stage == QLatin1String("review")) {
+    if (!compact && task.stage == QLatin1String("review")) {
         if (task.cancelledAt > 0)
             summary = QStringLiteral("<b>Cancelled at %1%2</b> %3").arg(QDateTime::fromMSecsSinceEpoch(task.cancelledAt).toString(QStringLiteral("HH:mm")),
                 task.cancelReason.isEmpty() ? QString() : QStringLiteral(":"), task.cancelReason.toHtmlEscaped());
         else if (!task.summary.isEmpty())
             summary = QStringLiteral("<b>%1 reported:</b> %2").arg(TaskBoard::sessionLabel(task.sessionHost, task.sessionName).toHtmlEscaped(), task.summary.toHtmlEscaped());
     }
-    m_summary->setText(summary); m_summary->setVisible(!summary.isEmpty());
+    m_summary->setText(compact ? QString() : summary); m_summary->setVisible(!compact && !summary.isEmpty());
     setWorkspaceStyle(m_summary, QStringLiteral("color:%1;border-left:2px solid %2;padding:1px 0 1px 10px;").arg(colors.muted.name(), stage.name()));
     if (rebuild) {
         qDeleteAll(m_buttons); m_buttons.clear();
-        const auto actions = TaskBoard::actions(task.stage);
+        auto actions = TaskBoard::actions(task.stage);
+        if (!actions.contains(TaskBoard::primaryAction(task.stage))) actions << TaskBoard::primaryAction(task.stage);
         for (const auto action : actions) {
             auto *button = new QToolButton(m_actions); button->setObjectName(QStringLiteral("taskAction:") + actionKey(action));
             button->setFixedSize(34, 32); button->setIconSize(QSize(20, 20)); button->setAutoRaise(true); button->setCursor(Qt::ArrowCursor);
@@ -203,18 +243,28 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
                 const QString why = button->property("blockedReason").toString();
                 if (why.isEmpty()) return emit actionRequested(action);
                 // A blocked action says why beside it, as a blocked message send does.
+                if (property("compact").toBool()) emit opened();
                 QToolTip::showText(button->mapToGlobal(QPoint(0, button->height())), why.toHtmlEscaped(), button, {}, 5000);
             });
             button->installEventFilter(this);
             m_actions->layout()->addWidget(button); m_buttons.insert(int(action), button);
         }
-        m_actions->setFixedWidth(int(actions.size()) * 34 + qMax(0, int(actions.size()) - 1) * 2);
     }
+    const int actionCount = m_buttons.size();
+    m_actions->setFixedWidth(compact ? 70 : actionCount * 34 + qMax(0, actionCount - 1) * 2);
+    if (m_more->property("iconColor") != colors.muted) { m_more->setProperty("iconColor", colors.muted); m_more->setIcon(workspaceIcon("more", colors.muted)); }
+    setWorkspaceStyle(m_more, QStringLiteral("QToolButton{border:0;border-radius:6px;background:transparent;}"
+        "QToolButton::menu-indicator{image:none;width:0;height:0;}QToolButton:hover{background:%1;}").arg(colors.hover.name()));
+    if (menuChanged && !m_menu->isVisible()) rebuildMenu();
     for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it) {
         const auto action = TaskAction(it.key()); const QString why = state.blocked.value(it.key());
         // A blocked action stays clickable, dimmed, so a click can say why it does nothing.
-        QColor icon = colors.muted; if (!why.isEmpty()) icon.setAlphaF(0.45);
-        it.value()->setIcon(workspaceIcon(TaskBoard::actionIcon(action), icon));
+        QColor icon = action == TaskBoard::primaryAction(task.stage) ? colors.accent : colors.muted;
+        if (!why.isEmpty()) icon.setAlphaF(0.45);
+        const auto iconKey = TaskBoard::actionIcon(action) + icon.name(QColor::HexArgb);
+        if (it.value()->property("taskIconKey").toString() != iconKey) {
+            it.value()->setProperty("taskIconKey", iconKey); it.value()->setIcon(workspaceIcon(TaskBoard::actionIcon(action), icon));
+        }
         it.value()->setProperty("blockedReason", why); it.value()->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why);
         it.value()->setAccessibleName(TaskBoard::actionLabel(action));
         it.value()->setAccessibleDescription(why);
@@ -222,6 +272,17 @@ void TaskRow::setTask(const TaskItem &task, const TaskRowState &state, const Tas
     }
     updateActions();
     layoutText(); update();
+}
+
+void TaskRow::rebuildMenu() {
+    m_menu->clear();
+    for (const auto action : TaskBoard::actions(m_task.stage)) {
+        const QString why = m_state.blocked.value(int(action));
+        auto *entry = m_menu->addAction(workspaceIcon(TaskBoard::actionIcon(action), m_colors.muted), TaskBoard::actionLabel(action));
+        entry->setObjectName(QStringLiteral("taskMenuAction:") + actionKey(action));
+        entry->setEnabled(why.isEmpty()); entry->setToolTip(why.isEmpty() ? TaskBoard::actionLabel(action) : why);
+        connect(entry, &QAction::triggered, this, [this, action] { emit actionRequested(action); });
+    }
 }
 
 void TaskRow::updateActions() {
@@ -244,13 +305,25 @@ void TaskRow::keyPressEvent(QKeyEvent *event) {
     QWidget::keyPressEvent(event);
 }
 
+void TaskRow::contextMenuEvent(QContextMenuEvent *event) {
+    m_pressed = false;
+    m_menu->popup(event->reason() == QContextMenuEvent::Keyboard ? mapToGlobal(rect().center()) : event->globalPos()); event->accept();
+}
+
 void TaskRow::showActions(bool shown) {
     // The container keeps its width, so the meta never moves.
-    for (auto *button : std::as_const(m_buttons)) button->setVisible(shown);
+    const bool compact = property("compact").toBool();
+    for (auto it = m_buttons.begin(); it != m_buttons.end(); ++it) {
+        const bool primary = TaskAction(it.key()) == TaskBoard::primaryAction(m_task.stage);
+        it.value()->setVisible(compact ? primary : shown);
+        it.value()->setEnabled(true);
+    }
+    m_more->setVisible(compact);
 }
 
 void TaskRow::layoutText() {
-    m_text->setText(clamp(m_task.text, m_text->font(), m_text->width() > 0 ? m_text->width() : width() - 60, 2));
+    const QString text = property("compact").toBool() ? m_task.displayTitle().simplified() : m_task.text;
+    m_text->setText(clamp(text, m_text->font(), m_text->width() > 0 ? m_text->width() : width() - 60, 2));
 }
 
 void TaskRow::resizeEvent(QResizeEvent *event) { QWidget::resizeEvent(event); layoutText(); }
@@ -267,7 +340,7 @@ void TaskRow::mousePressEvent(QMouseEvent *event) {
     m_pressAt = event->position().toPoint();
 }
 
-// A To do or Backlog row pressed outside its actions is dragged once the pointer
+// A writable row pressed outside its actions is dragged once the pointer
 // moves past the drag distance; the release after a drag opens nothing.
 void TaskRow::mouseMoveEvent(QMouseEvent *event) {
     QWidget::mouseMoveEvent(event);
@@ -291,7 +364,14 @@ void TaskRow::mouseReleaseEvent(QMouseEvent *event) {
 
 void TaskRow::paintEvent(QPaintEvent *) {
     QPainter p(this);
-    const bool lit = m_hovered || hasFocus();
+    const bool lit = m_hovered || hasFocus() || property("expanded").toBool();
+    if (property("compact").toBool()) {
+        const bool expanded = property("expanded").toBool();
+        QColor fill = expanded ? m_colors.accent : m_colors.fg; fill.setAlphaF(expanded ? .07 : lit ? .035 : 0);
+        p.setRenderHint(QPainter::Antialiasing); p.setBrush(fill);
+        p.setPen(QPen(expanded ? m_colors.accent : m_colors.border, expanded ? 1.2 : .5));
+        p.drawRoundedRect(QRectF(rect()).adjusted(.5, .5, -.5, -.5), 7, 7); return;
+    }
     QColor tint = m_state.mine ? m_colors.accent : m_colors.fg;
     tint.setAlphaF(m_state.mine ? (lit ? 0.11 : 0.07) : (lit ? 0.04 : 0));
     p.fillRect(rect(), tint);

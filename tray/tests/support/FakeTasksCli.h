@@ -22,7 +22,8 @@ with open(here/'calls.jsonl','a') as f: f.write(json.dumps({'argv':a,'stdin':tex
 fail=here/'fail'
 if a[:1]!=['task']: print('unexpected command',file=sys.stderr); sys.exit(2)
 want=fail.read_text().split() if fail.exists() else []
-if want and a[1]==want[0] and all(w in a for w in want[1:]): print('hgs refused: '+a[1],file=sys.stderr); sys.exit(1)
+failed=bool(want and a[1]==want[0] and all(w in a for w in want[1:]))
+if failed and a[1]!='message': print('hgs refused: '+a[1],file=sys.stderr); sys.exit(1)
 state=here/'tasks.json'
 data=json.loads(state.read_text()) if state.exists() else {}
 data.setdefault('tasks',[]); data.setdefault('next',1)
@@ -37,21 +38,28 @@ def log(t,kind,body=''): t.setdefault('log',[]).append({'kind':kind,'actor':{'ki
 def top(t): data['tasks'].remove(t); data['tasks'].insert(0,t)
 order=['review','active','todo','backlog','done']
 cmd=a[1]
+if cmd=='get' and (here/'delay-get').exists(): time.sleep(min(.5,float((here/'delay-get').read_text())))
 content={}
-if cmd in ('add','edit') and '--content-json' in a:
+if cmd in ('add','edit','comment','message') and '--content-json' in a:
     content=json.loads(text); text=content['text']
 if cmd=='list':
     tasks=sorted(data['tasks'],key=lambda t: order.index(t['stage']))
+    if (here/'delay-list').exists():
+        (here/'list-snapshot').write_text('captured')
+        time.sleep(min(.5,float((here/'delay-list').read_text())))
     out({'project':project,'tasks':[{k:v for k,v in t.items() if k!='log'} for t in tasks],'damaged':data.get('damaged',[])}); sys.exit(0)
 if cmd=='settings':
     if '--set' in a: data['settings'].update(json.loads(text)); save()
     out({'project':project,'settings':data['settings']}); sys.exit(0)
 if cmd=='add':
+    existing=next((t for t in data['tasks'] if t['uuid']==opt('--request-id')),None)
+    if existing: out({'task':existing}); sys.exit(0)
     n=data['next']; data['next']=n+1
-    target={'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':opt('--target'),'host':opt('--host') or ''} if opt('--target') else {'kind':'any'}
-    t={'uuid':'uuid-%d'%n,'id':'T-%06d'%n,'ref':'orchard/T-%06d'%n,'text':text,'stage':'backlog' if '--backlog' in a else 'todo',
+    target={'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':opt('--target'),'host':opt('--host') or ''} if opt('--target') and opt('--target')!='any' else {'kind':'any'}
+    t={'uuid':opt('--request-id') or 'uuid-%d'%n,'id':'T-%06d'%n,'ref':'orchard/T-%06d'%n,'text':text,'stage':'backlog' if '--backlog' in a else 'todo',
        'summary':'','cancel_reason':'','cancelled_at':None,'created_at':now,'stage_at':now,'writable':True,
        'author':{'kind':'person'},'target':target,'session':None,'rank':'V'}
+    if opt('--title'): t['title']=opt('--title')
     if 'attachments' in content: t['attachments']=content['attachments']
     log(t,'created'); data['tasks'].append(t); save(); out({'task':t}); sys.exit(0)
 t=find(a[2])
@@ -69,15 +77,31 @@ elif cmd=='send':
     t['stage']='active'; t['stage_at']=now; t['session']={'machine':'m-here','session':session,'host':''}; log(t,'sent')
 elif cmd=='cancel':
     t['stage']='review'; t['stage_at']=now; t['cancelled_at']=now; t['cancel_reason']=opt('--reason') or ''; log(t,'cancelled')
+elif cmd=='rename':
+    t['title']=text; log(t,'title',text)
 elif cmd=='edit':
     t['text']=text; log(t,'edited')
     if 'attachments' in content: t['attachments']=content['attachments']
 elif cmd=='target':
-    t['target']={'kind':'any'} if a[3]=='any' else {'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':a[3],'host':opt('--host') or ''}
+    target={'kind':'session','machine':'m-'+(opt('--host') or 'here'),'session':opt('--parent') or a[3],'host':opt('--host') or ''}
+    if opt('--session-id'): target['session_id']=opt('--session-id')
+    t['target']={'kind':'any'} if a[3]=='any' else {'kind':a[3].replace('-','_'),'parent':target} if a[3] in ('new-session','subagent') else target
     log(t,'target',a[3])
-elif cmd=='comment': log(t,'comment',text)
+elif cmd=='message':
+    old=next((e for e in t.get('log',[]) if e.get('request_id')==opt('--request-id')),None)
+    if not old and '--recover-only' in a: print('no reservation; check sent nothing',file=sys.stderr); sys.exit(1)
+    if not old:
+        log(t,'message',text); old=t['log'][-1]; old['request_id']=opt('--request-id')
+        old['attachments']=content.get('attachments',[])
+        old['delivery']={'mode':opt('--mode'),'state':{'queue':'queued','note':'note'}.get(opt('--mode'),'submitted')}
+        if opt('--mode')=='reopen': t['stage']='active'
+elif cmd=='comment':
+    log(t,'comment',text)
+    if 'attachments' in content: t['log'][-1]['attachments']=content['attachments']
 else: print('unknown task command '+cmd,file=sys.stderr); sys.exit(2)
-save(); out({'task':t})
+save()
+if failed: print('response lost after message reservation',file=sys.stderr); sys.exit(1)
+out({'task':t,'message':old} if cmd=='message' else {'task':t})
 )PY";
 }
 

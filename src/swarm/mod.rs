@@ -66,6 +66,11 @@ pub(crate) fn remote_hgs(config: &Config, alias: &str, args: &[String]) -> Resul
     transport::run(config, alias, &words, None)
 }
 
+pub(crate) fn remote_hgs_input(config: &Config, alias: &str, args: &[String], input: &Value) -> Result<Value> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    transport::run(config, alias, &words, Some(input))
+}
+
 /// Shared preferences for `hgs ls --json --local`. Lock-free: the store is
 /// replaced atomically and listings never wait for a sync. A missing or
 /// unreadable catalog reports the defaults.

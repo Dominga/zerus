@@ -663,6 +663,17 @@ pub(crate) fn submit_task_message(session: &zerus_replica::SessionKey, text: &st
     input::submit_task(session, text, attachments)
 }
 
+pub(crate) fn prepare_task_reply(session: &zerus_replica::SessionKey, dispatch: &str, id: &str, text: &str, attachments: &[Value]) -> Result<Value> {
+    local_sessions()?;
+    input::task_reply(session, dispatch, id, text, attachments)
+}
+pub(crate) fn submit_task_reply(name: &str, request: &Value) -> Result<Value> {
+    input::submit(name, request.to_string().as_bytes(), None)
+}
+pub(crate) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
+    input::task_reply_receipt(name, request)
+}
+
 /// Task routing uses saved identity metadata only: no provider inspection,
 /// history, process reconciliation or native API calls for each task row.
 pub(crate) fn task_bindings() -> Result<Vec<Value>> {

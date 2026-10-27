@@ -91,8 +91,8 @@ export const PARITY: ParityGroup[] = [
     { what: "Projects: проекты, цвета, папки, Clone repository, Worktrees, Swarm…", where: "Projects", status: "mock", link: app("page=projects") },
     { what: "Очистка worktree: просмотр, согласия, исходы «удалено/оставлено/неизвестно», ветки и игнорируемые данные сохраняются", where: "Worktrees → Clean up", status: "mock", link: app("dialog=worktree-cleanup") },
     { what: "New session: машина, агент, аккаунт (жирное имя и компактные полоски лимитов, как в Qt), папка, worktree (создаётся только после Start), прямой запуск, своя/существующая worktree, модель, предупреждения", where: "Кнопка «+» в рейле, Ctrl+N", status: "mock", link: app("dialog=new-session") },
-    { what: "Machines: статус подключения, платформа, версия, CPU/память, цвет, SSH, добавление/изменение/удаление", where: "Machines", status: "mock", link: app("page=machines") },
-    { what: "Accounts: аккаунты по машинам, лимиты 5h/7d, вход, установка, профили", where: "Accounts", status: "mock", link: app("page=accounts") },
+    { what: "Machines: статус подключения (точка в углу плашки с системой), платформа, версия, CPU/память, цвет, SSH, добавление/изменение/удаление; та же плашка в Overview и в выборе компьютера в New session", where: "Machines", status: "mock", link: app("page=machines") },
+    { what: "Accounts: аккаунты по машинам, лимиты 5h/7d, вход, установка, профили; аккаунт по умолчанию на машине — чип «Default» и кнопка «Make default»; добавление на машины — мастер из трёх шагов (выбор из списка с поиском, способ, ход по каждой машине), список машин аккаунта — несколько чипов и «+N more»", where: "Accounts", status: "mock", link: app("page=accounts") },
   ] },
   { id: "settings", title: "Settings", rows: [
     { what: "Appearance (скины, тема, масштаб, анимации, раскрытие по наведению, индикатор лимитов, язык), Sessions, Automatic recovery, Processes, Updates, Mobile connection, Files, Worktrees, Automatic approvals (опасная опция, выключена), Voice input, Keyboard, Private analytics, About", where: "Settings", status: "mock", link: app("page=settings") },

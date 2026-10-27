@@ -10,6 +10,7 @@
 #include "TeamWidgets.h"
 #include "TeamPhaseScroll.h"
 #include "CollapsibleBlock.h"
+#include "WorkspaceStyle.h"
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
@@ -134,9 +135,9 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     m_drawer->confirm = [this](const QString &name, const QString &title, const QString &text, const QString &action) { return m_panel->confirm(name, title, text, action); };
     // The panel may outlive this workspace.
     m_panel->confirmClosed = [alive = QPointer<TeamWorkspace>(this)] { if (alive) alive->scheduleRender(); };
-    m_drawer->reassign = [this](int task, const QPoint &global) { if (const auto *team = m_teams->watched()) m_panel->reassignMenu(*team, task, global); };
+    m_drawer->reassign = [this](int task, const QPoint &global) { if (const auto *team = currentTeam(m_team)) m_panel->reassignMenu(*team, task, global); };
     m_drawer->problemActions = [this](const Member &member, const Status &status) -> QWidget * {
-        const auto *team = m_teams->watched();
+        const auto *team = currentTeam(m_team);
         return team ? m_panel->problemActions(*team, member, status) : nullptr;
     };
     QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { scheduleRender(); });
@@ -843,7 +844,7 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
     const bool planning = team.status == "planning";
     if (planning) {
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
-        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, 0); });
+        QObject::connect(task, &QPushButton::clicked, this, [this] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, 0); });
         h->addWidget(task);
         if (m_view == "graph") {
             auto *hint = elided(tr("Drag from a node's right edge onto a task to connect them"), c.dim, 11);
@@ -935,135 +936,31 @@ QWidget *TeamWorkspace::canvas(const Team &team)
     // U25: a team with phases shows each phase as its own scroll, in every view.
     if (!phaseGroups(team).isEmpty()) return phaseColumn(team);
     if (m_view == "board") return board(team);
-    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
-    QSet<int> problemTasks; QMap<int, Tone> problemTone;
-    // U25 part 5: the short problem a node shows on its second line.
-    QMap<int, QString> problemText;
-    for (const auto &p : problems(team, live)) if (p.task) { problemTasks.insert(p.task); problemTone[p.task] = p.tone; }
-    for (const auto &m : team.members)
-        if (const auto s = memberStatus(team, m, live(m)); s.problem && s.task) problemText.insert(s.task, s.text);
-    for (const auto &task : team.tasks) if (const auto s = taskStatus(task); s.problem) {
-        problemTasks.insert(task.id); problemTone[task.id] = s.tone;
-        if (!problemText.contains(task.id)) problemText.insert(task.id, s.text);
-    }
+    // A team with phases never gets here: no bands, no other phases, no drafts.
     auto *view = new TaskView(c, m_view == "graph" ? TaskView::Wide : TaskView::List);
     view->setObjectName(m_view == "graph" ? "teamWorkspaceGraph" : "teamWorkspaceLayers");
     view->zoom = m_zoom;
     view->chain = [team](int id) { return Teams::chain(team, id); };
     view->cycle = team.cycle;
-    view->bands = phaseBands(team, [this, &team](const PhaseGroup &group) { return m_panel->phaseOpen(team, group); });
-    // G9: a decision already sent keeps its header controls off until the
-    // store's revision moves, across re-renders.
-    for (const auto &band : view->bands) if (phaseDecided(team, band.n) || m_phaseAct == band.n) view->decided.insert(band.n);
-    const bool grouped = !view->bands.isEmpty();
-    view->phaseToggled = [this, id = team.id](int phase) {
-        if (const auto *current = currentTeam(id)) m_panel->togglePhase(*current, phase);
-        scheduleRender();
-    };
-    // G9: the band header carries a draft's Approve and Discard (confirmed)
-    // and the F10 move arrows.
-    view->phaseApprove = [this, id = team.id](int phase) { return approvePhase(id, phase); };
-    view->phaseDiscard = [this, id = team.id](int phase) { return discardPhase(id, phase); };
-    view->phaseMoveUp = [this, id = team.id](int phase) {
-        const auto *current = currentTeam(id);
-        if (!current) return;
-        const auto drafts = current->draftPhases();
-        const int position = drafts.indexOf(phase);
-        if (position > 0) movePhase(*current, phase, drafts.value(position - 1), QStringLiteral("before"));
-    };
-    view->phaseMoveDown = [this, id = team.id](int phase) {
-        const auto *current = currentTeam(id);
-        if (!current) return;
-        const auto drafts = current->draftPhases();
-        const int position = drafts.indexOf(phase);
-        if (position >= 0 && position + 1 < drafts.size()) movePhase(*current, phase, drafts.value(position + 1), QStringLiteral("after"));
-    };
-    // Edges exist for every task: a collapsed phase's edges attach to its
-    // summary node.
     for (const auto &task : team.tasks)
         for (const auto &d : task.deps) {
             view->edges[task.id].append(d.task);
             if (d.soft && !team.allHard) view->soft.insert({d.task, task.id});
         }
-    QMap<int, int> localLayer;
-    if (grouped) for (const auto &band : view->bands) {
-        if (band.collapsed) continue;
-        const auto layers = phaseLayers(team, band.tasks);
-        for (auto it = layers.cbegin(); it != layers.cend(); ++it) localLayer.insert(it.key(), it.value());
-    }
     QList<int> order;
-    if (grouped) order = phaseOrder(team, view->bands);
-    else {
-        const auto byLayer = layered(team);
-        for (auto it = byLayer.cbegin(); it != byLayer.cend(); ++it) order += it.value();
-    }
-    for (int id : order) {
-        const auto *task = team.task(id);
-        const auto status = taskStatus(*task);
-        TaskView::Node node;
-        node.id = id; node.phase = task->phase; node.layer = grouped ? localLayer.value(id) : team.layers.value(id);
-        node.title = task->title;
-        node.role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
-        node.problem = problemTasks.contains(id);
-        node.tone = toneColor(c, node.problem ? problemTone.value(id, Tone::Danger) : status.tone);
-        node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
-        if (task->subteam.known && !task->subteam.team.isEmpty()) {
-            // G1: a delegated task is the group node for its sub-team.
-            node.subteam = task->subteam.team;
-            node.kind = QStringLiteral("subteam");
-            node.statusText = tr("Sub-team \u00b7 %1/%2").arg(task->subteam.done).arg(task->subteam.total);
-        }
-        node.draft = task->status == "draft"; node.error = team.cycle.contains(id);
-        node.attempt = task->last() ? task->last()->n : 0;
-        const auto *assignee = team.member(task->assignee);
-        if (assignee) node.agent = assignee->agent;
-        // U25 part 5 (spec 5.4): the dependencies from other phases on the
-        // first line ("↤#1"); the ones inside the phase are its edges.
-        QStringList external;
-        for (const auto &d : task->deps) if (const auto *dep = team.task(d.task); grouped && dep && dep->phase != task->phase) external << QStringLiteral("#%1").arg(d.task);
-        if (!external.isEmpty()) node.ext = QStringLiteral("↤") + external.join(' ');
-        // A plan or draft task without an assignee is an error on its node.
-        const bool unassigned = (team.status == "planning" || node.draft) && !assignee;
-        if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }
-        else if (node.problem) node.problemText = problemText.value(id);
-        // Spec 1.4: the dots under the model tile while its agent really runs
-        // this task.
-        node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
-                       && team.status == "running" && !live(*assignee).offline && !live(*assignee).attention;
-        // The full status lives in the tooltip: "#id Title — Status · after
-        // #x (earlier phase) · Role · model"; A1's attempt phase follows.
-        QString tip = QStringLiteral("#%1 %2 — %3").arg(id).arg(task->title, unassigned ? tr("No assignee") : status.text);
-        if (!external.isEmpty()) tip += tr(" · after %1 (earlier phase)").arg(external.join(QStringLiteral(", ")));
-        if (assignee) tip += QStringLiteral(" · %1 · %2").arg(team.roleOf(assignee->id), assignee->model.isEmpty() ? agentNames.value(assignee->agent, assignee->agent) : assignee->model);
-        const auto mark = phaseMark(team, *task);
-        if (!mark.tooltip.isEmpty() && mark.tooltip != status.text) tip += QLatin1Char('\n') + mark.tooltip;
-        node.tooltip = tip;
-        QStringList deps;
-        for (const auto &d : task->deps) deps << QStringLiteral("#%1").arg(d.task);
-        node.deps = deps.isEmpty() ? QString() : QStringLiteral("← ") + deps.join(' ');
-        const bool active = QStringList{"assigned", "in_progress", "submitted"}.contains(task->status);
-        node.match = (m_filter == "all" || team.status == "planning" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem))
-                     && (m_focus.isEmpty() || task->assignee == m_focus);
-        view->nodes.append(node);
-    }
+    const auto byLayer = layered(team);
+    for (auto it = byLayer.cbegin(); it != byLayer.cend(); ++it) order += it.value();
+    graphNodes(view, team, order, {});
     // Planning edits the plan here as in the inspector: a click edits the task,
     // a drag from a node's handle adds a dependency, a selected edge goes.
     if (team.status == "planning") {
         view->editable = true;
-        view->clicked = [this](int id, const QPoint &) { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
-        view->linked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, true); };
-        view->unlinked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, false); };
-    } else {
-        // U25 part 5: a draft phase's tasks take and lose dependencies in a
-        // running team too, through edit-draft.
-        for (const auto &task : team.tasks) if (task.status == "draft") view->editableTasks.insert(task.id);
-        if (!view->editableTasks.isEmpty()) {
-            view->linked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, true); };
-            view->unlinked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, false); };
-        }
+        view->clicked = [this](int id, const QPoint &) { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, false); };
     }
     if (team.status != "planning") view->clicked = [this](int id, const QPoint &) {
-        const auto *team = m_teams->watched();
+        const auto *team = currentTeam(m_team);
         if (team) if (const auto *task = team->task(id); task && task->subteam.known && !task->subteam.team.isEmpty()) {
             m_teams->watch(task->subteam.team);
             showTeam(task->subteam.team);
@@ -1071,6 +968,7 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         }
         m_drawerTask = id; scheduleRender();
     };
+    keepGraphEdit(view, team.id);
     auto *area = new GraphArea; area->setObjectName("teamWorkspaceCanvas");
     area->setFrameShape(QFrame::NoFrame);
     // Fit starts the graph afresh; otherwise it stays where it was scrolled.
@@ -1095,6 +993,80 @@ QWidget *TeamWorkspace::canvas(const Team &team)
         };
     } else view->layout();
     return area;
+}
+
+void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int> &order, const QSet<int> &phase)
+{
+    const Colors c = colorsFor(m_dark);
+    const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    const auto problemTone = problemTasks(team);
+    // The short problem a node shows on its second line, as Board and Layers name it.
+    const auto problemText = problemTexts(team);
+    const bool grouped = !phase.isEmpty();
+    for (int id : order) {
+        const auto *task = team.task(id);
+        if (!task) continue;
+        const auto status = taskStatus(*task);
+        TaskView::Node node;
+        node.id = id; node.phase = task->phase; node.layer = team.layers.value(id);
+        node.title = task->title;
+        node.role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
+        node.problem = problemTone.contains(id);
+        node.tone = toneColor(c, node.problem ? problemTone.value(id, Tone::Danger) : status.tone);
+        node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
+        if (task->subteam.known && !task->subteam.team.isEmpty()) {
+            // G1: a delegated task is the group node for its sub-team.
+            node.subteam = task->subteam.team;
+            node.kind = QStringLiteral("subteam");
+            node.statusText = tr("Sub-team \u00b7 %1/%2").arg(task->subteam.done).arg(task->subteam.total);
+        }
+        node.draft = task->status == "draft"; node.error = team.cycle.contains(id);
+        node.attempt = task->last() ? task->last()->n : 0;
+        const auto *assignee = team.member(task->assignee);
+        if (assignee) node.agent = assignee->agent;
+        // The dependencies from other phases on the first line ("↤#1"); the
+        // ones inside the phase are its edges.
+        QStringList external;
+        for (const auto &d : task->deps) if (grouped && !phase.contains(d.task)) external << QStringLiteral("#%1").arg(d.task);
+        if (!external.isEmpty()) node.ext = QStringLiteral("↤") + external.join(' ');
+        // A plan or draft task without an assignee is an error on its node.
+        const bool unassigned = (team.status == "planning" || node.draft) && !assignee;
+        if (unassigned) { node.error = true; node.problemText = tr("No assignee"); node.tone = c.danger; }
+        else if (node.problem) node.problemText = problemText.value(id);
+        // Spec 1.4: the dots under the model tile while its agent really runs
+        // this task.
+        node.working = assignee && task->status == "in_progress" && !node.problem && assignee->state != "paused"
+                       && team.status == "running" && !live(*assignee).offline && !live(*assignee).attention;
+        // The full status lives in the tooltip: "#id Title — Status · after
+        // #x (earlier phase) · Role · model"; A1's attempt phase follows.
+        QString tip = QStringLiteral("#%1 %2 — %3").arg(id).arg(task->title, unassigned ? tr("No assignee") : status.text);
+        if (!external.isEmpty()) tip += tr(" · after %1 (earlier phase)").arg(external.join(QStringLiteral(", ")));
+        if (assignee) tip += QStringLiteral(" · %1 · %2").arg(team.roleOf(assignee->id), assignee->model.isEmpty() ? agentNames.value(assignee->agent, assignee->agent) : assignee->model);
+        const auto mark = phaseMark(team, *task);
+        if (!mark.tooltip.isEmpty() && mark.tooltip != status.text) tip += QLatin1Char('\n') + mark.tooltip;
+        node.tooltip = tip;
+        if (!grouped) {
+            QStringList deps;
+            for (const auto &d : task->deps) deps << QStringLiteral("#%1").arg(d.task);
+            node.deps = deps.isEmpty() ? QString() : QStringLiteral("← ") + deps.join(' ');
+        }
+        const bool active = QStringList{"assigned", "in_progress", "submitted"}.contains(task->status);
+        node.match = grouped && m_showBlockers ? view->emphasis.contains(id)
+                   : (m_filter == "all" || team.status == "planning" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem))
+                     && (m_focus.isEmpty() || task->assignee == m_focus);
+        view->nodes.append(node);
+    }
+}
+
+void TeamWorkspace::keepGraphEdit(TaskView *view, const QString &team)
+{
+    if (!view->editable && view->editableTasks.isEmpty()) return;
+    const auto kept = m_graphEdit.value(team);
+    view->keepEdit(kept.first, kept.second);
+    view->editChanged = [this, team](int connectFrom, QPair<int, int> edge) {
+        if (!connectFrom && !edge.first) m_graphEdit.remove(team);
+        else m_graphEdit.insert(team, {connectFrom, edge});
+    };
 }
 
 QWidget *TeamWorkspace::board(const Team &team)
@@ -1257,15 +1229,21 @@ QMap<int, Tone> TeamWorkspace::problemTasks(const Team &team) const
 
 QString TeamWorkspace::problemText(const Team &team, int id) const
 {
+    return problemTexts(team).value(id);
+}
+
+QMap<int, QString> TeamWorkspace::problemTexts(const Team &team) const
+{
     const auto live = m_live ? m_live : LiveLookup([](const Member &) { return Live{}; });
+    QMap<int, QString> found;
     for (const auto &p : problems(team, live)) {
-        if (p.task != id) continue;
+        if (!p.task || found.contains(p.task)) continue;
         // "#6 Unit tests — Tester · Delivery unconfirmed": the reason after the dot.
         const int dot = p.text.lastIndexOf(QStringLiteral(" · "));
-        return dot >= 0 ? p.text.mid(dot + 3) : p.text;
+        found.insert(p.task, dot >= 0 ? p.text.mid(dot + 3) : p.text);
     }
-    if (const auto *task = team.task(id)) if (const auto s = taskStatus(*task); s.problem) return s.text;
-    return {};
+    for (const auto &task : team.tasks) if (const auto s = taskStatus(task); s.problem && !found.contains(task.id)) found.insert(task.id, s.text);
+    return found;
 }
 
 // Team stuck's blockers: the open tasks the problems name.
@@ -1568,54 +1546,38 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group)
     const auto layers = phaseLayers(team, group.tasks);
     QList<int> order = group.tasks;
     std::stable_sort(order.begin(), order.end(), [&layers](int a, int b) { return layers.value(a) < layers.value(b); });
-    for (int id : order) {
-        const auto *task = team.task(id);
-        if (!task) continue;
-        const auto status = taskStatus(*task);
-        TaskView::Node node;
-        node.id = id; node.phase = task->phase; node.layer = layers.value(id);
-        node.title = task->title;
-        node.role = task->assignee.isEmpty() ? tr("You") : team.roleOf(task->assignee);
-        node.problem = problemsByTask.contains(id);
-        node.tone = toneColor(c, node.problem ? problemsByTask.value(id, Tone::Danger) : status.tone);
-        node.kind = kindOfTask(*task, status); node.statusText = status.text; node.roleTone = roleColor(node.role, m_dark);
-        if (task->subteam.known && !task->subteam.team.isEmpty()) {
-            node.subteam = task->subteam.team; node.kind = QStringLiteral("subteam");
-            node.statusText = tr("Sub-team · %1/%2").arg(task->subteam.done).arg(task->subteam.total);
-        }
-        const auto mark = phaseMark(team, *task);
-        node.tooltip = mark.tooltip.isEmpty() ? status.text : mark.tooltip;
-        node.draft = task->status == "draft"; node.error = team.cycle.contains(id);
-        node.attempt = task->last() ? task->last()->n : 0;
-        if (const auto *m = team.member(task->assignee)) node.agent = m->agent;
-        QStringList external;
-        for (const auto &d : task->deps) if (!inPhase.contains(d.task)) external << QStringLiteral("#%1").arg(d.task);
-        node.deps = external.isEmpty() ? QString() : QStringLiteral("↤") + external.join(QStringLiteral(" "));
-        const bool active = QStringList{"assigned", "in_progress", "submitted"}.contains(task->status);
-        node.match = m_showBlockers ? view->emphasis.contains(id)
-                   : (m_filter == "all" || team.status == "planning" || (m_filter == "active" && active) || (m_filter == "problems" && node.problem))
-                     && (m_focus.isEmpty() || task->assignee == m_focus);
-        view->nodes.append(node);
-    }
-    if (team.status == "planning" || ownerPhaseState(team, group) == "draft") {
+    graphNodes(view, team, order, inPhase);
+    for (auto &node : view->nodes) node.layer = layers.value(node.id);
+    // Planning edits the plan with `plan`; a running team's draft phase edits
+    // its tasks' dependencies with edit-draft (the server takes `plan` only
+    // in Planning).
+    if (team.status == "planning") {
         view->editable = true;
-        view->linked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, true); };
-        view->unlinked = [this](int dependency, int task) { if (const auto *t = m_teams->watched()) m_panel->link(*t, dependency, task, false); };
+        view->linked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, true); };
+        view->unlinked = [this](int dependency, int task) { if (const auto *t = currentTeam(m_team)) m_panel->link(*t, dependency, task, false); };
+    } else if (ownerPhaseState(team, group) == "draft") {
+        for (int id : group.tasks) if (const auto *task = team.task(id); task && task->status == "draft") view->editableTasks.insert(id);
+        view->linked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, true); };
+        view->unlinked = [this, id = team.id](int dependency, int task) { if (const auto *t = currentTeam(id)) linkDraft(*t, dependency, task, false); };
     }
-    if (team.status == "planning") view->clicked = [this](int id, const QPoint &) { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
+    if (team.status == "planning") view->clicked = [this](int id, const QPoint &) { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
     else view->clicked = [this](int id, const QPoint &) {
-        const auto *t = m_teams->watched();
+        const auto *t = currentTeam(m_team);
         if (t) if (const auto *task = t->task(id); task && task->subteam.known && !task->subteam.team.isEmpty()) {
             m_teams->watch(task->subteam.team); showTeam(task->subteam.team); return;
         }
         m_drawerTask = id; scheduleRender();
     };
+    keepGraphEdit(view, team.id);
     view->layout();
     // The phase scrolls sideways when its graph is wider than the column.
     auto *area = new QScrollArea; area->setObjectName("teamPhaseGraphArea"); area->setFrameShape(QFrame::NoFrame);
     area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     area->setWidget(view); area->setWidgetResizable(false);
-    area->setStyleSheet(QStringLiteral("QScrollArea#teamPhaseGraphArea{background:transparent;} QScrollArea#teamPhaseGraphArea > QWidget > QWidget{background:transparent;}"));
+    // Spec 1.2: the thin 8 px bar without arrows here too, also outside a
+    // window that styles its bars.
+    area->setStyleSheet(QStringLiteral("QScrollArea#teamPhaseGraphArea{background:transparent;} QScrollArea#teamPhaseGraphArea > QWidget > QWidget{background:transparent;}")
+                        + workspaceScrollbars(m_dark));
     area->viewport()->setAutoFillBackground(false);
     area->setFixedHeight(view->height() + 10);
     return area;
@@ -1722,7 +1684,7 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
                                 .arg(c.surface.name(), problem ? toneColor(c, problemsByTask.value(id)).name() : c.cardBorder.name(), c.accent.name(),
                                      task->status == "draft" ? QStringLiteral("dashed") : QStringLiteral("solid")));
         line->setToolTip(QStringLiteral("#%1 %2 — %3").arg(id).arg(task->title, mark.tooltip.isEmpty() ? s.text : mark.tooltip));
-        line->clicked = team.status == "planning" ? std::function<void()>([this, id] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); })
+        line->clicked = team.status == "planning" ? std::function<void()>([this, id] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); })
                                                   : std::function<void()>([this, id] { m_drawerTask = id; scheduleRender(); });
         auto *h = new QHBoxLayout(line); h->setContentsMargins(8, 4, 8, 4); h->setSpacing(8);
         auto *layer = label(QStringLiteral("L%1").arg(layers.value(id) + 1), c.dim, 10, false, "teamLayerLabel"); layer->setFixedWidth(20); h->addWidget(layer);
@@ -1852,7 +1814,7 @@ QWidget *TeamWorkspace::sideLists(const Team &team, const QString &status)
                 auto *t = elided(issue.text, tone, 12); t->setToolTip(issue.text); h->addWidget(t, 1);
                 if (issue.task) {
                     r->setCursor(Qt::PointingHandCursor); r->setToolTip(tr("Open the task"));
-                    r->clicked = [this, id = issue.task] { if (const auto *t = m_teams->watched()) m_panel->editTask(*t, id); };
+                    r->clicked = [this, id = issue.task] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); };
                 }
                 block->body()->addWidget(r);
             }
@@ -1961,7 +1923,7 @@ QWidget *TeamWorkspace::members(const Team &team)
             auto *wait = row(6);
             wait->addWidget(label(tr("Waiting for a task"), c.muted, 11));
             auto *assign = button(tr("Assign task…"), "teamWorkspaceAssign"); assign->setProperty("ghost", true);
-            QObject::connect(assign, &QPushButton::clicked, this, [this, id = m.id, assign] { if (const auto *t = m_teams->watched()) assignMenu(*t, id, assign->mapToGlobal(QPoint(0, assign->height()))); });
+            QObject::connect(assign, &QPushButton::clicked, this, [this, id = m.id, assign] { if (const auto *t = currentTeam(m_team)) assignMenu(*t, id, assign->mapToGlobal(QPoint(0, assign->height()))); });
             auto *ask = button(tr("Ask lead to plan for it"), "teamWorkspaceAskLead"); ask->setProperty("ghost", true);
             QObject::connect(ask, &QPushButton::clicked, this, [this, role] {
                 m_conversation->send(tr("I added %1 to the team. Plan a task for it and reassign it with hgs team reassign.").arg(role));
@@ -2149,7 +2111,7 @@ QWidget *TeamWorkspace::members(const Team &team)
         auto *more = new QToolButton; more->setIcon(workspaceIcon("more", c.muted)); more->setAutoRaise(true); more->setObjectName("teamWorkspaceMemberMenu");
         more->setToolTip(tr("Member actions"));
         QObject::connect(more, &QToolButton::clicked, this, [this, id = m.id, more] {
-            const auto *t = m_teams->watched();
+            const auto *t = currentTeam(m_team);
             if (const auto *member = t ? t->member(id) : nullptr) memberMenu(*t, *member, more->mapToGlobal(QPoint(0, more->height())));
         });
         bh->addWidget(more, 0, Qt::AlignTop);

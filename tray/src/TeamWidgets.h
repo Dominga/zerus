@@ -8,6 +8,7 @@
 #include "WorkspaceIcons.h"
 #include "WorkspaceSkin.h"
 #include <QCoreApplication>
+#include <QCursor>
 #include <QDateTime>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -615,6 +616,12 @@ public:
     bool routed(int dependency, int task) const { return m_routes.contains({dependency, task}); }
     // The task a click on a node's handle started to connect from (0: none).
     int connecting() const { return m_connectFrom; }
+    // #465 N18: every render builds a new view, so the owner's half-made link
+    // and selected edge live with the caller: `editChanged` reports them, and
+    // keepEdit() puts them back at the next layout() while the task and the
+    // edge are still there.
+    std::function<void(int connectFrom, QPair<int, int> edge)> editChanged;
+    void keepEdit(int connectFrom, QPair<int, int> edge) { m_keepFrom = connectFrom; m_keepEdge = edge; m_keep = true; }
     QList<Node> nodes;
     // Phase grouping: empty while the plan is phase 1 only. The owner's
     // toggles call phaseToggled; the caller re-renders with the new collapse.
@@ -809,6 +816,17 @@ public:
             }
             setMinimumHeight(y + 4); setMaximumHeight(y + 4);
         }
+        if (m_keep) {
+            m_keep = false;
+            m_connectFrom = m_keepFrom && m_rects.contains(m_keepFrom) && canEdit(m_keepFrom) ? m_keepFrom : 0;
+            if (m_connectFrom) {
+                // The dashed line runs to the pointer when it is over the view.
+                const QPoint cursor = mapFromGlobal(QCursor::pos());
+                m_dragAt = rect().contains(cursor) ? QPointF(cursor) : out(m_rects[m_connectFrom]) * zoom;
+            }
+            const bool edge = m_keepEdge.first && edges.value(m_keepEdge.second).contains(m_keepEdge.first) && canEdit(m_keepEdge.second);
+            m_edge = edge ? m_keepEdge : qMakePair(0, 0);
+        }
         bool working = false;
         for (const auto &n : nodes) working = working || n.working;
         if (m_mode == Wide && working && AgentWorking::animated()) m_dots.start(); else m_dots.stop();
@@ -869,19 +887,44 @@ protected:
         const double gap = WideStep - WideW;
         QMap<QPair<int, int>, int> uses;
         const auto lane = [&](int group, double gx) {
-            const int k = uses[{group, qRound(gx)}]++;
+            // The lanes stay inside the gap: a crowded gap reuses them.
+            const int lanes = 2 * int((gap / 2 - 2) / WideLane) + 1;
+            const int k = uses[{group, qRound(gx)}]++ % lanes;
             return gx + (k % 2 ? 1 : -1) * std::ceil(k / 2.0) * WideLane;
         };
-        const auto layerOf = [&](int id) { const Node *node = nodeOf(id); return node ? node->layer : 0; };
-        const auto freeY = [&](int group, double y, int la, int lb) {
-            for (auto it = m_groupOf.cbegin(); it != m_groupOf.cend(); ++it) {
-                if (it.value() != group) continue;
-                const int l = layerOf(it.key());
-                if (l <= la || l >= lb) continue;
-                const QRectF q = m_rects.value(it.key());
-                if (y > q.top() - 6 && y < q.bottom() + 6) return false;
+        // #465 N19: the lookups are built once per routing, not once per
+        // edge and candidate: each task's layer, each group's columns of
+        // (top, bottom) by layer, and each group's corridor candidates.
+        QHash<int, int> layers;
+        layers.reserve(nodes.size());
+        for (const auto &node : nodes) if (!layers.contains(node.id)) layers.insert(node.id, node.layer);
+        const auto layerOf = [&](int id) { return layers.value(id, 0); };
+        QHash<int, QMap<int, QList<QPair<double, double>>>> columns;
+        QHash<int, QList<double>> corridors;
+        for (auto it = m_groupOf.cbegin(); it != m_groupOf.cend(); ++it) {
+            const QRectF q = m_rects.value(it.key());
+            columns[it.value()][layerOf(it.key())].append({q.top(), q.bottom()});
+            corridors[it.value()] << q.top() - (WideRow - WideH) / 2.0 << q.bottom() + (WideRow - WideH) / 2.0;
+        }
+        // The rows a long edge must not cross: the nodes of the columns
+        // between its ends, 6 px around each, merged and sorted.
+        const auto blocked = [&](int group, int la, int lb) {
+            QList<QPair<double, double>> spans;
+            const auto &byLayer = columns[group];
+            for (auto it = byLayer.lowerBound(la + 1); it != byLayer.cend() && it.key() < lb; ++it)
+                for (const auto &[top, bottom] : it.value()) spans.append({top - 6, bottom + 6});
+            std::sort(spans.begin(), spans.end());
+            QList<QPair<double, double>> merged;
+            for (const auto &span : spans) {
+                if (!merged.isEmpty() && span.first < merged.last().second) merged.last().second = qMax(merged.last().second, span.second);
+                else merged.append(span);
             }
-            return true;
+            return merged;
+        };
+        const auto freeY = [](const QList<QPair<double, double>> &spans, double y) {
+            // The first span that ends past y is the only one that can hold it.
+            const auto it = std::upper_bound(spans.cbegin(), spans.cend(), y, [](double v, const QPair<double, double> &span) { return v < span.second; });
+            return it == spans.cend() || !(y > it->first);
         };
         for (auto it = edges.cbegin(); it != edges.cend(); ++it) for (int dep : it.value()) {
             const int task = it.key();
@@ -902,19 +945,15 @@ protected:
                 r.points << QPointF(x1, y1) << QPointF(gx, y1) << QPointF(gx, y2) << QPointF(x2 - 2, y2);
                 r.mid = QPointF(gx, (y1 + y2) / 2);
             } else {
-                QList<double> candidates{top - 9, bottom + 10};
-                for (auto g = m_groupOf.cbegin(); g != m_groupOf.cend(); ++g) {
-                    if (g.value() != group) continue;
-                    const QRectF q = m_rects.value(g.key());
-                    candidates << q.top() - (WideRow - WideH) / 2.0 << q.bottom() + (WideRow - WideH) / 2.0;
-                }
+                const QList<double> candidates = QList<double>{top - 9, bottom + 10} + corridors.value(group);
+                const auto spans = blocked(group, la, lb);
                 QList<double> free;
-                for (double c : candidates) if (freeY(group, c, la, lb)) free << c;
+                for (double c : candidates) if (freeY(spans, c)) free << c;
                 std::stable_sort(free.begin(), free.end(), [&](double u, double v) {
                     return std::abs(u - y1) + std::abs(u - y2) < std::abs(v - y1) + std::abs(v - y2);
                 });
                 const double cy = free.isEmpty() ? bottom + 10 : free.first();
-                if (freeY(group, y1, la, lb) && std::abs(y1 - y2) < 1) {
+                if (freeY(spans, y1) && std::abs(y1 - y2) < 1) {
                     r.points << QPointF(x1, y1) << QPointF(x2 - 2, y2);
                     r.mid = QPointF((x1 + x2) / 2, y1);
                 } else {
@@ -1425,13 +1464,13 @@ protected:
         m_pressAt = e->position();
         if (m_connectFrom) return;   // the click that picks the task is taken on release
         if (m_edge.first && QLineF(edgeMid(m_edge.first, m_edge.second), point).length() <= (m_mode == Wide ? 10 : 8)) {
-            const auto edge = m_edge; m_edge = {0, 0}; update();
+            const auto edge = m_edge; m_edge = {0, 0}; update(); reportEdit();
             if (unlinked) unlinked(edge.first, edge.second);
             return;
         }
         for (auto it = m_rects.cbegin(); it != m_rects.cend(); ++it)
-            if (it.key() > 0 && canEdit(it.key()) && handle(it.value()).adjusted(-4, -4, 4, 4).contains(point)) { m_dragFrom = it.key(); m_dragAt = e->position(); m_edge = {0, 0}; update(); return; }
-        if (!at(e->position())) { m_edge = edgeAt(e->position()); update(); }
+            if (it.key() > 0 && canEdit(it.key()) && handle(it.value()).adjusted(-4, -4, 4, 4).contains(point)) { m_dragFrom = it.key(); m_dragAt = e->position(); m_edge = {0, 0}; update(); reportEdit(); return; }
+        if (!at(e->position())) { m_edge = edgeAt(e->position()); update(); reportEdit(); }
     }
     void mouseMoveEvent(QMouseEvent *e) override
     {
@@ -1462,13 +1501,13 @@ protected:
             const int from = m_dragFrom; m_dragFrom = 0;
             // Spec 5.4: a click on the handle (no drag) starts connecting; the
             // next click on a task links it.
-            if (QLineF(m_pressAt, e->position()).length() < 4 && (!id || id == from)) { m_connectFrom = from; m_dragAt = e->position(); update(); return; }
+            if (QLineF(m_pressAt, e->position()).length() < 4 && (!id || id == from)) { m_connectFrom = from; m_dragAt = e->position(); update(); reportEdit(); return; }
             update();
             if (id && id != from && canEdit(id) && linked) linked(from, id);
             return;
         }
         if (m_connectFrom) {
-            const int from = m_connectFrom; m_connectFrom = 0; update();
+            const int from = m_connectFrom; m_connectFrom = 0; update(); reportEdit();
             if (id && id != from && canEdit(id) && linked) linked(from, id);
             return;
         }
@@ -1505,18 +1544,22 @@ protected:
     }
     void keyPressEvent(QKeyEvent *e) override
     {
-        if (m_connectFrom && e->key() == Qt::Key_Escape) { m_connectFrom = 0; update(); return; }
+        if (m_connectFrom && e->key() == Qt::Key_Escape) { m_connectFrom = 0; update(); reportEdit(); return; }
         if (canEdit(m_edge.second) && m_edge.first && (e->key() == Qt::Key_Delete || e->key() == Qt::Key_Backspace)) {
-            const auto edge = m_edge; m_edge = {0, 0}; update();
+            const auto edge = m_edge; m_edge = {0, 0}; update(); reportEdit();
             if (unlinked) unlinked(edge.first, edge.second);
             return;
         }
         QWidget::keyPressEvent(e);
     }
 private:
+    void reportEdit() { if (editChanged) editChanged(m_connectFrom, m_edge); }
     Colors m_c;
     Mode m_mode;
     int m_hover = 0, m_dragFrom = 0, m_layers = 0, m_connectFrom = 0;
+    bool m_keep = false;
+    int m_keepFrom = 0;
+    QPair<int, int> m_keepEdge{0, 0};
     double m_ox = 0, m_oy = 0;
     QPointF m_dragAt, m_pressAt;
     // U25 part 5: the Wide graph's routes, each task's group (phase band) and

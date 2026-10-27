@@ -29,6 +29,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QUuid>
@@ -142,15 +143,34 @@ bool TeamPanel::confirm(const QString &name, const QString &title, const QString
 void TeamPanel::holdWhileOpen(QMenu *menu)
 {
     auto held = std::make_shared<bool>(false);
-    const auto release = [this, held] {
+    auto level = std::make_shared<int>(0);
+    const auto release = [this, held, level] {
         if (!*held) return;
         *held = false;
-        // After aboutToHide the triggered action still runs: release after it.
-        QTimer::singleShot(0, this, [this] { releaseHold(); });
+        // After aboutToHide the triggered action still runs, and it may open
+        // a dialog whose loop runs our timers: release once every loop the
+        // menu and its action opened has returned.
+        releaseUnwound(*level);
     };
-    QObject::connect(menu, &QMenu::aboutToShow, this, [this, held] { if (!*held) { *held = true; ++m_confirming; } });
+    QObject::connect(menu, &QMenu::aboutToShow, this, [this, held, level] {
+        if (*held) return;
+        *held = true; ++m_confirming;
+        *level = QThread::currentThread()->loopLevel();
+    });
     QObject::connect(menu, &QMenu::aboutToHide, this, release);
     QObject::connect(menu, &QObject::destroyed, this, release);
+}
+
+void TeamPanel::releaseUnwound(int level)
+{
+    QTimer::singleShot(0, this, [this, level] {
+        if (QThread::currentThread()->loopLevel() > level) {
+            // Still inside the menu's or the action's own loop: look again.
+            QTimer::singleShot(50, this, [this, level] { releaseUnwound(level); });
+            return;
+        }
+        releaseHold();
+    });
 }
 
 void TeamPanel::releaseHold()

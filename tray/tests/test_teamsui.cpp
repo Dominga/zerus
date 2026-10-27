@@ -54,6 +54,8 @@
 #include "TeamWorkspace.h"
 #include "TeamPhaseScroll.h"
 #include "WorkspaceStyle.h"
+#include <QScopeGuard>
+#include <QElapsedTimer>
 #include <QInputDialog>
 #include "support/FakeCli.h"
 
@@ -579,6 +581,7 @@ private slots:
     void aRefreshUnderThePhaseConfirmationKeepsItsAsker();
     void leftoverMembersAreShownApart();
     void memberEditorPicksAnExistingSession();
+    void rolePromptFromTheMemberMenuKeepsItsButton();
     void phaseProgressShowsTwoBars();
     void permissionCardsAndGraphOrder();
     void preflightWarningsShowInThePlanCard();
@@ -605,12 +608,14 @@ private slots:
     void nextGoalFromADoneTeam();
     void proposalsAreAcceptedOrRejectedOnce();
     void swapMemberAsksFirstAndListsTheOldSession();
+    void memberMenuWorksBeforeTheStatusReadLands();
     void limitedAndSharedHostMembersAreMarked();
     void reportPreviewsAndFindings();
     void hierarchyInTeamViewsAndMemberCards();
     void workspaceAddsAMember();
     void graphRoutesEdgesAroundNodes();
     void graphEdgesAreEditedByHandleAndSelection();
+    void graphRoutingStaysFastForTheLargestPlan();
     void graphNodesInTwoLinesWithDraftEdits();
     void subLeadsAreATreeInMembersAndTheInspector();
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
@@ -653,7 +658,13 @@ if a[:2]==['team','list']:
  t=json.load(open(__file__+'.status'))
  for key in ('layers','cycle','ready','validation'):t.pop(key)
  print(json.dumps({'items':[t]}))
-elif a[:2]==['team','status']:sys.stdout.write(open(__file__+'.status').read())
+elif a[:2]==['team','status']:
+ import os,time
+ # A test holds the status read back while `.statushold` exists (30 s at most).
+ for _ in range(300):
+  if not os.path.exists(__file__+'.statushold'):break
+  time.sleep(.1)
+ sys.stdout.write(open(__file__+'.status').read())
 elif a[:2]==['team','events']:sys.stdout.write(open(__file__+'.feed').read())
 elif a[:3]==['team','catalog','get']:sys.stdout.write(open(__file__+'.catalog').read())
 elif a[:2]==['team','approve-phase'] and body.get('phase')==9:
@@ -683,6 +694,7 @@ void TestTeamsUi::init()
 {
     QFile::remove(script() + ".calls");
     QFile::remove(script() + ".draftrev");
+    QFile::remove(script() + ".statushold");
     setTeam(team());
 }
 
@@ -1723,6 +1735,75 @@ void TestTeamsUi::leftoverMembersAreShownApart()
     panel.setTheme(true); workspace.setTheme(true);
 }
 
+// #465 C1: "Role prompt…" opens its dialog from inside the member menu's
+// activation. The menu's hold lasts until that activation has returned, so
+// neither the hold's own release nor a poll re-renders the panel (deleting
+// the ⋯ button and its menu) while the dialog is open.
+void TestTeamsUi::rolePromptFromTheMemberMenuKeepsItsButton()
+{
+    setTeam(team("planning"));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    panel.resize(420, 1400); panel.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    QTRY_VERIFY(panel.findChild<QWidget *>("teamPlanFooter"));
+    const auto testerMore = [&]() -> QToolButton * {
+        for (auto *card : panel.findChildren<QFrame *>("teamCard"))
+            if (card->property("teamMember") == "tester") return card->findChild<QToolButton *>("teamMemberMore");
+        return nullptr;
+    };
+    QTRY_VERIFY(testerMore());
+    QPointer<QToolButton> more = testerMore();
+    QPointer<QMenu> menu = more->menu();
+    auto changed = team("planning");
+    changed["revision"] = changed["revision"].toInt() + 1;
+    bool checked = false;
+    std::function<void(int)> lookDialog = [&](int tries) {
+        QTimer::singleShot(10, qApp, [&, tries] {
+            auto *dialog = qobject_cast<QInputDialog *>(QApplication::activeModalWidget());
+            if (!dialog) { if (tries > 0) lookDialog(tries - 1); return; }
+            QPointer<QInputDialog> open = dialog;
+            // A failed check closes the dialog, so the test ends instead of waiting on it.
+            const auto close = qScopeGuard([open] { if (open) open->reject(); });
+            // The menu's own release comes due inside the dialog's loop: no render.
+            QTest::qWait(400);
+            QVERIFY(panel.confirming());
+            QVERIFY(more && menu);
+            // A poll under the dialog: still no render.
+            setTeam(changed);
+            controller.refresh();
+            QTRY_COMPARE(controller.team("team-1")->revision, changed["revision"].toInt());
+            QTest::qWait(400);
+            QVERIFY(more && menu);
+            QVERIFY(more == testerMore());
+            QVERIFY(open && open->isVisible());
+            checked = true;
+        });
+    };
+    std::function<void(int)> lookMenu = [&](int tries) {
+        QTimer::singleShot(10, qApp, [&, tries] {
+            auto *popup = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+            if (!popup) { if (tries > 0) lookMenu(tries - 1); return; }
+            QAction *prompt = nullptr;
+            for (auto *action : popup->actions()) if (action->text().startsWith(QStringLiteral("Role prompt"))) prompt = action;
+            QVERIFY(prompt);
+            popup->setActiveAction(prompt);
+            lookDialog(300);
+            // The owner's choice: the menu hides, then the action opens its dialog.
+            QTest::keyClick(popup, Qt::Key_Return);
+        });
+    };
+    lookMenu(300);
+    more->click();
+    QTRY_VERIFY(checked);
+    // Once everything has returned the panel catches up with the poll.
+    QTRY_VERIFY(!panel.confirming());
+    QTRY_VERIFY(testerMore() && testerMore() != more.data());
+    QVERIFY(calls(script(), "plan").isEmpty());
+}
+
 void TestTeamsUi::memberEditorPicksAnExistingSession()
 {
     setTeam(team("planning"));
@@ -2672,7 +2753,8 @@ void TestTeamsUi::lightThemeShots()
             }
         return color.isValid() && color.lightness() < 150;
     };
-    QTRY_VERIFY(lightText());
+    // The Activity loads in the background: a loaded machine needs over 5 s.
+    QTRY_VERIFY_WITH_TIMEOUT(lightText(), 10000);
     shot(&workspace, "d3-phases-draft-light");
     auto waiting = phasedTeam();
     auto tasks = waiting["tasks"].toArray();
@@ -3383,6 +3465,43 @@ void TestTeamsUi::graphRoutesEdgesAroundNodes()
 
 // Spec 5.4: in planning a click on a node's handle starts a link and a click
 // on the dependent task makes it; a selected edge goes with its × or Delete.
+// #465 N19: a 200-task plan (the plan limit) in one Wide graph, with 180 long
+// edges, routes in well under a second per layout, as a resize lays it out
+// again; no long edge crosses a node of the columns it passes.
+void TestTeamsUi::graphRoutingStaysFastForTheLargestPlan()
+{
+    TeamUi::TaskView view(TeamUi::colorsFor(true), TeamUi::TaskView::Wide);
+    for (int id = 1; id <= 200; ++id) {
+        TeamUi::TaskView::Node n; n.id = id; n.layer = (id - 1) / 20; n.title = QStringLiteral("Task %1").arg(id); n.role = "Backend";
+        n.tone = TeamUi::colorsFor(true).muted; n.roleTone = TeamUi::roleColor(n.role, true); n.kind = "pending"; n.agent = "codex";
+        view.nodes.append(n);
+        // Two layers back, and three layers back for every other task.
+        if (n.layer >= 2) view.edges[id].append(id - 40 + (id % 7 == 0 ? 3 : 0));
+        if (n.layer >= 3 && id % 2) view.edges[id].append(id - 60);
+    }
+    int long_ = 0;
+    for (auto it = view.edges.cbegin(); it != view.edges.cend(); ++it) long_ += it.value().size();
+    QVERIFY(long_ >= 80);
+    view.area = QSize(1200, 800);
+    QElapsedTimer timer; timer.start();
+    for (int i = 0; i < 5; ++i) { view.zoom = 1 - i * .05; view.layout(); }
+    const qint64 elapsed = timer.elapsed();
+    QVERIFY2(elapsed < 2500, qPrintable(QStringLiteral("5 layouts took %1 ms").arg(elapsed)));
+    const auto layerOf = [&](int id) { return (id - 1) / 20; };
+    for (auto it = view.edges.cbegin(); it != view.edges.cend(); ++it) for (int dep : it.value()) {
+        const int task = it.key();
+        QVERIFY(view.routed(dep, task));
+        const auto route = view.route(dep, task).points;
+        for (int other = 1; other <= 200; ++other) {
+            if (layerOf(other) <= layerOf(dep) || layerOf(other) >= layerOf(task)) continue;
+            const QRectF box = view.nodeRect(other).adjusted(1, 1, -1, -1);
+            for (int i = 1; i < route.size(); ++i)
+                QVERIFY2(!QRectF(route.at(i - 1), route.at(i)).normalized().adjusted(-.01, -.01, .01, .01).intersects(box),
+                         qPrintable(QStringLiteral("#%1 -> #%2 crosses #%3").arg(dep).arg(task).arg(other)));
+        }
+    }
+}
+
 void TestTeamsUi::graphEdgesAreEditedByHandleAndSelection()
 {
     TeamUi::TaskView view(TeamUi::colorsFor(true), TeamUi::TaskView::Wide);
@@ -3427,6 +3546,76 @@ void TestTeamsUi::graphEdgesAreEditedByHandleAndSelection()
     view.editable = false;
     view.editableTasks = {3};
     QVERIFY(!view.canEdit(2) && view.canEdit(3));
+
+    // #461: in a running team the draft phase's scroll takes the same handle
+    // and selection edits through edit-draft, never `plan` (which the server
+    // takes only in Planning); the running phase's scroll takes none.
+    setTeam(graphTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1500, 900); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1"); workspace.showTeam("team-1");
+    TeamUi::TaskView *draft = nullptr;
+    QTRY_VERIFY(([&] { draft = phaseGraphOf(&workspace, 3); return draft && draft->nodeRect(8).width() > 0 && draft->isVisible(); })());
+    QCOMPARE(draft->property("phase").toInt(), 3);
+    auto *build = phaseGraphOf(&workspace, 2); QVERIFY(build);
+    QVERIFY(!build->editable && !build->canEdit(5) && !build->linked);
+    QVERIFY(!draft->editable && draft->canEdit(7) && draft->canEdit(8) && draft->canEdit(9));
+    const auto at = [&](const QPointF &point) { return QPoint(int(std::round(point.x() * draft->zoom)), int(std::round(point.y() * draft->zoom))); };
+    // #465 N18: a poll rebuilds every view; the owner's half-made link and
+    // selected edge come back in the new one.
+    int revision = 21;
+    const auto poll = [&] {
+        QPointer<TeamUi::TaskView> old = draft;
+        auto next = graphTeam(); next["revision"] = ++revision;
+        setTeam(next);
+        controller.refresh();
+        QTRY_VERIFY(!old && (draft = phaseGraphOf(&workspace, 3)) && draft->nodeRect(8).width() > 0);
+    };
+    // #9's handle, then a poll, then #8: #8 gains #9.
+    const QRectF nine = draft->nodeRect(9);
+    QTest::mouseMove(draft, at(nine.center()));
+    QTRY_VERIFY((draft = phaseGraphOf(&workspace, 3)) && draft->nodeRect(9).width() > 0);
+    QTest::mouseClick(draft, Qt::LeftButton, {}, at(QPointF(nine.right() - 4, nine.center().y())));
+    QCOMPARE(draft->connecting(), 9);
+    poll();
+    QCOMPARE(draft->connecting(), 9);
+    QTest::mouseClick(draft, Qt::LeftButton, {}, at(draft->nodeRect(8).center()));
+    QCOMPARE(draft->connecting(), 0);
+    QTRY_COMPARE(calls(script(), "edit-draft").size(), 1);
+    auto input = calls(script(), "edit-draft").first();
+    QCOMPARE(input["phase"].toInt(), 3);
+    auto update = input["tasks_update"].toArray().first().toObject();
+    QCOMPARE(update["id"].toInt(), 8);
+    QCOMPARE(update["deps"].toArray().last().toObject()["task"].toInt(), 9);
+    // The edge #8 -> #7 selected, then Delete: #7 keeps only #9.
+    QTRY_VERIFY(([&] { draft = phaseGraphOf(&workspace, 3); return draft && draft->routed(8, 7); })());
+    const auto legs = draft->route(8, 7).points;
+    QTest::mouseClick(draft, Qt::LeftButton, {}, at((legs.at(0) + legs.at(1)) / 2));
+    QCOMPARE(draft->selectedEdge(), qMakePair(8, 7));
+    poll();
+    QCOMPARE(draft->selectedEdge(), qMakePair(8, 7));
+    QTest::keyClick(draft, Qt::Key_Delete);
+    QTRY_COMPARE(calls(script(), "edit-draft").size(), 2);
+    update = calls(script(), "edit-draft").last()["tasks_update"].toArray().first().toObject();
+    QCOMPARE(update["id"].toInt(), 7);
+    QCOMPARE(update["deps"].toArray().size(), 1);
+    QCOMPARE(update["deps"].toArray().first().toObject()["task"].toInt(), 9);
+    QVERIFY(calls(script(), "plan").isEmpty());
+    // Escape ends a link for good: the next view starts clear. The reply to
+    // edit-draft may rebuild the views, so the click goes to the one shown.
+    QTRY_VERIFY((draft = phaseGraphOf(&workspace, 3)) && draft->nodeRect(9).width() > 0);
+    QTest::mouseClick(draft, Qt::LeftButton, {}, at(QPointF(draft->nodeRect(9).right() - 4, draft->nodeRect(9).center().y())));
+    QTRY_VERIFY((draft = phaseGraphOf(&workspace, 3)) && draft->connecting() == 9);
+    QTest::keyClick(draft, Qt::Key_Escape);
+    poll();
+    QCOMPARE(draft->connecting(), 0);
+    QCOMPARE(draft->selectedEdge(), qMakePair(0, 0));
+    QCOMPARE(calls(script(), "edit-draft").size(), 2);
 }
 
 void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
@@ -3444,31 +3633,50 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
     QTRY_VERIFY(controller.team("team-1"));
     panel.showTeam("team-1");
     workspace.showTeam("team-1");
-    TeamUi::TaskView *graph = nullptr;
-    QTRY_VERIFY(([&] { graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph")); return graph && graph->nodeRect(6).width() > 0; })());
-    graph = dynamic_cast<TeamUi::TaskView *>(workspace.findChild<QWidget *>("teamWorkspaceGraph"));
-    const auto nodeOf = [&](int id) { for (const auto &n : graph->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    // #461: a team with phases draws each phase in its own scroll; each one
+    // draws the spec 5.4 nodes.
+    TeamUi::TaskView *graph = nullptr, *draft = nullptr;
+    QTRY_VERIFY(([&] { graph = phaseGraphOf(&workspace, 2); draft = phaseGraphOf(&workspace, 3); return graph && draft && graph->nodeRect(6).width() > 0; })());
+    QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceGraph"));
+    QCOMPARE(graph->property("phase").toInt(), 2);
+    // #465 (spec 1.2): the phase scrolls sideways under the thin 8 px bar.
+    auto *sideways = qobject_cast<QScrollArea *>(phaseScrollOf(&workspace, 2)->findChild<QWidget *>("teamPhaseGraphArea"));
+    QVERIFY(sideways);
+    QTRY_VERIFY(sideways->horizontalScrollBar()->isVisible());
+    QCOMPARE(sideways->horizontalScrollBar()->sizeHint().height(), 8);
+    const auto nodeIn = [](TeamUi::TaskView *view, int id) { for (const auto &n : view->nodes) if (n.id == id) return n; return TeamUi::TaskView::Node{}; };
+    const auto nodeOf = [&](int id) { return nodeIn(graph, id); };
     // Only the dependencies from other phases show on the node; the edge
     // from #1 (phase 1) is not drawn inside phase 2.
     QCOMPARE(nodeOf(2).ext, QStringLiteral("↤#1"));
     QVERIFY(nodeOf(5).ext.isEmpty());
+    QVERIFY(nodeOf(2).deps.isEmpty());
     QVERIFY(!graph->routed(1, 2));
     QVERIFY(graph->routed(3, 6) && graph->routed(2, 5));
-    // The second line: the problem, never a status word; the full status in the tooltip.
+    // The second line: the problem as Board and Layers name it, never a
+    // status word; the full status in the tooltip.
     QCOMPARE(nodeOf(2).problemText, QStringLiteral("Waiting for your answer"));
+    QVERIFY(nodeOf(2).problem);
     QVERIFY(nodeOf(5).problemText.isEmpty());
     QVERIFY2(nodeOf(2).tooltip.startsWith(QStringLiteral("#2 Saved cards API — ")), qPrintable(nodeOf(2).tooltip));
     QVERIFY(nodeOf(2).tooltip.contains(QStringLiteral(" · after #1 (earlier phase) · Backend · deepseek-v4-pro")));
     QVERIFY(nodeOf(3).working);
     QVERIFY(!nodeOf(2).working);
+    // The draft phase's nodes too: its other-phase dependencies and tooltip.
+    QCOMPARE(nodeIn(draft, 8).ext, QStringLiteral("↤#2"));
+    QCOMPARE(nodeIn(draft, 9).ext, QStringLiteral("↤#6"));
+    QVERIFY(nodeIn(draft, 7).ext.isEmpty());
+    QVERIFY(nodeIn(draft, 8).tooltip.contains(QStringLiteral(" · after #2 (earlier phase) · Backend · deepseek-v4-pro")));
+    QVERIFY(draft->routed(8, 7) && draft->routed(9, 7));
     // The long edge #3 -> #6 passes #5's column without crossing it.
     const auto route = graph->route(3, 6).points;
     for (int i = 1; i < route.size(); ++i)
         QVERIFY(!QRectF(route.at(i - 1), route.at(i)).normalized().adjusted(-.01, -.01, .01, .01).intersects(graph->nodeRect(5).adjusted(1, 1, -1, -1)));
-    // The draft phase's tasks take edge edits through edit-draft.
-    QVERIFY(graph->canEdit(7) && !graph->canEdit(5));
-    QVERIFY(graph->linked);
-    graph->linked(9, 8);
+    // The draft phase's tasks take edge edits through edit-draft; the running
+    // phase's tasks take none.
+    QVERIFY(draft->canEdit(7) && !graph->canEdit(5));
+    QVERIFY(draft->linked && !graph->linked);
+    draft->linked(9, 8);
     QTRY_COMPARE(calls(script(), "edit-draft").size(), 1);
     const auto input = calls(script(), "edit-draft").first();
     QCOMPARE(input["phase"].toInt(), 3);
@@ -3476,6 +3684,7 @@ void TestTeamsUi::graphNodesInTwoLinesWithDraftEdits()
     QCOMPARE(update["id"].toInt(), 8);
     QCOMPARE(update["deps"].toArray().size(), 2);
     QCOMPARE(update["deps"].toArray().last().toObject()["task"].toInt(), 9);
+    QVERIFY(calls(script(), "plan").isEmpty());
     shot(&workspace, "ux-5-graph-dark");
     workspace.setTheme(false);
     lightShot(&workspace, "ux-5-graph-light");
@@ -4097,6 +4306,40 @@ void TestTeamsUi::proposalsAreAcceptedOrRejectedOnce()
 
 // H6: Swap from the member menu, a new session or an existing one, confirmed;
 // the old session stays listed for the owner to stop.
+// #465 (the lead's addition): the workspace draws a team from the list before
+// its `team status` read lands. Until then the member "…" opened nothing, so
+// the swap dialog never came on a loaded machine. Every handler now looks the
+// team up as the render does.
+void TestTeamsUi::memberMenuWorksBeforeTheStatusReadLands()
+{
+    setTeam(proposalsTeam(QDateTime::currentSecsSinceEpoch() + 3600));
+    { QFile hold(script() + ".statushold"); QVERIFY(hold.open(QIODevice::WriteOnly)); }
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QToolButton *more = nullptr;
+    QTRY_VERIFY(([&] {
+        for (auto *card : workspace.findChildren<QFrame *>("teamWorkspaceMember"))
+            if (card->property("teamMember") == "backend" && card->isVisibleTo(&workspace)) more = card->findChild<QToolButton *>("teamWorkspaceMemberMenu");
+        return more != nullptr;
+    })());
+    QVERIFY(!controller.watched());
+    chooseMenuAction("teamWorkspaceMemberSwap");
+    more->click();
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamSwapDialog")) && dialog->isVisible());
+    QVERIFY(!controller.watched());
+    dialog->close();
+    QFile::remove(script() + ".statushold");
+    QTRY_VERIFY(controller.watched());
+}
+
 void TestTeamsUi::swapMemberAsksFirstAndListsTheOldSession()
 {
     setTeam(proposalsTeam(QDateTime::currentSecsSinceEpoch() + 3600));
@@ -4777,7 +5020,7 @@ void TestTeamsUi::phaseScrollsInEveryView()
     auto *build = dynamic_cast<TeamUi::TaskView *>(scroll(2)->findChild<QWidget *>("teamPhaseGraph")); QVERIFY(build);
     QCOMPARE(build->nodes.size(), 5);
     auto *verify = dynamic_cast<TeamUi::TaskView *>(scroll(3)->findChild<QWidget *>("teamPhaseGraph")); QVERIFY(verify);
-    for (const auto &node : verify->nodes) if (node.id == 8) QCOMPARE(node.deps, QStringLiteral("↤#2"));
+    for (const auto &node : verify->nodes) if (node.id == 8) QCOMPARE(node.ext, QStringLiteral("↤#2"));
     QVERIFY(verify->edges.value(7).contains(8));
     // The draft's actions: Auto-accept, Reject…, Accept; Build's none.
     QVERIFY(scroll(3)->findChild<QPushButton *>("teamPhaseAccept") && scroll(3)->findChild<QPushButton *>("teamPhaseReject"));

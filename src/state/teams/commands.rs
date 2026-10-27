@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|approve-phase|discard-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|current|report|ask|reply|hold|release|accept|reject|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|run|templates --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "approve-phase", "discard-phase", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
@@ -318,6 +318,9 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
     value["ready"] = json!(plan::ready(team));
     value["waiting_for_lead"] = json!(waiting_for_lead(team));
     value["pending_phase"] = json!(pending_phase(team));
+    // U21: the command templates Zerus runs outside a member's sandbox: the
+    // built-ins (with the global switch) and the project's additions.
+    value["templates"] = super::templates::listed(std::path::Path::new(&team.folder));
     // C5: the plan approval view lists every check command with its expected
     // exit code, so the owner sees what will run and where.
     value["checks"] = json!(team
@@ -1856,6 +1859,63 @@ fn route_reply_down(store: &mut Store, parent_id: &str, input: &Value) -> anyhow
     .map(|_| ())
 }
 
+/// U21: a member asks Zerus to run one built-in command template. Zerus runs it
+/// outside the member's sandbox (the worker is not confined), so the request
+/// goes through the U20 outbox in the member's own folder; the member waits for
+/// the exit code and the output tail.
+fn team_run(input: &Value, _wait: bool) -> anyhow::Result<Value> {
+    let request_id = text(input, "request_id").to_owned();
+    ensure!(canonical_uuid(&request_id), "A canonical request_id is required");
+    let store = Store::open(false)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let Actor::Member(member_id) = actor(&team, "run", input)? else {
+        bail!("Only a member runs a template; the lead runs commands itself")
+    };
+    ensure!(member_id != team.lead, "The lead runs commands itself");
+    let attempt_id = text(input, "attempt").to_owned();
+    let task = team
+        .tasks
+        .iter()
+        .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member_id));
+    let Some(task) = task else { bail!("attempt {attempt_id} does not run for this member") };
+    let folder = std::env::current_dir().context("The member has no folder to run in")?;
+    // Validate here too: a bad template never reaches the worker's queue.
+    let template = text(input, "template").to_owned();
+    super::templates::plan(&template, &input["args"], &folder)?;
+    let request = json!({"op":"run","request_id":request_id,"team":team.id,"member":member_id,"attempt":attempt_id,
+        "template":template,"args":input["args"].clone(),"task":task.id,"input":input});
+    let path = super::outbox::push(&folder, &request)?;
+    let bounded = super::templates::timeout_for(&template, &folder);
+    let queued = json!({
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
+        "note":"Zerus runs the template outside your sandbox; the result waits in your folder."
+    });
+    // The run's own bound plus the worker's poll: a long build is not cut short.
+    Ok(super::outbox::wait(&folder, &request_id, bounded as f64 + 30.0).unwrap_or(queued))
+}
+
+/// U21: the built-in set, the project's additions and the global off switch.
+/// Only the owner (the desktop, not an agent) turns it off.
+fn templates_command(input: &Value) -> anyhow::Result<Value> {
+    let folder = match text(input, "folder") {
+        "" => std::env::current_dir().context("The owner's settings need a folder")?,
+        folder => std::path::PathBuf::from(folder),
+    };
+    match text(input, "action") {
+        "" | "get" => Ok(super::templates::listed(&folder)),
+        "set" => {
+            ensure!(
+                caller_record().is_none() && nonempty_env("DSH_SESSION_ID").is_none(),
+                "Only the owner changes the command templates"
+            );
+            let enabled = input["enabled"].as_bool().context("templates set names \"enabled\": true or false")?;
+            super::templates::set_enabled(enabled)?;
+            Ok(super::templates::listed(&folder))
+        }
+        other => bail!("templates action is get or set (got {other})"),
+    }
+}
+
 fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     // F5: the draft's read and its start are not mutations.
     if op == "draft" {
@@ -1864,6 +1924,14 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             "start" => return draft_start(input),
             _ => {}
         }
+    }
+    // U21: a member's template run and the owner's off switch are not team
+    // mutations: the worker runs the template outside the member's sandbox.
+    if op == "run" {
+        return team_run(input, wait);
+    }
+    if op == "templates" {
+        return templates_command(input);
     }
     // F8: a decision may create the next team, so it runs with the store.
     if op == "decide-proposal" {

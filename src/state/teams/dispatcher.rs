@@ -1009,6 +1009,18 @@ pub(crate) fn hand_off_text_with(
         current = json!({"attempt":attempt.id}),
         report = report
     );
+    // U21: the routine commands Zerus runs outside the member's sandbox; the
+    // owner turned the set off in Settings > Teams when it is off.
+    if super::templates::enabled() {
+        let ids: Vec<&str> = super::templates::BUILTIN.iter().map(|template| template.id).collect();
+        text += &format!(
+            "\nZerus runs these commands for you, outside your sandbox, without an approval: {}.\n\
+             Ask for one with {run} | hgs team run --json: the exit code and the output tail come back.\n\
+             Anything else still asks the lead.",
+            ids.join(", "),
+            run = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"attempt":attempt.id,"template":"cargo-test","args":{}})
+        );
+    }
     text
 }
 
@@ -3085,7 +3097,7 @@ fn take_outbox(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<
         let folder = Path::new(&found.cwd);
         let Ok(requests) = super::outbox::pending(folder, super::outbox::PER_TICK) else { continue };
         for (path, request) in requests {
-            let outcome = match apply_outbox(store, team, member, &request) {
+            let outcome = match apply_outbox(store, team, member, folder, &request) {
                 Ok(value) => value,
                 // A refusal is final: the request leaves the outbox as well, or
                 // the worker would try it again every tick.
@@ -3099,12 +3111,69 @@ fn take_outbox(store: &mut Store, team: &Team, seen: &[Seen]) -> anyhow::Result<
     Ok(())
 }
 
+/// U21: one queued template run, executed here (the worker is not confined, so
+/// the command runs outside the member's sandbox) and recorded on its attempt.
+fn apply_run(store: &mut Store, team: &Team, member: &Member, task_id: u32, folder: &Path, request: &Value) -> anyhow::Result<Value> {
+    let template = request["template"].as_str().unwrap_or_default();
+    let args = request["args"].clone();
+    let plan = super::templates::plan(template, &args, folder)?;
+    let mut env: Vec<(&str, String)> = Vec::new();
+    if template == "qt-test" && args["shots"].as_str() == Some("true") {
+        // U21: the shots go into the member's own folder, never the team's.
+        let shots = folder.join(".ci-build").join("shots");
+        let _ = fs::create_dir_all(&shots);
+        env.push(("ZERUS_TEAM_SHOTS", shots.display().to_string()));
+    }
+    let timeout = Duration::from_secs(super::templates::timeout_for(template, folder));
+    let outcome = match &plan.commit {
+        // B4/U21: the commit template is Zerus' own code, not a subprocess: the
+        // identity is the one the outbox proved.
+        Some(payload) => {
+            let input = json!({"request_id":request["request_id"],"team":team.id,"attempt":request["attempt"],
+                "message":payload["message"],"paths":payload["paths"]});
+            match super::commands::commit_in_team(team, &member.id, &input) {
+                Ok(result) => super::templates::Outcome {
+                    exit: Some(0),
+                    tail: format!("{} {}", result["status"].as_str().unwrap_or_default(), result["sha"].as_str().unwrap_or_default()).trim().to_owned(),
+                    ..Default::default()
+                },
+                Err(error) => super::templates::Outcome { exit: Some(1), tail: format!("{error:#}"), ..Default::default() },
+            }
+        }
+        None => super::templates::execute(&plan, folder, timeout, &env),
+    };
+    let attempt_id = request["attempt"].as_str().unwrap_or_default().to_owned();
+    let role = team.role_of(&member.id);
+    change(store, &team.id, |team, events| {
+        let task = team.task_mut(task_id).context("unknown task")?;
+        let attempt = task.open_attempt_mut().filter(|attempt| attempt.id == attempt_id).context("the attempt ended")?;
+        let n = attempt.n;
+        attempt.runs.push(RunRecord {
+            template: template.to_owned(),
+            args: args.clone(),
+            exit: outcome.exit,
+            at: now(),
+            ms: outcome.ms,
+            timed_out: outcome.timed_out,
+        });
+        let excess = attempt.runs.len().saturating_sub(20);
+        attempt.runs.drain(..excess);
+        events.push(Event::new(
+            "ran",
+            json!({"member":role,"task":task_id,"attempt":n,"template":template,"exit":outcome.exit,"timed_out":outcome.timed_out}),
+        ));
+        Ok(())
+    })?;
+    Ok(json!({"status":"ran","template":template,"exit":outcome.exit,"tail":outcome.tail,"ms":outcome.ms,
+        "timed_out":outcome.timed_out,"error":outcome.error}))
+}
+
 /// One queued request, applied as the member's own write (U20). The member's
 /// input keys the store receipt, so a request applied twice (a worker that died
 /// before it removed the file) is a replay, not a second report.
-fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
+fn apply_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit"), "Unknown outbox request {op}");
+    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "run"), "Unknown outbox request {op}");
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.role_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
@@ -3127,6 +3196,9 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
     }
     if op == "commit" {
         return super::commands::commit_in_team(team, &member.id, &input);
+    }
+    if op == "run" {
+        return apply_run(store, team, member, task.id, folder, request);
     }
     let member_id = member.id.clone();
     store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {
@@ -4021,6 +4093,68 @@ mod tests {
         let result = super::super::outbox::result(&folder, "44444444-4444-4444-8444-444444444444").unwrap();
         assert_eq!(result["status"], "refused");
         assert!(result["error"].as_str().unwrap_or_default().contains("folder belongs to Backend"), "{result}");
+    }
+
+    #[test]
+    fn a_queued_template_run_from_the_members_folder_runs_and_is_recorded() {
+        // U21: the member cannot run the command in its own sandbox; it queues
+        // the run and the worker executes it, recording exit and output tail.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        let id = task.id;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(folder.join(".zerus-team")).unwrap();
+        std::fs::write(
+            folder.join(".zerus-team").join("templates.json"),
+            serde_json::to_vec(&json!({"templates":[{"id":"say","program":"cmd","args":["/c","echo run-ok"]}]})).unwrap(),
+        )
+        .unwrap();
+        let request = json!({"op":"run","request_id":"77777777-7777-4777-8777-777777777777",
+            "team":t.id,"member":"dev","attempt":"A1","template":"say","args":{},
+            "input":{"request_id":"77777777-7777-4777-8777-777777777777","team":t.id,"attempt":"A1","template":"say","args":{}}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox(&mut store, &current, &[member]).unwrap();
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+        assert_eq!(attempt.runs.len(), 1);
+        assert_eq!((attempt.runs[0].template.as_str(), attempt.runs[0].exit), ("say", Some(0)));
+        let result = super::super::outbox::result(&folder, "77777777-7777-4777-8777-777777777777").unwrap();
+        assert_eq!(result["status"], "ran");
+        assert_eq!(result["tail"].as_str().unwrap_or_default().trim(), "run-ok", "{result}");
+    }
+
+    #[test]
+    fn a_queued_run_of_an_unknown_template_is_refused() {
+        // U21: the same argument validation guards the worker's queue.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.status = TeamStatus::Running;
+        let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+        task.status = TaskStatus::InProgress;
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+        let folder = dir.path().join("work");
+        let request = json!({"op":"run","request_id":"88888888-8888-4888-8888-888888888888",
+            "team":t.id,"member":"dev","attempt":"A1","template":"rm-rf","args":{},
+            "input":{"request_id":"88888888-8888-4888-8888-888888888888","team":t.id,"attempt":"A1","template":"rm-rf","args":{}}});
+        super::super::outbox::push(&folder, &request).unwrap();
+        let mut member = session("codex/x/dev", "r1", true);
+        member.cwd = folder.to_string_lossy().into_owned();
+        let current = store.load(&t.id).unwrap().unwrap();
+        take_outbox(&mut store, &current, &[member]).unwrap();
+        let result = super::super::outbox::result(&folder, "88888888-8888-4888-8888-888888888888").unwrap();
+        assert_eq!(result["status"], "refused");
+        assert!(result["error"].as_str().unwrap_or_default().contains("Unknown template"), "{result}");
     }
 
     #[test]

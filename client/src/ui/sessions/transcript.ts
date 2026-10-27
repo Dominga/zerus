@@ -113,8 +113,24 @@ const preview = (text: string | undefined) => {
   return flat.length > PREVIEW ? `${flat.slice(0, PREVIEW - 1)}…` : flat;
 };
 
+/**
+ * The request and reply the summary recorded, when the timeline has no events
+ * (a journal that kept nothing of this conversation). As in Qt, they are shown
+ * as preceding context, never as new messages.
+ */
+function recordedContext(summary: Record<string, unknown> | undefined): TranscriptItem[] {
+  const prompt = typeof summary?.prompt === "string" ? summary.prompt.trim() : "";
+  const answer = typeof summary?.last_message === "string" ? summary.last_message.trim() : "";
+  if (!prompt && !answer) return [];
+  const items: TranscriptItem[] = [{ id: "context", kind: "context", at: "", body: "Recorded context — outside the available timeline" }];
+  if (prompt) items.push({ id: "prompt-snapshot", kind: "user", at: "", label: "You (recorded request)", body: prompt });
+  if (answer) items.push({ id: "answer-snapshot", kind: "agent", at: "", label: "Agent (recorded response)", body: answer });
+  return items;
+}
+
 /** The items of a transcript, oldest first; ids are stable while events only append. */
-export function buildTranscript(events: readonly ActivityEvent[]): TranscriptItem[] {
+export function buildTranscript(events: readonly ActivityEvent[], summary?: Record<string, unknown>): TranscriptItem[] {
+  if (!events.length) return recordedContext(summary);
   const items: TranscriptItem[] = [];
   for (let i = 0; i < events.length;) {
     const e = events[i];

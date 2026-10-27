@@ -70,7 +70,7 @@ export interface Session {
 
 export interface ActivityItem {
   id: string;
-  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared";
+  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context";
   at: string;
   title?: string;
   body?: string;
@@ -82,6 +82,8 @@ export interface ActivityItem {
   receipt?: string;
   /** Operational group that contains an attention event (approval, failure). */
   warn?: boolean;
+  /** A header other than "You" or "Agent" (recorded context). */
+  label?: string;
 }
 
 export type VoiceState =

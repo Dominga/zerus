@@ -45,18 +45,30 @@ the frontend then uses its built-in replay.
 ## Headless runs
 
 Development windows never open on a desktop someone is using. On Linux run the
-app inside Xvfb with GTK forced to X11 and the Wayland socket name pointing
-nowhere. Unsetting `WAYLAND_DISPLAY` is not enough: GTK then tries the default
-socket `wayland-0` and the window opens on the desktop while Xvfb stays empty.
+app inside Xvfb and force X11: with `WAYLAND_DISPLAY` merely unset, GTK falls
+back to the default Wayland socket (`wayland-0`) and the window opens on the
+desktop. `ZERUS_CLIENT_HEADLESS=1` makes the app exit (code 3) instead of
+opening a window anywhere but an X server display. WebKitGTK paints a black
+window in Xvfb unless its DMA-BUF renderer is off:
 
 ```sh
-env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
-  xvfb-run -a -s "-screen 0 1440x900x24" \
+env -u DISPLAY WAYLAND_DISPLAY=zerus-none GDK_BACKEND=x11 ZERUS_CLIENT_HEADLESS=1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 xvfb-run -a -s "-screen 0 1440x900x24" \
   sh -c 'RUSTUP_TOOLCHAIN=1.99.1 ZERUS_CLIENT_REPLAY=$PWD/fixtures/replay.ndjson npx tauri dev'
 ```
 
-Without `WEBKIT_DISABLE_DMABUF_RENDERER=1` WebKitGTK paints a black window in
-Xvfb.
+## Measurement run
+
+`ZERUS_CLIENT_PERF=auto` runs the Diagnostics scenarios unattended (`src/perf`),
+writes the report to `ZERUS_CLIENT_PERF_OUT` and exits; every stage goes to
+stderr as `zerus-client perf: ...` (no session names). It picks a session whose
+Activity has events and scrolls, bounds each scenario at 60 s and the run at
+8 minutes, and ends with two 10 s idle windows: as displayed, and with Reduce
+motion. `ZERUS_CLIENT_PERF_LABEL` names the platform, `ZERUS_CLIENT_PERF_HZ`
+overrides the display rate (`display_hz`), `ZERUS_CLIENT_PERF_REPRESENTATIVE=0`
+marks Xvfb runs and `ZERUS_CLIENT_PERF_PREFERENCE=default` keeps WebKit's
+near-60 fps preference on macOS (the control run). The page is cross-origin
+isolated (COOP and COEP headers) for precise timers.
 
 Screenshots of real sessions are never committed; the fixtures are synthetic
 (example domains, `/home/example` paths).

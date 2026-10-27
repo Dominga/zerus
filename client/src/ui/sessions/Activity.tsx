@@ -288,6 +288,7 @@ function Item(props: { item: TranscriptItem }) {
   const [open, setOpen] = createSignal(false);
   const it = props.item;
   if (it.kind === "media") return <MediaCard item={it} />;
+  if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`}><span class="eyebrow">Thinking</span><p>{it.body}</p></div>;
   if (it.kind === "report")
     return (
@@ -314,7 +315,7 @@ function Item(props: { item: TranscriptItem }) {
     }>
       <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`}>
         <header>
-          <b>{it.kind === "user" ? "You" : it.kind === "agent" ? "Agent" : it.sender ?? "Zerus"}</b>
+          <b>{it.label ?? (it.kind === "user" ? "You" : it.kind === "agent" ? "Agent" : it.sender ?? "Zerus")}</b>
           <span class="act-time">{it.at}</span>
           <Show when={it.kind === "user" && it.receipt}><span class="act-receipt"><Icon name="check" size={11} />{it.receipt}</span></Show>
           <span class="grow" />
@@ -350,7 +351,7 @@ export function ActivityView() {
   // Items keep their identity while events append: the list reconciles by id,
   // so a growing tool group updates in place and older pages only add nodes.
   const [view, setView] = createStore<{ items: TranscriptItem[] }>({ items: [] });
-  const built = createMemo(() => buildTranscript(activity.events()));
+  const built = createMemo(() => buildTranscript(activity.events(), activity.summary()));
   createEffect(() => setView("items", reconcile(built(), { key: "id" })));
 
   // Stay at the bottom while it is in view; keep the reading position when an older page lands above.

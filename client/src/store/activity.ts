@@ -72,6 +72,8 @@ export function createActivity(port: ActivityPort) {
   const [loaded, setLoaded] = createSignal(false);
   const [loadingOlder, setLoadingOlder] = createSignal(false);
   const [olderDone, setOlderDone] = createSignal(false);
+  /** Why the last follow failed (unknown computer, too many followed sessions, ...). */
+  const [error, setError] = createSignal<string | undefined>();
 
   let byKey = new Map<string, ActivityEvent>();
   let stateRev = -1;
@@ -103,6 +105,7 @@ export function createActivity(port: ActivityPort) {
       setLoaded(false);
       setLoadingOlder(false);
       setOlderDone(false);
+      setError(undefined);
     });
   };
 
@@ -120,7 +123,7 @@ export function createActivity(port: ActivityPort) {
     if (prev) void port.unfollow(prev.computer, prev.key).catch(() => {});
     reset();
     setTarget(next);
-    if (next) void port.follow(request(next)).catch(() => setLoaded(true));
+    if (next) void port.follow(request(next)).catch((reason) => batch(() => { setError(String(reason)); setLoaded(true); }));
   }
 
   /** The finish of an older read: it either moved the oldest event back or doubles the reach. */
@@ -206,7 +209,7 @@ export function createActivity(port: ActivityPort) {
     if (older && olderFrom !== undefined) settleOlder();
   }
 
-  return { target, events, summary, ended, loaded, loadingOlder, olderDone, follow, loadOlder, applyActivity };
+  return { target, events, summary, ended, loaded, loadingOlder, olderDone, error, follow, loadOlder, applyActivity };
 }
 
 export type ActivityStore = ReturnType<typeof createActivity>;

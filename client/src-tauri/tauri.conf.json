@@ -28,6 +28,10 @@
         "img-src": "'self' data: http://127.0.0.1:1420",
         "font-src": "'self' data: http://127.0.0.1:1420",
         "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420"
+      },
+      "headers": {
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Embedder-Policy": "require-corp"
       }
     }
   },

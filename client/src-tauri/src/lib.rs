@@ -5,6 +5,7 @@
 //! frame-rate preference, plan Task 7).
 
 mod commands;
+mod display;
 mod metrics;
 mod platform;
 #[cfg(feature = "live")]
@@ -30,9 +31,15 @@ pub fn run() {
             commands::perf_config,
             commands::save_perf,
             commands::perf_log,
+            commands::display_hz,
             commands::exit_app,
         ])
         .setup(|app| {
+            let display = display::display_name();
+            if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
+                eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
+                std::process::exit(3);
+            }
             let window = create_main_window(app.handle())?;
             // An unattended measurement needs frames: keep its window in front
             // and focused for the run, which ends by exiting the app.

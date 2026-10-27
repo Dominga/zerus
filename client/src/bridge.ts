@@ -102,7 +102,7 @@ export const activityPort: ActivityPort = {
 };
 
 /** Process RSS and CPU of the app, when running in Tauri. */
-export async function metrics(): Promise<Record<string, unknown> | undefined> {
+export async function metrics(windowMs?: number): Promise<Record<string, unknown> | undefined> {
   if (!inTauri()) return undefined;
-  try { return await invoke<Record<string, unknown>>("metrics"); } catch { return undefined; }
+  try { return await invoke<Record<string, unknown>>("metrics", windowMs ? { window_ms: windowMs } : {}); } catch { return undefined; }
 }

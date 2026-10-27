@@ -9,6 +9,9 @@
   .act-tools.warn .act-tools-head b { color: var(--z-color-warn); }
   .act-live b { min-width: 0; }
   .later-screen { flex: 1; align-self: center; }
+  /* Reduce motion (the setting, root data-reduce-motion) stops the remaining endless motion as the media query does. */
+  :root[data-reduce-motion="1"] .typing i, :root[data-reduce-motion="1"] .state-dot.working, :root[data-reduce-motion="1"] .status.working .dot,
+  :root[data-reduce-motion="1"] .busy-arc, :root[data-reduce-motion="1"] .skeleton, :root[data-reduce-motion="1"] .mtile.s-connecting .mtile-dot::after { animation: none; }
   /* The measurement panel floats over the right edge, clear of the list and the Activity column. */
   .perf-host { position: fixed; z-index: 90; right: 12px; bottom: 40px; width: min(620px, 60vw); max-height: 78vh; overflow: auto; padding: 10px 12px; border-radius: var(--z-radius-lg); border: 1px solid var(--z-color-border); background: var(--z-color-raised); box-shadow: var(--z-shadow-popover); font-size: var(--fs-xs); }
 }

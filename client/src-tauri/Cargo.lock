@@ -4276,6 +4276,7 @@ dependencies = [
 name = "zerus-client"
 version = "0.1.0"
 dependencies = [
+ "gtk",
  "libc",
  "objc2",
  "objc2-foundation",

@@ -69,7 +69,15 @@ mod live {
 
         pub fn follow(&self, computer: String, key: String, session: SessionRef, after: Option<i64>, tail: u32) -> Result<(), String> {
             match self.source.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-                Some(Source::Fleet(fleet)) => fleet.follow(&ComputerId(computer), &key, session, after, tail).map_err(|error| error.to_string())?,
+                Some(Source::Fleet(fleet)) => {
+                    let computer = ComputerId(computer);
+                    // Following the same session again is a no-op in the core, so
+                    // an older page (`after`) starts a new subscription from there.
+                    if after.is_some() {
+                        fleet.unfollow(&computer, &key);
+                    }
+                    fleet.follow(&computer, &key, session, after, tail).map_err(|error| error.to_string())?
+                }
                 Some(Source::Replay(replay)) => replay.follow(&computer, &key, after, tail),
                 None => return Err("not started".into()),
             }
@@ -190,6 +198,8 @@ pub fn perf_config() -> Value {
         // `0` marks a run whose numbers do not represent the device (Xvfb, a remote session).
         "representative": var("ZERUS_CLIENT_PERF_REPRESENTATIVE").is_none_or(|value| value != "0"),
         "preference": if crate::keep_default_preference() { "default" } else { "display-rate" },
+        // `:N` is an X server (Xvfb); `wayland-N` is a desktop session.
+        "display": crate::display::display_name(),
     })
 }
 
@@ -216,6 +226,14 @@ pub fn save_perf(path: String, json: String) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
+/// The refresh rate of the main window's display in hertz, None when unknown
+/// (`ZERUS_CLIENT_PERF_HZ` overrides it). Synchronous: it runs on the main
+/// thread, where the platform display APIs must be called.
+#[tauri::command]
+pub fn display_hz(window: tauri::WebviewWindow) -> Option<f64> {
+    crate::display::display_hz(&window)
+}
+
 /// One progress line of a measurement run on stderr, so a stalled run shows
 /// where it stopped. The frontend writes no session names into it.
 #[tauri::command]
@@ -236,7 +254,13 @@ pub fn exit_app(app: tauri::AppHandle, code: i32) -> Result<(), String> {
 
 /// RSS and CPU of the client's process tree (the app and its webview
 /// processes). Sampling blocks for its 500 ms window, so it runs off the main thread.
-#[tauri::command(async)]
-pub fn metrics() -> Value {
-    crate::metrics::process_tree_metrics(std::process::id())
+/// `window_ms` sets the window between the two samples (default 500 ms; an idle
+/// measurement uses 10 s, so CPU is the cpu_seconds delta over that wall time).
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn metrics(window_ms: Option<u64>) -> Value {
+    let pid = std::process::id();
+    match window_ms {
+        Some(ms) => crate::metrics::process_tree_metrics_over(pid, std::time::Duration::from_millis(ms.clamp(100, 60_000))),
+        None => crate::metrics::process_tree_metrics(pid),
+    }
 }

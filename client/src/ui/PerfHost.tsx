@@ -27,6 +27,7 @@ interface PerfConfig {
   label?: string | null;
   representative?: boolean;
   preference?: string;
+  display?: string | null;
 }
 
 /** Resolves once `ready` holds; fails after `ms`. Timers, not frames: rAF stops while a window is hidden. */
@@ -47,6 +48,48 @@ function log(line: string) {
   if (inTauri()) void invoke("perf_log", { line }).catch(() => {});
   else console.info(`zerus-client perf: ${line}`);
 }
+
+/** The display's refresh rate from the native side (display_hz); null when unknown, then the panel estimates. */
+async function displayHz(): Promise<number | null> {
+  if (!inTauri()) return null;
+  const hz = await invoke<number | null>("display_hz").catch(() => null);
+  return typeof hz === "number" && hz > 0 ? hz : null;
+}
+
+/** Animation frames delivered within `ms` (a timer ends the count, so none still resolves). */
+function countFrames(ms: number): Promise<number> {
+  return new Promise((resolve) => {
+    let count = 0;
+    let running = true;
+    const tick = () => { if (!running) return; count++; requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+    setTimeout(() => { running = false; resolve(count); }, ms);
+  });
+}
+
+/** Running animations by name ("halo x12, zl-spin x1"), for the idle log. */
+function runningAnimations(): string {
+  const counts = new Map<string, number>();
+  for (const animation of document.getAnimations()) {
+    if (animation.playState !== "running") continue;
+    const name = (animation as CSSAnimation).animationName || animation.constructor.name;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].map(([name, count]) => `${name} x${count}`).join(", ") || "none";
+}
+
+/** The process tree over a 10 s window: CPU is the cpu_seconds delta over the wall time between two samples. */
+async function idleSample(what: string): Promise<unknown> {
+  let sample: unknown;
+  try { sample = (await metrics(10_000)) ?? null; } catch (error) { sample = { error: String(error) }; }
+  const s = sample as { total?: { cpu_percent?: number; rss_bytes?: number }; processes?: { role?: string; cpu_percent?: number | null }[]; window_ms?: number } | null;
+  const roles = (s?.processes ?? []).map((p) => `${p.role} ${p.cpu_percent ?? "n/a"}%`).join(", ");
+  log(`${what}: ${s?.total?.cpu_percent ?? "n/a"}% CPU over ${s?.window_ms ?? "n/a"} ms (${roles}), RSS ${Math.round((s?.total?.rss_bytes ?? 0) / 1048576)} MiB`);
+  return sample;
+}
+
+/** An Activity that scrolls at least this far serves the Activity scroll scenario. */
+const SCROLLABLE_PX = 2000;
 
 /** The whole unattended run ends after this, saving what it has. */
 const RUN_TIMEOUT_MS = 8 * 60_000;
@@ -99,27 +142,74 @@ async function autoRun(config: PerfConfig) {
     platform: { label: config.label ?? null, representative: config.representative ?? null }, preference: config.preference ?? null,
     scenarios: finished,
   }), 1);
+  const onVisibility = () => log(`visibility ${document.visibilityState} after ${elapsed()}`);
+  document.addEventListener("visibilitychange", onVisibility);
   const cutoff = setTimeout(() => { log(`run timeout after ${elapsed()}, saving ${finished.length} scenarios`); void failed("run timeout (8 min)"); }, RUN_TIMEOUT_MS);
   try {
-    log(`start (preference ${config.preference ?? "n/a"}, visibility ${document.visibilityState})`);
+    log(`start (display ${config.display ?? "n/a"}, preference ${config.preference ?? "n/a"}, visibility ${document.visibilityState}, cross-origin isolated ${crossOriginIsolated})`);
     await until(() => orderedRows().length > 0, 180_000, "the catalog stayed empty for 3 minutes");
     log(`rows ready: ${orderedRows().length} after ${elapsed()}`);
-    if (!selectedKey()) {
-      const first = listRows().find((r) => r.type === "card");
-      if (first) setSelectedKey(first.id);
+    // Many sessions keep no journal events; move on until one has some (the
+    // Activity scenarios need them). A chosen `?select=` session is tried first.
+    const cards = listRows().filter((r) => r.type === "card").map((r) => r.id);
+    const candidates = [...new Set([selectedKey(), ...cards].filter((id): id is string => !!id))].slice(0, 16);
+    // The Activity scenario needs a transcript that scrolls: read older pages
+    // of a short one, and keep the session that scrolls furthest.
+    const range = () => { const el = scrollActivity(); return el ? el.scrollHeight - el.clientHeight : 0; };
+    let tried = 0;
+    let best: { id: string; range: number; pages: number } | undefined;
+    /** Reads up to `pages` older pages, fewer once the Activity scrolls far enough. */
+    const readOlder = async (pages: number, enough: number) => {
+      let read = 0;
+      while (read < pages && activity.events().length > 0 && range() < enough && !activity.olderDone()) {
+        activity.loadOlder();
+        await until(() => !activity.loadingOlder(), 8000).catch(() => {});
+        await sleep(150);
+        read++;
+      }
+      await sleep(300);
+      return read;
+    };
+    for (const id of candidates) {
+      tried++;
+      setSelectedKey(id);
+      const kind = `${id.startsWith("\n") ? "this computer" : "a peer"}, ${id.includes("\nrun:") ? "run key" : "name key"}`;
+      await until(() => activity.target()?.id === id && (activity.loaded() || activity.events().length > 0), 15_000).catch(() => {});
+      // Events can follow the first (empty) answer by a moment.
+      await until(() => activity.events().length > 0, 1500).catch(() => {});
+      const pages = await readOlder(4, SCROLLABLE_PX);
+      const error = activity.error();
+      log(`selected ${tried}/${candidates.length}: ${kind}; events ${activity.events().length}; scrolls ${range()} px${error ? `; follow failed: ${error}` : ""}`);
+      if (activity.events().length > 0 && (!best || range() > best.range)) best = { id, range: range(), pages };
+      if (best && best.range >= SCROLLABLE_PX) break;
     }
-    const key = selectedKey();
-    log(`selected: ${key ? `${key.startsWith("\n") ? "this computer" : "a peer"}, ${key.includes("\nrun:") ? "run key" : "name key"}` : "none"}`);
-    // A session without recorded events still lets the list scenarios run.
-    await until(() => activity.events().length > 0, 60_000).catch(() => {});
-    log(`activity events: ${activity.events().length} after ${elapsed()}`);
+    if (best && selectedKey() !== best.id) {
+      const chosen = best;
+      setSelectedKey(chosen.id);
+      await until(() => activity.target()?.id === chosen.id && activity.events().length > 0, 15_000).catch(() => {});
+      await readOlder(chosen.pages, chosen.range);
+    }
+    log(`activity events: ${activity.events().length}, scrolls ${range()} px after ${elapsed()} (${tried} sessions tried)`);
+    // Without animation frames every pacing scenario would time out: say so at once.
+    const frames = await countFrames(3000);
+    log(`frames: ${frames} in 3 s (visibility ${document.visibilityState}, focus ${document.hasFocus()}, window ${innerWidth}x${innerHeight} at ${devicePixelRatio}x, display ${await displayHz() ?? "unknown"} Hz, cross-origin isolated ${crossOriginIsolated})`);
     await until(() => !!globalThis.zerusPerf, 30_000, "the Diagnostics panel did not start");
     const report = await globalThis.zerusPerf!.run();
-    log(`scenarios done after ${elapsed()}; idle 10 s`);
+    log(`scenarios done after ${elapsed()}; settling 10 s, then two 10 s idle windows`);
     await sleep(10_000);
-    let idle: unknown;
-    try { idle = await metrics(); } catch (error) { idle = { error: String(error) }; }
-    report.resources = { ...(report.resources ?? {}), idle: idle ?? null };
+    // Idle as displayed (working halos, header pulses, the mark while a session
+    // needs attention keep producing frames), then with Reduce motion on, so a
+    // report separates what the motion costs from what the app does.
+    log(`running animations: ${runningAnimations()}`);
+    const idle = await idleSample("idle");
+    const root = document.documentElement;
+    const before = root.dataset.reduceMotion;
+    root.dataset.reduceMotion = "1";
+    await sleep(1000);
+    log(`running animations with Reduce motion: ${runningAnimations()}`);
+    const calm = await idleSample("idle with Reduce motion");
+    if (before === undefined) delete root.dataset.reduceMotion; else root.dataset.reduceMotion = before;
+    report.resources = { ...(report.resources ?? {}), idle, idle_reduced_motion: calm };
     clearTimeout(cutoff);
     await finish(toJson({ ...report, preference: config.preference ?? null }), 0);
   } catch (error) {
@@ -163,7 +253,7 @@ export function PerfHost() {
       <aside class="perf-host" aria-label="Diagnostics">
         <Suspense>
           {/* The unattended run samples resources itself, after its own 10 s idle pause. */}
-          <Diagnostics scrollList={scrollList} scrollActivity={scrollActivity} openSession={openSession}
+          <Diagnostics scrollList={scrollList} scrollActivity={scrollActivity} openSession={openSession} displayHz={displayHz}
             metrics={auto() ? undefined : metrics} label={config().label ?? undefined} representative={config().representative}
             onScenarioStart={auto() ? onScenarioStart : undefined} onScenarioEnd={auto() ? onScenarioEnd : undefined} />
         </Suspense>

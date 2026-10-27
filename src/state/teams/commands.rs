@@ -3278,6 +3278,9 @@ mod tests {
             assert!(super::super::dispatcher::steps(&launched, &[free], 100.0).contains(&crate::state::teams::dispatcher::Step::Brief));
             let brief = super::super::dispatcher::brief_text(&launched);
             assert!(brief.contains("hgs guide designer") && brief.contains(&id), "{brief}");
+        });
+    }
+
     // ---- #480: the phase 35 review's findings through the real entry point
     // (commands::run on a private store), as the owner, the lead and members.
 

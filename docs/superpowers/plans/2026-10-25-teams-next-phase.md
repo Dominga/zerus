@@ -899,6 +899,30 @@ answered; a denial cannot carry an explanation.
   shows the setting in the team settings and the mark on the task. Owner:
   yes.
 
+## Phases 37-40 (replanned 2026-10-27)
+
+Phase 36 closed without its own build: its review findings and the build go to
+phase 37. Lanes are balanced by volume and cost (U28 rule 9), not by count.
+
+- **37 Fixes of phase 36 and the build** (running): the checkpoint and final
+  review fixes of phase 36 (two critical: templates off the worker's tick, a
+  dialog from a member menu keeping its hold), then integration, review, QA and
+  one build for phases 36-37.
+- **38 Server fixes and the Sessions settings (DeepSeek members)** (no
+  barrier, runs alongside 37): the server review fixes of phase 35 (C1/C3/C8/C9,
+  C7, C14 groups), the draft follow-ups (F5), MCP servers as services (U11),
+  the designer's narrow rules (U16), confirm subagents (U19) and the Sessions
+  settings for it and for the DeepSeek session-log lock (U22); integration,
+  review, QA, build.
+- **39 New UI, the rest** (Claude members): New session dialog, Team designer
+  and catalog editor, the session list, the inspector, the designer window's
+  questions, permission answers in one line, the light theme fix and the
+  graph nodes' activity label; a checkpoint after the first lane; build.
+- **40 Planning rules, lanes, scope additions and session states**: U28 rules
+  and their weight-based health warnings, U27 visual lanes, U29 adding a task
+  to a running phase, U30 six session states (server, desktop, Android), U31
+  work ahead; build.
+
 ## Order of work (proposal)
 
 1. Delivery and reports: A1-A6, H5.

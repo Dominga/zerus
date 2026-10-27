@@ -1667,6 +1667,34 @@ fn cascade_status(store: &mut Store, team_id: &str, op: &str, depth: usize) -> a
     Ok(())
 }
 
+/// U26: the values the owner's sentence must name for this roster change; empty
+/// when the request changes no roster or cap (so no word is needed).
+fn roster_word_names(team: &Team, op: &str, input: &Value) -> Vec<String> {
+    match op {
+        "add-member" => {
+            let member = &input["member"];
+            let id = text(member, "id");
+            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+        }
+        "remove-member" => {
+            let id = text(input, "member");
+            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+        }
+        "swap-member" => {
+            let id = text(input, "member");
+            if id.is_empty() { Vec::new() } else { vec![id.to_owned()] }
+        }
+        "settings" => {
+            let cap = input["settings"]["max_members"].as_u64();
+            match cap {
+                Some(cap) if cap as usize != team.settings.max_members => vec![cap.to_string()],
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// 9.7: a task with a sub-team cannot be cancelled or reassigned without
 /// saying whether the sub-team stops or keeps running.
 fn choose_subteam(store: &mut Store, team: &Team, input: &Value) -> anyhow::Result<()> {
@@ -2011,6 +2039,21 @@ fn run(op: &str, input: &Value) -> anyhow::Result<Value> {
                         .context("The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence")?;
                     let verified = super::owner_word::verify(&team, word, super::super::now())?;
                     filled["owner_word_checked"] = serde_json::to_value(&verified)?;
+                }
+            }
+            // U26: a lead changes the roster (or max_members) only on the
+            // owner's fresh word, and only for the change that word names.
+            if matches!(op, "add-member" | "swap-member" | "remove-member" | "settings") {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                let caller = actor(&team, op, &filled)?;
+                if matches!(&caller, Actor::Member(id) if *id == team.lead) {
+                    let needed = roster_word_names(&team, op, &filled);
+                    if !needed.is_empty() {
+                        let word = super::owner_word::verify_roster(&team, input, &needed, super::super::now())
+                            .context("The lead changes the roster only on your word; without it, propose the change (F8)")?;
+                        filled["owner_word_checked"] = serde_json::to_value(&word)?;
+                        filled["roster_word"] = Value::Bool(true);
+                    }
                 }
             }
             let receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {

@@ -19,6 +19,31 @@ const KEY_PHRASES: &[&str] = &[
     "next phase plan approved",
 ];
 
+/// U26: a roster change needs the owner's explicit word naming that change.
+const ROSTER_PHRASES: &[&str] = &[
+    "roster", "team change", "add", "remove", "swap", "max members",
+    "участник", "состав", "добав", "удал", "замен",
+];
+
+/// Verifies the owner's word for a roster change, requiring the sentence to
+/// name every `needed` value (the member, or the new cap).
+pub(crate) fn verify_roster(team: &Team, input: &Value, needed: &[String], now: f64) -> anyhow::Result<OwnerWord> {
+    let text = input["text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .context("owner_word.text is required: quote the owner's sentence")?;
+    let lead = team.member(&team.lead).context("The team has no lead")?;
+    let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
+    let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
+    verify_scan(&db, &session.name, &session.conversation_id, text, now, ROSTER_PHRASES, needed)
+}
+
+/// The fixture-testable roster check.
+pub(crate) fn verify_roster_in(db: &Connection, name: &str, conversation: &str, text: &str, needed: &[String], now: f64) -> anyhow::Result<OwnerWord> {
+    verify_scan(db, name, conversation, text, now, ROSTER_PHRASES, needed)
+}
+
 /// Checks the lead's `owner_word` request against the lead session's events
 /// and returns the quote to store.
 pub(crate) fn verify(team: &Team, input: &Value, now: f64) -> anyhow::Result<OwnerWord> {
@@ -36,6 +61,18 @@ pub(crate) fn verify(team: &Team, input: &Value, now: f64) -> anyhow::Result<Own
 /// The verification against one events database, so it is tested with a
 /// fixture instead of the live state.
 pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &str, now: f64) -> anyhow::Result<OwnerWord> {
+    verify_scan(db, name, conversation, text, now, KEY_PHRASES, &[])
+}
+
+fn verify_scan(
+    db: &Connection,
+    name: &str,
+    conversation: &str,
+    text: &str,
+    now: f64,
+    phrases: &[&str],
+    needed: &[String],
+) -> anyhow::Result<OwnerWord> {
     ensure!(!name.is_empty(), "The lead's session has no name to check the owner's word in");
     let mut statement = db
         .prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 200")
@@ -73,17 +110,20 @@ pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &
             continue;
         }
         let lowered = detail.to_lowercase();
-        if !KEY_PHRASES.iter().any(|phrase| lowered.contains(phrase)) {
+        if !phrases.iter().any(|phrase| lowered.contains(phrase)) {
             continue;
         }
         if !detail.contains(text) {
             continue;
         }
+        if !needed.iter().all(|value| lowered.contains(&value.to_lowercase())) {
+            continue;
+        }
         return Ok(OwnerWord { text: detail.to_owned(), at, event: seq });
     }
     anyhow::bail!(
-        "The owner's word is not in the lead session's last 30 minutes: no such prompt contains the sentence and a key phrase \
-         (\"plan approved\" or \"next phase plan approved\")"
+        "The owner's word is not in the lead session's last 30 minutes: no such prompt contains the sentence, \
+         the roster phrase and the change it names"
     )
 }
 
@@ -156,5 +196,17 @@ mod tests {
         // A lead on another computer cannot be checked here.
         let team = Team { lead: "lead".into(), ..Default::default() };
         assert!(verify(&team, &serde_json::json!({"text":"plan approved"}), 2000.0).is_err());
+    }
+
+    #[test]
+    fn a_roster_word_must_name_the_change() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add bob to the roster"));
+        let needed = vec!["bob".to_owned()];
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "Please add bob to the roster", &needed, 2010.0).is_ok());
+        // A sentence naming another member is not this change.
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "Please add bob to the roster", &["alice".to_owned()], 2010.0).is_err());
+        // The same 30-minute rule applies.
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "Please add bob to the roster", &needed, 2000.0 + FRESH_SECONDS + 1.0).is_err());
     }
 }

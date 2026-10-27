@@ -254,7 +254,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     };
     if let Some(settings) = &settings {
         validate_settings(settings)?;
-        ensure_lead_settings(&team.settings, settings, actor)?;
+        ensure_lead_settings(&team.settings, settings, actor, false)?;
     }
     // B6: under the auto folder policy a member without its own choice gets
     // its agent's default: a clone for a sandboxed agent, else a worktree.
@@ -531,7 +531,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         }
         let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
         validate_settings(&updated)?;
-        ensure_lead_settings(&team.settings, &updated, actor)?;
+        ensure_lead_settings(&team.settings, &updated, actor, input["roster_word"].as_bool() == Some(true))?;
         // N27: a sub-team's own lead cannot turn its approvals to auto; its
         // plan and phases stay with the parent lead or you.
         if team.parent.is_some() {
@@ -571,12 +571,16 @@ const OWNER_SETTINGS: [&str; 7] = [
     "subteam_approval",
 ];
 
-fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor) -> anyhow::Result<()> {
+fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
     if matches!(actor, Actor::Human) {
         return Ok(());
     }
     let (old, new) = (serde_json::to_value(old)?, serde_json::to_value(new)?);
     for field in OWNER_SETTINGS {
+        // U26: max_members may move on the owner's verified word.
+        if field == "max_members" && on_word {
+            continue;
+        }
         ensure!(old.get(field) == new.get(field), "Only you change the team's {field}");
     }
     Ok(())
@@ -1722,11 +1726,16 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
         team.brief = Notice::Pending;
         team.brief_id.clear();
     }
+    let by = if input["roster_word"].as_bool() == Some(true) {
+        format!("{} on your word", actor.label(team))
+    } else {
+        "You".to_owned()
+    };
     events.push(Event::new(
         "member_swapped",
-        json!({"member":role,"from":from,"to":to,"by":"You","agent":agent,"changed":changed,"lead":lead}),
+        json!({"member":role,"from":from,"to":to,"by":by,"agent":agent,"changed":changed,"lead":lead}),
     ));
-    Ok(json!({"status":"swapped","member":id,"from":from,"to":to,"agent":agent,"tasks":handed,"lead":lead}))
+    Ok(json!({"status":"swapped","member":id,"from":from,"to":to,"agent":agent,"tasks":handed,"lead":lead,"by":by}))
 }
 
 /// Section 9.2: the root of a team's tree, by parent links among the loaded
@@ -2111,7 +2120,7 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         let settings: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
                         validate_settings(&settings)?;
                         // C4: the lead drafts the rest; the owner's settings stay theirs.
-                        ensure_lead_settings(&team.settings, &settings, actor)?;
+                        ensure_lead_settings(&team.settings, &settings, actor, false)?;
                         team.settings = settings;
                     }
                     "members" => {
@@ -2636,15 +2645,25 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             if profile_rank(&profile) > profile_rank("write") {
                 team.profile_widening.push(json!({"member":id,"from":"write","to":profile}));
             }
-            events.push(Event::new("member_added", json!({"by":actor.label(team),"member":role})));
+            let by = if input["roster_word"].as_bool() == Some(true) {
+                format!("{} on your word", actor.label(team))
+            } else {
+                actor.label(team)
+            };
+            events.push(Event::new("member_added", json!({"by":by,"member":role})));
             // F8: the existing session is adopted, not launched (L2).
             if let Some(session) = adopted {
                 events.push(Event::new("member_adopted", json!({"member":role,"session":session})));
             }
-            Ok(json!({"status":"added","member":id}))
+            Ok(json!({"status":"added","member":id,"by":by}))
         }
         "remove-member" => {
-            ensure!(matches!(actor, Actor::Human), "Only you remove a member");
+            // U26: the lead removes only on the owner's verified word.
+            ensure!(
+                matches!(actor, Actor::Human)
+                    || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
+                "Only you remove a member; the lead needs your word"
+            );
             let id = text(input, "member").to_owned();
             ensure!(id != team.lead, "The lead cannot be removed");
             let open: Vec<u32> = team.tasks.iter().filter(|t| t.assignee == id && !t.status.finished()).map(|t| t.id).collect();
@@ -2653,8 +2672,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let role = team.role_of(&id);
             let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
             member.state = MemberState::Removed;
-            events.push(Event::new("member_removed", json!({"by":"You","member":role})));
-            Ok(json!({"status":"removed","member":id}))
+            let by = if input["roster_word"].as_bool() == Some(true) { "Lead on your word" } else { "You" };
+            events.push(Event::new("member_removed", json!({"by":by,"member":role})));
+            Ok(json!({"status":"removed","member":id,"by":by}))
         }
         _ => bail!("Unknown team operation {op}"),
     }?;
@@ -4453,6 +4473,28 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("never auto"), "{error}");
+    }
+
+    #[test]
+    fn a_lead_removes_a_member_or_raises_the_cap_only_on_the_word() {
+        let mut team = running_team();
+        let none = BTreeSet::new();
+        let mut events = Vec::new();
+        // Without the verified word the lead cannot remove a member.
+        let error = apply(&mut team, "remove-member", &json!({"member":"qa"}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("your word"), "{error}");
+        apply(&mut team, "cancel", &json!({"task":2}), &Actor::Human, &none, &mut events).unwrap();
+        let removed = apply(&mut team, "remove-member", &json!({"member":"qa","roster_word":true}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(removed["by"], "Lead on your word");
+        // max_members moves only with the word too.
+        let error = apply(&mut team, "settings", &json!({"settings":{"max_members":5}}), &Actor::Member("lead".into()), &none, &mut events)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Only you change"), "{error}");
+        apply(&mut team, "settings", &json!({"settings":{"max_members":5},"roster_word":true}), &Actor::Member("lead".into()), &none, &mut events).unwrap();
+        assert_eq!(team.settings.max_members, 5);
     }
 
     #[test]

@@ -309,6 +309,28 @@ inline QPushButton *memberQueueRow(const Team &team, const Task &task, const Col
     return row;
 }
 
+// U29: a task added to its phase after the phase started: who added it, when,
+// and the owner's request and confirmation.
+inline QString addedLateTip(const Task &task)
+{
+    if (!task.addedLate.known) return {};
+    const auto &late = task.addedLate;
+    QString tip = QCoreApplication::translate("TeamPanel", "Out of the phase's original scope: added by %1, %2")
+                      .arg(late.by.isEmpty() ? QCoreApplication::translate("TeamPanel", "the owner") : late.by,
+                           QDateTime::fromSecsSinceEpoch(qint64(late.at)).toLocalTime().toString(QStringLiteral("d MMM HH:mm")));
+    if (!late.request.isEmpty()) tip += QLatin1Char('\n') + QCoreApplication::translate("TeamPanel", "Asked: “%1”").arg(late.request);
+    if (!late.confirm.isEmpty()) tip += QLatin1Char('\n') + QCoreApplication::translate("TeamPanel", "Confirmed: “%1”").arg(late.confirm);
+    return tip;
+}
+
+// U29: the "out of the phase's original scope" icon with its tooltip.
+inline QLabel *outOfScopeMark(const Task &task, const Colors &c, int size = 14)
+{
+    auto *mark = new QLabel; mark->setObjectName("teamOutOfScope"); mark->setProperty("task", task.id);
+    mark->setPixmap(workspaceIcon("out-of-scope", c.violet).pixmap(size, size));
+    mark->setFixedSize(size, size); mark->setToolTip(addedLateTip(task)); mark->setAccessibleName(addedLateTip(task));
+    return mark;
+}
 
 inline QString kindOfTask(const Task &task, const Status &status)
 {
@@ -577,7 +599,9 @@ public:
         // owner's 2026-10-27 addition: a small activity label ("review",
         // "attempt 2", "held", "sub-team 1/2") right of the role chip and the
         // model tile; a problem text wins over it.
-        QString ext, problemText, activity; bool working = false; };
+        QString ext, problemText, activity; bool working = false;
+        // U29: added to its running phase, outside the original scope.
+        bool late = false; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -1070,6 +1094,7 @@ protected:
         const int idw = QFontMetrics(mono).horizontalAdvance(id);
         p.drawText(QRectF(x, line1, idw + 2, lineH), Qt::AlignLeft | Qt::AlignVCenter, id);
         x += idw + 6;
+        if (n.late) { workspaceIcon("out-of-scope", m_c.violet).paint(&p, QRect(int(x), int(line1 + 3), 12, 12)); x += 17; }
         if (!n.ext.isEmpty()) {
             QFont ext = NewSessionDense::mono(10); p.setFont(ext); p.setPen(m_c.folder);
             const int ew = QFontMetrics(ext).horizontalAdvance(n.ext);
@@ -1388,7 +1413,8 @@ protected:
                 QFont mono = NewSessionDense::mono(10); p.setFont(mono); p.setPen(m_c.dim);
                 const QString id = QStringLiteral("#%1").arg(n.id);
                 p.drawText(QRectF(r.left() + 9, r.top() + 5, 30, 16), Qt::AlignLeft | Qt::AlignVCenter, id);
-                const int idw = QFontMetrics(mono).horizontalAdvance(id) + 4;
+                int idw = QFontMetrics(mono).horizontalAdvance(id) + 4;
+                if (n.late) { workspaceIcon("out-of-scope", m_c.violet).paint(&p, QRect(int(r.left() + 9 + idw), int(r.top() + 7), 12, 12)); idw += 15; }
                 QFont title = font(); title.setPixelSize(12); if (m_mode == Wide) title.setWeight(QFont::DemiBold); p.setFont(title); p.setPen(m_c.fg);
                 if (m_mode == Wide) {
                     // Two lines of title, then role and status.

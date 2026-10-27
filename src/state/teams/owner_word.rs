@@ -179,7 +179,7 @@ pub(crate) fn verify_roster_in(db: &Connection, name: &str, conversation: &str, 
 }
 
 fn rule_scan(rule: &WordRule, exact: bool) -> ScanOptions<'_> {
-    ScanOptions { phrases: rule.phrases, needed: &rule.all, exact, add: rule.add }
+    ScanOptions { phrases: rule.phrases, needed: &rule.all, exact, add: rule.add, accept: None, after: 0.0 }
 }
 
 /// Checks the lead's `owner_word` request against the lead session's events
@@ -199,7 +199,80 @@ pub(crate) fn verify(team: &Team, input: &Value, now: f64) -> anyhow::Result<Own
 /// The verification against one events database, so it is tested with a
 /// fixture instead of the live state.
 pub(crate) fn verify_in(db: &Connection, name: &str, conversation: &str, text: &str, now: f64) -> anyhow::Result<OwnerWord> {
-    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: KEY_PHRASES, needed: &[], exact: false, add: false })
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: KEY_PHRASES, needed: &[], exact: false, add: false, accept: None, after: 0.0 })
+}
+
+/// U29: the owner asks to add a task to a running phase, naming it by number
+/// or as the current one; then confirms the warning in a newer sentence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PhaseWord {
+    Request,
+    Confirm,
+}
+
+/// The phase numbers a sentence names ("phase 3", "фаза 3", "фазу 3").
+fn named_phases(lowered: &str) -> Vec<u32> {
+    let words: Vec<&str> = lowered.split(|ch: char| !ch.is_alphanumeric()).filter(|word| !word.is_empty()).collect();
+    words
+        .windows(2)
+        .filter(|pair| pair[0] == "phase" || pair[0].starts_with("фаз"))
+        .filter_map(|pair| pair[1].parse().ok())
+        .collect()
+}
+
+fn asks_to_add(lowered: &str, phase: u32) -> bool {
+    let adds = has_token(lowered, "add") || lowered.contains("добав");
+    let task = lowered.contains("task") || lowered.contains("задач");
+    let current = ["current phase", "running phase", "this phase", "текущ", "идущ", "эту фаз", "этой фаз"]
+        .iter()
+        .any(|phrase| lowered.contains(phrase));
+    let names = named_phases(lowered);
+    adds && task && (names.contains(&phase) || (names.is_empty() && current))
+}
+
+fn confirms(lowered: &str, phase: u32) -> bool {
+    let yes = ["add", "confirm", "confirmed", "yes", "ok", "okay", "да"].iter().any(|token| has_token(lowered, token))
+        || lowered.contains("подтвер")
+        || lowered.contains("добав");
+    // A confirmation naming another phase is not this one's.
+    yes && named_phases(lowered).iter().all(|n| *n == phase)
+}
+
+/// U29: verifies the owner's request (or confirmation) for an addition to
+/// running phase `phase`; a confirmation must be newer than `after`.
+pub(crate) fn verify_phase(team: &Team, input: &Value, phase: u32, kind: PhaseWord, after: f64, now: f64) -> anyhow::Result<OwnerWord> {
+    let text = input["text"]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .context("owner_word.text is required: quote the owner's sentence")?;
+    let lead = team.member(&team.lead).context("The team has no lead")?;
+    let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
+    let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
+    verify_phase_in(&db, &session.name, &session.conversation_id, text, phase, kind, after, now)
+}
+
+/// The fixture-testable U29 check.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_phase_in(
+    db: &Connection,
+    name: &str,
+    conversation: &str,
+    text: &str,
+    phase: u32,
+    kind: PhaseWord,
+    after: f64,
+    now: f64,
+) -> anyhow::Result<OwnerWord> {
+    let accept = move |lowered: &str| match kind {
+        PhaseWord::Request => asks_to_add(lowered, phase),
+        PhaseWord::Confirm => confirms(lowered, phase),
+    };
+    verify_scan(db, name, conversation, text, now, ScanOptions { phrases: &[], needed: &[], exact: false, add: false, accept: Some(&accept), after })
+        .with_context(|| match kind {
+            PhaseWord::Request => format!("The owner has not asked to add a task to phase {phase} (name the phase or say the current phase)"),
+            PhaseWord::Confirm => format!("The owner has not confirmed the addition to phase {phase} after the warning"),
+        })
 }
 
 struct ScanOptions<'a> {
@@ -208,6 +281,10 @@ struct ScanOptions<'a> {
     exact: bool,
     /// U32: an add request, which says "add"/"добав" instead of a roster phrase.
     add: bool,
+    /// U29: a check of the lowered sentence instead of the phrases.
+    accept: Option<&'a dyn Fn(&str) -> bool>,
+    /// U29: the sentence must be newer than this time.
+    after: f64,
 }
 
 fn verify_scan(
@@ -246,7 +323,7 @@ fn verify_scan(
             continue;
         }
         let at = event["at"].as_f64().unwrap_or(0.0);
-        if at <= 0.0 || now - at > FRESH_SECONDS || at > now + 1.0 {
+        if at <= 0.0 || now - at > FRESH_SECONDS || at > now + 1.0 || at <= options.after {
             continue;
         }
         let detail = event["detail"].as_str().unwrap_or_default().trim();
@@ -256,7 +333,9 @@ fn verify_scan(
             continue;
         }
         let lowered = detail.to_lowercase();
-        let said = if options.add {
+        let said = if let Some(accept) = options.accept {
+            accept(&lowered)
+        } else if options.add {
             // U32: the owner asks to add someone, in either language; "add" is
             // a whole token, so "address" is not an add.
             has_token(&lowered, "add") || lowered.contains("добав")
@@ -383,6 +462,32 @@ mod tests {
         let db = database();
         add(&db, "claude/x/lead", "c1", prompt(2000.0, "может еще одного дипсик бэкендера добавим?"));
         verify_roster_in(&db, "claude/x/lead", "c1", "может еще одного дипсик бэкендера добавим?", &add_rule(), 2000.0).unwrap();
+    }
+
+    #[test]
+    fn a_phase_addition_needs_the_request_then_a_newer_confirmation() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(1000.0, "Please add a task to phase 3: the hotfix"));
+        add(&db, "claude/x/lead", "c1", prompt(1010.0, "Add a task to the running phase"));
+        add(&db, "claude/x/lead", "c1", prompt(1020.0, "Add a task to phase 4"));
+        add(&db, "claude/x/lead", "c1", prompt(1030.0, "Добавь задачу в текущую фазу"));
+        let request = |text: &str, phase: u32| verify_phase_in(&db, "claude/x/lead", "c1", text, phase, PhaseWord::Request, 0.0, 1100.0);
+        assert!(request("Please add a task to phase 3", 3).is_ok());
+        assert!(request("Please add a task to phase 3", 4).is_err());   // names another phase
+        assert!(request("Add a task to the running phase", 7).is_ok());  // "the running phase" names it
+        assert!(request("Add a task to phase 4", 3).is_err());
+        assert!(request("Добавь задачу в текущую фазу", 2).is_ok());
+        // A confirmation must be newer than the warning and not name another phase.
+        add(&db, "claude/x/lead", "c1", prompt(1050.0, "Yes, add it"));
+        add(&db, "claude/x/lead", "c1", prompt(1060.0, "Confirm phase 5"));
+        let confirm = |text: &str, phase: u32, after: f64| verify_phase_in(&db, "claude/x/lead", "c1", text, phase, PhaseWord::Confirm, after, 1100.0);
+        assert!(confirm("Yes, add it", 3, 1040.0).is_ok());
+        assert!(confirm("Yes, add it", 3, 1055.0).is_err());
+        assert!(confirm("Confirm phase 5", 3, 1040.0).is_err());
+        assert!(confirm("Confirm phase 5", 5, 1040.0).is_ok());
+        // "address" is not "add".
+        add(&db, "claude/x/lead", "c1", prompt(1070.0, "Address the task in phase 3"));
+        assert!(request("Address the task in phase 3", 3).is_err());
     }
 
     #[test]

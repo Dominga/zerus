@@ -1244,6 +1244,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
             node.statusText = tr("Sub-team \u00b7 %1/%2").arg(task->subteam.done).arg(task->subteam.total);
         }
         node.draft = task->status == "draft"; node.error = team.cycle.contains(id);
+        node.late = task->addedLate.known;
         node.attempt = task->last() ? task->last()->n : 0;
         const auto *assignee = team.member(task->assignee);
         if (assignee) node.agent = assignee->agent;
@@ -1269,6 +1270,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         if (assignee) tip += QStringLiteral(" · %1 · %2").arg(team.roleOf(assignee->id), assignee->model.isEmpty() ? agentNames.value(assignee->agent, assignee->agent) : assignee->model);
         const auto mark = phaseMark(team, *task);
         if (!mark.tooltip.isEmpty() && mark.tooltip != status.text) tip += QLatin1Char('\n') + mark.tooltip;
+        if (node.late) tip += QLatin1Char('\n') + addedLateTip(*task);
         node.tooltip = tip;
         if (!grouped) {
             QStringList deps;
@@ -1764,6 +1766,12 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
             });
             h->addWidget(undo);
         }
+    } else if (state == "running" && (team.status == "running" || team.status == "paused")) {
+        // U29: a running phase takes a task only on your word, after a warning.
+        auto *add = button(tr("Add task…"), "teamPhaseAddLate"); add->setProperty("ghost", true); add->setProperty("phase", group.n);
+        add->setToolTip(tr("Add a task to this running phase: Zerus warns first, then you confirm"));
+        QObject::connect(add, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] { if (const auto *t = currentTeam(id)) addLateDialog(*t, phase); });
+        h->addWidget(add);
     } else if (state == "queued") {
         const QString text = record && !record->waiting.text.isEmpty() ? record->waiting.text : tr("Starts after phase %1").arg(group.n - 1);
         auto *waits = label(text, c.dim, 11, false, "teamPhaseQueued"); waits->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -2075,6 +2083,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
                                          mark.kind.isEmpty() ? kindOfTask(*task, s) : mark.kind, 14, Qt::AlignLeft, nullptr, mark.tooltip.isEmpty() ? s.text : mark.tooltip);
             state->setObjectName("teamBoardState"); state->setProperty("statusText", s.text); r1->addWidget(state);
             auto *id = label(QStringLiteral("#%1").arg(task->id), c.fg, 12, true, "teamBoardId"); r1->addWidget(id);
+            if (task->addedLate.known) r1->addWidget(outOfScopeMark(*task, c));
             QStringList deps; for (const auto &d : task->deps) deps << QStringLiteral("#%1").arg(d.task);
             if (!deps.isEmpty()) r1->addWidget(label(QStringLiteral("←") + deps.join(QStringLiteral(" ")), c.folder, 11, false, "teamBoardDeps"));
             auto *name = elided(task->title, c.fg, 12); name->setObjectName("teamBoardTitle");
@@ -2150,6 +2159,7 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
                                      mark.kind.isEmpty() ? kindOfTask(*task, s) : mark.kind, 14, Qt::AlignLeft, nullptr, mark.tooltip.isEmpty() ? s.text : mark.tooltip);
         h->addWidget(state);
         h->addWidget(label(QStringLiteral("#%1").arg(id), c.fg, 12, true));
+        if (task->addedLate.known) h->addWidget(outOfScopeMark(*task, c));
         QStringList deps; for (const auto &d : task->deps) deps << QStringLiteral("#%1").arg(d.task);
         if (!deps.isEmpty()) h->addWidget(label(QStringLiteral("←") + deps.join(QStringLiteral(" ")), c.folder, 11));
         auto *name = elided(task->title, c.text2, 13); name->setObjectName("teamLayerTitle"); h->addWidget(name, 3);
@@ -2792,6 +2802,84 @@ void TeamWorkspace::nextGoalDialog(const Team &team)
                 }
                 if (guard) guard->accept();
                 openOtherTeam(result.value("team").toString());
+            });
+    });
+    dialog->show();
+}
+
+void TeamWorkspace::addLateDialog(const Team &team, int phase)
+{
+    if (auto *open = findChild<QDialog *>("teamAddLateDialog")) { open->raise(); open->activateWindow(); return; }
+    const Colors c = colorsFor(m_dark);
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName("teamAddLateDialog");
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Add a task to running phase %1").arg(phase));
+    dialog->resize(520, 420);
+    dialog->setStyleSheet(QStringLiteral("QDialog{background:%1;} QLabel{background:transparent;}").arg(c.bg.name()));
+    auto *v = new QVBoxLayout(dialog);
+    auto *intro = label(tr("Phase %1 is running. The task joins it only after Zerus warns what changes and you confirm.").arg(phase), c.text2, 12);
+    intro->setWordWrap(true); v->addWidget(intro);
+    v->addWidget(label(tr("Title"), c.muted, 11));
+    auto *title = new QLineEdit; title->setObjectName("teamAddLateTitle"); title->setMaxLength(200);
+    title->setPlaceholderText(tr("What the task delivers"));
+    v->addWidget(title);
+    v->addWidget(label(tr("Description"), c.muted, 11));
+    auto *description = new QPlainTextEdit; description->setObjectName("teamAddLateDescription");
+    description->setPlaceholderText(tr("What to do and how it is checked"));
+    v->addWidget(description, 1);
+    v->addWidget(label(tr("Assignee"), c.muted, 11));
+    auto *assignee = new QComboBox; assignee->setObjectName("teamAddLateAssignee");
+    for (const auto &member : team.members) if (!member.lead && member.state != "removed") assignee->addItem(team.roleOf(member.id), member.id);
+    if (const auto *lead = team.member(team.lead)) assignee->addItem(team.roleOf(lead->id), lead->id);
+    v->addWidget(assignee);
+    // The warning and the confirmation appear once Zerus answered the request.
+    auto *warning = label(QString(), c.warn, 12, false, "teamAddLateWarning"); warning->setWordWrap(true); warning->hide();
+    warning->setStyleSheet(QStringLiteral("QLabel{color:%1;background:%2;border:1px solid %3;border-radius:8px;padding:8px;}")
+                               .arg(c.warn.name(), alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .45).name(QColor::HexArgb)));
+    v->addWidget(warning);
+    auto *confirm = new QLineEdit; confirm->setObjectName("teamAddLateConfirm"); confirm->hide();
+    confirm->setPlaceholderText(tr("Type add or %1 to confirm").arg(phase));
+    v->addWidget(confirm);
+    auto *error = label(QString(), c.danger, 11, false, "teamAddLateError"); error->setWordWrap(true); error->hide();
+    v->addWidget(error);
+    auto *buttons = new QDialogButtonBox;
+    auto *next = buttons->addButton(tr("Continue"), QDialogButtonBox::AcceptRole); next->setObjectName("teamAddLateContinue");
+    auto *add = buttons->addButton(tr("Add to phase %1").arg(phase), QDialogButtonBox::AcceptRole); add->setObjectName("teamAddLateAdd"); add->hide();
+    buttons->addButton(QDialogButtonBox::Cancel);
+    v->addWidget(buttons);
+    next->setEnabled(false);
+    QObject::connect(title, &QLineEdit::textChanged, dialog, [next, title] { next->setEnabled(!title->text().trimmed().isEmpty()); });
+    QObject::connect(confirm, &QLineEdit::textChanged, dialog, [add, confirm, phase] {
+        const QString typed = confirm->text().trimmed().toLower();
+        add->setEnabled(typed == QLatin1String("add") || typed == QString::number(phase));
+    });
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    auto pending = std::make_shared<QString>();
+    int nextId = 0; for (const auto &task : team.tasks) nextId = qMax(nextId, task.id);
+    QObject::connect(next, &QPushButton::clicked, dialog, [this, dialog, title, description, assignee, warning, confirm, error, next, add, pending,
+                                                            id = team.id, phase, taskId = nextId + 1] {
+        next->setEnabled(false);
+        const QJsonObject task{{"id", taskId}, {"title", title->text().trimmed()}, {"description", description->toPlainText().trimmed()},
+                               {"assignee", assignee->currentData().toString()}};
+        m_teams->call(QStringLiteral("add-to-phase"), {{"team", id}, {"phase", phase}, {"tasks", QJsonArray{task}}},
+            [guard = QPointer<QDialog>(dialog), title, description, assignee, warning, confirm, error, next, add, pending](bool ok, const QJsonObject &result, const QString &message) {
+                if (!guard) return;
+                if (!ok) { error->setText(message); error->show(); next->setEnabled(true); return; }
+                *pending = result.value("pending").toString();
+                error->hide();
+                warning->setText(result.value("warning").toString()); warning->show();
+                for (QWidget *field : std::initializer_list<QWidget *>{title, description, assignee}) field->setEnabled(false);
+                next->hide(); confirm->show(); add->show(); add->setEnabled(false); confirm->setFocus();
+            });
+    });
+    QObject::connect(add, &QPushButton::clicked, dialog, [this, dialog, confirm, error, add, pending, id = team.id, phase] {
+        add->setEnabled(false);
+        m_teams->call(QStringLiteral("add-to-phase"), {{"team", id}, {"phase", phase}, {"confirm", *pending}, {"confirmation", confirm->text().trimmed()}},
+            [guard = QPointer<QDialog>(dialog), error, add](bool ok, const QJsonObject &, const QString &message) {
+                if (!guard) return;
+                if (!ok) { error->setText(message); error->show(); add->setEnabled(true); return; }
+                guard->accept();
             });
     });
     dialog->show();

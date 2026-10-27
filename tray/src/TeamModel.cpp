@@ -419,6 +419,10 @@ Team parse(const QJsonObject &v)
             task.held = true;
             task.hold.by = str(h, "by"); task.hold.reason = str(h, "reason"); task.hold.at = h.value("at").toDouble();
         }
+        if (t.value("added_late").isObject()) {
+            const auto a = t.value("added_late").toObject();
+            task.addedLate = {str(a, "by"), str(a, "request"), str(a, "confirm"), a.value("at").toDouble(), true};
+        }
         // G1: the sub-team this task delegated to, with its rolled-up counts.
         if (t.value("subteam").isObject()) {
             const auto s = t.value("subteam").toObject();
@@ -1380,6 +1384,19 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
                             : tr("Added phase %1 · %2 · %3 tasks").arg(n).arg(title).arg(d.value("tasks").toInt());
     }
     else if (k == "phase_approved") t = tr("Approved phase %1 · %2 tasks").arg(d.value("phase").toInt()).arg(d.value("tasks").toInt());
+    // U29: a task joins a running phase only after the warning is confirmed.
+    else if (k == "phase_addition_warned") {
+        const int count = d.value("tasks").toArray().size();
+        const int phase = d.value("phase").toInt();
+        t = count == 1 ? tr("Asked to add 1 task to running phase %1 · waits for your confirmation").arg(phase)
+                       : tr("Asked to add %1 tasks to running phase %2 · waits for your confirmation").arg(count).arg(phase);
+        line.tone = Tone::Warn;
+    }
+    else if (k == "phase_tasks_added") {
+        QStringList ids; for (const auto &id : d.value("tasks").toArray()) ids << QStringLiteral("#%1").arg(id.toInt());
+        t = tr("Added %1 to running phase %2 · outside its original scope").arg(ids.join(QStringLiteral(", "))).arg(d.value("phase").toInt());
+        line.tone = Tone::Warn;
+    }
     else if (k == "phase_moved") {
         // F10: the drafts are numbered live; a move renumbers them, and the
         // feed says where the phase went.
@@ -1603,7 +1620,10 @@ QJsonObject Catalog::json() const
     for (const auto &x : roles) r.append(x.json());
     for (const auto &x : templates) t.append(x.json());
     for (const auto &x : routing) u.append(x.json());
-    return {{"version", version}, {"roles", r}, {"templates", t}, {"routing", u}};
+    QJsonObject out{{"version", version}, {"roles", r}, {"templates", t}, {"routing", u}};
+    // U28: a save keeps the rules; leaving them out would reset them.
+    if (planningRulesKnown) out.insert("planning_rules", planningRules);
+    return out;
 }
 
 QHash<QString, QString> &catalogRoleColors()
@@ -1639,12 +1659,15 @@ Catalog parseCatalog(const QJsonObject &get)
     for (const auto &v : catalog.value("roles").toArray()) c.roles.append(parseRole(v.toObject()));
     for (const auto &v : catalog.value("templates").toArray()) c.templates.append(parseTemplate(v.toObject()));
     for (const auto &v : catalog.value("routing").toArray()) c.routing.append(parseRule(v.toObject()));
+    c.planningRulesKnown = catalog.value("planning_rules").isString();
+    c.planningRules = catalog.value("planning_rules").toString();
     const auto draft = get.value("draft").toObject();
     c.draftBase = draft.value("base").toInteger();
     for (const auto &v : draft.value("proposals").toArray()) {
         const auto o = v.toObject();
         c.proposals.append({str(o, "id"), str(o, "kind"), str(o, "action"), str(o, "target"), str(o, "title"), str(o, "reason"),
-                            o.value("state").toString(QStringLiteral("proposed")), o.value("value").toObject(), o.value("at").toDouble()});
+                            o.value("state").toString(QStringLiteral("proposed")), o.value("value").toObject(), o.value("at").toDouble(),
+                            o.value("value").isString() ? o.value("value").toString() : QString()});
     }
     return c;
 }
@@ -1665,6 +1688,7 @@ Catalog withProposals(const Catalog &catalog, bool includeUndecided)
         if (p.kind == "role") apply(c.roles, parseRole(p.value));
         else if (p.kind == "template") apply(c.templates, parseTemplate(p.value));
         else if (p.kind == "rule") apply(c.routing, parseRule(p.value));
+        else if (p.kind == "planning_rules" && !remove) { c.planningRules = p.text; c.planningRulesKnown = true; }
     }
     return c;
 }

@@ -847,6 +847,115 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":validation}))
 }
 
+/// U29: how long a warned addition waits for the owner's confirmation.
+const PENDING_ADDITION_SECONDS: f64 = super::owner_word::FRESH_SECONDS;
+/// U29: at most this many additions wait at once (one per phase).
+const PENDING_ADDITIONS: usize = 8;
+/// U29: at most this many tasks join a running phase in one addition.
+const ADDED_TASKS: usize = 20;
+
+/// U29: what the lead shows the owner (and the desktop asks) before a task
+/// joins a running phase.
+pub(crate) fn addition_warning(phase: u32) -> String {
+    format!(
+        "Adding tasks to running phase {phase} changes its scope after you approved it. The load balance of the lanes \
+         shifts and members may sit idle: members do not work ahead and later phases are not approved. \
+         Confirm in a new message to add them (type \"add\" or \"{phase}\" on the desktop)."
+    )
+}
+
+/// U29: tasks join a running phase only on the owner's word twice. The first
+/// call (a request word from the lead's session, or the owner in person)
+/// changes nothing: it keeps the addition pending and returns the warning.
+/// The second call names that pending addition and carries a confirmation
+/// newer than the warning; only then the tasks join as Pending with
+/// `added_late`. A member never adds; a draft phase keeps edit-draft.
+fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead, on your word, or you add a task to a running phase");
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "Only a running or paused team takes a task in a running phase");
+    let n = phase_number(input)?;
+    if let Some(record) = team.phases.iter().find(|phase| phase.n == n) {
+        ensure!(!record.state.is_draft(), "Phase {n} is a draft: change it with edit-draft");
+    }
+    let running = plan::phase_summary(team).iter().any(|phase| phase["n"].as_u64() == Some(u64::from(n)) && phase["state"] == "running");
+    ensure!(running, "Phase {n} is not running; add the task to a draft phase or extend the plan");
+    let word = verified_word(input)?;
+    ensure!(!actor.is_lead(team) || word.is_some(), "The lead adds a task to a running phase only on your word: pass \"owner_word\"");
+    let at = now();
+    team.pending_additions.retain(|pending| at - pending.warned_at <= PENDING_ADDITION_SECONDS);
+    let by = actor.label(team);
+    let quote = word.as_ref().map(|word| word.text.clone()).unwrap_or_default();
+    // The tasks as they would join: numbered on from the highest live id,
+    // Pending in this phase; validated in place and put back.
+    let check = |team: &mut Team, tasks: &[Task]| -> anyhow::Result<plan::Validation> {
+        let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
+        let wanted: BTreeSet<u32> = (next..next + tasks.len() as u32).collect();
+        ensure!(tasks.iter().map(|task| task.id).collect::<BTreeSet<u32>>() == wanted, "New tasks are numbered from #{next}");
+        let first_new = team.tasks.len();
+        team.tasks.extend(tasks.iter().cloned());
+        let validation = plan::validate(team, offline);
+        let errors = phase_errors(&validation, &wanted, true);
+        team.tasks.truncate(first_new);
+        ensure!(errors.is_empty(), "Fix {} task error(s) to add: {}", errors.len(), errors_text(&errors));
+        Ok(validation)
+    };
+    let Some(confirm) = input["confirm"].as_str().filter(|id| !id.is_empty()) else {
+        let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("Name at least one task to add")?;
+        ensure!(values.len() <= ADDED_TASKS, "At most {ADDED_TASKS} tasks join a running phase at once");
+        ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
+        let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
+        for task in &mut tasks {
+            task.phase = n;
+            task.status = TaskStatus::Pending;
+        }
+        check(team, &tasks)?;
+        // One waiting addition per phase: a new request replaces the old one.
+        team.pending_additions.retain(|pending| pending.phase != n);
+        ensure!(team.pending_additions.len() < PENDING_ADDITIONS, "{PENDING_ADDITIONS} additions already wait for your confirmation");
+        let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
+        let id = uuid::Uuid::new_v4().to_string();
+        team.pending_additions.push(PendingAddition { id: id.clone(), phase: n, tasks, by: by.clone(), request: quote.clone(), warned_at: at });
+        events.push(Event::new("phase_addition_warned", json!({"by":by,"phase":n,"tasks":ids,"request":quote})));
+        return Ok(json!({"status":"warning","phase":n,"pending":id,"tasks":ids,"warning":addition_warning(n),
+            "expires_at":at + PENDING_ADDITION_SECONDS}));
+    };
+    let found = team.pending_additions.iter().position(|pending| pending.id == confirm).context("That addition is unknown or expired; ask again")?;
+    let pending = &team.pending_additions[found];
+    ensure!(pending.phase == n, "That addition is for phase {}, not phase {n}", pending.phase);
+    let confirmation = match (&word, actor) {
+        (Some(word), _) => {
+            ensure!(word.at > pending.warned_at, "The confirmation must come after the warning");
+            word.text.clone()
+        }
+        (None, Actor::Human) => {
+            // The owner on the desktop types the word "add" or the phase number.
+            let typed = text(input, "confirmation").trim().to_lowercase();
+            ensure!(typed == "add" || typed == n.to_string(), "Type \"add\" or \"{n}\" to confirm the addition");
+            typed
+        }
+        (None, _) => bail!("The lead adds a task to a running phase only on your word: pass \"owner_word\""),
+    };
+    let pending = team.pending_additions.remove(found);
+    // The plan may have grown since the warning: then the numbers no longer fit.
+    let mut tasks = pending.tasks;
+    for task in &mut tasks {
+        task.added_late = Some(AddedLate { by: by.clone(), at, request: pending.request.clone(), confirm: confirmation.clone() });
+    }
+    let validation = check(team, &tasks).context("The plan changed since the warning; ask again")?;
+    let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
+    team.tasks.extend(tasks);
+    if let Some(record) = team.phases.iter_mut().find(|phase| phase.n == n) {
+        record.tasks.extend(ids.iter().copied());
+    }
+    let health = plan::phase_health(team, n);
+    events.push(Event::new(
+        "phase_tasks_added",
+        json!({"by":by,"phase":n,"tasks":ids,"request":pending.request,"confirm":confirmation,
+            "critical_path":health.critical_path,"parallelism":health.parallelism}),
+    ));
+    Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation}))
+}
+
 /// Approves a draft phase once every phase before it ended (owner), or discards
 /// it with its tasks (the lead or the owner, F10).
 fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -2985,6 +3094,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "edit-draft" => edit_draft(team, input, actor, offline, events),
         "reports-to" | "sub-lead" => hierarchy(team, op, input, actor, events),
         "move-phase" => move_phase(team, input, actor, events),
+        "add-to-phase" => add_to_phase(team, input, actor, offline, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "reject-phase" | "undo-reject-phase" | "rework-phase" => send_back(team, op, input, actor, events),

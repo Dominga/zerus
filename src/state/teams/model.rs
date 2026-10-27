@@ -956,6 +956,39 @@ pub(crate) struct Task {
     /// derived for `hgs team status`, not stored here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subteam: Option<String>,
+    /// U29: the task joined its phase after the phase started, on the owner's
+    /// word twice; outside the phase's original scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_late: Option<AddedLate>,
+}
+
+/// U29: who added a task to a running phase, when, and the owner's two
+/// sentences: the request and the confirmation after the warning.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct AddedLate {
+    pub by: String,
+    #[serde(default)]
+    pub at: f64,
+    #[serde(default)]
+    pub request: String,
+    #[serde(default)]
+    pub confirm: String,
+}
+
+/// U29: an addition to a running phase that waits for the owner's
+/// confirmation of the warning. One per phase; it expires after 30 minutes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PendingAddition {
+    pub id: String,
+    pub phase: u32,
+    pub tasks: Vec<Task>,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub request: String,
+    /// When Zerus answered with the warning; the confirmation must be newer.
+    #[serde(default)]
+    pub warned_at: f64,
 }
 
 /// U27: a visual lane of a phase, in order: the tasks drawn in it read as one
@@ -1189,6 +1222,9 @@ pub(crate) struct Team {
     /// authorizes one change: [{event, change}].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub used_owner_words: Vec<serde_json::Value>,
+    /// U29: additions to running phases waiting for the owner's confirmation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_additions: Vec<PendingAddition>,
 }
 
 impl Team {

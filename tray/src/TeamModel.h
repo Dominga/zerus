@@ -222,6 +222,10 @@ struct Task {
     Subteam subteam;
     // U27: the visual lane, read from `lane`; n 0 means none.
     Lane lane;
+    // U29: joined its phase after the phase started, on the owner's word
+    // twice: who added it, when, and the owner's two sentences.
+    struct AddedLate { QString by, request, confirm; double at = 0; bool known = false; };
+    AddedLate addedLate;
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
@@ -622,13 +626,19 @@ struct Template {
 // U25: `use` is a template id or "+role" (adds a member and keeps looking);
 // empty uses templateId. An empty approval is the template's own.
 struct Rule { QString id, when, templateId, approval; QJsonObject raw; QString use; QJsonObject json() const; };
-struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; };
+// U28: a proposal on the planning rules ("planning_rules") carries its text
+// in `text`; the others carry an object in `value`.
+struct Proposal { QString id, kind, action, target, title, reason, state; QJsonObject value; double at = 0; QString text; };
 struct Catalog {
     qint64 version = 0;
     bool builtin = false;
     QList<Role> roles;
     QList<Template> templates;
     QList<Rule> routing;
+    // U28: the lead's planning rules, versioned with the catalog. Known only
+    // when hgs sent them: a catalog saved without them gets the built-in ones.
+    QString planningRules;
+    bool planningRulesKnown = false;
     qint64 draftBase = 0;
     QList<Proposal> proposals;
     const Role *role(const QString &id) const;

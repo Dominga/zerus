@@ -419,8 +419,8 @@ TeamCatalogEditor::TeamCatalogEditor(TeamController *teams, QWidget *parent) : Q
     outer->addWidget(m_banner);
     // Segments with the diff legend on the right.
     auto *tabsRow = new QHBoxLayout;
-    m_tabs = segmented({{"roles", tr("Roles")}, {"templates", tr("Templates")}, {"routing", tr("Routing")}}, "roles", "teamCatalogTabs",
-                       [this](const QString &v) { setTab(v == "roles" ? Tab::Roles : v == "templates" ? Tab::Templates : Tab::Routing); });
+    m_tabs = segmented({{"roles", tr("Roles")}, {"templates", tr("Templates")}, {"routing", tr("Routing")}, {"rules", tr("Planning rules")}}, "roles", "teamCatalogTabs",
+                       [this](const QString &v) { setTab(v == "roles" ? Tab::Roles : v == "templates" ? Tab::Templates : v == "routing" ? Tab::Routing : Tab::Rules); });
     m_legend = new QLabel; m_legend->setObjectName("teamCatalogLegend"); m_legend->setTextFormat(Qt::RichText);
     tabsRow->addWidget(m_tabs); tabsRow->addStretch(); tabsRow->addWidget(m_legend);
     outer->addLayout(tabsRow);
@@ -583,6 +583,7 @@ void TeamCatalogEditor::load()
             if (p.kind == "role") put(m_catalog.roles, parseRole(p.value));
             else if (p.kind == "template") put(m_catalog.templates, parseTemplate(p.value));
             else if (p.kind == "rule") put(m_catalog.routing, parseRule(p.value));
+            else if (p.kind == "planning_rules") m_catalog.planningRules = p.text;
         }
     }
     rebuildLists(); rebuildEditor(); updateHeader();
@@ -632,6 +633,8 @@ int TeamCatalogEditor::unsavedChanges() const
     for (const auto &r : m_catalog.routing) order << r.id;
     for (const auto &r : base.routing) baseOrder << r.id;
     if (n == 0 && order != baseOrder) n = 1;
+    // U28: the planning rules are one change.
+    n += m_catalog.planningRules != base.planningRules;
     return qMax(1, n);
 }
 
@@ -660,10 +663,10 @@ void TeamCatalogEditor::updateHeader()
     m_apply->setToolTip(stale ? tr("The catalog changed after this draft; applying would overwrite those edits.")
                               : undecided ? tr("Undecided changes stay in the draft") : QString());
     // Counters per tab while a draft shows.
-    const QStringList kinds{"role", "template", "rule"};
-    const QStringList names{tr("Roles"), tr("Templates"), tr("Routing")};
+    const QStringList kinds{"role", "template", "rule", "planning_rules"};
+    const QStringList names{tr("Roles"), tr("Templates"), tr("Routing"), tr("Planning rules")};
     const auto buttons = m_tabs->findChildren<QPushButton *>();
-    for (int i = 0; i < buttons.size() && i < 3; ++i)
+    for (int i = 0; i < buttons.size() && i < kinds.size(); ++i)
         buttons[i]->setText(draft && perKind.value(kinds[i]) ? QStringLiteral("%1   %2").arg(names[i]).arg(perKind.value(kinds[i])) : names[i]);
     m_legend->setVisible(draft);
     const auto legendMark = [](const QString &text, const QColor &color) {
@@ -703,7 +706,8 @@ void TeamCatalogEditor::setTab(Tab tab)
     m_tab = tab;
     for (auto *b : m_tabs->findChildren<QPushButton *>()) {
         const auto v = b->property("segment").toString();
-        b->setChecked((v == "roles" && tab == Tab::Roles) || (v == "templates" && tab == Tab::Templates) || (v == "routing" && tab == Tab::Routing));
+        b->setChecked((v == "roles" && tab == Tab::Roles) || (v == "templates" && tab == Tab::Templates) || (v == "routing" && tab == Tab::Routing)
+                      || (v == "rules" && tab == Tab::Rules));
     }
     rebuildLists(); rebuildEditor();
 }
@@ -782,7 +786,7 @@ void TeamCatalogEditor::rebuildLists()
     };
     fill(m_roles, "role"); fill(m_templates, "template");
     m_roles->setVisible(m_tab == Tab::Roles); m_templates->setVisible(m_tab == Tab::Templates);
-    m_left->setVisible(m_tab != Tab::Routing);
+    m_left->setVisible(m_tab == Tab::Roles || m_tab == Tab::Templates);
     m_add->setText(m_tab == Tab::Roles ? tr("+ Role") : tr("+ Template"));
     m_add->setVisible(!m_readOnly);
 }
@@ -794,6 +798,7 @@ void TeamCatalogEditor::rebuildEditor()
     const QString id = list && list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
     if (m_tab == Tab::Roles) { for (int i = 0; i < m_catalog.roles.size(); ++i) if (m_catalog.roles[i].id == id) editor = roleEditor(i); }
     else if (m_tab == Tab::Templates) { for (int i = 0; i < m_catalog.templates.size(); ++i) if (m_catalog.templates[i].id == id) editor = templateEditor(i); }
+    else if (m_tab == Tab::Rules) editor = planningRulesEditor();
     else editor = routingEditor();
     if (!editor) editor = label(tr("Nothing selected"), colorsFor(m_dark).muted, 12);
     const int scroll = m_body->verticalScrollBar() ? m_body->verticalScrollBar()->value() : 0;
@@ -1502,6 +1507,95 @@ QWidget *TeamCatalogEditor::templateEditor(int index)
     return w;
 }
 
+// U28: the lead's planning rules as one text, saved and reverted with the
+// catalog. A designer proposal on them shows as CHANGED with Keep / Reject /
+// Undo and the lines it removes and adds.
+QWidget *TeamCatalogEditor::planningRulesEditor()
+{
+    const Colors c = colorsFor(m_dark);
+    const auto &base = m_teams->catalog();
+    auto *w = new QFrame; w->setObjectName("teamCatalogCard");
+    auto *outer = new QVBoxLayout(w); outer->setContentsMargins(16, 14, 16, 16); outer->setSpacing(12);
+    auto *head = row(8);
+    auto *title = label(tr("Planning rules"), c.fg, 14, true, "teamPlanningRulesTitle");
+    head->addWidget(title);
+    head->addWidget(ellipsis(tr("The lead follows them in every plan; the designer and the plan health refer to them."), c.muted, 13), 1);
+    auto *reset = button(tr("Reset to built-in"), "teamPlanningRulesReset"); reset->setProperty("ghost", true);
+    reset->setIcon(workspaceIcon("reset", c.text2));
+    reset->setVisible(!m_readOnly);
+    reset->setEnabled(!m_dirty && base.planningRulesKnown);
+    reset->setToolTip(m_dirty ? tr("Save or revert your edits first") : tr("Replace the rules with Zerus's built-in ones and save the catalog"));
+    connect(reset, &QPushButton::clicked, this, [this] { resetPlanningRules(); });
+    head->addWidget(reset);
+    outer->addLayout(head);
+    const Proposal *proposal = nullptr;
+    if (draftMode()) for (const auto &p : base.proposals) if (p.kind == "planning_rules") proposal = &p;
+    if (proposal) {
+        outer->addWidget(proposalPlate(*proposal));
+        // The proposal's diff, line by line (a longest common subsequence).
+        const QStringList before = base.planningRules.split(QLatin1Char('\n')), after = proposal->text.split(QLatin1Char('\n'));
+        const int n = before.size(), m = after.size();
+        QVector<QVector<int>> common(n + 1, QVector<int>(m + 1, 0));
+        for (int i = n - 1; i >= 0; --i)
+            for (int j = m - 1; j >= 0; --j)
+                common[i][j] = before[i] == after[j] ? common[i + 1][j + 1] + 1 : qMax(common[i + 1][j], common[i][j + 1]);
+        auto *diff = new QFrame; diff->setObjectName("teamPlanningRulesDiff");
+        auto *dv = new QVBoxLayout(diff); dv->setContentsMargins(0, 0, 0, 0); dv->setSpacing(2);
+        const bool rejected = proposal->state == "rejected";
+        const auto line = [&](const QString &text, const char *name, const QColor &ink, const QColor &fill, bool struck) {
+            auto *l = label(text.isEmpty() ? QStringLiteral(" ") : text, ink, 12, false, name); l->setWordWrap(true);
+            if (struck) { QFont f = l->font(); f.setStrikeOut(true); l->setFont(f); }
+            if (fill.isValid()) l->setStyleSheet(QStringLiteral("QLabel{background:%1;padding:1px 6px;border-radius:3px;}").arg(fill.name(QColor::HexArgb)));
+            else l->setStyleSheet(QStringLiteral("QLabel{padding:1px 6px;}"));
+            dv->addWidget(l);
+        };
+        int i = 0, j = 0;
+        while (i < n || j < m) {
+            if (i < n && j < m && before[i] == after[j]) { line(before[i], "teamPlanningRulesSame", c.text2, QColor(), false); ++i; ++j; }
+            // A replaced line reads old, then new.
+            else if (i < n && (j == m || common[i + 1][j] >= common[i][j + 1])) {
+                line(before[i], "teamPlanningRulesRemoved", rejected ? c.dim : c.text2, rejected ? QColor() : alpha(c.danger, .14), !rejected); ++i;
+            } else { line(after[j], "teamPlanningRulesAdded", rejected ? c.dim : c.fg, rejected ? QColor() : alpha(c.accent, .14), rejected); ++j; }
+        }
+        outer->addWidget(diff);
+        outer->addStretch();
+        return w;
+    }
+    if (!m_catalog.planningRulesKnown) {
+        outer->addWidget(hint(tr("This hgs does not report planning rules yet; update it to edit them here."), c.muted));
+        return w;
+    }
+    auto *text = area(m_catalog.planningRules, "teamPlanningRules", 12, 30);
+    text->setFont(NewSessionDense::mono(12));
+    text->setReadOnly(m_readOnly);
+    text->setPlaceholderText(tr("One rule per line, such as (1) At most 20-25 tasks per phase…"));
+    connect(text, &QPlainTextEdit::textChanged, this, [this, text] {
+        if (text->toPlainText() == m_catalog.planningRules) return;
+        m_catalog.planningRules = text->toPlainText(); changed();
+    });
+    outer->addWidget(text);
+    outer->addStretch();
+    return w;
+}
+
+// U28: the built-in rules come back by saving the catalog without them; hgs
+// fills in its own. Only from a saved catalog, after the owner confirms.
+void TeamCatalogEditor::resetPlanningRules()
+{
+    const auto &base = m_teams->catalog();
+    if (m_dirty || !base.planningRulesKnown) return;
+    if (confirm && !confirm(QStringLiteral("teamPlanningRulesResetConfirm"), tr("Reset planning rules"),
+                            tr("Replace the planning rules with the built-in ones and save the catalog as v%1?").arg(base.version + 1), tr("Reset"))) return;
+    QJsonObject catalog = base.json();
+    catalog.remove(QStringLiteral("planning_rules"));
+    m_teams->call(QStringLiteral("catalog set"), {{"catalog", catalog}, {"version", base.version}}, [this](bool ok, const QJsonObject &result, const QString &error) {
+        if (!ok) { m_meta->setText(QStringLiteral("⚠ ") + error.toHtmlEscaped()); return; }
+        m_applied = tr("Planning rules reset to built-in · saved as v%1").arg(result.value("version").toInteger());
+        updateHeader();
+        m_teams->refreshCatalog();
+    });
+}
+
 QWidget *TeamCatalogEditor::routingEditor()
 {
     const Colors c = colorsFor(m_dark);
@@ -1598,7 +1692,7 @@ QWidget *TeamCatalogEditor::routingEditor()
 void TeamCatalogEditor::showProposal(const QString &proposal)
 {
     for (const auto &p : m_teams->catalog().proposals) if (p.id == proposal) {
-        setTab(p.kind == "role" ? Tab::Roles : p.kind == "template" ? Tab::Templates : Tab::Routing);
+        setTab(p.kind == "role" ? Tab::Roles : p.kind == "template" ? Tab::Templates : p.kind == "planning_rules" ? Tab::Rules : Tab::Routing);
         auto *list = p.kind == "role" ? m_roles : m_templates;
         if (p.kind != "rule") for (int i = 0; i < list->count(); ++i) if (list->item(i)->data(Qt::UserRole).toString() == p.target) list->setCurrentRow(i);
         return;

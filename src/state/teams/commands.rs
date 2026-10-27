@@ -84,14 +84,32 @@ fn dsh_member(team: &Team, conversation: &str) -> Option<String> {
 /// elsewhere (a member on another computer) is authorized by its attempt id;
 /// anything else must say it is you.
 fn actor(team: &Team, op: &str, input: &Value) -> anyhow::Result<Actor> {
-    resolve_actor(
-        team,
-        op,
-        input,
-        caller_record().as_ref(),
-        nonempty_env("DSH_SESSION_ID").as_deref(),
-        nonempty_env("HGS_SESSION").as_deref(),
-    )
+    let (dsh, env) = caller_identities();
+    resolve_actor(team, op, input, caller_record().as_ref(), dsh.as_deref(), env.as_deref())
+}
+
+/// The ambient session identities of this process (H7): its dsh conversation
+/// and its hgs session. A test driving the real entry point replaces them,
+/// because the test process itself may run inside a session.
+fn caller_identities() -> (Option<String>, Option<String>) {
+    #[cfg(test)]
+    if let Some(found) = TEST_CALLER_IDENTITIES.with(|value| value.borrow().clone()) {
+        return found;
+    }
+    (nonempty_env("DSH_SESSION_ID"), nonempty_env("HGS_SESSION"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CALLER_IDENTITIES: std::cell::RefCell<Option<(Option<String>, Option<String>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Sets (or clears) this thread's ambient session identities; used with the
+/// private state directory so a command test acts as the owner, not as the
+/// session that happens to run the tests.
+#[cfg(test)]
+pub(crate) fn set_test_caller_identities(identities: Option<(Option<String>, Option<String>)>) {
+    TEST_CALLER_IDENTITIES.with(|value| *value.borrow_mut() = identities);
 }
 
 /// The proven identities decide who asks. A stale `HGS_SESSION` (a resumed host
@@ -488,19 +506,39 @@ fn view_with(team: &Team, teams: &[Team], sessions: Option<&[super::dispatcher::
             value["left_running"] = json!(left_running(team, teams, sessions));
         }
     }
-    // F1.6: every member's folder facts, read from git once per view; a member
-    // whose folder is another repository is flagged, not silently accepted.
+    // F1.6/N37: every member's folder facts, read from the folder the member
+    // actually works in (a worktree member's own worktree, not the team folder)
+    // and once per distinct folder; a member whose folder is another repository
+    // is flagged, not silently accepted. The team's `project` is the GUI's group
+    // name (N36), so the folders themselves decide what is outside.
     if let Some(members) = value["members"].as_array_mut() {
+        let team_facts = super::dispatcher::folder_facts(&team.folder);
+        let mut cache: std::collections::BTreeMap<String, (String, String)> = std::collections::BTreeMap::new();
+        cache.insert(team.folder.clone(), team_facts.clone());
         for (member, entry) in team.members.iter().zip(members.iter_mut()) {
             if member.state == MemberState::Removed {
                 continue;
             }
-            let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
-            let (project, branch) = super::dispatcher::folder_facts(&folder);
+            let folder = super::dispatcher::member_folder_path(team, member).unwrap_or_default();
+            // C11: a member on another computer works in a folder there; this
+            // computer cannot read it, so its facts stay empty rather than
+            // showing a local folder that happens to share the path.
+            if !member.computer.is_empty() {
+                entry["folder_path"] = json!(folder);
+                entry["project"] = json!("");
+                entry["branch"] = json!("");
+                entry["outside_project"] = json!(false);
+                continue;
+            }
+            let (project, branch) = cache
+                .entry(folder.clone())
+                .or_insert_with(|| super::dispatcher::folder_facts(&folder))
+                .clone();
+            let outside = super::dispatcher::outside_project(&team.folder, &folder, &project, &team_facts.0);
+            entry["folder_path"] = json!(folder);
             entry["project"] = json!(&project);
             entry["branch"] = json!(branch);
-            let team_project = team.project.replace('\\', "/");
-            entry["outside_project"] = json!(!team_project.is_empty() && !project.is_empty() && project != team_project);
+            entry["outside_project"] = json!(outside);
         }
     }
     // D2: the findings summary and the newest page of findings (50).
@@ -2283,38 +2321,166 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    /// N37/F1.6: status reads each member's own folder - a worktree member's
+    /// worktree, not the team folder - one read per distinct folder, and flags
+    /// a member in another repository. N36: the team's project label is a GUI
+    /// group name and never decides the flag.
     #[test]
-    fn members_carry_their_folder_branch_and_outside_project_flag() {
-        use crate::state::teams::model::{Member, Team, TeamStatus};
+    fn status_reads_each_members_own_folder_once_and_flags_another_repository() {
+        use crate::state::teams::dispatcher;
+        use crate::state::teams::model::{Member, MemberFolder, Team, TeamStatus};
         let dir = tempfile::tempdir().unwrap();
-        // Hermetic: a TEMP inside another repository must not flag the sibling.
-        crate::state::teams::dispatcher::set_git_ceiling(&dir.path().display().to_string());        let repo = dir.path().join("project");
-        std::fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap();
-        assert!(git(&["init", "-q"]).success());
-        assert!(git(&["config", "user.email", "t@example.com"]).success());
-        assert!(git(&["config", "user.name", "T"]).success());
-        std::fs::write(repo.join("a.txt"), "a").unwrap();
-        assert!(git(&["add", "a.txt"]).success());
-        assert!(git(&["commit", "-qm", "one"]).success());
-        assert!(git(&["switch", "-qc", "team/t1/dev"]).success());
+        dispatcher::set_git_ceiling(&dir.path().display().to_string());
+        let make_repo = |path: &std::path::Path| {
+            std::fs::create_dir(path).unwrap();
+            let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(path).args(args).status().unwrap();
+            assert!(git(&["init", "-q"]).success());
+            assert!(git(&["config", "user.email", "t@example.com"]).success());
+            assert!(git(&["config", "user.name", "T"]).success());
+            std::fs::write(path.join("a.txt"), "a").unwrap();
+            assert!(git(&["add", "a.txt"]).success());
+            assert!(git(&["commit", "-qm", "one"]).success());
+        };
+        let repo = dir.path().join("project");
+        make_repo(&repo);
+        let main = String::from_utf8(std::process::Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "--abbrev-ref", "HEAD"]).output().unwrap().stdout).unwrap().trim().to_owned();
         let folder = repo.display().to_string();
-        let mut team = Team { id: "t1".into(), name: "T".into(), lead: "lead".into(), status: TeamStatus::Running, folder: folder.clone(), project: folder.clone(), ..Default::default() };
+        let mut team = Team {
+            id: "abcdef12-0000-4000-8000-000000000000".into(),
+            name: "T".into(),
+            lead: "lead".into(),
+            status: TeamStatus::Running,
+            folder: folder.clone(),
+            // The GUI's group name, not a project id or a path (N36).
+            project: "Checkout".into(),
+            ..Default::default()
+        };
         team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
-        team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() });
-        let value = super::view_with(&team, &[], None);
-        assert_eq!(value["members"][1]["branch"], "team/t1/dev");
-        assert_eq!(value["members"][1]["outside_project"], false);
-        let normalized = folder.replace('\\', "/");
-        assert_eq!(value["members"][1]["project"].as_str(), Some(normalized.as_str()));
-        // A member whose folder is another repository is flagged.
-        team.members[1].directory = dir.path().join("sibling").display().to_string();
-        std::fs::create_dir(dir.path().join("sibling")).unwrap();
-        assert_eq!(super::view_with(&team, &[], None)["members"][1]["outside_project"], false);
-        assert_eq!(super::view_with(&team, &[], None)["members"][1]["project"], "");
-        team.project = "/elsewhere".into();
-        team.members[1].directory.clear();
-        assert_eq!(super::view_with(&team, &[], None)["members"][1]["outside_project"], true);
+        team.members.push(Member { id: "dev".into(), role: "Backend".into(), agent: "dsh".into(), folder: MemberFolder::Worktree, ..Default::default() });
+        team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "codex".into(), ..Default::default() });
+        let foreign = dir.path().join("sibling");
+        make_repo(&foreign);
+        team.members.push(Member { id: "out".into(), role: "Ops".into(), agent: "codex".into(), directory: foreign.display().to_string(), ..Default::default() });
+        // A member on another computer works in a folder this one cannot read.
+        team.members.push(Member {
+            id: "far".into(),
+            role: "Docs".into(),
+            agent: "codex".into(),
+            computer: "msi".into(),
+            directory: foreign.display().to_string(),
+            ..Default::default()
+        });
+        // The worktree the dispatcher would create for dev.
+        let worktree = dispatcher::member_folder_path(&team, team.member("dev").unwrap()).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(["worktree", "add", "--quiet", "-b", "team/abcdef12/dev", &worktree, "HEAD"]).status().unwrap().success());
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open(true).unwrap();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+            dispatcher::reset_folder_facts_reads();
+            let value = run("status", &json!({"team":team.id}), false).unwrap();
+            assert_eq!(value["members"].as_array().unwrap().len(), 5);
+            let member = |id: &str| value["members"].as_array().unwrap().iter().find(|member| member["id"] == id).cloned().unwrap();
+            // dev shows its own worktree's branch and folder, not the team folder's.
+            let dev = member("dev");
+            assert_eq!(dev["branch"], "team/abcdef12/dev");
+            assert_eq!(dev["folder_path"], worktree);
+            assert_eq!(dev["outside_project"], false);
+            assert_eq!(dev["project"], member("lead")["project"]);
+            assert_eq!(dev["project"].as_str(), Some(folder.replace('\\', "/").as_str()));
+            // The shared members show the team folder's branch; the foreign one
+            // is flagged and the group name plays no part.
+            let lead = member("lead");
+            assert_eq!(lead["branch"], main);
+            assert_eq!(lead["outside_project"], false);
+            let out = member("out");
+            assert_eq!(out["outside_project"], true);
+            assert_eq!(out["folder_path"], foreign.display().to_string());
+            assert!(!out["branch"].as_str().unwrap_or_default().is_empty());
+            // The remote member's folder is not read here (C11): its facts stay
+            // empty even though a local folder has that path.
+            let far = member("far");
+            assert_eq!((far["project"].as_str(), far["branch"].as_str()), (Some(""), Some("")));
+            assert_eq!(far["outside_project"], false);
+            // One git read per distinct folder: the team's, dev's worktree and
+            // the foreign one, for five members - not one per member.
+            assert_eq!(dispatcher::folder_facts_reads(), 3);
+        });
+    }
+
+    /// The dispatcher's worker lock, held so a command that would start a
+    /// worker does not spawn one from the test binary.
+    fn hold_worker_lock() -> crate::platform::FileLock {
+        let path = crate::state::teams::dispatcher::lock_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path).unwrap();
+        let lock = crate::platform::FileLock::exclusive(file).unwrap();
+        assert!(crate::status::locked(&path), "the worker lock is held");
+        lock
+    }
+
+    /// N39/F1.3: add-member checks the new member's folder against the team's
+    /// policy, as plan and approve do, and files nothing on a mismatch.
+    #[test]
+    fn adding_a_member_whose_folder_breaks_the_policy_is_refused() {
+        use crate::state::teams::model::FolderPolicy;
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.settings.folder_policy = FolderPolicy::Shared;
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+            let error = run(
+                "add-member",
+                &json!({"request_id":"22222222-2222-4222-8222-222222222222","team":id,"by":"human",
+                    "member":{"id":"ops","role":"Ops","agent":"codex","folder":"worktree"}}),
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("folder error(s) to add the member"), "{error}");
+            assert!(error.contains("the shared folder policy leaves no own folder"), "{error}");
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert!(saved.member("ops").is_none(), "the refused member is not filed");
+            // A member that fits the policy is added.
+            run(
+                "add-member",
+                &json!({"request_id":"33333333-3333-4333-8333-333333333333","team":id,"by":"human",
+                    "member":{"id":"ops","role":"Ops","agent":"codex"}}),
+                false,
+            )
+            .unwrap();
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert!(saved.member("ops").is_some());
+        });
+    }
+
+    /// N39/F1.3: extend keeps a folder or policy mismatch instead of dropping
+    /// it (it names no task), so the phase that cannot run is not added.
+    #[test]
+    fn extending_a_team_whose_folders_break_the_policy_is_refused() {
+        use crate::state::teams::model::FolderPolicy;
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let _worker = hold_worker_lock();
+            let mut store = Store::open(true).unwrap();
+            let mut team = running_team();
+            team.settings.folder_policy = FolderPolicy::Worktree;
+            let id = team.id.clone();
+            store.create("11111111-1111-4111-8111-111111111112", &json!({}), team, vec![]).unwrap();
+            let error = run(
+                "extend",
+                &json!({"request_id":"22222222-2222-4222-8222-222222222223","team":id,"by":"human",
+                    "tasks":[{"id":2,"title":"More","assignee":"dev"}]}),
+                false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("phase error(s) to extend"), "{error}");
+            assert!(error.contains("the worktree policy gives every member its own folder"), "{error}");
+            let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+            assert!(saved.task(2).is_none(), "the refused phase is not added");
+        });
     }
 
     #[test]

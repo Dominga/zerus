@@ -1653,11 +1653,26 @@ fn remote_checkout(run: &dyn Fn(&str, &[&str]) -> anyhow::Result<Output>, comput
     Ok(Some(branch.to_owned()))
 }
 
-/// F1.6: the folder's repository and branch, read from git; empty when unknown.
+/// F1.6/N37: the folder's repository and branch, read from git in one command
+/// (a status call reads each distinct folder once); empty when unknown.
 pub(crate) fn folder_facts(folder: &str) -> (String, String) {
+    #[cfg(test)]
+    FOLDER_FACTS_READS.with(|reads| reads.set(reads.get() + 1));
     if folder.is_empty() {
         return (String::new(), String::new());
     }
+    // N37: one `rev-parse` prints the common dir and the branch together, so a
+    // status call with several members in one folder spawns one git, not 2-4
+    // per member.
+    if let Some(read) = git_at(folder, &["rev-parse", "--path-format=absolute", "--git-common-dir", "--abbrev-ref", "HEAD"]) {
+        let mut lines = read.lines();
+        let dir = lines.next().unwrap_or_default().trim().to_owned();
+        let branch = lines.next().unwrap_or_default().trim().to_owned();
+        let project = Path::new(&dir).parent().map(|parent| parent.display().to_string()).unwrap_or(dir);
+        return (project, branch);
+    }
+    // An older git, or a repository with no commit yet (an unborn HEAD has no
+    // branch to abbreviate): the same facts in separate reads.
     let project = git_at(folder, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .or_else(|| git_at(folder, &["rev-parse", "--git-common-dir"]))
         .map(|dir| {
@@ -1669,11 +1684,42 @@ pub(crate) fn folder_facts(folder: &str) -> (String, String) {
     (project, branch)
 }
 
-/// F1.1: the project an adopted session is filed into: the team's own project
-/// when it names one (a directory_project result), else the project of the
-/// folder; None when neither gives one.
-fn filed_project(team_project: &str, known: &Value) -> Option<String> {
-    let project = if team_project.is_empty() { known["project_id"].as_str().unwrap_or_default() } else { team_project };
+#[cfg(test)]
+thread_local! {
+    static FOLDER_FACTS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// N37: how many folder-fact reads this test thread made, so a status call's
+/// git work can be counted.
+#[cfg(test)]
+pub(crate) fn folder_facts_reads() -> usize {
+    FOLDER_FACTS_READS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_folder_facts_reads() {
+    FOLDER_FACTS_READS.with(|reads| reads.set(0));
+}
+
+/// F1.6/N36: whether a member's folder is outside the team's repository. A
+/// team's project label is the GUI's group name, never a path or an id, so the
+/// folders themselves decide: the same repository (shared, nested or a
+/// worktree), a clone of it (C10) or an unknown folder is not outside.
+pub(crate) fn outside_project(team_folder: &str, folder: &str, project: &str, team_project: &str) -> bool {
+    if team_folder.is_empty() || folder.is_empty() || project.is_empty() || team_project.is_empty() {
+        return false;
+    }
+    if same_path(folder, team_folder) || same_path(project, team_project) {
+        return false;
+    }
+    !clone_of(folder, team_folder)
+}
+
+/// F1.1/N36: the project an adopted session is filed into, from the catalog's
+/// entry for the team's folder. `team.project` is the GUI's group name (a
+/// label), not a catalog project id or a path, so it never decides this.
+fn filed_project(known: &Value) -> Option<String> {
+    let project = known["project_id"].as_str().unwrap_or_default();
     (!project.is_empty()).then(|| project.to_owned())
 }
 
@@ -1683,20 +1729,30 @@ fn assign_launch_payload(swarm_id: &str, project_id: &str, session: &SessionRef,
         "expected_conversation_id":session.conversation_id,"swarm_id":swarm_id,"project_id":project_id,"directory":directory})
 }
 
+/// F1.1/N36: the `swarm assign-launch` payload for an adopted member, or None
+/// when the catalog does not know the folder or its project. The project is the
+/// folder's catalog entry: a team's own `project` is the GUI's group name, not
+/// a catalog project id, and never decides the filing.
+fn filing_payload(team: &Team, known: &Value, session: &SessionRef) -> Option<Value> {
+    if team.folder.is_empty() {
+        return None;
+    }
+    let swarm_id = known["swarm_id"].as_str().unwrap_or_default();
+    if swarm_id.is_empty() {
+        return None;
+    }
+    let project_id = filed_project(known)?;
+    Some(assign_launch_payload(swarm_id, &project_id, session, &team.folder))
+}
+
 /// F1.1: files an adopted member's session into the team's project with
 /// `hgs swarm assign-launch`, as the dispatcher's other child hgs calls do. No
 /// catalog, or a folder the catalog does not know, means nothing to do; a
 /// failure never blocks the member.
-fn file_in_project(team_id: &str, project: &str, folder: &str, computer: &str, session: &SessionRef) {
-    let _ = team_id;
+fn file_in_project(team: &Team, computer: &str, session: &SessionRef) {
     let Ok(config) = crate::config::Config::load() else { return };
-    let Some(known) = crate::swarm::directory_project(&config, Path::new(folder)) else { return };
-    let Some(project_id) = filed_project(project, &known) else { return };
-    let swarm_id = known["swarm_id"].as_str().unwrap_or_default();
-    if swarm_id.is_empty() {
-        return;
-    }
-    let payload = assign_launch_payload(swarm_id, &project_id, session, folder);
+    let Some(known) = crate::swarm::directory_project(&config, Path::new(&team.folder)) else { return };
+    let Some(payload) = filing_payload(team, &known, session) else { return };
     let _ = hgs(computer, &["swarm", "assign-launch", "--json"], Some(&payload), Duration::from_secs(15));
 }
 
@@ -1726,6 +1782,15 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     let folder = if member.directory.is_empty() { team.folder.clone() } else { member.directory.clone() };
     let short = &team.id[..8.min(team.id.len())];
     let branch = format!("team/{short}/{}", tag(&member.id));
+    // N38/F1.4: a worktree or clone is cut from the team's repository, never
+    // from another repository the member's own folder field happens to name.
+    // The source is checked here on this computer; on another computer
+    // `worktrees create` makes and checks the folder there (C11).
+    if !remote {
+        if let Some(problem) = folder_problem(&folder, &team.folder, None) {
+            anyhow::bail!("The worktree source {folder} is not the team's repository: {problem}");
+        }
+    }
     // C12: the member's own worktree or clone from an earlier start (a
     // relaunch, a swap) is used again; any other folder there is refused.
     if remote {
@@ -2879,13 +2944,15 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 if started {
                     let role = team.role_of(member);
                     events.push(Event::new("member_started", json!({"member":role,"session":session.name})));
-                    // F1.1: the adopted session is filed into the team's project.
-                    filing = Some((team.project.clone(), team.folder.clone(), computer, team.id.clone()));
+                    // F1.1: the adopted session is filed into the team's project,
+                    // which is its folder's (the team's project label is only a
+                    // GUI group name, N36).
+                    filing = Some(computer);
                 }
                 Ok(())
             })?;
-            if let Some((project, folder, computer, team_id)) = filing {
-                file_in_project(&team_id, &project, &folder, &computer, session);
+            if let Some(computer) = filing {
+                file_in_project(team, &computer, session);
             }
             Ok(())
         }
@@ -5688,26 +5755,40 @@ mod tests {
     }
 
     #[test]
-    fn an_adopted_session_is_filed_with_the_swarm_request() {
-        // F1.1: the team's own project wins; an empty one takes the folder's;
-        // neither means no filing.
+    fn an_adopted_session_is_filed_into_its_folders_project() {
+        // F1.1/N36: the filing project is the team folder's catalog entry. A
+        // team's `project` is the GUI's group name ("Checkout", "billing"), not
+        // a project id, and is never sent as one.
+        let mut team = Team {
+            name: "T".into(),
+            project: "Checkout".into(),
+            folder: "D:/projects/checkout".into(),
+            ..Default::default()
+        };
         let known = json!({"schema":1,"swarm_id":"swarm-1","project_id":"checkout"});
-        assert_eq!(filed_project("billing", &known).as_deref(), Some("billing"));
-        assert_eq!(filed_project("", &known).as_deref(), Some("checkout"));
-        assert_eq!(filed_project("", &json!({"schema":1,"swarm_id":"","project_id":""})), None);
+        assert_eq!(filed_project(&known).as_deref(), Some("checkout"));
+        assert_eq!(filed_project(&json!({"schema":1,"swarm_id":"swarm-1","project_id":""})), None);
         let session = SessionRef {
             host: "msi".into(),
             name: "claude/x/dev".into(),
             run_id: "run-1".into(),
             conversation_id: "conv-1".into(),
         };
-        let payload = assign_launch_payload("swarm-1", "billing", &session, "D:/projects/checkout");
+        let payload = filing_payload(&team, &known, &session).unwrap();
         assert_eq!(payload["name"], "claude/x/dev");
         assert_eq!(payload["expected_run_id"], "run-1");
         assert_eq!(payload["expected_conversation_id"], "conv-1");
-        assert_eq!((payload["swarm_id"].as_str(), payload["project_id"].as_str()), (Some("swarm-1"), Some("billing")));
+        assert_eq!((payload["swarm_id"].as_str(), payload["project_id"].as_str()), (Some("swarm-1"), Some("checkout")));
         assert_eq!(payload["directory"], "D:/projects/checkout");
         assert!(payload["request_id"].as_str().is_some_and(|id| id.len() == 36));
+        // The label never becomes the project, whatever it says.
+        team.project = "billing".into();
+        assert_eq!(filing_payload(&team, &known, &session).unwrap()["project_id"], "checkout");
+        // A team without a folder, or a catalog without a swarm or a project,
+        // files nothing.
+        assert!(filing_payload(&Team { ..Default::default() }, &known, &session).is_none());
+        assert!(filing_payload(&team, &json!({"swarm_id":"","project_id":"checkout"}), &session).is_none());
+        assert!(filing_payload(&team, &json!({"swarm_id":"swarm-1","project_id":""}), &session).is_none());
     }
 
     /// A Git repository with one commit in `dir/name`, for the folder tests.
@@ -5742,6 +5823,84 @@ mod tests {
         team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
         team.members.push(member);
         team
+    }
+
+    #[test]
+    fn a_member_worktree_is_cut_only_from_the_teams_repository() {
+        // N38/F1.4: the member's own `directory` names where its worktree or
+        // clone is cut from; another repository there must not become the
+        // member's folder, and nothing is created from it.
+        let dir = tempfile::tempdir().unwrap();
+        set_git_ceiling(&dir.path().display().to_string());
+        let repo = folder_repo(dir.path(), "project");
+        let other = folder_repo(dir.path(), "other");
+        for kind in [MemberFolder::Worktree, MemberFolder::Clone] {
+            let member = Member {
+                id: "dev".into(),
+                role: "Backend".into(),
+                agent: "codex".into(),
+                folder: kind,
+                directory: other.display().to_string(),
+                ..Default::default()
+            };
+            let team = folder_team(&repo, member.clone());
+            let calls = std::cell::Cell::new(0);
+            let run = |_: &str, args: &[&str]| {
+                calls.set(calls.get() + 1);
+                local_create(args)
+            };
+            let error = member_folder_with(&team, &member, &run).unwrap_err().to_string();
+            assert!(error.contains("is not the team's repository"), "{kind:?}: {error}");
+            assert!(error.contains("belongs to another repository"), "{kind:?}: {error}");
+            assert_eq!(calls.get(), 0, "{kind:?}: nothing is created");
+            assert!(!Path::new(&member_folder_path(&team, &member).unwrap()).exists(), "{kind:?}");
+        }
+        // A folder inside the team's repository is a fine source.
+        let nested = repo.join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        let member = Member {
+            id: "qa".into(),
+            role: "QA".into(),
+            agent: "codex".into(),
+            folder: MemberFolder::Worktree,
+            directory: nested.display().to_string(),
+            ..Default::default()
+        };
+        let team = folder_team(&repo, member.clone());
+        let folder = member_folder_with(&team, &member, &|_, args| local_create(args)).unwrap();
+        assert_eq!(folder_facts(&folder).1, "team/abcdef12/qa");
+    }
+
+    #[test]
+    fn a_worktree_outside_the_teams_repository_is_flagged() {
+        // F1.6/N36: "outside" compares the folders, not the team's project
+        // label: a worktree of the team's repository is inside, another
+        // repository is not.
+        let dir = tempfile::tempdir().unwrap();
+        set_git_ceiling(&dir.path().display().to_string());
+        let repo = folder_repo(dir.path(), "project");
+        let other = folder_repo(dir.path(), "other");
+        let source = repo.display().to_string();
+        let team = source.clone();
+        // Unknown folders are not flagged.
+        assert!(!outside_project(&team, "", "", &source));
+        // A shared folder, a nested folder and a member worktree are inside.
+        let nested = repo.join("sub");
+        std::fs::create_dir(&nested).unwrap();
+        for folder in [repo.clone(), nested.clone()] {
+            let folder = folder.display().to_string();
+            let facts = folder_facts(&folder);
+            assert!(!outside_project(&team, &folder, &facts.0, &source), "{folder}");
+        }
+        let member = Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), folder: MemberFolder::Worktree, ..Default::default() };
+        let team_record = folder_team(&repo, member.clone());
+        let worktree = member_folder_with(&team_record, &member, &|_, args| local_create(args)).unwrap();
+        let facts = folder_facts(&worktree);
+        assert!(!outside_project(&team, &worktree, &facts.0, &source), "{worktree}");
+        // Another repository is.
+        let foreign = other.display().to_string();
+        let facts = folder_facts(&foreign);
+        assert!(outside_project(&team, &foreign, &facts.0, &source));
     }
 
     #[test]

@@ -447,7 +447,9 @@ fn widening(team: &Team, members: &[Member]) -> Vec<Value> {
 }
 
 /// The validation findings that concern a new phase: those naming one of its
-/// tasks, and dependency cycles (a cycle finding names its tasks in `tasks`).
+/// tasks, dependency cycles (a cycle finding names its tasks in `tasks`), and a
+/// folder or policy mismatch (N39): that one names no task but the team cannot
+/// run the phase in it, so it is not dropped.
 fn phase_errors(validation: &plan::Validation, ids: &BTreeSet<u32>, any_cycle: bool) -> Vec<plan::Finding> {
     validation
         .errors
@@ -455,6 +457,7 @@ fn phase_errors(validation: &plan::Validation, ids: &BTreeSet<u32>, any_cycle: b
         .filter(|finding| {
             finding.task.is_some_and(|task| ids.contains(&task))
                 || (finding.kind == "cycle" && (any_cycle || finding.tasks.iter().any(|task| ids.contains(task))))
+                || finding.kind == "folder"
         })
         .cloned()
         .collect()
@@ -2799,6 +2802,18 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             let profile = member.permissions_profile.clone();
             let adopted = member.session.as_ref().map(|session| session.name.clone());
             team.members.push(member);
+            // N39/F1.3: a new member's folder is checked against the team's
+            // policy here, as at plan and approve: a mismatch is an error, and
+            // the member is not filed to fail at its launch.
+            let folder_errors: Vec<plan::Finding> = plan::validate(team, offline)
+                .errors
+                .into_iter()
+                .filter(|finding| finding.kind == "folder" && finding.member.as_deref() == Some(id.as_str()))
+                .collect();
+            if !folder_errors.is_empty() {
+                team.members.retain(|member| member.id != id);
+                bail!("Fix {} folder error(s) to add the member: {}", folder_errors.len(), errors_text(&folder_errors));
+            }
             // B5: a profile wider than the role's default waits for the owner.
             if profile_rank(&profile) > profile_rank("write") {
                 team.profile_widening.push(json!({"member":id,"from":"write","to":profile}));

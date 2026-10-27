@@ -5,6 +5,10 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 
 pub(super) fn root() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = TEST_ROOT.with(|root| root.borrow().clone()) {
+        return root;
+    }
     nonempty_env("HGS_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -13,6 +17,21 @@ pub(super) fn root() -> PathBuf {
                 .unwrap_or_else(|| home().join(".local/state"))
                 .join("hgs/sessions")
         })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A private state directory for a test driving the real command entry
+    /// point: the store, the worker lock and the records all live here, and
+    /// nothing outside the test sees it.
+    static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Sets (or clears) this thread's state directory; `state::with_test_state_root`
+/// restores it even when the test panics.
+#[cfg(test)]
+pub(super) fn set_test_root(root: Option<PathBuf>) {
+    TEST_ROOT.with(|value| *value.borrow_mut() = root);
 }
 
 pub(super) fn private_dir(path: &Path) -> Result<()> {

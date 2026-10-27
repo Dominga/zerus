@@ -116,6 +116,27 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use storage::*;
 
+/// Tests drive the real command entry point (`teams::commands::run`) against a
+/// private state directory: the team store, the worker lock and the session
+/// records all live there, on this thread only. It is restored even when the
+/// test panics.
+#[cfg(test)]
+pub(crate) fn with_test_state_root<T>(root: &Path, run: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            storage::set_test_root(None);
+            teams::commands::set_test_caller_identities(None);
+        }
+    }
+    storage::set_test_root(Some(root.to_path_buf()));
+    // The test process may itself run inside a session; the command must see
+    // no ambient identity so it acts as the owner.
+    teams::commands::set_test_caller_identities(Some((None, None)));
+    let _restore = Restore;
+    run()
+}
+
 /// The state directory the Windows session host serves (`HGS_STATE_DIR`, else
 /// the default below the home directory), not yet created or canonical.
 #[cfg(windows)]
